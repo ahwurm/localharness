@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 from localharness.config.models import AgentConfig, OrgConfig
 from localharness.core.bus import EventBus
+from localharness.memory.sqlite import MemoryStore
 
 
 @pytest.fixture
@@ -26,3 +27,17 @@ def bus() -> EventBus:
 def bus_with_persistence(tmp_path: Path) -> EventBus:
     """Event bus with JSONL persistence to tmp dir."""
     return EventBus(persist_path=tmp_path / "events.jsonl")
+
+
+@pytest.fixture
+async def memory_store(tmp_path: Path) -> MemoryStore:
+    """Fresh MemoryStore with temporary database."""
+    store = MemoryStore(
+        agent_id="test-agent",
+        division_id="test-div",
+        org_id="default",
+        base_dir=str(tmp_path),
+    )
+    await store.open()
+    yield store
+    await store.close()
