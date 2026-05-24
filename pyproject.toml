@@ -1,0 +1,42 @@
+[project]
+name = "localharness"
+version = "0.1.0"
+description = "Model-agnostic hierarchical agent harness for local LLMs"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.13,<3",
+    "pydantic-yaml>=1.4,<2",
+    "pyyaml>=6.0,<7",
+    "bubus>=1.5,<2",
+    "aiosqlite>=0.22,<1",
+    "structlog>=25.5,<26",
+    "typer>=0.25,<1",
+    "rich>=15.0,<16",
+    "openai>=1.0,<2",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+localharness = "localharness.cli.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/localharness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff.lint]
+extend-select = ["S506"]
