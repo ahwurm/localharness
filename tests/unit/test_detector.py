@@ -241,12 +241,11 @@ async def test_parallel_probing():
     assert gather_calls[0] == len(DEFAULT_PORTS)
 
 
-def test_ollama_base_url_no_v1():
-    """Ollama base_url must not include /v1."""
+def test_all_base_urls_include_v1():
+    """All providers use /v1 suffix for OpenAI-compat API."""
     from localharness.provider.detector import _build_base_url
-    url = _build_base_url(11434)
-    assert url == "http://localhost:11434"
-    assert "/v1" not in url
+    assert _build_base_url(11434) == "http://localhost:11434/v1"
+    assert _build_base_url(8000) == "http://localhost:8000/v1"
 
 
 def test_default_ports_constant():

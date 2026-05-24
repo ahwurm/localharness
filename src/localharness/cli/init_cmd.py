@@ -182,7 +182,9 @@ def _get_ollama_hot_model(base_url: str) -> str | None:
     """Query Ollama /api/ps to get currently loaded model. Returns None on any error."""
     try:
         import httpx
-        response = httpx.get(f"{base_url}/api/ps", timeout=1.0)
+        # base_url is OpenAI-compat (e.g. http://localhost:11434/v1); strip /v1 for native API
+        native_url = base_url.removesuffix("/v1")
+        response = httpx.get(f"{native_url}/api/ps", timeout=1.0)
         data = response.json()
         models = data.get("models", [])
         if len(models) == 1:

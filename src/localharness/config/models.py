@@ -464,6 +464,17 @@ class AgentConfig(BaseModel):
         description="Maximum tokens to generate in a single LLM response.",
     )
 
+    timeout_seconds: Optional[float] = Field(
+        default=None,
+        ge=30.0,
+        le=3600.0,
+        description=(
+            "Per-agent HTTP timeout override for LLM API calls. "
+            "None means use the global provider timeout. "
+            "Use higher values for large models (e.g. 600s for 122B)."
+        ),
+    )
+
     # --- Subsystem configs ---
     tools: ToolConfig = Field(
         default_factory=ToolConfig,
@@ -664,8 +675,10 @@ class ProviderConfig(BaseModel):
     """Detected LLM provider configuration. Written by localharness init."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    provider_type: str = Field(description="One of the ProviderType constants.")
-    base_url: str = Field(description="OpenAI-compatible base URL. Includes /v1 suffix.")
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+        description="Detected provider type.",
+    )
+    base_url: str = Field(description="OpenAI-compatible base URL with /v1 suffix.")
     api_key: str = Field(default="none", description="API key (usually 'none' for local servers).")
     default_model: str = Field(description="First model from the detected backend's model list.")
     available_models: list[str] = Field(default_factory=list)
