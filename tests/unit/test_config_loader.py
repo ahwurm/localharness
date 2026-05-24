@@ -217,15 +217,15 @@ def test_validate_all_returns_results(config_dir: Path) -> None:
 # 12. loader uses yaml.safe_load (verify no yaml.load call)
 # ------------------------------------------------------------------ #
 def test_yaml_safe_load_only(config_dir: Path) -> None:
-    _write_yaml(config_dir / "agents" / "safe-agent.yaml", {
-        "name": "safe-agent",
-        "role": "Safe agent",
-    })
-    loader = ConfigLoader(config_dir=config_dir)
-    with patch("yaml.load", side_effect=AssertionError("yaml.load must not be called")) as mock_load:
-        cfg = loader.load_agent("safe-agent")
-        mock_load.assert_not_called()
-    assert cfg.name == "safe-agent"
+    """Verify loader source does not contain a call to yaml.load (unsafe)."""
+    import localharness.config.loader as loader_module
+    source = inspect.getsource(loader_module)
+    # Must not contain bare yaml.load( — yaml.safe_load is the only allowed call
+    import re as _re
+    unsafe_calls = _re.findall(r'\byaml\.load\s*\(', source)
+    assert not unsafe_calls, f"Found unsafe yaml.load call(s) in loader: {unsafe_calls}"
+    # Also verify yaml.safe_load is present
+    assert "yaml.safe_load" in source
 
 
 # ------------------------------------------------------------------ #
