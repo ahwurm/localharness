@@ -93,9 +93,7 @@ async def detect_provider(
 
 
 def _build_base_url(port: int) -> str:
-    """Return base URL for a port. Ollama uses native API root (no /v1)."""
-    if port == 11434:
-        return "http://localhost:11434"
+    """Return OpenAI-compatible base URL for a port. Always includes /v1."""
     return f"http://localhost:{port}/v1"
 
 
