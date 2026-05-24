@@ -6,6 +6,8 @@ AgentID = NewType("AgentID", str)
 SessionID = NewType("SessionID", str)
 EventSeq = NewType("EventSeq", int)
 ToolCallID = NewType("ToolCallID", str)
+DivisionID = NewType("DivisionID", str)
+OrgID = NewType("OrgID", str)
 
 # Message type used by LLMClient — OpenAI-compat format
 Message = dict[str, Any]
