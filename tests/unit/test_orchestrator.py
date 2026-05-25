@@ -140,10 +140,16 @@ def test_greeting_new_session():
     assert len(greeting) > 20  # not empty
 
 def test_greeting_returning_session():
-    """Returning session: no greeting, straight to prompt."""
+    """Returning session: minimal 'Ready.' banner."""
     from localharness.orchestrator.router import Orchestrator
     greeting = Orchestrator.compose_greeting(is_returning=True)
-    assert greeting == ""  # empty for returning users
+    assert greeting == "Ready."  # minimal banner for returning users
+
+def test_greeting_returning_session_with_model():
+    """Returning session with model name: 'model -- Ready.'"""
+    from localharness.orchestrator.router import Orchestrator
+    greeting = Orchestrator.compose_greeting(is_returning=True, model_name="gpt-oss-120b")
+    assert greeting == "gpt-oss-120b -- Ready."
 
 
 # --- Orchestrator.begin_agent_creation ---
