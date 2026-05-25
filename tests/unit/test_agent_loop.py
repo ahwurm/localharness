@@ -413,3 +413,131 @@ async def test_request_messages_go_through_context_manager(mock_llm_client, bus)
     loop._ctx = TrackingContextManager()
     await loop.run_turn("task")
     assert len(build_called) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Event publication tests (06-01: Heartbeat, Action(tool_call), TaskComplete)
+# ---------------------------------------------------------------------------
+
+from localharness.core.events import Heartbeat, TaskComplete
+
+
+@pytest.mark.asyncio
+async def test_execute_loop_publishes_heartbeat(mock_llm_client, bus):
+    """AgentLoop._execute_loop publishes at least one Heartbeat per iteration."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus)
+    await loop.run_turn("task")
+    heartbeats = bus.history(event_types=[Heartbeat])
+    assert len(heartbeats) >= 1
+    assert heartbeats[0].iteration >= 1
+    assert heartbeats[0].agent_id == "test-agent"
+
+
+@pytest.mark.asyncio
+async def test_execute_loop_publishes_tool_call_action(mock_llm_client, bus):
+    """AgentLoop publishes Action(action_type='tool_call') before each tool dispatch."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="ok", success=True)
+
+    tc = ToolCallObj(id="tc-1", name="glob_files", arguments={"pattern": "*.py"})
+    responses = [
+        Response(content=None, tool_calls=[tc]),
+        Response(content="Finished."),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    await loop.run_turn("task")
+
+    tool_call_actions = [
+        e for e in bus.history(event_types=[Action])
+        if e.action_type == "tool_call"
+    ]
+    assert len(tool_call_actions) >= 1
+    assert tool_call_actions[0].tool_name == "glob_files"
+    assert tool_call_actions[0].tool_call_id == "tc-1"
+    assert tool_call_actions[0].tool_params == {"pattern": "*.py"}
+
+
+@pytest.mark.asyncio
+async def test_execute_loop_publishes_task_complete(mock_llm_client, bus):
+    """AgentLoop publishes TaskComplete(success=True) on natural completion."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="All done!")], bus)
+    await loop.run_turn("task")
+    completions = bus.history(event_types=[TaskComplete])
+    assert len(completions) == 1
+    assert completions[0].success is True
+    assert completions[0].duration_seconds > 0
+    assert completions[0].iterations >= 1
+    assert "All done!" in completions[0].summary
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_contains_correct_iteration_and_agent(mock_llm_client, bus):
+    """Heartbeat event has correct session.iteration count and agent_id."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="ok", success=True)
+
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc]),
+        Response(content="Done."),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    await loop.run_turn("task")
+
+    heartbeats = bus.history(event_types=[Heartbeat])
+    # Two iterations: one tool call, one completion
+    assert len(heartbeats) == 2
+    assert heartbeats[0].iteration == 1
+    assert heartbeats[1].iteration == 2
+    assert all(h.agent_id == "test-agent" for h in heartbeats)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_action_published_before_observation(mock_llm_client, bus):
+    """Action(tool_call) is published BEFORE Observation(tool_result) in bus history."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="result", success=True)
+
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc]),
+        Response(content="Done."),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    await loop.run_turn("task")
+
+    # Find the Action(tool_call) and the Observation for the same tool_call_id
+    all_events = bus.history()
+    action_idx = None
+    observation_idx = None
+    for i, e in enumerate(all_events):
+        if isinstance(e, Action) and e.action_type == "tool_call" and e.tool_call_id == "tc-1":
+            action_idx = i
+        if isinstance(e, Observation) and e.tool_call_id == "tc-1":
+            observation_idx = i
+    assert action_idx is not None, "Action(tool_call) not found"
+    assert observation_idx is not None, "Observation(tool_result) not found"
+    assert action_idx < observation_idx, "Action must come before Observation"
