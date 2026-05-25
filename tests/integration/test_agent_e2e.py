@@ -11,51 +11,8 @@ from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
 from localharness.core.bus import EventBus
-from localharness.core.types import ToolCall
 from localharness.tools.builtin import register_builtin_tools
-from localharness.tools.base import ToolResult
 from localharness.tools.registry import ToolRegistry
-
-
-# ---------------------------------------------------------------------------
-# MockToolRegistry: duck-typed, wraps real ToolRegistry but adapts loop's call signature
-# ---------------------------------------------------------------------------
-
-class MockToolRegistry:
-    """Wraps a real ToolRegistry, adapting the AgentLoop duck-typed interface.
-
-    AgentLoop calls:
-        self._tools.get_tools_for_agent(self._config)  -> list[ToolSchema]
-        self._tools.dispatch(tool_call)               -> ToolResult
-
-    The real ToolRegistry has a different signature but the loop uses duck typing.
-    We bridge the gap here.
-    """
-
-    def __init__(self, registry: ToolRegistry, config: AgentConfig) -> None:
-        self._registry = registry
-        self._config = config
-
-    def get_tools_for_agent(self, config):  # noqa: ANN001
-        # Return list of ToolSchema for all global tools
-        return list(self._registry._tools["global"].values())
-
-    async def dispatch(self, tool_call: ToolCall) -> ToolResult:
-        # Look up the tool directly in the global registry
-        tool = self._registry._tools["global"].get(tool_call.name)
-        if tool is None:
-            return ToolResult(
-                output="",
-                success=False,
-                error=f"Tool '{tool_call.name}' not found",
-                error_type="not_found",
-            )
-        # Validate arguments through registry's validator
-        schema = tool.info()
-        validated = self._registry._validate_arguments(tool_call.name, tool_call.arguments, schema)
-        if isinstance(validated, ToolResult):
-            return validated
-        return await tool.run(**validated)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +91,7 @@ def _make_config(max_actions: int = 100) -> AgentConfig:
 async def _make_loop(
     responses: list[dict],
     config: AgentConfig,
-    mock_registry: MockToolRegistry,
+    registry: ToolRegistry,
 ) -> AgentLoop:
     bus = EventBus()
     llm = MockLLMClient(responses)
@@ -145,7 +102,7 @@ async def _make_loop(
         llm=llm,
         bus=bus,
         context_manager=ctx,
-        tool_registry=mock_registry,
+        tool_registry=registry,
         permission_evaluator=perm,
         kill_file_path=None,
     )
@@ -161,7 +118,6 @@ async def test_natural_completion_with_tool_call(tmp_path):
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     config = _make_config()
-    mock_reg = MockToolRegistry(registry, config)
 
     responses = [
         {
@@ -174,7 +130,7 @@ async def test_natural_completion_with_tool_call(tmp_path):
         },
     ]
 
-    loop = await _make_loop(responses, config, mock_reg)
+    loop = await _make_loop(responses, config, registry)
     summary = await loop.run_turn("Find all Python files in the current directory")
 
     assert summary, "Summary should be non-empty"
@@ -195,7 +151,6 @@ async def test_validation_error_recovery(tmp_path):
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     config = _make_config()
-    mock_reg = MockToolRegistry(registry, config)
 
     responses = [
         # Response 1: missing required 'path' arg for 'read' — validation error
@@ -215,7 +170,7 @@ async def test_validation_error_recovery(tmp_path):
         },
     ]
 
-    loop = await _make_loop(responses, config, mock_reg)
+    loop = await _make_loop(responses, config, registry)
     summary = await loop.run_turn("Read the test file")
 
     assert summary, "Summary should be non-empty"
@@ -232,7 +187,6 @@ async def test_stuck_escalation(tmp_path):
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     config = _make_config(max_actions=50)
-    mock_reg = MockToolRegistry(registry, config)
 
     # Same glob call repeated indefinitely
     responses = [
@@ -243,7 +197,7 @@ async def test_stuck_escalation(tmp_path):
         for i in range(10)
     ]
 
-    loop = await _make_loop(responses, config, mock_reg)
+    loop = await _make_loop(responses, config, registry)
     summary = await loop.run_turn("Find Python files over and over")
 
     assert summary, "Summary should be non-empty"
@@ -262,7 +216,6 @@ async def test_budget_enforcement(tmp_path):
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     config = _make_config(max_actions=2)
-    mock_reg = MockToolRegistry(registry, config)
 
     # Provide many tool-calling responses — agent should stop at budget
     responses = [
@@ -273,7 +226,7 @@ async def test_budget_enforcement(tmp_path):
         for i in range(10)
     ]
 
-    loop = await _make_loop(responses, config, mock_reg)
+    loop = await _make_loop(responses, config, registry)
     summary = await loop.run_turn("Keep calling tools")
 
     assert summary, "Summary should be non-empty"
