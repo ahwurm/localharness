@@ -48,22 +48,24 @@ def test_repair_handles_empty_message_list():
     assert cm.repair_tool_pairing([]) == []
 
 
-def test_build_messages_returns_copy_not_original():
+@pytest.mark.asyncio
+async def test_build_messages_returns_copy_not_original():
     cm = ContextManager()
     original = [{"role": "user", "content": "hello"}]
-    result = cm.build_messages(original)
+    result = await cm.build_messages(original)
     assert result is not original
     assert result == original
 
 
-def test_build_messages_calls_repair_internally():
+@pytest.mark.asyncio
+async def test_build_messages_calls_repair_internally():
     """build_messages should strip orphaned tool results via repair_tool_pairing."""
     cm = ContextManager()
     messages = [
         {"role": "user", "content": "go"},
         _make_tool_result("orphan"),
     ]
-    result = cm.build_messages(messages)
+    result = await cm.build_messages(messages)
     assert all(m.get("role") != "tool" for m in result)
 
 
