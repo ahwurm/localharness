@@ -15,6 +15,19 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> bool:
+    """Probe LLM reachability with retry for cold start. Returns True if reachable."""
+    import asyncio as _asyncio
+    for attempt in range(max_retries):
+        try:
+            await llm.detect_capabilities()
+            return True
+        except Exception:
+            if attempt < max_retries - 1:
+                await _asyncio.sleep(delay)
+    return False
+
+
 def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     """Return agents from global config dir and local .localharness/agents/, local overrides."""
     global_dir = config_dir / "agents"
@@ -68,10 +81,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     cfg_path = Path(config_dir).expanduser()
     config_file = cfg_path / "config.yaml"
 
-    # Run init if config missing
+    # No config → welcome message + exit
     if not config_file.exists():
-        console.print("No config found. Running init...")
-        init_app()
+        from localharness.orchestrator.router import Orchestrator
+        console.print(Orchestrator.no_config_message())
+        raise typer.Exit(0)
 
     # Load harness config
     loader = ConfigLoader(config_dir=cfg_path)
@@ -145,6 +159,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         tool_call_mode="native" if provider.supports_function_calling else "xml",
     )
     llm = LLMClient(llm_cfg)
+
+    # Startup probe — local LLMs may need warm-up
+    probe_ok = await _probe_llm(llm)
+    if not probe_ok:
+        err_console.print(
+            f"[bold red]Error:[/bold red] Cannot reach model '{resolved_model}' "
+            f"at {provider.base_url}"
+        )
+        err_console.print("Check that your LLM backend is running and try again.")
+        raise typer.Exit(1)
 
     start_time = _time.monotonic()
 
@@ -252,7 +276,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         pipeline=pipeline,
     )
 
-    # --- 9. Agent loop ---
+    # --- 9. Orchestrator ---
+    from localharness.orchestrator.router import Orchestrator, OrchestratorContextGuard
+    from localharness.orchestrator.cards import AgentCardRegistry
+    card_registry = AgentCardRegistry()
+    for agent_data in agents:
+        try:
+            a_name = agent_data.get("name", "")
+            a_cfg = loader.load_agent(a_name)
+            card_registry.register_from_config(a_cfg)
+        except Exception:
+            pass  # skip agents that fail to load — non-fatal
+    orchestrator = Orchestrator(card_registry=card_registry)
+
+    # --- 10. Agent loop ---
     perm_eval = PermissionEvaluator()
     agent_loop = AgentLoop(
         config=agent_config,
@@ -264,9 +301,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     )
     channel = TerminalChannel(bus=bus, config={})
 
-    # --- Startup summary line ---
+    # --- Determine returning user ---
+    is_returning = events_path.exists() and events_path.stat().st_size > 0
+
+    # --- Startup greeting ---
     elapsed = _time.monotonic() - start_time
-    parts = [f"Ready ({resolved_model}) in {elapsed:.1f}s"]
+    greeting = orchestrator.compose_greeting(is_returning=is_returning, model_name=resolved_model)
+    if greeting:
+        console.print(greeting)
+
+    # --- Startup summary line ---
+    parts = [f"({elapsed:.1f}s startup)"]
     counts: list[str] = ["1 agent"]
     if mcp_connected > 0 or mcp_failed > 0:
         mcp_str = f"{mcp_connected} MCP server{'s' if mcp_connected != 1 else ''}"
@@ -298,7 +343,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # --- Run REPL ---
     from localharness.cli.repl import OrchestratorREPL
 
-    repl = OrchestratorREPL(agent_loop=agent_loop, channel=channel, bus=bus)
+    repl = OrchestratorREPL(
+        orchestrator=orchestrator,
+        agent_loop=agent_loop,
+        channel=channel,
+        bus=bus,
+        config_dir=cfg_path,
+    )
 
     try:
         await repl.run()

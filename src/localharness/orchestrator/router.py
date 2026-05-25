@@ -57,12 +57,23 @@ class Orchestrator:
         self._active_workflow: AgentCreationWorkflow | None = None
 
     @staticmethod
-    def compose_greeting(is_returning: bool) -> str:
+    def compose_greeting(is_returning: bool, model_name: str = "") -> str:
         if is_returning:
-            return ""
+            if model_name:
+                return f"{model_name} -- Ready."
+            return "Ready."
         return (
             "Hello. I'm the LocalHarness orchestrator. "
             "Tell me what you'd like to build or ask /help for available commands."
+        )
+
+    @staticmethod
+    def no_config_message() -> str:
+        return (
+            "Welcome to LocalHarness.\n\n"
+            "To configure, run: localharness init\n\n"
+            "For model and inference provider recommendations for your hardware,\n"
+            "see: localharness.dev/resources"
         )
 
     def route_task(self, task: str) -> RoutingDecision:
