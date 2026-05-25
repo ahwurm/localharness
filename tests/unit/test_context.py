@@ -65,3 +65,41 @@ def test_build_messages_calls_repair_internally():
     ]
     result = cm.build_messages(messages)
     assert all(m.get("role") != "tool" for m in result)
+
+
+# --- Phase 4: TokenCounter + TokenBudget ---
+
+def test_token_counter_tiktoken():
+    """TokenCounter produces non-zero count for non-empty text."""
+    from localharness.agent.context import TokenCounter
+    tc = TokenCounter()
+    count = tc.count("Hello, world! This is a test sentence.")
+    assert count > 0
+    assert count < 100  # sanity
+
+
+def test_token_counter_messages():
+    from localharness.agent.context import TokenCounter
+    tc = TokenCounter()
+    msgs = [
+        {"role": "system", "content": "You are a helper."},
+        {"role": "user", "content": "What is 2+2?"},
+    ]
+    count = tc.count_messages(msgs)
+    assert count > 10  # at least the text content
+    assert count < 200  # sanity
+
+
+def test_token_budget_usage_fraction():
+    from localharness.agent.context import TokenBudget
+    budget = TokenBudget(total_limit=100_000, current_usage=70_000, tool_schema_tokens=10_000)
+    assert budget.usage_fraction == pytest.approx(0.80, abs=0.01)
+    assert budget.needs_summary_compact is True
+    assert budget.needs_full_compact is False
+
+
+def test_token_budget_below_threshold():
+    from localharness.agent.context import TokenBudget
+    budget = TokenBudget(total_limit=100_000, current_usage=50_000, tool_schema_tokens=5_000)
+    assert budget.usage_fraction == pytest.approx(0.55, abs=0.01)
+    assert budget.needs_summary_compact is False
