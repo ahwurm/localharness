@@ -103,3 +103,117 @@ def test_token_budget_below_threshold():
     budget = TokenBudget(total_limit=100_000, current_usage=50_000, tool_schema_tokens=5_000)
     assert budget.usage_fraction == pytest.approx(0.55, abs=0.01)
     assert budget.needs_summary_compact is False
+
+
+# --- Phase 4: CompactionPipeline ---
+
+def test_tool_result_cap_truncates():
+    from localharness.agent.context import ToolResultCapStage, TokenBudget, TokenCounter
+    stage = ToolResultCapStage(max_chars=100)
+    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": "x" * 200}]
+    budget = TokenBudget(total_limit=128000, current_usage=1000, tool_schema_tokens=0)
+    result, modified = stage.apply(messages, budget, TokenCounter())
+    assert modified is True
+    assert len(result[0]["content"]) <= 150  # 100 + truncation suffix
+
+
+def test_tool_result_cap_no_op_when_short():
+    from localharness.agent.context import ToolResultCapStage, TokenBudget, TokenCounter
+    stage = ToolResultCapStage(max_chars=100)
+    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": "short"}]
+    budget = TokenBudget(total_limit=128000, current_usage=1000, tool_schema_tokens=0)
+    result, modified = stage.apply(messages, budget, TokenCounter())
+    assert modified is False
+
+
+@pytest.mark.asyncio
+async def test_summary_compaction_fires_at_80_pct():
+    from localharness.agent.context import SummaryCompactionStage, TokenBudget, TokenCounter
+    async def mock_summarize(msgs):
+        return "Summary of middle messages"
+    stage = SummaryCompactionStage(preserve_first_n=2, preserve_last_n=2, llm_summarize_fn=mock_summarize)
+    # Build messages: 2 preserved first + 6 middle + 2 preserved last = 10
+    messages = [{"role": "system", "content": "sys"}]
+    messages.append({"role": "user", "content": "task"})
+    for i in range(6):
+        messages.append({"role": "assistant", "content": f"response {i}"})
+    messages.append({"role": "user", "content": "recent"})
+    messages.append({"role": "assistant", "content": "latest"})
+    budget = TokenBudget(total_limit=100_000, current_usage=82_000, tool_schema_tokens=0)
+    result, modified = await stage.apply(messages, budget, TokenCounter())
+    assert modified is True
+    assert len(result) < len(messages)
+    # Summary message should be present
+    assert any("[Context Summary]" in (m.get("content") or "") for m in result)
+
+
+@pytest.mark.asyncio
+async def test_summary_compaction_skips_below_80_pct():
+    from localharness.agent.context import SummaryCompactionStage, TokenBudget, TokenCounter
+    async def mock_summarize(msgs):
+        return "Should not be called"
+    stage = SummaryCompactionStage(preserve_first_n=2, preserve_last_n=2, llm_summarize_fn=mock_summarize)
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    budget = TokenBudget(total_limit=100_000, current_usage=50_000, tool_schema_tokens=0)
+    result, modified = await stage.apply(messages, budget, TokenCounter())
+    assert modified is False
+    assert result == messages
+
+
+@pytest.mark.asyncio
+async def test_compaction_pipeline_preserves_tool_pairs():
+    from localharness.agent.context import CompactionPipeline, TokenBudget, TokenCounter
+    async def mock_summarize(msgs):
+        return "Summarized"
+    tc = TokenCounter()
+    pipeline = CompactionPipeline(token_counter=tc, preserve_first_n=2, preserve_last_n=2, llm_summarize_fn=mock_summarize)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "tc-1", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-1", "content": "result"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "recent"},
+        {"role": "assistant", "content": "latest"},
+    ]
+    budget = TokenBudget(total_limit=100_000, current_usage=82_000, tool_schema_tokens=0)
+    result, modified = await pipeline.run(messages, budget)
+    # No orphaned tool messages in result
+    tool_msgs = [m for m in result if m.get("role") == "tool"]
+    for tm in tool_msgs:
+        tc_id = tm.get("tool_call_id")
+        assert any(
+            tc_id in [tc.get("id") for tc in (m.get("tool_calls") or [])]
+            for m in result if m.get("role") == "assistant"
+        )
+
+
+# --- Phase 4: compact.md load path ---
+
+def test_load_compact_md_returns_message_when_file_exists(tmp_path):
+    """load_compact_md returns a system message when compact.md exists with content."""
+    from localharness.agent.context import load_compact_md
+    compact_file = tmp_path / "compact.md"
+    compact_file.write_text("Previous session summary: user was building a research agent.")
+    msg = load_compact_md(compact_file)
+    assert msg is not None
+    assert msg["role"] == "system"
+    assert "[Prior Session Context]" in msg["content"]
+    assert "research agent" in msg["content"]
+
+
+def test_load_compact_md_returns_none_when_missing(tmp_path):
+    """load_compact_md returns None when compact.md does not exist."""
+    from localharness.agent.context import load_compact_md
+    compact_file = tmp_path / "compact.md"
+    msg = load_compact_md(compact_file)
+    assert msg is None
+
+
+def test_load_compact_md_returns_none_when_empty(tmp_path):
+    """load_compact_md returns None when compact.md is empty."""
+    from localharness.agent.context import load_compact_md
+    compact_file = tmp_path / "compact.md"
+    compact_file.write_text("")
+    msg = load_compact_md(compact_file)
+    assert msg is None

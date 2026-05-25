@@ -301,6 +301,15 @@ class AgentLoop:
             messages=list(initial_messages) if initial_messages else [],
         )
 
+        # Load prior session context from compact.md if present
+        from localharness.agent.context import load_compact_md
+        compact_path = Path.home() / ".localharness" / "agents" / self._config.name / "compact.md"
+        compact_msg = load_compact_md(compact_path)
+        if compact_msg is not None:
+            insert_idx = 1 if session.messages and session.messages[0].get("role") == "system" else 0
+            session.messages.insert(insert_idx, compact_msg)
+            log.info("Loaded compact.md for agent %s", self._config.name)
+
         budget_cfg = self._config.permissions.budget
         await self._bus.publish(TurnStarted(
             agent_id=session.agent_id,
