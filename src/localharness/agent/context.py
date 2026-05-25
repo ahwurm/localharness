@@ -1,7 +1,71 @@
 """ContextManager: build_messages with repair_tool_pairing boundary guard."""
 from __future__ import annotations
 
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
 from localharness.core.types import Message
+
+log = logging.getLogger("localharness.agent.context")
+
+RESPONSE_RESERVE_TOKENS: int = 4096
+
+
+class TokenCounter:
+    """Token counting with tiktoken (preferred) or char heuristic fallback."""
+
+    def __init__(self) -> None:
+        self._encoder = None
+        try:
+            import tiktoken
+            self._encoder = tiktoken.get_encoding("cl100k_base")
+        except (ImportError, Exception):
+            pass
+
+    def count(self, text: str) -> int:
+        if self._encoder is not None:
+            return len(self._encoder.encode(text))
+        return len(text) // 4  # char heuristic fallback
+
+    def count_messages(self, messages: list[dict]) -> int:
+        total = 0
+        for msg in messages:
+            total += 4  # message overhead tokens
+            content = msg.get("content") or ""
+            if isinstance(content, str):
+                total += self.count(content)
+            # tool_calls in assistant messages
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                total += self.count(fn.get("name", ""))
+                total += self.count(fn.get("arguments", ""))
+        return total
+
+
+@dataclass
+class TokenBudget:
+    total_limit: int
+    current_usage: int
+    tool_schema_tokens: int
+    headroom: int = 0
+
+    def __post_init__(self) -> None:
+        self.headroom = self.total_limit - self.current_usage - self.tool_schema_tokens - RESPONSE_RESERVE_TOKENS
+
+    @property
+    def usage_fraction(self) -> float:
+        return (self.current_usage + self.tool_schema_tokens) / self.total_limit if self.total_limit > 0 else 1.0
+
+    @property
+    def needs_summary_compact(self) -> bool:
+        return self.usage_fraction >= 0.80
+
+    @property
+    def needs_full_compact(self) -> bool:
+        return self.usage_fraction >= 0.95
 
 
 class ContextManager:
