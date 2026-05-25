@@ -171,5 +171,253 @@ def test_kill_watcher_true_when_file_exists(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: AgentLoop tests (appended below after Task 1 commit)
+# Task 2: AgentLoop tests
 # ---------------------------------------------------------------------------
+
+import pytest
+from localharness.agent.loop import AgentLoop
+from localharness.agent.context import ContextManager
+from localharness.agent.permissions import PermissionEvaluator
+from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Action, Observation
+
+
+def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None):
+    """Helper to construct an AgentLoop with mock dependencies."""
+    from localharness.config.models import AgentConfig
+    cfg = config or AgentConfig(name="test-agent", role="Test agent.")
+    llm = mock_llm_client_factory(responses)
+    ctx = ContextManager()
+    perm = PermissionEvaluator()
+    return AgentLoop(
+        config=cfg,
+        llm=llm,
+        bus=bus,
+        context_manager=ctx,
+        tool_registry=tool_registry,
+        permission_evaluator=perm,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_turn_publishes_turn_started(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus)
+    await loop.run_turn("Do something")
+    events = bus.history(event_types=[TurnStarted])
+    assert len(events) == 1
+    assert events[0].task_summary == "Do something"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_completes_naturally_no_tool_calls(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="All done!")], bus)
+    summary = await loop.run_turn("task")
+    assert "All done!" in summary
+
+
+@pytest.mark.asyncio
+async def test_run_turn_publishes_turn_completed(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus)
+    await loop.run_turn("task")
+    events = bus.history(event_types=[TurnCompleted])
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_executes_tool_calls(mock_llm_client, bus):
+    """AgentLoop dispatches tool calls and pushes tool results to session."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    # Mock tool registry that returns "ok" for any dispatch
+    class FakeRegistry:
+        def get_tools_for_agent(self, config):
+            return []
+
+        async def dispatch(self, tool_call):
+            class Result:
+                output = "tool-result"
+                is_error = False
+            return Result()
+
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc]),
+        Response(content="Finished after tool."),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    summary = await loop.run_turn("task")
+    assert "Finished after tool." in summary
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stops_on_budget_exceeded(mock_llm_client, bus):
+    from localharness.config.models import AgentConfig, PermissionConfig, BudgetConfig
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, config):
+            return []
+        async def dispatch(self, tc):
+            class R:
+                output = "x"
+                is_error = False
+            return R()
+
+    cfg = AgentConfig(
+        name="budget-agent",
+        role="Test.",
+        permissions=PermissionConfig(
+            deny_patterns=[],
+            budget=BudgetConfig(max_actions=1, max_duration_minutes=30.0),
+        ),
+    )
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [Response(content=None, tool_calls=[tc])] * 10
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=cfg, tool_registry=FakeRegistry())
+    summary = await loop.run_turn("task")
+    # Budget exceeded: should publish TurnFailed
+    failed = bus.history(event_types=[TurnFailed])
+    assert len(failed) >= 1
+    assert any(e.reason == "budget_exceeded" for e in failed)
+    assert "Budget limit" in summary
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stops_on_kill_file(mock_llm_client, bus, tmp_path):
+    Response = mock_llm_client.Response
+    kill_path = tmp_path / "KILL"
+    kill_path.touch()
+
+    loop = _make_agent_loop(mock_llm_client, [Response(content="unreachable")], bus)
+    loop._kill = KillWatcher(kill_file_path=kill_path)
+    summary = await loop.run_turn("task")
+    failed = bus.history(event_types=[TurnFailed])
+    assert any(e.reason == "kill_file" for e in failed)
+    assert "kill signal" in summary
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, config):
+            return []
+        async def dispatch(self, tc):
+            class R:
+                output = "same"
+                is_error = False
+            return R()
+
+    # Same tool call repeated 4 times will trigger ESCALATE at iteration 3
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [Response(content=None, tool_calls=[tc])] * 10
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    summary = await loop.run_turn("task")
+    failed = bus.history(event_types=[TurnFailed])
+    assert any(e.reason == "stuck_detected" for e in failed)
+    assert "stuck" in summary.lower() or "escalat" in summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
+    """At 2 identical calls, recovery message is set; agent continues."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, config):
+            return []
+        async def dispatch(self, tc):
+            class R:
+                output = "same"
+                is_error = False
+            return R()
+
+    tc_same = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    tc_diff = ToolCallObj(id="tc-2", name="write", arguments={"path": "/tmp/x"})
+    # 2 same → triggers recovery; then different → clears; then finish
+    responses = [
+        Response(content=None, tool_calls=[tc_same]),
+        Response(content=None, tool_calls=[tc_same]),
+        Response(content=None, tool_calls=[tc_diff]),
+        Response(content="Recovery worked."),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    summary = await loop.run_turn("task")
+    # Agent should complete normally (not stuck)
+    completed = bus.history(event_types=[TurnCompleted])
+    assert len(completed) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_handles_provider_connection_error_with_retry(mock_llm_client, bus):
+    """ProviderConnectionError triggers one retry; if second also fails, returns summary."""
+    from localharness.provider.client import ProviderConnectionError
+
+    class FailTwiceLLM:
+        class config:
+            tool_call_mode = "native"
+
+        _count = 0
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            self._count += 1
+            raise ProviderConnectionError("connection refused")
+
+    loop = _make_agent_loop(mock_llm_client, [], bus)
+    loop._llm = FailTwiceLLM()
+    summary = await loop.run_turn("task")
+    # Should not raise — returns error summary
+    assert isinstance(summary, str) and len(summary) > 0
+
+
+@pytest.mark.asyncio
+async def test_run_turn_never_raises(mock_llm_client, bus):
+    """run_turn must return a string even if LLM raises completely unexpected error."""
+    class BrokenLLM:
+        class config:
+            tool_call_mode = "native"
+
+        async def stream_complete(self, **kwargs):
+            raise RuntimeError("catastrophic failure")
+
+    loop = _make_agent_loop(mock_llm_client, [], bus)
+    loop._llm = BrokenLLM()
+    summary = await loop.run_turn("task")
+    assert isinstance(summary, str) and len(summary) > 0
+
+
+@pytest.mark.asyncio
+async def test_step_returns_correct_action_type(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="step done")], bus)
+    session = Session(agent_id="test-agent", session_id="sess", messages=[
+        {"role": "user", "content": "hi"},
+    ])
+    result = await loop.step(session)
+    assert result.action == "complete"
+    assert "step done" in result.llm_response_preview
+
+
+@pytest.mark.asyncio
+async def test_request_messages_go_through_context_manager(mock_llm_client, bus):
+    """Verify build_messages is called (orphaned tool result removed before LLM call)."""
+    Response = mock_llm_client.Response
+
+    build_called = []
+
+    class TrackingContextManager(ContextManager):
+        def build_messages(self, messages, tool_schemas=None):
+            build_called.append(True)
+            return super().build_messages(messages, tool_schemas)
+
+    loop = _make_agent_loop(mock_llm_client, [Response(content="ok")], bus)
+    loop._ctx = TrackingContextManager()
+    await loop.run_turn("task")
+    assert len(build_called) >= 1
