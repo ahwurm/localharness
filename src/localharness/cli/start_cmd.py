@@ -289,6 +289,28 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             pass  # skip agents that fail to load — non-fatal
     orchestrator = Orchestrator(card_registry=card_registry)
 
+    # --- 9b. Agent delegation tool (ORCH-04) ---
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    async def _run_agent(agent_id: str, task: str) -> str:
+        """Closure for AgentTool: resolve agent_id and run.
+
+        Raises ValueError for unknown agents. Full multi-agent loop creation
+        will come with context graph phase (MULTI-02, v2).
+        """
+        raise ValueError(f"Agent '{agent_id}' dispatch not yet wired")
+
+    available_agent_names = [c.name for c in card_registry.all_cards()]
+    agent_tool = AgentTool(
+        agent_runner=_run_agent,
+        available_agents=available_agent_names,
+    )
+    await tool_registry.register(
+        agent_tool,
+        scope="agent",
+        agent_id="orchestrator",
+    )
+
     # --- 10. Agent loop ---
     perm_eval = PermissionEvaluator()
     agent_loop = AgentLoop(
