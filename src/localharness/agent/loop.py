@@ -392,7 +392,7 @@ class AgentLoop:
             ProviderTimeoutError,
             ProviderAPIError,
         )
-        from localharness.core.events import Action, Observation, Escalation
+        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
@@ -461,7 +461,16 @@ class AgentLoop:
                 )
                 return _format_budget_summary(session, violation)
 
-            # 3. Build request messages (copy, with repair)
+            # 3. Publish heartbeat for liveness indication
+            await self._bus.publish(Heartbeat(
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+                iteration=session.iteration,
+                context_utilization_pct=0.0,
+                last_tool=None,
+            ))
+
+            # 4. Build request messages (copy, with repair)
             request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
 
             # 4. Inject recovery if set
@@ -538,12 +547,31 @@ class AgentLoop:
 
             # 9. No tool calls → natural completion
             if not tool_calls:
+                summary = _format_completion_summary(session, content)
+                await self._bus.publish(TaskComplete(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    success=True,
+                    summary=summary,
+                    duration_seconds=session.elapsed_seconds(),
+                    iterations=session.iteration,
+                ))
                 session.terminated_reason = "complete"
-                return _format_completion_summary(session, content)
+                return summary
 
             # 10. Execute each tool call
             for tool_call in tool_calls:
                 session.actions_taken += 1
+
+                # Publish tool_call action for terminal display
+                await self._bus.publish(Action(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    action_type="tool_call",
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    tool_params=tool_call.arguments,
+                ))
 
                 # Permission check
                 perm_result = self._permissions.evaluate(tool_call, self._config.permissions)
