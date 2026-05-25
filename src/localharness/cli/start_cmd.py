@@ -45,9 +45,11 @@ def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     return list(agents.values())
 
 
-async def _start_async(agent_name: str | None, debug: bool, config_dir: str) -> None:
+async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
-    from localharness.agent.context import ContextManager
+    import time as _time
+
+    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
     from localharness.agent.loop import AgentLoop
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.channels.terminal import TerminalChannel
@@ -56,7 +58,11 @@ async def _start_async(agent_name: str | None, debug: bool, config_dir: str) -> 
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
     from localharness.core.bus import EventBus
+    from localharness.memory.sqlite import MemoryStore
+    from localharness.plugins.loader import PluginLoader
     from localharness.provider.client import LLMClient, LLMConfig
+    from localharness.tools.hooks import HookSystem
+    from localharness.tools.mcp import MCPClientManager
     from localharness.tools.registry import ToolRegistry, register_builtin_tools
 
     cfg_path = Path(config_dir).expanduser()
@@ -139,14 +145,114 @@ async def _start_async(agent_name: str | None, debug: bool, config_dir: str) -> 
         tool_call_mode="native" if provider.supports_function_calling else "xml",
     )
     llm = LLMClient(llm_cfg)
-    bus = EventBus()
+
+    start_time = _time.monotonic()
+
+    # --- Startup state tracker ---
+    warnings: list[str] = []
+    plugins_loaded = 0
+    mcp_connected = 0
+    mcp_failed = 0
+
+    # --- 1. HARD requirements (abort on failure) ---
+    agent_dir = cfg_path / "agents" / agent_name_str
+    events_path = agent_dir / "bus-events.jsonl"
+    bus = EventBus(persist_path=events_path)
+    # LLMClient already created above (llm variable)
+
+    # --- 2. Core infrastructure ---
     tool_registry = ToolRegistry()
     await register_builtin_tools(tool_registry)
+
+    # --- 3. Hook system (soft) ---
+    hook_system: HookSystem | None = None
+    try:
+        hook_system = HookSystem()
+        hook_system.wire_to_registry(tool_registry)
+    except Exception as exc:
+        warnings.append(f"hooks: {exc}")
+        hook_system = None
+
+    # --- 4. Memory store (soft -- degrade to None) ---
+    memory_store: MemoryStore | None = None
+    try:
+        memory_store = MemoryStore(
+            agent_id=agent_name_str,
+            division_id=agent_config.division or "default",
+            org_id="default",
+            base_dir=str(cfg_path),
+            bus=bus,
+        )
+        await memory_store.open()
+    except Exception as exc:
+        warnings.append(f"memory: {exc} (in-memory mode)")
+        memory_store = None
+
+    # --- 5. Plugin loader (soft) ---
+    plugin_loader: PluginLoader | None = None
+    try:
+        if hook_system is not None:
+            plugin_loader = PluginLoader(tool_registry, hook_system)
+            loaded_names = await plugin_loader.discover_all()
+            plugins_loaded = len(loaded_names)
+    except Exception as exc:
+        warnings.append(f"plugins: {exc}")
+
+    # --- 6. MCP client manager (soft) ---
+    mcp_manager: MCPClientManager | None = None
+    try:
+        mcp_configs = agent_config.tools.mcp_servers
+        if mcp_configs:
+            mcp_manager = MCPClientManager(tool_registry)
+            results = await mcp_manager.startup(mcp_configs)
+            mcp_connected = sum(1 for v in results.values() if v > 0)
+            mcp_failed = sum(1 for v in results.values() if v == 0)
+    except Exception as exc:
+        warnings.append(f"mcp: {exc}")
+
+    # --- 7. Compaction pipeline (soft) ---
+    pipeline: CompactionPipeline | None = None
+    try:
+        compact_md_path = agent_dir / "compact.md"
+
+        def _make_summarize_fn(llm_client: LLMClient):
+            async def summarize(messages: list) -> str:
+                prompt = [
+                    {"role": "system", "content": (
+                        "Summarize the following conversation history concisely. "
+                        "Preserve key facts, decisions, and tool results. "
+                        "Output a dense summary paragraph."
+                    )},
+                    {"role": "user", "content": "\n".join(
+                        f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}"
+                        for m in messages
+                    )},
+                ]
+                response = await llm_client.complete(prompt, tools=None)
+                return response.content or ""
+            return summarize
+
+        pipeline = CompactionPipeline(
+            token_counter=TokenCounter(),
+            tool_result_cap=agent_config.context.max_tool_output_chars,
+            preserve_first_n=agent_config.context.preserve_first_n_messages,
+            preserve_last_n=agent_config.context.preserve_last_n_messages,
+            llm_summarize_fn=_make_summarize_fn(llm),
+            compact_md_path=compact_md_path,
+        )
+    except Exception as exc:
+        warnings.append(f"compaction: {exc}")
+        pipeline = None
+
+    # --- 8. Context manager (with pipeline) ---
     ctx_mgr = ContextManager(
         max_context_tokens=agent_config.context.max_context_tokens,
         preserve_first_n=agent_config.context.preserve_first_n_messages,
         preserve_last_n=agent_config.context.preserve_last_n_messages,
+        pipeline=pipeline,
     )
+
+    # --- 9. Agent loop ---
     perm_eval = PermissionEvaluator()
     agent_loop = AgentLoop(
         config=agent_config,
@@ -158,6 +264,38 @@ async def _start_async(agent_name: str | None, debug: bool, config_dir: str) -> 
     )
     channel = TerminalChannel(bus=bus, config={})
 
+    # --- Startup summary line ---
+    elapsed = _time.monotonic() - start_time
+    parts = [f"Ready ({resolved_model}) in {elapsed:.1f}s"]
+    counts: list[str] = ["1 agent"]
+    if mcp_connected > 0 or mcp_failed > 0:
+        mcp_str = f"{mcp_connected} MCP server{'s' if mcp_connected != 1 else ''}"
+        if mcp_failed > 0:
+            mcp_str += f" ({mcp_failed} failed)"
+        counts.append(mcp_str)
+    if plugins_loaded > 0:
+        counts.append(f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}")
+    summary_line = " -- ".join(parts + [", ".join(counts)])
+    if warnings:
+        summary_line += f" [{'; '.join(warnings)}]"
+    console.print(summary_line)
+
+    # --- Verbose output ---
+    if verbose:
+        if mcp_manager and mcp_manager.connected_servers:
+            for srv in mcp_manager.connected_servers:
+                console.print(f"  MCP: {srv}")
+        if plugins_loaded > 0 and hook_system:
+            for pname in hook_system.loaded_plugin_names:
+                console.print(f"  Plugin: {pname}")
+        tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
+        console.print(f"  Tools: {tool_count} total")
+        if memory_store:
+            console.print(f"  Memory: {agent_dir / 'memory.db'} (WAL)")
+        else:
+            console.print("  Memory: in-memory (no persistence)")
+
+    # --- Run REPL ---
     from localharness.cli.repl import OrchestratorREPL
 
     repl = OrchestratorREPL(agent_loop=agent_loop, channel=channel, bus=bus)
@@ -166,15 +304,29 @@ async def _start_async(agent_name: str | None, debug: bool, config_dir: str) -> 
         await repl.run()
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
+    finally:
+        # --- Ordered shutdown: MCP -> MemoryStore ---
+        # (EventBus handles its own file closing on GC/process exit)
+        if mcp_manager:
+            try:
+                await mcp_manager.shutdown()
+            except Exception:
+                pass
+        if memory_store:
+            try:
+                await memory_store.close()
+            except Exception:
+                pass
 
 
 def start_app(
     agent: Annotated[str | None, typer.Option("--agent", "-a", help="Start specific agent")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show per-component startup detail")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, debug, config_dir))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
