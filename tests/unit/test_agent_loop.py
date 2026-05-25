@@ -233,14 +233,12 @@ async def test_run_turn_executes_tool_calls(mock_llm_client, bus):
 
     # Mock tool registry that returns "ok" for any dispatch
     class FakeRegistry:
-        def get_tools_for_agent(self, config):
-            return []
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
 
-        async def dispatch(self, tool_call):
-            class Result:
-                output = "tool-result"
-                is_error = False
-            return Result()
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="tool-result", success=True)
 
     tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
     responses = [
@@ -259,13 +257,11 @@ async def test_run_turn_stops_on_budget_exceeded(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
-        def get_tools_for_agent(self, config):
-            return []
-        async def dispatch(self, tc):
-            class R:
-                output = "x"
-                is_error = False
-            return R()
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="x", success=True)
 
     cfg = AgentConfig(
         name="budget-agent",
@@ -306,13 +302,11 @@ async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
-        def get_tools_for_agent(self, config):
-            return []
-        async def dispatch(self, tc):
-            class R:
-                output = "same"
-                is_error = False
-            return R()
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="same", success=True)
 
     # Same tool call repeated 4 times will trigger ESCALATE at iteration 3
     tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
@@ -331,13 +325,11 @@ async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
-        def get_tools_for_agent(self, config):
-            return []
-        async def dispatch(self, tc):
-            class R:
-                output = "same"
-                is_error = False
-            return R()
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="same", success=True)
 
     tc_same = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
     tc_diff = ToolCallObj(id="tc-2", name="write", arguments={"path": "/tmp/x"})
