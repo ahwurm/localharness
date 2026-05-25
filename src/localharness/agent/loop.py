@@ -462,7 +462,7 @@ class AgentLoop:
                 return _format_budget_summary(session, violation)
 
             # 3. Build request messages (copy, with repair)
-            request_messages = self._ctx.build_messages(session.messages, tool_schemas)
+            request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
 
             # 4. Inject recovery if set
             if recovery_injection is not None:
@@ -664,7 +664,7 @@ class AgentLoop:
             except Exception:
                 pass
 
-        request_messages = self._ctx.build_messages(session.messages, tool_schemas)
+        request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
 
         try:
             response_message = await self._llm.stream_complete(

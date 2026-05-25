@@ -363,7 +363,7 @@ class ContextManager:
         """
         return _repair_tool_pairing(messages)
 
-    def build_messages(
+    async def build_messages(
         self,
         messages: list[Message],
         tool_schemas: list[dict] | None = None,
@@ -374,4 +374,18 @@ class ContextManager:
         otherwise just repairs tool pairing.
         """
         copied = list(messages)
-        return self.repair_tool_pairing(copied)
+        repaired = self.repair_tool_pairing(copied)
+        if self._pipeline is not None:
+            import json as _json
+            tool_tokens = self._token_counter.count_messages(
+                [{"role": "system", "content": _json.dumps(tool_schemas)}]
+            ) if tool_schemas else 0
+            usage = self._token_counter.count_messages(repaired)
+            budget = TokenBudget(
+                total_limit=self.max_context_tokens,
+                current_usage=usage,
+                tool_schema_tokens=tool_tokens,
+            )
+            if budget.needs_summary_compact:
+                repaired, _ = await self._pipeline.run(repaired, budget)
+        return repaired
