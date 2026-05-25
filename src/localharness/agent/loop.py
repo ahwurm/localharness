@@ -405,8 +405,11 @@ class AgentLoop:
         tool_schemas: list = []
         if self._tools is not None:
             try:
-                tools = self._tools.get_tools_for_agent(self._config)
-                tool_schemas = [t.info() for t in tools]
+                agent_id = self._config.name
+                division_id = self._config.division or ""
+                tool_config = self._config.tools
+                tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
+                tool_schemas = list(tool_schemas_dict.values())
             except Exception:
                 tool_schemas = []
 
@@ -558,9 +561,15 @@ class AgentLoop:
                 is_error = False
                 if self._tools is not None:
                     try:
-                        result = await self._tools.dispatch(tool_call)
-                        result_content = str(result.output) if hasattr(result, "output") else str(result)
-                        is_error = getattr(result, "is_error", False)
+                        result = await self._tools.dispatch(
+                            tool_call.name,
+                            tool_call.arguments,
+                            self._config.name,
+                            self._config.division or "",
+                            self._config.tools,
+                        )
+                        result_content = result.output
+                        is_error = not result.success
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -638,8 +647,11 @@ class AgentLoop:
         tool_schemas: list = []
         if self._tools is not None:
             try:
-                tools = self._tools.get_tools_for_agent(self._config)
-                tool_schemas = [t.info() for t in tools]
+                agent_id = self._config.name
+                division_id = self._config.division or ""
+                tool_config = self._config.tools
+                tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
+                tool_schemas = list(tool_schemas_dict.values())
             except Exception:
                 pass
 
@@ -686,8 +698,14 @@ class AgentLoop:
             result_content = ""
             if self._tools is not None:
                 try:
-                    result = await self._tools.dispatch(tool_call)
-                    result_content = str(getattr(result, "output", result))
+                    result = await self._tools.dispatch(
+                        tool_call.name,
+                        tool_call.arguments,
+                        self._config.name,
+                        self._config.division or "",
+                        self._config.tools,
+                    )
+                    result_content = result.output
                 except Exception as exc:
                     result_content = f"Error: {exc}"
             session.push({
