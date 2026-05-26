@@ -322,6 +322,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         tool_registry=tool_registry,
         permission_evaluator=perm_eval,
         memory_loader=memory_store,
+        compact_md_path=compact_md_path,
     )
     channel = TerminalChannel(bus=bus, config={})
 
