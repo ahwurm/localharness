@@ -170,14 +170,20 @@ class OrchestratorREPL:
             return
 
         if new_state == WorkflowState.CONFIGURE:
-            # Workflow gathered enough info — use LLM to generate YAML
+            # Workflow gathered enough info — use LLM directly to generate YAML.
+            # Uses llm.complete() instead of run_turn() to avoid publishing
+            # TaskComplete events which cause double terminal output.
+            import re
             gathered = workflow.gathered
-            prompt = (
-                f"Generate a LocalHarness agent YAML config for: "
-                f"{gathered.get('description', user_input)}. "
-                f"Return only the YAML, no explanation."
-            )
-            yaml_str = await self._agent.run_turn(task=prompt, on_token=None)
+            messages = [
+                {"role": "system", "content": "Generate a LocalHarness agent YAML config. Return only the YAML, no explanation."},
+                {"role": "user", "content": gathered.get("description", user_input)},
+            ]
+            response = await self._agent._llm.complete(messages, tools=None)
+            yaml_str = getattr(response, "content", "") or ""
+            # Strip markdown code fences if present (LLMs often wrap in ```yaml...```)
+            yaml_str = re.sub(r'^```(?:yaml)?\s*\n?', '', yaml_str.strip())
+            yaml_str = re.sub(r'\n?```\s*$', '', yaml_str.strip())
             workflow.set_generated_yaml(yaml_str)
             workflow.transition("configure_done")  # advance to CONFIRM
             await self._channel.send_message(
