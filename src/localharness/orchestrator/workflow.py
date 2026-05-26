@@ -111,12 +111,36 @@ class AgentCreationWorkflow:
     def deploy_config(self, agent_name: str) -> Path:
         """Write the generated YAML to the config directory.
 
+        Validates the YAML parses correctly and satisfies AgentConfig schema
+        before writing. Overrides the name field to match agent_name.
+        Raises ValueError if YAML is invalid or fails schema validation.
         Returns the path to the written config file.
         """
+        import yaml as _yaml
+        from localharness.config.models import AgentConfig
+
+        # Parse YAML
+        try:
+            data = _yaml.safe_load(self._generated_yaml)
+        except _yaml.YAMLError as exc:
+            raise ValueError(f"Generated YAML is not valid: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Generated YAML is not a mapping (got {type(data).__name__})")
+
+        # Override name to match the deployment target
+        data["name"] = agent_name
+
+        # Validate against AgentConfig schema
+        AgentConfig(**data)  # raises ValidationError (subclass of ValueError) if malformed
+
+        # Re-serialize with corrected name
+        validated_yaml = _yaml.dump(data, default_flow_style=False, sort_keys=False)
+
         config_path = self._config_dir / "agents" / f"{agent_name}.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = config_path.with_suffix(".yaml.tmp")
-        tmp_path.write_text(self._generated_yaml)
+        tmp_path.write_text(validated_yaml)
         os.replace(str(tmp_path), str(config_path))
         self._agent_name = agent_name
         return config_path
