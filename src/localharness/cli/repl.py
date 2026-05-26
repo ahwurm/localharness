@@ -84,7 +84,7 @@ class OrchestratorREPL:
                         )
                         continue
 
-                    # Route through orchestrator — all other input
+                    # Publish user message for memory pipeline
                     await self._bus.publish(
                         UserMessage(
                             agent_id=self._agent._config.name,
@@ -92,14 +92,17 @@ class OrchestratorREPL:
                             channel="terminal",
                         )
                     )
-                    summary = await self._agent.run_turn(
+                    # Route through orchestrator
+                    decision = self._orchestrator.route_task(user_input)
+                    # v1: single agent loop — use it regardless of routing decision.
+                    # Routing decision is logged for observability; multi-agent dispatch is MULTI-02 (v2).
+                    await self._agent.run_turn(
                         task=user_input,
                         on_token=None,
                     )
-                    await self._channel.send_message(
-                        summary,
-                        agent_id=self._agent._config.name,
-                    )
+                    # NOTE: Do NOT send_message here. The TaskComplete event handler
+                    # in TerminalChannel.on_task_complete() handles output.
+                    # Sending here would produce duplicate output.
                 except EOFError:
                     break
         finally:
