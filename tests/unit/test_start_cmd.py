@@ -426,3 +426,20 @@ def test_start_single_agent_no_picker(tmp_path):
     agents = _discover_agents_for_start(tmp_path)
     assert len(agents) == 1
     assert agents[0]["name"] == "solo"
+
+
+# ---------------------------------------------------------------------------
+# Task 1: Import path regression tests
+# ---------------------------------------------------------------------------
+
+def test_register_builtin_tools_import_path():
+    """CLI-02: register_builtin_tools imports from localharness.tools.builtin without error."""
+    from localharness.tools.builtin import register_builtin_tools
+    assert callable(register_builtin_tools)
+
+
+def test_register_builtin_tools_not_in_registry():
+    """Regression: register_builtin_tools must NOT be importable from tools.registry."""
+    import pytest
+    with pytest.raises(ImportError):
+        from localharness.tools.registry import register_builtin_tools
