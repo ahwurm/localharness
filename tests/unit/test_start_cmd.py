@@ -77,7 +77,7 @@ def test_repl_slash_help():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -96,7 +96,7 @@ def test_repl_slash_quit_raises_eof():
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(return_value="/quit")
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -114,7 +114,7 @@ def test_repl_slash_exit_raises_eof():
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(return_value="/exit")
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -140,7 +140,7 @@ def test_repl_slash_agents_empty():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -171,7 +171,7 @@ def test_repl_slash_agents_with_cards():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
     mock_orch._card_registry.all_cards.return_value = [mock_card]
 
@@ -203,7 +203,7 @@ def test_repl_unknown_slash_passes_through():
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
     mock_loop.run_turn = AsyncMock(return_value="Done.")
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -237,7 +237,7 @@ def test_repl_normal_input_routes_to_agent():
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
     mock_loop.run_turn = AsyncMock(return_value="Done.")
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -262,7 +262,7 @@ def test_repl_skips_empty_input():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -278,7 +278,7 @@ def test_repl_exits_on_eof():
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(side_effect=EOFError)
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -307,7 +307,7 @@ def test_repl_creation_intent_starts_workflow():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     mock_workflow = MagicMock()
@@ -345,7 +345,7 @@ def test_repl_active_workflow_routes_to_creation_handler():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     # Set up active workflow
@@ -382,7 +382,7 @@ def test_repl_creation_cancel_clears_workflow():
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
-    mock_bus = MagicMock()
+    mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
     # Set up active workflow that will transition to CANCELLED
