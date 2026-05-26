@@ -243,7 +243,7 @@ class ToolRegistry:
 
         for hook in self._pre_hooks:
             try:
-                await _maybe_await(hook(name=name, arguments=validated, agent_id=agent_id))
+                await _maybe_await(hook(name=name, arguments=validated, agent_id=agent_id, division_id=division_id))
             except ToolVetoed as exc:
                 return ToolResult(
                     output="",
@@ -274,7 +274,7 @@ class ToolRegistry:
         for hook in self._post_hooks:
             try:
                 await _maybe_await(
-                    hook(name=name, arguments=validated, result=result, agent_id=agent_id)
+                    hook(name=name, arguments=validated, result=result, agent_id=agent_id, division_id=division_id)
                 )
             except Exception:
                 pass
