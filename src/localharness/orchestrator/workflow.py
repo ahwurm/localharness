@@ -26,7 +26,7 @@ class AgentCreationWorkflow:
 
     def __init__(self, config_dir: Path | None = None) -> None:
         self._state = WorkflowState.DISCUSS
-        self._config_dir = config_dir or Path.home() / ".localharness" / "agents"
+        self._config_dir = config_dir or Path.home() / ".localharness"
         self._gathered: dict[str, Any] = {}
         self._generated_yaml: str = ""
         self._agent_name: str = ""
@@ -113,7 +113,7 @@ class AgentCreationWorkflow:
 
         Returns the path to the written config file.
         """
-        config_path = self._config_dir / f"{agent_name}.yaml"
+        config_path = self._config_dir / "agents" / f"{agent_name}.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = config_path.with_suffix(".yaml.tmp")
         tmp_path.write_text(self._generated_yaml)
