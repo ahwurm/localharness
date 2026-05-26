@@ -12,6 +12,7 @@ from localharness.agent.loop import (
     KillWatcher,
     StepResult,
 )
+from localharness.core.bus import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +542,141 @@ async def test_tool_call_action_published_before_observation(mock_llm_client, bu
     assert action_idx is not None, "Action(tool_call) not found"
     assert observation_idx is not None, "Observation(tool_result) not found"
     assert action_idx < observation_idx, "Action must come before Observation"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Memory loader tiered prompt tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock as _AsyncMock
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class _MockMemoryContext:
+    agent_memory_md: str
+    division_md: str
+    guardrails_md: str
+    fact_count: int
+    token_estimate: int
+
+
+def _make_memory_agent_loop(memory_loader=None):
+    """Create an AgentLoop with mocked dependencies for memory testing."""
+    from localharness.config.models import AgentConfig
+    from tests.conftest import MockLLMClient, FakeLLMResponse
+
+    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    ctx = ContextManager()
+    perm = PermissionEvaluator()
+    mock_bus = EventBus()
+
+    return AgentLoop(
+        config=cfg,
+        llm=llm,
+        bus=mock_bus,
+        context_manager=ctx,
+        tool_registry=None,
+        permission_evaluator=perm,
+        memory_loader=memory_loader,
+    ), llm
+
+
+@pytest.mark.asyncio
+async def test_memory_loader_tiered_prompt():
+    """MEM-03: load_context() result builds tiered system prompt with all 3 sections."""
+    memory = _AsyncMock()
+    memory.load_context = _AsyncMock(return_value=_MockMemoryContext(
+        agent_memory_md="my notes",
+        division_md="div context",
+        guardrails_md="safety rules",
+        fact_count=5,
+        token_estimate=100,
+    ))
+
+    loop, llm = _make_memory_agent_loop(memory_loader=memory)
+
+    # Capture messages sent to LLM
+    captured_messages = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        captured_messages.extend(messages or [])
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+    await loop.run_turn("hello")
+
+    memory.load_context.assert_awaited_once()
+    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
+    assert len(sys_msgs) >= 1
+    sys_content = sys_msgs[0]["content"]
+    assert "## Guardrails\nsafety rules" in sys_content
+    assert "## Division Context\ndiv context" in sys_content
+    assert "## Agent Memory\nmy notes" in sys_content
+    # Verify order: guardrails before division before agent memory
+    g_idx = sys_content.index("## Guardrails")
+    d_idx = sys_content.index("## Division Context")
+    a_idx = sys_content.index("## Agent Memory")
+    assert g_idx < d_idx < a_idx
+
+
+@pytest.mark.asyncio
+async def test_memory_loader_empty_tiers_omitted():
+    """MEM-03: Empty tiers silently omitted -- no empty ## headings."""
+    memory = _AsyncMock()
+    memory.load_context = _AsyncMock(return_value=_MockMemoryContext(
+        agent_memory_md="notes only",
+        division_md="",
+        guardrails_md="",
+        fact_count=0,
+        token_estimate=10,
+    ))
+
+    loop, llm = _make_memory_agent_loop(memory_loader=memory)
+
+    captured_messages = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        captured_messages.extend(messages or [])
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+    await loop.run_turn("hello")
+
+    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
+    assert len(sys_msgs) >= 1
+    sys_content = sys_msgs[0]["content"]
+    assert "## Agent Memory\nnotes only" in sys_content
+    assert "## Guardrails" not in sys_content
+    assert "## Division Context" not in sys_content
+
+
+@pytest.mark.asyncio
+async def test_memory_loader_failure_nonfatal():
+    """MEM-03: Memory load failure is non-fatal -- agent runs with base role only."""
+    memory = _AsyncMock()
+    memory.load_context = _AsyncMock(side_effect=RuntimeError("db gone"))
+
+    loop, llm = _make_memory_agent_loop(memory_loader=memory)
+
+    captured_messages = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        captured_messages.extend(messages or [])
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+
+    # Should not raise
+    result = await loop.run_turn("hello")
+    assert isinstance(result, str)
+
+    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
+    if sys_msgs:
+        sys_content = sys_msgs[0]["content"]
+        assert "You are a test assistant." in sys_content
+        assert "## Agent Memory" not in sys_content
