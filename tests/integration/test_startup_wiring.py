@@ -196,3 +196,52 @@ async def test_compaction_fires_at_80_percent():
 
     result = await ctx.build_messages(messages)
     assert summarize_called
+
+
+@pytest.mark.asyncio
+async def test_repl_publishes_user_message(tmp_harness_dir):
+    """MEM-02: REPL publishes UserMessage, MemoryStore handler captures it to JSONL."""
+    import json
+    import asyncio
+    from localharness.core.bus import EventBus
+    from localharness.core.events import UserMessage
+    from localharness.memory.sqlite import MemoryStore
+
+    agent_name = "test-agent"
+    events_path = tmp_harness_dir / "agents" / agent_name / "bus-events.jsonl"
+    bus = EventBus(persist_path=events_path)
+
+    store = MemoryStore(
+        agent_id=agent_name,
+        division_id="default",
+        org_id="default",
+        base_dir=str(tmp_harness_dir),
+        bus=bus,
+    )
+    await store.open()
+
+    try:
+        # Publish a UserMessage directly (simulating what REPL does)
+        await bus.publish(
+            UserMessage(
+                agent_id=agent_name,
+                content="test user input",
+                channel="terminal",
+            )
+        )
+
+        # Give async handlers a moment to process
+        await asyncio.sleep(0.1)
+
+        # Verify history.jsonl contains the user_message record
+        history_path = tmp_harness_dir / "agents" / agent_name / "history.jsonl"
+        assert history_path.exists(), f"history.jsonl not found at {history_path}"
+        lines = history_path.read_text().strip().split("\n")
+        records = [json.loads(line) for line in lines if line.strip()]
+        user_records = [r for r in records if r.get("type") == "user_message"]
+        assert len(user_records) == 1
+        assert user_records[0]["content"] == "test user input"
+        assert user_records[0]["channel"] == "terminal"
+        assert user_records[0]["agent_id"] == agent_name
+    finally:
+        await store.close()
