@@ -265,6 +265,7 @@ class AgentLoop:
         permission_evaluator: Any,  # PermissionEvaluator
         memory_loader: Any = None,
         kill_file_path: Path | None = None,
+        compact_md_path: Path | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -273,6 +274,7 @@ class AgentLoop:
         self._tools = tool_registry
         self._permissions = permission_evaluator
         self._memory = memory_loader
+        self._compact_md_path = compact_md_path
         # Determine kill file path
         if kill_file_path is not None:
             kf = kill_file_path
@@ -303,7 +305,7 @@ class AgentLoop:
 
         # Load prior session context from compact.md if present
         from localharness.agent.context import load_compact_md
-        compact_path = Path.home() / ".localharness" / "agents" / self._config.name / "compact.md"
+        compact_path = self._compact_md_path or (Path.home() / ".localharness" / "agents" / self._config.name / "compact.md")
         compact_msg = load_compact_md(compact_path)
         if compact_msg is not None:
             insert_idx = 1 if session.messages and session.messages[0].get("role") == "system" else 0
