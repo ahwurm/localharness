@@ -287,6 +287,12 @@ class AgentLoop:
         else:
             kf = Path.cwd() / "KILL"
         self._kill = KillWatcher(kill_file_path=kf)
+        self._current_session_id: str | None = None
+
+    @property
+    def current_session_id(self) -> str | None:
+        """Return the session_id from the most recent run_turn() call."""
+        return self._current_session_id
 
     async def run_turn(
         self,
@@ -302,6 +308,7 @@ class AgentLoop:
             session_id=str(uuid.uuid4()),
             messages=list(initial_messages) if initial_messages else [],
         )
+        self._current_session_id = session.session_id
 
         # Load prior session context from compact.md if present
         from localharness.agent.context import load_compact_md

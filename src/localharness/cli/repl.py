@@ -88,6 +88,7 @@ class OrchestratorREPL:
                     await self._bus.publish(
                         UserMessage(
                             agent_id=self._agent._config.name,
+                            session_id=self._agent.current_session_id,
                             content=user_input,
                             channel="terminal",
                         )
