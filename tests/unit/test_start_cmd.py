@@ -30,6 +30,9 @@ def _make_mock_orchestrator():
     mock._card_registry.all_cards = MagicMock(return_value=[])
     mock.active_workflow = None
     mock.begin_agent_creation = MagicMock()
+    mock.route_task = MagicMock(return_value=MagicMock(
+        matched=False, agent_id=None, confidence=0.0, reason="No active agents",
+    ))
     return mock
 
 
@@ -183,7 +186,7 @@ def test_repl_slash_agents_with_cards():
 
 
 def test_repl_unknown_slash_passes_through():
-    """Unknown slash command passes through to agent loop."""
+    """Unknown slash command passes through to orchestrator routing then agent loop."""
     from localharness.cli.repl import OrchestratorREPL
 
     responses = ["/unknown"]
@@ -209,7 +212,14 @@ def test_repl_unknown_slash_passes_through():
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
     asyncio.run(repl.run())
 
+    mock_orch.route_task.assert_called_once_with("/unknown")
     mock_loop.run_turn.assert_called_once_with(task="/unknown", on_token=None)
+    # REPL should NOT call send_message with the summary
+    summary_calls = [
+        c for c in mock_channel.send_message.call_args_list
+        if len(c[0]) > 0 and c[0][0] == "Done."
+    ]
+    assert len(summary_calls) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +227,7 @@ def test_repl_unknown_slash_passes_through():
 # ---------------------------------------------------------------------------
 
 def test_repl_normal_input_routes_to_agent():
-    """Normal text routes to agent_loop.run_turn."""
+    """Normal text calls route_task then routes to agent_loop.run_turn."""
     from localharness.cli.repl import OrchestratorREPL
 
     responses = ["do something"]
@@ -243,7 +253,103 @@ def test_repl_normal_input_routes_to_agent():
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
     asyncio.run(repl.run())
 
+    mock_orch.route_task.assert_called_once_with("do something")
     mock_loop.run_turn.assert_called_once_with(task="do something", on_token=None)
+    # REPL should NOT call send_message with the summary — TaskComplete event does it
+    summary_calls = [
+        c for c in mock_channel.send_message.call_args_list
+        if len(c[0]) > 0 and c[0][0] == "Done."
+    ]
+    assert len(summary_calls) == 0
+
+
+def test_repl_does_not_double_fire_output():
+    """ORCH-01: After run_turn, REPL does NOT call send_message (TaskComplete event does it)."""
+    from localharness.cli.repl import OrchestratorREPL
+
+    responses = ["hello"]
+    response_iter = iter(responses)
+
+    async def fake_read_input(prompt="you> "):
+        val = next(response_iter, None)
+        if val is None:
+            raise EOFError()
+        return val
+
+    mock_agent_config = MagicMock()
+    mock_agent_config.name = "test-agent"
+
+    mock_channel = AsyncMock()
+    mock_channel.read_input = fake_read_input
+    mock_loop = AsyncMock()
+    mock_loop._config = mock_agent_config
+    mock_loop.run_turn = AsyncMock(return_value="Done.")
+    mock_bus = AsyncMock()
+    mock_orch = _make_mock_orchestrator()
+    mock_orch.route_task.return_value = MagicMock(
+        matched=True, agent_id="test-agent", confidence=0.8, reason="Routed",
+    )
+
+    repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
+    asyncio.run(repl.run())
+
+    # REPL must NOT call send_message with the run_turn summary
+    summary_calls = [
+        c for c in mock_channel.send_message.call_args_list
+        if len(c[0]) > 0 and c[0][0] == "Done."
+    ]
+    assert len(summary_calls) == 0, "REPL should not send summary — TaskComplete event handles output"
+
+
+def test_repl_calls_route_task_before_run_turn():
+    """ORCH-01: route_task is called before run_turn for proper routing order."""
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.orchestrator.cards import RoutingDecision
+
+    responses = ["analyze data"]
+    response_iter = iter(responses)
+
+    async def fake_read_input(prompt="you> "):
+        val = next(response_iter, None)
+        if val is None:
+            raise EOFError()
+        return val
+
+    mock_agent_config = MagicMock()
+    mock_agent_config.name = "test-agent"
+
+    mock_channel = AsyncMock()
+    mock_channel.read_input = fake_read_input
+    mock_loop = AsyncMock()
+    mock_loop._config = mock_agent_config
+    mock_loop.run_turn = AsyncMock(return_value="Done.")
+    mock_bus = AsyncMock()
+    mock_orch = _make_mock_orchestrator()
+    mock_orch.route_task.return_value = RoutingDecision(
+        matched=True, agent_id="test-agent", agent_card=None,
+        confidence=0.8, reason="Routed",
+    )
+
+    # Track call order
+    call_order = []
+    original_route = mock_orch.route_task
+    original_run = mock_loop.run_turn
+
+    def track_route(*a, **kw):
+        call_order.append("route_task")
+        return original_route(*a, **kw)
+
+    async def track_run(*a, **kw):
+        call_order.append("run_turn")
+        return await original_run(*a, **kw)
+
+    mock_orch.route_task = track_route
+    mock_loop.run_turn = track_run
+
+    repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
+    asyncio.run(repl.run())
+
+    assert call_order == ["route_task", "run_turn"], f"Expected route_task before run_turn, got: {call_order}"
 
 
 def test_repl_skips_empty_input():
