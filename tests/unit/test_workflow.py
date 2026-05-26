@@ -1,5 +1,6 @@
 """Tests for AgentCreationWorkflow state machine."""
 import pytest
+import yaml
 from pathlib import Path
 from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
 
@@ -73,3 +74,30 @@ def test_workflow_gathered_stores_description():
     wf.transition("I need a fitness tracking agent that logs meals")
     assert "description" in wf.gathered
     assert "fitness" in wf.gathered["description"].lower()
+
+
+def test_deploy_config_rejects_invalid_yaml(tmp_path: Path):
+    """deploy_config must raise ValueError for unparseable YAML."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("this is: [[[not: valid")
+    with pytest.raises(ValueError):
+        wf.deploy_config("test-agent")
+    assert not (tmp_path / "agents" / "test-agent.yaml").exists()
+
+
+def test_deploy_config_rejects_bad_schema(tmp_path: Path):
+    """deploy_config must raise for YAML that fails AgentConfig validation."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("name: INVALID_UPPER\nrole: test")
+    with pytest.raises((ValueError, Exception)):
+        wf.deploy_config("test-agent")
+    assert not (tmp_path / "agents" / "test-agent.yaml").exists()
+
+
+def test_deploy_config_overrides_name(tmp_path: Path):
+    """deploy_config must override the name field to match the agent_name parameter."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("name: llm-chose-this\nrole: A helpful agent")
+    path = wf.deploy_config("my-agent")
+    data = yaml.safe_load(path.read_text())
+    assert data["name"] == "my-agent"
