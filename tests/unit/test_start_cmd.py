@@ -205,6 +205,7 @@ def test_repl_unknown_slash_passes_through():
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
+    mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -246,6 +247,7 @@ def test_repl_normal_input_routes_to_agent():
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
+    mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -283,6 +285,7 @@ def test_repl_does_not_double_fire_output():
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
+    mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -322,6 +325,7 @@ def test_repl_calls_route_task_before_run_turn():
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
+    mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -576,6 +580,7 @@ def test_repl_publishes_user_message_before_run_turn():
     mock_channel.read_input = fake_read_input
     mock_loop = AsyncMock()
     mock_loop._config = mock_agent_config
+    mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
