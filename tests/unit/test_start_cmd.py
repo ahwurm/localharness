@@ -443,3 +443,80 @@ def test_register_builtin_tools_not_in_registry():
     import pytest
     with pytest.raises(ImportError):
         from localharness.tools.registry import register_builtin_tools
+
+
+# ---------------------------------------------------------------------------
+# Task 3: UserMessage publishing tests
+# ---------------------------------------------------------------------------
+
+def test_repl_publishes_user_message_before_run_turn():
+    """MEM-02: Normal input publishes UserMessage with correct agent_id and content."""
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.core.events import UserMessage
+
+    responses = ["do something"]
+    response_iter = iter(responses)
+
+    async def fake_read_input(prompt="you> "):
+        val = next(response_iter, None)
+        if val is None:
+            raise EOFError()
+        return val
+
+    mock_agent_config = MagicMock()
+    mock_agent_config.name = "test-agent"
+
+    mock_channel = AsyncMock()
+    mock_channel.read_input = fake_read_input
+    mock_loop = AsyncMock()
+    mock_loop._config = mock_agent_config
+    mock_loop.run_turn = AsyncMock(return_value="Done.")
+    mock_bus = AsyncMock()
+    mock_orch = _make_mock_orchestrator()
+
+    repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
+    asyncio.run(repl.run())
+
+    # bus.publish should have been called with a UserMessage
+    publish_calls = mock_bus.publish.call_args_list
+    user_msg_calls = [
+        c for c in publish_calls
+        if isinstance(c[0][0], UserMessage)
+    ]
+    assert len(user_msg_calls) == 1
+    msg = user_msg_calls[0][0][0]
+    assert msg.content == "do something"
+    assert msg.channel == "terminal"
+    assert msg.agent_id == "test-agent"
+
+
+def test_repl_slash_commands_no_user_message():
+    """MEM-02: Slash commands do NOT publish UserMessage -- they are infrastructure."""
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.core.events import UserMessage
+
+    responses = ["/help"]
+    response_iter = iter(responses)
+
+    async def fake_read_input(prompt="you> "):
+        val = next(response_iter, None)
+        if val is None:
+            raise EOFError()
+        return val
+
+    mock_channel = AsyncMock()
+    mock_channel.read_input = fake_read_input
+    mock_loop = AsyncMock()
+    mock_bus = AsyncMock()
+    mock_orch = _make_mock_orchestrator()
+
+    repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
+    asyncio.run(repl.run())
+
+    # bus.publish should NOT have been called with UserMessage
+    publish_calls = mock_bus.publish.call_args_list
+    user_msg_calls = [
+        c for c in publish_calls
+        if len(c[0]) > 0 and isinstance(c[0][0], UserMessage)
+    ]
+    assert len(user_msg_calls) == 0
