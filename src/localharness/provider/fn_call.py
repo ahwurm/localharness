@@ -72,6 +72,13 @@ _LEGACY_PARTIAL = re.compile(
 # ---------------------------------------------------------------------------
 
 
+# TODO: Model-family recognizer system — at startup, identify the model family
+# (Qwen 3.6 Coder, Qwen 3 base, Llama, DeepSeek, etc.) and select an optimized
+# tool call parser per family instead of the current try-all-formats chain.
+# This would eliminate wasted regex passes and allow family-specific prompt
+# injection (e.g. Hermes JSON for Qwen 3 base, XML params for Qwen 3.6 Coder).
+
+
 class FnCallConverter:
     """Convert between OpenAI native tool_calls format and XML text format.
 

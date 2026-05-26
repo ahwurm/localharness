@@ -116,6 +116,50 @@ def test_stuck_clear_when_window_too_small():
 
 
 # ---------------------------------------------------------------------------
+# Permission pattern matching tests
+# ---------------------------------------------------------------------------
+
+def test_permission_denies_relative_path():
+    """Relative paths must match deny patterns with */ prefix (bug fix)."""
+    from localharness.agent.permissions import PermissionEvaluator, PermissionResult
+    from localharness.core.types import ToolCall
+
+    class FakePerms:
+        deny_patterns = ["write(*/agents/*.yaml)"]
+
+    ev = PermissionEvaluator()
+    tc = ToolCall(name="write", arguments={"path": "agents/brave-search.yaml"}, id="t1")
+    result = ev.evaluate(tc, FakePerms())
+    assert result.denied is True
+
+
+def test_permission_denies_absolute_path():
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.core.types import ToolCall
+
+    class FakePerms:
+        deny_patterns = ["write(*/agents/*.yaml)"]
+
+    ev = PermissionEvaluator()
+    tc = ToolCall(name="write", arguments={"path": "/home/user/agents/foo.yaml"}, id="t1")
+    result = ev.evaluate(tc, FakePerms())
+    assert result.denied is True
+
+
+def test_permission_allows_non_matching():
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.core.types import ToolCall
+
+    class FakePerms:
+        deny_patterns = ["write(*/agents/*.yaml)"]
+
+    ev = PermissionEvaluator()
+    tc = ToolCall(name="write", arguments={"path": "src/main.py"}, id="t1")
+    result = ev.evaluate(tc, FakePerms())
+    assert result.denied is False
+
+
+# ---------------------------------------------------------------------------
 # BudgetTracker tests
 # ---------------------------------------------------------------------------
 

@@ -527,9 +527,9 @@ class AgentLoop:
             # 4. Build request messages (copy, with repair)
             request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
 
-            # 4. Inject recovery if set
+            # 4. Inject recovery if set (use "user" role — vLLM rejects mid-conversation system messages)
             if recovery_injection is not None:
-                request_messages.append({"role": "system", "content": recovery_injection})
+                request_messages.append({"role": "user", "content": recovery_injection})
                 recovery_injection = None
 
             # 5. LLM call with error handling
@@ -652,7 +652,19 @@ class AgentLoop:
                 self._conversation = list(session.messages)
                 return summary
 
-            # 10. Execute each tool call
+            # 10. Deduplicate identical tool calls in same response
+            seen_sigs: set[str] = set()
+            unique_calls: list = []
+            for tc in tool_calls:
+                sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, separators=(',', ':'))}"
+                if sig in seen_sigs:
+                    log.warning("Duplicate tool call %s in same response — skipping", tc.name)
+                    continue
+                seen_sigs.add(sig)
+                unique_calls.append(tc)
+            tool_calls = unique_calls
+
+            # 11. Execute each tool call
             for tool_call in tool_calls:
                 session.actions_taken += 1
 
@@ -728,7 +740,7 @@ class AgentLoop:
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
 
-            # 11. Check stuck state
+            # 12. Check stuck state
             stuck_state = stuck_detector.check()
             if stuck_state == StuckState.RECOVERING:
                 repeated_sig = stuck_detector.most_repeated_signature()
