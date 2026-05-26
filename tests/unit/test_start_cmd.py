@@ -626,3 +626,29 @@ def test_repl_slash_commands_no_user_message():
         if len(c[0]) > 0 and isinstance(c[0][0], UserMessage)
     ]
     assert len(user_msg_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 2: deploy_config path tests
+# ---------------------------------------------------------------------------
+
+def test_deploy_config_writes_to_agents_subdir(tmp_path):
+    """ORCH-02: deploy_config writes to config_dir/agents/{name}.yaml."""
+    from localharness.orchestrator.workflow import AgentCreationWorkflow
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("name: test-bot\nrole: Test\n")
+    result_path = wf.deploy_config("test-bot")
+    assert result_path == tmp_path / "agents" / "test-bot.yaml"
+    assert result_path.exists()
+    assert "name: test-bot" in result_path.read_text()
+
+
+def test_deploy_config_default_path(tmp_path, monkeypatch):
+    """ORCH-02: default deploy path is ~/.localharness/agents/{name}.yaml."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from localharness.orchestrator.workflow import AgentCreationWorkflow
+    wf = AgentCreationWorkflow()  # no config_dir
+    wf.set_generated_yaml("name: default-bot\nrole: Default\n")
+    result_path = wf.deploy_config("default-bot")
+    assert result_path == tmp_path / ".localharness" / "agents" / "default-bot.yaml"
+    assert result_path.exists()
