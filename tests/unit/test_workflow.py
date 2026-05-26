@@ -88,7 +88,8 @@ def test_deploy_config_rejects_invalid_yaml(tmp_path: Path):
 def test_deploy_config_rejects_bad_schema(tmp_path: Path):
     """deploy_config must raise for YAML that fails AgentConfig validation."""
     wf = AgentCreationWorkflow(config_dir=tmp_path)
-    wf.set_generated_yaml("name: INVALID_UPPER\nrole: test")
+    # temperature > 2.0 exceeds AgentConfig's le=2.0 constraint
+    wf.set_generated_yaml("name: x\nrole: test\ntemperature: 999")
     with pytest.raises((ValueError, Exception)):
         wf.deploy_config("test-agent")
     assert not (tmp_path / "agents" / "test-agent.yaml").exists()
