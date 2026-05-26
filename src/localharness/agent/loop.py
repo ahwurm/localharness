@@ -404,9 +404,15 @@ class AgentLoop:
         system_prompt = self._config.role
         if self._memory is not None:
             try:
-                memory_context = await self._memory.load(self._config)
-                if memory_context:
-                    system_prompt += "\n\n## Agent Memory\n" + memory_context
+                ctx = await self._memory.load_context()
+                parts = [system_prompt]
+                if ctx.guardrails_md:
+                    parts.append("## Guardrails\n" + ctx.guardrails_md)
+                if ctx.division_md:
+                    parts.append("## Division Context\n" + ctx.division_md)
+                if ctx.agent_memory_md:
+                    parts.append("## Agent Memory\n" + ctx.agent_memory_md)
+                system_prompt = "\n\n".join(parts)
             except Exception:
                 pass  # memory load failure is non-fatal
 
