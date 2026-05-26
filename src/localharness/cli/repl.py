@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from localharness.core.events import UserMessage
+
 
 HELP_TEXT = """\
 Available commands:
@@ -83,6 +85,13 @@ class OrchestratorREPL:
                         continue
 
                     # Route through orchestrator — all other input
+                    await self._bus.publish(
+                        UserMessage(
+                            agent_id=self._agent._config.name,
+                            content=user_input,
+                            channel="terminal",
+                        )
+                    )
                     summary = await self._agent.run_turn(
                         task=user_input,
                         on_token=None,
