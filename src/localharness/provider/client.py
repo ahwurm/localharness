@@ -116,6 +116,15 @@ class MalformedResponseError(ProviderError):
 # ---------------------------------------------------------------------------
 
 
+def _tools_to_api_format(tools: list[ToolSchema]) -> list[dict]:
+    """Serialize ToolSchema list to OpenAI tools API format."""
+    result = []
+    for t in tools:
+        fn = t.model_dump() if hasattr(t, "model_dump") else dict(t)
+        result.append({"type": "function", "function": fn})
+    return result
+
+
 class LLMClient:
     """OpenAI-compatible async LLM client with XML fallback and local timeout handling."""
 
@@ -258,7 +267,7 @@ class LLMClient:
                 "max_tokens": self.config.max_tokens,
             }
             if tools:
-                kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+                kwargs["tools"] = _tools_to_api_format(tools)
             if self.config.stop_sequences:
                 kwargs["stop"] = self.config.stop_sequences
             response = await self._client.chat.completions.create(**kwargs)
@@ -272,7 +281,43 @@ class LLMClient:
         tools: list[ToolSchema] | None,
         stream: bool,
     ) -> Any:
-        """Inject XML tool schema, call without tools param, extract via FnCallConverter."""
+        """Send tools via API for chat-template injection, parse tool calls from text.
+
+        vLLM injects tools via the model's chat template (e.g. Qwen's native format),
+        producing much better compliance than custom system-prompt injection.
+        Falls back to system-prompt injection if the API rejects the tools param.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": list(messages),
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = _tools_to_api_format(tools)
+        if self.config.stop_sequences:
+            kwargs["stop"] = self.config.stop_sequences
+        # Disable thinking mode for xml tool-calling — reduces token waste 100x
+        if self.config.is_local:
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+            return response.choices[0].message
+        except openai.BadRequestError:
+            # Server rejected tools/extra_body — fall back to system prompt injection
+            log.warning("Server rejected request, falling back to system prompt injection")
+            return await self._complete_xml_fallback(messages, tools, stream)
+        except Exception as exc:
+            raise self._wrap_error(exc) from exc
+
+    async def _complete_xml_fallback(
+        self,
+        messages: list[Message],
+        tools: list[ToolSchema] | None,
+        stream: bool,
+    ) -> Any:
+        """Legacy fallback: inject tool schemas into system prompt as XML text."""
         msgs = list(messages)
         if tools and self._fn_converter:
             injection = self._fn_converter.build_system_injection(tools)
