@@ -76,7 +76,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
     from localharness.tools.mcp import MCPClientManager
-    from localharness.tools.registry import ToolRegistry, register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
 
     cfg_path = Path(config_dir).expanduser()
     config_file = cfg_path / "config.yaml"
@@ -320,6 +321,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         context_manager=ctx_mgr,
         tool_registry=tool_registry,
         permission_evaluator=perm_eval,
+        memory_loader=memory_store,
     )
     channel = TerminalChannel(bus=bus, config={})
 
