@@ -214,3 +214,68 @@ async def test_user_message_includes_session_id():
     assert len(user_msgs) == 1
     assert user_msgs[0].session_id == "sess-123"
     assert user_msgs[0].content == "hello"
+
+
+# --- OrchestratorREPL: no double output during YAML generation ---
+
+@pytest.mark.asyncio
+async def test_yaml_generation_no_double_output():
+    """YAML gen uses llm.complete() directly -- no TaskComplete event, send_message called once."""
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.core.events import TaskComplete
+    from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
+
+    # Mock agent loop with _llm.complete that returns YAML content
+    mock_response = MagicMock()
+    mock_response.content = "name: my-agent\nrole: test helper"
+    mock_agent = MagicMock()
+    mock_agent._config.name = "test-agent"
+    mock_agent._llm = AsyncMock()
+    mock_agent._llm.complete = AsyncMock(return_value=mock_response)
+    mock_agent.run_turn = AsyncMock(return_value="should not be called")
+
+    # Mock bus that captures published events
+    mock_bus = AsyncMock()
+    published_events = []
+    async def capture_publish(event):
+        published_events.append(event)
+    mock_bus.publish = AsyncMock(side_effect=capture_publish)
+
+    # Mock channel
+    mock_channel = AsyncMock()
+    # First input triggers DISCUSS->CONFIGURE transition (description > 10 chars)
+    # Second input raises EOFError to exit
+    mock_channel.read_input = AsyncMock(side_effect=[
+        "build me an agent that does web research and summarization",
+        EOFError(),
+    ])
+
+    # Create real workflow in DISCUSS state with no gathered data
+    workflow = AgentCreationWorkflow()
+
+    # Mock orchestrator with active_workflow set to the real workflow
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.active_workflow = workflow
+
+    repl = OrchestratorREPL(
+        orchestrator=mock_orchestrator,
+        agent_loop=mock_agent,
+        channel=mock_channel,
+        bus=mock_bus,
+    )
+    await repl.run()
+
+    # Assert run_turn was NOT called (llm.complete used instead)
+    mock_agent.run_turn.assert_not_called()
+
+    # Assert llm.complete WAS called
+    mock_agent._llm.complete.assert_called_once()
+
+    # Assert no TaskComplete events published
+    task_completes = [e for e in published_events if isinstance(e, TaskComplete)]
+    assert len(task_completes) == 0
+
+    # Assert send_message called exactly once (the YAML display)
+    assert mock_channel.send_message.call_count == 1
+    call_args = mock_channel.send_message.call_args
+    assert "my-agent" in call_args[0][0]  # YAML content in the message
