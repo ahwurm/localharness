@@ -1,4 +1,7 @@
 """Tests for orchestrator routing, Agent Cards, and context guard."""
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from localharness.orchestrator.cards import AgentCard, AgentCardRegistry, score_card, RoutingDecision
 from localharness.config.models import AgentConfig
@@ -166,3 +169,48 @@ def test_orchestrator_begin_agent_creation():
     # Calling again returns a fresh workflow (not the same instance)
     wf2 = orch.begin_agent_creation()
     assert wf2 is not wf
+
+
+# --- OrchestratorREPL: session_id on UserMessage ---
+
+@pytest.mark.asyncio
+async def test_user_message_includes_session_id():
+    """UserMessage published by REPL includes session_id from AgentLoop.current_session_id."""
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.core.events import UserMessage
+
+    # Mock agent loop with current_session_id property
+    mock_agent = MagicMock()
+    mock_agent._config.name = "test-agent"
+    mock_agent.current_session_id = "sess-123"
+    mock_agent.run_turn = AsyncMock(return_value="done")
+
+    # Mock bus that captures published events
+    mock_bus = AsyncMock()
+    published_events = []
+    async def capture_publish(event):
+        published_events.append(event)
+    mock_bus.publish = AsyncMock(side_effect=capture_publish)
+
+    # Mock channel: first read returns input, second raises EOFError
+    mock_channel = AsyncMock()
+    mock_channel.read_input = AsyncMock(side_effect=["hello", EOFError()])
+
+    # Mock orchestrator with no active workflow and route_task returning a decision
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.active_workflow = None
+    mock_orchestrator.route_task = MagicMock(return_value=RoutingDecision(matched=True, agent_id="test-agent", agent_card=None, confidence=1.0, reason="test"))
+
+    repl = OrchestratorREPL(
+        orchestrator=mock_orchestrator,
+        agent_loop=mock_agent,
+        channel=mock_channel,
+        bus=mock_bus,
+    )
+    await repl.run()
+
+    # Find the UserMessage event
+    user_msgs = [e for e in published_events if isinstance(e, UserMessage)]
+    assert len(user_msgs) == 1
+    assert user_msgs[0].session_id == "sess-123"
+    assert user_msgs[0].content == "hello"
