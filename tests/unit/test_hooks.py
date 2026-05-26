@@ -148,3 +148,42 @@ async def test_register_plugin_dedup():
     plugin = NoopPlugin()
     hs.register_plugin(plugin)
     hs.register_plugin(plugin)  # Must not raise
+
+
+@pytest.mark.asyncio
+async def test_division_id_forwarded_to_hooks():
+    """dispatch() must forward division_id to pre_tool and post_tool hook implementations."""
+    pre_divisions: list[str] = []
+    post_divisions: list[str] = []
+
+    class DivisionTracker:
+        @HARNESS_HOOKIMPL
+        def pre_tool(self, name: str, arguments: dict, agent_id: str, division_id: str) -> None:
+            pre_divisions.append(division_id)
+
+        @HARNESS_HOOKIMPL
+        def post_tool(
+            self, name: str, arguments: dict, result: Any, agent_id: str, division_id: str
+        ) -> None:
+            post_divisions.append(division_id)
+
+    registry = ToolRegistry()
+    await registry.register(_OkTool(), scope="global")
+
+    hs = HookSystem()
+    hs.register_plugin(DivisionTracker())
+    hs.wire_to_registry(registry)
+
+    result = await registry.dispatch(
+        name="ok_tool",
+        arguments={},
+        agent_id="test-agent",
+        division_id="engineering",
+        tool_config=_TOOL_CONFIG,
+    )
+
+    assert result.success is True
+    assert len(pre_divisions) == 1
+    assert pre_divisions[0] == "engineering", f"Expected 'engineering', got '{pre_divisions[0]}'"
+    assert len(post_divisions) == 1
+    assert post_divisions[0] == "engineering", f"Expected 'engineering', got '{post_divisions[0]}'"
