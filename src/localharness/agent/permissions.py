@@ -36,8 +36,9 @@ class PermissionEvaluator:
                 # Bare tool name pattern — any call to this tool is denied
                 return PermissionResult(denied=True, reason=f"Matches deny pattern: {pattern}")
             # Check arg_glob against all string values in arguments
+            # Also try with "./" prefix so relative paths match patterns like "*/agents/*.yaml"
             for v in _iter_string_values(tool_call.arguments):
-                if fnmatch.fnmatch(v, arg_glob):
+                if fnmatch.fnmatch(v, arg_glob) or fnmatch.fnmatch("./" + v, arg_glob):
                     return PermissionResult(denied=True, reason=f"Matches deny pattern: {pattern}")
         return PermissionResult(denied=False)
 
