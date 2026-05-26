@@ -378,7 +378,7 @@ class ContextManager:
         if self._pipeline is not None:
             import json as _json
             tool_tokens = self._token_counter.count_messages(
-                [{"role": "system", "content": _json.dumps(tool_schemas)}]
+                [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
             ) if tool_schemas else 0
             usage = self._token_counter.count_messages(repaired)
             budget = TokenBudget(

@@ -36,6 +36,7 @@ class Session:
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
     summary: str = ""
     terminated_reason: str | None = None
+    parse_retries: int = 0
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -212,6 +213,18 @@ def _format_error_summary(session: Session, exc: Exception) -> str:
     )
 
 
+def _clean_summary(text: str) -> str:
+    """Remove XML tool call remnants and thinking tags from summary text."""
+    import re
+    from localharness.provider.fn_call import strip_thinking_tags
+    text = strip_thinking_tags(text)
+    # Remove any leftover <tool_call>...</tool_call> blocks
+    text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL)
+    # Remove orphaned opening <tool_call> blocks (truncated)
+    text = re.sub(r"<tool_call>.*", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
 def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
     """Extract tool calls from an LLM response regardless of mode."""
     from localharness.core.types import ToolCall
@@ -288,6 +301,7 @@ class AgentLoop:
             kf = Path.cwd() / "KILL"
         self._kill = KillWatcher(kill_file_path=kf)
         self._current_session_id: str | None = None
+        self._conversation: list[Message] = []
 
     @property
     def current_session_id(self) -> str | None:
@@ -303,21 +317,30 @@ class AgentLoop:
         """Execute a full agent turn. Never raises — all errors become summary strings."""
         from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, BudgetSpec
 
+        # Session continuity: reuse prior conversation if available
+        if self._conversation:
+            prior = list(self._conversation)
+        elif initial_messages:
+            prior = list(initial_messages)
+        else:
+            prior = []
+
         session = Session(
             agent_id=self._config.name,
             session_id=str(uuid.uuid4()),
-            messages=list(initial_messages) if initial_messages else [],
+            messages=prior,
         )
         self._current_session_id = session.session_id
 
-        # Load prior session context from compact.md if present
-        from localharness.agent.context import load_compact_md
-        compact_path = self._compact_md_path or (Path.home() / ".localharness" / "agents" / self._config.name / "compact.md")
-        compact_msg = load_compact_md(compact_path)
-        if compact_msg is not None:
-            insert_idx = 1 if session.messages and session.messages[0].get("role") == "system" else 0
-            session.messages.insert(insert_idx, compact_msg)
-            log.info("Loaded compact.md for agent %s", self._config.name)
+        # Load prior session context from compact.md if no conversation history
+        if not prior:
+            from localharness.agent.context import load_compact_md
+            compact_path = self._compact_md_path or (Path.home() / ".localharness" / "agents" / self._config.name / "compact.md")
+            compact_msg = load_compact_md(compact_path)
+            if compact_msg is not None:
+                insert_idx = 1 if session.messages and session.messages[0].get("role") == "system" else 0
+                session.messages.insert(insert_idx, compact_msg)
+                log.info("Loaded compact.md for agent %s", self._config.name)
 
         budget_cfg = self._config.permissions.budget
         await self._bus.publish(TurnStarted(
@@ -410,7 +433,15 @@ class AgentLoop:
         stuck_detector = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
 
         # Build system prompt
+        tool_call_mode = getattr(
+            getattr(self._llm, "config", None), "tool_call_mode", "native"
+        )
         system_prompt = self._config.role
+        if tool_call_mode != "native":
+            system_prompt += (
+                "\n\nWhen you have finished using tools, respond directly to the user. "
+                "Be concise — give the answer, not your reasoning process."
+            )
         if self._memory is not None:
             try:
                 ctx = await self._memory.load_context()
@@ -437,8 +468,14 @@ class AgentLoop:
             except Exception:
                 tool_schemas = []
 
-        # Initialize session messages
-        session.push({"role": "system", "content": system_prompt})
+        # Initialize or continue session messages
+        has_prior_turns = any(m.get("role") == "user" for m in session.messages)
+        if has_prior_turns and session.messages and session.messages[0].get("role") == "system":
+            # Continuing conversation — refresh system prompt, append new user message
+            session.messages[0] = {"role": "system", "content": system_prompt}
+        else:
+            # First turn (may have compact.md already) — insert system prompt at front
+            session.messages.insert(0, {"role": "system", "content": system_prompt})
         session.push({"role": "user", "content": task})
 
         recovery_injection: str | None = None
@@ -456,6 +493,7 @@ class AgentLoop:
             # 1. Kill check
             if self._kill.is_killed():
                 session.terminated_reason = "kill_file"
+                self._conversation = list(session.messages)
                 log.warning(
                     "KILL file detected, stopping agent %s after %d iterations",
                     self._config.name,
@@ -467,6 +505,7 @@ class AgentLoop:
             violation = budget.check(session)
             if violation is not None:
                 session.terminated_reason = f"budget_{violation.reason}"
+                self._conversation = list(session.messages)
                 log.info(
                     "Budget exceeded for %s: %s (limit=%s, current=%s)",
                     self._config.name,
@@ -540,8 +579,10 @@ class AgentLoop:
                 session.terminated_reason = "error"
                 return _format_error_summary(session, exc)
 
-            # 6. Push assistant response to session
-            content = getattr(response_message, "content", None)
+            # 6. Strip thinking tags and push assistant response to session
+            from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
+            raw_content = getattr(response_message, "content", None)
+            content = strip_thinking_tags(raw_content) if raw_content else raw_content
             raw_tool_calls = getattr(response_message, "tool_calls", None)
             session.push({
                 "role": "assistant",
@@ -560,9 +601,45 @@ class AgentLoop:
             # 8. Extract tool calls
             tool_calls = _extract_tool_calls(response_message, tool_call_mode)
 
-            # 9. No tool calls → natural completion
+            # 8b. In xml mode, populate assistant message tool_calls so
+            # repair_tool_pairing doesn't strip tool results as orphaned
+            if tool_call_mode != "native" and tool_calls:
+                tc_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                    }
+                    for tc in tool_calls
+                ]
+                for i in range(len(session.messages) - 1, -1, -1):
+                    if session.messages[i].get("role") == "assistant":
+                        session.messages[i]["tool_calls"] = tc_dicts
+                        break
+
+            # 9. No tool calls — check if parse failed on an attempted tool call
             if not tool_calls:
-                summary = _format_completion_summary(session, content)
+                if has_tool_call_attempt(raw_content or "") and session.parse_retries < 3:
+                    session.parse_retries += 1
+                    log.warning(
+                        "Tool call XML parse failed (attempt %d/3) for %s",
+                        session.parse_retries,
+                        self._config.name,
+                    )
+                    session.push({
+                        "role": "user",
+                        "content": (
+                            "Your tool call could not be parsed. Please use the correct format "
+                            "and try again with your intended tool call."
+                        ),
+                    })
+                    continue
+
+                # Natural completion — reset parse retries
+                session.parse_retries = 0
+                summary = _clean_summary(
+                    _format_completion_summary(session, content)
+                )
                 await self._bus.publish(TaskComplete(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -572,6 +649,7 @@ class AgentLoop:
                     iterations=session.iteration,
                 ))
                 session.terminated_reason = "complete"
+                self._conversation = list(session.messages)
                 return summary
 
             # 10. Execute each tool call
@@ -647,6 +725,9 @@ class AgentLoop:
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)
 
+            # Tool calls parsed and executed — reset parse retry counter
+            session.parse_retries = 0
+
             # 11. Check stuck state
             stuck_state = stuck_detector.check()
             if stuck_state == StuckState.RECOVERING:
@@ -667,6 +748,7 @@ class AgentLoop:
                     stuck_signature=stuck_detector.most_repeated_signature(),
                     iteration_at_escalation=session.iteration,
                 ))
+                self._conversation = list(session.messages)
                 log.warning(
                     "Agent %s stuck after %d iterations, escalating",
                     self._config.name,
@@ -728,6 +810,22 @@ class AgentLoop:
         })
 
         tool_calls = _extract_tool_calls(response_message, tool_call_mode)
+
+        # Populate assistant tool_calls for xml mode (repair_tool_pairing compatibility)
+        if tool_call_mode != "native" and tool_calls:
+            tc_dicts = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                }
+                for tc in tool_calls
+            ]
+            for i in range(len(session.messages) - 1, -1, -1):
+                if session.messages[i].get("role") == "assistant":
+                    session.messages[i]["tool_calls"] = tc_dicts
+                    break
+
         if not tool_calls:
             session.terminated_reason = "complete"
             return StepResult(
