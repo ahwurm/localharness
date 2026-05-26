@@ -680,3 +680,72 @@ async def test_memory_loader_failure_nonfatal():
         sys_content = sys_msgs[0]["content"]
         assert "You are a test assistant." in sys_content
         assert "## Agent Memory" not in sys_content
+
+
+# ---------------------------------------------------------------------------
+# Task: compact_md_path parameter tests (08-01)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compact_md_path_from_constructor(tmp_path):
+    """AgentLoop constructed with compact_md_path uses that path, not hardcoded Path.home()."""
+    from localharness.config.models import AgentConfig
+    from tests.conftest import MockLLMClient, FakeLLMResponse
+
+    # Write compact.md to tmp_path (definitely not ~/.localharness)
+    compact_file = tmp_path / "compact.md"
+    compact_file.write_text("Prior context here")
+
+    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    ctx = ContextManager()
+    perm = PermissionEvaluator()
+    mock_bus = EventBus()
+
+    loop = AgentLoop(
+        config=cfg,
+        llm=llm,
+        bus=mock_bus,
+        context_manager=ctx,
+        tool_registry=None,
+        permission_evaluator=perm,
+        compact_md_path=compact_file,
+    )
+
+    # Capture messages sent to LLM
+    captured_messages = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        captured_messages.extend(messages or [])
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+    await loop.run_turn("hello")
+
+    # The session should contain the compact.md content as [Prior Session Context]
+    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
+    compact_contents = [m for m in sys_msgs if "Prior Session Context" in (m.get("content") or "")]
+    assert len(compact_contents) >= 1, "compact.md content not loaded into session"
+    assert "Prior context here" in compact_contents[0]["content"]
+
+
+def test_compact_md_path_default_fallback():
+    """AgentLoop constructed without compact_md_path stores None (fallback activates in run_turn)."""
+    from localharness.config.models import AgentConfig
+
+    cfg = AgentConfig(name="test-agent", role="Test.")
+    mock_bus = EventBus()
+    ctx = ContextManager()
+    perm = PermissionEvaluator()
+
+    loop = AgentLoop(
+        config=cfg,
+        llm=None,
+        bus=mock_bus,
+        context_manager=ctx,
+        tool_registry=None,
+        permission_evaluator=perm,
+    )
+    assert loop._compact_md_path is None
