@@ -219,3 +219,102 @@ def test_load_compact_md_returns_none_when_empty(tmp_path):
     compact_file.write_text("")
     msg = load_compact_md(compact_file)
     assert msg is None
+
+
+# ---------------------------------------------------------------------------
+# SCEN-04 plumbing: CompactionTriggered publication (Plan 12-01 Task 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_compaction_publishes_event():
+    """When pipeline modifies messages, CompactionTriggered is published once."""
+    from localharness.agent.context import ContextManager
+    from localharness.core.events import CompactionTriggered
+
+    published: list = []
+
+    class FakeBus:
+        async def publish(self, event):
+            published.append(event)
+
+    # Stub pipeline that always reports modified=True
+    class StubPipeline:
+        async def run(self, messages, budget):
+            return messages[:1], True   # truncate to first message; any_modified=True
+
+    # Use a tiny budget so needs_summary_compact triggers
+    cm = ContextManager(
+        max_context_tokens=100,
+        pipeline=StubPipeline(),
+        bus=FakeBus(),
+        agent_id="agent-1",
+        session_id="session-1",
+    )
+    cm.set_iteration(7)
+
+    # Build messages large enough to exceed needs_summary_compact threshold
+    big = [{"role": "user", "content": "x" * 5000}] * 5
+    await cm.build_messages(big, tool_schemas=None)
+
+    assert len(published) == 1
+    ev = published[0]
+    assert isinstance(ev, CompactionTriggered)
+    assert ev.agent_id == "agent-1"
+    assert ev.session_id == "session-1"
+    assert ev.iteration == 7
+    assert ev.pre_usage_fraction >= 0.0
+    assert ev.post_usage_fraction >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_compaction_no_publish_when_unchanged():
+    """When pipeline reports any_modified=False, no event is published."""
+    from localharness.agent.context import ContextManager
+
+    published: list = []
+
+    class FakeBus:
+        async def publish(self, event):
+            published.append(event)
+
+    class NoOpPipeline:
+        async def run(self, messages, budget):
+            return messages, False
+
+    cm = ContextManager(
+        max_context_tokens=100,
+        pipeline=NoOpPipeline(),
+        bus=FakeBus(),
+        agent_id="a",
+        session_id="s",
+    )
+    big = [{"role": "user", "content": "x" * 5000}] * 5
+    await cm.build_messages(big, tool_schemas=None)
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_compaction_no_bus_no_publish():
+    """Back-compat — ContextManager without bus must not raise."""
+    from localharness.agent.context import ContextManager
+
+    class StubPipeline:
+        async def run(self, messages, budget):
+            return messages[:1], True
+
+    cm = ContextManager(max_context_tokens=100, pipeline=StubPipeline())
+    big = [{"role": "user", "content": "x" * 5000}] * 5
+    out, _budget = await cm.build_messages(big, tool_schemas=None)
+    # Should not raise. No bus, no publication.
+    assert out == big[:1]
+
+
+def test_default_deny_patterns_use_bash_exec():
+    """Default deny_patterns reference bash_exec (the actual tool name), not legacy bash."""
+    from localharness.config.models import PermissionConfig
+    patterns = PermissionConfig().deny_patterns
+    assert "bash_exec(sudo:*)" in patterns
+    assert "bash_exec(rm -rf *)" in patterns
+    assert "bash_exec(chmod 777 *)" in patterns
+    assert "bash(sudo:*)" not in patterns
+    assert "bash(rm -rf *)" not in patterns

@@ -347,12 +347,23 @@ class ContextManager:
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         pipeline: CompactionPipeline | None = None,
+        bus: Any = None,
+        agent_id: str = "",
+        session_id: str = "",
     ) -> None:
         self.max_context_tokens = max_context_tokens
         self.preserve_first_n = preserve_first_n
         self.preserve_last_n = preserve_last_n
         self._pipeline = pipeline
         self._token_counter = TokenCounter()
+        self._bus = bus
+        self._agent_id = agent_id
+        self._session_id = session_id
+        self._iteration = 0
+
+    def set_iteration(self, iteration: int) -> None:
+        """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
+        self._iteration = int(iteration)
 
     def repair_tool_pairing(self, messages: list[Message]) -> list[Message]:
         """Remove orphaned tool role messages.
@@ -388,7 +399,24 @@ class ContextManager:
                 tool_schema_tokens=tool_tokens,
             )
             if pre_budget.needs_summary_compact:
-                repaired, _ = await self._pipeline.run(repaired, pre_budget)
+                pre_frac = pre_budget.usage_fraction
+                repaired, any_modified = await self._pipeline.run(repaired, pre_budget)
+                if any_modified and self._bus is not None:
+                    post_usage = self._token_counter.count_messages(repaired)
+                    post_budget = TokenBudget(
+                        total_limit=self.max_context_tokens,
+                        current_usage=post_usage,
+                        tool_schema_tokens=tool_tokens,
+                    )
+                    from localharness.core.events import CompactionTriggered
+                    await self._bus.publish(CompactionTriggered(
+                        agent_id=self._agent_id,
+                        session_id=self._session_id,
+                        iteration=self._iteration,
+                        pre_usage_fraction=pre_frac,
+                        post_usage_fraction=post_budget.usage_fraction,
+                        stages_modified=[],
+                    ))
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.count_messages(repaired)

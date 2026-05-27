@@ -177,9 +177,9 @@ class PermissionConfig(BaseModel):
             "write(*/secrets*)",
             "write(*/config.yaml)",
             "write(*/agents/*.yaml)",
-            "bash(sudo:*)",
-            "bash(rm -rf *)",
-            "bash(chmod 777 *)",
+            "bash_exec(sudo:*)",
+            "bash_exec(rm -rf *)",
+            "bash_exec(chmod 777 *)",
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
