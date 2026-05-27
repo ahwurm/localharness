@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_accumulate_tokens_from_turn_completed():
     """MetricAccumulator.on_turn_completed sums input_tokens+output_tokens across events."""
     from localharness.bench.runner import MetricAccumulator
@@ -21,7 +20,6 @@ def test_accumulate_tokens_from_turn_completed():
     assert acc.tokens_out == 60
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_accumulate_iterations_from_turn_completed():
     """MetricAccumulator.iterations takes max iterations from TurnCompleted events."""
     from localharness.bench.runner import MetricAccumulator
@@ -34,19 +32,17 @@ def test_accumulate_iterations_from_turn_completed():
     assert acc.iterations == 5
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_accumulate_tool_call_count_from_actions():
     """MetricAccumulator.on_action increments tool_call_count when tool_name set."""
     from localharness.bench.runner import MetricAccumulator
     from localharness.core.events import Action
     acc = MetricAccumulator()
-    acc.on_action(Action(agent_id="a", session_id="s", action="tool_calls", tool_name="bash"))
-    acc.on_action(Action(agent_id="a", session_id="s", action="tool_calls", tool_name="read_file"))
-    acc.on_action(Action(agent_id="a", session_id="s", action="complete"))  # no tool_name → not counted
+    acc.on_action(Action(agent_id="a", session_id="s", action_type="tool_calls", tool_name="bash"))
+    acc.on_action(Action(agent_id="a", session_id="s", action_type="tool_calls", tool_name="read_file"))
+    acc.on_action(Action(agent_id="a", session_id="s", action_type="complete"))  # no tool_name → not counted
     assert acc.tool_call_count == 2
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_accumulate_parse_failures_from_event():
     """MetricAccumulator.on_parse_failed increments parse_failures counter."""
     from localharness.bench.runner import MetricAccumulator
@@ -57,7 +53,6 @@ def test_accumulate_parse_failures_from_event():
     assert acc.parse_failures == 2
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_accumulate_stuck_recoveries_from_event():
     """MetricAccumulator.on_stuck_recovered increments stuck_recoveries counter."""
     from localharness.bench.runner import MetricAccumulator
@@ -67,7 +62,6 @@ def test_accumulate_stuck_recoveries_from_event():
     assert acc.stuck_recoveries == 1
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.runner module not yet created (11-03)")
 def test_tokens_estimated_propagates():
     """Any TurnCompleted with tokens_estimated=True → ScenarioCompleted.tokens_estimated=True."""
     from localharness.bench.runner import MetricAccumulator
