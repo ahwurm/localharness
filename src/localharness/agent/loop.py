@@ -521,17 +521,24 @@ class AgentLoop:
                 )
                 return _format_budget_summary(session, violation)
 
-            # 3. Publish heartbeat for liveness indication
+            # 3. Build request messages first (runs compaction if needed)
+            request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
+
+            # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
+            raw_pct = ctx_budget.usage_fraction * 100.0
+            util_pct = min(100.0, raw_pct)
+            if raw_pct > 100.0:
+                log.warning(
+                    "context_utilization_pct overflow (%.1f%%) — compaction may be failing",
+                    raw_pct,
+                )
             await self._bus.publish(Heartbeat(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
                 iteration=session.iteration,
-                context_utilization_pct=0.0,
+                context_utilization_pct=util_pct,
                 last_tool=None,
             ))
-
-            # 4. Build request messages (copy, with repair)
-            request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
 
             # 4. Inject recovery if set (use "user" role — vLLM rejects mid-conversation system messages)
             if recovery_injection is not None:
