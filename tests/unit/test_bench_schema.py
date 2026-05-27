@@ -174,3 +174,30 @@ def test_evaluate_signature_back_compat():
     sc = SuccessCriteria(rubric=["contains:hi"])
     assert sc.evaluate("hi there") is True
     assert sc.evaluate("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 corpus / SCEN-03: every committed fixture parses as ScenarioSpec
+# (schema-side mirror of test_bench_corpus.py::test_corpus_loads_all_fixtures —
+# VALIDATION.md maps this test name under both modules)
+# ---------------------------------------------------------------------------
+
+def test_corpus_loads_all_fixtures():
+    """Schema-side check: every YAML in bench/scenarios/ parses as ScenarioSpec.
+
+    Same logic as test_bench_corpus.py::test_corpus_loads_all_fixtures —
+    duplicated here because VALIDATION.md maps this test name under both
+    modules. test_bench_corpus.py owns the broader corpus-shape suite;
+    this test_bench_schema.py copy guards against schema-level regression
+    when corpus content evolves.
+    """
+    from localharness.bench.schema import load_scenario
+
+    corpus_dir = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
+    if not corpus_dir.exists():
+        pytest.skip("bench/scenarios/ does not exist yet")
+    fixtures = sorted(p for p in corpus_dir.iterdir() if p.suffix == ".yaml")
+    if not fixtures:
+        pytest.skip("bench/scenarios/ is empty")
+    for path in fixtures:
+        load_scenario(path)   # raises ValidationError on bad input
