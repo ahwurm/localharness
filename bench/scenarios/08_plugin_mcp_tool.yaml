@@ -1,0 +1,29 @@
+name: plugin_mcp_tool
+prompt: |
+  You have access to one MCP tool (mcp:fetch) and one plugin tool
+  (plugin:research_tools.exa_search). Use either of them once to look up
+  the canonical homepage of the IETF (https://www.ietf.org). Return the
+  organization's full name verbatim — "Internet Engineering Task Force"
+  — in your final response.
+expected_outcome: |
+  Agent dispatches one of the prefixed tools. The plugin-prefix dispatch
+  path was verified in 12-04 Task 1. The MCP fetch tool is also available
+  (mcp: prefix). The fixture's rubric anchors on the invariant org name —
+  either tool can satisfy by returning the IETF homepage which mentions
+  the full name in its title and content. If neither tool is callable in
+  the test environment, the fixture is exercised only at parse time via
+  test_corpus_dry_run + test_known_good_pass — manual calibration runs
+  validate live behavior.
+success_criteria:
+  rubric:
+    - "contains:Internet Engineering Task Force"
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.5
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 120.0
+  max_tool_calls: 4
+tools_allowed:
+  - mcp:fetch
+  - plugin:research_tools.exa_search

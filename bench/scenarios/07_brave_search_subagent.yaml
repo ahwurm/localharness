@@ -1,0 +1,26 @@
+name: brave_search_subagent
+prompt: |
+  Build a small research subagent using the `agent` tool. Give it the
+  tool whitelist [plugin:research_tools.exa_search] and the prompt:
+  "Search for the meaning of LocalHarness". Return the subagent's summary
+  verbatim in your final response.
+expected_outcome: |
+  Agent calls the `agent` tool (registered by _build_agent_loop's stub
+  in 12-04 Task 1) with the requested whitelist. The stub returns a
+  canned summary containing STUB_SUBAGENT_OK. Rubric anchors on that
+  invariant token. This fixture exercises the tool-CALL shape (with a
+  plugin-prefixed entry inside the subagent's whitelist), not real
+  plugin execution. Real plugin/MCP execution is in fixture 08.
+success_criteria:
+  rubric:
+    - "contains:STUB_SUBAGENT_OK"
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 4
+tools_allowed:
+  - agent
+  - plugin:research_tools.exa_search
