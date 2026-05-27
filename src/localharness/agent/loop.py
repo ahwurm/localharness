@@ -430,7 +430,7 @@ class AgentLoop:
             ProviderTimeoutError,
             ProviderAPIError,
         )
-        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete
+        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
@@ -653,6 +653,13 @@ class AgentLoop:
             if not tool_calls:
                 if has_tool_call_attempt(raw_content or "") and session.parse_retries < 3:
                     session.parse_retries += 1
+                    await self._bus.publish(ParseFailed(
+                        agent_id=session.agent_id,
+                        session_id=session.session_id,
+                        iteration=session.iteration,
+                        parse_retry_count=session.parse_retries,
+                        raw_content_preview=(raw_content or "")[:200],
+                    ))
                     log.warning(
                         "Tool call XML parse failed (attempt %d/3) for %s",
                         session.parse_retries,
@@ -776,6 +783,12 @@ class AgentLoop:
             stuck_state = stuck_detector.check()
             if stuck_state == StuckState.RECOVERING:
                 repeated_sig = stuck_detector.most_repeated_signature()
+                await self._bus.publish(StuckRecovered(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    iteration=session.iteration,
+                    stuck_signature=repeated_sig or "",
+                ))
                 recovery_injection = stuck_detector.recovery_message(repeated_sig)
                 log.info(
                     "Stuck recovery triggered for %s at iteration %d",

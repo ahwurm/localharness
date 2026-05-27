@@ -793,3 +793,72 @@ def test_compact_md_path_default_fallback():
         permission_evaluator=perm,
     )
     assert loop._compact_md_path is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 / SCEN-02: ParseFailed and StuckRecovered publish contracts
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock
+from localharness.core.events import ParseFailed, StuckRecovered
+
+
+@pytest.mark.asyncio
+async def test_parse_failed_published_on_retry_increment():
+    """Stub bus captures ParseFailed with the post-increment retry count and iteration.
+
+    Mirrors the publish-site contract from loop.py: ParseFailed is constructed
+    with session.parse_retries (post-increment) and session.iteration.
+    """
+    bus = AsyncMock()
+    await bus.publish(ParseFailed(
+        agent_id="agent-1",
+        session_id="sess-1",
+        iteration=5,
+        parse_retry_count=2,
+        raw_content_preview="<tool_call>broken",
+    ))
+    bus.publish.assert_awaited_once()
+    ev = bus.publish.await_args.args[0]
+    assert isinstance(ev, ParseFailed)
+    assert ev.parse_retry_count == 2
+    assert ev.iteration == 5
+    assert ev.raw_content_preview == "<tool_call>broken"
+
+
+@pytest.mark.asyncio
+async def test_stuck_recovered_published_with_signature():
+    """Stub bus captures StuckRecovered with signature + iteration from RECOVERING branch."""
+    bus = AsyncMock()
+    await bus.publish(StuckRecovered(
+        agent_id="agent-1",
+        session_id="sess-1",
+        iteration=10,
+        stuck_signature="tool:bash:{cmd:ls}",
+    ))
+    bus.publish.assert_awaited_once()
+    ev = bus.publish.await_args.args[0]
+    assert isinstance(ev, StuckRecovered)
+    assert ev.stuck_signature == "tool:bash:{cmd:ls}"
+    assert ev.iteration == 10
+
+
+@pytest.mark.asyncio
+async def test_parse_failed_truncates_long_content():
+    """raw_content_preview accepts the slice `(raw_content or '')[:200]` pattern from loop.py."""
+    long_content = "x" * 500
+    ev = ParseFailed(
+        agent_id="a", session_id="s", iteration=1, parse_retry_count=1,
+        raw_content_preview=(long_content or "")[:200],
+    )
+    assert len(ev.raw_content_preview) == 200
+
+
+@pytest.mark.asyncio
+async def test_parse_failed_none_content_safe():
+    """raw_content_preview accepts the (None or '')[:200] = '' fallback."""
+    ev = ParseFailed(
+        agent_id="a", session_id="s", iteration=1, parse_retry_count=1,
+        raw_content_preview=(None or "")[:200],
+    )
+    assert ev.raw_content_preview == ""
