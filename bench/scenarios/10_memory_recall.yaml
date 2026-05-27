@@ -1,0 +1,21 @@
+name: memory_recall
+prompt: |
+  I told you a codename in a previous session. What was the codename?
+expected_outcome: |
+  Agent's memory subsystem loads tests/fixtures/bench/memory_seed.db at
+  startup (memory.load_context — agent/loop.py:451-463). The seeded fact
+  contains the codename STARFRUIT_42, which is injected into the system
+  prompt. Agent returns the token. Rubric anchors on STARFRUIT_42. This
+  fixture tests the memory LOAD PATH only — there are no memory_read or
+  memory_write tools in v1.0 (see 12-RESEARCH §"Pattern 6 DESIGN CAVEAT").
+success_criteria:
+  rubric:
+    - "contains:STARFRUIT_42"
+budget:
+  max_actions: 1
+  max_duration_minutes: 0.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 0
+tools_allowed: []

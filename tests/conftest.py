@@ -158,15 +158,27 @@ _BENCH_FIXTURE_STAGED = Path("/tmp/bench_fixtures")
 def bench_fixtures_staged():
     """Stage non-YAML fixture data from tests/fixtures/bench/ to /tmp/bench_fixtures/.
 
-    Used by bench/scenarios/02_single_read.yaml (and future fixtures) which
-    reference an absolute /tmp/bench_fixtures/<file> path so the agent loop's
-    `read` tool can find them at scenario-run time without dynamic-path injection.
+    Used by bench/scenarios/02_single_read.yaml, 05_file_exploration.yaml (and
+    future fixtures) which reference an absolute /tmp/bench_fixtures/<file>
+    path so the agent loop's tools can find them at scenario-run time without
+    dynamic-path injection.
+
+    Recursively copies subdirectories (e.g. exploration_root/) so multi-file
+    fixture trees stage cleanly. memory_seed.db and other binary data files
+    are copied as-is by the non-yaml suffix filter.
     """
     _BENCH_FIXTURE_STAGED.mkdir(parents=True, exist_ok=True)
     if _BENCH_FIXTURE_SOURCE.exists():
         for src in _BENCH_FIXTURE_SOURCE.iterdir():
-            if src.is_file() and src.suffix != ".yaml":
-                shutil.copy2(src, _BENCH_FIXTURE_STAGED / src.name)
+            if src.suffix == ".yaml":
+                continue
+            dst = _BENCH_FIXTURE_STAGED / src.name
+            if src.is_dir():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            elif src.is_file():
+                shutil.copy2(src, dst)
     yield _BENCH_FIXTURE_STAGED
     # No teardown — /tmp is volatile; leaving the file present lets manual
     # bench runs after the test suite still find it.

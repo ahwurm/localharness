@@ -1,0 +1,24 @@
+name: agent_creation
+prompt: |
+  Create a subagent using the `agent` tool with a prompt asking it to
+  summarize the phrase "the quick brown fox". Use the empty tool whitelist
+  (the subagent does not need tools for this task). Return the subagent's
+  summary verbatim in your final response.
+expected_outcome: |
+  Agent invokes the AgentTool registered by _build_agent_loop with the
+  stub agent_runner (12-04 Task 1). The stub returns a canned dict whose
+  'subagent_summary' field contains "STUB_SUBAGENT_OK". Rubric anchors on
+  that token. The fixture exercises the tool-call shape, not real subagent
+  execution.
+success_criteria:
+  rubric:
+    - "contains:STUB_SUBAGENT_OK"
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 4
+tools_allowed:
+  - agent

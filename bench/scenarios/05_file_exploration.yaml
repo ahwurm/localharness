@@ -1,0 +1,22 @@
+name: file_exploration
+prompt: |
+  Explore the directory /tmp/bench_fixtures/exploration_root to find a file
+  named values.txt. Read its contents and report the value it holds.
+expected_outcome: |
+  Agent uses `glob` to discover the file under /tmp/bench_fixtures/exploration_root,
+  then `read` to fetch its content. The file contains the invariant token
+  MAGIC_VALUE_777. Rubric anchors on that token; survives LLM wrapping
+  ("The value is: MAGIC_VALUE_777", "I found: MAGIC_VALUE_777").
+success_criteria:
+  rubric:
+    - "contains:MAGIC_VALUE_777"
+budget:
+  max_actions: 5
+  max_duration_minutes: 1.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 90.0
+  max_tool_calls: 6
+tools_allowed:
+  - read
+  - glob
