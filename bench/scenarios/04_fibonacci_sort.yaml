@@ -1,0 +1,25 @@
+name: fibonacci_sort
+prompt: |
+  Generate the first 10 Fibonacci numbers (starting from 0, 1) using a
+  single Python one-liner via `bash_exec`, sort them in ascending order,
+  and print them as a comma-separated list. Example call:
+  bash_exec command='python3 -c "..."'.
+expected_outcome: |
+  Agent runs Python via bash_exec to compute and print
+  "0, 1, 1, 2, 3, 5, 8, 13, 21, 34" (the sorted first 10 Fibonacci numbers
+  with 0-indexed F(0)=0, F(1)=1). Rubric uses a tolerant regex that matches
+  the digit sequence with optional whitespace and either commas or other
+  common separators — anchoring on the unique 34 terminator and the
+  ascending prefix.
+success_criteria:
+  rubric:
+    - "regex:0[,\\s]+1[,\\s]+1[,\\s]+2[,\\s]+3[,\\s]+5[,\\s]+8[,\\s]+13[,\\s]+21[,\\s]+34"
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 4
+tools_allowed:
+  - bash_exec
