@@ -70,26 +70,54 @@ class LimitsSpec(BaseModel):
 # -------------------------------------------------------------------------
 
 class SuccessCriteria(BaseModel):
-    """golden_output (exact-text-match) AND/OR rubric (list of assertions). Both AND'd if both set."""
+    """golden_output (exact-text-match) AND/OR rubric (list of assertions) AND/OR event_counts.
+
+    All configured dimensions are ANDed in evaluate(). event_counts maps event-count names
+    (e.g., 'deny_events', 'stuck_recoveries', 'compaction_triggered', 'tool_call_count',
+    'parse_failures') to operator dicts with keys 'min', 'max', 'exact'.
+    """
 
     model_config = ConfigDict(frozen=True)
     golden_output: Optional[str] = None
     rubric: list[str] = Field(default_factory=list)
+    event_counts: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-event-type assertions. Keys are event-count names "
+            "(e.g., 'deny_events', 'stuck_recoveries', 'compaction_triggered', "
+            "'tool_call_count', 'parse_failures'). Values are operator dicts "
+            "with keys 'min', 'max', 'exact'. ANDed with golden_output and rubric."
+        ),
+    )
 
     @model_validator(mode="after")
     def at_least_one(self) -> "SuccessCriteria":
-        if self.golden_output is None and not self.rubric:
-            raise ValueError("success_criteria must have golden_output or non-empty rubric (or both)")
+        if self.golden_output is None and not self.rubric and not self.event_counts:
+            raise ValueError(
+                "success_criteria must have golden_output, non-empty rubric, or non-empty event_counts"
+            )
         return self
 
-    def evaluate(self, final_message: str) -> bool:
-        """Return True iff all configured assertions match the final_message."""
+    def evaluate(self, final_message: str, counts: dict[str, int] | None = None) -> bool:
+        """Return True iff all configured assertions match. counts maps event-count
+        name (e.g., 'deny_events') to observed integer count from MetricAccumulator."""
         if self.golden_output is not None:
             if final_message.strip() != self.golden_output.strip():
                 return False
         for assertion in self.rubric:
             if not _match_rubric(assertion, final_message):
                 return False
+        if self.event_counts:
+            if counts is None:
+                return False
+            for key, ops in self.event_counts.items():
+                observed = counts.get(key, 0)
+                if "exact" in ops and observed != ops["exact"]:
+                    return False
+                if "min" in ops and observed < ops["min"]:
+                    return False
+                if "max" in ops and observed > ops["max"]:
+                    return False
         return True
 
 
