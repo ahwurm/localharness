@@ -57,13 +57,26 @@ def test_failure_mode_fixtures_use_event_counts(filename: str, event_key: str):
 
 
 def test_scenario_class_coverage():
-    """Wave 1 skeleton — assert the 3 failure-mode fixtures are present.
-    Wave 2/3 will extend this to require all 12 canonical names.
+    """Assert the corpus contains the Wave 1+2 fixture names.
+
+    Wave 3 will extend this list with the 5 mid-complexity fixtures
+    (file_exploration, agent_creation, brave_search_subagent, plugin_mcp_tool,
+    memory_recall) to reach the full 12-canonical-scenario coverage.
     """
     fixtures = _list_yaml_fixtures()
     if not fixtures:
         pytest.skip("bench/scenarios/ is empty")
     names = {load_scenario(p).name for p in fixtures}
-    assert "stuck_recovery" in names
-    assert "deny_pattern_hit" in names
-    assert "near_compaction" in names
+    wave_1_2_required = {
+        # Wave 1 (failure-mode)
+        "stuck_recovery",
+        "deny_pattern_hit",
+        "near_compaction",
+        # Wave 2 (deterministic-easy)
+        "pure_qa",
+        "single_read",
+        "write_execute",
+        "fibonacci_sort",
+    }
+    missing = wave_1_2_required - names
+    assert not missing, f"corpus missing fixtures: {missing}"
