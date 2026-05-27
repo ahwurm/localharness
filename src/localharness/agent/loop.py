@@ -37,6 +37,9 @@ class Session:
     summary: str = ""
     terminated_reason: str | None = None
     parse_retries: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_estimated: bool = False
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -413,7 +416,10 @@ class AgentLoop:
                 session_id=session.session_id,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
-                elapsed_tokens=0,
+                elapsed_tokens=session.input_tokens + session.output_tokens,
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
                 summary=summary,
             ))
         return summary
@@ -537,7 +543,7 @@ class AgentLoop:
                 getattr(self._llm, "config", None), "tool_call_mode", "native"
             )
             try:
-                response_message = await self._llm.stream_complete(
+                response_message, usage = await self._llm.stream_complete(
                     messages=request_messages,
                     tools=tool_schemas if tool_call_mode != "text" else None,
                     on_token=on_token,
@@ -551,7 +557,7 @@ class AgentLoop:
                 )
                 await asyncio.sleep(2.0)
                 try:
-                    response_message = await self._llm.stream_complete(
+                    response_message, usage = await self._llm.stream_complete(
                         messages=request_messages,
                         tools=tool_schemas if tool_call_mode != "text" else None,
                         on_token=on_token,
@@ -578,6 +584,25 @@ class AgentLoop:
                     )
                 session.terminated_reason = "error"
                 return _format_error_summary(session, exc)
+
+            # Accumulate per-turn token usage (TELEM-02)
+            if usage is not None:
+                session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+            else:
+                # Provider omitted usage — fall back to tiktoken estimate
+                est_in = self._ctx._token_counter.count_messages(request_messages)
+                est_out = self._ctx._token_counter.count(
+                    getattr(response_message, "content", "") or ""
+                )
+                session.input_tokens += est_in
+                session.output_tokens += est_out
+                if not session.tokens_estimated:
+                    log.warning(
+                        "Provider returned no usage for iter %d — tiktoken fallback engaged",
+                        session.iteration,
+                    )
+                session.tokens_estimated = True
 
             # 6. Strip thinking tags and push assistant response to session
             from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
@@ -804,7 +829,7 @@ class AgentLoop:
         request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
 
         try:
-            response_message = await self._llm.stream_complete(
+            response_message, usage = await self._llm.stream_complete(
                 messages=request_messages,
                 tools=tool_schemas if tool_call_mode != "text" else None,
                 on_token=on_token,
@@ -812,6 +837,19 @@ class AgentLoop:
         except Exception as exc:
             session.terminated_reason = "error"
             return StepResult(action="error", error=str(exc))
+
+        # Accumulate per-turn token usage (TELEM-02)
+        if usage is not None:
+            session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+            session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+        else:
+            est_in = self._ctx._token_counter.count_messages(request_messages)
+            est_out = self._ctx._token_counter.count(
+                getattr(response_message, "content", "") or ""
+            )
+            session.input_tokens += est_in
+            session.output_tokens += est_out
+            session.tokens_estimated = True
 
         content = getattr(response_message, "content", None)
         raw_tool_calls = getattr(response_message, "tool_calls", None)

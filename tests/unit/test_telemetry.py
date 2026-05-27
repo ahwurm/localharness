@@ -43,12 +43,43 @@ async def test_complete_native_returns_usage():
     assert usage.completion_tokens == 7
 
 
-@pytest.mark.xfail(strict=True, reason="TELEM-02: TurnCompleted.elapsed_tokens must equal sum of provider usage")
 @pytest.mark.asyncio
 async def test_turn_completed_elapsed_tokens_matches_tiktoken(mock_llm_client, bus):
     # TELEM-02
-    # Wave 1 (10-01-02) will wire Session counters + emit elapsed_tokens
-    assert False, "Wave 1 must accumulate usage into Session and emit it on TurnCompleted"
+    from localharness.agent.loop import AgentLoop
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+
+    Resp = mock_llm_client.Response
+    Usage = mock_llm_client.Usage
+    responses = [
+        Resp(
+            content="all done",
+            usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        ),
+    ]
+    llm = mock_llm_client(responses)  # return_tuple=True by default
+    cfg = AgentConfig(name="test-agent", role="Test agent.")
+    ctx = ContextManager()
+    perm = PermissionEvaluator()
+    loop = AgentLoop(
+        config=cfg,
+        llm=llm,
+        bus=bus,
+        context_manager=ctx,
+        tool_registry=None,
+        permission_evaluator=perm,
+    )
+
+    await loop.run_turn("hello")
+
+    captured = bus.history(event_types=[TurnCompleted])
+    assert len(captured) == 1
+    assert captured[0].elapsed_tokens == 15
+    assert captured[0].input_tokens == 10
+    assert captured[0].output_tokens == 5
+    assert captured[0].tokens_estimated is False
 
 
 # ---------- TELEM-01 stubs ----------

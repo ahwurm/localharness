@@ -66,9 +66,14 @@ class FakeLLMResponse:
 
 
 class MockLLMClient:
-    """Fake LLM client that returns scripted responses in sequence."""
+    """Fake LLM client that returns scripted responses in sequence.
 
-    def __init__(self, responses: list[FakeLLMResponse], return_tuple: bool = False) -> None:
+    return_tuple defaults to True post-10-01 (production stream_complete returns
+    (message, usage) tuples). Set False only for legacy tests that intentionally
+    test the bare-message shape.
+    """
+
+    def __init__(self, responses: list[FakeLLMResponse], return_tuple: bool = True) -> None:
         self._responses = list(responses)
         self._index = 0
         self._return_tuple = return_tuple
@@ -93,7 +98,7 @@ class MockLLMClient:
 @pytest.fixture
 def mock_llm_client():
     """Factory fixture: call with a list of FakeLLMResponse objects."""
-    def _factory(responses: list[FakeLLMResponse], return_tuple: bool = False) -> MockLLMClient:
+    def _factory(responses: list[FakeLLMResponse], return_tuple: bool = True) -> MockLLMClient:
         return MockLLMClient(responses, return_tuple=return_tuple)
     _factory.Response = FakeLLMResponse
     _factory.ToolCall = FakeToolCall

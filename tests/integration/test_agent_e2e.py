@@ -58,9 +58,10 @@ class MockLLMClient:
 
         self.config = _Config()
 
-    async def stream_complete(self, messages=None, tools=None, on_token=None) -> _FakeResponse:
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        """Returns (message, usage) tuple to match production shape post-10-01."""
         if self._index >= len(self._responses):
-            return _FakeResponse(content="Done.", tool_calls=None)
+            return _FakeResponse(content="Done.", tool_calls=None), None
         resp = self._responses[self._index]
         self._index += 1
         raw_tool_calls = resp.get("tool_calls")
@@ -74,7 +75,7 @@ class MockLLMClient:
                 )
                 for tc in raw_tool_calls
             ]
-        return _FakeResponse(content=resp.get("content"), tool_calls=tool_call_objs)
+        return _FakeResponse(content=resp.get("content"), tool_calls=tool_call_objs), None
 
 
 def _make_config(max_actions: int = 100) -> AgentConfig:
