@@ -35,3 +35,30 @@ async def test_one_scenario_full_pipeline(tmp_path: Path, mock_llm_client, fixtu
     for d in model_dirs:
         assert (d / "summary.json").exists()
         assert (d / "summary.md").exists()
+
+
+def test_corpus_dry_run():
+    """Full-corpus dry-run: every YAML under bench/scenarios/ loads as ScenarioSpec.
+
+    Final check before phase verify — confirms the 12 fixtures parse without
+    triggering Pydantic validation errors (no schema drift, no malformed YAML,
+    no missing required fields).
+    """
+    from pathlib import Path
+    from localharness.bench.schema import load_scenario
+
+    corpus = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
+    fixtures = sorted(corpus.glob("*.yaml"))
+    assert len(fixtures) >= 12, (
+        f"expected at least 12 fixtures, found {len(fixtures)}: "
+        f"{[p.name for p in fixtures]}"
+    )
+    loaded = [load_scenario(p) for p in fixtures]
+    names = {s.name for s in loaded}
+    all_12 = {
+        "pure_qa", "single_read", "write_execute", "fibonacci_sort",
+        "file_exploration", "agent_creation", "brave_search_subagent",
+        "plugin_mcp_tool", "stuck_recovery", "memory_recall",
+        "deny_pattern_hit", "near_compaction",
+    }
+    assert all_12.issubset(names), f"missing canonical names: {all_12 - names}"
