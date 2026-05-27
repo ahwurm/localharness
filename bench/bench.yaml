@@ -1,0 +1,38 @@
+# LocalHarness bench harness configuration.
+# Locked thresholds from .planning/phases/11-bench-harness/11-CONTEXT.md
+corpus_path: bench/scenarios
+results_path: bench/results
+
+# Multi-model matrix (BENCH-06). Default v1.0.2 trio.
+# Each entry: discriminator + concrete model identifier + optional overrides.
+matrix:
+  - name: qwen-3.6-27b
+    provider: ollama
+    model_id: qwen2.5:27b
+  - name: gpt-oss-120b
+    provider: ollama
+    model_id: gpt-oss:120b
+  - name: qwen-7b
+    provider: ollama
+    model_id: qwen2.5:7b
+
+# Sequential adaptive sampling defaults.
+sampling:
+  tolerance: 0.10
+  min_runs: 3
+  max_runs: 20
+  confidence: 0.95
+
+# Per-metric regression thresholds (locked).
+thresholds:
+  latency_total: { type: relative, value: 0.15 }
+  latency_ttft:  { type: relative, value: 0.10 }
+  tokens_out:    { type: relative, value: 0.10 }
+  tokens_in:     { type: relative, value: 0.10 }
+  success_rate:  { type: absolute_pp, value: -0.05 }
+  iterations:    { type: relative, value: 0.20 }
+  parse_failures:   { type: absolute, value: 1 }
+  stuck_recoveries: { type: absolute, value: 1 }
+
+# NOTE: Per-scenario threshold overrides live in scenario YAML files (Phase 12),
+# not here. 11-04 compare's resolve_thresholds() merges them at compare time.
