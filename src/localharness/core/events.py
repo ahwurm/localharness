@@ -88,6 +88,9 @@ class TurnCompleted(BaseEvent):
     duration_seconds: float
     elapsed_tokens: int
     summary: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_estimated: bool = False
 
 
 class TurnFailed(BaseEvent):
