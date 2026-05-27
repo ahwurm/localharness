@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.xfail(strict=False, reason="11-03: with llm_client=None, runner emits only the ScenarioCompleted error event — real AgentLoop trace coverage moved to 11-04 e2e with MockLLMClient")
 @pytest.mark.asyncio
 async def test_jsonl_trace_written(tmp_path: Path):
     """execute_one_run constructs EventBus(persist_path=...) which writes the JSONL trace."""
@@ -25,7 +24,6 @@ async def test_jsonl_trace_written(tmp_path: Path):
     assert len(lines) >= 1
 
 
-@pytest.mark.xfail(strict=False, reason="11-03: with llm_client=None, runner emits only the ScenarioCompleted error event — replayability under a real AgentLoop trace moved to 11-04 e2e with MockLLMClient")
 @pytest.mark.asyncio
 async def test_jsonl_replayable(tmp_path: Path):
     """JSONL trace lines parse back into BaseEvent subclasses via deserialize_event."""
