@@ -1,0 +1,21 @@
+name: single_read
+prompt: |
+  Read the file at /tmp/bench_fixtures/single_read_target.txt and report
+  what fruit is mentioned in it.
+expected_outcome: |
+  Agent uses the `read` tool once with path /tmp/bench_fixtures/single_read_target.txt
+  then names the fruit in its final response. The target file is staged by
+  tests/conftest.py session fixture from tests/fixtures/bench/single_read_target.txt
+  and contains the word "apricot" (low-collision invariant anchor token).
+success_criteria:
+  rubric:
+    - "contains:apricot"
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 5
+tools_allowed:
+  - read

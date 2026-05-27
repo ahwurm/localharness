@@ -1,0 +1,18 @@
+name: pure_qa
+prompt: "What is 6 multiplied by 7? Reply with just the number."
+expected_outcome: |
+  LLM responds with text containing the digits 42 as a word-boundary token.
+  Pure-LLM execution — no tools available. Rubric anchors on regex \b42\b
+  so phrasing variations ("Answer: 42", "It's 42.") still pass while a wrong
+  answer ("420", "42.0", "forty-two") fails the regex.
+success_criteria:
+  rubric:
+    - "regex:\\b42\\b"
+budget:
+  max_actions: 0
+  max_duration_minutes: 0.5
+  max_context_tokens: 8000
+limits:
+  max_latency_s: 30.0
+  max_tool_calls: 0
+tools_allowed: []
