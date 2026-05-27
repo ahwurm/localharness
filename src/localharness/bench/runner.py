@@ -14,7 +14,9 @@ from localharness.bench.schema import ScenarioSpec
 from localharness.core.bus import EventBus
 from localharness.core.events import (
     Action,
+    CompactionTriggered,
     Heartbeat,
+    Observation,
     ParseFailed,
     ScenarioCompleted,
     StuckRecovered,
@@ -47,6 +49,8 @@ class MetricAccumulator:
     final_message: str = ""
     internal_latencies: dict[str, float] = field(default_factory=dict)
     peak_context_pct: float = 0.0
+    deny_events: int = 0
+    compaction_triggered: int = 0
 
     def on_turn_completed(self, event: TurnCompleted) -> None:
         self.tokens_in += int(getattr(event, "input_tokens", 0) or 0)
@@ -69,6 +73,13 @@ class MetricAccumulator:
 
     def on_heartbeat(self, event: Heartbeat) -> None:
         self.peak_context_pct = max(self.peak_context_pct, float(event.context_utilization_pct))
+
+    def on_observation(self, event: Observation) -> None:
+        if event.error and event.error.startswith("Permission denied:"):
+            self.deny_events += 1
+
+    def on_compaction_triggered(self, event: CompactionTriggered) -> None:
+        self.compaction_triggered += 1
 
 
 # -------------------------------------------------------------------------
@@ -113,6 +124,9 @@ async def execute_one_run(
     run_path = Path(run_path)
     bus = EventBus(persist_path=run_path)
     acc = MetricAccumulator()
+    # session_id threaded through to ContextManager so CompactionTriggered events
+    # carry stable identity for the run. Derived from run_path stem (timestamp slug).
+    session_id = f"{scen.name}:{run_path.stem}"
 
     # Wrap sync handlers as async closures for bus delivery
     async def _h_turn(ev: TurnCompleted) -> None:
@@ -130,11 +144,19 @@ async def execute_one_run(
     async def _h_heartbeat(ev: Heartbeat) -> None:
         acc.on_heartbeat(ev)
 
+    async def _h_observation(ev: Observation) -> None:
+        acc.on_observation(ev)
+
+    async def _h_compaction(ev: CompactionTriggered) -> None:
+        acc.on_compaction_triggered(ev)
+
     bus.subscribe(TurnCompleted, _h_turn)
     bus.subscribe(Action, _h_action)
     bus.subscribe(ParseFailed, _h_parse)
     bus.subscribe(StuckRecovered, _h_stuck)
     bus.subscribe(Heartbeat, _h_heartbeat)
+    bus.subscribe(Observation, _h_observation)
+    bus.subscribe(CompactionTriggered, _h_compaction)
 
     t_start = time.monotonic()
     ttft: Optional[float] = None
@@ -146,7 +168,7 @@ async def execute_one_run(
             ttft = time.monotonic() - t_start
 
     try:
-        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen)
+        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id)
         try:
             await asyncio.wait_for(
                 _run_loop(loop, scen.prompt, _on_token),
@@ -161,7 +183,17 @@ async def execute_one_run(
         acc.final_message = f"[scenario_error: {e!r}]"
 
     latency_total = (scen.limits.max_latency_s if timed_out else time.monotonic() - t_start)
-    success = False if timed_out else scen.success_criteria.evaluate(acc.final_message)
+    counts = {
+        "tokens_in": acc.tokens_in,
+        "tokens_out": acc.tokens_out,
+        "iterations": acc.iterations,
+        "parse_failures": acc.parse_failures,
+        "stuck_recoveries": acc.stuck_recoveries,
+        "tool_call_count": acc.tool_call_count,
+        "deny_events": acc.deny_events,
+        "compaction_triggered": acc.compaction_triggered,
+    }
+    success = False if timed_out else scen.success_criteria.evaluate(acc.final_message, counts=counts)
 
     completed = ScenarioCompleted(
         scenario_name=scen.name,
@@ -186,7 +218,7 @@ async def execute_one_run(
 # Agent loop builder (overridable shim — keeps execute_one_run testable)
 # -------------------------------------------------------------------------
 
-def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec) -> Any:
+def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "") -> Any:
     """Construct an AgentLoop instance for the given scenario.
 
     AgentLoop signature (verified from src/localharness/agent/loop.py, lines 271-285):
@@ -212,17 +244,22 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec) ->
     # Imports are local to avoid module-import-time cycles and to keep the
     # bench package importable even when these optional modules shift.
     from localharness.agent.loop import AgentLoop
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
     from localharness.config.models import AgentConfig
-    from localharness.core.context_manager import ContextManager
-    from localharness.core.permissions import PermissionEvaluator
-    from localharness.core.tool_registry import ToolRegistry
+    from localharness.tools.registry import ToolRegistry
 
     agent_config = AgentConfig(
         name=f"bench-{scenario.name}",
         role=f"Bench harness execution for scenario {scenario.name}",
     )
 
-    ctx_manager = ContextManager(max_tokens=scenario.budget.max_context_tokens)
+    ctx_manager = ContextManager(
+        max_context_tokens=scenario.budget.max_context_tokens,
+        bus=bus,
+        agent_id=session_id,
+        session_id=session_id,
+    )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed)
     perm_evaluator = PermissionEvaluator.from_config(agent_config)
 
