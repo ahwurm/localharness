@@ -1,0 +1,27 @@
+name: write_execute
+prompt: |
+  Write a Python script at /tmp/bench_fixtures/hello_bench.py that prints
+  the exact line:
+
+    HELLO_BENCH_OK
+
+  Then run the script with `python3 /tmp/bench_fixtures/hello_bench.py`
+  and report the output.
+expected_outcome: |
+  Agent uses the `write` tool to create the file, then `bash_exec` to run
+  it. The script's stdout is the invariant anchor token HELLO_BENCH_OK.
+  Rubric uses contains: on that token — case- and substring-stable across
+  LLM wrapping ("The output was: HELLO_BENCH_OK", "Output: HELLO_BENCH_OK").
+success_criteria:
+  rubric:
+    - "contains:HELLO_BENCH_OK"
+budget:
+  max_actions: 5
+  max_duration_minutes: 1.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 90.0
+  max_tool_calls: 6
+tools_allowed:
+  - write
+  - bash_exec
