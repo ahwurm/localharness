@@ -194,7 +194,7 @@ async def test_compaction_fires_at_80_percent():
         {"role": "user", "content": "I" * 200},
     ]
 
-    result = await ctx.build_messages(messages)
+    result, budget = await ctx.build_messages(messages)
     assert summarize_called
 
 

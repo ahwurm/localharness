@@ -367,25 +367,34 @@ class ContextManager:
         self,
         messages: list[Message],
         tool_schemas: list[dict] | None = None,
-    ) -> list[Message]:
-        """Return a repaired copy of messages ready for LLM request.
+    ) -> tuple[list[Message], TokenBudget]:
+        """Return repaired messages + budget snapshot for the request that will be sent.
 
-        Does NOT modify the input list. Applies compaction pipeline if set,
-        otherwise just repairs tool pairing.
+        Budget reflects post-compaction state so callers (heartbeat emitter) see the
+        actual size of the next outgoing request. Budget is always returned (never None).
         """
+        import json as _json
         copied = list(messages)
         repaired = self.repair_tool_pairing(copied)
+        tool_tokens = self._token_counter.count_messages(
+            [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
+        ) if tool_schemas else 0
+
         if self._pipeline is not None:
-            import json as _json
-            tool_tokens = self._token_counter.count_messages(
-                [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
-            ) if tool_schemas else 0
-            usage = self._token_counter.count_messages(repaired)
-            budget = TokenBudget(
+            pre_usage = self._token_counter.count_messages(repaired)
+            pre_budget = TokenBudget(
                 total_limit=self.max_context_tokens,
-                current_usage=usage,
+                current_usage=pre_usage,
                 tool_schema_tokens=tool_tokens,
             )
-            if budget.needs_summary_compact:
-                repaired, _ = await self._pipeline.run(repaired, budget)
-        return repaired
+            if pre_budget.needs_summary_compact:
+                repaired, _ = await self._pipeline.run(repaired, pre_budget)
+
+        # Recompute budget AFTER any compaction so the return reflects what will ship
+        post_usage = self._token_counter.count_messages(repaired)
+        budget = TokenBudget(
+            total_limit=self.max_context_tokens,
+            current_usage=post_usage,
+            tool_schema_tokens=tool_tokens,
+        )
+        return repaired, budget
