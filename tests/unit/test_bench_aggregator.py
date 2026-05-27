@@ -4,7 +4,6 @@ import math
 import pytest
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_continuous_ci_95_matches_scipy():
     """continuous_ci_95(samples) returns Student's-t 95% CI matching scipy reference."""
     import numpy as np
@@ -23,7 +22,6 @@ def test_continuous_ci_95_matches_scipy():
     assert math.isclose(ci.upper, mean_ref + half_ref, rel_tol=1e-6)
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_continuous_ci_95_degenerate_n_lt_2():
     """continuous_ci_95 with n<2 returns half_width_pct=inf (degenerate marker)."""
     from localharness.bench.aggregator import continuous_ci_95
@@ -31,7 +29,6 @@ def test_continuous_ci_95_degenerate_n_lt_2():
     assert math.isinf(ci.half_width_pct)
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_wilson_ci_95_basic():
     """wilson_ci_95(5, 10) returns Wilson 95% CI with p_hat=0.5."""
     from localharness.bench.aggregator import wilson_ci_95
@@ -40,7 +37,6 @@ def test_wilson_ci_95_basic():
     assert 0.0 < ci.lower < 0.5 < ci.upper < 1.0
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_wilson_ci_95_zero_successes():
     """wilson_ci_95(0, 5) returns p_hat=0.0, lower=0.0, upper>0 (not Wald-broken)."""
     from localharness.bench.aggregator import wilson_ci_95
@@ -50,7 +46,6 @@ def test_wilson_ci_95_zero_successes():
     assert ci.upper > 0.0
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_wilson_ci_95_all_successes():
     """wilson_ci_95(5, 5) returns p_hat=1.0, lower<1.0, upper=1.0."""
     from localharness.bench.aggregator import wilson_ci_95
@@ -60,7 +55,6 @@ def test_wilson_ci_95_all_successes():
     assert ci.upper == 1.0
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_welch_ab_test_regression_detected():
     """welch_ab_test: head > baseline + p<0.05 → returns regressed=True."""
     from localharness.bench.aggregator import welch_ab_test
@@ -71,7 +65,6 @@ def test_welch_ab_test_regression_detected():
     assert p_value < 0.05
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_welch_ab_test_no_regression_same_means():
     """welch_ab_test: head ~= baseline → regressed=False, p>0.05."""
     from localharness.bench.aggregator import welch_ab_test
@@ -81,7 +74,6 @@ def test_welch_ab_test_no_regression_same_means():
     assert regressed is False
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_metrics_summary_median_p95(fake_completed_runs):
     """metrics_summary returns median, p95, mean, std, n per SCEN-02 numeric field."""
     from localharness.bench.aggregator import metrics_summary
@@ -98,7 +90,6 @@ def test_metrics_summary_median_p95(fake_completed_runs):
     assert summary["success_rate"]["rate"] == 1.0
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_should_stop_min_runs(fake_completed_runs):
     """should_stop returns (False, ...) before min_runs even if CI tight."""
     from localharness.bench.aggregator import should_stop
@@ -108,7 +99,6 @@ def test_should_stop_min_runs(fake_completed_runs):
     assert "min_runs" in reason
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_should_stop_max_runs(fake_completed_runs):
     """should_stop returns (True, max_runs_hit) at max_runs regardless of CI."""
     from localharness.bench.aggregator import should_stop
@@ -118,7 +108,6 @@ def test_should_stop_max_runs(fake_completed_runs):
     assert "max_runs" in reason
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_should_stop_converged(fake_completed_runs):
     """should_stop returns (True, converged) when both CIs ≤ tolerance after min_runs."""
     from localharness.bench.aggregator import should_stop
@@ -129,7 +118,6 @@ def test_should_stop_converged(fake_completed_runs):
     assert "converged" in reason
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: bench.aggregator module not yet created (11-03)")
 def test_should_stop_not_converged(fake_completed_runs):
     """should_stop returns (False, not_converged) when CI too wide."""
     from localharness.bench.aggregator import should_stop
