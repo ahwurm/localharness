@@ -310,3 +310,82 @@ class ToolRegistry:
 
     def register_post_hook(self, fn: Callable) -> None:
         self._post_hooks.append(fn)
+
+    # ------------------------------------------------------------------
+    # Bench-runner helpers (Plan 12-04 Task 1)
+    # ------------------------------------------------------------------
+
+    def has(self, name: str) -> bool:
+        """Return True if `name` resolves to a registered tool in any scope.
+
+        Accepts bare names (`exa_search`), MCP-prefixed names (`mcp:fetch`),
+        and plugin-prefixed names (`plugin:PLUGIN.TOOL`). The prefix forms
+        strip down to the bare TOOL name for resolution because plugin tools
+        register at scope="global" under their bare name (see plugins/loader.py).
+        """
+        from localharness.bench.schema import parse_tool_name
+        try:
+            _source, tool_name, _plugin = parse_tool_name(name)
+        except ValueError:
+            tool_name = name
+        # Also keep the raw form so MCP/plugin lookups can find prefixed
+        # registrations if any backend chose to store them prefixed.
+        return (
+            tool_name in self._tools["global"]
+            or tool_name in self._tools["mcp"]
+            or name in self._tools["global"]
+            or name in self._tools["mcp"]
+        )
+
+    @classmethod
+    def from_allowed(
+        cls,
+        allowed: list[str],
+        base_registry: "ToolRegistry | None" = None,
+    ) -> "ToolRegistry":
+        """Build a registry containing only the tools named in `allowed`.
+
+        `allowed` entries use the source-prefix convention from
+        bench.schema.parse_tool_name (`bare`, `mcp:TOOL`, `plugin:PLUGIN.TOOL`).
+        For each entry the bare TOOL name is resolved against `base_registry`'s
+        scope='global' (where plugins/loader.py and register_builtin_tools both
+        register) and re-registered under both bare and prefixed forms so
+        downstream dispatch resolves whichever form the agent loop uses.
+
+        If `base_registry` is None, the returned registry is empty for entries
+        whose source is `builtin`/`plugin`/`mcp` — the spike test substitutes
+        its own base. Bench runner callers must pass a base populated with
+        builtin + plugin + mcp tools.
+        """
+        from localharness.bench.schema import parse_tool_name
+
+        out = cls()
+        if base_registry is None:
+            return out
+
+        for entry in allowed:
+            try:
+                _source, tool_name, _plugin = parse_tool_name(entry)
+            except ValueError:
+                tool_name = entry
+
+            tool = (
+                base_registry._tools["global"].get(tool_name)
+                or base_registry._tools["mcp"].get(tool_name)
+                or base_registry._tools["global"].get(entry)
+                or base_registry._tools["mcp"].get(entry)
+            )
+            if tool is None:
+                continue
+
+            # Register under bare name in global scope (sync — bypass async lock
+            # because from_allowed is invoked during bench-loop construction)
+            if tool_name not in out._tools["global"]:
+                out._tools["global"][tool_name] = tool
+                out._schemas[tool_name] = tool.info()
+            # Also register under the prefixed form if the entry was prefixed
+            if entry != tool_name and entry not in out._tools["global"]:
+                out._tools["global"][entry] = tool
+                out._schemas[entry] = tool.info()
+
+        return out

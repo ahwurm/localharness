@@ -261,7 +261,28 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
         session_id=session_id,
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed)
-    perm_evaluator = PermissionEvaluator.from_config(agent_config)
+
+    # Plan 12-04 Task 1: register AgentTool stub when 'agent' is in tools_allowed.
+    # The stub agent_runner returns a canned summary containing STUB_SUBAGENT_OK
+    # so fixtures exercising the agent-creation tool-call shape complete
+    # deterministically — NOT a real subagent (does not invoke another LLM).
+    if "agent" in scenario.tools_allowed:
+        from localharness.tools.builtin.agent_tool import AgentTool
+
+        async def _stub_agent_runner(agent_id: str, task: str) -> str:
+            return (
+                f"STUB_SUBAGENT_OK agent_id={agent_id} task={task[:80]}"
+            )
+
+        tool_registry._tools["global"]["agent"] = AgentTool(agent_runner=_stub_agent_runner)
+        tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
+
+    # PermissionEvaluator is stateless; constructor takes no args. (Plan 12-04
+    # Rule 3 fix — the prior `from_config(agent_config)` referenced a method
+    # that does not exist on PermissionEvaluator and would have crashed at
+    # runtime. The evaluator reads deny_patterns from the config object passed
+    # to `evaluate(...)` at call time, not at construction.)
+    perm_evaluator = PermissionEvaluator()
 
     try:
         return AgentLoop(
