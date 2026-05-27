@@ -1,4 +1,4 @@
-"""All 15 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 18 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -211,6 +211,63 @@ class Heartbeat(BaseEvent):
     last_tool: Optional[str] = None
 
 
+class ScenarioCompleted(BaseEvent):
+    """Published by the bench runner when a scenario run finishes (success or fail).
+
+    Carries the standardized SCEN-02 metric payload aggregated from event subscriptions
+    across one scenario run. Latency semantics:
+      - latency_ttft: prompt-submit -> first user-visible token (user-friction, regression-gated).
+        NOTE: when provider streaming is non-functional (current native mode), this equals
+        latency_total -- see Phase 11 known limitation.
+      - latency_total: prompt-submit -> final response (user-friction, regression-gated).
+      - internal_latencies: dict of internal latency buckets (model_gen, tool_exec, mcp), info-only.
+    """
+
+    event_type: str = "ScenarioCompleted"
+    scenario_name: str
+    model: str
+    success: bool
+    latency_ttft: float
+    latency_total: float
+    tokens_in: int
+    tokens_out: int
+    iterations: int
+    parse_failures: int
+    stuck_recoveries: int
+    tool_call_count: int
+    internal_latencies: dict[str, float] = Field(default_factory=dict)
+    tokens_estimated: bool = False
+
+
+class ParseFailed(BaseEvent):
+    """Published by the agent loop when a tool-call parse attempt fails and parse_retries is bumped.
+
+    SCEN-02 derives `parse_failures` per scenario by counting these events for the run's session.
+    """
+
+    event_type: str = "ParseFailed"
+    agent_id: AgentID
+    session_id: SessionID
+    iteration: int
+    parse_retry_count: int  # session.parse_retries value AT emission (after increment)
+    raw_content_preview: str  # first 200 chars of the unparseable assistant content
+
+
+class StuckRecovered(BaseEvent):
+    """Published by the agent loop on every StuckState.RECOVERING transition.
+
+    SCEN-02 derives `stuck_recoveries` per scenario by counting these events. Note:
+    emitted once per RECOVERING decision (not once per re-entry into the state); the
+    loop calls stuck_detector.check() once per iteration so this naturally throttles.
+    """
+
+    event_type: str = "StuckRecovered"
+    agent_id: AgentID
+    session_id: SessionID
+    iteration: int
+    stuck_signature: str  # from stuck_detector.most_repeated_signature()
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -227,6 +284,9 @@ AnyEvent = Union[
     DelegationResult,
     Escalation,
     Heartbeat,
+    ScenarioCompleted,
+    ParseFailed,
+    StuckRecovered,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -245,6 +305,9 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "DelegationResult": DelegationResult,
     "Escalation": Escalation,
     "Heartbeat": Heartbeat,
+    "ScenarioCompleted": ScenarioCompleted,
+    "ParseFailed": ParseFailed,
+    "StuckRecovered": StuckRecovered,
 }
 
 
