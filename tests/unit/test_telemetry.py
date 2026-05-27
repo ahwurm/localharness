@@ -84,12 +84,23 @@ async def test_turn_completed_elapsed_tokens_matches_tiktoken(mock_llm_client, b
 
 # ---------- TELEM-01 stubs ----------
 
-@pytest.mark.xfail(strict=True, reason="TELEM-01: build_messages must return (messages, TokenBudget|None)")
 @pytest.mark.asyncio
 async def test_build_messages_returns_budget():
     # TELEM-01
-    # Wave 2 (10-02-01) will change build_messages return type to tuple
-    assert False, "Wave 2 must change build_messages to return (messages, TokenBudget|None)"
+    from localharness.agent.context import ContextManager, TokenBudget
+
+    cm = ContextManager(max_context_tokens=128_000)
+    messages = [
+        {"role": "system", "content": "you are a helpful agent"},
+        {"role": "user", "content": "hi"},
+    ]
+    result, budget = await cm.build_messages(messages)
+
+    assert isinstance(result, list)
+    assert isinstance(budget, TokenBudget)
+    assert budget.total_limit == 128_000
+    assert budget.current_usage > 0
+    assert 0.0 <= budget.usage_fraction <= 1.0
 
 
 @pytest.mark.xfail(strict=True, reason="TELEM-01: Heartbeat must emit non-zero context_utilization_pct after build_messages")
