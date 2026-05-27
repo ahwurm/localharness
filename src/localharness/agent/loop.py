@@ -531,7 +531,7 @@ class AgentLoop:
             ))
 
             # 4. Build request messages (copy, with repair)
-            request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
+            request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
 
             # 4. Inject recovery if set (use "user" role — vLLM rejects mid-conversation system messages)
             if recovery_injection is not None:
@@ -826,7 +826,7 @@ class AgentLoop:
             except Exception:
                 pass
 
-        request_messages = await self._ctx.build_messages(session.messages, tool_schemas)
+        request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
 
         try:
             response_message, usage = await self._llm.stream_complete(

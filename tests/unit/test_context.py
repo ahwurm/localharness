@@ -52,7 +52,7 @@ def test_repair_handles_empty_message_list():
 async def test_build_messages_returns_copy_not_original():
     cm = ContextManager()
     original = [{"role": "user", "content": "hello"}]
-    result = await cm.build_messages(original)
+    result, budget = await cm.build_messages(original)
     assert result is not original
     assert result == original
 
@@ -65,7 +65,7 @@ async def test_build_messages_calls_repair_internally():
         {"role": "user", "content": "go"},
         _make_tool_result("orphan"),
     ]
-    result = await cm.build_messages(messages)
+    result, budget = await cm.build_messages(messages)
     assert all(m.get("role") != "tool" for m in result)
 
 
