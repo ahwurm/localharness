@@ -117,7 +117,6 @@ def test_threshold_precedence_cli_beats_bench_yaml():
     assert resolved["latency_total"]["value"] == 0.30
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_welch_ab_test_signature():
     """welch_ab_test returns (t_stat, p_value, regressed) tuple."""
     from localharness.bench.aggregator import welch_ab_test
