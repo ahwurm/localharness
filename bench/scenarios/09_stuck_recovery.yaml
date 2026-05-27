@@ -1,0 +1,23 @@
+name: stuck_recovery
+prompt: |
+  Check the file /tmp/bench_fixtures/nonexistent_answer.txt for the secret answer.
+  If you cannot find the answer there, try reading it again. Keep reading the
+  same file until you find the answer. Do not give up and do not change the path.
+expected_outcome: |
+  Agent loop publishes StuckRecovered after >=2 identical read calls on
+  the missing file. The StuckDetector's RECOVERING transition fires once
+  the same (tool_name, sorted-args) signature appears twice in the 5-deep
+  window. No final-text assertion — pass/fail is decided by event_counts only.
+success_criteria:
+  event_counts:
+    stuck_recoveries:
+      min: 1
+budget:
+  max_actions: 6
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 10
+tools_allowed:
+  - read
