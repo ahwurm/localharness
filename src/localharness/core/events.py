@@ -211,6 +211,26 @@ class Heartbeat(BaseEvent):
     last_tool: Optional[str] = None
 
 
+class CompactionTriggered(BaseEvent):
+    """Published by ContextManager.build_messages when CompactionPipeline modifies messages.
+
+    SCEN-event-counts derives `compaction_triggered` per scenario by counting these events.
+    pre_usage_fraction = TokenBudget.usage_fraction BEFORE compaction ran.
+    post_usage_fraction = TokenBudget.usage_fraction AFTER compaction ran.
+    stages_modified lists CompactionStage subclass names that returned modified=True
+    (for diagnostic visibility — not currently surfaced through the pipeline; use empty
+    list for now and revisit if stage-level granularity is needed).
+    """
+
+    event_type: str = "CompactionTriggered"
+    agent_id: AgentID
+    session_id: SessionID
+    iteration: int
+    pre_usage_fraction: float
+    post_usage_fraction: float
+    stages_modified: list[str] = Field(default_factory=list)
+
+
 class ScenarioCompleted(BaseEvent):
     """Published by the bench runner when a scenario run finishes (success or fail).
 
@@ -284,6 +304,7 @@ AnyEvent = Union[
     DelegationResult,
     Escalation,
     Heartbeat,
+    CompactionTriggered,
     ScenarioCompleted,
     ParseFailed,
     StuckRecovered,
@@ -305,6 +326,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "DelegationResult": DelegationResult,
     "Escalation": Escalation,
     "Heartbeat": Heartbeat,
+    "CompactionTriggered": CompactionTriggered,
     "ScenarioCompleted": ScenarioCompleted,
     "ParseFailed": ParseFailed,
     "StuckRecovered": StuckRecovered,
