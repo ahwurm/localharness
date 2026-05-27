@@ -1,0 +1,13 @@
+name: minimal_golden
+prompt: "What is 2 + 2? Give just the number."
+expected_outcome: "Returns 4."
+success_criteria:
+  golden_output: "4"
+budget:
+  max_actions: 5
+  max_duration_minutes: 1.0
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 30.0
+  max_tool_calls: 0
+tools_allowed: []
