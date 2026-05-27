@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 15 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 18 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -14,6 +14,9 @@ from localharness.core.events import (
     EVENT_TYPE_MAP,
     Heartbeat,
     Observation,
+    ParseFailed,
+    ScenarioCompleted,
+    StuckRecovered,
     SystemReady,
     TaskComplete,
     TaskRequest,
@@ -87,6 +90,7 @@ def test_event_type_matches_class_name():
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
+        ScenarioCompleted, ParseFailed, StuckRecovered,
     ]
     for cls in classes:
         # Get the default value from model_fields
@@ -125,12 +129,13 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 15 event types."""
-    assert len(EVENT_TYPE_MAP) == 15
+    """EVENT_TYPE_MAP has entries for all 18 event types."""
+    assert len(EVENT_TYPE_MAP) == 18
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
         "Observation", "DelegationRequest", "DelegationResult", "Escalation", "Heartbeat",
+        "ScenarioCompleted", "ParseFailed", "StuckRecovered",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -160,15 +165,16 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 15 event classes."""
+    """AnyEvent type contains all 18 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     args = typing.get_args(AnyEvent)
-    assert len(args) == 15
+    assert len(args) == 18
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
+        ScenarioCompleted, ParseFailed, StuckRecovered,
     }
     assert set(args) == expected
 
@@ -192,3 +198,119 @@ def test_model_copy_updates_seq():
     assert updated.seq == 42
     assert action.seq is None  # original unchanged
     assert updated.id == action.id  # same id, different seq
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 / SCEN-02: ScenarioCompleted, ParseFailed, StuckRecovered
+# ---------------------------------------------------------------------------
+
+def test_scenario_completed_shape():
+    """ScenarioCompleted carries all 11 SCEN-02 fields + 2 optional fields with sane defaults."""
+    ev = ScenarioCompleted(
+        scenario_name="x",
+        model="qwen",
+        success=True,
+        latency_ttft=0.1,
+        latency_total=1.0,
+        tokens_in=100,
+        tokens_out=50,
+        iterations=3,
+        parse_failures=0,
+        stuck_recoveries=0,
+        tool_call_count=2,
+    )
+    assert ev.event_type == "ScenarioCompleted"
+    assert ev.scenario_name == "x"
+    assert ev.model == "qwen"
+    assert ev.success is True
+    assert ev.latency_ttft == 0.1
+    assert ev.latency_total == 1.0
+    assert ev.tokens_in == 100
+    assert ev.tokens_out == 50
+    assert ev.iterations == 3
+    assert ev.parse_failures == 0
+    assert ev.stuck_recoveries == 0
+    assert ev.tool_call_count == 2
+    # Optional fields with defaults
+    assert ev.internal_latencies == {}
+    assert ev.tokens_estimated is False
+
+
+def test_scenario_completed_in_event_type_map():
+    """EVENT_TYPE_MAP routes ScenarioCompleted, ParseFailed, StuckRecovered to their classes."""
+    assert EVENT_TYPE_MAP["ScenarioCompleted"] is ScenarioCompleted
+    assert EVENT_TYPE_MAP["ParseFailed"] is ParseFailed
+    assert EVENT_TYPE_MAP["StuckRecovered"] is StuckRecovered
+
+
+def test_scenario_completed_roundtrip():
+    """deserialize_event reconstructs a ScenarioCompleted from its JSON form."""
+    ev = ScenarioCompleted(
+        scenario_name="round",
+        model="m",
+        success=False,
+        latency_ttft=0.25,
+        latency_total=2.5,
+        tokens_in=12,
+        tokens_out=34,
+        iterations=2,
+        parse_failures=1,
+        stuck_recoveries=1,
+        tool_call_count=4,
+        internal_latencies={"model_gen": 0.5, "tool_exec": 1.0},
+        tokens_estimated=True,
+    )
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, ScenarioCompleted)
+    assert restored.scenario_name == "round"
+    assert restored.success is False
+    assert restored.tokens_in == 12
+    assert restored.parse_failures == 1
+    assert restored.stuck_recoveries == 1
+    assert restored.tool_call_count == 4
+    assert restored.internal_latencies == {"model_gen": 0.5, "tool_exec": 1.0}
+    assert restored.tokens_estimated is True
+
+
+def test_parse_failed_shape_and_map():
+    """ParseFailed carries agent_id, session_id, iteration, parse_retry_count, raw_content_preview."""
+    ev = ParseFailed(
+        agent_id=AgentID("a"),
+        session_id=SessionID("s"),
+        iteration=1,
+        parse_retry_count=2,
+        raw_content_preview="x",
+    )
+    assert ev.event_type == "ParseFailed"
+    assert ev.agent_id == "a"
+    assert ev.session_id == "s"
+    assert ev.iteration == 1
+    assert ev.parse_retry_count == 2
+    assert ev.raw_content_preview == "x"
+    # Empty preview is allowed (None or "" fallback at publish site)
+    empty = ParseFailed(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        iteration=0, parse_retry_count=1, raw_content_preview="",
+    )
+    assert empty.raw_content_preview == ""
+    # Roundtrip
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, ParseFailed)
+    assert restored.parse_retry_count == 2
+
+
+def test_stuck_recovered_shape_and_map():
+    """StuckRecovered carries agent_id, session_id, iteration, stuck_signature."""
+    ev = StuckRecovered(
+        agent_id=AgentID("a"),
+        session_id=SessionID("s"),
+        iteration=3,
+        stuck_signature="tool:bash{}",
+    )
+    assert ev.event_type == "StuckRecovered"
+    assert ev.iteration == 3
+    assert ev.stuck_signature == "tool:bash{}"
+    # Roundtrip
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, StuckRecovered)
+    assert restored.stuck_signature == "tool:bash{}"
