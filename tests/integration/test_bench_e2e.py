@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: full pipeline not yet wired (11-04)")
 @pytest.mark.asyncio
 async def test_one_scenario_full_pipeline(tmp_path: Path, mock_llm_client, fixture_scenario_path: Path):
     """Single-scenario bench: ScenarioSpec → N runs → summary.json + summary.md written."""

@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.runner matrix path not yet created (11-04)")
 @pytest.mark.asyncio
 async def test_matrix_writes_per_model(tmp_path: Path, monkeypatch):
     """run_bench(matrix=True) creates bench/results/{model}/ for every model in bench.yaml."""

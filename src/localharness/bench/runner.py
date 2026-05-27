@@ -294,3 +294,20 @@ async def accumulate_runs(
         stop, reason = should_stop(samples, scen.tolerance, min_r, max_r)
         if stop:
             return (samples, reason)
+
+
+# -------------------------------------------------------------------------
+# Re-export the top-level orchestrator entrypoint.
+#
+# `run_bench` is implemented in localharness.bench.orchestrator so the
+# orchestration layer is decoupled from the per-run execution primitives in
+# this module. We re-bind it here because the CLI (and its unit tests) drive
+# bench execution via `localharness.bench.runner.run_bench` — keeping the
+# import path stable lets monkeypatch.setattr work as expected.
+# -------------------------------------------------------------------------
+
+def __getattr__(name: str):  # PEP 562 — lazy attribute lookup
+    if name == "run_bench":
+        from localharness.bench.orchestrator import run_bench as _run_bench
+        return _run_bench
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
