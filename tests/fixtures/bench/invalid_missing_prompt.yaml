@@ -1,0 +1,5 @@
+name: invalid_no_prompt
+success_criteria:
+  golden_output: "x"
+budget:
+  max_actions: 1

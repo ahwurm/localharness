@@ -1,0 +1,20 @@
+{
+  "model": "qwen-3.6-27b",
+  "scenarios": {
+    "minimal_golden": {
+      "n_runs": 5,
+      "latency_total": {"median": 1.00, "p95": 1.20, "mean": 1.05, "std": 0.08, "n": 5},
+      "latency_ttft":  {"median": 0.10, "p95": 0.15, "mean": 0.11, "std": 0.02, "n": 5},
+      "tokens_in":  {"median": 100, "p95": 110, "mean": 102, "std": 4, "n": 5},
+      "tokens_out": {"median": 50,  "p95": 55,  "mean": 51,  "std": 2, "n": 5},
+      "iterations":   {"median": 3, "p95": 3, "mean": 3.0, "std": 0.0, "n": 5},
+      "parse_failures":   {"median": 0, "p95": 0, "mean": 0.0, "std": 0.0, "n": 5},
+      "stuck_recoveries": {"median": 0, "p95": 0, "mean": 0.0, "std": 0.0, "n": 5},
+      "tool_call_count":  {"median": 0, "p95": 0, "mean": 0.0, "std": 0.0, "n": 5},
+      "success_rate": {"rate": 1.0, "successes": 5, "n": 5, "wilson_ci": {"p_hat": 1.0, "lower": 0.566, "upper": 1.0, "half_width_pct": 21.7}},
+      "stable": true,
+      "samples_latency_total": [0.95, 1.00, 1.05, 1.05, 1.20],
+      "samples_success": [true, true, true, true, true]
+    }
+  }
+}

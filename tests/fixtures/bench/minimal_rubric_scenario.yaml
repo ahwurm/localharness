@@ -1,0 +1,11 @@
+name: minimal_rubric
+prompt: "Say hello to the world."
+success_criteria:
+  rubric:
+    - "contains:hello"
+    - "regex:[Ww]orld"
+budget:
+  max_actions: 3
+  max_duration_minutes: 0.5
+  max_context_tokens: 16000
+tools_allowed: []

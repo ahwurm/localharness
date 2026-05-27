@@ -118,3 +118,74 @@ async def memory_store(tmp_path: Path) -> MemoryStore:
     await store.open()
     yield store
     await store.close()
+
+
+# -----------------------------------------------------------------------------
+# Phase 11 bench harness fixtures
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bench_results_dir(tmp_path: Path) -> Path:
+    """tmp_path-scoped bench/results/{model}/{scenario}/ tree."""
+    root = tmp_path / "bench" / "results"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@pytest.fixture
+def fixture_scenario_path() -> Path:
+    """Path to the static minimal_golden_scenario.yaml fixture."""
+    return Path(__file__).parent / "fixtures" / "bench" / "minimal_golden_scenario.yaml"
+
+
+@pytest.fixture
+def fixture_rubric_scenario_path() -> Path:
+    return Path(__file__).parent / "fixtures" / "bench" / "minimal_rubric_scenario.yaml"
+
+
+@pytest.fixture
+def fixture_invalid_scenario_path() -> Path:
+    return Path(__file__).parent / "fixtures" / "bench" / "invalid_missing_prompt.yaml"
+
+
+@pytest.fixture
+def fake_completed_runs():
+    """Factory: produce a list[ScenarioCompleted]-shaped dicts for aggregator tests.
+
+    Returns dicts (not events) so this fixture works before ScenarioCompleted is added.
+    Tests that need the real event can model_validate after Wave 1 lands.
+    """
+    def _factory(
+        n: int,
+        success: list[bool] | None = None,
+        latency_total: list[float] | None = None,
+        latency_ttft: list[float] | None = None,
+        tokens_in: list[int] | None = None,
+        tokens_out: list[int] | None = None,
+        iterations: list[int] | None = None,
+        parse_failures: list[int] | None = None,
+        stuck_recoveries: list[int] | None = None,
+        tool_call_count: list[int] | None = None,
+        scenario_name: str = "test_scenario",
+        model: str = "test-model",
+    ) -> list[dict]:
+        out = []
+        for i in range(n):
+            out.append({
+                "scenario_name": scenario_name,
+                "model": model,
+                "success": (success[i] if success else True),
+                "latency_ttft": (latency_ttft[i] if latency_ttft else 0.1 + 0.01 * i),
+                "latency_total": (latency_total[i] if latency_total else 1.0 + 0.05 * i),
+                "tokens_in": (tokens_in[i] if tokens_in else 100 + i),
+                "tokens_out": (tokens_out[i] if tokens_out else 50 + i),
+                "iterations": (iterations[i] if iterations else 3),
+                "parse_failures": (parse_failures[i] if parse_failures else 0),
+                "stuck_recoveries": (stuck_recoveries[i] if stuck_recoveries else 0),
+                "tool_call_count": (tool_call_count[i] if tool_call_count else 2),
+                "internal_latencies": {},
+                "tokens_estimated": False,
+            })
+        return out
+    return _factory
