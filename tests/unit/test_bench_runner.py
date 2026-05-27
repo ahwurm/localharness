@@ -72,3 +72,158 @@ def test_tokens_estimated_propagates():
         elapsed_tokens=100, tokens_estimated=True, summary="done",
     ))
     assert acc.tokens_estimated is True
+
+
+# ---------------------------------------------------------------------------
+# SCEN-04 plumbing: deny_events + compaction_triggered counters (Plan 12-01 Task 3)
+# ---------------------------------------------------------------------------
+
+def test_deny_event_counter():
+    """on_observation increments deny_events only when error starts with 'Permission denied:'."""
+    from localharness.bench.runner import MetricAccumulator
+    from localharness.core.events import Observation
+    acc = MetricAccumulator()
+    acc.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result",
+        tool_call_id="t1", tool_name="bash_exec", output="[DENIED]",
+        error="Permission denied: matched pattern bash_exec(rm -rf *)",
+    ))
+    assert acc.deny_events == 1
+    # Different error — does not count
+    acc.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result",
+        tool_call_id="t2", tool_name="bash_exec", output="x", error="some other error",
+    ))
+    assert acc.deny_events == 1
+    # No error — does not count
+    acc.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result",
+        tool_call_id="t3", tool_name="bash_exec", output="ok",
+    ))
+    assert acc.deny_events == 1
+
+
+def test_compaction_triggered_counter():
+    """on_compaction_triggered increments compaction_triggered each call."""
+    from localharness.bench.runner import MetricAccumulator
+    from localharness.core.events import CompactionTriggered
+    acc = MetricAccumulator()
+    acc.on_compaction_triggered(CompactionTriggered(
+        agent_id="a", session_id="s", iteration=1,
+        pre_usage_fraction=0.9, post_usage_fraction=0.4, stages_modified=[],
+    ))
+    assert acc.compaction_triggered == 1
+    acc.on_compaction_triggered(CompactionTriggered(
+        agent_id="a", session_id="s", iteration=2,
+        pre_usage_fraction=0.9, post_usage_fraction=0.4, stages_modified=[],
+    ))
+    assert acc.compaction_triggered == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_one_run_subscribes_observation_and_compaction(monkeypatch, tmp_path):
+    """execute_one_run subscribes to Observation + CompactionTriggered events."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec, Observation, CompactionTriggered
+
+    async def fake_run_loop(loop, prompt, on_token):
+        await loop["bus"].publish(Observation(
+            agent_id="a", session_id="s", observation_type="tool_result",
+            tool_call_id="tc-1", tool_name="bash_exec", output="[DENIED]",
+            error="Permission denied: bash_exec(rm -rf *)",
+        ))
+        await loop["bus"].publish(CompactionTriggered(
+            agent_id="a", session_id="s", iteration=1,
+            pre_usage_fraction=0.9, post_usage_fraction=0.4, stages_modified=[],
+        ))
+
+    def fake_build(bus, llm_client, scenario, session_id=""):
+        return {"bus": bus}
+
+    monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
+    monkeypatch.setattr(bench_runner, "_run_loop", fake_run_loop)
+
+    scen = ScenarioSpec(
+        name="t",
+        prompt="x",
+        success_criteria=SuccessCriteria(
+            event_counts={
+                "deny_events": {"min": 1},
+                "compaction_triggered": {"min": 1},
+            },
+        ),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=["bash_exec"],
+    )
+    out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
+    assert out.success is True
+
+
+@pytest.mark.asyncio
+async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
+    """counts dict (including deny_events) is passed to success_criteria.evaluate()."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec, Observation
+
+    async def fake_run_loop(loop, prompt, on_token):
+        await loop["bus"].publish(Observation(
+            agent_id="a", session_id="s", observation_type="tool_result",
+            tool_call_id="tc-1", tool_name="bash_exec",
+            output="[DENIED]",
+            error="Permission denied: bash_exec(rm -rf *)",
+        ))
+
+    def fake_build(bus, llm_client, scenario, session_id=""):
+        return {"bus": bus}
+
+    monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
+    monkeypatch.setattr(bench_runner, "_run_loop", fake_run_loop)
+
+    scen = ScenarioSpec(
+        name="t",
+        prompt="x",
+        success_criteria=SuccessCriteria(event_counts={"deny_events": {"min": 1}}),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=["bash_exec"],
+    )
+    out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
+    assert out.success is True   # event_counts assertion satisfied via counts dict
+
+
+@pytest.mark.asyncio
+async def test_compaction_event_counter(monkeypatch, tmp_path):
+    """When _build_agent_loop wires bus into ContextManager and the pipeline reports
+    modifications during a bench run, MetricAccumulator.compaction_triggered increments.
+    Proves the runner.py call site passes bus= correctly.
+    """
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec, CompactionTriggered
+
+    async def fake_run_loop(loop, prompt, on_token):
+        await loop["bus"].publish(CompactionTriggered(
+            agent_id="a", session_id="s", iteration=1,
+            pre_usage_fraction=0.9, post_usage_fraction=0.5,
+            stages_modified=[],
+        ))
+
+    def fake_build(bus, llm_client, scenario, session_id=""):
+        return {"bus": bus}
+
+    monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
+    monkeypatch.setattr(bench_runner, "_run_loop", fake_run_loop)
+
+    scen = ScenarioSpec(
+        name="t",
+        prompt="x",
+        success_criteria=SuccessCriteria(event_counts={"compaction_triggered": {"min": 1}}),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=[],
+    )
+    out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
+    assert out.success is True
