@@ -23,7 +23,6 @@ def head_dir(tmp_path: Path) -> Path:
     return d.parent
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_flags_latency_regression(baseline_dir, head_dir):
     """head latency_total median +20% vs baseline triggers regression flag (threshold +15%)."""
     from localharness.bench.compare import diff_summaries
@@ -35,7 +34,6 @@ def test_compare_flags_latency_regression(baseline_dir, head_dir):
     assert scen.regressions.get("latency_total") is True
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_flags_success_regression(baseline_dir, head_dir):
     """head success_rate -20pp vs baseline triggers regression flag (threshold -5pp)."""
     from localharness.bench.compare import diff_summaries
@@ -47,7 +45,6 @@ def test_compare_flags_success_regression(baseline_dir, head_dir):
     assert scen.regressions.get("success_rate") is True
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_exit_zero_no_regression(baseline_dir):
     """run_compare with identical baseline+head dirs exits 0."""
     import asyncio
@@ -56,7 +53,6 @@ def test_compare_exit_zero_no_regression(baseline_dir):
     assert rc == 0
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_exit_one_on_regression(baseline_dir, head_dir):
     """run_compare with regressed head exits 1."""
     import asyncio
@@ -65,7 +61,6 @@ def test_compare_exit_one_on_regression(baseline_dir, head_dir):
     assert rc == 1
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_exit_two_on_missing_baseline(tmp_path):
     """run_compare with nonexistent baseline dir exits 2 (infra error)."""
     import asyncio
@@ -75,7 +70,6 @@ def test_compare_exit_two_on_missing_baseline(tmp_path):
     assert rc == 2
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_compare_exit_three_on_unstable(tmp_path):
     """run_compare exits 3 when any scenario marked stable=false in head summary."""
     import asyncio, json
@@ -93,7 +87,6 @@ def test_compare_exit_three_on_unstable(tmp_path):
     assert rc == 3
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_cli_threshold_override(baseline_dir, head_dir):
     """CLI --threshold metric=value overrides default. Loose threshold accepts the regression."""
     from localharness.bench.compare import resolve_thresholds
@@ -105,7 +98,6 @@ def test_cli_threshold_override(baseline_dir, head_dir):
     assert resolved["latency_total"]["value"] == 0.50
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_threshold_precedence_cli_beats_bench_yaml():
     """Precedence: CLI > scenario YAML > bench.yaml > defaults."""
     from localharness.bench.compare import resolve_thresholds
@@ -128,7 +120,6 @@ def test_welch_ab_test_signature():
     assert isinstance(regressed, bool)
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: bench.compare not yet created (11-04)")
 def test_parse_failures_absolute_threshold(baseline_dir, tmp_path):
     """parse_failures: +1 absolute over baseline triggers regression (any new parse failure)."""
     from localharness.bench.compare import diff_summaries
