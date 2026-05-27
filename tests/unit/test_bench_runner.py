@@ -161,6 +161,78 @@ async def test_execute_one_run_subscribes_observation_and_compaction(monkeypatch
     assert out.success is True
 
 
+# ---------------------------------------------------------------------------
+# Plan 12-04 Task 1: AgentTool stub + plugin-prefix dispatch spike
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_prefix_dispatch_resolves():
+    """ScenarioSpec(tools_allowed=['plugin:research_tools.exa_search']) resolves to
+    the registered plugin tool at scope='global' under bare name.
+
+    See 12-RESEARCH §"Pattern 8" — the spike. ToolRegistry.from_allowed must
+    accept entries with `plugin:PLUGIN.TOOL` form and resolve them against
+    tools registered at scope="global" under the bare TOOL name.
+    """
+    import asyncio
+    from localharness.tools.base import Tool, ToolSchema
+    from localharness.tools.registry import ToolRegistry
+
+    class StubPluginTool(Tool):
+        timeout_s = 30.0
+        async def _execute(self):
+            return self.ok("stub")
+        def info(self) -> ToolSchema:
+            return ToolSchema(
+                name="exa_search",
+                description="stub plugin tool",
+                parameters={"type": "object", "properties": {}, "required": []},
+                scope="agent",
+                estimated_tokens=10,
+                destructive=False,
+            )
+
+    base = ToolRegistry()
+    asyncio.run(base.register(StubPluginTool(), scope="global"))
+
+    allowed_registry = ToolRegistry.from_allowed(
+        ["plugin:research_tools.exa_search"],
+        base_registry=base,
+    )
+    # Lookup resolves via either bare name or prefixed name — the spike fixed
+    # whichever lookup form the runner uses. Both are valid resolutions.
+    assert allowed_registry.has("exa_search") or allowed_registry.has(
+        "plugin:research_tools.exa_search"
+    )
+
+
+def test_build_agent_loop_registers_agent_tool(monkeypatch):
+    """_build_agent_loop with 'agent' in tools_allowed registers the stub AgentTool."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    # Stub AgentLoop construction so we don't drag in the whole agent stack
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    scen = ScenarioSpec(
+        name="t",
+        prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=["agent"],
+    )
+    bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    tr = captured["tool_registry"]
+    assert tr.has("agent"), "AgentTool stub was not registered"
+
 @pytest.mark.asyncio
 async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
     """counts dict (including deny_events) is passed to success_criteria.evaluate()."""
