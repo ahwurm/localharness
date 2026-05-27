@@ -10,14 +10,37 @@ from localharness.core.events import Heartbeat, TurnCompleted
 
 # ---------- TELEM-02 stubs ----------
 
-@pytest.mark.xfail(strict=True, reason="TELEM-02: _complete_native must return (message, usage)")
 @pytest.mark.asyncio
 async def test_complete_native_returns_usage():
     # TELEM-02
+    from unittest.mock import AsyncMock, MagicMock
     from localharness.provider.client import LLMClient, LLMConfig
-    # Wave 1 (10-01-01) will make _complete_native return tuple (message, usage)
-    # For now, sanity assertion that fails:
-    assert False, "Wave 1 must update _complete_native to return (message, usage)"
+
+    config = LLMConfig(
+        base_url="http://localhost:11434/v1",
+        model="test-model",
+        api_key="x",
+        tool_call_mode="native",
+        is_local=True,
+        timeout_seconds=300.0,
+    )
+    client = LLMClient(config)
+    fake_message = MagicMock(content="hi", tool_calls=None)
+    fake_usage = MagicMock(prompt_tokens=42, completion_tokens=7, total_tokens=49)
+    fake_response = MagicMock(choices=[MagicMock(message=fake_message)], usage=fake_usage)
+    client._client = MagicMock()
+    client._client.chat.completions.create = AsyncMock(return_value=fake_response)
+
+    result = await client._complete_native(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        stream=False,
+    )
+
+    assert isinstance(result, tuple) and len(result) == 2
+    message, usage = result
+    assert usage.prompt_tokens == 42
+    assert usage.completion_tokens == 7
 
 
 @pytest.mark.xfail(strict=True, reason="TELEM-02: TurnCompleted.elapsed_tokens must equal sum of provider usage")

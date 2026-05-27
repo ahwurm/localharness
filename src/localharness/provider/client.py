@@ -237,8 +237,11 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None = None,
         stream: bool = False,
-    ) -> Any:
-        """Single-turn completion. Routes to native or XML based on tool_call_mode."""
+    ) -> tuple[Any, Any]:
+        """Single-turn completion. Routes to native or XML based on tool_call_mode.
+
+        Returns (message, usage) — usage is openai.types.CompletionUsage or None.
+        """
         if self.config.tool_call_mode == "native":
             return await self._complete_native(messages, tools, stream)
         return await self._complete_xml(messages, tools, stream)
@@ -248,8 +251,8 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
-    ) -> Any:
-        """Streaming completion with per-token callback."""
+    ) -> tuple[Any, Any]:
+        """Streaming completion with per-token callback. Returns (message, usage)."""
         return await self.complete(messages, tools, stream=True)
 
     async def _complete_native(
@@ -257,8 +260,8 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
-    ) -> Any:
-        """Call OpenAI-compat API with tool_calls parameter."""
+    ) -> tuple[Any, Any]:
+        """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage)."""
         try:
             kwargs: dict[str, Any] = {
                 "model": self.config.model,
@@ -271,7 +274,7 @@ class LLMClient:
             if self.config.stop_sequences:
                 kwargs["stop"] = self.config.stop_sequences
             response = await self._client.chat.completions.create(**kwargs)
-            return response.choices[0].message
+            return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -280,12 +283,13 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
-    ) -> Any:
+    ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection, parse tool calls from text.
 
         vLLM injects tools via the model's chat template (e.g. Qwen's native format),
         producing much better compliance than custom system-prompt injection.
         Falls back to system-prompt injection if the API rejects the tools param.
+        Returns (message, usage).
         """
         kwargs: dict[str, Any] = {
             "model": self.config.model,
@@ -303,7 +307,7 @@ class LLMClient:
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
-            return response.choices[0].message
+            return response.choices[0].message, response.usage
         except openai.BadRequestError:
             # Server rejected tools/extra_body — fall back to system prompt injection
             log.warning("Server rejected request, falling back to system prompt injection")
@@ -316,8 +320,11 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
-    ) -> Any:
-        """Legacy fallback: inject tool schemas into system prompt as XML text."""
+    ) -> tuple[Any, Any]:
+        """Legacy fallback: inject tool schemas into system prompt as XML text.
+
+        Returns (message, usage).
+        """
         msgs = list(messages)
         if tools and self._fn_converter:
             injection = self._fn_converter.build_system_injection(tools)
@@ -332,7 +339,7 @@ class LLMClient:
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
             )
-            return response.choices[0].message
+            return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
