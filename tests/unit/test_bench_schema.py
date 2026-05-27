@@ -95,3 +95,82 @@ def test_limits_spec_validation():
         LimitsSpec(max_latency_s=0)
     with pytest.raises(ValidationError):
         LimitsSpec(max_tool_calls=-1)
+
+
+# ---------------------------------------------------------------------------
+# SCEN-04 plumbing: SuccessCriteria.event_counts (Plan 12-01 Task 1)
+# ---------------------------------------------------------------------------
+
+def test_event_counts_operators():
+    """event_counts={'deny_events': {'min': 1}} requires observed >= 1."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"deny_events": {"min": 1}})
+    assert sc.evaluate("any", counts={"deny_events": 1}) is True
+    assert sc.evaluate("any", counts={"deny_events": 0}) is False
+    assert sc.evaluate("any", counts={"deny_events": 5}) is True
+
+
+def test_event_counts_operators_max():
+    """event_counts={'parse_failures': {'max': 0}} requires observed <= 0."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"parse_failures": {"max": 0}})
+    assert sc.evaluate("x", counts={"parse_failures": 0}) is True
+    assert sc.evaluate("x", counts={"parse_failures": 1}) is False
+
+
+def test_event_counts_operators_exact():
+    """event_counts={'tool_call_count': {'exact': 2}} requires observed == 2."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"tool_call_count": {"exact": 2}})
+    assert sc.evaluate("x", counts={"tool_call_count": 2}) is True
+    assert sc.evaluate("x", counts={"tool_call_count": 3}) is False
+    assert sc.evaluate("x", counts={"tool_call_count": 1}) is False
+
+
+def test_evaluate_combines_all_dimensions():
+    """golden_output AND rubric AND event_counts must all pass."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(
+        golden_output="hello hi",
+        rubric=["contains:hi"],
+        event_counts={"deny_events": {"min": 1}},
+    )
+    assert sc.evaluate("hello hi", counts={"deny_events": 1}) is True
+    assert sc.evaluate("hello hi", counts={"deny_events": 0}) is False
+    assert sc.evaluate("bye hi", counts={"deny_events": 1}) is False  # golden mismatch
+    # Rubric mismatch — change rubric to a missing token
+    sc2 = SuccessCriteria(
+        golden_output="hello",
+        rubric=["contains:xyzzy"],
+        event_counts={"deny_events": {"min": 1}},
+    )
+    assert sc2.evaluate("hello", counts={"deny_events": 1}) is False
+
+
+def test_event_counts_alone_satisfies_at_least_one():
+    """event_counts alone (no golden_output, no rubric) must construct successfully."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"stuck_recoveries": {"min": 1}})
+    assert sc.event_counts == {"stuck_recoveries": {"min": 1}}
+
+
+def test_event_counts_missing_key_treated_as_zero():
+    """A missing key in counts dict is treated as observed=0."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"deny_events": {"min": 1}})
+    assert sc.evaluate("x", counts={}) is False
+
+
+def test_event_counts_none_supplied_fails_when_asserted():
+    """If event_counts is non-empty but no counts arg is supplied, evaluation fails."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(event_counts={"deny_events": {"min": 1}})
+    assert sc.evaluate("x") is False
+
+
+def test_evaluate_signature_back_compat():
+    """Legacy single-arg evaluate() calls still work when event_counts is unset."""
+    from localharness.bench.schema import SuccessCriteria
+    sc = SuccessCriteria(rubric=["contains:hi"])
+    assert sc.evaluate("hi there") is True
+    assert sc.evaluate("nope") is False
