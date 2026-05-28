@@ -2138,3 +2138,5 @@ limits:
   max_latency_s: 120.0
   max_tool_calls: 0
 tools_allowed: []
+slice: train
+category: loop_resilience

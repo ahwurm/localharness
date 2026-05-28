@@ -21,3 +21,5 @@ limits:
   max_tool_calls: 10
 tools_allowed:
   - read
+slice: train
+category: loop_resilience

@@ -23,3 +23,5 @@ limits:
   max_tool_calls: 4
 tools_allowed:
   - bash_exec
+slice: train
+category: tool_basics

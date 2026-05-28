@@ -9,3 +9,5 @@ budget:
   max_duration_minutes: 0.5
   max_context_tokens: 16000
 tools_allowed: []
+slice: train
+category: tool_basics

@@ -27,3 +27,5 @@ limits:
 tools_allowed:
   - mcp:fetch
   - plugin:research_tools.exa_search
+slice: train
+category: extension_systems

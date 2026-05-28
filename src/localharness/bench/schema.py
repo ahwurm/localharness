@@ -5,14 +5,45 @@ builtin = bare name, mcp:NAME, plugin:PLUGIN.NAME (locked in 11-CONTEXT.md).
 """
 from __future__ import annotations
 
+import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_yaml import parse_yaml_raw_as
 
 from localharness.core.events import BudgetSpec
+
+
+# -------------------------------------------------------------------------
+# Category allowed-set loader (Phase 13 Wave 1)
+# -------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _load_allowed_categories() -> frozenset[str]:
+    """Load category names from bench/categories.yaml. Cached for process lifetime.
+
+    Resolution order:
+      1. $LOCALHARNESS_CATEGORIES_PATH if set (used by tests)
+      2. ./bench/categories.yaml relative to cwd
+
+    Raises FileNotFoundError if not found.
+    """
+    override = os.environ.get("LOCALHARNESS_CATEGORIES_PATH")
+    path = Path(override) if override else Path("bench/categories.yaml")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"bench/categories.yaml not found at {path}. "
+            f"Set LOCALHARNESS_CATEGORIES_PATH or run from repo root."
+        )
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    cats = (data or {}).get("categories", {})
+    if not cats:
+        raise ValueError(f"{path} has no 'categories:' mapping or it is empty")
+    return frozenset(cats.keys())
 
 
 # -------------------------------------------------------------------------
@@ -146,6 +177,26 @@ class ScenarioSpec(BaseModel):
     tolerance: float = 0.10
     min_runs: int = 3
     max_runs: int = 20
+    slice: Literal["train", "holdout"] = Field(
+        description="Slice membership. No default — every fixture must commit explicitly."
+    )
+    category: str = Field(
+        description="Behavioral class. Validated against bench/categories.yaml allowed-set."
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Optional info-only metadata. NOT sentinel-enforced."
+    )
+
+    @model_validator(mode="after")
+    def _validate_category(self) -> "ScenarioSpec":
+        allowed = _load_allowed_categories()
+        if self.category not in allowed:
+            raise ValueError(
+                f"category={self.category!r} is not in bench/categories.yaml allowed-set. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        return self
 
 
 # -------------------------------------------------------------------------

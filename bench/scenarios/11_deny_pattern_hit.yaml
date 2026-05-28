@@ -22,3 +22,5 @@ limits:
   max_tool_calls: 3
 tools_allowed:
   - bash_exec
+slice: train
+category: permission_enforcement

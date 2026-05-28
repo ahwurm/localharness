@@ -25,3 +25,5 @@ limits:
 tools_allowed:
   - write
   - bash_exec
+slice: train
+category: tool_basics

@@ -24,3 +24,5 @@ limits:
 tools_allowed:
   - agent
   - plugin:research_tools.exa_search
+slice: train
+category: agent_orchestration

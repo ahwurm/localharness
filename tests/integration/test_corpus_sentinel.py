@@ -17,7 +17,6 @@ HOLDOUT_CATEGORIES = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 1 scaffold: flips to PASS after Task 3 migration")
 def test_every_category_partitions_to_one_slice():
     fixtures = sorted(CORPUS_ROOT.rglob("*.yaml"))
     assert fixtures, f"No fixtures found under {CORPUS_ROOT}"
@@ -29,7 +28,6 @@ def test_every_category_partitions_to_one_slice():
     assert not mixed, f"Categories mixed across slices (forbidden): {mixed}"
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 1 scaffold: flips to PASS after Task 3 migration")
 def test_every_declared_train_category_has_at_least_one_fixture():
     """Holdout categories are populated in Wave 3 — only train-side coverage enforced here.
     Wave 3 PLAN adds a separate strict check for holdout coverage."""
@@ -41,7 +39,6 @@ def test_every_declared_train_category_has_at_least_one_fixture():
     assert not missing_train, f"Train-side categories missing fixtures: {missing_train}"
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 1 scaffold: flips to PASS after Task 3 migration")
 def test_every_fixture_has_valid_slice_and_category():
     fixtures = sorted(CORPUS_ROOT.rglob("*.yaml"))
     assert fixtures, f"No fixtures found under {CORPUS_ROOT}"

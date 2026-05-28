@@ -281,7 +281,8 @@ def test_corpus_loads_all_fixtures():
     corpus_dir = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
     if not corpus_dir.exists():
         pytest.skip("bench/scenarios/ does not exist yet")
-    fixtures = sorted(p for p in corpus_dir.iterdir() if p.suffix == ".yaml")
+    # rglob covers post-Phase-13 train/ + holdout/ subdir layout
+    fixtures = sorted(p for p in corpus_dir.rglob("*.yaml") if p.is_file())
     if not fixtures:
         pytest.skip("bench/scenarios/ is empty")
     for path in fixtures:
