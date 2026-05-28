@@ -266,6 +266,137 @@ async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
     assert out.success is True   # event_counts assertion satisfied via counts dict
 
 
+# ---------------------------------------------------------------------------
+# Phase 13 Wave 1: rglob discovery + slice filter in orchestrator
+# ---------------------------------------------------------------------------
+
+
+def test_discover_scenarios_recurses_into_subdirs(tmp_path):
+    """_discover_scenarios uses rglob — finds yaml in train/ and holdout/ subdirs."""
+    (tmp_path / "train").mkdir()
+    (tmp_path / "holdout").mkdir()
+    (tmp_path / "train" / "a.yaml").write_text("name: a\nprompt: x\n")
+    (tmp_path / "holdout" / "b.yaml").write_text("name: b\nprompt: x\n")
+    from localharness.bench.orchestrator import _discover_scenarios
+    paths = _discover_scenarios(tmp_path)
+    names = {p.name for p in paths}
+    assert names == {"a.yaml", "b.yaml"}
+
+
+def _write_fixture(path, name, slice_):
+    """Write a minimal valid ScenarioSpec YAML to path with given slice."""
+    path.write_text(
+        f"name: {name}\n"
+        f"prompt: x\n"
+        f"success_criteria:\n  golden_output: '4'\n"
+        f"budget:\n  max_actions: 0\n  max_duration_minutes: 0.5\n  max_context_tokens: 8000\n"
+        f"tools_allowed: []\n"
+        f"slice: {slice_}\n"
+        f"category: tool_basics\n"
+    )
+
+
+@pytest.fixture
+def _hermetic_categories(monkeypatch, tmp_path):
+    """Point schema loader at a tmp categories.yaml so run_bench can load fixtures
+    without depending on the repo-root bench/categories.yaml."""
+    import textwrap
+    from localharness.bench import schema as schema_mod
+    cats = tmp_path / "categories.yaml"
+    cats.write_text(textwrap.dedent("""\
+        categories:
+          tool_basics: "test only"
+    """))
+    monkeypatch.setenv("LOCALHARNESS_CATEGORIES_PATH", str(cats))
+    schema_mod._load_allowed_categories.cache_clear()
+    yield cats
+    schema_mod._load_allowed_categories.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_scenario_overrides_slice_filter(tmp_path, monkeypatch, _hermetic_categories):
+    """When --scenario is set, the slice filter is BYPASSED — named fixture wins
+    regardless of which slice it lives in."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "train").mkdir()
+    (corpus / "holdout").mkdir()
+    _write_fixture(corpus / "train" / "a.yaml", "a", "train")
+    _write_fixture(corpus / "holdout" / "b.yaml", "b", "holdout")
+    results = tmp_path / "results"
+
+    seen = []
+
+    async def fake_run_one_model(entry, scenarios, **kw):
+        seen.extend(s.name for s in scenarios)
+        return len(scenarios)
+
+    from localharness.bench import orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "_run_one_model", fake_run_one_model)
+    code = await orch_mod.run_bench(
+        scenario="b",
+        slice="train",  # would normally filter out b (holdout), but --scenario overrides
+        corpus_path=corpus,
+        results_path=results,
+    )
+    assert code == 0
+    assert seen == ["b"], f"expected only 'b' (named override), got {seen}"
+
+
+@pytest.mark.asyncio
+async def test_slice_filter_applied_when_no_scenario(tmp_path, monkeypatch, _hermetic_categories):
+    """With --slice=train and scenario=None, only train-slice fixtures pass to runner."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "train").mkdir()
+    (corpus / "holdout").mkdir()
+    _write_fixture(corpus / "train" / "a.yaml", "a", "train")
+    _write_fixture(corpus / "holdout" / "b.yaml", "b", "holdout")
+    results = tmp_path / "results"
+
+    seen = []
+
+    async def fake_run_one_model(entry, scenarios, **kw):
+        seen.extend(s.name for s in scenarios)
+        return len(scenarios)
+
+    from localharness.bench import orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "_run_one_model", fake_run_one_model)
+    code = await orch_mod.run_bench(
+        scenario=None,
+        slice="train",
+        corpus_path=corpus,
+        results_path=results,
+    )
+    assert code == 0
+    assert seen == ["a"], f"expected only train-slice 'a', got {seen}"
+
+
+@pytest.mark.asyncio
+async def test_missing_slice_field_exits_2(tmp_path, monkeypatch, _hermetic_categories):
+    """A YAML missing the required `slice` field is dropped from load; if it's the
+    only fixture, run_bench returns 2 (all_scenarios_failed_to_load)."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    # Missing slice + category — pydantic ValidationError → silently dropped by loader
+    (corpus / "broken.yaml").write_text(
+        "name: broken\n"
+        "prompt: x\n"
+        "success_criteria:\n  golden_output: '4'\n"
+        "budget:\n  max_actions: 0\n  max_duration_minutes: 0.5\n  max_context_tokens: 8000\n"
+        "tools_allowed: []\n"
+    )
+    results = tmp_path / "results"
+    from localharness.bench import orchestrator as orch_mod
+    code = await orch_mod.run_bench(
+        scenario=None,
+        slice="train",
+        corpus_path=corpus,
+        results_path=results,
+    )
+    assert code == 2
+
+
 @pytest.mark.asyncio
 async def test_compaction_event_counter(monkeypatch, tmp_path):
     """When _build_agent_loop wires bus into ContextManager and the pipeline reports
