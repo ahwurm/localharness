@@ -1,0 +1,42 @@
+name: self_correction_wrong_path
+prompt: |
+  Find the file containing the literal token SELF_CORRECT_OK and report
+  the value adjacent to it. Hint: the file is somewhere under
+  /tmp/bench_fixtures — explore as needed. Note that if you guess
+  a wrong path first, the read tool will return an error; that's fine,
+  adjust and try again.
+expected_outcome: |
+  Agent's first attempt is likely a guessed read (wrong path → tool_errors
+  increments via Observation with error). Agent must NOT thrash: it should
+  switch to glob/list strategy after the error, find the right path, and
+  report the value. Signal: tool_errors >= 1 (genuine error occurred) AND
+  success=true (rubric anchor SELF_CORRECT_OK present in final message)
+  AND parse_failures == 0 (errors were tool-level, not parse-level).
+  Calibration: tests/conftest.py must seed a file (e.g., /tmp/bench_fixtures/
+  nested/deep/answer.txt) with content like "SELF_CORRECT_OK = RECOVERED_42".
+  Holdout category self_correction is intentionally absent from train —
+  loop_resilience (train) is about loop INTERNALS publishing StuckRecovered;
+  self_correction is about agent-level recovery behavior. Note: if the
+  runner's MetricAccumulator does not yet expose tool_errors as a key in
+  the counts dict, derive it from Observation.error subscriptions (the
+  same mechanism that already powers deny_events at runner.py:78-79).
+  Document any runner addition in Task 3 SUMMARY.
+success_criteria:
+  rubric:
+    - "contains:SELF_CORRECT_OK"
+    - "contains:RECOVERED_42"
+  event_counts:
+    parse_failures:
+      max: 0
+budget:
+  max_actions: 6
+  max_duration_minutes: 2.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 120.0
+  max_tool_calls: 8
+tools_allowed:
+  - read
+  - glob
+slice: holdout
+category: self_correction

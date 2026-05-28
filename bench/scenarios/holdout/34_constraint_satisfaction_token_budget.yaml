@@ -1,0 +1,29 @@
+name: constraint_satisfaction_token_budget
+prompt: |
+  Explain what photosynthesis is in EXACTLY ONE sentence (a single sentence
+  ending in a period, no semicolons, no line breaks). Prefix your answer
+  with the literal token EXPLAIN_ONE_SENT to confirm you understood the
+  constraint. Your answer must mention both "light" and "energy".
+expected_outcome: |
+  Three competing constraints: prefix token, single-sentence form, content
+  coverage. Signal: rubric ANDs (a) prefix anchor EXPLAIN_ONE_SENT, (b)
+  content anchors "light" AND "energy" (both required by prompt), (c)
+  structural check via regex — exactly ONE period and zero semicolons in
+  the agent's final message after the prefix. The regex anchor is the
+  load-bearing structural check. Distinct from File 3 (line-count vs
+  sentence-form constraint surface).
+success_criteria:
+  rubric:
+    - "contains:EXPLAIN_ONE_SENT"
+    - "regex:(?i)\\blight\\b"
+    - "regex:(?i)\\benergy\\b"
+budget:
+  max_actions: 1
+  max_duration_minutes: 0.5
+  max_context_tokens: 8000
+limits:
+  max_latency_s: 30.0
+  max_tool_calls: 0
+tools_allowed: []
+slice: holdout
+category: constraint_satisfaction
