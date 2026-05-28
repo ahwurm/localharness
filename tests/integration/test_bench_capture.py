@@ -15,6 +15,8 @@ async def test_jsonl_trace_written(tmp_path: Path):
         name="t", prompt="hi",
         success_criteria=SuccessCriteria(golden_output="hi"),
         budget=BudgetSpec(max_actions=1, max_duration_minutes=0.1),
+        slice="train",
+        category="tool_basics",
     )
     run_path = tmp_path / "bench" / "results" / "mock" / "t" / "ts.jsonl"
     # Use MockLLMClient via a factory the runner accepts
@@ -34,6 +36,8 @@ async def test_jsonl_replayable(tmp_path: Path):
         name="t", prompt="hi",
         success_criteria=SuccessCriteria(golden_output="hi"),
         budget=BudgetSpec(max_actions=1, max_duration_minutes=0.1),
+        slice="train",
+        category="tool_basics",
     )
     run_path = tmp_path / "bench" / "results" / "mock" / "t" / "ts.jsonl"
     await execute_one_run(scen, model="mock", run_path=run_path, llm_client=None)

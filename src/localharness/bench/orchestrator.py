@@ -41,8 +41,8 @@ log = logging.getLogger(__name__)
 # -------------------------------------------------------------------------
 
 def _discover_scenarios(corpus_path: Path) -> list[Path]:
-    """Find all *.yaml files in corpus_path (non-recursive)."""
-    return sorted(p for p in Path(corpus_path).glob("*.yaml") if p.is_file())
+    """Find all *.yaml files under corpus_path RECURSIVELY (covers train/ and holdout/ subdirs)."""
+    return sorted(p for p in Path(corpus_path).rglob("*.yaml") if p.is_file())
 
 
 def _load_scenarios_from_paths(scenario_paths: list[Path]) -> list[ScenarioSpec]:
@@ -58,6 +58,13 @@ def _load_scenarios_from_paths(scenario_paths: list[Path]) -> list[ScenarioSpec]
 
 def _filter_scenarios_by_name(scenarios: list[ScenarioSpec], name: str) -> list[ScenarioSpec]:
     return [s for s in scenarios if s.name == name]
+
+
+def _filter_scenarios_by_slice(scenarios: list[ScenarioSpec], slice_: str) -> list[ScenarioSpec]:
+    """Return scenarios whose .slice matches. slice_='all' passes everything through."""
+    if slice_ == "all":
+        return scenarios
+    return [s for s in scenarios if s.slice == slice_]
 
 
 # -------------------------------------------------------------------------
@@ -221,6 +228,7 @@ async def run_bench(
     config_path: Optional[Path] = None,
     min_runs_override: Optional[int] = None,
     max_runs_override: Optional[int] = None,
+    slice: str = "train",
 ) -> int:
     """Top-level bench entry point.
 
@@ -285,6 +293,19 @@ async def run_bench(
             log.error("scenario_not_found name=%s", scenario)
             if json_output:
                 sys.stdout.write(_json.dumps({"status": "error", "reason": f"scenario_not_found:{scenario}", "exit_code": 2}) + "\n")
+            return 2
+    else:
+        # --scenario overrides --slice (single-fixture by-name invocation bypasses slice filter)
+        scenarios = _filter_scenarios_by_slice(scenarios, slice)
+        if not scenarios:
+            log.warning("no_scenarios_for_slice slice=%s", slice)
+            if json_output:
+                sys.stdout.write(_json.dumps({
+                    "status": "error",
+                    "reason": f"no_scenarios_for_slice:{slice}",
+                    "exit_code": 2,
+                    "total_runs": 0,
+                }) + "\n")
             return 2
 
     # Resolve matrix
