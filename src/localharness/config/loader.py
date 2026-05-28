@@ -10,6 +10,11 @@ from pydantic import ValidationError
 from pydantic_yaml import to_yaml_str
 
 from .models import AgentConfig, DivisionConfig, HarnessConfig, OrgConfig
+from localharness.config.overlay import (
+    deep_merge,
+    load_overlay,
+    _resolve_user_overlay_path,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -180,6 +185,7 @@ class ConfigLoader:
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
         self._org_cache: Optional[OrgConfig] = None
+        self._raw_harness_dict: Optional[dict] = None
 
     # ---------------------------------------------------------------- #
     # Internal helpers
@@ -213,10 +219,46 @@ class ConfigLoader:
         if not cfg_path.exists():
             raise ConfigNotFoundError("config.yaml", [str(cfg_path)])
         text = cfg_path.read_text(encoding="utf-8")
-        data = _load_yaml_file(cfg_path)
-        result = self._validate_dict(HarnessConfig, data, str(cfg_path), text)
+        project_data = _load_yaml_file(cfg_path)
+        # Cache raw project dict so callers (e.g. components_cmd) can rebuild merged config
+        self._raw_harness_dict = project_data
+
+        # Apply user overlay cascade (Phase 14)
+        overlay_path = _resolve_user_overlay_path()
+        user_overlay = load_overlay(overlay_path)
+        merged = deep_merge(project_data, user_overlay) if user_overlay else project_data
+
+        result = self._validate_dict(HarnessConfig, merged, str(cfg_path), text)
         self._harness_cache = result
         return result
+
+    def raw_harness_dict(self) -> dict:
+        """Return the parsed project YAML dict (NO overlay applied).
+
+        Used by `localharness components set` to rebuild the merged config for
+        validation BEFORE writing the overlay. Side-effect: triggers load_harness
+        if not yet called (populates _raw_harness_dict).
+        """
+        if self._harness_cache is None:
+            self.load_harness()
+        return dict(self._raw_harness_dict)  # defensive copy
+
+    @property
+    def user_overlay_path(self) -> Path:
+        """Path to the user overlay file (LOCALHARNESS_HOME-aware).
+
+        Used by `localharness components set` as the atomic_write_overlay target.
+        Always resolved at call time so test monkeypatching takes effect.
+        """
+        return _resolve_user_overlay_path()
+
+    def invalidate_cache(self) -> None:
+        """Drop the cached HarnessConfig so the next load_harness() re-reads disk.
+
+        Used by `localharness components set` after writing the overlay.
+        """
+        self._harness_cache = None
+        self._raw_harness_dict = None
 
     def load_org(self) -> OrgConfig:
         if self._org_cache is not None:
