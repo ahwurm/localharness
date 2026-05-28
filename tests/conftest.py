@@ -32,6 +32,29 @@ def bus_with_persistence(tmp_path: Path) -> EventBus:
     return EventBus(persist_path=tmp_path / "events.jsonl")
 
 
+@pytest.fixture
+def components_home(tmp_path, monkeypatch):
+    """Hermetic LocalHarness home dir.
+
+    Creates tmp_path/.localharness/ with empty config.yaml and audit.jsonl;
+    sets LOCALHARNESS_HOME so ConfigLoader, overlay writer, and EventBus
+    all isolate to tmp_path. Yields the home Path.
+    """
+    home = tmp_path / ".localharness"
+    home.mkdir(parents=True, exist_ok=True)
+    # Minimal valid HarnessConfig YAML for loader smoke
+    (home / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: ollama\n"
+        "  base_url: http://localhost:11434/v1\n"
+        "  default_model: test-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(home))
+    return home
+
+
 @dataclass
 class FakeToolCall:
     """Minimal tool call object for mock LLM responses."""
