@@ -131,3 +131,61 @@ def test_context_config_defaults():
     cfg = ContextConfig()
     assert cfg.max_context_tokens == 128_000
     assert cfg.compaction_threshold_pct == 80.0
+
+
+# --- Phase 14-02 Task 1: StuckDetectorConfig / RecoveryInjectionConfig / OrgConfig.hooks ---
+
+def test_stuck_detector_config_defaults_mirror_loop_hardcode():
+    from localharness.config.models import AgentConfig
+    cfg = AgentConfig(name="t", role="t")
+    assert cfg.stuck_detector.window_size == 5
+    assert cfg.stuck_detector.recovery_threshold == 2
+    assert cfg.stuck_detector.escalation_threshold == 3
+
+
+def test_stuck_detector_override():
+    from localharness.config.models import AgentConfig
+    cfg = AgentConfig(name="t", role="t", stuck_detector={"window_size": 7})
+    assert cfg.stuck_detector.window_size == 7
+
+
+def test_recovery_injection_default_matches_loop_string():
+    from localharness.config.models import AgentConfig
+    cfg = AgentConfig(name="t", role="t")
+    expected = (
+        "You have attempted the same tool call multiple times with identical arguments "
+        "and received the same result. That approach is not working. "
+        "Consider a fundamentally different strategy: try different arguments, "
+        "use a different tool, or conclude that the information is not available this way."
+    )
+    assert cfg.recovery_injection.message == expected
+
+
+def test_recovery_injection_override():
+    from localharness.config.models import AgentConfig
+    cfg = AgentConfig(name="t", role="t", recovery_injection={"message": "custom"})
+    assert cfg.recovery_injection.message == "custom"
+
+
+def test_org_hooks_default_empty():
+    from localharness.config.models import OrgConfig
+    cfg = OrgConfig()
+    assert cfg.hooks == {}
+
+
+def test_org_hooks_accept_freeform_dict():
+    from localharness.config.models import OrgConfig
+    cfg = OrgConfig(hooks={"my_hook": {"enabled": True}})
+    assert cfg.hooks["my_hook"]["enabled"] is True
+
+
+def test_stuck_detector_zero_window_raises():
+    from localharness.config.models import AgentConfig
+    with pytest.raises(ValidationError):
+        AgentConfig(name="t", role="t", stuck_detector={"window_size": 0})
+
+
+def test_stuck_detector_extra_forbid():
+    from localharness.config.models import AgentConfig
+    with pytest.raises(ValidationError):
+        AgentConfig(name="t", role="t", stuck_detector={"unknownField": 5})
