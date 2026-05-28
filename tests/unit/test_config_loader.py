@@ -290,3 +290,122 @@ def test_mcp_http_requires_url(config_dir: Path) -> None:
     loader = ConfigLoader(config_dir=config_dir)
     with pytest.raises(ConfigValidationError):
         loader.load_agent("http-agent")
+
+
+# ------------------------------------------------------------------ #
+# Phase 14-03: ConfigLoader user-overlay cascade
+# ------------------------------------------------------------------ #
+
+
+def _write_harness_yaml(config_dir: Path, data: dict) -> None:
+    (config_dir / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+def _minimal_harness_dict(**overrides) -> dict:
+    base = {
+        "version": "1",
+        "provider": {
+            "provider_type": "ollama",
+            "base_url": "http://localhost:11434/v1",
+            "default_model": "test-model",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_load_harness_no_overlay_returns_project_yaml(config_dir: Path, monkeypatch) -> None:
+    """No overrides.yaml → returned HarnessConfig matches project YAML unchanged."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict(
+        org={"context": {"compaction_threshold_pct": 70.0}},
+    ))
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg = loader.load_harness()
+    assert cfg.org.context.compaction_threshold_pct == 70.0
+
+
+def test_load_harness_user_overlay_wins(config_dir: Path, monkeypatch) -> None:
+    """overrides.yaml present → merged HarnessConfig reflects overlay values."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict(
+        org={"context": {"compaction_threshold_pct": 70.0}},
+    ))
+    (config_dir / "overrides.yaml").write_text(
+        yaml.safe_dump({"org": {"context": {"compaction_threshold_pct": 85.0}}}),
+        encoding="utf-8",
+    )
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg = loader.load_harness()
+    assert cfg.org.context.compaction_threshold_pct == 85.0
+
+
+def test_load_harness_invalid_overlay_raises(config_dir: Path, monkeypatch) -> None:
+    """Bad overlay value (out of range) raises ConfigValidationError on load."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict())
+    # 999.0 violates le=99.0 constraint on compaction_threshold_pct
+    (config_dir / "overrides.yaml").write_text(
+        yaml.safe_dump({"org": {"context": {"compaction_threshold_pct": 999.0}}}),
+        encoding="utf-8",
+    )
+    loader = ConfigLoader(config_dir=config_dir)
+    with pytest.raises(ConfigValidationError):
+        loader.load_harness()
+
+
+def test_load_harness_overlay_typo_rejected_by_extra_forbid(config_dir: Path, monkeypatch) -> None:
+    """Typo'd key in overlay (camelCase) raises ConfigValidationError (extra='forbid')."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict())
+    (config_dir / "overrides.yaml").write_text(
+        yaml.safe_dump({"org": {"context": {"compactionThreshold": 50}}}),
+        encoding="utf-8",
+    )
+    loader = ConfigLoader(config_dir=config_dir)
+    with pytest.raises(ConfigValidationError):
+        loader.load_harness()
+
+
+def test_raw_harness_dict_returns_project_yaml_unmodified(config_dir: Path, monkeypatch) -> None:
+    """raw_harness_dict() returns parsed project YAML (no overlay applied)."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict(
+        org={"context": {"compaction_threshold_pct": 70.0}},
+    ))
+    (config_dir / "overrides.yaml").write_text(
+        yaml.safe_dump({"org": {"context": {"compaction_threshold_pct": 85.0}}}),
+        encoding="utf-8",
+    )
+    loader = ConfigLoader(config_dir=config_dir)
+    raw = loader.raw_harness_dict()
+    # Project value preserved; overlay NOT applied
+    assert raw["org"]["context"]["compaction_threshold_pct"] == 70.0
+
+
+def test_user_overlay_path_property_honors_env(config_dir: Path, monkeypatch) -> None:
+    """loader.user_overlay_path returns LOCALHARNESS_HOME-aware overlay path."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict())
+    loader = ConfigLoader(config_dir=config_dir)
+    assert loader.user_overlay_path == config_dir / "overrides.yaml"
+
+
+def test_invalidate_cache_drops_cache(config_dir: Path, monkeypatch) -> None:
+    """invalidate_cache() forces re-read on next load_harness."""
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(config_dir))
+    _write_harness_yaml(config_dir, _minimal_harness_dict(
+        org={"context": {"compaction_threshold_pct": 70.0}},
+    ))
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg1 = loader.load_harness()
+    cfg2 = loader.load_harness()
+    assert cfg1 is cfg2  # cached
+    loader.invalidate_cache()
+    # Rewrite project YAML; next load should see new value
+    _write_harness_yaml(config_dir, _minimal_harness_dict(
+        org={"context": {"compaction_threshold_pct": 90.0}},
+    ))
+    cfg3 = loader.load_harness()
+    assert cfg3 is not cfg1
+    assert cfg3.org.context.compaction_threshold_pct == 90.0
