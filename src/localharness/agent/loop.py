@@ -436,7 +436,12 @@ class AgentLoop:
             max_actions=self._config.permissions.budget.max_actions,
             max_duration_minutes=self._config.permissions.budget.max_duration_minutes,
         )
-        stuck_detector = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
+        sd_cfg = self._config.stuck_detector
+        stuck_detector = StuckDetector(
+            window_size=sd_cfg.window_size,
+            recovery_threshold=sd_cfg.recovery_threshold,
+            escalation_threshold=sd_cfg.escalation_threshold,
+        )
 
         # Build system prompt
         tool_call_mode = getattr(
@@ -789,7 +794,8 @@ class AgentLoop:
                     iteration=session.iteration,
                     stuck_signature=repeated_sig or "",
                 ))
-                recovery_injection = stuck_detector.recovery_message(repeated_sig)
+                # Phase 14 REG-04: recovery wording is now a mutable config component
+                recovery_injection = self._config.recovery_injection.message
                 log.info(
                     "Stuck recovery triggered for %s at iteration %d",
                     self._config.name,
