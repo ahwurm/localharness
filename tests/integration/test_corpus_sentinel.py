@@ -46,3 +46,24 @@ def test_every_fixture_has_valid_slice_and_category():
         spec = load_scenario(path)
         assert spec.slice in ("train", "holdout"), f"{path}: bad slice {spec.slice!r}"
         assert spec.category, f"{path}: empty category"
+
+
+def test_every_train_category_has_at_least_two_fixtures():
+    """Within-class variance invariant: each train-side category needs >=2 fixtures so
+    a mutation that helps the category must help BOTH variants (beats fixture-specific
+    overfitting). Holdout categories are exempt — they intentionally have just 2 each,
+    and that lower bar is enforced separately in Wave 3.
+    """
+    from collections import Counter
+    fixtures = sorted(CORPUS_ROOT.rglob("*.yaml"))
+    assert fixtures, f"No fixtures found under {CORPUS_ROOT}"
+    counts: Counter[str] = Counter()
+    for path in fixtures:
+        spec = load_scenario(path)
+        if spec.slice == "train":
+            counts[spec.category] += 1
+    thin = {cat: n for cat, n in counts.items() if n < 2}
+    assert not thin, (
+        f"Train categories with <2 fixtures (violates within-class variance invariant): {thin}. "
+        f"Wave 2 must land >=2 fixtures per train category."
+    )
