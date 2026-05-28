@@ -1,0 +1,29 @@
+name: stateful_behavior_two_facts
+prompt: |
+  I told you two codenames in previous sessions. What were both codenames?
+  Report both, separated by a comma.
+expected_outcome: |
+  Agent's memory subsystem loads tests/fixtures/bench/memory_seed.db at
+  startup. Two facts must be seeded: the existing STARFRUIT_42 plus a
+  new MOONFRUIT_88. Both anchor tokens appear in the system-prompt-
+  injected context, and the agent reports both. Rubric asserts BOTH
+  tokens via two contains assertions (ANDed). Distinct from 10's
+  single-fact shape — exercises multi-fact memory hydration. Deferred
+  execution note (same as 10_memory_recall): MemoryStore is not yet
+  wired into _build_agent_loop per Phase 13 known issue (STATE.md
+  pending todos). Until that wiring lands in a follow-up phase, this
+  fixture is exercised at parse-time only via the corpus sentinel.
+success_criteria:
+  rubric:
+    - "contains:STARFRUIT_42"
+    - "contains:MOONFRUIT_88"
+budget:
+  max_actions: 1
+  max_duration_minutes: 0.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 0
+tools_allowed: []
+slice: train
+category: stateful_behavior
