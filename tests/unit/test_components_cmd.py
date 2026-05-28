@@ -10,6 +10,32 @@ from __future__ import annotations
 import pytest
 
 
+# ------------------------------------------------------------------ #
+# Module-shape contract (Task 1 RED — fails until components_cmd.py exists)
+# ------------------------------------------------------------------ #
+
+
+def test_components_cmd_module_exports_typer_subapp():
+    """Task 1 / 14-04: components_cmd.py exports a `components_app` Typer subapp
+    with `list`, `get`, `set` commands. This is the RED test for Task 1."""
+    import typer
+
+    from localharness.cli.components_cmd import (  # noqa: F401
+        components_app,
+        components_get,
+        components_list,
+        components_set,
+    )
+
+    assert isinstance(components_app, typer.Typer)
+    assert components_app.info.name == "components"
+    # no_args_is_help is configured at construction; verify subapp has commands wired
+    registered_names = {cmd.name for cmd in components_app.registered_commands}
+    assert {"list", "get", "set"}.issubset(registered_names), (
+        f"Expected list/get/set commands, got {registered_names}"
+    )
+
+
 @pytest.mark.xfail(reason="Phase 14-04 components_cmd.py not yet implemented", strict=False)
 def test_list_includes_all_six_surfaces(components_home):
     """REG-01 / REG-04: `components list` must surface all 6 mutable categories."""
