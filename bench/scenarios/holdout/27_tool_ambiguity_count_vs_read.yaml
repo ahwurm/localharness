@@ -1,0 +1,31 @@
+name: tool_ambiguity_count_vs_read
+prompt: |
+  How many files exist directly in /tmp/bench_fixtures/exploration_root that
+  end with the extension .txt? Report only the count. You may use whichever
+  tool is most appropriate.
+expected_outcome: |
+  Both `glob` (right tool — designed for file matching) and `bash_exec` (could
+  do `ls | grep | wc -l` but heavier-weight) are available. Signal: the count
+  anchor (5, per the staged fixture set) appears in the final message AND
+  tool_call_count is bounded (<=3 — agent should pick one tool, not flail).
+  Distinct from train's tool_basics fixtures which gave minimum-needed
+  whitelists — this one offers ambiguity. Holdout category tool_ambiguity_
+  resolution is intentionally absent from train.
+success_criteria:
+  rubric:
+    - "regex:\\b5\\b"
+  event_counts:
+    tool_call_count:
+      max: 3
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 5
+tools_allowed:
+  - glob
+  - bash_exec
+slice: holdout
+category: tool_ambiguity_resolution

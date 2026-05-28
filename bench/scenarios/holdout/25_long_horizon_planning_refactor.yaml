@@ -1,0 +1,36 @@
+name: long_horizon_planning_refactor
+prompt: |
+  The directory /tmp/bench_fixtures/stub_repo/ contains three Python files
+  (a.py, b.py, c.py). Each defines a class named "OldName". Your task: rename
+  the class to "NewName" everywhere it appears across all three files AND
+  update all callers. Plan your approach first (list the steps), then execute
+  them. When done, report the literal token REFACTOR_COMPLETE_3FILES.
+expected_outcome: |
+  Long-horizon task: agent must (1) list files, (2) read each, (3) plan
+  edits, (4) write each file, (5) verify with a second read or grep, (6)
+  report completion. ~8-12 tool calls expected. Signal mechanism: final-
+  message anchor REFACTOR_COMPLETE_3FILES (only emitted if agent reaches
+  the planned end-state) PLUS iterations count >=5 (genuine multi-step
+  work, not a one-shot trick). The stub repo is staged by tests/conftest.py.
+  Holdout category long_horizon_planning is intentionally absent from train —
+  proposer has no fixture of this shape to overfit on.
+success_criteria:
+  rubric:
+    - "contains:REFACTOR_COMPLETE_3FILES"
+  event_counts:
+    iterations:
+      min: 5
+budget:
+  max_actions: 15
+  max_duration_minutes: 5.0
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 300.0
+  max_tool_calls: 20
+tools_allowed:
+  - read
+  - write
+  - glob
+  - bash_exec
+slice: holdout
+category: long_horizon_planning

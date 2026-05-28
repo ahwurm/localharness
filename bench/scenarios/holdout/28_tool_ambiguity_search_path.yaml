@@ -1,0 +1,30 @@
+name: tool_ambiguity_search_path
+prompt: |
+  Somewhere under /tmp/bench_fixtures/exploration_root there is a file
+  containing the token AMBIGUITY_ANSWER_HORIZON. Find that token and
+  report it verbatim. You have read and glob available.
+expected_outcome: |
+  Direct read won't work without knowing the file path — agent must use glob
+  to locate it first. Some agents will try read on a guessed path (wrong tool
+  choice for the discovery sub-task). Signal: anchor AMBIGUITY_ANSWER_HORIZON
+  present AND parse_failures == 0 (clean execution, no thrashing). Calibration:
+  tests/conftest.py must seed a file under the exploration_root containing
+  the literal token AMBIGUITY_ANSWER_HORIZON.
+success_criteria:
+  rubric:
+    - "contains:AMBIGUITY_ANSWER_HORIZON"
+  event_counts:
+    parse_failures:
+      max: 0
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 90.0
+  max_tool_calls: 6
+tools_allowed:
+  - read
+  - glob
+slice: holdout
+category: tool_ambiguity_resolution
