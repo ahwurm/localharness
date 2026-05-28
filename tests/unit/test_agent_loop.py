@@ -901,3 +901,81 @@ def test_recovery_message_from_config():
         assert cfg.recovery_injection.message == "custom recovery wording"
     except (TypeError, AttributeError):
         pytest.xfail("scaffolded; awaiting plan 14-02 + 14-03")
+
+
+# ---------------------------------------------------------------------------
+# Phase 14-03: AgentLoop reads stuck_detector + recovery_injection from AgentConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_instantiates_stuck_detector_from_config(mock_llm_client, bus, monkeypatch):
+    """AgentLoop._execute_loop must build StuckDetector with values from
+    self._config.stuck_detector (not the hardcoded 5/2/3 literals)."""
+    from localharness.config.models import AgentConfig
+    from localharness.agent import loop as loop_mod
+
+    captured: dict = {}
+
+    real_init = loop_mod.StuckDetector.__init__
+
+    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3):
+        captured["window_size"] = window_size
+        captured["recovery_threshold"] = recovery_threshold
+        captured["escalation_threshold"] = escalation_threshold
+        real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
+                  escalation_threshold=escalation_threshold)
+
+    monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
+
+    cfg = AgentConfig(
+        name="test-agent",
+        role="t",
+        stuck_detector={"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4},
+    )
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
+    await loop.run_turn("task")
+
+    assert captured == {"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus, monkeypatch):
+    """With default AgentConfig, StuckDetector still gets (5, 2, 3)."""
+    from localharness.config.models import AgentConfig
+    from localharness.agent import loop as loop_mod
+
+    captured: dict = {}
+    real_init = loop_mod.StuckDetector.__init__
+
+    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3):
+        captured["window_size"] = window_size
+        captured["recovery_threshold"] = recovery_threshold
+        captured["escalation_threshold"] = escalation_threshold
+        real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
+                  escalation_threshold=escalation_threshold)
+
+    monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
+
+    cfg = AgentConfig(name="test-agent", role="t")
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
+    await loop.run_turn("task")
+
+    assert captured == {"window_size": 5, "recovery_threshold": 2, "escalation_threshold": 3}
+
+
+def test_agent_loop_uses_config_recovery_message_not_hardcoded():
+    """Source-level guarantee: loop reads self._config.recovery_injection.message,
+    no longer calls stuck_detector.recovery_message(repeated_sig)."""
+    import inspect
+    from localharness.agent import loop as loop_mod
+    src = inspect.getsource(loop_mod)
+    # Hardcoded form is gone
+    assert "StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)" not in src
+    # Config-driven access present
+    assert "self._config.stuck_detector" in src
+    assert "self._config.recovery_injection.message" in src
+    # Old call-site replaced (we no longer pass repeated_sig into recovery_message)
+    assert "stuck_detector.recovery_message(repeated_sig)" not in src
