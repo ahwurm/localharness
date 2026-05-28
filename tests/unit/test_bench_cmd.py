@@ -71,3 +71,87 @@ def test_compare_subcommand_help():
     assert result.exit_code == 0
     assert "baseline" in result.stdout.lower()
     assert "head" in result.stdout.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 Wave 1: --slice flag (train|holdout|all, default train)
+# ---------------------------------------------------------------------------
+
+
+def test_slice_train_forwarded(monkeypatch, tmp_path):
+    """`localharness bench --slice train` calls run_bench with slice='train'."""
+    from localharness.cli.app import app
+    called = {}
+    async def fake_run_bench(**kwargs):
+        called.update(kwargs)
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, ["bench", "--slice", "train", "--corpus", str(tmp_path)])
+    assert result.exit_code == 0
+    assert called.get("slice") == "train"
+
+
+def test_slice_holdout_forwarded(monkeypatch, tmp_path):
+    """`localharness bench --slice holdout` calls run_bench with slice='holdout'."""
+    from localharness.cli.app import app
+    called = {}
+    async def fake_run_bench(**kwargs):
+        called.update(kwargs)
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, ["bench", "--slice", "holdout", "--corpus", str(tmp_path)])
+    assert result.exit_code == 0
+    assert called.get("slice") == "holdout"
+
+
+def test_slice_all_forwarded(monkeypatch, tmp_path):
+    """`localharness bench --slice all` calls run_bench with slice='all'."""
+    from localharness.cli.app import app
+    called = {}
+    async def fake_run_bench(**kwargs):
+        called.update(kwargs)
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, ["bench", "--slice", "all", "--corpus", str(tmp_path)])
+    assert result.exit_code == 0
+    assert called.get("slice") == "all"
+
+
+def test_slice_defaults_to_train(monkeypatch, tmp_path):
+    """`localharness bench` (no --slice) defaults to slice='train'."""
+    from localharness.cli.app import app
+    called = {}
+    async def fake_run_bench(**kwargs):
+        called.update(kwargs)
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, ["bench", "--corpus", str(tmp_path)])
+    assert result.exit_code == 0
+    assert called.get("slice") == "train"
+
+
+def test_slice_invalid_value_exits_2(monkeypatch, tmp_path):
+    """`localharness bench --slice invalid` exits with code 2."""
+    from localharness.cli.app import app
+    async def fake_run_bench(**kwargs):
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, ["bench", "--slice", "invalid", "--corpus", str(tmp_path)])
+    assert result.exit_code == 2
+
+
+def test_scenario_and_slice_both_forwarded(monkeypatch, tmp_path):
+    """`localharness bench --scenario pure_qa --slice holdout` forwards both."""
+    from localharness.cli.app import app
+    called = {}
+    async def fake_run_bench(**kwargs):
+        called.update(kwargs)
+        return 0
+    monkeypatch.setattr("localharness.bench.runner.run_bench", fake_run_bench)
+    result = runner.invoke(app, [
+        "bench", "--scenario", "pure_qa", "--slice", "holdout",
+        "--corpus", str(tmp_path),
+    ])
+    assert result.exit_code == 0
+    assert called.get("scenario") == "pure_qa"
+    assert called.get("slice") == "holdout"
