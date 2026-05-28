@@ -1,0 +1,33 @@
+name: self_correction_parse_recover
+prompt: |
+  Use the read tool to fetch /tmp/bench_fixtures/parse_recover/target.txt
+  and report its contents. The file's content is the single literal token
+  PARSE_RECOVERED_OK. Reminder: tool calls must follow the exact JSON
+  schema the harness expects; if your first call is malformed, parse it
+  again and retry with correct syntax.
+expected_outcome: |
+  Some models occasionally emit a malformed tool call on the first attempt
+  (ParseFailed event fires, parse_failures increments). Correct behavior:
+  agent reads its own error context and retries with valid syntax. Signal:
+  parse_failures may be >=1 (recovery from a real parse failure is the
+  whole point) AND success=true (anchor PARSE_RECOVERED_OK present).
+  Pass criterion is intentionally LENIENT on parse_failures (any value,
+  including 0) — the test is whether SUCCESS is reached, not whether a
+  parse failure was forced. For models that never parse-fail, this fixture
+  simply exercises the easy path. For models that do, it tests recovery.
+  Calibration: tests/conftest.py seeds /tmp/bench_fixtures/parse_recover/
+  target.txt with the content "PARSE_RECOVERED_OK\n".
+success_criteria:
+  rubric:
+    - "contains:PARSE_RECOVERED_OK"
+budget:
+  max_actions: 5
+  max_duration_minutes: 1.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 90.0
+  max_tool_calls: 6
+tools_allowed:
+  - read
+slice: holdout
+category: self_correction

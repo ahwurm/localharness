@@ -1,0 +1,34 @@
+name: constraint_satisfaction_max_lines
+prompt: |
+  Write a Python script at /tmp/bench_fixtures/constraint_target.py that
+  prints the first 5 prime numbers (2, 3, 5, 7, 11) on a single line as a
+  space-separated list. The ENTIRE script must be NO MORE THAN 3 lines of
+  code (excluding blank lines and comments). Then run the script and
+  report its output.
+expected_outcome: |
+  Two competing constraints: produce correct output AND keep code <=3 lines.
+  Signal: script's stdout contains "2 3 5 7 11" (correctness anchor) AND
+  the final message includes the script source AND the source is <=3 lines
+  long. Verification of the line-count constraint is via rubric regex
+  on the final message — agent must surface the source for human/regex
+  check. Anchor: literal CONSTRAINT_LINES_3 prefix MUST be emitted by
+  the agent in its final message immediately before the script source.
+  Rubric anchors on CONSTRAINT_LINES_3 (agent self-attests constraint
+  satisfaction) plus the correctness output. Holdout category
+  constraint_satisfaction is intentionally absent from train.
+success_criteria:
+  rubric:
+    - "contains:CONSTRAINT_LINES_3"
+    - "regex:2\\s+3\\s+5\\s+7\\s+11"
+budget:
+  max_actions: 4
+  max_duration_minutes: 2.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 120.0
+  max_tool_calls: 5
+tools_allowed:
+  - write
+  - bash_exec
+slice: holdout
+category: constraint_satisfaction
