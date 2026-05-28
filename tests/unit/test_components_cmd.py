@@ -15,6 +15,30 @@ import pytest
 # ------------------------------------------------------------------ #
 
 
+def test_components_subapp_registered_in_main_app():
+    """Task 2 / 14-04: cli/app.py must register components_app under name='components'.
+    RED until the add_typer call lands in src/localharness/cli/app.py."""
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    runner = CliRunner()
+    # Top-level --help must list 'components' as a registered subcommand
+    top_help = runner.invoke(app, ["--help"])
+    assert top_help.exit_code == 0, top_help.output
+    assert "components" in top_help.output, (
+        f"'components' not registered in main CLI app; got:\n{top_help.output}"
+    )
+
+    # `components --help` must reach the subapp and list list/get/set
+    sub_help = runner.invoke(app, ["components", "--help"])
+    assert sub_help.exit_code == 0, sub_help.output
+    for cmd in ("list", "get", "set"):
+        assert cmd in sub_help.output, (
+            f"'{cmd}' subcommand missing from components --help; got:\n{sub_help.output}"
+        )
+
+
 def test_components_cmd_module_exports_typer_subapp():
     """Task 1 / 14-04: components_cmd.py exports a `components_app` Typer subapp
     with `list`, `get`, `set` commands. This is the RED test for Task 1."""
