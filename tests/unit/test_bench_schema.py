@@ -1,8 +1,93 @@
 """SCEN-01: ScenarioSpec, LimitsSpec, SuccessCriteria Pydantic validation."""
 from __future__ import annotations
 from pathlib import Path
+import textwrap
 import pytest
 from pydantic import ValidationError
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 Wave 1: slice/category/tags additive schema fields
+# ---------------------------------------------------------------------------
+
+
+def _minimal_kwargs(**overrides):
+    """Build kwargs for a minimal valid ScenarioSpec including new required fields."""
+    from localharness.bench.schema import SuccessCriteria
+    from localharness.core.events import BudgetSpec
+    base = dict(
+        name="t",
+        prompt="x",
+        success_criteria=SuccessCriteria(golden_output="x"),
+        budget=BudgetSpec(),
+        slice="train",
+        category="tool_basics",
+    )
+    base.update(overrides)
+    return base
+
+
+@pytest.fixture
+def _override_categories(monkeypatch, tmp_path):
+    """Point _load_allowed_categories at a tmp categories file with only 'tool_basics'."""
+    from localharness.bench import schema as schema_mod
+    cats_path = tmp_path / "categories.yaml"
+    cats_path.write_text(textwrap.dedent("""\
+        categories:
+          tool_basics: "test only"
+    """))
+    monkeypatch.setenv("LOCALHARNESS_CATEGORIES_PATH", str(cats_path))
+    schema_mod._load_allowed_categories.cache_clear()
+    yield cats_path
+    schema_mod._load_allowed_categories.cache_clear()
+
+
+def test_scenario_spec_rejects_missing_slice():
+    """ScenarioSpec rejects YAML missing `slice` field with ValidationError."""
+    from localharness.bench.schema import ScenarioSpec
+    kw = _minimal_kwargs()
+    kw.pop("slice")
+    with pytest.raises(ValidationError):
+        ScenarioSpec(**kw)
+
+
+def test_scenario_spec_rejects_missing_category():
+    """ScenarioSpec rejects YAML missing `category` field with ValidationError."""
+    from localharness.bench.schema import ScenarioSpec
+    kw = _minimal_kwargs()
+    kw.pop("category")
+    with pytest.raises(ValidationError):
+        ScenarioSpec(**kw)
+
+
+def test_scenario_spec_rejects_bad_slice_value():
+    """ScenarioSpec rejects slice='training' (not in Literal allowed-set)."""
+    from localharness.bench.schema import ScenarioSpec
+    with pytest.raises(ValidationError):
+        ScenarioSpec(**_minimal_kwargs(slice="training"))
+
+
+def test_scenario_spec_rejects_unknown_category(_override_categories):
+    """ScenarioSpec rejects category not in bench/categories.yaml allowed-set."""
+    from localharness.bench.schema import ScenarioSpec
+    with pytest.raises(ValidationError):
+        ScenarioSpec(**_minimal_kwargs(category="made_up_name"))
+
+
+def test_scenario_spec_accepts_valid_slice_category_tags():
+    """ScenarioSpec accepts valid slice/category/tags combo."""
+    from localharness.bench.schema import ScenarioSpec
+    spec = ScenarioSpec(**_minimal_kwargs(tags=["uses_mcp"]))
+    assert spec.slice == "train"
+    assert spec.category == "tool_basics"
+    assert spec.tags == ["uses_mcp"]
+
+
+def test_scenario_spec_tags_defaults_to_empty_list():
+    """ScenarioSpec.tags defaults to empty list when omitted."""
+    from localharness.bench.schema import ScenarioSpec
+    spec = ScenarioSpec(**_minimal_kwargs())
+    assert spec.tags == []
 
 
 def test_scenario_spec_valid(fixture_scenario_path: Path):

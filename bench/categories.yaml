@@ -1,0 +1,14 @@
+categories:
+  # Train-side categories (Wave 1 migration + Wave 2 variants)
+  tool_basics: "Pure tool primitive exercises: read, write, bash_exec, glob, single Q&A"
+  agent_orchestration: "agent tool / subagent creation shapes"
+  extension_systems: "MCP and plugin dispatch paths"
+  loop_resilience: "Loop-internal recovery: stuck detection, compaction triggers"
+  permission_enforcement: "Deny-pattern firing, refusal of disallowed tool calls"
+  stateful_behavior: "Memory load/recall across sessions"
+  # Holdout-side categories (Wave 3 fills these — declared up front so sentinel >=1-per-category check is meaningful)
+  long_horizon_planning: "Multi-turn decomposition tasks (8-15 turn budgets)"
+  tool_ambiguity_resolution: "Multiple tools could solve; agent picks correctly"
+  graceful_failure: "Required tool unavailable/denied; agent explains rather than thrashes"
+  self_correction: "Wrong first tool call; agent recovers without external prompt"
+  constraint_satisfaction: "Task with competing requirements (e.g., output <= N lines)"
