@@ -9,6 +9,7 @@ from localharness.core.events import (
     BaseEvent,
     BudgetSpec,
     CompactionTriggered,
+    ComponentMutated,
     DelegationRequest,
     DelegationResult,
     Escalation,
@@ -315,3 +316,96 @@ def test_stuck_recovered_shape_and_map():
     restored = deserialize_event(ev.model_dump_json())
     assert isinstance(restored, StuckRecovered)
     assert restored.stuck_signature == "tool:bash{}"
+
+
+# --- Phase 14-02 Task 2: ComponentMutated event ---
+
+
+def test_component_mutated_constructs_with_all_fields():
+    ev = ComponentMutated(
+        path="x.y",
+        before_value=1,
+        after_value=2,
+        layer="user",
+        actor="cli",
+    )
+    assert ev.event_type == "ComponentMutated"
+    assert ev.path == "x.y"
+    assert ev.before_value == 1
+    assert ev.after_value == 2
+    assert ev.layer == "user"
+    assert ev.actor == "cli"
+    assert ev.actor_detail is None
+
+
+def test_component_mutated_frozen():
+    ev = ComponentMutated(
+        path="a.b", before_value=None, after_value=1, layer="user", actor="cli"
+    )
+    with pytest.raises(Exception):
+        ev.path = "z"
+
+
+def test_component_mutated_jsonl_round_trip():
+    ev = ComponentMutated(
+        path="agent.stuck_detector.window_size",
+        before_value=5,
+        after_value=7,
+        layer="experiment",
+        actor="experiment",
+        actor_detail="exp-42",
+    )
+    line = ev.model_dump_json()
+    restored = deserialize_event(line)
+    assert isinstance(restored, ComponentMutated)
+    assert restored.path == "agent.stuck_detector.window_size"
+    assert restored.before_value == 5
+    assert restored.after_value == 7
+    assert restored.layer == "experiment"
+    assert restored.actor == "experiment"
+    assert restored.actor_detail == "exp-42"
+
+
+def test_component_mutated_in_event_type_map():
+    assert EVENT_TYPE_MAP["ComponentMutated"] is ComponentMutated
+
+
+def test_component_mutated_in_any_event_union():
+    from typing import get_args
+    assert ComponentMutated in get_args(AnyEvent)
+
+
+def test_component_mutated_rejects_invalid_layer():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ComponentMutated(
+            path="x", before_value=1, after_value=2, layer="bogus", actor="cli"
+        )
+
+
+def test_component_mutated_rejects_invalid_actor():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ComponentMutated(
+            path="x", before_value=1, after_value=2, layer="user", actor="bogus"
+        )
+
+
+def test_component_mutated_accepts_arbitrary_actor_detail_string():
+    ev = ComponentMutated(
+        path="x", before_value=1, after_value=2, layer="user", actor="proposer",
+        actor_detail="proposal-abc-123",
+    )
+    assert ev.actor_detail == "proposal-abc-123"
+
+
+def test_component_mutated_accepts_primitive_value_types():
+    """before/after_value should accept JSON-serializable primitives."""
+    for raw in (1, 0.75, "abc", True, [1, 2, 3], {"k": "v"}, None):
+        ev = ComponentMutated(
+            path="x", before_value=raw, after_value=raw, layer="user", actor="cli"
+        )
+        # Round trip must preserve value
+        restored = deserialize_event(ev.model_dump_json())
+        assert restored.before_value == raw
+        assert restored.after_value == raw
