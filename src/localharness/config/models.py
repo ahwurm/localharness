@@ -404,6 +404,63 @@ class ScheduleConfig(BaseModel):
         return v
 
 
+class StuckDetectorConfig(BaseModel):
+    """Stuck-loop detection knobs. Extracted from StuckDetector class defaults
+    in agent/loop.py so they become addressable via component registry (REG-04).
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    window_size: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description=(
+            "Number of recent tool-call signatures to keep in the sliding window. "
+            "Larger window = more lenient stuck detection."
+        ),
+    )
+    recovery_threshold: int = Field(
+        default=2,
+        ge=1,
+        le=100,
+        description=(
+            "Number of identical signatures in the window that triggers RECOVERING state "
+            "(injects recovery_injection.message into the conversation)."
+        ),
+    )
+    escalation_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Number of identical signatures in the window that triggers ESCALATE state "
+            "(terminates the turn with stuck reason)."
+        ),
+    )
+
+
+class RecoveryInjectionConfig(BaseModel):
+    """Recovery prompt injected into the conversation when StuckState.RECOVERING.
+    Extracted from StuckDetector.recovery_message hardcoded string so the wording
+    becomes a mutable component (REG-04).
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    message: str = Field(
+        default=(
+            "You have attempted the same tool call multiple times with identical arguments "
+            "and received the same result. That approach is not working. "
+            "Consider a fundamentally different strategy: try different arguments, "
+            "use a different tool, or conclude that the information is not available this way."
+        ),
+        min_length=1,
+        description=(
+            "Message injected into the conversation when stuck recovery fires. "
+            "Mutable via `localharness components set agent.recovery_injection.message <value>`."
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Complete configuration for one agent.
@@ -508,6 +565,23 @@ class AgentConfig(BaseModel):
             "Channel for delivering results. "
             "v1: 'terminal' only. "
             "v2: 'discord://channel-name', 'slack://channel-name'."
+        ),
+    )
+
+    # --- Stuck detection / recovery (REG-04 surfaces 4 + 5) ---
+    stuck_detector: StuckDetectorConfig = Field(
+        default_factory=StuckDetectorConfig,
+        description=(
+            "Stuck-loop detection knobs. Addressable via "
+            "`agent.stuck_detector.{window_size,recovery_threshold,escalation_threshold}`."
+        ),
+    )
+
+    recovery_injection: RecoveryInjectionConfig = Field(
+        default_factory=RecoveryInjectionConfig,
+        description=(
+            "Recovery message injected when StuckState.RECOVERING. "
+            "Addressable via `agent.recovery_injection.message`."
         ),
     )
 
@@ -667,6 +741,15 @@ class OrgConfig(BaseModel):
             "Path to the org-level audit log. "
             "All events from all agents are also written here. "
             "Set to null to disable org-level audit log."
+        ),
+    )
+
+    hooks: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Free-form per-hook config dict keyed by hook plugin name. "
+            "Addressable via `org.hooks.<plugin_name>.<key>`. "
+            "Phase 14 ships the schema slot for REG-04 surface 6; hook plugins read their own subtree."
         ),
     )
 
