@@ -67,6 +67,34 @@ def _build_overlays(loader: ConfigLoader) -> dict[str, dict]:
     return {"project": project_dict, "user": user_dict}
 
 
+def _build_tool_registry() -> Any:
+    """Construct a ToolRegistry with builtin tools registered so the
+    tools.*.description surface family appears in `components list`.
+
+    Mirrors start_cmd.py's eager builtin registration but skips MCP / plugin
+    instantiation since CLI inspection doesn't need live tool dispatch.
+    Returns None on any failure (e.g. import error) — catalogue degrades
+    gracefully to "no tools" rather than crashing the list command.
+    """
+    try:
+        from localharness.tools.builtin import register_builtin_tools
+        from localharness.tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        # register_builtin_tools is async; run in a one-shot loop.
+        try:
+            asyncio.run(register_builtin_tools(registry))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(register_builtin_tools(registry))
+            finally:
+                loop.close()
+        return registry
+    except Exception:
+        return None
+
+
 def _err(json_output: bool, message: str, exit_code: int = 2) -> None:
     """Print error to stderr (or JSON) and exit."""
     if json_output:
@@ -106,7 +134,8 @@ def components_list(
         return  # unreachable but satisfies type checker
 
     overlays = _build_overlays(loader)
-    catalogue = build_catalogue(cfg, overlays=overlays)
+    tool_registry = _build_tool_registry()
+    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
 
     entries = list(catalogue.values())
     if layer is not None:
@@ -159,7 +188,8 @@ def components_get(
         return
 
     overlays = _build_overlays(loader)
-    catalogue = build_catalogue(cfg, overlays=overlays)
+    tool_registry = _build_tool_registry()
+    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
     entry = catalogue.get(path)
     if entry is None:
         _err(
@@ -226,7 +256,8 @@ def components_set(
 
     # 2. Build catalogue, resolve entry
     overlays = _build_overlays(loader)
-    catalogue = build_catalogue(cfg, overlays=overlays)
+    tool_registry = _build_tool_registry()
+    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
     entry = catalogue.get(path)
     if entry is None:
         _err(json_output, f"Unknown path: {path!r}", exit_code=2)
