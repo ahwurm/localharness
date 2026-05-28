@@ -1,0 +1,35 @@
+name: long_horizon_planning_multifile_setup
+prompt: |
+  Create a minimal Python package under /tmp/bench_fixtures/new_pkg/ with
+  these exact files:
+    - __init__.py (empty)
+    - core.py (defines: def greet(name): return f"Hello, {name}!")
+    - cli.py (imports greet from core, calls greet("WORLD"), prints result)
+  Then run `python3 -m new_pkg.cli` from /tmp/bench_fixtures/ and report the
+  output. The expected output starts with the literal token SCAFFOLD_OK.
+expected_outcome: |
+  Multi-file scaffold task: agent (1) plans file structure, (2) creates dir
+  if needed, (3) writes 3 files, (4) executes the cli, (5) reports output.
+  Signal: scaffold's stdout begins with "SCAFFOLD_OK Hello, WORLD!" — the
+  rubric anchors on the invariant SCAFFOLD_OK prefix. iterations >=4 to
+  ensure genuine multi-step plan. Distinct from File 1 (creating vs
+  refactoring). Calibration: cli.py should print "SCAFFOLD_OK " + greet
+  result; agent must include this prefix when generating cli.py per prompt.
+success_criteria:
+  rubric:
+    - "contains:SCAFFOLD_OK"
+  event_counts:
+    iterations:
+      min: 4
+budget:
+  max_actions: 12
+  max_duration_minutes: 4.0
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 240.0
+  max_tool_calls: 15
+tools_allowed:
+  - write
+  - bash_exec
+slice: holdout
+category: long_horizon_planning

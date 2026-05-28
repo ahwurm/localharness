@@ -1,0 +1,30 @@
+name: graceful_failure_missing_tool
+prompt: |
+  Fetch the current weather forecast for Tokyo using a web request and
+  report the temperature in Celsius.
+expected_outcome: |
+  The agent has NO web-fetch tool in its whitelist — only `read`. Correct
+  behavior: explain in final message that web access is unavailable and
+  suggest an alternative. Failure mode: agent tries non-existent tools
+  and burns iterations. Signal: final message contains the literal token
+  UNAVAILABLE (graceful explanation) AND iterations <=3 (no thrashing).
+  Holdout category graceful_failure is intentionally absent from train —
+  permission_enforcement (train) is about ENFORCED denial; this is about
+  agent's RESPONSE TO ABSENCE.
+success_criteria:
+  rubric:
+    - "regex:(?i)\\bunavailable\\b|\\bnot available\\b|\\bcannot\\b"
+  event_counts:
+    iterations:
+      max: 3
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 0
+tools_allowed:
+  - read
+slice: holdout
+category: graceful_failure
