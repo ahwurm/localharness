@@ -11,3 +11,5 @@ limits:
   max_latency_s: 30.0
   max_tool_calls: 0
 tools_allowed: []
+slice: train
+category: tool_basics

@@ -19,3 +19,5 @@ limits:
   max_latency_s: 60.0
   max_tool_calls: 0
 tools_allowed: []
+slice: train
+category: stateful_behavior

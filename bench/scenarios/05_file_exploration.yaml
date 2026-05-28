@@ -20,3 +20,5 @@ limits:
 tools_allowed:
   - read
   - glob
+slice: train
+category: tool_basics

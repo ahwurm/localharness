@@ -17,7 +17,8 @@ CORPUS_DIR = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
 def _list_yaml_fixtures() -> list[Path]:
     if not CORPUS_DIR.exists():
         return []
-    return sorted(p for p in CORPUS_DIR.iterdir() if p.suffix == ".yaml")
+    # rglob covers post-Phase-13 train/ + holdout/ subdir layout
+    return sorted(p for p in CORPUS_DIR.rglob("*.yaml") if p.is_file())
 
 
 def test_corpus_loads_all_fixtures():
@@ -40,9 +41,11 @@ FAILURE_MODE_FIXTURES = {
 @pytest.mark.parametrize("filename,event_key", list(FAILURE_MODE_FIXTURES.items()))
 def test_failure_mode_fixtures_use_event_counts(filename: str, event_key: str):
     """Failure-mode fixtures decide pass/fail via event_counts only — no LLM-text golden."""
-    path = CORPUS_DIR / filename
-    if not path.exists():
+    # rglob covers post-Phase-13 train/ + holdout/ subdir layout
+    matches = [p for p in CORPUS_DIR.rglob(filename) if p.is_file()]
+    if not matches:
         pytest.skip(f"fixture {filename} not yet authored")
+    path = matches[0]
     scen = load_scenario(path)
     assert scen.success_criteria.event_counts, (
         f"{filename}: failure-mode fixture must define non-empty event_counts"

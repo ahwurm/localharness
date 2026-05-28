@@ -22,3 +22,5 @@ limits:
   max_tool_calls: 4
 tools_allowed:
   - agent
+slice: train
+category: agent_orchestration

@@ -19,3 +19,5 @@ limits:
   max_tool_calls: 5
 tools_allowed:
   - read
+slice: train
+category: tool_basics
