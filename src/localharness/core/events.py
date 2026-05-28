@@ -288,6 +288,26 @@ class StuckRecovered(BaseEvent):
     stuck_signature: str  # from stuck_detector.most_repeated_signature()
 
 
+class ComponentMutated(BaseEvent):
+    """Published by `localharness components set` and the Phase 17 experiment runner.
+
+    Records every component-registry mutation. Persisted to audit.jsonl via the
+    standard EventBus path. Phase 15 SQLite archive may query this stream for
+    raw mutation history.
+
+    Fields are kept JSON-serializable (Any restricted to YAML-primitive types by
+    coerce-on-set in the registry CLI; see Pitfall 6 in 14-RESEARCH.md).
+    """
+
+    event_type: str = "ComponentMutated"
+    path: str  # dot-path: e.g. "agent.stuck_detector.window_size"
+    before_value: Any  # int|float|str|bool|list|dict|None — JSON-primitive only
+    after_value: Any
+    layer: Literal["user", "experiment"]  # which overlay was written
+    actor: Literal["cli", "experiment", "proposer"]
+    actor_detail: Optional[str] = None  # proposal_id, experiment_id, etc.
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -308,6 +328,7 @@ AnyEvent = Union[
     ScenarioCompleted,
     ParseFailed,
     StuckRecovered,
+    ComponentMutated,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -330,6 +351,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ScenarioCompleted": ScenarioCompleted,
     "ParseFailed": ParseFailed,
     "StuckRecovered": StuckRecovered,
+    "ComponentMutated": ComponentMutated,
 }
 
 

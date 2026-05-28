@@ -131,13 +131,14 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 19 event types."""
-    assert len(EVENT_TYPE_MAP) == 19
+    """EVENT_TYPE_MAP has entries for all 20 event types."""
+    assert len(EVENT_TYPE_MAP) == 20
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
         "Observation", "DelegationRequest", "DelegationResult", "Escalation", "Heartbeat",
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
+        "ComponentMutated",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -167,16 +168,17 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 19 event classes."""
+    """AnyEvent type contains all 20 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     args = typing.get_args(AnyEvent)
-    assert len(args) == 19
+    assert len(args) == 20
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
+        ComponentMutated,
     }
     assert set(args) == expected
 
