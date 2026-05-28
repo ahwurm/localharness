@@ -862,3 +862,42 @@ async def test_parse_failed_none_content_safe():
         raw_content_preview=(None or "")[:200],
     )
     assert ev.raw_content_preview == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 config-driven StuckDetector + recovery_injection scaffolding
+# (xfail until 14-02 extends AgentConfig + 14-03 wires the agent loop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(reason="Phase 14-03 stuck_detector wiring from AgentConfig not yet landed", strict=False)
+def test_stuck_detector_reads_from_config():
+    """The agent loop must instantiate StuckDetector with values from
+    AgentConfig.stuck_detector, NOT hardcoded defaults (5/2/3)."""
+    from localharness.config.models import AgentConfig
+    try:
+        cfg = AgentConfig(
+            name="test",
+            role="test",
+            stuck_detector={"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4},
+        )
+        assert cfg.stuck_detector.window_size == 7
+        assert cfg.stuck_detector.recovery_threshold == 3
+        assert cfg.stuck_detector.escalation_threshold == 4
+    except (TypeError, AttributeError):
+        pytest.xfail("scaffolded; awaiting plan 14-02 + 14-03")
+
+
+@pytest.mark.xfail(reason="Phase 14-03 recovery_injection.message wiring not yet landed", strict=False)
+def test_recovery_message_from_config():
+    """AgentConfig.recovery_injection.message must be addressable via the registry."""
+    from localharness.config.models import AgentConfig
+    try:
+        cfg = AgentConfig(
+            name="test",
+            role="test",
+            recovery_injection={"message": "custom recovery wording"},
+        )
+        assert cfg.recovery_injection.message == "custom recovery wording"
+    except (TypeError, AttributeError):
+        pytest.xfail("scaffolded; awaiting plan 14-02 + 14-03")
