@@ -1,0 +1,28 @@
+name: tool_basics_glob_count
+prompt: |
+  Count how many *.txt files exist directly inside /tmp/bench_fixtures/exploration_root
+  (top-level only, do NOT recurse). Report the count as a single number prefixed by
+  the literal token TOTAL_FILES_ — for example "TOTAL_FILES_3".
+expected_outcome: |
+  Agent uses `glob` or `bash_exec` with `ls -1 *.txt | wc -l` to count files in
+  the exploration_root staged by tests/conftest.py. Rubric anchors on the
+  invariant prefix TOTAL_FILES_ followed by the actual count (5 — calibrated to
+  the staged fixture set: alpha.txt, beta.txt, gamma.txt, delta.txt, epsilon.txt
+  added to tests/fixtures/bench/exploration_root/ in Plan 13-02 Task 1).
+  Different surface form from 05_file_exploration (counting vs reading) — same
+  category (tool_basics primitive) but distinct anchor.
+success_criteria:
+  rubric:
+    - "regex:TOTAL_FILES_5\\b"
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 4
+tools_allowed:
+  - glob
+  - bash_exec
+slice: train
+category: tool_basics

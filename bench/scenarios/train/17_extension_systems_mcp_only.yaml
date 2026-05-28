@@ -1,0 +1,26 @@
+name: extension_systems_mcp_only
+prompt: |
+  Use the mcp:fetch tool exactly once to retrieve the homepage of the W3C
+  (https://www.w3.org). The page title contains the organization's full
+  name. Report that full name verbatim in your final response.
+expected_outcome: |
+  Agent uses mcp:fetch (the only tool available — plugin path is not in
+  the whitelist). Rubric anchors on "World Wide Web Consortium" — invariant
+  org name returned in the homepage title. Exercises the MCP dispatch path
+  in isolation, separating it from the plugin dispatch path tested in 08
+  (which made BOTH available). If mcp:fetch is not callable in the test
+  env, fixture is exercised at parse-time only via test_corpus_dry_run.
+success_criteria:
+  rubric:
+    - "contains:World Wide Web Consortium"
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.5
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 120.0
+  max_tool_calls: 3
+tools_allowed:
+  - mcp:fetch
+slice: train
+category: extension_systems
