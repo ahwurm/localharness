@@ -156,6 +156,8 @@ async def test_execute_one_run_subscribes_observation_and_compaction(monkeypatch
         budget=BudgetSpec(),
         limits=LimitsSpec(),
         tools_allowed=["bash_exec"],
+        slice="train",
+        category="tool_basics",
     )
     out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
     assert out.success is True
@@ -228,6 +230,8 @@ def test_build_agent_loop_registers_agent_tool(monkeypatch):
         budget=BudgetSpec(),
         limits=LimitsSpec(),
         tools_allowed=["agent"],
+        slice="train",
+        category="tool_basics",
     )
     bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     tr = captured["tool_registry"]
@@ -261,6 +265,8 @@ async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
         budget=BudgetSpec(),
         limits=LimitsSpec(),
         tools_allowed=["bash_exec"],
+        slice="train",
+        category="tool_basics",
     )
     out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
     assert out.success is True   # event_counts assertion satisfied via counts dict
@@ -427,6 +433,8 @@ async def test_compaction_event_counter(monkeypatch, tmp_path):
         budget=BudgetSpec(),
         limits=LimitsSpec(),
         tools_allowed=[],
+        slice="train",
+        category="tool_basics",
     )
     out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
     assert out.success is True

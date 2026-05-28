@@ -63,6 +63,15 @@ def bench_default(
         "--matrix",
         help="Run the FULL configured matrix. Default: only the current backend (matrix[0]).",
     ),
+    slice_: str = typer.Option(
+        "train",
+        "--slice",
+        help=(
+            "Corpus slice to run: 'train' (default — matches Phase 17 EXP-03 invariant), "
+            "'holdout' (sealed slice, explicit opt-in), or 'all' (full corpus diagnostic). "
+            "Overridden by --scenario."
+        ),
+    ),
     threshold: Optional[list[str]] = typer.Option(
         None,
         "--threshold",
@@ -97,6 +106,14 @@ def bench_default(
             typer.echo(msg, err=True)
         raise typer.Exit(code=2)
 
+    if slice_ not in ("train", "holdout", "all"):
+        msg = f"Invalid --slice value {slice_!r}. Must be one of: train, holdout, all."
+        if json_output:
+            typer.echo(_json.dumps({"status": "error", "reason": msg, "exit_code": 2}))
+        else:
+            typer.echo(msg, err=True)
+        raise typer.Exit(code=2)
+
     exit_code = asyncio.run(
         run_bench(
             scenario=scenario,
@@ -108,6 +125,7 @@ def bench_default(
             json_output=json_output,
             llm_client_factory=None,
             config_path=config_path,
+            slice=slice_,
         )
     )
     raise typer.Exit(code=exit_code)
