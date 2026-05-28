@@ -1,0 +1,27 @@
+name: agent_orchestration_two_step
+prompt: |
+  Create two subagents in sequence using the `agent` tool. First subagent:
+  prompt "summarize the phrase 'lazy dog jumps'". Second subagent: prompt
+  "summarize the phrase 'quick brown fox'". Both subagents use an empty
+  tool whitelist. After both complete, return BOTH summaries concatenated
+  with a comma in your final response.
+expected_outcome: |
+  Agent invokes the AgentTool stub TWICE in sequence. Each stub call
+  returns "STUB_SUBAGENT_OK agent_id=... task=...". Both responses must
+  appear in the final message. Rubric asserts at least TWO occurrences
+  of the invariant STUB_SUBAGENT_OK token (one per subagent). Exercises
+  sequential delegation orchestration — distinct from 06's single-step shape.
+success_criteria:
+  rubric:
+    - "regex:STUB_SUBAGENT_OK.*STUB_SUBAGENT_OK"
+budget:
+  max_actions: 6
+  max_duration_minutes: 1.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 90.0
+  max_tool_calls: 6
+tools_allowed:
+  - agent
+slice: train
+category: agent_orchestration

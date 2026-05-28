@@ -1,0 +1,26 @@
+name: agent_orchestration_named_role
+prompt: |
+  Create a subagent using the `agent` tool. The subagent's role should be
+  "json-formatter" and its prompt should be "respond with the literal
+  token READY". Use an empty subagent tool whitelist. Return the subagent's
+  response verbatim in your final response.
+expected_outcome: |
+  Agent invokes AgentTool stub with a role/name argument. Stub returns
+  canned "STUB_SUBAGENT_OK agent_id=... task=..." payload. Rubric anchors
+  on STUB_SUBAGENT_OK — distinct call-shape from 06 (named role param)
+  and from 07 (plugin in subagent whitelist). Exercises orchestration's
+  named-role configuration path.
+success_criteria:
+  rubric:
+    - "contains:STUB_SUBAGENT_OK"
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 4
+tools_allowed:
+  - agent
+slice: train
+category: agent_orchestration

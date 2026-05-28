@@ -1,0 +1,26 @@
+name: stateful_behavior_overwrite_recall
+prompt: |
+  Earlier I told you my favorite color was "blue". Then later I corrected
+  myself and said it was actually "amber". What is my CURRENT favorite color?
+  Reply with just the color word.
+expected_outcome: |
+  Agent's memory subsystem loads tests/fixtures/bench/memory_seed.db with
+  the latest fact "favorite_color = amber" hydrated. Rubric anchors on the
+  invariant token amber as a word boundary (case-insensitive). Distinct
+  from 10's static-fact shape — exercises memory's most-recent-write-wins
+  semantics. Same deferral note as 23 (MemoryStore wiring pending per
+  Phase 13 STATE.md follow-up). Until then, exercised at parse-time only
+  via the corpus sentinel.
+success_criteria:
+  rubric:
+    - "regex:(?i)\\bamber\\b"
+budget:
+  max_actions: 1
+  max_duration_minutes: 0.5
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 0
+tools_allowed: []
+slice: train
+category: stateful_behavior
