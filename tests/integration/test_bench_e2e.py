@@ -48,7 +48,7 @@ def test_corpus_dry_run():
     from localharness.bench.schema import load_scenario
 
     corpus = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
-    fixtures = sorted(corpus.glob("*.yaml"))
+    fixtures = sorted(corpus.rglob("*.yaml"))
     assert len(fixtures) >= 12, (
         f"expected at least 12 fixtures, found {len(fixtures)}: "
         f"{[p.name for p in fixtures]}"
@@ -62,3 +62,52 @@ def test_corpus_dry_run():
         "deny_pattern_hit", "near_compaction",
     }
     assert all_12.issubset(names), f"missing canonical names: {all_12 - names}"
+
+
+def test_bench_slice_holdout_lists_only_holdout_fixtures():
+    """Hermetic discovery+filter smoke for `localharness bench --slice holdout`.
+
+    Confirms the exact invariant the user-facing flag promises end-to-end:
+    rglob discovery + _filter_scenarios_by_slice yields ONLY holdout-slice
+    fixtures, and exactly the 5 holdout categories at 2 each (10 total).
+
+    Patches no LLM — exercises the discovery/filter seam directly, which is
+    the same seam the CLI invokes via run_bench. Preferred over a typer.testing
+    invocation here because it avoids mocking deep into the runner per the
+    13-03 plan guidance ("fallback version is preferred for hermetic CI").
+    """
+    from pathlib import Path
+    from localharness.bench.orchestrator import (
+        _discover_scenarios,
+        _load_scenarios_from_paths,
+        _filter_scenarios_by_slice,
+    )
+
+    corpus = Path(__file__).resolve().parents[2] / "bench" / "scenarios"
+    all_scens = _load_scenarios_from_paths(_discover_scenarios(corpus))
+    holdout = _filter_scenarios_by_slice(all_scens, "holdout")
+
+    assert len(holdout) == 10, (
+        f"expected exactly 10 holdout fixtures, got {len(holdout)}: "
+        f"{[s.name for s in holdout]}"
+    )
+    assert all(s.slice == "holdout" for s in holdout), (
+        "non-holdout slice leaked through filter: "
+        f"{[(s.name, s.slice) for s in holdout if s.slice != 'holdout']}"
+    )
+    assert {s.category for s in holdout} == {
+        "long_horizon_planning", "tool_ambiguity_resolution",
+        "graceful_failure", "self_correction", "constraint_satisfaction",
+    }, f"unexpected holdout categories: {sorted({s.category for s in holdout})}"
+
+    # Symmetric check: --slice train yields exactly the 24 train fixtures.
+    train = _filter_scenarios_by_slice(all_scens, "train")
+    assert len(train) == 24, (
+        f"expected exactly 24 train fixtures, got {len(train)}: "
+        f"{[s.name for s in train]}"
+    )
+    assert all(s.slice == "train" for s in train)
+
+    # --slice all is the no-op bypass: 34 fixtures total.
+    full = _filter_scenarios_by_slice(all_scens, "all")
+    assert len(full) == 34, f"expected 34 total fixtures, got {len(full)}"

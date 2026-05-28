@@ -28,15 +28,15 @@ def test_every_category_partitions_to_one_slice():
     assert not mixed, f"Categories mixed across slices (forbidden): {mixed}"
 
 
-def test_every_declared_train_category_has_at_least_one_fixture():
-    """Holdout categories are populated in Wave 3 — only train-side coverage enforced here.
-    Wave 3 PLAN adds a separate strict check for holdout coverage."""
+def test_every_declared_category_has_at_least_one_fixture():
+    """Strict version (post-Wave-3): every category declared in bench/categories.yaml
+    must have at least one fixture. Was relaxed in Wave 1 to allow holdout categories
+    to be unpopulated; Wave 3 fills them, so we tighten the assertion."""
     allowed = set(yaml.safe_load(CATEGORIES_FILE.read_text())["categories"].keys())
-    train_allowed = allowed - HOLDOUT_CATEGORIES
     fixtures = sorted(CORPUS_ROOT.rglob("*.yaml"))
     used = {load_scenario(p).category for p in fixtures}
-    missing_train = train_allowed - used
-    assert not missing_train, f"Train-side categories missing fixtures: {missing_train}"
+    missing = allowed - used
+    assert not missing, f"Declared categories with no fixtures: {missing}"
 
 
 def test_every_fixture_has_valid_slice_and_category():
@@ -66,4 +66,24 @@ def test_every_train_category_has_at_least_two_fixtures():
     assert not thin, (
         f"Train categories with <2 fixtures (violates within-class variance invariant): {thin}. "
         f"Wave 2 must land >=2 fixtures per train category."
+    )
+
+
+def test_every_holdout_category_has_at_least_two_fixtures():
+    """Strict holdout coverage: every holdout-side category must have exactly 2 fixtures.
+    >=2 is required so a mutation must transfer across BOTH variants of an unseen class.
+    More than 2 would amplify multi-trial exposure of the sealed slice (Karpathy failure
+    mode #3, p-hacking via repeated holdout queries).
+    """
+    from collections import Counter
+    fixtures = sorted(CORPUS_ROOT.rglob("*.yaml"))
+    counts: Counter[str] = Counter()
+    for path in fixtures:
+        spec = load_scenario(path)
+        if spec.slice == "holdout":
+            counts[spec.category] += 1
+    thin = {cat: counts.get(cat, 0) for cat in HOLDOUT_CATEGORIES if counts.get(cat, 0) < 2}
+    assert not thin, (
+        f"Holdout categories with <2 fixtures: {thin}. "
+        f"Wave 3 must land exactly 2 fixtures per holdout category."
     )
