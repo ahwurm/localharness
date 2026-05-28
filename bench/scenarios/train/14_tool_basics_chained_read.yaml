@@ -1,0 +1,25 @@
+name: tool_basics_chained_read
+prompt: |
+  Read /tmp/bench_fixtures/two_reads/a.txt and /tmp/bench_fixtures/two_reads/b.txt.
+  Each file contains a single integer. Compute their sum and report it in the
+  format "SUM_RESULT_<integer>" — for example "SUM_RESULT_42".
+expected_outcome: |
+  Agent issues two `read` calls then computes the sum (10 + 15 = 25, calibrated
+  to staged fixture contents in tests/fixtures/bench/two_reads/ added in Plan
+  13-02 Task 1). Rubric anchors on the invariant prefix SUM_RESULT_ plus the
+  calibrated answer 25. Exercises chained tool use within the tool_basics class
+  — distinct from 02's single-read shape.
+success_criteria:
+  rubric:
+    - "regex:SUM_RESULT_25\\b"
+budget:
+  max_actions: 4
+  max_duration_minutes: 1.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 60.0
+  max_tool_calls: 5
+tools_allowed:
+  - read
+slice: train
+category: tool_basics

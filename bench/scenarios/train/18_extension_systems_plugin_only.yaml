@@ -1,0 +1,25 @@
+name: extension_systems_plugin_only
+prompt: |
+  Use the plugin:research_tools.exa_search tool exactly once to find the
+  official acronym expansion of "MIT" (the university in Cambridge,
+  Massachusetts). Report the full expansion verbatim in your final response.
+expected_outcome: |
+  Agent uses plugin:research_tools.exa_search (the only tool available —
+  MCP path is not in whitelist). Rubric anchors on "Massachusetts Institute
+  of Technology" — invariant org name returned by search results. Exercises
+  the plugin dispatch path in isolation, separating it from the MCP path
+  tested in 17.
+success_criteria:
+  rubric:
+    - "contains:Massachusetts Institute of Technology"
+budget:
+  max_actions: 3
+  max_duration_minutes: 1.5
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 120.0
+  max_tool_calls: 3
+tools_allowed:
+  - plugin:research_tools.exa_search
+slice: train
+category: extension_systems
