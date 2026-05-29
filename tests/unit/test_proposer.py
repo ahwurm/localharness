@@ -1,11 +1,8 @@
-"""PROP-01/02/03 + SC4 + edge — proposer pipeline (Phase 16 Wave 0 RED stubs).
+"""PROP-01/02/03 + SC4 + edge — proposer pipeline behavioral tests.
 
-Each test is an xfail(strict=False) stub encoding the intended behavior with a real
-assertion, so it flips RED→GREEN once proposer.py lands in 16-02/16-03. The proposer
-import is guarded at module top so collection never breaks before the module ships;
-each test body also xfails early if the module is absent (belt-and-suspenders matching
-the Phase 14/15 Wave 0 cadence). Fixtures (FakeLLMClient, proposer_corpus,
-proposer_results) come from tests/conftest.py.
+The proposer landed in 16-02 (pipeline) + 16-03 (CLI), so the Wave-0 xfail guards
+have been removed and these are now plain passing behavioral tests. Fixtures
+(FakeLLMClient, proposer_corpus, proposer_results) come from tests/conftest.py.
 """
 import json
 
@@ -13,11 +10,7 @@ import pytest
 
 from tests.conftest import FakeLLMClient
 
-try:
-    from localharness.autoresearch.proposer import propose, Proposal, ProposerError  # noqa: F401
-    _PROPOSER_READY = True
-except Exception:
-    _PROPOSER_READY = False
+from localharness.autoresearch.proposer import propose, Proposal, ProposerError  # noqa: F401
 
 
 def _cfg():
@@ -50,11 +43,8 @@ def _good_payload(after: str = "You are a careful, terse assistant.") -> str:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=False)
 async def test_before_is_current_component_value(proposer_corpus, proposer_results):
     """PROP-01: proposal.before equals the catalogue current_value for the component."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     from localharness.registry import build_catalogue
 
     cfg = _cfg()
@@ -71,11 +61,8 @@ async def test_before_is_current_component_value(proposer_corpus, proposer_resul
     assert proposal.before == expected_before
 
 
-@pytest.mark.xfail(strict=False)
 async def test_diff_shape_is_before_after(proposer_corpus, proposer_results):
     """PROP-01: emitted diff JSON parses to a dict with exactly keys {before, after}."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     proposal = await propose(
         "agent.role",
@@ -89,11 +76,8 @@ async def test_diff_shape_is_before_after(proposer_corpus, proposer_results):
     assert json.loads(diff).keys() == {"before", "after"}
 
 
-@pytest.mark.xfail(strict=False)
 async def test_malformed_proposal_fails_explicitly(proposer_corpus, proposer_results):
     """PROP-01: non-JSON garbage from the model → ProposerError, never a silent proposal."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     with pytest.raises(ProposerError):
         await propose(
@@ -111,11 +95,8 @@ async def test_malformed_proposal_fails_explicitly(proposer_corpus, proposer_res
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=False)
 async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_results, monkeypatch):
     """PROP-02: the LLMConfig built for the proposer carries proposer.model, NOT provider.default_model."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     import localharness.autoresearch.proposer as prop_mod
 
     captured = {}
@@ -150,11 +131,8 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=False)
 async def test_refuses_holdout_run_id(proposer_corpus, proposer_results):
     """PROP-03: a HOLDOUT run_id → ProposerError AND FakeLLMClient.complete_calls == 0."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     spy = FakeLLMClient(_good_payload())
     with pytest.raises(ProposerError):
@@ -169,11 +147,8 @@ async def test_refuses_holdout_run_id(proposer_corpus, proposer_results):
     assert spy.complete_calls == 0
 
 
-@pytest.mark.xfail(strict=False)
 async def test_refuses_unknown_scenario(proposer_corpus, proposer_results):
     """PROP-03: a run_id whose scenario maps to no fixture → ProposerError before any model call."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     spy = FakeLLMClient(_good_payload())
     with pytest.raises(ProposerError):
@@ -188,11 +163,8 @@ async def test_refuses_unknown_scenario(proposer_corpus, proposer_results):
     assert spy.complete_calls == 0
 
 
-@pytest.mark.xfail(strict=False)
 async def test_no_model_call_before_seal(proposer_corpus, proposer_results):
     """PROP-03: on any seal refusal the spy FakeLLMClient.complete_calls == 0 (model never reached)."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     spy = FakeLLMClient(_good_payload())
     with pytest.raises(ProposerError):
@@ -212,11 +184,8 @@ async def test_no_model_call_before_seal(proposer_corpus, proposer_results):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=False)
 async def test_atomic_single_component(proposer_corpus, proposer_results):
     """SC4: propose() targets exactly the supplied component; Proposal.component == input."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     proposal = await propose(
         "agent.role",
@@ -229,11 +198,8 @@ async def test_atomic_single_component(proposer_corpus, proposer_results):
     assert proposal.component == "agent.role"
 
 
-@pytest.mark.xfail(strict=False)
 async def test_after_type_coercion_enforced(proposer_corpus, proposer_results):
     """SC4: an `after` that fails coerce_value for the path annotation → ProposerError (clean refusal)."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     cfg = _cfg()
     # org.context.compaction_threshold_pct is a bounded float; a non-numeric after must refuse.
     bad = json.dumps({"after": "definitely-not-a-float", "rationale": "x"})
@@ -253,11 +219,8 @@ async def test_after_type_coercion_enforced(proposer_corpus, proposer_results):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=False)
 async def test_no_failed_traces_refuses(proposer_corpus, proposer_results, tmp_path):
     """edge: when the only supplied run_id is a PASSING train run → ProposerError (no evidence)."""
-    if not _PROPOSER_READY:
-        pytest.xfail("proposer.py not yet implemented")
     from localharness.bench.runner import resolve_run_path
     from localharness.core.events import ScenarioCompleted
 
