@@ -189,7 +189,6 @@ async def test_approval_appends_history(archive_store, seeded_archive):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
 async def test_update_verdict(archive_store, seeded_archive):
     """update_verdict flips status + fills every score; returned entry AND a fresh get() agree."""
     await seeded_archive(archive_store, [dict(id="uv-1", status="in_flight")])
@@ -212,7 +211,6 @@ async def test_update_verdict(archive_store, seeded_archive):
         assert got.cost == 1234.0
 
 
-@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
 async def test_update_verdict_republishes_event(tmp_path, bus, seeded_archive):
     """update_verdict re-publishes MutationArchived with the NEW status + filled train_score."""
     from localharness.core.events import MutationArchived
@@ -235,7 +233,6 @@ async def test_update_verdict_republishes_event(tmp_path, bus, seeded_archive):
     await store.close()
 
 
-@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
 async def test_update_verdict_preserves_integrity(archive_store, seeded_archive):
     """integrity_check stays clean ([]) after an update_verdict write-back."""
     await seeded_archive(archive_store, [dict(id="uv-int", status="in_flight")])

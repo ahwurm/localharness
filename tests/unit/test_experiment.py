@@ -1,10 +1,8 @@
-"""Phase 17 Wave 0 RED stubs — experiment gate logic (EXP-01..05 + promotion/seal/audit).
+"""Phase 17 — experiment gate logic (EXP-01..05 + promotion/seal/audit).
 
-xfail(strict=False) until experiment.py lands in 17-03. The module-top import is guarded
-so collection never breaks before the module exists; once it ships the xfail markers govern.
-
-These stubs are the binding RED→GREEN contract: 17-03's `experiment.py` must satisfy every
-assertion here. The bench is injected via a fake `run_slice` callable
+The Wave-0 xfail(strict=False) scaffold has been removed now that experiment.py landed
+in 17-03 (flip-xfail->pass cadence). These are the binding RED->GREEN contract: experiment.py
+satisfies every assertion here. The bench is injected via a fake `run_slice` callable
 (``run_slice(worktree, *, slice, with_overlay) -> dict[str, float]``) so the gate logic is
 exercised LLM-free and worktree-free where possible.
 """
@@ -13,10 +11,7 @@ import subprocess
 
 import pytest
 
-try:
-    from localharness.autoresearch import experiment as exp  # noqa: F401
-except ImportError:
-    pytest.skip("experiment.py not yet implemented (17-03)", allow_module_level=True)
+from localharness.autoresearch import experiment as exp
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +77,6 @@ _HOLDOUT_HEAD_OK = {"h1": 0.6, "h2": 0.6, "h3": 0.6}
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 def test_worktree_cleanup(tmp_git_repo):
     """experiment_worktree yields a real path that exists inside the with and is gone after (keep=False)."""
     with exp.experiment_worktree(repo_root=tmp_git_repo) as wt:
@@ -91,7 +85,6 @@ def test_worktree_cleanup(tmp_git_repo):
     assert not captured.exists()
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 def test_overlay_written_into_worktree(tmp_git_repo):
     """write_experiment_overlay materializes the after-value into the worktree at the dot-path."""
     import yaml
@@ -109,7 +102,6 @@ def test_overlay_written_into_worktree(tmp_git_repo):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_refuses_multi_component_diff(archive_store, seeded_inflight):
     """A diff resolving to >1 component path → EXIT_REFUSE_MULTI_COMPONENT (>=4); bench never runs."""
     multi = json.dumps({
@@ -124,7 +116,6 @@ async def test_refuses_multi_component_diff(archive_store, seeded_inflight):
     assert fake.calls == []  # refused before any bench arm
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_refuses_offregistry_component(archive_store, seeded_inflight):
     """Off-registry / grader-targeting component → EXIT_REFUSE_OFFREGISTRY (>=4); bench never runs."""
     pid = await seeded_inflight(
@@ -142,7 +133,6 @@ async def test_refuses_offregistry_component(archive_store, seeded_inflight):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_holdout_skipped_on_train_reject(archive_store, seeded_inflight):
     """No train improvement → EXIT_REJECT_TRAIN (1) and holdout bench NEVER invoked."""
     pid = await seeded_inflight(archive_store, component="agent.role")
@@ -154,7 +144,6 @@ async def test_holdout_skipped_on_train_reject(archive_store, seeded_inflight):
     assert "holdout" not in fake.slices_requested  # conditional holdout never reached
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_welch_improvement_direction(archive_store, seeded_inflight):
     """Clear train improvement + non-regressing holdout → does NOT reject-train (promotes)."""
     pid = await seeded_inflight(archive_store, component="agent.role")
@@ -165,7 +154,6 @@ async def test_welch_improvement_direction(archive_store, seeded_inflight):
     assert code == exp.EXIT_PROMOTE
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_per_fixture_vector_shape(archive_store, seeded_inflight):
     """train_scores_per_fixture has one key per TRAIN fixture (not rep count) — train names only."""
     pid = await seeded_inflight(archive_store, component="agent.role")
@@ -182,7 +170,6 @@ async def test_per_fixture_vector_shape(archive_store, seeded_inflight):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_bonferroni_alpha_scaling(archive_store, seeded_inflight):
     """A borderline-worse holdout: rejected at α=0.05 (trials=1) but passes at α=0.0125 (trials=4).
 
@@ -208,7 +195,6 @@ async def test_bonferroni_alpha_scaling(archive_store, seeded_inflight):
     assert code4 == exp.EXIT_PROMOTE  # NOT significant at α=0.05/4=0.0125 → non-regression passes
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_holdout_nonregression_promotes(archive_store, seeded_inflight):
     """Train improves + holdout not significantly worse → EXIT_PROMOTE (0)."""
     pid = await seeded_inflight(archive_store, component="agent.role")
@@ -223,7 +209,6 @@ async def test_holdout_nonregression_promotes(archive_store, seeded_inflight):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_promote_writes_archive_not_live_config(archive_store, seeded_inflight, components_home):
     """Promote flips status + fills scores in the archive; does NOT write the user overlay."""
     pid = await seeded_inflight(archive_store, component="agent.role")
@@ -240,7 +225,6 @@ async def test_promote_writes_archive_not_live_config(archive_store, seeded_infl
     assert not (components_home / "overrides.yaml").exists()
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_reject_status_writeback(archive_store, seeded_inflight):
     """Train-reject writes status 'train_rejected'; holdout-reject writes 'holdout_rejected'."""
     pid_tr = await seeded_inflight(archive_store, component="agent.role")
@@ -267,7 +251,6 @@ async def test_reject_status_writeback(archive_store, seeded_inflight):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_emits_component_mutated_experiment(tmp_path, bus, seeded_inflight):
     """Running the proposal arm publishes ComponentMutated(layer/actor='experiment', actor_detail=pid)."""
     from localharness.autoresearch.archive import ArchiveStore
@@ -296,7 +279,6 @@ async def test_emits_component_mutated_experiment(tmp_path, bus, seeded_inflight
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 async def test_holdout_not_in_train_blob(archive_store, seeded_inflight):
     """After a promote, train_scores_per_fixture holds ONLY train names — no holdout names (pareto-blind)."""
     pid = await seeded_inflight(archive_store, component="agent.role")
