@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from localharness.config.models import AgentConfig, OrgConfig
 from localharness.core.bus import EventBus
+from localharness.core.events import ScenarioCompleted
+from localharness.bench.runner import resolve_run_path
 from localharness.memory.sqlite import MemoryStore
 
 
@@ -307,3 +309,116 @@ def seeded_archive():
         return written
 
     return _seed
+
+
+# -----------------------------------------------------------------------------
+# Phase 16 proposer fixtures
+# -----------------------------------------------------------------------------
+
+
+class FakeLLMClient:
+    """Spy LLM client for proposer tests.
+
+    Exposes complete() — the method the proposer calls (NOT MockLLMClient's
+    stream_complete) — and a complete_calls counter so seal tests can assert the
+    model was never reached. Returns (message, usage) like the real LLMClient.
+    """
+
+    def __init__(self, content: str):
+        self._content = content
+        self.complete_calls = 0
+
+        class _Cfg:
+            tool_call_mode = "native"
+            context_window = 128_000
+
+        self.config = _Cfg()
+
+    async def complete(self, messages, tools=None, stream=False):
+        self.complete_calls += 1
+
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.content = self._content
+        return msg, FakeCompletionUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20)
+
+
+def _scenario_yaml(name: str, slice_: str) -> str:
+    """A complete, VALID ScenarioSpec YAML (mirrors minimal_golden_scenario.yaml)."""
+    return (
+        f"name: {name}\n"
+        'prompt: "What is 2 + 2? Give just the number."\n'
+        'expected_outcome: "Returns 4."\n'
+        "success_criteria:\n"
+        '  golden_output: "4"\n'
+        "budget:\n"
+        "  max_actions: 5\n"
+        "  max_duration_minutes: 1.0\n"
+        "  max_context_tokens: 32000\n"
+        "limits:\n"
+        "  max_latency_s: 30.0\n"
+        "  max_tool_calls: 0\n"
+        "tools_allowed: []\n"
+        f"slice: {slice_}\n"
+        "category: tool_basics\n"
+    )
+
+
+@pytest.fixture
+def proposer_corpus(tmp_path: Path) -> Path:
+    """tmp corpus holding ONE train fixture + ONE holdout fixture (both valid ScenarioSpecs).
+
+    Scenario names mirror the proposer_results run_ids: prop_train_fx / prop_holdout_fx.
+    The slice line is the single source of truth the PROP-03 seal resolves through.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+    (corpus / "prop_train_fx.yaml").write_text(
+        _scenario_yaml("prop_train_fx", "train"), encoding="utf-8"
+    )
+    (corpus / "prop_holdout_fx.yaml").write_text(
+        _scenario_yaml("prop_holdout_fx", "holdout"), encoding="utf-8"
+    )
+    return corpus
+
+
+@pytest.fixture
+def proposer_results(tmp_path: Path) -> dict:
+    """tmp results tree with canned JSONL traces for the seal/evidence tests.
+
+    Writes one FAILED ScenarioCompleted trace per scenario (a failed train run is
+    real mutation signal). run_id syntax is the resolved Phase 16 contract
+    `{model}/{scenario}/{timestamp}`.
+    """
+    results = tmp_path / "results"
+    model = "fakemodel"
+    timestamp = "20260529T000000Z"
+
+    def _write(scenario_name: str, success: bool) -> None:
+        path = resolve_run_path(results, model, scenario_name, timestamp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = ScenarioCompleted(
+            scenario_name=scenario_name,
+            model=model,
+            success=success,
+            latency_ttft=1.0,
+            latency_total=1.0,
+            tokens_in=5,
+            tokens_out=5,
+            iterations=1,
+            parse_failures=0,
+            stuck_recoveries=0,
+            tool_call_count=0,
+        ).model_dump_json()
+        path.write_text(line + "\n", encoding="utf-8")
+
+    _write("prop_train_fx", success=False)
+    _write("prop_holdout_fx", success=False)
+
+    return {
+        "results": results,
+        "train_run_id": f"{model}/prop_train_fx/{timestamp}",
+        "holdout_run_id": f"{model}/prop_holdout_fx/{timestamp}",
+    }
