@@ -16,6 +16,7 @@ before sampler/budget/adoption/loop exist (17-01 precedent: pytest.skip allow_mo
 """
 import json
 import random
+from pathlib import Path
 
 import pytest
 
@@ -318,7 +319,6 @@ async def test_adopt_commits_and_sets_status(archive_store, seeded_archive, tmp_
     assert (await archive_store.get(row.id)).status == "adopted"
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_thin_lift_holds(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                FakeClock, FakeWindowMeter, FakeExperimentFn):
     """Gate exit 0 but lift < min_lift → status 'held', NO commit (loop-level decision)."""
@@ -337,7 +337,6 @@ async def test_thin_lift_holds(archive_store, seeded_inflight, tmp_git_repo, com
     assert summary.held >= 1
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_inconclusive_holds(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                   FakeClock, FakeWindowMeter, FakeExperimentFn):
     """Gate exit 3 (inconclusive) → status 'held'."""
@@ -354,7 +353,6 @@ async def test_inconclusive_holds(archive_store, seeded_inflight, tmp_git_repo, 
     assert len(_git_log_lines(tmp_git_repo)) == before_commits  # inconclusive never commits
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_reject_no_commit(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                 FakeClock, FakeWindowMeter, FakeExperimentFn):
     """Gate exit 1 or 2 → no adoption, no commit; row keeps train_rejected/holdout_rejected."""
@@ -434,7 +432,6 @@ async def test_adopt_refuses_invalid_config(archive_store, seeded_archive, tmp_g
     assert len(_git_log_lines(tmp_git_repo)) == before_commits
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_rejected_not_reoffered(archive_store, seeded_archive, tmp_git_repo, components_home):
     """A row at status 'adoption_rejected' is excluded from review's held list AND adopt() refuses to re-adopt it."""
     [row] = await seeded_archive(
@@ -496,7 +493,6 @@ def _fake_propose(pid, *, component="agent.role"):
     return _fn
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_proposal_timeout_kills_and_continues(archive_store, seeded_inflight, tmp_git_repo,
                                                     components_home, FakeClock, FakeWindowMeter, FakeExperimentFn):
     """A slow experiment_fn (> proposal_timeout) is cancelled (asyncio.TimeoutError); row → train_rejected; loop continues to the next iteration."""
@@ -514,7 +510,6 @@ async def test_proposal_timeout_kills_and_continues(archive_store, seeded_inflig
     assert summary.iterations >= 1  # loop did not deadlock; it continued
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_running_experiment_not_killed_by_total_cap(archive_store, seeded_inflight, tmp_git_repo,
                                                           components_home, FakeClock, FakeWindowMeter, FakeExperimentFn):
     """A budget that trips its TOTAL cap mid-experiment must NOT cancel the in-flight experiment_fn — only the PRE-FLIGHT gate halts.
@@ -549,7 +544,6 @@ def _exhaust_after_first(meter):
     return _fn
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_journal_captures_loop_why(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                         FakeClock, FakeWindowMeter, FakeExperimentFn):
     """The per-run JSONL journal at .localharness/autoresearch/runs/<run_id>.jsonl captures the loop-level 'why'."""
@@ -571,7 +565,6 @@ async def test_journal_captures_loop_why(archive_store, seeded_inflight, tmp_git
         assert field in blob, f"journal missing {field!r}"
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_circuit_breaker_halts(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                     FakeClock, FakeWindowMeter, FakeExperimentFn):
     """An experiment_fn/propose_fn that fails every call → loop halts after N consecutive failures (≈ N iterations, not infinite)."""
@@ -589,7 +582,6 @@ async def test_circuit_breaker_halts(archive_store, seeded_inflight, tmp_git_rep
     assert summary.iterations < 20
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_graceful_interrupt(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                   FakeClock, FakeWindowMeter, FakeExperimentFn):
     """Setting the loop's interrupt flag mid-run → it finishes the current experiment, writes a run-complete summary line, returns cleanly."""
@@ -617,7 +609,6 @@ async def test_graceful_interrupt(archive_store, seeded_inflight, tmp_git_repo, 
     assert "complete" in journal_path.read_text()  # a run-complete summary line was written
 
 
-@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
 async def test_run_summary_fields(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                  FakeClock, FakeWindowMeter, FakeExperimentFn):
     """The returned RunSummary carries iterations / adopted / held / rejected counts, time + window/tokens consumed, and the journal path."""

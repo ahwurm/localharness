@@ -24,7 +24,8 @@ CRITICAL invariants:
     never stale; no overlay replay).
   - The TOTAL-cap gate is ``BudgetController.can_start_iteration()`` at the TOP of the loop
     ONLY. It NEVER cancels a running experiment — a total breach halts BEFORE the next
-    iteration. The ONLY mid-experiment kill is ``asyncio.wait_for(.., proposal_timeout)``.
+    iteration. The ONLY mid-experiment kill is the per-proposal timeout (the single wait-for
+    around ``experiment_fn`` below).
   - The circuit breaker increments on proposer error / timeout / structural-skip (>=4) and
     RESETS to 0 on ANY completed gate verdict (exit 0-3).
   - An ``AdoptionRefused`` is a guard, not an outage — count it skipped, reset the breaker.
@@ -42,6 +43,10 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from localharness.autoresearch.adoption import AdoptionRefused
+from localharness.autoresearch.adoption import adopt as _default_adopt
+from localharness.autoresearch.archive import ArchiveEntry, ArchiveQuery
+
 # Exit constants — SINGLE source of truth (the gate writes them; the loop reads them).
 from localharness.autoresearch.experiment import (
     EXIT_INCONCLUSIVE,
@@ -49,9 +54,21 @@ from localharness.autoresearch.experiment import (
     EXIT_REJECT_HOLDOUT,
     EXIT_REJECT_TRAIN,
 )
+from localharness.autoresearch.budget import BudgetController, WindowMeter
+from localharness.autoresearch.sampler import BASELINE_ROOT, ParentSampler
+from localharness.registry import build_catalogue
 
 # Loop-level decisions (distinct from the gate's exit codes).
 ADOPT, HOLD, REJECT, SKIP = "adopt", "hold", "reject", "skip"
+
+# Consecutive proposer-error / timeout / structural-skip failures before the loop halts.
+# Research says 3-5; 4 balances tolerating a transient blip against bleaking budget on a
+# systemic outage (e.g. the proposer model is down). Resets to 0 on any real gate verdict.
+CIRCUIT_BREAKER_N = 4
+
+# The high metering-bug backstop: even with no wallclock/window cap, the loop can never run
+# unbounded. The CLI (18-06) always passes a high value; this is the library default.
+DEFAULT_MAX_ITERATIONS = 1000
 
 
 def interpret(exit_code: int, entry, min_lift: float | None) -> tuple[str, str]:
@@ -101,6 +118,11 @@ class RunSummary:
     journal_path: str = ""
     halt_reason: str = ""
 
+    @property
+    def wallclock_elapsed(self) -> float:
+        """Alias for ``seconds_elapsed`` (the CLI/report + tests read wallclock_elapsed)."""
+        return self.seconds_elapsed
+
 
 class RunJournal:
     """Per-run JSONL audit at ``.localharness/autoresearch/runs/<run_id>.jsonl``.
@@ -124,3 +146,266 @@ class RunJournal:
         line = json.dumps({"ts": time.time(), "run_id": self._run_id, **record}) + "\n"
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(line)
+
+
+# ---------------------------------------------------------------------------
+# Target derivation + real-fn factories (the loop body calls a uniform 2-arg
+# propose_fn(component, run_ids) and 1-arg experiment_fn(pid); tests inject these).
+# ---------------------------------------------------------------------------
+
+
+async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
+    """Pick (component, run_ids, branch) for this iteration.
+
+    branch is "cold_start" when ``parent is BASELINE_ROOT`` else "sampled" (the sampler
+    internally chose explore/exploit; the loop records cold-vs-sampled, keeping it simple).
+    Component policy is "go broad, not deep": bias toward the parent's component when a parent
+    exists; on a cold start pick a component nothing has touched yet (so coverage spreads),
+    falling back to the first catalogue entry. ``run_ids`` are the live failed-TRAIN run_ids the
+    proposer reads (derived from the latest failed train traces in production); in tests
+    ``propose_fn`` is injected so run_ids is a passthrough. The proposer's PROP-03 seal validates
+    run_ids, so an empty/garbage list is refused there (not here).
+    """
+    if parent is not BASELINE_ROOT and parent is not None:
+        return parent.component, [], "sampled"
+    catalogue = build_catalogue(cfg)
+    touched = {e.component for e in await store.query(ArchiveQuery(limit=10_000))}
+    untouched = [p for p in catalogue if p not in touched]
+    component = untouched[0] if untouched else next(iter(catalogue))
+    return component, [], "cold_start"
+
+
+def _real_propose(cfg, corpus_path, results_path):
+    """Bind the real proposer into the loop's uniform 2-arg propose_fn(component, run_ids) -> pid.
+
+    The real ``propose()`` returns a Proposal; the loop archives it to an in_flight row and runs
+    the gate on that row. Tests inject ``propose_fn`` directly (returning a seeded pid), so this
+    closure is only used in production.
+    """
+
+    async def _fn(component, run_ids):
+        from localharness.autoresearch.proposer import propose
+
+        return await propose(
+            component, run_ids, cfg=cfg, corpus_path=corpus_path, results_path=results_path
+        )
+
+    return _fn
+
+
+def _real_experiment(cfg, repo_root, store, bus):
+    """Bind the real gate into the loop's uniform 1-arg experiment_fn(pid) -> exit_code."""
+
+    async def _fn(pid):
+        from localharness.autoresearch.experiment import run_experiment
+
+        return await run_experiment(pid, store=store, repo_root=repo_root, cfg=cfg, bus=bus)
+
+    return _fn
+
+
+def _stop_requested(should_stop, interrupt) -> bool:
+    """True if a graceful stop was requested via the should_stop callable OR the interrupt event.
+
+    The binding test passes a ``threading.Event`` as ``interrupt``; the plan also documents a
+    ``should_stop`` callable. Both are honored (checked at the TOP of the loop, so the current
+    experiment always finishes before the next starts).
+    """
+    if should_stop is not None and should_stop():
+        return True
+    if interrupt is not None and interrupt.is_set():
+        return True
+    return False
+
+
+async def run_loop(
+    *,
+    store,
+    cfg,
+    repo_root,
+    budget=None,
+    max_iterations=DEFAULT_MAX_ITERATIONS,
+    max_cost=None,
+    epsilon=0.2,
+    min_lift=None,
+    proposal_timeout=1800.0,
+    window_tokens=None,
+    corpus_path=None,
+    results_path=None,
+    journal=None,
+    rng=None,
+    clock=None,
+    wall_clock=None,
+    propose_fn=None,
+    experiment_fn=None,
+    adopt_fn=None,
+    meter=None,
+    should_stop=None,
+    interrupt=None,
+    bus=None,
+) -> RunSummary:
+    """Drive the sequential self-improvement loop until a budget gate / breaker / interrupt halts.
+
+    sample -> propose -> write in_flight -> run_experiment (timeout-bounded) -> interpret ->
+    adopt/hold/reject/skip -> journal -> repeat. Returns a RunSummary; ALWAYS exits cleanly
+    (the gate's exit codes never become the run's exit code). See the module docstring for the
+    invariants this function is contractually bound to.
+    """
+    run_id = uuid.uuid4().hex[:12]
+    base_dir = Path(repo_root) / ".localharness"
+    journal = journal or RunJournal(run_id, base_dir)
+    summary = RunSummary(run_id=run_id, journal_path=str(journal.path))
+
+    clock = clock or time.monotonic
+    meter = meter or WindowMeter(
+        window_budget_tokens=window_tokens,
+        state_path=base_dir / "autoresearch" / "window.json",
+        clock=(wall_clock or time.time),
+    )
+    sampler = ParentSampler(store, epsilon=epsilon, rng=rng)
+    budget_ctl = BudgetController(
+        budget_seconds=budget,
+        max_iterations=max_iterations,
+        max_cost=max_cost,
+        meter=meter,
+        clock=clock,
+    )
+    propose_fn = propose_fn or _real_propose(cfg, corpus_path, results_path)
+    experiment_fn = experiment_fn or _real_experiment(cfg, repo_root, store, bus)
+    adopt_fn = adopt_fn or _default_adopt
+
+    consecutive_failures = 0
+    run_start = clock()
+
+    # PRE-FLIGHT gate at the TOP of the loop — the ONLY total-cap check (never mid-experiment).
+    while budget_ctl.can_start_iteration():
+        # Graceful interrupt: checked at the top so the current experiment always finishes
+        # before the next starts (the in-flight iteration below runs to completion uninterrupted).
+        if _stop_requested(should_stop, interrupt):
+            summary.halt_reason = "interrupt"
+            break
+
+        summary.iterations += 1
+
+        # 1. SAMPLE — a parent (lineage + "go broad" bias) or the cold-start baseline root.
+        epsilon_roll = sampler._rng.random() if hasattr(sampler, "_rng") else None
+        parent = await sampler.sample()
+        is_cold = parent is BASELINE_ROOT
+        parent_id = None if is_cold else parent.id
+        component, run_ids, branch = await _derive_target(parent, store, cfg)
+
+        # 2. PROPOSE — a proposer failure is a circuit-breaker increment, not a crash.
+        try:
+            proposal = await propose_fn(component, run_ids)
+        except Exception as exc:  # ProposerError or any transient model/IO failure
+            consecutive_failures += 1
+            summary.failures += 1
+            journal.write({
+                "iteration": summary.iterations, "phase": "propose", "branch": branch,
+                "epsilon_roll": epsilon_roll, "parent_id": parent_id, "component": component,
+                "archive_id": None, "exit_code": None, "decision": SKIP,
+                "reason": f"proposer error: {exc}", "budget": budget_ctl.snapshot(),
+            })
+            if consecutive_failures >= CIRCUIT_BREAKER_N:
+                summary.halt_reason = "circuit_breaker"
+                break
+            continue
+
+        # The real propose() returns a Proposal; the injected fake returns a seeded pid directly.
+        # Self-meter ONLY the proposer's reported tokens (local bench inference is never metered).
+        tokens_used = getattr(proposal, "tokens_used", None)
+        if tokens_used is not None:
+            meter.record_tokens(tokens_used or 0)
+        summary.tokens_spent = meter.snapshot().get("tokens_spent", summary.tokens_spent)
+
+        # 3. RESOLVE / WRITE the in_flight row. A Proposal is archived now; a bare pid (test seam)
+        #    points at an already-seeded row. STRICTLY SEQUENTIAL: one row, run it, act, then next.
+        if isinstance(proposal, str):
+            pid = proposal
+        else:
+            pid = (await store.write(ArchiveEntry(
+                id=uuid.uuid4().hex, parent_id=parent_id, component=proposal.component,
+                diff=json.dumps(proposal.diff), train_score=None,
+                train_scores_per_fixture=None, holdout_score=None, p_value=None, cost=None,
+                ts=int(time.time()), approved_by=None, status="in_flight",
+            ))).id
+
+        # 4. RUN_EXPERIMENT under the per-proposal timeout. This wait_for is the ONLY mid-experiment
+        #    kill — the total-cap gate above NEVER cancels a running experiment.
+        try:
+            exit_code = await asyncio.wait_for(experiment_fn(pid), timeout=proposal_timeout)
+        except asyncio.TimeoutError:
+            await store.update_verdict(pid, status="train_rejected")  # killed run = negative signal
+            consecutive_failures += 1
+            summary.failures += 1
+            journal.write({
+                "iteration": summary.iterations, "phase": "experiment", "branch": branch,
+                "epsilon_roll": epsilon_roll, "parent_id": parent_id, "component": component,
+                "archive_id": pid, "exit_code": None, "decision": SKIP,
+                "reason": f"proposal-timeout after {proposal_timeout}s",
+                "budget": budget_ctl.snapshot(),
+            })
+            if consecutive_failures >= CIRCUIT_BREAKER_N:
+                summary.halt_reason = "circuit_breaker"
+                break
+            continue
+
+        # 5. INTERPRET + ACT on the gate's verdict.
+        row = await store.get(pid)
+        decision, reason = interpret(exit_code, row, min_lift)
+
+        if decision == ADOPT:
+            try:
+                await adopt_fn(pid, store=store, cfg=cfg, repo_root=repo_root, bus=bus)
+                await store.update_verdict(pid, status="adopted")
+                summary.adopted += 1
+                summary.top_wins.append(
+                    (pid, getattr(row, "component", component),
+                     row.train_score if row else None)
+                )
+                consecutive_failures = 0  # a real verdict resets the breaker
+            except AdoptionRefused:
+                # A seal guard is NOT an outage — count it skipped, reset the breaker, continue.
+                summary.skipped += 1
+                consecutive_failures = 0
+        elif decision == HOLD:
+            await store.update_verdict(pid, status="held")
+            summary.held += 1
+            consecutive_failures = 0
+        elif decision == REJECT:
+            # The real run_experiment already wrote train_rejected / holdout_rejected; persist it
+            # idempotently here too so the row reflects the gate's verdict even under an injected
+            # experiment_fn that returns the exit code only (and the status never silently stays
+            # in_flight on a reject).
+            reject_status = (
+                "train_rejected" if exit_code == EXIT_REJECT_TRAIN else "holdout_rejected"
+            )
+            await store.update_verdict(pid, status=reject_status)
+            summary.rejected += 1
+            consecutive_failures = 0
+        else:  # SKIP (>=4 structural refusal)
+            summary.skipped += 1
+            consecutive_failures += 1
+            if consecutive_failures >= CIRCUIT_BREAKER_N:
+                summary.halt_reason = "circuit_breaker"
+
+        journal.write({
+            "iteration": summary.iterations, "phase": "decision", "branch": branch,
+            "epsilon_roll": epsilon_roll, "parent_id": parent_id, "component": component,
+            "archive_id": pid, "exit_code": exit_code, "decision": decision,
+            "reason": reason, "budget": budget_ctl.snapshot(),
+        })
+        if summary.halt_reason == "circuit_breaker":
+            break
+
+    if not summary.halt_reason:
+        summary.halt_reason = "budget"  # the clean cap-trip default
+    summary.seconds_elapsed = clock() - run_start
+    summary.tokens_spent = meter.snapshot().get("tokens_spent", summary.tokens_spent)
+    journal.write({
+        "iteration": summary.iterations, "phase": "complete", "decision": "complete",
+        "reason": summary.halt_reason, "adopted": summary.adopted, "held": summary.held,
+        "rejected": summary.rejected, "skipped": summary.skipped,
+        "halt_reason": summary.halt_reason, "budget": budget_ctl.snapshot(),
+    })
+    return summary
