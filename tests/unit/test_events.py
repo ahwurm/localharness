@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 19 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 21 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -15,6 +15,7 @@ from localharness.core.events import (
     Escalation,
     EVENT_TYPE_MAP,
     Heartbeat,
+    MutationArchived,
     Observation,
     ParseFailed,
     ScenarioCompleted,
@@ -131,14 +132,14 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 20 event types."""
-    assert len(EVENT_TYPE_MAP) == 20
+    """EVENT_TYPE_MAP has entries for all 21 event types."""
+    assert len(EVENT_TYPE_MAP) == 21
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
         "Observation", "DelegationRequest", "DelegationResult", "Escalation", "Heartbeat",
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
-        "ComponentMutated",
+        "ComponentMutated", "MutationArchived",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -168,17 +169,17 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 20 event classes."""
+    """AnyEvent type contains all 21 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     args = typing.get_args(AnyEvent)
-    assert len(args) == 20
+    assert len(args) == 21
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
-        ComponentMutated,
+        ComponentMutated, MutationArchived,
     }
     assert set(args) == expected
 
