@@ -289,11 +289,16 @@ class StuckRecovered(BaseEvent):
 
 
 class ComponentMutated(BaseEvent):
-    """Published by `localharness components set` and the Phase 17 experiment runner.
+    """Published by `localharness components set`, the Phase 17 experiment runner,
+    and the Phase 18 autoresearch adoption write.
 
     Records every component-registry mutation. Persisted to audit.jsonl via the
     standard EventBus path. Phase 15 SQLite archive may query this stream for
     raw mutation history.
+
+    actor='orchestrator' is the autoresearch loop's adoption write to the LIVE
+    project-local overlay (layer='user'), distinct from actor='experiment' (the
+    gate's throwaway worktree overlay) and actor='cli' (a human `components set`).
 
     Fields are kept JSON-serializable (Any restricted to YAML-primitive types by
     coerce-on-set in the registry CLI; see Pitfall 6 in 14-RESEARCH.md).
@@ -304,7 +309,7 @@ class ComponentMutated(BaseEvent):
     before_value: Any  # int|float|str|bool|list|dict|None — JSON-primitive only
     after_value: Any
     layer: Literal["user", "experiment"]  # which overlay was written
-    actor: Literal["cli", "experiment", "proposer"]
+    actor: Literal["cli", "experiment", "proposer", "orchestrator"]
     actor_detail: Optional[str] = None  # proposal_id, experiment_id, etc.
 
 
@@ -319,7 +324,10 @@ class MutationArchived(BaseEvent):
     event_type: str = "MutationArchived"
     mutation_id: str  # the archive row id (full UUID)
     component: str  # dot-path, e.g. "agents.main.system_prompt"
-    status: str  # in_flight | train_rejected | holdout_rejected | promoted | superseded
+    # status (free-text TEXT, no schema migration — see archive.py update_verdict):
+    #   in_flight | train_rejected | holdout_rejected | promoted | superseded  (Phases 15-17)
+    #   adopted | held | adoption_rejected                                     (Phase 18 AUTO-04)
+    status: str
     train_score: Optional[float] = None
     holdout_score: Optional[float] = None
     p_value: Optional[float] = None
