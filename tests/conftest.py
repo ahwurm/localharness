@@ -446,3 +446,112 @@ def proposer_results(tmp_path: Path) -> dict:
         "train_run_id": f"{model}/prop_train_fx/{timestamp}",
         "holdout_run_id": f"{model}/prop_holdout_fx/{timestamp}",
     }
+
+
+# -----------------------------------------------------------------------------
+# Phase 18 autoresearch-loop fixtures
+#
+# Hermetic seams for the loop driver / budget / adoption tests: a REAL tmp git repo
+# (adoption commits land in it), a monotonic-style FakeClock (budget wallclock + the 5h
+# window boundary), a FakeWindowMeter (force token-window exhaustion without real math),
+# and a FakeExperimentFn (returns a chosen gate exit code; a slow variant for the timeout
+# test). Mirrors test_experiment.py's _make_git_repo + test_experiment_cmd.py's _fake seam.
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tmp_git_repo(tmp_path: Path) -> Path:
+    """A real `git init` repo with an initial committed .localharness/overrides.yaml.
+
+    The adoption mechanism (AUTO-04) writes the live overlay here and git-commits it; tests
+    assert against `git log` + the overrides.yaml content. CI-safe (sets user.email/name).
+    Returns the repo root Path. The seed overlay is a minimal valid overlay ({"agent": {"role": "initial"}})
+    so the "compound baseline advances" assertion has a prior value to evolve from.
+    """
+    import subprocess
+
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+    overlay = repo / ".localharness" / "overrides.yaml"
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(yaml.safe_dump({"agent": {"role": "initial"}}), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True, capture_output=True)
+    return repo
+
+
+@pytest.fixture
+def FakeClock():
+    """Factory for a monotonic-style callable clock injectable as `clock`.
+
+    `c = FakeClock(); c()` reads the current time; `c.advance(dt)` moves it forward.
+    The budget uses two clock readings — a monotonic for wallclock elapsed and a wall-epoch
+    for the 5h window boundary; this single advanceable callable serves both in tests.
+    """
+
+    class _Clock:
+        def __init__(self, t: float = 0.0):
+            self._t = t
+
+        def __call__(self) -> float:
+            return self._t
+
+        def advance(self, dt: float) -> None:
+            self._t += dt
+
+    return _Clock
+
+
+@pytest.fixture
+def FakeWindowMeter():
+    """Factory for a token-window meter stub.
+
+    record_tokens(n) accumulates self.spent; window_exhausted() returns the settable
+    self._exhausted bool (default False) so budget tests force exhaustion without real
+    token math; snapshot() exposes the counters for journal/summary assertions.
+    """
+
+    class _Meter:
+        def __init__(self):
+            self.spent = 0
+            self._exhausted = False
+
+        def record_tokens(self, n: int) -> None:
+            self.spent += n
+
+        def window_exhausted(self) -> bool:
+            return self._exhausted
+
+        def snapshot(self) -> dict:
+            return {"tokens_spent": self.spent, "exhausted": self._exhausted}
+
+    return _Meter
+
+
+@pytest.fixture
+def FakeExperimentFn():
+    """Factory: make(exit_code=0, *, slow=False, record=None) → an async experiment_fn seam.
+
+    The returned `async def _fn(proposal_id, **kwargs)` records its kwargs (if `record` is a
+    list), optionally `await asyncio.sleep(big)` when slow=True (drives the proposal-timeout
+    test), then returns the chosen gate exit code (0=promote .. 3=inconclusive, >=4 structural).
+    Mirrors test_experiment_cmd.py's _fake seam so the loop is exercised without a real bench.
+    """
+    import asyncio
+
+    def make(exit_code: int = 0, *, slow: bool = False, record: list | None = None):
+        async def _fn(proposal_id, **kwargs):
+            if record is not None:
+                record.append({"proposal_id": proposal_id, **kwargs})
+            if slow:
+                await asyncio.sleep(3600)  # cancelled by the loop's proposal_timeout
+            return exit_code
+
+        return _fn
+
+    return make
