@@ -22,7 +22,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from localharness.autoresearch.adoption import AdoptionRefused
+from localharness.autoresearch.adoption import adopt as _adopt
 from localharness.autoresearch.archive import ArchiveEntry, ArchiveQuery, ArchiveStore
+from localharness.autoresearch.loop import RunSummary, run_loop
 
 autoresearch_app = typer.Typer(
     name="autoresearch",
@@ -118,6 +121,32 @@ def _parse_since(s: str | None) -> int | None:
     except ValueError as exc:
         raise ValueError(f"bad duration {s!r}: {exc}") from exc
     return int(time.time()) - value * _SINCE_UNITS[s[-1]]
+
+
+def _parse_budget(s: str | None) -> float | None:
+    """Parse a FORWARD duration like ``4h``/``30m``/``2d`` into SECONDS (None if s is None).
+
+    Reuses the ``_SINCE_UNITS`` table (s/m/h/d) but, unlike ``_parse_since`` (an epoch floor
+    for the archive window), this returns ``value * unit`` seconds — the loop's wallclock /
+    per-proposal-timeout caps are forward durations. Raises ValueError on bad format; the run
+    command maps that to exit 2 via ``_err`` (an abnormal start, distinct from a gate verdict).
+    """
+    if s is None:
+        return None
+    s = s.strip()
+    # A bare number is interpreted as SECONDS (e.g. --budget 1 == 1s); a trailing unit scales.
+    if s and s[-1] not in _SINCE_UNITS:
+        try:
+            return float(s)
+        except ValueError as exc:
+            raise ValueError(f"bad duration {s!r}: expected e.g. 4h, 30m, 2d, or seconds") from exc
+    if len(s) < 2:
+        raise ValueError(f"bad duration {s!r}: expected e.g. 4h, 30m, 2d")
+    try:
+        value = int(s[:-1])
+    except ValueError as exc:
+        raise ValueError(f"bad duration {s!r}: {exc}") from exc
+    return float(value * _SINCE_UNITS[s[-1]])
 
 
 def _entry_to_dict(e: ArchiveEntry) -> dict:
@@ -414,3 +443,308 @@ def archive_approve(
         typer.echo(_json.dumps({"id": entry.id, "approved_by": entry.approved_by}))
         return
     console.print(f"[green]approved[/green] {entry.id[:8]} by {approver}")
+
+
+# ------------------------------------------------------------------ #
+# run / review / adopt — AUTO-01 + AUTO-04 (the hands-off entrypoint)
+#
+# These are commands on ``autoresearch_app`` itself (siblings of the ``archive`` sub-app).
+# ``add_typer(archive_app)`` above already forces Typer's command-group mode, so each command
+# stays a NAMED subcommand (no extra @callback needed — confirmed: ``autoresearch run --help``
+# resolves). The ``run`` command's exit code is the RUN code (0 = any clean halt), DISTINCT
+# from the gate verdict band (a loop full of rejects is still exit 0); the ONLY non-zero exits
+# are the early bad-flag / config-error paths via ``_err`` (Pitfall 5).
+# ------------------------------------------------------------------ #
+
+
+def _repo_root() -> Path:
+    """Resolve the git toplevel of the cwd (the MAIN repo adoptions commit into)."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return Path(out.stdout.strip())
+
+
+@autoresearch_app.command("run")
+def autoresearch_run(
+    budget: Optional[str] = typer.Option(
+        None, "--budget", help="wallclock cap, e.g. 4h, 30m (default: until the 5h window is ~spent)"
+    ),
+    max_cost: Optional[float] = typer.Option(
+        None, "--max-cost", help="USD cap (sums archive per-row cost; ~$0 for a local proposer)"
+    ),
+    max_iterations: int = typer.Option(
+        1000, "--max-iterations", help="hard iteration backstop so a metering bug can't loop forever"
+    ),
+    checkpoint_every: int = typer.Option(
+        5,
+        "--checkpoint-every",
+        help="reserved for AUTO-01 literal compliance (held items surface via the Phase 19 report; this loop is fire-and-forget)",
+    ),
+    epsilon: float = typer.Option(
+        0.2, "--epsilon", help="explore probability for the parent sampler"
+    ),
+    min_lift: Optional[float] = typer.Option(
+        None,
+        "--min-lift",
+        help="effect-size floor for auto-adoption; default unset — calibrate from early-run data (see journal)",
+    ),
+    proposal_timeout: str = typer.Option(
+        "30m", "--proposal-timeout", help="hard-kill a single hung experiment"
+    ),
+    claude_window_tokens: Optional[int] = typer.Option(
+        None,
+        "--claude-window-tokens",
+        help="proposer 5h-window token budget; set to match your Max plan",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="emit the RunSummary as JSON"),
+) -> None:
+    """Drive the autonomous self-improvement loop until a budget/breaker/interrupt halts.
+
+    Exit code is the RUN code: 0 on ANY clean halt (budget / circuit_breaker / interrupt /
+    complete). The ONLY non-zero exits are an early bad-flag or config-error (exit 2) — a gate
+    verdict NEVER becomes the run's exit code (Pitfall 5).
+    """
+    # Bad flag = abnormal start = non-zero (exit 2), DISTINCT from the gate's 0-3 verdict band.
+    try:
+        budget_s = _parse_budget(budget)
+        timeout_s = _parse_budget(proposal_timeout) or 1800.0
+    except ValueError as exc:
+        _err(json_output, str(exc), exit_code=2)
+        return
+
+    # checkpoint_every is accepted for AUTO-01 literal compliance; this loop is fire-and-forget
+    # (held items surface async via the Phase 19 report — AUTO-04 amended to auto-adopt).
+    _ = checkpoint_every
+
+    try:
+        from localharness.cli.components_cmd import _build_loader
+
+        cfg = _build_loader().load_harness()
+    except Exception as exc:  # config load failure = abnormal start, not a gate verdict
+        _err(json_output, f"config error: {exc}", exit_code=2)
+        return
+
+    try:
+        repo_root = _repo_root()
+    except Exception as exc:
+        _err(json_output, f"not inside a git repo: {exc}", exit_code=2)
+        return
+
+    async def _go() -> RunSummary:
+        db_path = _archive_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            return await run_loop(
+                store=store,
+                cfg=cfg,
+                repo_root=repo_root,
+                budget=budget_s,
+                max_iterations=max_iterations,
+                max_cost=max_cost,
+                epsilon=epsilon,
+                min_lift=min_lift,
+                proposal_timeout=timeout_s,
+                window_tokens=claude_window_tokens,
+            )
+        finally:
+            await store.close()
+
+    summary = _run(_go())
+
+    # The RUN-COMPLETE summary (the run-complete ping content): counts + consumption + journal.
+    if json_output:
+        payload = {
+            "run_id": getattr(summary, "run_id", None),
+            "iterations": summary.iterations,
+            "adopted": summary.adopted,
+            "held": summary.held,
+            "rejected": summary.rejected,
+            "skipped": getattr(summary, "skipped", None),
+            "seconds_elapsed": getattr(summary, "seconds_elapsed", None),
+            "tokens_spent": getattr(summary, "tokens_spent", None),
+            "top_wins": getattr(summary, "top_wins", None),
+            "journal_path": getattr(summary, "journal_path", None),
+            "halt_reason": getattr(summary, "halt_reason", None),
+        }
+        typer.echo(_json.dumps(payload))
+    else:
+        console.print("[bold]autoresearch run complete[/bold]")
+        console.print(f"  halt:       {getattr(summary, 'halt_reason', '-')}")
+        console.print(f"  iterations: {summary.iterations}")
+        console.print(
+            f"  adopted={summary.adopted}  held={summary.held}  "
+            f"rejected={summary.rejected}  skipped={getattr(summary, 'skipped', 0)}"
+        )
+        elapsed = getattr(summary, "seconds_elapsed", None)
+        if elapsed is not None:
+            console.print(f"  time:       {elapsed:.1f}s")
+        tokens = getattr(summary, "tokens_spent", None)
+        if tokens is not None:
+            console.print(f"  claude-window tokens: {tokens}")
+        wins = getattr(summary, "top_wins", None) or []
+        if wins:
+            console.print("[bold]top wins[/bold]")
+            for win in wins[:5]:
+                wid, comp, score = (list(win) + [None, None, None])[:3]
+                console.print(f"  {str(wid)[:8]} {comp} train={_fmt_float(score)}")
+        console.print(f"  journal:    {getattr(summary, 'journal_path', '-')}")
+
+    # Any clean halt is exit 0 — a gate reject inside the loop is NOT a non-zero run.
+    raise typer.Exit(code=0)
+
+
+def _review_card_dict(e: ArchiveEntry) -> dict:
+    """A held-item review card for --json (the full row + a decoded before/after diff)."""
+    payload = _entry_to_dict(e)
+    try:
+        payload["diff_decoded"] = e.diff_decoded
+    except (ValueError, TypeError):
+        payload["diff_decoded"] = None
+    return payload
+
+
+@autoresearch_app.command("review")
+def autoresearch_review(
+    limit: int = typer.Option(50, "--limit", help="Max held items to surface (default 50)"),
+    json_output: bool = typer.Option(False, "--json", help="Emit held items as a JSON array"),
+) -> None:
+    """List HELD items as review cards (component, before->after diff, lift, p-value, id).
+
+    Only ``held`` rows are reviewable — ``adoption_rejected`` rows are kept as parent material
+    and never re-offered. An empty/absent archive is a normal survey result (exit 0).
+    """
+
+    async def _go() -> list[ArchiveEntry]:
+        db_path = _archive_db_path()
+        if not db_path.exists():
+            return []  # no archive yet -> nothing held, exit 0
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            return await store.query(ArchiveQuery(status="held", limit=limit))
+        finally:
+            await store.close()
+
+    held = _run(_go())
+
+    if json_output:
+        typer.echo(_json.dumps([_review_card_dict(e) for e in held], indent=2))
+        return
+
+    if not held:
+        console.print("[dim]No held items to review.[/dim]")
+        return
+
+    console.print(f"[bold]{len(held)} held item(s) for review[/bold]")
+    for e in held:
+        console.print(f"\n[bold cyan]{e.id[:8]}[/bold cyan]  {e.component}")
+        console.print(
+            f"  train={_fmt_float(e.train_score)}  holdout={_fmt_float(e.holdout_score)}  "
+            f"p={_fmt_float(e.p_value)}"
+        )
+        console.print("  diff:")
+        _render_diff(e.diff)
+        console.print(f"  adopt with: localharness autoresearch adopt {e.id[:8]}")
+
+
+@autoresearch_app.command("adopt")
+def autoresearch_adopt(
+    id: str = typer.Argument(..., help="8-char hex prefix or full UUID of a held item"),
+    json_output: bool = typer.Option(False, "--json", help="Emit the adoption result as JSON"),
+) -> None:
+    """Adopt a HELD item into LIVE config (overlay write + git commit in the MAIN repo).
+
+    A ``adoption_rejected`` row is kept as parent material and never re-offered (refused, exit 2);
+    an already-``adopted`` row is a no-op (exit 0). On a successful adopt the commit sha is printed
+    and the row's status flips to ``adopted``.
+    """
+    try:
+        from localharness.cli.components_cmd import _build_loader
+
+        cfg = _build_loader().load_harness()
+    except Exception as exc:
+        _err(json_output, f"config error: {exc}", exit_code=2)
+        return
+
+    try:
+        repo_root = _repo_root()
+    except Exception as exc:
+        _err(json_output, f"not inside a git repo: {exc}", exit_code=2)
+        return
+
+    async def _go():
+        db_path = _archive_db_path()
+        if not db_path.exists():
+            return ("missing", None, [])
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            entry, matches = await _resolve(store, id)
+            if entry is None:
+                return ("resolve", None, matches)
+            if entry.status == "adoption_rejected":
+                return ("rejected", entry, [])
+            if entry.status == "adopted":
+                return ("already", entry, [])
+            sha = await _adopt(entry.id, store=store, cfg=cfg, repo_root=repo_root)
+            await store.update_verdict(entry.id, status="adopted")
+            return ("adopted", entry, sha)
+        finally:
+            await store.close()
+
+    try:
+        outcome, entry, extra = _run(_go())
+    except AdoptionRefused as exc:
+        # The row is now adoption_rejected (set inside adopt); kept as parent material.
+        _err(json_output, f"adoption refused: {exc}", exit_code=2)
+        return
+
+    if outcome == "missing":
+        _err(json_output, f"no mutation matches id {id!r}", exit_code=2)
+        return
+    if outcome == "resolve":
+        matches = extra
+        if matches:  # ambiguous prefix
+            if json_output:
+                typer.echo(
+                    _json.dumps({"error": "ambiguous prefix", "matches": [m.id for m in matches]}),
+                    err=True,
+                )
+            else:
+                err_console.print(
+                    f"[bold red]Error:[/bold red] ambiguous prefix {id!r} matches {len(matches)}:"
+                )
+                for m in matches:
+                    err_console.print(f"  {m.id} {m.component} {m.status}")
+            raise typer.Exit(code=2)
+        _err(json_output, f"no mutation matches id {id!r}", exit_code=2)
+        return
+    if outcome == "rejected":
+        _err(
+            json_output,
+            f"{id!r} was already rejected; kept as parent material, never re-offered",
+            exit_code=2,
+        )
+        return
+    if outcome == "already":
+        if json_output:
+            typer.echo(_json.dumps({"id": entry.id, "status": "adopted", "sha": None}))
+        else:
+            console.print(f"[yellow]{entry.id[:8]} already adopted[/yellow] ({entry.component})")
+        raise typer.Exit(code=0)
+
+    # outcome == "adopted"
+    sha = extra
+    if json_output:
+        typer.echo(_json.dumps({"id": entry.id, "status": "adopted", "sha": sha}))
+    else:
+        console.print(f"[green]adopted[/green] {entry.id[:8]} {entry.component} -> {sha[:8]}")
+    raise typer.Exit(code=0)
