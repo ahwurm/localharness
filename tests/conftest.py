@@ -311,6 +311,30 @@ def seeded_archive():
     return _seed
 
 
+@pytest.fixture
+def seeded_inflight():
+    """Factory: write ONE in_flight ArchiveEntry (uuid id, single-component diff, null scores).
+
+    Usage: `pid = await seeded_inflight(store, component="agent.role",
+                before="old role", after="new role")`. Phase 17 experiment runner reads
+    this row, runs the gate, then update_verdict()s status + scores back onto it.
+    """
+    import json, time, uuid
+    from localharness.autoresearch.archive import ArchiveEntry
+
+    async def _seed(store, *, component="agent.role", before="old", after="new",
+                    diff=None, status="in_flight", id=None):
+        d = diff if diff is not None else json.dumps({"before": before, "after": after})
+        entry = ArchiveEntry(
+            id=id or str(uuid.uuid4()), parent_id=None, component=component, diff=d,
+            train_score=None, train_scores_per_fixture=None, holdout_score=None,
+            p_value=None, cost=None, ts=int(time.time()), approved_by=None, status=status)
+        written = await store.write(entry)
+        return written.id
+
+    return _seed
+
+
 # -----------------------------------------------------------------------------
 # Phase 16 proposer fixtures
 # -----------------------------------------------------------------------------
