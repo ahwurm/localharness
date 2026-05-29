@@ -22,9 +22,11 @@ import pytest
 try:
     from localharness.autoresearch.sampler import ParentSampler, BASELINE_ROOT
     from localharness.autoresearch.budget import BudgetController, WindowMeter
+    from localharness.autoresearch.adoption import adopt, AdoptionRefused
+    from localharness.autoresearch.loop import run_loop, RunSummary
 except ImportError:
     pytest.skip(
-        "autoresearch.sampler/budget not yet implemented (18-02/18-03)",
+        "autoresearch.sampler/budget/adoption/loop not yet implemented (18-02..18-05)",
         allow_module_level=True,
     )
 
@@ -250,3 +252,380 @@ async def test_only_proposer_tokens_metered(tmp_path, FakeClock):
     assert meter.window_exhausted() in (True, False)  # a pure read, never a mutation
     after = json.loads(state_path.read_text())["tokens_spent"]
     assert before == after == 120
+
+
+# ---------------------------------------------------------------------------
+# AUTO-04 — adoption (a git-committed config-overlay write reusing components-set)
+#
+# Adoption is the human-checkpoint live write: a held/promoted mutation's after-value
+# is merged into {repo}/.localharness/overrides.yaml, validated, atomically written, and
+# git-committed in the MAIN repo (never a worktree). It re-asserts the anti-reward-hacking
+# seal and emits ComponentMutated(layer="user", actor="orchestrator", actor_detail=pid).
+# These use the real tmp_git_repo fixture (Task 3) — overrides.yaml + git log are the asserts.
+# ---------------------------------------------------------------------------
+
+
+def _git_log_lines(repo):
+    """`git -C <repo> log --oneline` → list of commit lines (empty list if none/error)."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline"],
+        capture_output=True, text=True,
+    )
+    return [ln for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def _git_head_sha(repo):
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_adopt_commits_and_sets_status(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """adopt() writes the after-value into {repo}/.localharness/overrides.yaml, git-commits, flips status→adopted, returns a 40-char sha."""
+    import yaml
+
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-ok", component="agent.role", status="promoted",
+              diff=json.dumps({"before": "initial", "after": "evolved role"}))],
+    )
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    sha = await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+
+    overrides = tmp_git_repo / ".localharness" / "overrides.yaml"
+    data = yaml.safe_load(overrides.read_text())
+    assert data["agent"]["role"] == "evolved role"        # the after-value is now live
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits + 1  # exactly one new commit
+    assert (await archive_store.get(row.id)).status == "adopted"
+    assert isinstance(sha, str) and len(sha) == 40        # full git sha returned
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_thin_lift_holds(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                               FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """Gate exit 0 but lift < min_lift → status 'held', NO commit (loop-level decision)."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    # A gate that promotes (exit 0) but whose measured lift is below the floor.
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.5, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=0),  # promotes, but thin lift
+    )
+    assert (await archive_store.get(pid)).status == "held"
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # no commit on a held row
+    assert summary.held >= 1
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_inconclusive_holds(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                  FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """Gate exit 3 (inconclusive) → status 'held'."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=3),  # inconclusive
+    )
+    assert (await archive_store.get(pid)).status == "held"
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # inconclusive never commits
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_reject_no_commit(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """Gate exit 1 or 2 → no adoption, no commit; row keeps train_rejected/holdout_rejected."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=1),  # reject-train
+    )
+    status = (await archive_store.get(pid)).status
+    assert status in ("train_rejected", "holdout_rejected")  # the gate's own verdict, not adopted/held
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # a reject never commits
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_adopt_commits_main_repo_not_worktree(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """The adoption commit lands in repo_root HEAD (HEAD sha advances) — NOT in any lh-exp-* worktree."""
+    import subprocess
+
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-main", component="agent.role", status="promoted",
+              diff=json.dumps({"before": "initial", "after": "mainline"}))],
+    )
+    head_before = _git_head_sha(tmp_git_repo)
+    await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+    head_after = _git_head_sha(tmp_git_repo)
+    assert head_after != head_before  # MAIN repo HEAD advanced
+    # No lingering experiment worktree carries the commit (adoption is not a worktree write).
+    wt = subprocess.run(["git", "-C", str(tmp_git_repo), "worktree", "list"],
+                        capture_output=True, text=True)
+    assert "lh-exp-" not in wt.stdout
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_adopt_refuses_sealed_surface(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """adopt() on a sealed-prefix OR multi-component row raises AdoptionRefused, sets status 'adoption_rejected', NO commit.
+
+    Mirrors experiment.py _OFFREGISTRY_PREFIXES (grader/bench./holdout/success_criteria/scenario)
+    + _is_multi_component (a.b,c.d) — the seal is re-asserted at the live-write boundary.
+    """
+    [sealed] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-sealed", component="grader.weights", status="promoted",
+              diff=json.dumps({"before": "a", "after": "b"}))],
+    )
+    [multi] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-multi", component="agent.role,tools.bash.description", status="promoted",
+              diff=json.dumps({"before": "a", "after": "b"}))],
+    )
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    for row in (sealed, multi):
+        with pytest.raises(AdoptionRefused):
+            await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+        assert (await archive_store.get(row.id)).status == "adoption_rejected"
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # refused before any commit
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_adopt_refuses_invalid_config(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """An after-value that makes HarnessConfig.model_validate(merged) fail → no write, no commit."""
+    import yaml
+
+    # agent.stuck_detector.threshold has a numeric constraint; a non-coercible after fails validation.
+    [bad] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-bad", component="agents.main.stuck_detector.repeated_threshold", status="promoted",
+              diff=json.dumps({"before": 3, "after": "not-an-int"}))],
+    )
+    overrides = tmp_git_repo / ".localharness" / "overrides.yaml"
+    before_text = overrides.read_text()
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    with pytest.raises(Exception):  # AdoptionRefused or a validation error — either way no write
+        await adopt(bad.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+    assert overrides.read_text() == before_text  # overlay untouched on validation failure
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_rejected_not_reoffered(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """A row at status 'adoption_rejected' is excluded from review's held list AND adopt() refuses to re-adopt it."""
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-declined", component="agent.role", status="adoption_rejected",
+              diff=json.dumps({"before": "a", "after": "b"}))],
+    )
+    before_commits = len(_git_log_lines(tmp_git_repo))
+    with pytest.raises(AdoptionRefused):
+        await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # a declined row never re-commits
+    # And it is not surfaced as a held candidate for re-offer.
+    from localharness.autoresearch.archive import ArchiveQuery
+
+    held = await archive_store.query(ArchiveQuery(status="held", limit=100))
+    assert row.id not in {e.id for e in held}
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_adoption_emits_component_mutated(archive_store, seeded_archive, tmp_git_repo, components_home, bus):
+    """Adoption publishes ComponentMutated(layer='user', actor='orchestrator', actor_detail=<pid>) on the bus."""
+    from localharness.core.events import ComponentMutated
+
+    received = []
+
+    async def _handler(event):
+        received.append(event)
+
+    bus.subscribe(ComponentMutated, _handler)
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-evt", component="agent.role", status="promoted",
+              diff=json.dumps({"before": "initial", "after": "audited"}))],
+    )
+    await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo, bus=bus)
+    mutated = [e for e in received
+               if e.layer == "user" and e.actor == "orchestrator" and e.actor_detail == row.id]
+    assert len(mutated) >= 1  # the loop (not the gate) is recorded as the live-overlay author
+
+
+# ---------------------------------------------------------------------------
+# AUTO-01 — loop driver (sample → propose → run_experiment → adopt/hold → journal)
+#
+# The loop body is injected end-to-end: propose_fn returns a Proposal-shaped object,
+# experiment_fn (FakeExperimentFn) returns a gate exit code, clock/meter/rng/adopt_fn
+# are fakes. No Ollama, no real bench. These assert the loop's control flow + audit.
+# ---------------------------------------------------------------------------
+
+
+def _fake_propose(pid, *, component="agent.role"):
+    """An async propose_fn seam returning the seeded in_flight row's id (the loop then runs experiment_fn on it).
+
+    The real propose() returns a Proposal that gets archived to an in_flight row; the loop
+    reads that row id. The fake short-circuits to the already-seeded pid so experiment_fn/adopt
+    operate on a real archive row without invoking the LLM.
+    """
+    async def _fn(*args, **kwargs):
+        return pid
+
+    return _fn
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_proposal_timeout_kills_and_continues(archive_store, seeded_inflight, tmp_git_repo,
+                                                    components_home, FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """A slow experiment_fn (> proposal_timeout) is cancelled (asyncio.TimeoutError); row → train_rejected; loop continues to the next iteration."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=2, max_cost=None, epsilon=0.0, min_lift=0.0,
+        proposal_timeout=0.05, window_tokens=10_000,
+        clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=0, slow=True),  # sleeps past the timeout
+    )
+    # The hung experiment was killed and recorded as a training rejection (negative signal).
+    assert (await archive_store.get(pid)).status == "train_rejected"
+    assert summary.iterations >= 1  # loop did not deadlock; it continued
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_running_experiment_not_killed_by_total_cap(archive_store, seeded_inflight, tmp_git_repo,
+                                                          components_home, FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """A budget that trips its TOTAL cap mid-experiment must NOT cancel the in-flight experiment_fn — only the PRE-FLIGHT gate halts.
+
+    The running experiment_fn completes once before the loop halts (the cap is a start-gate, never a kill switch).
+    """
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    record = []
+    fn = FakeExperimentFn(exit_code=0, record=record)
+    # A budget that allows exactly one start, then the meter trips exhausted for the next pre-flight.
+    meter = FakeWindowMeter()
+    clock = FakeClock()
+
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=5, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=clock, meter=meter,
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=fn,
+        adopt_fn=_exhaust_after_first(meter),  # flips meter exhausted AFTER the first experiment completes
+    )
+    assert len(record) >= 1  # the in-flight experiment ran to completion before the halt
+    assert summary.iterations >= 1
+
+
+def _exhaust_after_first(meter):
+    """An adopt_fn seam that completes the adoption then trips the meter exhausted (simulating a mid-run total-cap breach)."""
+    async def _fn(*args, **kwargs):
+        meter._exhausted = True
+        return None
+
+    return _fn
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_journal_captures_loop_why(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                        FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """The per-run JSONL journal at .localharness/autoresearch/runs/<run_id>.jsonl captures the loop-level 'why'."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=0),
+    )
+    journal_path = Path(summary.journal_path)
+    assert journal_path.exists()
+    lines = [json.loads(ln) for ln in journal_path.read_text().splitlines() if ln.strip()]
+    blob = json.dumps(lines)
+    # The audit captures the explore/exploit decision + ε roll + lineage + gate verdict + budget snapshot.
+    for field in ("branch", "epsilon_roll", "parent_id", "component", "archive_id",
+                  "exit_code", "decision", "reason", "tokens_spent", "wallclock_elapsed"):
+        assert field in blob, f"journal missing {field!r}"
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_circuit_breaker_halts(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                    FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """An experiment_fn/propose_fn that fails every call → loop halts after N consecutive failures (≈ N iterations, not infinite)."""
+    async def _always_raises(*args, **kwargs):
+        raise RuntimeError("proposer down")
+
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=10_000, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_always_raises,
+        experiment_fn=FakeExperimentFn(exit_code=0),
+    )
+    # The breaker bounds the run: a handful of consecutive failures, NOT 10_000 iterations.
+    assert summary.iterations < 20
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_graceful_interrupt(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                  FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """Setting the loop's interrupt flag mid-run → it finishes the current experiment, writes a run-complete summary line, returns cleanly."""
+    import threading
+
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    interrupt = threading.Event()
+
+    async def _propose_then_interrupt(*args, **kwargs):
+        interrupt.set()  # request interrupt during the iteration
+        return pid
+
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=10_000, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_propose_then_interrupt,
+        experiment_fn=FakeExperimentFn(exit_code=0),
+        interrupt=interrupt,
+    )
+    # It finished the in-flight iteration then exited cleanly (not after 10_000 iterations).
+    assert summary.iterations >= 1
+    assert summary.iterations < 5
+    journal_path = Path(summary.journal_path)
+    assert "complete" in journal_path.read_text()  # a run-complete summary line was written
+
+
+@pytest.mark.xfail(strict=False)  # impl pending 18-04/18-05
+async def test_run_summary_fields(archive_store, seeded_inflight, tmp_git_repo, components_home,
+                                 FakeClock, FakeWindowMeter, FakeExperimentFn):
+    """The returned RunSummary carries iterations / adopted / held / rejected counts, time + window/tokens consumed, and the journal path."""
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=0),
+    )
+    assert isinstance(summary, RunSummary)
+    for attr in ("iterations", "adopted", "held", "rejected", "journal_path"):
+        assert hasattr(summary, attr), f"RunSummary missing {attr!r}"
+    assert isinstance(summary.iterations, int)
+    # time + window/token consumption are surfaced (exact attr names are the impl's; assert ≥1 present).
+    assert any(hasattr(summary, a) for a in ("wallclock_elapsed", "elapsed", "duration"))
+    assert any(hasattr(summary, a) for a in ("tokens_spent", "window_tokens_spent", "tokens"))
