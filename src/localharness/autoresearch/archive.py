@@ -92,6 +92,11 @@ _ENTRY_COLUMNS = (
     "holdout_score, p_value, cost, ts, approved_by, status"
 )
 
+# Sealed-slice invariant (Pitfall 3): holdout metrics must NEVER feed a Pareto
+# front. pareto_front_2d rejects any metric in this set at the query layer so the
+# seal is executable, not just documented. The holdout slice is sealed end-to-end.
+_SEALED_COLUMNS = frozenset({"holdout_score"})
+
 
 # ---------------------------------------------------------------------------
 # ArchiveStore
@@ -325,6 +330,53 @@ class ArchiveStore:
                     winners.add(e.id)
 
         return [e for e in cands if e.id in winners]
+
+    async def pareto_front_2d(
+        self,
+        metrics: list[str] | tuple[str, ...] = ("train_score", "cost"),
+    ) -> list[ArchiveEntry]:
+        """Global 2D non-dominated set: maximize ``train_score``, minimize ``cost``.
+
+        Eligible rows: status ``promoted`` AND ``p_value < 0.05`` AND both
+        ``train_score`` and ``cost`` present (sealed-slice + significance gate).
+
+        Sealing teeth (validated BEFORE any DB access):
+        1. Any metric in ``_SEALED_COLUMNS`` (``holdout_score``) raises ValueError —
+           the executable form of the sealed-slice invariant (Pitfall 3).
+        2. v1.1 supports only the (train_score, cost) pair; any other set raises
+           ValueError. This is the forward-compat hook for richer fronts.
+        """
+        # Tooth 1 + forward-compat gate — fail before touching the DB.
+        for m in metrics:
+            if m in _SEALED_COLUMNS:
+                raise ValueError(f"sealed column not allowed in Pareto metrics: {m}")
+        if set(metrics) != {"train_score", "cost"}:
+            raise ValueError(
+                f"pareto_front_2d v1.1 supports only (train_score, cost), got {metrics}"
+            )
+
+        rows = await self.query(ArchiveQuery(status="promoted", limit=10_000))
+        cands = [
+            e
+            for e in rows
+            if e.p_value is not None
+            and e.p_value < 0.05
+            and e.train_score is not None
+            and e.cost is not None
+        ]
+
+        def dominates(a: ArchiveEntry, b: ArchiveEntry) -> bool:
+            return (
+                a.train_score >= b.train_score
+                and a.cost <= b.cost
+                and (a.train_score > b.train_score or a.cost < b.cost)
+            )
+
+        return [
+            b
+            for b in cands
+            if not any(dominates(a, b) for a in cands if a.id != b.id)
+        ]
 
 
 # ---------------------------------------------------------------------------
