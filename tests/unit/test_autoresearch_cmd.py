@@ -189,7 +189,6 @@ async def test_show_json(components_home):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False, reason="autoresearch run wired in 18-06")
 def test_run_clean_halt_exit_zero(components_home, monkeypatch):
     """`autoresearch run` with injected fakes exits 0 even when the last gate verdict was a reject (run-code distinct from gate-code)."""
     import localharness.cli.autoresearch_cmd as cmd_mod
@@ -209,17 +208,22 @@ def test_run_clean_halt_exit_zero(components_home, monkeypatch):
     assert result.exit_code == 0, result.output  # a loop full of rejects is still exit 0
 
 
-@pytest.mark.xfail(strict=False, reason="autoresearch review/adopt wired in 18-06")
-async def test_review_and_adopt_held(components_home):
-    """`review` lists a held row (component, diff, lift, p-value, id); `adopt <8-char-prefix>` flips it to 'adopted'."""
+async def test_review_and_adopt_held(components_home, tmp_git_repo, monkeypatch):
+    """`review` lists a held row (component, diff, lift, p-value, id); `adopt <8-char-prefix>` flips it to 'adopted'.
+
+    The seeded row addresses a REAL registry path (``agent.role``) so the adoption seal +
+    ``HarnessConfig`` re-validation pass. ``adopt`` git-commits in the cwd's git toplevel, so
+    the test chdirs into the throwaway ``tmp_git_repo`` — NEVER the real project repo.
+    """
+    monkeypatch.chdir(tmp_git_repo)
     held_id = "held1234abcd5678"
     await _seed_rows(
         [
             dict(
                 id=held_id,
-                component="agents.main.system_prompt",
+                component="agent.role",
                 status="held",
-                diff=json.dumps({"before": "old prompt", "after": "new prompt"}),
+                diff=json.dumps({"before": "old role", "after": "new role"}),
                 train_score=0.82,
                 p_value=0.01,
             )
@@ -228,7 +232,7 @@ async def test_review_and_adopt_held(components_home):
     review = runner.invoke(app, ["autoresearch", "review"])
     assert review.exit_code == 0, review.output
     assert held_id[:8] in review.output
-    assert "agents.main.system_prompt" in review.output
+    assert "agent.role" in review.output
 
     adopt_res = runner.invoke(app, ["autoresearch", "adopt", held_id[:8]])
     assert adopt_res.exit_code == 0, adopt_res.output
