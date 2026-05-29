@@ -270,6 +270,55 @@ class ArchiveStore:
         )
         await self._db.commit()
 
+    async def update_verdict(
+        self,
+        mutation_id: str,
+        *,
+        status: str,
+        train_score: float | None = None,
+        train_scores_per_fixture: dict[str, float] | None = None,
+        holdout_score: float | None = None,
+        p_value: float | None = None,
+        cost: float | None = None,
+    ) -> "ArchiveEntry":
+        """UPDATE a row's verdict (status + scores) in place, then re-publish MutationArchived.
+
+        The Phase 17 experiment runner's write-back: in_flight → {promoted | train_rejected |
+        holdout_rejected}. Only the verdict columns are touched; component/diff/parent_id/ts are
+        immutable. train_scores_per_fixture MUST carry TRAIN scenario_name keys only (sealed-slice
+        contract — pareto_front_per_fixture is holdout-blind; never pass holdout fixture rates here).
+        Re-publishes MutationArchived AFTER commit so the event stream and the SQLite projection agree.
+        """
+        assert self._db is not None
+        tspf = (
+            json.dumps(train_scores_per_fixture)
+            if train_scores_per_fixture is not None
+            else None
+        )
+        await self._db.execute(
+            "UPDATE mutations SET status=?, train_score=?, train_scores_per_fixture=?, "
+            "holdout_score=?, p_value=?, cost=? WHERE id=?",
+            (status, train_score, tspf, holdout_score, p_value, cost, mutation_id),
+        )
+        await self._db.commit()
+        stored = await self.get(mutation_id)
+        assert stored is not None  # caller guarantees the row exists (resolved before run)
+        if self._bus is not None:
+            from localharness.core.events import MutationArchived
+            await self._bus.publish(
+                MutationArchived(
+                    mutation_id=stored.id,
+                    component=stored.component,
+                    status=stored.status,
+                    train_score=stored.train_score,
+                    holdout_score=stored.holdout_score,
+                    p_value=stored.p_value,
+                    cost=stored.cost,
+                    mutation_parent_id=stored.parent_id,
+                )
+            )
+        return stored
+
     async def lineage(self, id: str) -> list[ArchiveEntry]:
         """Walk parent_id to root. Returns chain child→...→root (git-log-oneline order)."""
         assert self._db is not None
