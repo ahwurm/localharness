@@ -94,6 +94,39 @@ def welch_ab_test(baseline: list[float], head: list[float], alpha: float = 0.05)
     return (float(t_stat), float(p_value), regressed)
 
 
+def welch_improvement(baseline: list[float], head: list[float], alpha: float = 0.05) -> tuple[float, float, bool]:
+    """HIGH-is-BETTER one-sided Welch (TRAIN gate): is `head` significantly GREATER than `baseline`?
+
+    success_rate is HIGH-is-BETTER, so a genuine improvement must read as a PASS — the opposite
+    of welch_ab_test (HIGH-is-WORSE). alternative="greater" tests mean(head) > mean(baseline).
+    Returns (t_stat, p_value, improved); improved = p_value < alpha. Insufficient data
+    (either arm n<2) returns (0.0, 1.0, False) so a degenerate slice never falsely "improves"
+    (the experiment runner maps that to inconclusive, not promote).
+
+    EXP-03 locks "Welch" (unpaired, equal_var=False). baseline+proposal are naturally paired by
+    fixture, so a paired test / bootstrap on the per-fixture deltas would have more power — a
+    documented future stat-upgrade, NOT substituted here.
+    """
+    if len(baseline) < 2 or len(head) < 2:
+        return (0.0, 1.0, False)
+    t_stat, p_value = stats.ttest_ind(head, baseline, equal_var=False, alternative="greater")
+    return (float(t_stat), float(p_value), bool(p_value < alpha))
+
+
+def welch_regression(baseline: list[float], head: list[float], alpha: float) -> bool:
+    """One-sided non-regression Welch (HOLDOUT gate): is `head` significantly WORSE (lower)?
+
+    alternative="greater" with (baseline, head) tests mean(baseline) > mean(head), i.e. the
+    proposal is WORSE. Returns True iff a regression is detected at the (Bonferroni-corrected)
+    alpha. NOT-significantly-worse ⇒ False ⇒ the holdout gate passes. Insufficient data
+    (either arm n<2) returns False (never falsely flag a regression).
+    """
+    if len(baseline) < 2 or len(head) < 2:
+        return False
+    _t, p_value = stats.ttest_ind(baseline, head, equal_var=False, alternative="greater")
+    return bool(p_value < alpha)
+
+
 # -------------------------------------------------------------------------
 # Helper: read a field from either an event-like object or a dict
 # -------------------------------------------------------------------------
