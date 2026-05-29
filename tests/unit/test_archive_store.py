@@ -238,3 +238,25 @@ async def test_update_verdict_preserves_integrity(archive_store, seeded_archive)
     await seeded_archive(archive_store, [dict(id="uv-int", status="in_flight")])
     await archive_store.update_verdict("uv-int", status="promoted", train_score=0.9, p_value=0.01)
     assert await archive_store.integrity_check() == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 Wave 0 — new loop statuses (adopted / held / adoption_rejected)
+#
+# status is a free-text TEXT column (no CHECK constraint, no migration), so the
+# orchestrator's three new lifecycle statuses round-trip immediately. This test is
+# NOT xfail: it must pass the moment it lands (the schema already supports it).
+# ---------------------------------------------------------------------------
+
+
+async def test_new_loop_statuses(archive_store, seeded_archive):
+    """The three Phase-18 statuses adopted/held/adoption_rejected each round-trip via update_verdict (no migration error)."""
+    await seeded_archive(archive_store, [dict(id="loop-status", status="promoted")])
+
+    for status in ("adopted", "held", "adoption_rejected"):
+        returned = await archive_store.update_verdict("loop-status", status=status)
+        assert returned.status == status
+        refetched = await archive_store.get("loop-status")
+        assert refetched.status == status  # the literal persists across a fresh read
+
+    assert await archive_store.integrity_check() == []  # no migration corruption

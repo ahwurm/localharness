@@ -176,3 +176,65 @@ async def test_show_json(components_home):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert len(payload["lineage"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 Wave 0 — `autoresearch run` / `review` / `adopt` CLI (impl lands 18-06)
+#
+# The run command drives loop.run_loop autonomously; its process exit code is the
+# RUN code (clean halt = 0), DISTINCT from the gate verdict code (a reject inside the
+# loop is not a non-zero run). review/adopt are the human-checkpoint surface over held rows.
+# Tests monkeypatch the module-level run_loop seam (raising=False until 18-05 wires it),
+# mirroring how test_propose_cmd patches the proposer's module-level LLMClient.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=False, reason="autoresearch run wired in 18-06")
+def test_run_clean_halt_exit_zero(components_home, monkeypatch):
+    """`autoresearch run` with injected fakes exits 0 even when the last gate verdict was a reject (run-code distinct from gate-code)."""
+    import localharness.cli.autoresearch_cmd as cmd_mod
+
+    class _Summary:
+        iterations = 3
+        adopted = 0
+        held = 0
+        rejected = 3  # every iteration rejected — still a CLEAN run halt
+        journal_path = str(_archive_db_path().parent / "run.jsonl")
+
+    async def _fake_run_loop(*args, **kwargs):
+        return _Summary()
+
+    monkeypatch.setattr(cmd_mod, "run_loop", _fake_run_loop, raising=False)
+    result = runner.invoke(app, ["autoresearch", "run", "--budget", "1", "--max-iterations", "3"])
+    assert result.exit_code == 0, result.output  # a loop full of rejects is still exit 0
+
+
+@pytest.mark.xfail(strict=False, reason="autoresearch review/adopt wired in 18-06")
+async def test_review_and_adopt_held(components_home):
+    """`review` lists a held row (component, diff, lift, p-value, id); `adopt <8-char-prefix>` flips it to 'adopted'."""
+    held_id = "held1234abcd5678"
+    await _seed_rows(
+        [
+            dict(
+                id=held_id,
+                component="agents.main.system_prompt",
+                status="held",
+                diff=json.dumps({"before": "old prompt", "after": "new prompt"}),
+                train_score=0.82,
+                p_value=0.01,
+            )
+        ]
+    )
+    review = runner.invoke(app, ["autoresearch", "review"])
+    assert review.exit_code == 0, review.output
+    assert held_id[:8] in review.output
+    assert "agents.main.system_prompt" in review.output
+
+    adopt_res = runner.invoke(app, ["autoresearch", "adopt", held_id[:8]])
+    assert adopt_res.exit_code == 0, adopt_res.output
+
+    store = ArchiveStore(_archive_db_path())
+    await store.open()
+    got = await store.get(held_id)
+    await store.close()
+    assert got.status == "adopted"
