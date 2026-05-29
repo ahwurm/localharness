@@ -237,7 +237,70 @@ def _pair_vectors(base_map, head_map):
 
 
 # ---------------------------------------------------------------------------
-# run_experiment (Task 3 implements the gate body)
+# run_experiment helpers
+# ---------------------------------------------------------------------------
+
+
+async def _maybe_await(value):
+    """Support both an async real run_slice and a sync injected fake (tests use a plain dict)."""
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+def _estimate_cost(*maps: dict[str, float]) -> float:
+    """Cost proxy (Open Q #5): recorded, NOT gated (efficiency-as-objective deferred).
+
+    Summed fixture-runs across both arms of both stages — a simple, monotone, defensible
+    number filled into the archive. The injected fakes don't surface tokens, so this is a
+    count, not a token sum; the tests assert cost is a number, not its exact value.
+    """
+    return float(sum(len(m) for m in maps if m))
+
+
+def _build_default_run_slice(model, factory, *, annotation=None, component=None, after=None):
+    """The real bench-backed slice runner used when the caller injects no run_slice.
+
+    Closure signature matches the injected fake: ``run_slice(worktree, *, slice, with_overlay)``.
+    The proposal arm (with_overlay=True) runs with the experiment overlay materialized in the
+    worktree; the baseline arm (with_overlay=False) WITHOUT it. CONTEXT: the baseline is a FRESH
+    re-run, never cached — each arm re-discovers + re-runs the worktree corpus from scratch.
+    """
+    from localharness.bench.orchestrator import (
+        _discover_scenarios,
+        _filter_scenarios_by_slice,
+        _synthesize_default_entry,
+        build_llm_client_factory,
+    )
+
+    async def _run_slice(worktree, *, slice, with_overlay):
+        corpus = Path(worktree) / "bench" / "scenarios"
+        results_root = Path(worktree) / "bench" / "results"
+        scenarios = _filter_scenarios_by_slice(_discover_scenarios(corpus), slice)
+        if with_overlay and annotation is not None and component is not None:
+            # the experiment overlay is already materialized into the worktree; the bench's
+            # own ConfigLoader (rooted at the worktree) reads it (Pattern 3 Option B).
+            pass
+        client_factory = factory or build_llm_client_factory(_synthesize_default_entry())
+        return await slice_success_by_fixture(
+            scenarios, model, results_root, client_factory
+        )
+
+    return _run_slice
+
+
+def _resolve_store(store, cfg):
+    """Open a default ArchiveStore at the LOCALHARNESS_HOME archive.db if none injected."""
+    if store is not None:
+        return store, False
+    from localharness.autoresearch.archive import ArchiveStore
+    from localharness.cli.autoresearch_cmd import _archive_db_path
+
+    return ArchiveStore(_archive_db_path()), True
+
+
+# ---------------------------------------------------------------------------
+# run_experiment — the two-stage promotion gate (EXP-01..05)
 # ---------------------------------------------------------------------------
 
 
@@ -254,14 +317,121 @@ async def run_experiment(
 ) -> int:
     """Run the two-stage promotion gate. ALWAYS returns an int exit code.
 
-    Structural refusals are caught here and returned as their exit code (>=4) so the
-    caller's contract is simply "an int". Task 3 wires the gate body.
+    Structural refusals are caught here and returned as their exit code (>=4) so the caller's
+    contract is simply "an int". Flow: load+validate → throwaway worktree → materialize the
+    experiment overlay + emit the audit event → TRAIN Welch improvement (p<0.05) → conditional
+    HOLDOUT Bonferroni-corrected non-regression (alpha=0.05/trials) → verdict write-back.
+    Promote is archive-ONLY (no live-config write; baseline adoption is Phase 18).
     """
     if cfg is None:
         from localharness.cli.components_cmd import _build_loader
         cfg = _build_loader().load_harness()
+
+    store, _opened = _resolve_store(store, cfg)
+    if _opened:
+        await store.open()
     try:
-        await _load_and_validate(store, proposal_id, cfg)
-    except ExperimentRefusal as exc:
-        return exc.exit_code
-    raise NotImplementedError  # Task 3
+        # 1. Structural validation (refusals return >=4 BEFORE any worktree/bench).
+        try:
+            entry, component, after = await _load_and_validate(store, proposal_id, cfg)
+        except ExperimentRefusal as exc:
+            return exc.exit_code
+
+        # Resolve the typed annotation for overlay coercion (off-registry already refused).
+        cat_entry = build_catalogue(cfg).get(component)
+        annotation = cat_entry.annotation if cat_entry is not None else None
+
+        # 2. Default real run_slice if the caller injected none.
+        if run_slice is None:
+            model = cfg.provider.default_model
+            run_slice = _build_default_run_slice(
+                model, None, annotation=annotation, component=component, after=after
+            )
+
+        # 3. One throwaway worktree for the whole run.
+        root = Path(repo_root) if repo_root is not None else _git_root()
+        with experiment_worktree(root, keep=keep) as wt:
+            # 3a. Materialize the mutation INTO the worktree (cannot leak to real ~/.localharness).
+            write_experiment_overlay(wt, component, after, annotation=annotation)
+
+            # 3b. Audit event for the proposal arm.
+            await _emit_audit(bus, cfg, component, entry, after, proposal_id)
+
+            # 3c. TRAIN stage — fresh baseline + proposal (CONTEXT: baseline is NOT cached).
+            base_train = await _maybe_await(run_slice(wt, slice="train", with_overlay=False))
+            head_train = await _maybe_await(run_slice(wt, slice="train", with_overlay=True))
+            names, base_vec, head_vec = _pair_vectors(base_train, head_train)
+            head_map = head_train  # TRAIN per-fixture map (TRAIN keys ONLY — sealed-slice).
+
+            # Inconclusive guard (Pitfall 5): too few paired fixtures to support a Welch call.
+            if len(names) < 2:
+                await store.update_verdict(proposal_id, status="in_flight")
+                return EXIT_INCONCLUSIVE
+
+            _t, p, improved = welch_improvement(base_vec, head_vec, alpha=0.05)
+            train_cost = _estimate_cost(base_train, head_train)
+
+            if not improved:
+                await store.update_verdict(
+                    proposal_id, status="train_rejected",
+                    train_score=statistics.mean(head_vec),
+                    train_scores_per_fixture=head_map, p_value=p, cost=train_cost,
+                )
+                return EXIT_REJECT_TRAIN
+
+            # 3d. HOLDOUT stage — reached ONLY on a train pass (conditional; never on reject).
+            base_hold = await _maybe_await(run_slice(wt, slice="holdout", with_overlay=False))
+            head_hold = await _maybe_await(run_slice(wt, slice="holdout", with_overlay=True))
+            hnames, bh_vec, hh_vec = _pair_vectors(base_hold, head_hold)
+            alpha_corr = 0.05 / trials  # Bonferroni multi-TRIAL (NOT multi-metric).
+            regressed = welch_regression(bh_vec, hh_vec, alpha=alpha_corr)
+            holdout_score = statistics.mean(hh_vec) if hh_vec else None
+            total_cost = _estimate_cost(base_train, head_train, base_hold, head_hold)
+
+            if regressed:
+                await store.update_verdict(
+                    proposal_id, status="holdout_rejected",
+                    train_score=statistics.mean(head_vec),
+                    train_scores_per_fixture=head_map,  # TRAIN-only; holdout never enters the blob
+                    holdout_score=holdout_score, p_value=p, cost=total_cost,
+                )
+                return EXIT_REJECT_HOLDOUT
+
+            # 3e. PROMOTE — archive-ONLY. NO atomic_write_overlay on the user overlay here.
+            await store.update_verdict(
+                proposal_id, status="promoted",
+                train_score=statistics.mean(head_vec),
+                train_scores_per_fixture=head_map,  # TRAIN scenario names only (sealed-slice)
+                holdout_score=holdout_score, p_value=p, cost=total_cost,
+            )
+            return EXIT_PROMOTE
+    finally:
+        if _opened:
+            await store.close()
+
+
+async def _emit_audit(bus, cfg, component, entry, after, proposal_id) -> None:
+    """Publish ComponentMutated(layer='experiment', actor='experiment', actor_detail=pid).
+
+    Uses the injected bus if provided (tests subscribe to it); otherwise builds one pointed at
+    cfg.org.audit_log_path (mirrors components_cmd's audit path).
+    """
+    from localharness.core.events import ComponentMutated
+
+    target_bus = bus
+    if target_bus is None:
+        from localharness.core.bus import EventBus
+        audit_path = getattr(getattr(cfg, "org", None), "audit_log_path", None)
+        target_bus = EventBus(persist_path=Path(audit_path).expanduser() if audit_path else None)
+
+    before = entry.diff_decoded.get("before")
+    await target_bus.publish(
+        ComponentMutated(
+            path=component,
+            before_value=before,
+            after_value=after,
+            layer="experiment",
+            actor="experiment",
+            actor_detail=proposal_id,
+        )
+    )

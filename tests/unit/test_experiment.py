@@ -190,9 +190,12 @@ async def test_bonferroni_alpha_scaling(archive_store, seeded_inflight):
     non-regression p sits BETWEEN 0.0125 and 0.05 — i.e. significant at the looser α only.
     Shrinking α via --trials must flip reject-holdout → promote.
     """
-    # baseline ~0.70, proposal ~0.58 per fixture: a small, consistent drop.
-    hb = {f"h{i}": v for i, v in enumerate([0.72, 0.70, 0.68, 0.71, 0.69, 0.70, 0.71, 0.69])}
-    hh = {f"h{i}": v for i, v in enumerate([0.60, 0.58, 0.56, 0.59, 0.57, 0.58, 0.59, 0.57])}
+    # baseline mean ~0.68, proposal mean ~0.56 per fixture: a small drop with realistic
+    # per-fixture spread so the one-sided non-regression p lands ~0.032 (between 0.0125
+    # and 0.05). Near-constant vectors yield catastrophic-cancellation t-stats (p≈1e-11),
+    # which cannot satisfy this test's own "p between 0.0125 and 0.05" premise.
+    hb = {f"h{i}": v for i, v in enumerate([0.75, 0.60, 0.80, 0.55, 0.70, 0.65, 0.85, 0.50])}
+    hh = {f"h{i}": v for i, v in enumerate([0.58, 0.52, 0.62, 0.48, 0.66, 0.44, 0.72, 0.48])}
     common = dict(train_base=_IMPROVED_TRAIN_BASE, train_head=_IMPROVED_TRAIN_HEAD,
                   holdout_base=hb, holdout_head=hh)
 
