@@ -10,6 +10,7 @@ import json
 import re as _re
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -261,3 +262,38 @@ def test_audit_log_append_only(components_home):
     events = _read_audit(components_home)
     mutations = [e for e in events if e.get("event_type") == "ComponentMutated"]
     assert len(mutations) == 3, f"Expected 3 ComponentMutated lines, got {len(mutations)}"
+
+
+# ------------------------------------------------------------------ #
+# PROP-02: proposer.* path enumeration (Phase 16 Wave 0 RED stub)
+# ------------------------------------------------------------------ #
+
+try:
+    from localharness.config.models import ProposerConfig  # noqa: F401
+
+    _PC_READY = True
+except Exception:
+    _PC_READY = False
+
+
+@pytest.mark.xfail(strict=False)
+def test_proposer_paths_enumerated(components_home):
+    """PROP-02: with a proposer block attached, `components list` surfaces `proposer.*` paths.
+
+    Proves the registry walker auto-addresses ProposerConfig with zero extra registry code.
+    """
+    if not _PC_READY:
+        pytest.xfail("ProposerConfig not yet implemented")
+    _write_project_yaml(
+        components_home,
+        proposer={
+            "base_url": "http://localhost:11434/v1",
+            "model": "frontier-strong:latest",
+        },
+        org={"audit_log_path": str(components_home / "audit.jsonl")},
+    )
+    result = runner.invoke(app, ["components", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    paths = [row["path"] for row in payload]
+    assert any(p.startswith("proposer.") for p in paths), f"no proposer.* paths in {paths[:15]}..."

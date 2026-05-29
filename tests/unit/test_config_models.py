@@ -189,3 +189,56 @@ def test_stuck_detector_extra_forbid():
     from localharness.config.models import AgentConfig
     with pytest.raises(ValidationError):
         AgentConfig(name="t", role="t", stuck_detector={"unknownField": 5})
+
+
+# -----------------------------------------------------------------------------
+# PROP-02 — ProposerConfig (Phase 16 Wave 0 RED stubs)
+# -----------------------------------------------------------------------------
+
+try:
+    from localharness.config.models import ProposerConfig  # noqa: F401
+    _PC_READY = True
+except Exception:
+    _PC_READY = False
+
+
+def _harness_dict(**overrides) -> dict:
+    """Minimal valid HarnessConfig dict; overrides merge at the top level."""
+    data = {
+        "version": "1",
+        "provider": {
+            "provider_type": "ollama",
+            "base_url": "http://localhost:11434/v1",
+            "default_model": "gpt-oss:120b",
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.xfail(strict=False)
+def test_proposer_model_must_differ():
+    """PROP-02: proposer.model == provider.default_model → ValidationError (distinct-model rule)."""
+    if not _PC_READY:
+        pytest.xfail("ProposerConfig not yet implemented")
+    from localharness.config.models import HarnessConfig
+
+    bad = _harness_dict(
+        proposer={
+            "base_url": "http://localhost:11434/v1",
+            "model": "gpt-oss:120b",  # same as provider.default_model
+        }
+    )
+    with pytest.raises(ValidationError):
+        HarnessConfig.model_validate(bad)
+
+
+@pytest.mark.xfail(strict=False)
+def test_proposer_config_optional():
+    """PROP-02: a HarnessConfig with NO proposer block validates (proposer is opt-in)."""
+    if not _PC_READY:
+        pytest.xfail("ProposerConfig not yet implemented")
+    from localharness.config.models import HarnessConfig
+
+    cfg = HarnessConfig.model_validate(_harness_dict())
+    assert getattr(cfg, "proposer", None) is None
