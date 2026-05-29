@@ -178,3 +178,66 @@ async def test_approval_appends_history(archive_store, seeded_archive):
     ) as cur:
         (count,) = await cur.fetchone()
     assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 Wave 0 — update_verdict (impl lands 17-02)
+#
+# The experiment runner is the metric writer: it flips an in_flight row to
+# promoted/train_rejected/holdout_rejected and fills train/holdout/p/cost on the
+# rows the `propose --archive` seam created with null scores.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
+async def test_update_verdict(archive_store, seeded_archive):
+    """update_verdict flips status + fills every score; returned entry AND a fresh get() agree."""
+    await seeded_archive(archive_store, [dict(id="uv-1", status="in_flight")])
+    returned = await archive_store.update_verdict(
+        "uv-1",
+        status="promoted",
+        train_score=0.82,
+        train_scores_per_fixture={"01_pure_qa": 0.9},
+        holdout_score=0.80,
+        p_value=0.01,
+        cost=1234.0,
+    )
+    refetched = await archive_store.get("uv-1")
+    for got in (returned, refetched):
+        assert got.status == "promoted"
+        assert got.train_score == 0.82
+        assert got.train_scores_per_fixture == {"01_pure_qa": 0.9}
+        assert got.holdout_score == 0.80
+        assert got.p_value == 0.01
+        assert got.cost == 1234.0
+
+
+@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
+async def test_update_verdict_republishes_event(tmp_path, bus, seeded_archive):
+    """update_verdict re-publishes MutationArchived with the NEW status + filled train_score."""
+    from localharness.core.events import MutationArchived
+
+    received = []
+
+    async def _handler(event):
+        received.append(event)
+
+    bus.subscribe(MutationArchived, _handler)
+    store = ArchiveStore(tmp_path / ".localharness" / "archive.db", bus=bus)
+    await store.open()
+    await seeded_archive(store, [dict(id="uv-evt", status="in_flight")])
+    received.clear()  # drop the write() event; we assert on the update re-publish only
+    await store.update_verdict("uv-evt", status="promoted", train_score=0.77, p_value=0.02)
+    promoted = [e for e in received if e.status == "promoted"]
+    assert len(promoted) == 1
+    assert promoted[0].mutation_id == "uv-evt"
+    assert promoted[0].train_score == 0.77
+    await store.close()
+
+
+@pytest.mark.xfail(strict=False, reason="update_verdict lands in 17-02")
+async def test_update_verdict_preserves_integrity(archive_store, seeded_archive):
+    """integrity_check stays clean ([]) after an update_verdict write-back."""
+    await seeded_archive(archive_store, [dict(id="uv-int", status="in_flight")])
+    await archive_store.update_verdict("uv-int", status="promoted", train_score=0.9, p_value=0.01)
+    assert await archive_store.integrity_check() == []

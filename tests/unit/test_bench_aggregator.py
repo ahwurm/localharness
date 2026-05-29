@@ -125,3 +125,59 @@ def test_should_stop_not_converged(fake_completed_runs):
     stop, reason = should_stop(runs, tolerance=0.10, min_runs=3, max_runs=20)
     assert stop is False
     assert "not_converged" in reason
+
+
+# --- Phase 17: direction-aware Welch siblings (impl lands 17-02) ---
+# welch_ab_test is HIGH-is-WORSE (latency). The promotion gate scores SUCCESS RATE,
+# where HIGH-is-BETTER, so 17-02 ships one-sided siblings:
+#   welch_improvement(baseline, head)  -> (t, p, improved)  improved iff head > baseline at p<alpha
+#   welch_regression(baseline, head, alpha) -> bool          True iff head < baseline at p<alpha
+# Both share welch_ab_test's n<2 insufficient-data guard: never flag.
+
+
+@pytest.mark.xfail(strict=False, reason="welch_improvement/welch_regression land in 17-02")
+def test_welch_improvement_detects_higher():
+    """welch_improvement: head clearly GREATER than baseline → improved=True, p<0.05 (one-sided)."""
+    from localharness.bench.aggregator import welch_improvement
+    t, p, improved = welch_improvement(
+        baseline=[0.2, 0.3, 0.2, 0.25, 0.3], head=[0.8, 0.9, 0.85, 0.8, 0.9]
+    )
+    assert improved is True
+    assert p < 0.05
+
+
+@pytest.mark.xfail(strict=False, reason="welch_improvement/welch_regression land in 17-02")
+def test_welch_improvement_no_change_not_flagged():
+    """welch_improvement: equal-ish arms → improved=False, p>=0.05 (no false promote)."""
+    from localharness.bench.aggregator import welch_improvement
+    _, p, improved = welch_improvement(
+        baseline=[0.5, 0.55, 0.5, 0.5, 0.55], head=[0.5, 0.55, 0.5, 0.5, 0.55]
+    )
+    assert improved is False
+    assert p >= 0.05
+
+
+@pytest.mark.xfail(strict=False, reason="welch_improvement/welch_regression land in 17-02")
+def test_welch_improvement_insufficient_data():
+    """welch_improvement: n<2 guard returns exactly (0.0, 1.0, False) — never flag."""
+    from localharness.bench.aggregator import welch_improvement
+    assert welch_improvement([0.5], [0.9]) == (0.0, 1.0, False)
+
+
+@pytest.mark.xfail(strict=False, reason="welch_improvement/welch_regression land in 17-02")
+def test_welch_regression_detects_worse():
+    """welch_regression: head significantly LOWER than baseline → True (regressed)."""
+    from localharness.bench.aggregator import welch_regression
+    assert welch_regression(
+        baseline=[0.8, 0.9, 0.85, 0.8, 0.9], head=[0.2, 0.3, 0.2, 0.25, 0.3], alpha=0.05
+    ) is True
+
+
+@pytest.mark.xfail(strict=False, reason="welch_improvement/welch_regression land in 17-02")
+def test_welch_regression_nonregressing_passes():
+    """welch_regression: equal arms → False; n<2 guard → False (never flag a regression)."""
+    from localharness.bench.aggregator import welch_regression
+    assert welch_regression(
+        baseline=[0.5, 0.55, 0.5, 0.5, 0.55], head=[0.5, 0.55, 0.5, 0.5, 0.55], alpha=0.05
+    ) is False
+    assert welch_regression([0.5], [0.9], 0.05) is False
