@@ -163,23 +163,121 @@ class ArchiveStore:
         return errors
 
     # ------------------------------------------------------------------
-    # CRUD  (filled in Task 2)
+    # CRUD
     # ------------------------------------------------------------------
 
     async def write(self, entry: ArchiveEntry) -> ArchiveEntry:
-        raise NotImplementedError
+        """INSERT the mutation, re-read it, then publish MutationArchived (after commit)."""
+        assert self._db is not None
+        tspf_json = (
+            json.dumps(entry.train_scores_per_fixture)
+            if entry.train_scores_per_fixture is not None
+            else None
+        )
+        ts = entry.ts if entry.ts else int(time.time())
+        await self._db.execute(
+            """
+            INSERT INTO mutations
+                (id, parent_id, component, diff, train_score, train_scores_per_fixture,
+                 holdout_score, p_value, cost, ts, approved_by, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry.id, entry.parent_id, entry.component, entry.diff,
+                entry.train_score, tspf_json, entry.holdout_score, entry.p_value,
+                entry.cost, ts, entry.approved_by, entry.status,
+            ),
+        )
+        await self._db.commit()
+        stored = await self.get(entry.id)
+        assert stored is not None  # just inserted
+
+        # Publish AFTER commit so the projection (DB) and the event agree.
+        if self._bus is not None:
+            from localharness.core.events import MutationArchived
+            event = MutationArchived(
+                mutation_id=stored.id,
+                component=stored.component,
+                status=stored.status,
+                train_score=stored.train_score,
+                holdout_score=stored.holdout_score,
+                p_value=stored.p_value,
+                cost=stored.cost,
+                mutation_parent_id=stored.parent_id,
+            )
+            await self._bus.publish(event)  # never set seq; publish assigns it
+
+        return stored
 
     async def get(self, id: str) -> ArchiveEntry | None:
-        raise NotImplementedError
+        """Get a single mutation by full id. Returns None if not found."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {_ENTRY_COLUMNS} FROM mutations WHERE id = ?",
+            (id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_entry(row)
 
     async def query(self, q: ArchiveQuery) -> list[ArchiveEntry]:
-        raise NotImplementedError
+        """Query mutations with optional component/status/since_ts filters, ts DESC."""
+        assert self._db is not None
+        clauses: list[str] = []
+        params: list[object] = []
+        if q.component is not None:
+            clauses.append("component = ?")
+            params.append(q.component)
+        if q.status is not None:
+            clauses.append("status = ?")
+            params.append(q.status)
+        if q.since_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(q.since_ts)
 
-    async def add_approval(self, mutation_id: str, approver: str, comment: str | None = None) -> None:
-        raise NotImplementedError
+        sql = f"SELECT {_ENTRY_COLUMNS} FROM mutations"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(q.limit)
+
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_entry(r) for r in rows]
+
+    async def add_approval(
+        self, mutation_id: str, approver: str, comment: str | None = None
+    ) -> None:
+        """Append to mutation_approvals + update mutations.approved_by in ONE transaction.
+
+        Append-only: prior approval rows are never deleted or overwritten.
+        """
+        assert self._db is not None
+        now = int(time.time())
+        await self._db.execute(
+            "INSERT INTO mutation_approvals (mutation_id, approver, ts, comment) VALUES (?, ?, ?, ?)",
+            (mutation_id, approver, now, comment),
+        )
+        await self._db.execute(
+            "UPDATE mutations SET approved_by = ? WHERE id = ?",
+            (approver, mutation_id),
+        )
+        await self._db.commit()
 
     async def lineage(self, id: str) -> list[ArchiveEntry]:
-        raise NotImplementedError
+        """Walk parent_id to root. Returns chain child→...→root (git-log-oneline order)."""
+        assert self._db is not None
+        chain: list[ArchiveEntry] = []
+        visited: set[str] = set()
+        current = await self.get(id)
+        while current is not None and current.id not in visited:
+            visited.add(current.id)
+            chain.append(current)
+            if current.parent_id is None:
+                break
+            current = await self.get(current.parent_id)
+        return chain
 
 
 # ---------------------------------------------------------------------------
