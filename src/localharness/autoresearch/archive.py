@@ -270,6 +270,16 @@ class ArchiveStore:
         )
         await self._db.commit()
 
+    # status values (free-text TEXT NOT NULL — SCHEMA_V1_SQL has NO CHECK constraint,
+    # NO enum, so these round-trip with NO migration and CURRENT_SCHEMA_VERSION stays 1):
+    #   in_flight         — proposal archived, gate not yet run                      (Phases 15-16)
+    #   train_rejected    — failed the TRAIN Welch improvement gate                  (Phase 17)
+    #   holdout_rejected  — passed TRAIN but regressed on HOLDOUT (Bonferroni)       (Phase 17)
+    #   promoted          — passed both gates; archive-only, NOT yet live            (Phase 17)
+    #   superseded        — an older row eclipsed by a newer adoption                (Phases 15-17)
+    #   adopted           — committed into the live project-local overlay            (Phase 18 AUTO-04)
+    #   held              — clean-or-inconclusive but not auto-adopted (awaiting async review)
+    #   adoption_rejected — a held item the human declined; valid parent material, never re-offered
     async def update_verdict(
         self,
         mutation_id: str,
@@ -284,9 +294,11 @@ class ArchiveStore:
         """UPDATE a row's verdict (status + scores) in place, then re-publish MutationArchived.
 
         The Phase 17 experiment runner's write-back: in_flight → {promoted | train_rejected |
-        holdout_rejected}. Only the verdict columns are touched; component/diff/parent_id/ts are
-        immutable. train_scores_per_fixture MUST carry TRAIN scenario_name keys only (sealed-slice
-        contract — pareto_front_per_fixture is holdout-blind; never pass holdout fixture rates here).
+        holdout_rejected}. Phase 18 adds the loop write-back: → {adopted | held | adoption_rejected}.
+        Only the verdict columns are touched; component/diff/parent_id/ts are immutable. The status
+        column is free-text TEXT (no CHECK, no enum) so the three Phase-18 statuses need NO migration.
+        train_scores_per_fixture MUST carry TRAIN scenario_name keys only (sealed-slice contract —
+        pareto_front_per_fixture is holdout-blind; never pass holdout fixture rates here).
         Re-publishes MutationArchived AFTER commit so the event stream and the SQLite projection agree.
         """
         assert self._db is not None
