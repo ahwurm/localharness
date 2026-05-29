@@ -1,9 +1,9 @@
 """Phase 17 — ONE real git-worktree lifecycle test. No Ollama (no bench LLM here; this
-exercises the worktree context manager directly). xfail until experiment.py lands in 17-03.
+exercises the worktree context manager directly).
 
 SC1: `experiment run` must isolate all work in a throwaway git worktree so the main
 checkout's working tree, HEAD, and branch are untouched, and no stale `lh-exp-*` worktree
-is left behind. Guarded module-top import skips cleanly until 17-03.
+is left behind.
 """
 from __future__ import annotations
 
@@ -11,10 +11,7 @@ import subprocess
 
 import pytest
 
-try:
-    from localharness.autoresearch import experiment as exp  # noqa: F401
-except ImportError:
-    pytest.skip("experiment.py not yet implemented (17-03)", allow_module_level=True)
+from localharness.autoresearch import experiment as exp
 
 
 def _git(repo, *args):
@@ -47,7 +44,6 @@ def tmp_git_repo(tmp_path):
     return _make_repo(tmp_path / "repo")
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 def test_worktree_no_main_contamination(tmp_git_repo):
     """A real experiment_worktree run leaves the main checkout's tree/HEAD/branch unchanged + no stale worktree."""
     repo = tmp_git_repo
@@ -71,7 +67,6 @@ def test_worktree_no_main_contamination(tmp_git_repo):
     assert "lh-exp-" not in _git(repo, "worktree", "list")  # git worktree list — no stale worktree
 
 
-@pytest.mark.xfail(strict=False, reason="experiment.py lands in 17-03")
 def test_keep_retains_worktree(tmp_git_repo):
     """`keep=True` retains the worktree after exit; it appears in `git worktree list`."""
     repo = tmp_git_repo
