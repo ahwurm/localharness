@@ -778,6 +778,22 @@ class ProviderConfig(BaseModel):
     )
 
 
+class ProposerConfig(BaseModel):
+    """Separate stronger-model config for the autoresearch proposer (PROP-02).
+    NO default model/base_url — explicit choice forced (mirrors ScenarioSpec.slice).
+    Frontier example: base_url=https://api.anthropic.com/v1, model=claude-..., is_local=False.
+    Local 120B+ example: base_url=http://127.0.0.1:11434/v1, model=gpt-oss:120b,
+    is_local=True, timeout_seconds=600 (LLMClient requires >=300s when is_local)."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+    base_url: str = Field(description="OpenAI-compatible base URL for the proposer model.")
+    model: str = Field(description="Proposer model id — MUST differ from provider.default_model.")
+    api_key: str = Field(default="none", description="API key ('none' for local).")
+    is_local: bool = Field(default=False, description="True for local 120B+; requires timeout>=300s.")
+    timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=4096, ge=1)
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -785,3 +801,14 @@ class HarnessConfig(BaseModel):
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
     org: OrgConfig = Field(default_factory=OrgConfig)
+    proposer: Optional[ProposerConfig] = None
+
+    @model_validator(mode="after")
+    def _proposer_model_distinct(self) -> "HarnessConfig":
+        if self.proposer is not None and self.proposer.model == self.provider.default_model:
+            raise ValueError(
+                "proposer.model must differ from provider.default_model "
+                f"(both are {self.provider.default_model!r}); the proposer requires a "
+                "distinct, stronger model (PROP-02)."
+            )
+        return self
