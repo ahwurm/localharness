@@ -215,6 +215,31 @@ async def test_after_type_coercion_enforced(proposer_corpus, proposer_results):
 
 
 # --------------------------------------------------------------------------- #
+# AUTO-03 — proposer self-metering: Proposal carries CompletionUsage.total_tokens
+# --------------------------------------------------------------------------- #
+
+
+async def test_tokens_used_captured_from_usage(proposer_corpus, proposer_results):
+    """AUTO-03: Proposal.tokens_used == the proposer's CompletionUsage.total_tokens (20 from FakeLLMClient)."""
+    cfg = _cfg()
+    proposal = await propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=FakeLLMClient(_good_payload()),
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+    )
+    assert proposal.tokens_used == 20
+
+
+def test_tokens_used_defaults_none():
+    """AUTO-03: Proposal constructs without tokens_used (defaults None) so existing call sites keep working."""
+    p = Proposal(component="agent.role", before="a", after="b", rationale="x")
+    assert p.tokens_used is None
+
+
+# --------------------------------------------------------------------------- #
 # edge — no failed traces → refuse
 # --------------------------------------------------------------------------- #
 

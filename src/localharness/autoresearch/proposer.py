@@ -100,6 +100,7 @@ class Proposal:
     before: object
     after: object
     rationale: str
+    tokens_used: int | None = None  # proposer CompletionUsage.total_tokens (AUTO-03 self-meter); None if unknown
 
     @property
     def diff(self) -> str:
@@ -223,7 +224,7 @@ async def propose(
 
     # (C) Call the model (AFTER the seal + after `before` is read), parse, coerce.
     messages = _build_reflection_messages(component, before, entry.type_name, failed)
-    msg, _usage = await llm.complete(messages)
+    msg, usage = await llm.complete(messages)
     raw = msg.content or ""
     parsed = _parse(raw)
     try:
@@ -244,4 +245,5 @@ async def propose(
         before=before,
         after=typed_after,
         rationale=parsed.rationale,
+        tokens_used=(usage.total_tokens if usage is not None else None),
     )
