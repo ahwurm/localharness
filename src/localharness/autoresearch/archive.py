@@ -279,6 +279,53 @@ class ArchiveStore:
             current = await self.get(current.parent_id)
         return chain
 
+    # ------------------------------------------------------------------
+    # Pareto fronts (ARCH-02)
+    #
+    # Both methods return the dumb non-dominated SET — no selection weights,
+    # no sampling, no epsilon-greedy. Coverage-proportional exploration is
+    # Phase 18's ParentSampler. Naive O(n^2) over a status-filtered fetch is
+    # fine: the archive is low thousands of rows (CONTEXT).
+    # ------------------------------------------------------------------
+
+    async def pareto_front_per_fixture(self) -> list[ArchiveEntry]:
+        """GEPA-style per-fixture front: every mutation best on >=1 train fixture.
+
+        Sealed-slice (Pitfall 3): scoring reads ONLY ``train_scores_per_fixture``;
+        ``holdout_score`` is never referenced here. The blob carries train
+        scenario_name keys only (Phase 17 writer contract), so a holdout-best
+        mutation cannot enter the front. Ties are INCLUDED — every candidate
+        whose score equals the per-fixture max wins that fixture.
+        Eligible status: ``promoted`` | ``in_flight``.
+        """
+        rows = await self.query(ArchiveQuery(limit=10_000))
+        cands = [
+            e
+            for e in rows
+            if e.status in ("promoted", "in_flight") and e.train_scores_per_fixture
+        ]
+
+        # Fixture universe = union of all candidates' train-fixture keys (train only).
+        fixtures: set[str] = set()
+        for e in cands:
+            fixtures.update(e.train_scores_per_fixture.keys())
+
+        winners: set[str] = set()
+        for fx in fixtures:
+            scored = [
+                (e, e.train_scores_per_fixture[fx])
+                for e in cands
+                if fx in e.train_scores_per_fixture
+            ]
+            if not scored:
+                continue
+            best = max(score for _, score in scored)
+            for e, score in scored:
+                if score == best:  # ties included
+                    winners.add(e.id)
+
+        return [e for e in cands if e.id in winners]
+
 
 # ---------------------------------------------------------------------------
 # Helpers

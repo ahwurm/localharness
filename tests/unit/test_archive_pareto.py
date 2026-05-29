@@ -15,7 +15,6 @@ except ImportError:
     pytest.skip("ArchiveStore not yet implemented (15-02)", allow_module_level=True)
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_per_fixture_known_front(archive_store, seeded_archive):
     """Per-fixture front = entries best on >=1 fixture (ties included), dominated-on-all excluded."""
     await seeded_archive(
@@ -46,7 +45,6 @@ async def test_2d_known_front(archive_store, seeded_archive):
     assert front == {"P1", "P3"}  # P2 dominated (lower score AND higher cost than P1)
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_holdout_excluded_from_front(archive_store, seeded_archive):
     """An entry with the highest holdout_score but best on no train fixture is absent from the front."""
     await seeded_archive(
@@ -68,7 +66,6 @@ async def test_metrics_rejects_sealed_column(archive_store):
         await archive_store.pareto_front_2d(metrics=["holdout_score", "cost"])
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_per_fixture_status_filter(archive_store, seeded_archive):
     """A train_rejected entry that would win a fixture is excluded (only promoted|in_flight eligible)."""
     await seeded_archive(
