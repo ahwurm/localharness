@@ -247,3 +247,63 @@ def fake_completed_runs():
             })
         return out
     return _factory
+
+
+# -----------------------------------------------------------------------------
+# Phase 15 mutation-archive fixtures
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def archive_store(tmp_path: Path):
+    """Fresh ArchiveStore with a temporary .localharness/archive.db.
+
+    Mirrors the memory_store fixture (conftest.py:133-144). The store module
+    lands in 15-02; until then this fixture xfails any test that requests it.
+    """
+    try:
+        from localharness.autoresearch.archive import ArchiveStore
+    except ImportError:
+        pytest.skip("ArchiveStore not yet implemented (15-02)")
+    store = ArchiveStore(tmp_path / ".localharness" / "archive.db")
+    await store.open()
+    yield store
+    await store.close()
+
+
+@pytest.fixture
+def seeded_archive():
+    """Factory: async helper that writes ArchiveEntry rows into a store.
+
+    Usage: `entries = await seeded_archive(store, [dict(...), dict(...)])`.
+    Each dict overrides ArchiveEntry defaults (id auto-uuid if omitted).
+    Mirrors fake_completed_runs (conftest.py:210). Import is deferred so this
+    file collects before 15-02 ships the module.
+    """
+    import json
+    import time
+    import uuid
+
+    async def _seed(store, specs: list[dict]):
+        from localharness.autoresearch.archive import ArchiveEntry
+        written = []
+        for spec in specs:
+            tspf = spec.get("train_scores_per_fixture")
+            entry = ArchiveEntry(
+                id=spec.get("id", str(uuid.uuid4())),
+                parent_id=spec.get("parent_id"),
+                component=spec.get("component", "agents.main.system_prompt"),
+                diff=spec.get("diff", json.dumps({"before": "a", "after": "b"})),
+                train_score=spec.get("train_score"),
+                train_scores_per_fixture=tspf,
+                holdout_score=spec.get("holdout_score"),
+                p_value=spec.get("p_value"),
+                cost=spec.get("cost"),
+                ts=spec.get("ts", int(time.time())),
+                approved_by=spec.get("approved_by"),
+                status=spec.get("status", "in_flight"),
+            )
+            written.append(await store.write(entry))
+        return written
+
+    return _seed
