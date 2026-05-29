@@ -2,7 +2,7 @@
 
 Composes Phase 13/14/15 primitives + one model call into the mutation generator:
   - reads FAILED *train* traces (the reward-signal evidence),
-  - asks a STRONGER, DISTINCT model (ProposerConfig, never provider.default_model)
+  - asks a STRONGER, DISTINCT model (ProposerConfig — never the main provider model)
     for ONE change to ONE component,
   - returns an archive-shape Proposal {"before": current_value, "after": typed_after}.
 
@@ -21,6 +21,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import BaseModel, Field, ValidationError
+
 from localharness.bench.orchestrator import _discover_scenarios
 from localharness.bench.schema import load_scenario
 from localharness.bench.runner import resolve_run_path
@@ -31,6 +33,65 @@ from localharness.registry import build_catalogue, coerce_value
 
 class ProposerError(Exception):
     """Raised on any proposer refusal (CLI maps to exit code 2)."""
+
+
+class _RawProposal(BaseModel):
+    """Schema the model's JSON reply must satisfy. `component` is NEVER taken from
+    the model — it is pinned to the caller's input (SC4 atomicity)."""
+    after: object
+    rationale: str = Field(min_length=1)
+
+
+def _parse(raw: str) -> _RawProposal:
+    """Parse + schema-validate the model reply. Fails EXPLICITLY (never silently)."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            from json_repair import repair_json  # optional local-model garble fallback
+
+            data = json.loads(repair_json(raw))
+        except Exception as exc:
+            raise ProposerError(
+                f"proposer returned unparseable JSON: {exc}\nraw={raw[:500]}"
+            ) from exc
+    if not isinstance(data, dict):
+        raise ProposerError(f"proposer output is not a JSON object: {raw[:500]}")
+    try:
+        return _RawProposal.model_validate(data)
+    except ValidationError as exc:
+        raise ProposerError(
+            f"proposer proposal failed schema validation: {exc}\nraw={raw[:500]}"
+        ) from exc
+
+
+def _build_reflection_messages(
+    component: str, before: object, type_name: str, traces: list[list]
+) -> list[dict]:
+    """Reflection prompt: failed-trace evidence + current value → one typed change."""
+    system = (
+        "You propose ONE change to a single config component. "
+        'Return ONLY JSON {"after": <new value>, "rationale": <why>}. '
+        "Do not change any other component. "
+        f"The target component is {component} (type {type_name})."
+    )
+    summaries = []
+    for events in traces:
+        for e in events:
+            if isinstance(e, ScenarioCompleted) and not e.success:
+                summaries.append(f"- scenario {e.scenario_name!r} FAILED (model {e.model})")
+    evidence = "\n".join(summaries) if summaries else "- (failed train run)"
+    user = (
+        f"Component: {component} (type {type_name})\n"
+        f"Current value:\n{json.dumps(before)}\n\n"
+        f"Failed TRAIN traces (the change must address these failures):\n{evidence}\n\n"
+        'Respond with JSON only: {"after": <new value for this component>, '
+        '"rationale": <one sentence tying the change to the failures>}.'
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
 
 @dataclass(frozen=True)
@@ -129,6 +190,58 @@ async def propose(
     """
     _enforce_seal(list(run_ids), corpus_path)  # FIRST — before anything else
     failed = _load_failed_traces(list(run_ids), results_path)
-    # Task 3 implements: build_catalogue → current_value (before) → model call →
-    #     parse → coerce after → return Proposal(...)
-    raise NotImplementedError  # replaced in Task 3
+
+    # (A) Resolve the component + current value via the registry (reuse Phase 14).
+    catalogue = build_catalogue(cfg)  # default attribution is fine for the before-value
+    entry = catalogue.get(component)
+    if entry is None:
+        raise ProposerError(
+            f"unknown component path {component!r} — run `localharness components list`"
+        )
+    before = entry.current_value
+
+    # (B) Build the proposer model client from ProposerConfig (PROP-02) — NEVER
+    #     the main harness model. Tests inject `llm` to stay hermetic.
+    if llm is None:
+        if cfg.proposer is None:
+            raise ProposerError(
+                "no [proposer] config — set proposer.base_url/model (PROP-02)"
+            )
+        pc = cfg.proposer
+        llm = LLMClient(
+            LLMConfig(
+                base_url=pc.base_url,
+                model=pc.model,
+                api_key=pc.api_key,
+                timeout_seconds=pc.timeout_seconds,
+                temperature=pc.temperature,
+                max_tokens=pc.max_tokens,
+                is_local=pc.is_local,
+                tool_call_mode="native",
+            )
+        )
+
+    # (C) Call the model (AFTER the seal + after `before` is read), parse, coerce.
+    messages = _build_reflection_messages(component, before, entry.type_name, failed)
+    msg, _usage = await llm.complete(messages)
+    raw = msg.content or ""
+    parsed = _parse(raw)
+    try:
+        typed_after = (
+            parsed.after
+            if isinstance(parsed.after, (dict, list))
+            else coerce_value(str(parsed.after), entry.annotation)
+        )
+    except ValueError as exc:
+        raise ProposerError(
+            f"after value {parsed.after!r} invalid for {component} "
+            f"({entry.type_name}): {exc}"
+        ) from exc
+
+    # (D) Proposal.component is pinned to the input — the model never widens scope (SC4).
+    return Proposal(
+        component=component,
+        before=before,
+        after=typed_after,
+        rationale=parsed.rationale,
+    )
