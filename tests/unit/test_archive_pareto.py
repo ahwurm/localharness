@@ -30,7 +30,6 @@ async def test_per_fixture_known_front(archive_store, seeded_archive):
     assert front == {"A", "B", "D"}  # C dominated on every fixture; D ties A on fx1
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_2d_known_front(archive_store, seeded_archive):
     """2D (train_score, cost) front = non-dominated set among eligible (promoted, p<0.05) rows."""
     await seeded_archive(
@@ -59,7 +58,6 @@ async def test_holdout_excluded_from_front(archive_store, seeded_archive):
     assert "WIN" in front
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_metrics_rejects_sealed_column(archive_store):
     """pareto_front_2d refuses holdout_score as a front axis (sealed-slice invariant)."""
     with pytest.raises(ValueError):
@@ -80,7 +78,6 @@ async def test_per_fixture_status_filter(archive_store, seeded_archive):
     assert "OK" in front
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-03")
 async def test_2d_status_and_pvalue_filter(archive_store, seeded_archive):
     """Only promoted rows with p_value < 0.05 are eligible for the 2D front."""
     await seeded_archive(
