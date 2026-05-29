@@ -1,4 +1,4 @@
-"""All 18 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 19 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -308,6 +308,25 @@ class ComponentMutated(BaseEvent):
     actor_detail: Optional[str] = None  # proposal_id, experiment_id, etc.
 
 
+class MutationArchived(BaseEvent):
+    """Published by ArchiveStore.write() on every persisted mutation.
+
+    The event bus is the source of truth; the SQLite archive is a projection.
+    NB: mutation lineage uses `mutation_parent_id` (NOT BaseEvent.parent_id,
+    which is event causality) to avoid overloading the field's meaning.
+    """
+
+    event_type: str = "MutationArchived"
+    mutation_id: str  # the archive row id (full UUID)
+    component: str  # dot-path, e.g. "agents.main.system_prompt"
+    status: str  # in_flight | train_rejected | holdout_rejected | promoted | superseded
+    train_score: Optional[float] = None
+    holdout_score: Optional[float] = None
+    p_value: Optional[float] = None
+    cost: Optional[float] = None
+    mutation_parent_id: Optional[str] = None  # archive lineage parent (full UUID)
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -329,6 +348,7 @@ AnyEvent = Union[
     ParseFailed,
     StuckRecovered,
     ComponentMutated,
+    MutationArchived,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -352,6 +372,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ParseFailed": ParseFailed,
     "StuckRecovered": StuckRecovered,
     "ComponentMutated": ComponentMutated,
+    "MutationArchived": MutationArchived,
 }
 
 
