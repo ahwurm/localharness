@@ -219,3 +219,198 @@ def archive_list(
         )
     # Render at a fixed wide width so non-tty (CliRunner / pipes) don't crop columns.
     Console(width=200).print(table)
+
+
+# ------------------------------------------------------------------ #
+# show / approve helpers
+# ------------------------------------------------------------------ #
+
+
+async def _resolve(store: ArchiveStore, raw_id: str):
+    """Resolve a full UUID or 8-char hex prefix to a single entry.
+
+    Returns (entry, matches): exactly one of these is meaningful.
+      - unique hit  -> (ArchiveEntry, None)
+      - not found   -> (None, [])
+      - ambiguous   -> (None, [match, match, ...])   (>1 prefix match)
+    """
+    if len(raw_id) == 36:  # full UUID
+        entry = await store.get(raw_id)
+        return (entry, None) if entry is not None else (None, [])
+
+    rows = await store.query(ArchiveQuery(limit=10_000))
+    matches = [e for e in rows if e.id.startswith(raw_id)]
+    if len(matches) == 0:
+        return (None, [])
+    if len(matches) == 1:
+        return (matches[0], None)
+    return (None, matches)
+
+
+def _to_lines(value) -> list[str]:
+    """Render a diff side to text lines: strings split on newlines; else YAML/repr."""
+    if value is None:
+        return ["null"]
+    if isinstance(value, str):
+        return value.split("\n")
+    try:
+        import yaml
+
+        return yaml.safe_dump(value, default_flow_style=False, sort_keys=False).splitlines()
+    except Exception:
+        return repr(value).splitlines()
+
+
+def _render_diff(diff_json: str) -> None:
+    """Inline red/green diff via stdlib difflib.ndiff + rich (no new dependency)."""
+    try:
+        data = _json.loads(diff_json)
+    except (ValueError, TypeError):
+        console.print(diff_json)
+        return
+    before_lines = _to_lines(data.get("before"))
+    after_lines = _to_lines(data.get("after"))
+    for line in difflib.ndiff(before_lines, after_lines):
+        if line.startswith("- "):
+            console.print(line, style="red")
+        elif line.startswith("+ "):
+            console.print(line, style="green")
+        elif line.startswith("? "):
+            continue
+        else:
+            console.print(line)
+
+
+# ------------------------------------------------------------------ #
+# show
+# ------------------------------------------------------------------ #
+
+
+@archive_app.command("show")
+def archive_show(
+    id: str = typer.Argument(..., help="8-char hex prefix or full UUID"),
+    json_output: bool = typer.Option(False, "--json", help="Emit full row + lineage as JSON"),
+) -> None:
+    """Show one mutation: header + metrics + red/green diff + git-log-oneline lineage."""
+
+    async def _go():
+        db_path = _archive_db_path()
+        if not db_path.exists():
+            return (None, [], [])
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            entry, matches = await _resolve(store, id)
+            if entry is None:
+                return (None, matches, [])
+            lineage = await store.lineage(entry.id)
+            return (entry, None, lineage)
+        finally:
+            await store.close()
+
+    entry, matches, lineage = _run(_go())
+
+    if entry is None:
+        if matches:  # ambiguous prefix
+            if json_output:
+                typer.echo(
+                    _json.dumps({"error": "ambiguous prefix", "matches": [m.id for m in matches]}),
+                    err=True,
+                )
+            else:
+                err_console.print(f"[bold red]Error:[/bold red] ambiguous prefix {id!r} matches {len(matches)}:")
+                for m in matches:
+                    err_console.print(f"  {m.id} {m.component} {m.status}")
+            raise typer.Exit(code=2)
+        _err(json_output, f"no mutation matches id {id!r}", exit_code=2)
+        return
+
+    if json_output:
+        payload = _entry_to_dict(entry)
+        payload["lineage"] = [_entry_to_dict(e) for e in lineage]
+        typer.echo(_json.dumps(payload, indent=2))
+        return
+
+    # Block 1: header
+    console.print(f"[bold]{entry.id}[/bold]")
+    console.print(f"  parent:    {entry.parent_id or '-'}")
+    console.print(f"  component: {entry.component}")
+    console.print(f"  status:    {entry.status}")
+    console.print(f"  ts:        {entry.ts} ({_fmt_ts(entry.ts)})")
+    console.print(f"  approved:  {entry.approved_by or '-'}")
+
+    # Block 2: metrics
+    console.print("[bold]metrics[/bold]")
+    console.print(f"  train:   {_fmt_float(entry.train_score)}")
+    console.print(f"  holdout: {_fmt_float(entry.holdout_score)}")
+    console.print(f"  p_value: {_fmt_float(entry.p_value)}")
+    console.print(f"  cost:    {_fmt_float(entry.cost)}")
+    tspf = entry.train_scores_per_fixture
+    if tspf:
+        ordered = sorted(tspf.items(), key=lambda kv: kv[1], reverse=True)
+        best = ordered[:3]
+        worst = list(reversed(ordered[-3:]))
+        console.print("  best:  " + ", ".join(f"{k}={v:.3f}" for k, v in best))
+        console.print("  worst: " + ", ".join(f"{k}={v:.3f}" for k, v in worst))
+
+    # Block 3: diff
+    console.print("[bold]diff[/bold]")
+    _render_diff(entry.diff)
+
+    # Block 4: lineage (lineage() returns child->root = newest first = git-log-oneline order)
+    console.print("[bold]lineage[/bold]")
+    for e in lineage:
+        console.print(f"{e.id[:8]} {e.component} {e.status} {e.ts}")
+
+
+# ------------------------------------------------------------------ #
+# approve
+# ------------------------------------------------------------------ #
+
+
+@archive_app.command("approve")
+def archive_approve(
+    id: str = typer.Argument(..., help="8-char hex prefix or full UUID"),
+    approver: str = typer.Option(..., "--approver", help="Approver, e.g. human:alice"),
+    comment: Optional[str] = typer.Option(None, "--comment", help="Optional note"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Append an approval to a mutation's history."""
+
+    async def _go():
+        db_path = _archive_db_path()
+        if not db_path.exists():
+            return (None, [])
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            entry, matches = await _resolve(store, id)
+            if entry is None:
+                return (None, matches)
+            await store.add_approval(entry.id, approver, comment)
+            refreshed = await store.get(entry.id)
+            return (refreshed, None)
+        finally:
+            await store.close()
+
+    entry, matches = _run(_go())
+
+    if entry is None:
+        if matches:
+            if json_output:
+                typer.echo(
+                    _json.dumps({"error": "ambiguous prefix", "matches": [m.id for m in matches]}),
+                    err=True,
+                )
+            else:
+                err_console.print(f"[bold red]Error:[/bold red] ambiguous prefix {id!r} matches {len(matches)}:")
+                for m in matches:
+                    err_console.print(f"  {m.id} {m.component} {m.status}")
+            raise typer.Exit(code=2)
+        _err(json_output, f"no mutation matches id {id!r}", exit_code=2)
+        return
+
+    if json_output:
+        typer.echo(_json.dumps({"id": entry.id, "approved_by": entry.approved_by}))
+        return
+    console.print(f"[green]approved[/green] {entry.id[:8]} by {approver}")
