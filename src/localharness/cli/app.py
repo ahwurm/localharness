@@ -2,6 +2,7 @@
 import typer
 
 from localharness.cli.agent_cmd import agent_app
+from localharness.cli.autoresearch_cmd import autoresearch_app
 from localharness.cli.bench_cmd import bench_app
 from localharness.cli.components_cmd import components_app
 from localharness.cli.doctor_cmd import doctor
@@ -25,6 +26,7 @@ app.command("validate")(validate)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
+app.add_typer(autoresearch_app, name="autoresearch")
 
 
 def main() -> None:
