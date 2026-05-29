@@ -204,11 +204,36 @@ async def _load_and_validate(store, proposal_id: str, cfg) -> tuple[Any, str, An
 async def slice_success_by_fixture(
     scenarios, model, results_root, factory, *, min_reps: int = 5
 ) -> dict[str, float]:
-    raise NotImplementedError  # Task 2
+    """Run each scenario (>=min_reps reps via accumulate_runs) → {scenario_name: success_rate}.
+
+    The Welch gate's n is the FIXTURE count (len of this map), NOT the rep count (Pitfall 2).
+    Per scenario, the success_rate is metrics_summary(samples)["success_rate"]["rate"] — a
+    proportion over that scenario's reps. CONTEXT locks >=5 reps/fixture (ADAS precedent).
+    """
+    from localharness.bench.aggregator import metrics_summary
+    from localharness.bench.runner import accumulate_runs
+
+    out: dict[str, float] = {}
+    for scen in scenarios:
+        samples, _stop = await accumulate_runs(
+            scen, model, results_root, factory,
+            min_runs_override=max(min_reps, scen.min_runs),
+            max_runs_override=scen.max_runs,
+        )
+        if not samples:
+            continue
+        out[scen.name] = metrics_summary(samples)["success_rate"]["rate"]
+    return out
 
 
 def _pair_vectors(base_map, head_map):
-    raise NotImplementedError  # Task 2
+    """Pair two arms fixture-for-fixture by scenario name (intersection, sorted).
+
+    The Welch vectors MUST be aligned by fixture; only names present in BOTH arms enter
+    the comparison. Returns (names, base_vec, head_vec) with matching order.
+    """
+    names = sorted(set(base_map) & set(head_map))
+    return names, [base_map[n] for n in names], [head_map[n] for n in names]
 
 
 # ---------------------------------------------------------------------------
