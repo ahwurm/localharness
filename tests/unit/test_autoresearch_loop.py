@@ -1,18 +1,15 @@
-"""Phase 18 Wave-0 scaffold — AUTO-01..04 behaviors as xfail(strict=False) stubs; flipped green as 18-02..18-05 land.
+"""Phase 18 — AUTO-01..04 behavioral tests (all green; the Wave-0 scaffold landed 18-02..18-05).
 
 The autoresearch orchestrator wires four net-new pieces: a ParentSampler (ε-greedy
 over the GEPA per-fixture front), a BudgetController (token-window + wallclock pre-flight
 gate + per-proposal timeout), an adoption mechanism (a git-committed config-overlay write),
 and the loop driver (sample → propose → run_experiment → interpret-exit → adopt/hold →
 journal). Every test name below is BINDING: 18-RESEARCH §"Phase Requirements → Test Map"
-names each one verbatim, and plans 18-02..18-06 resolve their <automated> verify command
-to a test that already exists here. Each stub asserts REAL behavior (never placeholder
-data), so it is meaningful the moment the impl lands and flips it RED→GREEN.
+names each one verbatim. Each test asserts REAL behavior (never placeholder data).
 
 Hermetic injection mirrors test_experiment.py: fakes for the clock, the token meter, the
 RNG, propose_fn, experiment_fn, and adopt_fn keep every test LLM-free / bench-free and (for
-the non-adoption tests) worktree-free. The guarded module-top import lets this file COLLECT
-before sampler/budget/adoption/loop exist (17-01 precedent: pytest.skip allow_module_level).
+the non-adoption tests) worktree-free.
 """
 import json
 import random
@@ -20,20 +17,12 @@ from pathlib import Path
 
 import pytest
 
-# AUTO-02 sampler landed (18-02): import unconditionally so its 5 tests run live.
+# Sampler (18-02), budget (18-03), adoption (18-04), and loop (18-05) have all landed —
+# import unconditionally so every test runs live (the Wave-0 guarded import is no longer needed).
 from localharness.autoresearch.sampler import ParentSampler, BASELINE_ROOT
-
-# AUTO-03/AUTO-04/AUTO-01 (budget/adoption/loop) land in 18-03..18-05 (parallel wave).
-# Guard ONLY these so the file keeps collecting and the live sampler tests are not blocked
-# by a sibling that hasn't merged yet. The budget/adoption/loop tests retain their
-# xfail(strict=False) markers (the parallel-wave convention, STATE.md 15-01) — they surface
-# as xfail until each owning plan flips them green; xpass is informational, never a failure.
-try:  # noqa: F401 — names used by the still-xfailed budget/adoption/loop tests below
-    from localharness.autoresearch.budget import BudgetController, WindowMeter
-    from localharness.autoresearch.adoption import adopt, AdoptionRefused
-    from localharness.autoresearch.loop import run_loop, RunSummary
-except ImportError:
-    pass
+from localharness.autoresearch.budget import BudgetController, WindowMeter
+from localharness.autoresearch.adoption import adopt, AdoptionRefused
+from localharness.autoresearch.loop import run_loop, RunSummary
 
 
 # ---------------------------------------------------------------------------
