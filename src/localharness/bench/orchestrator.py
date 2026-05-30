@@ -71,33 +71,53 @@ def _filter_scenarios_by_slice(scenarios: list[ScenarioSpec], slice_: str) -> li
 # LLM client factory builder (real-provider path)
 # -------------------------------------------------------------------------
 
-def build_llm_client_factory(entry: MatrixEntry) -> Callable[[ScenarioSpec], Any]:
-    """Construct a real provider-client factory for the given matrix entry.
+# Default OpenAI-compatible base URLs per known provider type. Any provider that
+# exposes an OpenAI-compatible /v1 endpoint works; unknown providers must supply
+# base_url on the matrix entry. This keeps the bench model-agnostic — swapping in
+# a different model family is a config change, not a code change.
+_DEFAULT_BASE_URLS: dict[str, str] = {
+    "ollama": "http://127.0.0.1:11434/v1",
+    "vllm": "http://localhost:8000/v1",
+}
 
-    Reads entry.provider, entry.model_id, entry.base_url, entry.num_ctx.
 
-    Currently only `ollama` is wired (via the OpenAI-compatible LLMClient at
-    localharness.provider.client). Other providers raise NotImplementedError.
+def _build_bench_client(entry: MatrixEntry) -> Any:
+    """Build an OpenAI-compatible LLMClient for a matrix entry (any provider).
+
+    tool_call_mode is left at the LLMConfig default and is meant to be overwritten
+    by a detect_capabilities() probe (see _run_one_model) so each model gets its
+    natural mode (native vs xml) rather than a hardcoded guess.
     """
-    if entry.provider == "ollama":
-        def _factory(_scen: ScenarioSpec) -> Any:
-            from localharness.provider.client import LLMClient, LLMConfig
-            base_url = entry.base_url or "http://127.0.0.1:11434/v1"
-            cfg = LLMConfig(
-                base_url=base_url,
-                model=entry.model_id,
-                api_key="none",
-                tool_call_mode="native",
-                context_window=entry.num_ctx or 128_000,
-                is_local=True,
-            )
-            return LLMClient(cfg)
-        return _factory
+    from localharness.provider.client import LLMClient, LLMConfig
 
-    raise NotImplementedError(
-        f"Provider {entry.provider!r} not supported in bench orchestrator. "
-        f"Add a builder branch in build_llm_client_factory."
+    base_url = entry.base_url or _DEFAULT_BASE_URLS.get(entry.provider)
+    if not base_url:
+        raise ValueError(
+            f"Matrix entry {entry.name!r} (provider={entry.provider!r}) has no base_url "
+            f"and no default is known. Add base_url to the matrix entry."
+        )
+    cfg = LLMConfig(
+        base_url=base_url,
+        model=entry.model_id,
+        api_key="none",
+        timeout_seconds=300.0,
+        context_window=entry.num_ctx or 128_000,
+        is_local=True,
     )
+    return LLMClient(cfg)
+
+
+def build_llm_client_factory(entry: MatrixEntry) -> Callable[[ScenarioSpec], Any]:
+    """Return a per-scenario factory building a client for this matrix entry.
+
+    Provider-agnostic: any OpenAI-compatible endpoint works (vllm, ollama, …).
+    This path does NOT probe capabilities — _run_one_model builds a probed, reused
+    client for the default (non-injected) path. Kept for direct callers/tests.
+    """
+    def _factory(_scen: ScenarioSpec) -> Any:
+        return _build_bench_client(entry)
+
+    return _factory
 
 
 # -------------------------------------------------------------------------
@@ -114,7 +134,22 @@ async def _run_one_model(
     max_runs_override: Optional[int] = None,
 ) -> int:
     """Run all scenarios for one matrix entry. Returns count of total runs executed."""
-    factory = llm_client_factory or build_llm_client_factory(entry)
+    if llm_client_factory is not None:
+        factory = llm_client_factory
+    else:
+        # Build one client per matrix entry and probe it so tool_call_mode is
+        # auto-detected (model-agnostic) instead of hardcoded. Reused across all
+        # scenarios/runs for this entry — detect_capabilities() never raises.
+        probed_client = _build_bench_client(entry)
+        cap = await probed_client.detect_capabilities()
+        log.info(
+            "bench_probe model=%s mode=%s ctx=%d err=%s",
+            entry.name, cap.tool_call_mode, cap.context_window, cap.probe_error,
+        )
+
+        def factory(_scen: ScenarioSpec) -> Any:
+            return probed_client
+
     per_scenario: dict[str, dict[str, Any]] = {}
     runs_executed = 0
 
@@ -184,14 +219,25 @@ async def _run_one_model(
 # -------------------------------------------------------------------------
 
 def _synthesize_default_entry() -> MatrixEntry:
-    """Synthesize a stand-in MatrixEntry for callers without a BenchConfig.
+    """Synthesize a MatrixEntry resolved from the running HarnessConfig (cfg.provider).
 
-    Used by e2e tests + CLI smoke tests that inject a llm_client_factory directly.
+    Reads provider/model/base_url from the loaded HarnessConfig so the gate's bench
+    client targets the REAL configured backend — no hardcoded ollama/bench-default.
+    Raises RuntimeError if no config is available (CLAUDE.md: fail explicitly).
     """
+    try:
+        from localharness.config.loader import ConfigLoader
+        cfg = ConfigLoader().load_harness()
+    except Exception as exc:
+        raise RuntimeError(
+            "_synthesize_default_entry: no HarnessConfig available — "
+            "inject a llm_client_factory or ensure ~/.localharness/config.yaml exists"
+        ) from exc
     return MatrixEntry(
-        name="default",
-        provider="ollama",
-        model_id="bench-default",
+        name=cfg.provider.default_model,
+        provider=cfg.provider.provider_type,
+        model_id=cfg.provider.default_model,
+        base_url=cfg.provider.base_url,
     )
 
 

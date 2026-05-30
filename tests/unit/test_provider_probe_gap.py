@@ -122,10 +122,6 @@ async def test_xml_fallback_omits_stop_and_thinking():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AUDIT-03a: the gate builds an unprobed ollama/bench-default client, ignoring cfg.provider",
-)
 def test_gate_factory_ignores_cfg_provider_and_skips_probe(monkeypatch):
     """The autoresearch gate's default factory is, verbatim (experiment.py:330):
         build_llm_client_factory(_synthesize_default_entry())
