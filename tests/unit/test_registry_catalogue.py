@@ -161,3 +161,31 @@ def test_catalogue_hook_configs(components_home):
     entries = build_catalogue(cfg, overlays={}, hook_system=_HookSystem())
     assert "hooks.audit_logger.config" in entries
     assert "hooks.pev_check.config" in entries
+
+
+def test_agent_cfg_drives_agent_star_current_value(components_home):
+    """WARNING-2: agent.* current_value must reflect the LIVE AgentConfig, not field defaults.
+
+    With agent_cfg=None the catalogue reports the StuckDetectorConfig default (window_size=5).
+    With a live AgentConfig carrying window_size=9, the catalogue MUST report 9 — this is the
+    provenance the experiment/proposer call sites get wrong today (build_catalogue(cfg) with no
+    agent_cfg=), making the recorded `before` value detached from the live overlay-resolved config.
+    """
+    from localharness.config.models import AgentConfig
+    from localharness.registry import build_catalogue
+
+    cfg = _make_minimal_harness_cfg()
+
+    # Baseline: no agent_cfg -> field default (5).
+    default_entries = build_catalogue(cfg, overlays={})
+    assert default_entries["agent.stuck_detector.window_size"].current_value == 5
+
+    # Live: a resolved AgentConfig with the overlay value (9).
+    live = AgentConfig.model_validate(
+        {"name": "bench-x", "role": "r", "stuck_detector": {"window_size": 9}}
+    )
+    live_entries = build_catalogue(cfg, overlays={}, agent_cfg=live)
+    assert live_entries["agent.stuck_detector.window_size"].current_value == 9, (
+        "build_catalogue must thread agent_cfg into agent.* current_value so the recorded "
+        "`before` value is the live overlay-resolved config (WARNING-2), not AgentConfig defaults."
+    )
