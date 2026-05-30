@@ -335,6 +335,19 @@ class MutationArchived(BaseEvent):
     mutation_parent_id: Optional[str] = None  # archive lineage parent (full UUID)
 
 
+class SentinelAlert(BaseEvent):
+    """Non-blocking eval-sentinel alert (REP-03/04). Emitted on the EventBus + journaled +
+    surfaced in `autoresearch report`. NEVER pauses/halts the loop (fire-and-forget, AUTO-04 amended)."""
+
+    event_type: str = "SentinelAlert"
+    kind: Literal["overfit", "near_duplicate", "saturation"]
+    detail: str                                   # human-readable one-liner
+    mutation_id: Optional[str] = None             # offending archive row (full UUID), if any
+    metric_value: Optional[float] = None          # gap / similarity ratio / etc.
+    threshold: Optional[float] = None
+    fixtures: list[str] = Field(default_factory=list)  # saturated fixtures (kind="saturation")
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -357,6 +370,7 @@ AnyEvent = Union[
     StuckRecovered,
     ComponentMutated,
     MutationArchived,
+    SentinelAlert,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -381,6 +395,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "StuckRecovered": StuckRecovered,
     "ComponentMutated": ComponentMutated,
     "MutationArchived": MutationArchived,
+    "SentinelAlert": SentinelAlert,
 }
 
 
