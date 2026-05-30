@@ -131,21 +131,22 @@ async def test_spine_write_execute_real_file(tool_scenario_corpus, faithful_fake
 
 
 def test_from_allowed_none_base_is_empty():
-    """AUDIT-06 fix#4 residual: pin the still-dangerous direct-call default.
+    """REG-01 (AUDIT-06 fix#4): from_allowed(base_registry=None) must RAISE, not silently return
+    a zero-tool registry.
 
-    The fix only routed the BENCH through `_get_base_registry()` (runner.py:172-173); direct
-    callers passing `base_registry=None` STILL get zero tools. registry.py:363-364 returns an
-    empty registry for a None base — a documented foot-gun: any direct caller that forgets to pass
-    `_get_base_registry()` silently gets ZERO tools (and the agent hallucinates on every tool
-    scenario). This pure-unit RED-characterization documents the gap for the future fix phase; it
-    PASSES today (the default IS empty), so it is NOT xfail.
+    The prior characterization documented the foot-gun (from_allowed returned an empty registry
+    for None base, a silent failure mode). The fix (phase-22-plan-05) makes None an explicit
+    ValueError so a caller that forgets _get_base_registry() gets an immediate, actionable error
+    rather than a zero-tool agent loop.
+
+    POST-FIX: from_allowed(["read"], base_registry=None) raises ValueError.
     """
+    import pytest as _pytest
+
     from localharness.tools.registry import ToolRegistry
 
-    reg = ToolRegistry.from_allowed(["read"], base_registry=None)
-    # from_allowed populates global scope (registry.py:383-385); a None base never reaches that loop,
-    # so global stays the empty dict from ToolRegistry.__init__ (registry.py:60-65).
-    assert reg._tools["global"] == {}
+    with _pytest.raises(ValueError, match="base_registry"):
+        ToolRegistry.from_allowed(["read"], base_registry=None)
 
 
 @pytest.mark.live_vllm

@@ -352,16 +352,23 @@ class ToolRegistry:
         register) and re-registered under both bare and prefixed forms so
         downstream dispatch resolves whichever form the agent loop uses.
 
-        If `base_registry` is None, the returned registry is empty for entries
-        whose source is `builtin`/`plugin`/`mcp` — the spike test substitutes
-        its own base. Bench runner callers must pass a base populated with
-        builtin + plugin + mcp tools.
+        `base_registry` must not be None.  Passing None previously returned an
+        empty registry — a silent foot-gun where a caller that forgot
+        ``_get_base_registry()`` would hand the agent loop a zero-tool registry
+        and every tool dispatch would fail silently.  Pass the builtin registry
+        (``await _get_base_registry()``) or an explicit empty one built with
+        ``ToolRegistry()`` when you deliberately want no base tools.
         """
         from localharness.bench.schema import parse_tool_name
 
-        out = cls()
         if base_registry is None:
-            return out
+            raise ValueError(
+                "from_allowed() requires an explicit base_registry; "
+                "pass the builtin registry (await _get_base_registry()) or "
+                "ToolRegistry() when no base tools are desired. "
+                "Passing None previously silently returned a zero-tool registry."
+            )
+        out = cls()
 
         for entry in allowed:
             try:
