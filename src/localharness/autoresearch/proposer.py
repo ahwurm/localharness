@@ -223,6 +223,10 @@ async def propose(
                 "no [proposer] config — set proposer.base_url/model (PROP-02)"
             )
         pc = cfg.proposer
+        # Probe the proposer endpoint to determine tool_call_mode (FIDEL-03).
+        # Reuses the same detect_capabilities surface as the matrix path — model-agnostic.
+        _probe_client = LLMClient(LLMConfig(base_url=pc.base_url, model=pc.model, api_key=pc.api_key))
+        _cap = await _probe_client.detect_capabilities()
         llm = LLMClient(
             LLMConfig(
                 base_url=pc.base_url,
@@ -232,7 +236,7 @@ async def propose(
                 temperature=pc.temperature,
                 max_tokens=pc.max_tokens,
                 is_local=pc.is_local,
-                tool_call_mode="native",
+                tool_call_mode=_cap.tool_call_mode,
             )
         )
 

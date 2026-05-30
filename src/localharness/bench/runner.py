@@ -169,7 +169,8 @@ async def execute_one_run(
             ttft = time.monotonic() - t_start
 
     try:
-        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config)
+        base_registry = await _get_base_registry()
+        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
         try:
             await asyncio.wait_for(
                 _run_loop(loop, scen.prompt, _on_token),
@@ -219,7 +220,26 @@ async def execute_one_run(
 # Agent loop builder (overridable shim — keeps execute_one_run testable)
 # -------------------------------------------------------------------------
 
-def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None) -> Any:
+_BASE_REGISTRY: Any = None
+
+
+async def _get_base_registry() -> Any:
+    """Cached base registry populated with the builtin tools (read/write/glob/grep/
+    bash_exec). from_allowed() returns an EMPTY registry when given no base, so the
+    bench MUST supply one or the agent gets zero tools and hallucinates on every
+    tool scenario. Built once (builtin tools are stateless) and reused across runs."""
+    global _BASE_REGISTRY
+    if _BASE_REGISTRY is None:
+        from localharness.tools.builtin import register_builtin_tools
+        from localharness.tools.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        await register_builtin_tools(reg)
+        _BASE_REGISTRY = reg
+    return _BASE_REGISTRY
+
+
+def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None, base_registry: Any = None) -> Any:
     """Construct an AgentLoop instance for the given scenario.
 
     AgentLoop signature (verified from src/localharness/agent/loop.py, lines 271-285):
@@ -250,10 +270,20 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
     from localharness.config.models import AgentConfig
     from localharness.tools.registry import ToolRegistry
 
-    agent_config = agent_config if agent_config is not None else AgentConfig(
-        name=f"bench-{scenario.name}",
-        role=f"Bench harness execution for scenario {scenario.name}",
-    )
+    if agent_config is None:
+        from localharness.config.models import BudgetConfig, PermissionConfig
+        agent_config = AgentConfig(
+            # Scenario names use underscores (pure_qa, single_read…) but AgentConfig's
+            # name validator only allows [a-z0-9-]. Sanitize so every scenario yields a
+            # valid agent name instead of crashing at construction.
+            name=f"bench-{scenario.name.replace('_', '-')}",
+            role=f"Bench harness execution for scenario {scenario.name}",
+            permissions=PermissionConfig(
+                budget=BudgetConfig(
+                    max_actions=scenario.budget.max_actions,
+                ),
+            ),
+        )
 
     ctx_manager = ContextManager(
         max_context_tokens=scenario.budget.max_context_tokens,
@@ -261,7 +291,7 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
         agent_id=session_id,
         session_id=session_id,
     )
-    tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed)
+    tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry)
 
     # Plan 12-04 Task 1: register AgentTool stub when 'agent' is in tools_allowed.
     # The stub agent_runner returns a canned summary containing STUB_SUBAGENT_OK

@@ -237,10 +237,6 @@ def _proposer_cfg():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AUDIT-03c: the proposer hardcodes tool_call_mode='native' (proposer.py:235), never probes",
-)
 async def test_proposer_hardcodes_native_mode(proposer_corpus, proposer_results, monkeypatch):
     """When llm is None the proposer builds LLMClient(LLMConfig(..., tool_call_mode='native'))
     (proposer.py:226-237, :235 the literal). We spy the MODULE-LEVEL LLMClient (the exact seam
@@ -261,6 +257,12 @@ async def test_proposer_hardcodes_native_mode(proposer_corpus, proposer_results,
     class _SpyClient:
         def __init__(self, cfg):
             recorded["cfg"] = cfg
+
+        async def detect_capabilities(self):
+            # Probe spy: return a non-"native" mode so the production code feeds it into LLMConfig.
+            class _Cap:
+                tool_call_mode = "xml"
+            return _Cap()
 
         async def complete(self, messages, tools=None, stream=False):
             complete_calls["n"] += 1
