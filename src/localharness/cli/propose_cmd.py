@@ -127,7 +127,26 @@ def _resolve_bench_paths() -> tuple[Path, Path]:
     return Path(bc.corpus_path), Path(bc.results_path)
 
 
-async def _write_in_flight(proposal) -> None:
+def _diff_blob(proposal, cfg) -> str:
+    """Single-encoded archive diff blob incl. rationale + kind (GAP-1)."""
+    import json
+
+    from localharness.registry.catalogue import build_catalogue
+
+    try:
+        type_name = build_catalogue(cfg)[proposal.component].type_name
+    except Exception:
+        type_name = ""
+    kind = "hyperparameter" if type_name in ("int", "float") else "prompt"
+    return json.dumps({
+        "before": proposal.before,
+        "after": proposal.after,
+        "rationale": proposal.rationale,
+        "kind": kind,
+    })
+
+
+async def _write_in_flight(proposal, cfg) -> None:
     """Persist a single in_flight archive row (uuid4 id, null scores) under --archive."""
     import time
     import uuid
@@ -142,7 +161,7 @@ async def _write_in_flight(proposal) -> None:
                 id=str(uuid.uuid4()),
                 parent_id=None,
                 component=proposal.component,
-                diff=proposal.diff,
+                diff=_diff_blob(proposal, cfg),
                 train_score=None,
                 train_scores_per_fixture=None,
                 holdout_score=None,
@@ -203,7 +222,7 @@ def propose(
 
     if archive:
         try:
-            _run(_write_in_flight(proposal))
+            _run(_write_in_flight(proposal, cfg))
         except Exception as exc:
             _err(json_output, f"archive write failed: {exc}", exit_code=2)
             return
