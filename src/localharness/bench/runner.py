@@ -104,6 +104,7 @@ async def execute_one_run(
     model: str,
     run_path: Path,
     llm_client: Any,
+    agent_config: Any = None,
 ) -> ScenarioCompleted:
     """Run one scenario, capturing JSONL trace and emitting ScenarioCompleted.
 
@@ -168,7 +169,7 @@ async def execute_one_run(
             ttft = time.monotonic() - t_start
 
     try:
-        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id)
+        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config)
         try:
             await asyncio.wait_for(
                 _run_loop(loop, scen.prompt, _on_token),
@@ -218,7 +219,7 @@ async def execute_one_run(
 # Agent loop builder (overridable shim — keeps execute_one_run testable)
 # -------------------------------------------------------------------------
 
-def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "") -> Any:
+def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None) -> Any:
     """Construct an AgentLoop instance for the given scenario.
 
     AgentLoop signature (verified from src/localharness/agent/loop.py, lines 271-285):
@@ -249,7 +250,7 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
     from localharness.config.models import AgentConfig
     from localharness.tools.registry import ToolRegistry
 
-    agent_config = AgentConfig(
+    agent_config = agent_config if agent_config is not None else AgentConfig(
         name=f"bench-{scenario.name}",
         role=f"Bench harness execution for scenario {scenario.name}",
     )
@@ -332,6 +333,7 @@ async def accumulate_runs(
     timestamp_fn: Callable[[], str] = _timestamp_now,
     min_runs_override: Optional[int] = None,
     max_runs_override: Optional[int] = None,
+    agent_config: Any = None,
 ) -> tuple[list[ScenarioCompleted], str]:
     """Run scen repeatedly until should_stop says converged or max_runs hit.
 
@@ -347,7 +349,7 @@ async def accumulate_runs(
         timestamp = timestamp_fn()
         run_path = resolve_run_path(results_root, model, scen.name, timestamp)
         client = llm_client_factory(scen)
-        result = await execute_one_run(scen, model, run_path, client)
+        result = await execute_one_run(scen, model, run_path, client, agent_config=agent_config)
         samples.append(result)
         stop, reason = should_stop(samples, scen.tolerance, min_r, max_r)
         if stop:
