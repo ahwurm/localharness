@@ -103,35 +103,35 @@ def _make_corpus_repo(root):
 
 
 async def test_non_agent_mutation_yields_identical_arms(tmp_path, monkeypatch):
-    """The two gate arms resolve the IDENTICAL AgentConfig for a non-agent.* mutation.
+    """The two gate arms resolve DIVERGENT AgentConfigs for a non-agent.* mutation.
 
     Drives the REAL _build_default_run_slice / _run_slice (NO injected fake slice runner,
     NO monkeypatched run_experiment). The mutation targets org.context.compaction_threshold_pct
-    — a VALID registry path OUTSIDE the agent subtree — so _resolve_worktree_agent_cfg (which
-    reads only merged.get("agent", {}), experiment.py:218) drops it and both arms build the same
-    config. The gate therefore runs model-vs-itself for this whole class of proposal.
+    — a VALID registry path OUTSIDE the agent subtree. After ARM-01 widened
+    _resolve_worktree_agent_cfg to the full config cascade (org-inherited < agent), the org-level
+    context mutation now reaches the per-arm AgentConfig — the proposal arm gets 75.0 (non-default)
+    while the baseline arm gets 80.0 (default). Arms DIVERGE.
     """
     wt = _make_corpus_repo(tmp_path / "wt")
 
-    # Materialize a NON-agent.* mutation into the worktree (the gate's experiment.py:355 call).
-    # org.context.compaction_threshold_pct (ge=50.0) lives OUTSIDE the agent.* subtree — the
-    # point: a path the agent-only resolver cannot see.
+    # Materialize a NON-agent.* mutation (non-default value so it diverges from the 80.0 default).
+    # org.context.compaction_threshold_pct (ge=50.0, default=80.0) lives OUTSIDE the agent.* subtree.
     exp.write_experiment_overlay(
-        wt, "org.context.compaction_threshold_pct", 80.0, annotation=float
+        wt, "org.context.compaction_threshold_pct", 75.0, annotation=float
     )
 
-    # Capture the resolved AgentConfig that reaches the loop, per arm, WITHOUT running a turn.
-    # This is a config-capture (the AgentConfig IS the artifact under audit here — NOT the
-    # AUDIT-01 spine). Mirror the live builder's fallback so the captured value is the real
-    # per-arm config in both the threaded (post-20-02) and the no-thread era.
-    captured: dict = {}
+    # Capture one AgentConfig per arm. accumulate_runs invokes _build_agent_loop N times per
+    # arm; each call receives the same per-arm agent_config from _run_slice, so we only need one
+    # sample per arm. Track per-arm with a flag that flips after the baseline run_slice returns.
+    arm_cfgs: list = []
+    _arm: list = []  # current arm accumulator; reset between run_slice calls
 
     def _capture(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         resolved = agent_config if agent_config is not None else AgentConfig(
             name=f"bench-{scenario.name}",
             role=f"Bench harness execution for scenario {scenario.name}",
         )
-        captured.setdefault("cfgs", []).append(resolved)
+        _arm.append(resolved)
 
         class _StubLoop:  # no run_turn — _run_loop is patched to a no-op below
             pass
@@ -151,34 +151,33 @@ async def test_non_agent_mutation_yields_identical_arms(tmp_path, monkeypatch):
     # Stay offline: a canned client factory (the captured cfg is what matters; _run_loop is a no-op).
     factory = lambda _scen: object()  # noqa: E731
 
-    # Drive the REAL slice runner for BOTH arms.
+    # Drive the REAL slice runner for BOTH arms; flush _arm into arm_cfgs between calls.
     run_slice = exp._build_default_run_slice(
         "test-model",
         factory,
         annotation=float,
         component="org.context.compaction_threshold_pct",
-        after=80.0,
+        after=75.0,
     )
     await run_slice(wt, slice="train", with_overlay=False)  # baseline arm
+    arm_cfgs.append(_arm[0] if _arm else None)  # one representative from baseline
+    _arm.clear()
     await run_slice(wt, slice="train", with_overlay=True)  # proposal arm
+    arm_cfgs.append(_arm[0] if _arm else None)  # one representative from proposal
 
-    cfgs = [c for c in captured.get("cfgs", []) if c is not None]
-    assert len(cfgs) >= 2, (
+    base_cfg, head_cfg = arm_cfgs[0], arm_cfgs[1]
+    assert base_cfg is not None and head_cfg is not None, (
         "fewer than two AgentConfigs captured — _build_agent_loop was not reached for both arms "
         "(corpus invalid?)"
     )
-    base_cfg, head_cfg = cfgs[0], cfgs[1]
 
-    # THE characterization (pins the AUDIT-04 correctness hole): the non-agent.* mutation is
-    # dropped by _resolve_worktree_agent_cfg (it reads only the agent subtree), so BOTH arms
-    # resolve the IDENTICAL AgentConfig -> the gate runs model-vs-itself for this proposal.
-    # This PASSES today; a future fix that widens the resolver to merge the FULL config (so a
-    # provider/org/compaction mutation actually changes the runtime) would FLIP this assertion.
-    # CONTRAST: test_experiment_overlay_e2e::test_overlay_diverges_arms uses an agent.* mutation
-    # (agent.stuck_detector.window_size) -> arms DO diverge {5, 9}. The asymmetry IS the finding.
-    assert base_cfg.model_dump() == head_cfg.model_dump(), (
-        "arms differ — a future fix that widens _resolve_worktree_agent_cfg to the full config "
-        "would flip this characterization (a non-agent.* mutation would then change the runtime)"
+    # ARM-01 post-fix: the org.* mutation now reaches the per-arm AgentConfig via the widened
+    # cascade (identity < org-inherited < agent). The proposal arm (with_overlay=True) resolves
+    # context.compaction_threshold_pct=75.0 (from org overlay); the baseline arm (with_overlay=False)
+    # resolves the default 80.0. Arms DIVERGE — the gate no longer runs model-vs-itself.
+    assert base_cfg.model_dump() != head_cfg.model_dump(), (
+        "arms are identical — _resolve_worktree_agent_cfg did not thread the org.* mutation into "
+        "the per-arm AgentConfig (ARM-01 widen of the full cascade required)"
     )
 
 
