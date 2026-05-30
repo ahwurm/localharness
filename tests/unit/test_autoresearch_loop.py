@@ -631,7 +631,6 @@ async def test_run_summary_fields(archive_store, seeded_inflight, tmp_git_repo, 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_inline_sentinel_nonblocking(archive_store, seeded_inflight, tmp_git_repo,
                                            components_home, FakeClock, FakeWindowMeter, FakeExperimentFn,
                                            monkeypatch):
