@@ -222,7 +222,10 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
         # Thread scenario budget so the cascade AgentConfig enforces the scenario cap.
         # The overlay wins (deep_merge below), so an explicit agent.permissions overlay
         # can still override the scenario default.
-        "permissions": {"budget": {"max_actions": scenario.budget.max_actions}},
+        "permissions": {"budget": {
+            "max_actions": scenario.budget.max_actions,
+            "max_duration_minutes": scenario.budget.max_duration_minutes,
+        }},
     }
     # Scenario identity is the base; the overlay's agent subtree wins (so an agent.role
     # mutation is observable). name is always synthesized last to satisfy the validator.

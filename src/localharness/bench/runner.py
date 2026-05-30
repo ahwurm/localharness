@@ -280,7 +280,11 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
             role=f"Bench harness execution for scenario {scenario.name}",
             permissions=PermissionConfig(
                 budget=BudgetConfig(
-                    max_actions=scenario.budget.max_actions,
+                    # max_tool_calls (limits) acts as a ceiling on dispatch; take the
+                    # tighter of the two caps so both budget.max_actions and
+                    # limits.max_tool_calls are enforced by the real loop.
+                    max_actions=max(1, min(scenario.budget.max_actions, scenario.limits.max_tool_calls)),
+                    max_duration_minutes=scenario.budget.max_duration_minutes,
                 ),
             ),
         )

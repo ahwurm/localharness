@@ -107,8 +107,6 @@ async def test_scenario_max_actions_not_enforced(tool_scenario_corpus, faithful_
 
     # THE FIX target: the loop must honor the scenario's max_actions=1 ceiling. tool_call_count is
     # one Action per dispatched tool (runner.py:64-66); with the cap enforced it cannot exceed 1.
-    # Today the loop uses max_actions=100, so all 10 reads dispatch (tool_call_count == 10) and
-    # this fails -> xfail(strict=True) PASSES the suite (the documented gap).
     assert completed.tool_call_count <= scen.budget.max_actions
 
 
@@ -116,24 +114,22 @@ async def test_scenario_max_actions_not_enforced(tool_scenario_corpus, faithful_
 # AUDIT-02b: limits.max_tool_calls has ZERO readers; the run is not capped.
 # ---------------------------------------------------------------------------
 def test_max_tool_calls_has_zero_readers():
-    # GREEN source-level characterization (14-03 regression-guard precedent): PINS the zero-readers
-    # gap. Flips RED the moment a future fix adds a reader, alerting the fix phase to update it.
+    # Post-fix source-level pin: documents that max_tool_calls now HAS a reader in runner.py.
+    # Updated from "exactly 1 hit (schema def only)" to "> 1 hit" acknowledging the new reader
+    # that caps dispatch in _build_agent_loop (BUDGET-03 fix). The schema.py definition is still
+    # present; the runner.py reader is the new addition.
     hits = subprocess.run(
         ["grep", "-rn", "max_tool_calls", "src/localharness/"],
         capture_output=True,
         text=True,
     ).stdout.strip().splitlines()
-    # Exactly ONE line — the schema.py:96 DEFINITION. Zero readers anywhere in src.
-    assert len(hits) == 1, f"expected only the schema definition, got readers: {hits}"
-    assert "schema.py" in hits[0] and "max_tool_calls" in hits[0]
+    # Schema definition is still present
+    assert any("schema.py" in h and "max_tool_calls" in h for h in hits), f"schema def missing: {hits}"
+    # Runner now has a reader — more than just the schema def
+    reader_hits = [h for h in hits if "runner.py" in h and "max_tool_calls" in h]
+    assert len(reader_hits) >= 1, f"expected a runner.py reader for max_tool_calls, got: {hits}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AUDIT-02: limits.max_tool_calls is enforced nowhere (zero readers, schema.py:96 is "
-    "the only line); the run is not capped — execute_one_run reads scen.limits.max_latency_s "
-    "but never scen.limits.max_tool_calls",
-)
 async def test_scenario_max_tool_calls_not_enforced(tool_scenario_corpus, faithful_fake_llm, tmp_path):
     scen = _budget_scenario(tmp_path, name="cap_tool_calls", max_tool_calls=1)
     assert scen.limits.max_tool_calls == 1
@@ -213,9 +209,8 @@ async def test_scenario_max_duration_not_threaded(tool_scenario_corpus, faithful
     assert samples  # the run completed (no turn ran — _run_loop is a no-op)
 
     cfg = captured["cfg"]
-    # The DEFAULT BudgetConfig.max_duration_minutes (30.0) reaches the loop, NOT the scenario's 0.5.
-    # Written so it FLIPS when a future phase threads scenario.budget.max_duration_minutes onto the
-    # AgentConfig the bench builds (then the captured value becomes 0.5 and this assertion fails,
-    # alerting the fix phase).
-    assert cfg.permissions.budget.max_duration_minutes == 30.0
-    assert cfg.permissions.budget.max_duration_minutes != scen.budget.max_duration_minutes
+    # Post-fix: scenario.budget.max_duration_minutes is threaded onto the AgentConfig the bench
+    # builds (via BudgetConfig in _build_agent_loop). The captured value must equal the scenario's
+    # 0.5, not the old default of 30.0.
+    assert cfg.permissions.budget.max_duration_minutes == scen.budget.max_duration_minutes
+    assert cfg.permissions.budget.max_duration_minutes == 0.5
