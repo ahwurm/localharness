@@ -288,3 +288,28 @@ async def test_holdout_not_in_train_blob(archive_store, seeded_inflight):
     blob = (await archive_store.get(pid)).train_scores_per_fixture
     assert set(blob) == set(_IMPROVED_TRAIN_HEAD)        # train scenario names only
     assert set(blob).isdisjoint(set(_HOLDOUT_HEAD_OK))   # zero holdout names in the train blob
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 Wave-0 — the sentinel's OWN config is off-registry (Pitfall 5)
+#
+# sentinel.* lives on HarnessConfig, so it appears in build_catalogue — a self-modifying
+# proposer could try to mutate overfit_gap_threshold to silence its own alarm (the DGM
+# reward-hacking failure mode). 19-03 hardens the seal by adding "sentinel" to
+# _OFFREGISTRY_PREFIXES in experiment.py (+ adoption.py). Until then this xfail(strict=False)
+# stub stays RED (the seal does not yet refuse sentinel.*), then flips to pass. Mirrors
+# test_refuses_offregistry_component above exactly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=False)  # impl-pending-19
+async def test_refuse_sentinel_surface(archive_store, seeded_inflight):
+    """A proposal targeting `sentinel.overfit_gap_threshold` is refused off-registry; bench never runs."""
+    pid = await seeded_inflight(
+        archive_store, component="sentinel.overfit_gap_threshold", before=0.10, after=0.5
+    )
+    fake = FakeRunSlice(train_base=_EQUAL_TRAIN, train_head=_EQUAL_TRAIN)
+    code = await exp.run_experiment(pid, store=archive_store, run_slice=fake)
+    assert code == exp.EXIT_REFUSE_OFFREGISTRY  # the watchdog's own knobs are not mutable surface
+    assert code >= 4
+    assert fake.calls == []  # refused BEFORE any bench arm (no goalpost-moving)

@@ -616,3 +616,45 @@ async def test_run_summary_fields(archive_store, seeded_inflight, tmp_git_repo, 
     # time + window/token consumption are surfaced (exact attr names are the impl's; assert ≥1 present).
     assert any(hasattr(summary, a) for a in ("wallclock_elapsed", "elapsed", "duration"))
     assert any(hasattr(summary, a) for a in ("tokens_spent", "window_tokens_spent", "tokens"))
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 Wave-0 — the inline eval-sentinel hook is NON-BLOCKING (REP-03/04)
+#
+# 19-03/19-05 add a cheap inline sentinel check beside the per-iteration journal.write.
+# Its hard rule (19-RESEARCH Pitfall 4): a sentinel bug can NEVER crash the fire-and-forget
+# loop — it must be try/except-guarded. This stub monkeypatches that hook (module-level seam
+# ``run_inline_sentinel``, patched raising=False so the file collects before the seam exists —
+# the same raising=False idiom test_run_clean_halt_exit_zero uses) to RAISE, then asserts the
+# loop runs to its clean halt without propagating the exception and still journals 'complete'.
+# xfail(strict=False) until the guarded hook lands (then flips to pass).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=False)  # impl-pending-19
+async def test_inline_sentinel_nonblocking(archive_store, seeded_inflight, tmp_git_repo,
+                                           components_home, FakeClock, FakeWindowMeter, FakeExperimentFn,
+                                           monkeypatch):
+    """A sentinel hook that RAISES does not propagate out of run_loop; the run halts cleanly + journals 'complete'."""
+    import localharness.autoresearch.loop as loop_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("sentinel exploded")  # the inline check blows up mid-iteration
+
+    # patch the inline-sentinel seam; raising=False keeps this collectable before 19-03 wires it
+    monkeypatch.setattr(loop_mod, "run_inline_sentinel", _boom, raising=False)
+
+    pid = await seeded_inflight(archive_store, component="agent.role", before="i", after="x")
+    summary = await run_loop(  # must NOT raise — the try/except guard swallows the sentinel error
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_fake_propose(pid, component="agent.role"),
+        experiment_fn=FakeExperimentFn(exit_code=0),
+    )
+    assert summary.iterations >= 1  # the loop ran the iteration despite the sentinel raising
+    assert summary.halt_reason in ("budget", "complete")  # a clean cap-trip halt, not a crash
+
+    journal_path = Path(summary.journal_path)
+    assert journal_path.exists()
+    assert "complete" in journal_path.read_text()  # ran to its clean run-complete summary line
