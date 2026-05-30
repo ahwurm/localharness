@@ -794,6 +794,29 @@ class ProposerConfig(BaseModel):
     max_tokens: int = Field(default=4096, ge=1)
 
 
+class SentinelConfig(BaseModel):
+    """Eval-sentinel thresholds (REP-03/04). Auto-surfaced as `sentinel.*` registry knobs
+    (REG-04). SEALED from the proposer — see _OFFREGISTRY_PREFIXES in experiment.py/adoption.py."""
+
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    overfit_gap_threshold: float = Field(
+        default=0.10, ge=0.0, le=1.0,
+        description="train_score - holdout_score above this flags overfitting (10pp default).")
+    duplicate_similarity: float = Field(
+        default=0.90, ge=0.0, le=1.0,
+        description="difflib.SequenceMatcher ratio at/above which two consecutive same-component proposals are near-duplicate.")
+    duplicate_consecutive_k: int = Field(
+        default=3, ge=2, le=50,
+        description="N consecutive near-duplicate proposals that trip the search-diversity-collapse alert.")
+    saturation_k: int = Field(
+        default=5, ge=2, le=100,
+        description="A train fixture passed by the last K mutations is 'saturated' (rotation candidate).")
+    saturation_ceiling: float = Field(
+        default=0.99, ge=0.5, le=1.0,
+        description="Per-fixture train score counted as 'passing' for saturation (tolerates Wilson noise).")
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -802,6 +825,9 @@ class HarnessConfig(BaseModel):
     provider: ProviderConfig
     org: OrgConfig = Field(default_factory=OrgConfig)
     proposer: Optional[ProposerConfig] = None
+    sentinel: SentinelConfig = Field(
+        default_factory=SentinelConfig,
+        description="Eval-sentinel thresholds (REP-03/04). Addressable via `sentinel.{overfit_gap_threshold,duplicate_similarity,duplicate_consecutive_k,saturation_k,saturation_ceiling}`.")
 
     @model_validator(mode="after")
     def _proposer_model_distinct(self) -> "HarnessConfig":

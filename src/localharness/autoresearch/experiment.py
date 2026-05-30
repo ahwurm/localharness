@@ -48,7 +48,7 @@ EXIT_REFUSE_MALFORMED = 7
 
 # Belt-and-suspenders prefixes for the anti-reward-hacking seal (Pitfall 3). The
 # registry already excludes these by omission; this is defense-in-depth.
-_OFFREGISTRY_PREFIXES = ("bench.", "scenario", "grader", "success_criteria", "holdout")
+_OFFREGISTRY_PREFIXES = ("bench.", "scenario", "grader", "success_criteria", "holdout", "sentinel")
 
 # A component path encoding >1 dot-path (mirrors components_cmd._MULTI_PATH_PATTERN).
 _MULTI_PATH_PATTERN = re.compile(r"[,\s;]")

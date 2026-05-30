@@ -302,7 +302,6 @@ async def test_holdout_not_in_train_blob(archive_store, seeded_inflight):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_refuse_sentinel_surface(archive_store, seeded_inflight):
     """A proposal targeting `sentinel.overfit_gap_threshold` is refused off-registry; bench never runs."""
     pid = await seeded_inflight(
