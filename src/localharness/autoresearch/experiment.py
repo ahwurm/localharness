@@ -189,7 +189,7 @@ async def _load_and_validate(store, proposal_id: str, cfg) -> tuple[Any, str, An
     if any(component.startswith(p) for p in _OFFREGISTRY_PREFIXES):
         raise ExperimentRefusal(EXIT_REFUSE_OFFREGISTRY,
                                 f"component targets a sealed surface: {component!r}")
-    catalogue = build_catalogue(cfg)
+    catalogue = build_catalogue(cfg, agent_cfg=_provenance_agent_cfg())
     if catalogue.get(component) is None:
         raise ExperimentRefusal(EXIT_REFUSE_OFFREGISTRY,
                                 f"component not in the mutable registry: {component!r}")
@@ -225,6 +225,19 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     built = deep_merge(identity, agent_overlay)
     built["name"] = f"bench-{scenario.name}"
     return AgentConfig.model_validate(built)
+
+
+def _provenance_agent_cfg():
+    """The live ADOPTED agent.* config (overrides.yaml, no experiment overlay) for catalogue
+    `before` provenance. Returns None when nothing is adopted — behavior-identical to the old
+    agent_cfg=None (build_catalogue's own model_construct default); only becomes a truthful
+    live config once an agent.* mutation IS adopted (WARNING-2).
+    """
+    from localharness.config.overlay import _resolve_user_overlay_path
+    agent_overlay = load_overlay(_resolve_user_overlay_path()).get("agent", {})
+    if not agent_overlay:
+        return None
+    return AgentConfig.model_validate(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay))
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +399,7 @@ async def run_experiment(
             return exc.exit_code
 
         # Resolve the typed annotation for overlay coercion (off-registry already refused).
-        cat_entry = build_catalogue(cfg).get(component)
+        cat_entry = build_catalogue(cfg, agent_cfg=_provenance_agent_cfg()).get(component)
         annotation = cat_entry.annotation if cat_entry is not None else None
 
         # 2. Default real run_slice if the caller injected none.

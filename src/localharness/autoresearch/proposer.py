@@ -31,6 +31,20 @@ from localharness.provider.client import LLMClient, LLMConfig
 from localharness.registry import build_catalogue, coerce_value
 
 
+def _provenance_agent_cfg():
+    """The live ADOPTED agent.* config (overrides.yaml, no experiment overlay) for catalogue
+    `before` provenance. Returns None when nothing is adopted — behavior-identical to the old
+    agent_cfg=None (build_catalogue's own model_construct default); only becomes a truthful
+    live config once an agent.* mutation IS adopted (WARNING-2).
+    """
+    from localharness.config.models import AgentConfig
+    from localharness.config.overlay import _resolve_user_overlay_path, deep_merge, load_overlay
+    agent_overlay = load_overlay(_resolve_user_overlay_path()).get("agent", {})
+    if not agent_overlay:
+        return None
+    return AgentConfig.model_validate(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay))
+
+
 class ProposerError(Exception):
     """Raised on any proposer refusal (CLI maps to exit code 2)."""
 
@@ -193,7 +207,7 @@ async def propose(
     failed = _load_failed_traces(list(run_ids), results_path)
 
     # (A) Resolve the component + current value via the registry (reuse Phase 14).
-    catalogue = build_catalogue(cfg)  # default attribution is fine for the before-value
+    catalogue = build_catalogue(cfg, agent_cfg=_provenance_agent_cfg())  # live adopted agent.* before-value
     entry = catalogue.get(component)
     if entry is None:
         raise ProposerError(
