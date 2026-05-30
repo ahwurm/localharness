@@ -555,3 +555,80 @@ def FakeExperimentFn():
         return _fn
 
     return make
+
+
+# -----------------------------------------------------------------------------
+# Phase 21 bench/autoresearch audit fixtures (AUDIT-01)
+#
+# A prompt-conditioned faithful-fake LLM that drives the REAL bench spine, a
+# tool-scenario corpus builder with non-empty tools_allowed, and the live_vllm
+# opt-in marker. ADDITIVE — the existing MockLLMClient/FakeLLMClient/FakeToolCall/
+# FakeCompletionUsage stubs above are unchanged (the 744 baseline depends on them).
+# Consumed by 21-02 (AUDIT-01/06), 21-03 (AUDIT-02), 21-05 (AUDIT-04).
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class _NativeMsg:
+    """Minimal native-mode response message: .content + .tool_calls (loop.py:231-259, :621)."""
+    content: str | None = None
+    tool_calls: list = field(default_factory=list)
+
+
+class FaithfulFakeLLM:
+    """Prompt-conditioned native-mode fake. Emits tool_calls from `tool_plan` in order;
+    the final answer ECHOES the last observed tool result (causal dependency on real dispatch).
+
+    Unlike MockLLMClient (which blindly scripts the answer regardless of tools), a broken
+    registry makes this fake echo the dispatch error, not the file content — so AUDIT-01's
+    rubric assertion genuinely fails when the tool seam is broken (the green-check-trap guard).
+    """
+
+    def __init__(self, *, tool_plan, tool_call_mode: str = "native"):
+        # tool_plan: list[tuple[str, dict]] — (tool_name, args) to emit in order.
+        self._plan = list(tool_plan)
+        self._emitted = 0
+
+        class _Cfg:
+            pass
+        self.config = _Cfg()
+        self.config.tool_call_mode = tool_call_mode
+        self.config.context_window = 128_000
+
+    @staticmethod
+    def _last_tool_result(messages):
+        for m in reversed(messages or []):
+            role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            if role == "tool":
+                return m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        return None
+
+    async def complete(self, messages=None, tools=None, stream=False):
+        if self._emitted < len(self._plan):
+            name, args = self._plan[self._emitted]
+            self._emitted += 1
+            msg = _NativeMsg(
+                content=None,
+                tool_calls=[FakeToolCall(id=f"c{self._emitted}", name=name, arguments=args)],
+            )
+            return msg, FakeCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+        # No more tools to emit -> final answer is the echoed real tool result.
+        result = self._last_tool_result(messages)
+        return _NativeMsg(content=(result if result is not None else "no tool result"), tool_calls=[]), \
+            FakeCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        return await self.complete(messages, tools)
+
+
+@pytest.fixture
+def faithful_fake_llm():
+    """Factory: faithful_fake_llm(tool_plan=[("read", {"path": "..."}), ...]) -> FaithfulFakeLLM.
+
+    Reusable across AUDIT-01 (single read/write), AUDIT-02 (never-completes plan), AUDIT-04
+    (prompt-conditioned divergence). Pass as accumulate_runs(..., llm_client_factory=lambda _s: fake).
+    """
+    def _make(*, tool_plan, tool_call_mode: str = "native"):
+        return FaithfulFakeLLM(tool_plan=tool_plan, tool_call_mode=tool_call_mode)
+    _make.cls = FaithfulFakeLLM
+    return _make
