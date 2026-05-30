@@ -9,6 +9,8 @@ from localharness.cli.doctor_cmd import doctor
 from localharness.cli.experiment_cmd import experiment_app
 from localharness.cli.init_cmd import init_app
 from localharness.cli.propose_cmd import propose
+# report_cmd registers `report`/`sentinel` on autoresearch_app at import time (sibling commands).
+from localharness.cli import report_cmd as _report_cmd  # noqa: F401
 from localharness.cli.start_cmd import start_app
 from localharness.cli.validate_cmd import validate
 
