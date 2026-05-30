@@ -36,6 +36,11 @@ class _FakeProposerClient:
     def __init__(self, llm_cfg):
         self.config = llm_cfg
 
+    async def detect_capabilities(self):
+        class _Cap:
+            tool_call_mode = "xml"
+        return _Cap()
+
     async def complete(self, messages, tools=None, stream=False):
         class _Msg:
             content = json.dumps({"after": _GOOD_AFTER, "rationale": _GOOD_RATIONALE})

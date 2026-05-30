@@ -107,6 +107,11 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
             captured["base_url"] = llm_cfg.base_url
             self.config = llm_cfg
 
+        async def detect_capabilities(self):
+            class _Cap:
+                tool_call_mode = "xml"
+            return _Cap()
+
         async def complete(self, messages, tools=None, stream=False):
             class _Msg:
                 content = _good_payload()
