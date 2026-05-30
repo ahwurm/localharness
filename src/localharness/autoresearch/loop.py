@@ -149,6 +149,77 @@ class RunJournal:
 
 
 # ---------------------------------------------------------------------------
+# Phase 19 — the CHEAP, write-only, NON-BLOCKING inline sentinel hook (REP-03/04)
+#
+# A module-level seam (tests monkeypatch ``run_inline_sentinel`` to assert a sentinel
+# bug NEVER crashes the fire-and-forget loop — Pitfall 4). Per locked decision 5 +
+# 19-RESEARCH § Pattern 3, the inline hook runs ONLY the cheap signals over a small
+# recent window (the just-written row's overfit gap if it reached holdout + the near-
+# duplicate check over the recent same-component proposals). The full saturation/
+# rotation pass stays on-demand in ``autoresearch report`` (19-04) — never per-iteration.
+# This function WRITES to the journal (and, if a bus is given, the EventBus) only; it
+# NEVER writes to the archive's train/holdout columns and NEVER halts the loop.
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_cfg(cfg):
+    """The SentinelConfig to read thresholds from — defaults when cfg/cfg.sentinel is absent.
+
+    The loop tolerates ``cfg=None`` (the hermetic loop tests pass it), so the inline hook falls
+    back to a default-constructed SentinelConfig rather than dereferencing None.
+    """
+    sentinel = getattr(cfg, "sentinel", None)
+    if sentinel is None:
+        from localharness.config.models import SentinelConfig
+        sentinel = SentinelConfig()
+    return sentinel
+
+
+async def run_inline_sentinel(store, cfg, journal, bus, component):
+    """CHEAP, NON-BLOCKING sentinel check beside the per-iteration journal write.
+
+    Fetches a bounded recent same-component window (NOT the whole archive — that is the on-demand
+    pass's job), runs the cheap overfit-gap + near-duplicate signals, journals any SentinelAlert
+    as a write-only ``phase="sentinel"`` line, and (if a bus is attached) publishes it. Returns
+    the SentinelReport. The CALLER wraps this in try/except so ANY failure here is swallowed —
+    a sentinel bug can NEVER halt the loop (AUTO-04 amended, Pitfall 4).
+    """
+    from localharness.autoresearch.sentinel import (
+        RotationSuggestion,
+        SentinelReport,
+        alerts_from_report,
+        near_duplicate_runs,
+        overfit_gaps,
+    )
+
+    sentinel = _sentinel_cfg(cfg)
+    # Bounded recent window: the just-written row + enough same-component history for the dup check.
+    recent_rows = await store.query(
+        ArchiveQuery(component=component, limit=sentinel.duplicate_consecutive_k + 1)
+    )
+    gaps = overfit_gaps(recent_rows, sentinel.overfit_gap_threshold)
+    dups = near_duplicate_runs(
+        sorted(recent_rows, key=lambda r: r.ts),
+        sentinel.duplicate_similarity,
+        sentinel.duplicate_consecutive_k,
+    )
+    # Saturation/rotation stays on-demand (empty here): the inline check is intentionally cheap.
+    report = SentinelReport(
+        gaps=gaps, duplicates=dups, rotation=RotationSuggestion([], "", {})
+    )
+
+    alerts = alerts_from_report(report)
+    for alert in alerts:
+        journal.write({
+            "phase": "sentinel", "kind": alert.kind, "detail": alert.detail,
+            "mutation_id": alert.mutation_id, "metric_value": alert.metric_value,
+        })
+        if bus is not None:
+            await bus.publish(alert)
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Target derivation + real-fn factories (the loop body calls a uniform 2-arg
 # propose_fn(component, run_ids) and 1-arg experiment_fn(pid); tests inject these).
 # ---------------------------------------------------------------------------
@@ -410,6 +481,16 @@ async def run_loop(
             "archive_id": pid, "exit_code": exit_code, "decision": decision,
             "reason": reason, "budget": budget_ctl.snapshot(),
         })
+
+        # CHEAP, write-only, NON-BLOCKING inline sentinel check (Phase 19, REP-03/04).
+        # Resolved through the module global so tests can monkeypatch the seam; the bare
+        # ``except Exception: pass`` is REQUIRED — a sentinel bug NEVER halts the fire-and-forget
+        # loop (AUTO-04 amended, Pitfall 4). It journals + (if bus) emits alerts; never writes back.
+        try:
+            await run_inline_sentinel(store, cfg, journal, bus, component)
+        except Exception:
+            pass
+
         if summary.halt_reason == "circuit_breaker":
             break
 
