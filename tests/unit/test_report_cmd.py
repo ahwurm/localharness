@@ -110,7 +110,6 @@ async def test_top_mutations_and_lineage(components_home):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_drilldown_hypothesis_and_proof(components_home):
     """Prompt-edit `--show` prints rationale + p + a per-fixture mover; hyperparameter says 'no mechanism'."""
     prompt_id = "prompt00edit0001"
