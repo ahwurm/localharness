@@ -60,11 +60,6 @@ def _make_create_spy(captured: dict):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AUDIT-03b: _complete_xml_fallback omits stop and extra_body{enable_thinking:False} "
-    "(sibling divergence vs _complete_native client.py:274-282)",
-)
 async def test_xml_fallback_omits_stop_and_thinking():
     """The xml-fallback create() (client.py:343-348) passes ONLY model/messages/temperature/
     max_tokens — it drops BOTH `stop` and `extra_body{enable_thinking:False}` that its native/xml

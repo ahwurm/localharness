@@ -273,6 +273,13 @@ class LLMClient:
                 kwargs["tools"] = _tools_to_api_format(tools)
             if self.config.stop_sequences:
                 kwargs["stop"] = self.config.stop_sequences
+            # Disable thinking for local subjects — same policy as the xml path.
+            # Qwen3.6 emits a long <think> block on every call (30s+ on trivial Q&A),
+            # which the native path otherwise never suppresses. The kwarg is a no-op
+            # for families whose chat template doesn't reference it, so this stays
+            # model-agnostic: it disables thinking where supported, is ignored elsewhere.
+            if self.config.is_local:
+                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except Exception as exc:
@@ -332,13 +339,18 @@ class LLMClient:
                 msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\n\n" + injection}
             elif injection:
                 msgs = [{"role": "system", "content": injection}] + msgs
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": msgs,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if self.config.stop_sequences:
+            kwargs["stop"] = self.config.stop_sequences
+        if self.config.is_local:
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
-            response = await self._client.chat.completions.create(
-                model=self.config.model,
-                messages=msgs,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
+            response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
