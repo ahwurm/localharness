@@ -11,8 +11,9 @@ it must be actionable at a glance. The overview renders the signed-off mockup (1
 
 ``report --show <id>`` drills into one mutation: change diff + hypothesis (rationale, or the exact
 ``hyperparameter (numeric tuning), no mechanism`` label for a numeric tuning) + GAP-2 proof
-(p + lift + per-fixture movers + holdout verdict — NO Welch t / df / Cohen's d / CI; Phase 17 is sealed)
-+ the full child→root lineage.
+(only the ship-available stats: p-value + lift + per-fixture movers + holdout verdict; the richer
+effect-size/CI block is intentionally NOT rendered — Phase 17 is sealed and the baseline vector
+isn't stored) + the full child→root lineage.
 
 Each run writes a durable, diffable markdown snapshot under ``<home>/autoresearch/reports/<ts>.md`` so
 the remote/async reviewer has a copy.
