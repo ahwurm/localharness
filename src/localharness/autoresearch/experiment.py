@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from localharness.bench.aggregator import welch_improvement, welch_regression
-from localharness.config.overlay import atomic_write_overlay
+from localharness.config.models import AgentConfig
+from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay
 from localharness.registry import build_catalogue, coerce_value, set_value_in_dict
 
 # ---------------------------------------------------------------------------
@@ -197,12 +198,42 @@ async def _load_and_validate(store, proposal_id: str, cfg) -> tuple[Any, str, An
 
 
 # ---------------------------------------------------------------------------
+# Worktree config-cascade → AgentConfig resolver (BLOCKER-1 fix)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
+    """Build the per-scenario AgentConfig from the worktree config cascade.
+
+    Cascade: base ({}) -> <root>/.localharness/overrides.yaml (adopted mutations, BOTH arms)
+             -> <root>/.localharness/experiment-overlay.yaml (the candidate, PROPOSAL arm ONLY).
+    Mirrors adoption.py:83-103 (the agent.* -> AgentConfig validate precedent) but RETURNS the
+    built runtime config. The `agent` subtree is the registry addressing namespace; scenario
+    identity (name) is synthesized, role/everything-else comes from the overlay when present.
+    """
+    root = Path(root)
+    merged = deep_merge({}, load_overlay(root / ".localharness" / "overrides.yaml"))
+    if include_experiment_overlay:
+        merged = deep_merge(merged, load_overlay(root / ".localharness" / "experiment-overlay.yaml"))
+    agent_overlay = merged.get("agent", {})
+    identity = {
+        "name": f"bench-{scenario.name}",
+        "role": f"Bench harness execution for scenario {scenario.name}",
+    }
+    # Scenario identity is the base; the overlay's agent subtree wins (so an agent.role
+    # mutation is observable). name is always synthesized last to satisfy the validator.
+    built = deep_merge(identity, agent_overlay)
+    built["name"] = f"bench-{scenario.name}"
+    return AgentConfig.model_validate(built)
+
+
+# ---------------------------------------------------------------------------
 # Per-fixture success-rate vector extraction (Task 2 implements the body)
 # ---------------------------------------------------------------------------
 
 
 async def slice_success_by_fixture(
-    scenarios, model, results_root, factory, *, min_reps: int = 5
+    scenarios, model, results_root, factory, *, min_reps: int = 5, agent_config=None
 ) -> dict[str, float]:
     """Run each scenario (>=min_reps reps via accumulate_runs) → {scenario_name: success_rate}.
 
@@ -219,6 +250,7 @@ async def slice_success_by_fixture(
             scen, model, results_root, factory,
             min_runs_override=max(min_reps, scen.min_runs),
             max_runs_override=scen.max_runs,
+            agent_config=agent_config,
         )
         if not samples:
             continue
@@ -269,6 +301,7 @@ def _build_default_run_slice(model, factory, *, annotation=None, component=None,
     from localharness.bench.orchestrator import (
         _discover_scenarios,
         _filter_scenarios_by_slice,
+        _load_scenarios_from_paths,
         _synthesize_default_entry,
         build_llm_client_factory,
     )
@@ -276,15 +309,30 @@ def _build_default_run_slice(model, factory, *, annotation=None, component=None,
     async def _run_slice(worktree, *, slice, with_overlay):
         corpus = Path(worktree) / "bench" / "scenarios"
         results_root = Path(worktree) / "bench" / "results"
-        scenarios = _filter_scenarios_by_slice(_discover_scenarios(corpus), slice)
-        if with_overlay and annotation is not None and component is not None:
-            # the experiment overlay is already materialized into the worktree; the bench's
-            # own ConfigLoader (rooted at the worktree) reads it (Pattern 3 Option B).
-            pass
-        client_factory = factory or build_llm_client_factory(_synthesize_default_entry())
-        return await slice_success_by_fixture(
-            scenarios, model, results_root, client_factory
+        # _discover_scenarios returns list[Path]; load them into ScenarioSpec objects
+        # (mirrors bench.orchestrator) BEFORE filtering — the filter reads scen.slice.
+        scenarios = _filter_scenarios_by_slice(
+            _load_scenarios_from_paths(_discover_scenarios(corpus)), slice
         )
+        client_factory = factory or build_llm_client_factory(_synthesize_default_entry())
+        # The bench resolves each arm's AgentConfig from the worktree cascade. with_overlay
+        # (NOT the filesystem) decides whether the candidate experiment-overlay layer is included
+        # — both arms share the same worktree where the overlay is materialized (experiment.py:355).
+        out: dict[str, float] = {}
+        from localharness.bench.aggregator import metrics_summary
+        from localharness.bench.runner import accumulate_runs
+        for scen in scenarios:
+            agent_cfg = _resolve_worktree_agent_cfg(worktree, scen, include_experiment_overlay=with_overlay)
+            samples, _stop = await accumulate_runs(
+                scen, model, results_root, client_factory,
+                min_runs_override=max(5, scen.min_runs),
+                max_runs_override=scen.max_runs,
+                agent_config=agent_cfg,
+            )
+            if not samples:
+                continue
+            out[scen.name] = metrics_summary(samples)["success_rate"]["rate"]
+        return out
 
     return _run_slice
 
