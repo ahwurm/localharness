@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 21 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 22 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -19,6 +19,7 @@ from localharness.core.events import (
     Observation,
     ParseFailed,
     ScenarioCompleted,
+    SentinelAlert,
     StuckRecovered,
     SystemReady,
     TaskComplete,
@@ -132,14 +133,14 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 21 event types."""
-    assert len(EVENT_TYPE_MAP) == 21
+    """EVENT_TYPE_MAP has entries for all 22 event types."""
+    assert len(EVENT_TYPE_MAP) == 22
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
         "Observation", "DelegationRequest", "DelegationResult", "Escalation", "Heartbeat",
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
-        "ComponentMutated", "MutationArchived",
+        "ComponentMutated", "MutationArchived", "SentinelAlert",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -169,17 +170,17 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 21 event classes."""
+    """AnyEvent type contains all 22 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     args = typing.get_args(AnyEvent)
-    assert len(args) == 21
+    assert len(args) == 22
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
-        ComponentMutated, MutationArchived,
+        ComponentMutated, MutationArchived, SentinelAlert,
     }
     assert set(args) == expected
 
@@ -420,7 +421,6 @@ def test_component_mutated_accepts_primitive_value_types():
 # ImportError until then, then flips to a pass. Mirrors the 5-point event contract above.
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 def test_sentinel_alert_roundtrip():
     """SentinelAlert constructs, is frozen, and round-trips through deserialize_event (incl. fixtures list)."""
     from localharness.core.events import SentinelAlert, deserialize_event
@@ -446,7 +446,6 @@ def test_sentinel_alert_roundtrip():
     assert sat_restored.fixtures == ["fx_a", "fx_b"]
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_sentinel_alert_delivered_to_subscriber(bus):
     """Publishing a SentinelAlert delivers it to a bus subscriber (fire-and-forget emit contract)."""
     from localharness.core.events import SentinelAlert
