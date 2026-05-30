@@ -1,3 +1,4 @@
+import os
 import shutil
 import pytest
 from dataclasses import dataclass, field
@@ -632,3 +633,92 @@ def faithful_fake_llm():
         return FaithfulFakeLLM(tool_plan=tool_plan, tool_call_mode=tool_call_mode)
     _make.cls = FaithfulFakeLLM
     return _make
+
+
+def _tool_scenario_yaml(name: str, prompt: str, rubric_needle: str, tools_allowed_line: str) -> str:
+    """A complete, VALID ScenarioSpec YAML with NON-EMPTY tools_allowed (mirrors
+    _scenario_yaml / test_experiment_overlay_e2e._scenario_body, but drives real dispatch).
+
+    Uses a `contains:` rubric (NOT golden_output) because SuccessCriteria.golden_output is
+    EXACT-match (schema.py:136 `.strip() != .strip()`) — the echoed tool result is the full
+    file/bash output (e.g. 'The fruit of the day is apricot.'), so success is True ONLY when the
+    real tool returned content containing the needle. `tools_allowed_line` is a full YAML line
+    (e.g. 'tools_allowed: [read]') passed verbatim so the non-empty list is literal in source.
+    """
+    return (
+        f"name: {name}\n"
+        f'prompt: "{prompt}"\n'
+        'expected_outcome: "Reports the real tool result."\n'
+        "success_criteria:\n"
+        f'  rubric: ["contains:{rubric_needle}"]\n'
+        "budget:\n"
+        "  max_actions: 5\n"
+        "  max_duration_minutes: 1.0\n"
+        "  max_context_tokens: 32000\n"
+        "limits:\n"
+        "  max_latency_s: 30.0\n"
+        "  max_tool_calls: 5\n"
+        f"{tools_allowed_line}\n"
+        "slice: train\n"
+        "category: tool_basics\n"
+    )
+
+
+@pytest.fixture
+def tool_scenario_corpus(tmp_path: Path) -> dict:
+    """tmp corpus of VALID tool scenarios with NON-EMPTY tools_allowed (drives real dispatch).
+
+    Returns {"corpus": <dir>, "single_read": <path>, "write_execute": <path>,
+             "read_target": "/tmp/bench_fixtures/single_read_target.txt",  # staged, content "apricot"
+             "write_target": "/tmp/bench_fixtures/hello_bench.py"}.
+    Mirrors conftest._scenario_yaml structure (a valid ScenarioSpec) but with real tools.
+    Each YAML is round-tripped through load_scenario so a malformed scenario fails LOUDLY
+    here rather than silently resolving to an empty slice at bench-run time.
+    """
+    from localharness.bench.schema import load_scenario
+
+    # load_scenario validates `category` against bench/categories.yaml relative to cwd; pin
+    # the repo file so the fixture is hermetic regardless of the test runner's cwd (16-03 precedent).
+    repo_categories = Path(__file__).resolve().parent.parent / "bench" / "categories.yaml"
+    if repo_categories.exists():
+        os.environ.setdefault("LOCALHARNESS_CATEGORIES_PATH", str(repo_categories))
+
+    read_target = "/tmp/bench_fixtures/single_read_target.txt"  # staged by bench_fixtures_staged (content: apricot)
+    write_target = "/tmp/bench_fixtures/hello_bench.py"
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+
+    single_read = corpus / "single_read.yaml"
+    single_read.write_text(
+        _tool_scenario_yaml(
+            "single_read",
+            f"Read the file at {read_target} and report its contents.",
+            "apricot",
+            "tools_allowed: [read]",
+        ),
+        encoding="utf-8",
+    )
+
+    write_execute = corpus / "write_execute.yaml"
+    write_execute.write_text(
+        _tool_scenario_yaml(
+            "write_execute",
+            f"Write a Python file to {write_target} that prints HELLO_BENCH_OK, then run it with python3.",
+            "HELLO_BENCH_OK",
+            "tools_allowed: [write, bash_exec]",
+        ),
+        encoding="utf-8",
+    )
+
+    # Validate loudly — a malformed ScenarioSpec must fail the fixture, not resolve empty downstream.
+    for p in (single_read, write_execute):
+        load_scenario(p)
+
+    return {
+        "corpus": corpus,
+        "single_read": single_read,
+        "write_execute": write_execute,
+        "read_target": read_target,
+        "write_target": write_target,
+    }
