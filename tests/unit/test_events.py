@@ -412,3 +412,51 @@ def test_component_mutated_accepts_primitive_value_types():
         restored = deserialize_event(ev.model_dump_json())
         assert restored.before_value == raw
         assert restored.after_value == raw
+
+
+# --- Phase 19 Wave-0: SentinelAlert event (the class lands in 19-02) ---
+# SentinelAlert is imported INSIDE each test body so this module still collects before 19-02
+# ships the class (the 17-01 import-inside-body idiom); the xfail(strict=False) absorbs the
+# ImportError until then, then flips to a pass. Mirrors the 5-point event contract above.
+
+
+@pytest.mark.xfail(strict=False)  # impl-pending-19
+def test_sentinel_alert_roundtrip():
+    """SentinelAlert constructs, is frozen, and round-trips through deserialize_event (incl. fixtures list)."""
+    from localharness.core.events import SentinelAlert, deserialize_event
+
+    ev = SentinelAlert(
+        kind="overfit", detail="gap 0.2 > 0.1", mutation_id="abc",
+        metric_value=0.2, threshold=0.1,
+    )
+    assert ev.event_type == "SentinelAlert"
+
+    # frozen: mutating a field raises (the BaseEvent immutability contract)
+    with pytest.raises(Exception):
+        ev.kind = "x"
+
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, SentinelAlert)
+    assert restored.kind == "overfit"
+    assert restored.metric_value == 0.2
+
+    # a saturation alert carries its saturated-fixtures list through the round-trip
+    sat = SentinelAlert(kind="saturation", detail="fx_a saturated", fixtures=["fx_a", "fx_b"])
+    sat_restored = deserialize_event(sat.model_dump_json())
+    assert sat_restored.fixtures == ["fx_a", "fx_b"]
+
+
+@pytest.mark.xfail(strict=False)  # impl-pending-19
+async def test_sentinel_alert_delivered_to_subscriber(bus):
+    """Publishing a SentinelAlert delivers it to a bus subscriber (fire-and-forget emit contract)."""
+    from localharness.core.events import SentinelAlert
+
+    received = []
+
+    async def _handler(event):
+        received.append(event)
+
+    bus.subscribe(SentinelAlert, _handler)
+    await bus.publish(SentinelAlert(kind="near_duplicate", detail="3 dupes"))
+    assert len(received) == 1
+    assert received[0].kind == "near_duplicate"
