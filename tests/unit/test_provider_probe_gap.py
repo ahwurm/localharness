@@ -1,0 +1,363 @@
+"""AUDIT-03 (provider/probe seams that silently run the wrong model/mode) + AUDIT-06
+fix#2/#3 construction characterization.
+
+Every test here is CONSTRUCTION-ONLY or a CAPTURE-SPY (records kwargs / the constructed
+LLMConfig / the MatrixEntry, returns a fabricated value). NO test calls a real model — the
+only network seam (the OpenAI create()) is always replaced by a spy that returns a hand-built
+response object, so nothing ever reaches an endpoint. Model-agnostic and offline.
+
+The four AUDIT-03 seams:
+  a) the autoresearch GATE builds an unprobed ollama/`bench-default` client, ignoring cfg.provider
+     (experiment.py:330 -> build_llm_client_factory(_synthesize_default_entry()))
+  b) _complete_xml_fallback omits BOTH stop_sequences and extra_body{enable_thinking:False}
+     (the sibling divergence vs _complete_native client.py:274-282)  [also AUDIT-06 fix#2 twin]
+  c) the proposer hardcodes tool_call_mode="native" (proposer.py:235), never probes
+  d) startup derives mode from the STORED provider.supports_function_calling flag and discards
+     the probe (_probe_llm returns only a bool; start_cmd.py:160,165)
+  e) the root enabler: LLMConfig default tool_call_mode="native" (client.py:33)
+
+AUDIT-06 fix#3 asymmetry: the MATRIX path DOES probe via detect_capabilities
+(orchestrator.py:143-144); the gate path does not.
+"""
+import inspect
+
+import pytest
+
+
+# --------------------------------------------------------------------------- #
+# Shared spy plumbing for the OpenAI create() network seam.
+# A capture spy: records kwargs, returns a fabricated response. NEVER connects.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeMsg:
+    content = "ok"
+    tool_calls: list = []
+
+
+class _Choice:
+    message = _FakeMsg()
+
+
+class _Resp:
+    choices = [_Choice()]
+    usage = None
+
+
+def _make_create_spy(captured: dict):
+    """Return an async spy for client._client.chat.completions.create that records
+    the kwargs it was called with and returns a fabricated response (no network)."""
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _Resp()
+
+    return _spy_create
+
+
+# --------------------------------------------------------------------------- #
+# Task 1 — AUDIT-03b + AUDIT-06 fix#2 twin: _complete_xml_fallback create()-spy (RED)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AUDIT-03b: _complete_xml_fallback omits stop and extra_body{enable_thinking:False} "
+    "(sibling divergence vs _complete_native client.py:274-282)",
+)
+async def test_xml_fallback_omits_stop_and_thinking():
+    """The xml-fallback create() (client.py:343-348) passes ONLY model/messages/temperature/
+    max_tokens — it drops BOTH `stop` and `extra_body{enable_thinking:False}` that its native/xml
+    siblings apply (client.py:274-275, :281-282 and :309-310, :312-313).
+
+    AUDIT-06 fix#2: enable_thinking=False is present on _complete_native (client.py:281-282) but
+    its fallback twin is UNFIXED on the fallback path.
+
+    The two asserts below are the fix target — they PASS once the fallback mirrors the siblings,
+    and FAIL today (the fallback omits both), so xfail(strict=True) keeps the suite green. Every
+    assertion is on the recorded create() kwargs via a capture-spy returning a fabricated _Resp
+    — no real model call.
+    """
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    # is_local=True + stop_sequences=["X"] make the SIBLINGS add stop + extra_body; tool_call_mode
+    # ="xml" builds self._fn_converter so the fallback's system injection runs. base_url/model are
+    # dummies we never connect to (the spy intercepts the only create() call).
+    client = LLMClient(
+        LLMConfig(
+            base_url="http://localhost:0/v1",
+            model="m",
+            is_local=True,
+            stop_sequences=["X"],
+            tool_call_mode="xml",
+        )
+    )
+
+    captured: dict = {}
+    client._client.chat.completions.create = _make_create_spy(captured)
+
+    # ToolSchema is a plain JSON-Schema dict (core/types.py:16); the _fn_converter accepts a dict.
+    tool = {
+        "name": "list_files",
+        "description": "List directory contents",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+
+    await client._complete_xml_fallback(
+        messages=[{"role": "system", "content": "sys"}],
+        tools=[tool],
+        stream=False,
+    )
+
+    # THE assertion (the D-fix target): the fallback MUST forward stop + enable_thinking like
+    # its siblings. Today it omits both -> RED -> xfail(strict=True) passes the suite.
+    assert captured.get("stop") == ["X"], "fallback dropped stop_sequences (sibling divergence)"
+    assert captured.get("extra_body") == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }, "fallback dropped enable_thinking=False (AUDIT-06 fix#2 native-thinking twin is UNFIXED on the fallback)"
+
+
+# --------------------------------------------------------------------------- #
+# Task 2A — AUDIT-03a (D2 direction): gate-factory probe-skip spy (RED)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AUDIT-03a: the gate builds an unprobed ollama/bench-default client, ignoring cfg.provider",
+)
+def test_gate_factory_ignores_cfg_provider_and_skips_probe(monkeypatch):
+    """The autoresearch gate's default factory is, verbatim (experiment.py:330):
+        build_llm_client_factory(_synthesize_default_entry())
+    _synthesize_default_entry() (orchestrator.py:226-230) is a HARDCODED
+    MatrixEntry(provider='ollama', model_id='bench-default'); build_llm_client_factory's docstring
+    says 'This path does NOT probe capabilities'. So the gate runs an unprobed ollama/bench-default
+    client regardless of cfg.provider.
+
+    We spy the construction seam (_build_bench_client) to OBSERVE the MatrixEntry the gate builds
+    with — we do NOT replace behavior and NEVER call .complete(). The assertion is model-agnostic:
+    the gate must NOT hardcode bench-default/ollama (D2: it SHOULD resolve model/base_url from
+    cfg.provider + a detect_capabilities probe, like the matrix path). Today it does hardcode both
+    -> RED -> xfail(strict=True) passes.
+    """
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.orchestrator import (
+        _synthesize_default_entry,
+        build_llm_client_factory,
+    )
+
+    real_entry_holder: dict = {}
+
+    def _spy_build(entry):
+        real_entry_holder["entry"] = entry
+
+        class _Dummy:  # stand-in client — never connected, never probed
+            ...
+
+        return _Dummy()
+
+    monkeypatch.setattr(orch, "_build_bench_client", _spy_build)
+
+    # Reproduce EXACTLY what the gate does at experiment.py:330, then invoke the returned factory
+    # with a dummy scenario to trigger _build_bench_client — no real bench, no network.
+    factory = build_llm_client_factory(_synthesize_default_entry())
+    factory(object())  # _factory(_scen) ignores its arg; just triggers the construction seam
+
+    entry = real_entry_holder["entry"]
+    # The gate synthesizes a HARDCODED ollama/bench-default entry and never probes. D2 fix
+    # direction: it SHOULD resolve model_id/base_url from cfg.provider + a detect_capabilities probe.
+    assert entry.model_id != "bench-default", "gate still hardcodes model_id=bench-default (unprobed)"
+    assert entry.provider != "ollama", "gate still hardcodes provider=ollama regardless of cfg.provider"
+
+
+# --------------------------------------------------------------------------- #
+# Task 2B — AUDIT-06 fix#3: the MATRIX path DOES probe (GREEN characterization)
+# --------------------------------------------------------------------------- #
+
+
+async def test_matrix_path_probes(monkeypatch, tmp_path):
+    """fix#3: the matrix path probes (orchestrator.py:143-144 — _run_one_model builds a client and
+    awaits detect_capabilities); the gate path (AUDIT-03a above) does not. This is the asymmetry.
+
+    GREEN characterization of present behavior. We monkeypatch _build_bench_client to return a stub
+    whose detect_capabilities is a capture-spy (sets probed=True, returns a fabricated
+    CapabilityResult) and stub accumulate_runs to a no-op — so no real bench, no network. With
+    scenarios=[] the scenario loop never runs; the only thing exercised is the probe.
+    """
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import MatrixEntry, SamplingConfig
+    from localharness.provider.client import CapabilityResult
+
+    state = {"probed": False}
+
+    class _ProbedStub:
+        async def detect_capabilities(self):
+            state["probed"] = True
+            # Fabricated CapabilityResult (client.py:45-51) — no real probe.
+            return CapabilityResult(
+                tool_call_mode="native",
+                context_window=128_000,
+                supports_streaming=True,
+                probe_duration_ms=0.0,
+                probe_error=None,
+            )
+
+    monkeypatch.setattr(orch, "_build_bench_client", lambda entry: _ProbedStub())
+
+    async def _noop_accumulate(*args, **kwargs):
+        return [], "stop"
+
+    monkeypatch.setattr(orch, "accumulate_runs", _noop_accumulate)
+
+    entry = MatrixEntry(name="m", provider="vllm", model_id="some-model", base_url="http://localhost:0/v1")
+    await orch._run_one_model(
+        entry,
+        scenarios=[],  # empty -> the per-scenario loop body never runs; only the probe fires
+        results_path=tmp_path,
+        sampling=SamplingConfig(),
+    )
+
+    assert state["probed"] is True, "matrix path must invoke detect_capabilities (fix#3)"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3A — AUDIT-03c: proposer hardcodes tool_call_mode='native' (RED)
+# --------------------------------------------------------------------------- #
+
+
+def _proposer_cfg():
+    """A HarnessConfig with a DISTINCT proposer block (PROP-02 _proposer_model_distinct validator
+    forces proposer.model != provider.default_model). Mirrors test_proposer.py::_cfg."""
+    from localharness.config.models import HarnessConfig
+
+    return HarnessConfig.model_validate(
+        {
+            "version": "1",
+            "provider": {
+                "provider_type": "ollama",
+                "base_url": "http://localhost:11434/v1",
+                "default_model": "gpt-oss:120b",
+            },
+            "proposer": {
+                "base_url": "http://localhost:11434/v1",
+                "model": "frontier-strong:latest",
+            },
+        }
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AUDIT-03c: the proposer hardcodes tool_call_mode='native' (proposer.py:235), never probes",
+)
+async def test_proposer_hardcodes_native_mode(proposer_corpus, proposer_results, monkeypatch):
+    """When llm is None the proposer builds LLMClient(LLMConfig(..., tool_call_mode='native'))
+    (proposer.py:226-237, :235 the literal). We spy the MODULE-LEVEL LLMClient (the exact seam
+    test_proposer.py:116 uses) to RECORD the LLMConfig it is constructed with, returning a fake
+    whose complete() yields a parseable proposal so propose() runs to completion.
+
+    The seal runs FIRST (proposer.py:206) so the spy's complete() is only reached AFTER a valid
+    train run_id passes the seal (no real model — the fake returns canned JSON). THE assertion:
+    the proposer SHOULD derive/probe the mode from cfg.proposer, not hardcode native. Today it is
+    the literal 'native' -> RED -> xfail(strict=True) passes. (An XML-mode proposer model would
+    mis-parse every proposal.)
+    """
+    import localharness.autoresearch.proposer as prop
+
+    recorded: dict = {}
+    complete_calls = {"n": 0}
+
+    class _SpyClient:
+        def __init__(self, cfg):
+            recorded["cfg"] = cfg
+
+        async def complete(self, messages, tools=None, stream=False):
+            complete_calls["n"] += 1
+
+            class _M:
+                # _parse (proposer.py:59) requires {"after", "rationale"} with rationale min_length>=1.
+                content = '{"after": "You are a careful, terse assistant.", "rationale": "verbosity in failed traces"}'
+
+            return _M(), None
+
+    monkeypatch.setattr(prop, "LLMClient", _SpyClient, raising=False)
+
+    cfg = _proposer_cfg()
+    # agent.role coerces trivially (a string path); valid train run_id passes the seal.
+    await prop.propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=None,  # force the hardcoded construction path
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+    )
+
+    # complete() reached ONLY after the seal (valid train run_id) — proves no pre-seal model call.
+    assert complete_calls["n"] == 1, "spy.complete must be reached exactly once, after the seal"
+    # THE fix target: mode must NOT be the hardcoded 'native' — it should come from cfg.proposer / a probe.
+    assert recorded["cfg"].tool_call_mode != "native", (
+        "proposer hardcodes tool_call_mode='native' (proposer.py:235) — should derive/probe from cfg.proposer"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Task 3B — AUDIT-03d: startup builds the LLMConfig from the STORED flag, discards the probe (GREEN)
+# --------------------------------------------------------------------------- #
+
+
+def test_startup_uses_stored_flag_not_probe():
+    """AUDIT-03d: start_cmd.py:160 builds the LLMConfig mode from the STORED
+    provider.supports_function_calling:
+        tool_call_mode = "native" if provider.supports_function_calling else "xml"
+    _probe_llm (start_cmd.py:18-28) calls detect_capabilities but RETURNS ONLY A BOOL (:165
+    probe_ok) — the probed mode is discarded. Swap the model without re-init and the mode is stale.
+
+    Construction-only (no REPL, no model): reproduce the exact expression with
+    supports_function_calling=False and assert the mode follows the STORED flag, then prove the
+    source via inspect (the 14-03 source-regression precedent).
+    """
+    from localharness.config.models import ProviderConfig
+    from localharness.provider.client import LLMConfig
+
+    provider = ProviderConfig(
+        provider_type="ollama",
+        base_url="http://localhost:11434/v1",
+        default_model="some-model",
+        supports_function_calling=False,  # stored flag -> xml
+    )
+
+    # Reproduce start_cmd.py:155-161 verbatim.
+    llm_cfg = LLMConfig(
+        base_url=provider.base_url,
+        model=provider.default_model,
+        api_key=provider.api_key,
+        timeout_seconds=provider.timeout_seconds,
+        tool_call_mode="native" if provider.supports_function_calling else "xml",
+    )
+    assert llm_cfg.tool_call_mode == "xml", "startup mode must follow the STORED flag (not a probe)"
+
+    # Source-level proof: the stored-flag derivation is literally in start_cmd, and the probe
+    # result is captured as a bool (probe_ok) — never fed into the LLMConfig.
+    from localharness.cli import start_cmd
+
+    src = inspect.getsource(start_cmd).replace("'", '"')
+    assert 'tool_call_mode="native" if provider.supports_function_calling else "xml"' in src, (
+        "start_cmd must derive the mode from the STORED supports_function_calling flag"
+    )
+    assert "probe_ok" in src, (
+        "the probe result is captured as a bool (probe_ok) and discarded — the probed mode never reaches the LLMConfig"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Task 3C — AUDIT-03e: the root enabler — LLMConfig default tool_call_mode='native' (GREEN)
+# --------------------------------------------------------------------------- #
+
+
+def test_llmconfig_default_mode_is_native():
+    """AUDIT-03e: the inherited default that makes every unprobed path native (client.py:33).
+    GREEN characterization of the root enabler."""
+    from localharness.provider.client import LLMConfig
+
+    assert LLMConfig(base_url="x", model="y").tool_call_mode == "native"
