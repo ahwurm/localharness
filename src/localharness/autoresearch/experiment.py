@@ -303,15 +303,19 @@ def _estimate_cost(*maps: dict[str, float]) -> float:
     return float(sum(len(m) for m in maps if m))
 
 
-def _build_default_run_slice(model, factory, *, annotation=None, component=None, after=None):
+def _build_default_run_slice(model, factory, *, cfg=None, annotation=None, component=None, after=None):
     """The real bench-backed slice runner used when the caller injects no run_slice.
 
     Closure signature matches the injected fake: ``run_slice(worktree, *, slice, with_overlay)``.
     The proposal arm (with_overlay=True) runs with the experiment overlay materialized in the
     worktree; the baseline arm (with_overlay=False) WITHOUT it. CONTEXT: the baseline is a FRESH
     re-run, never cached — each arm re-discovers + re-runs the worktree corpus from scratch.
+
+    cfg: HarnessConfig threaded from run_experiment so the gate's bench client resolves
+    provider/model/base_url from cfg.provider + a detect_capabilities probe (FIDEL-01).
     """
     from localharness.bench.orchestrator import (
+        _build_bench_client,
         _discover_scenarios,
         _filter_scenarios_by_slice,
         _load_scenarios_from_paths,
@@ -327,7 +331,23 @@ def _build_default_run_slice(model, factory, *, annotation=None, component=None,
         scenarios = _filter_scenarios_by_slice(
             _load_scenarios_from_paths(_discover_scenarios(corpus)), slice
         )
-        client_factory = factory or build_llm_client_factory(_synthesize_default_entry())
+        if factory is not None:
+            client_factory = factory
+        elif cfg is not None:
+            # FIDEL-01: resolve from cfg.provider + probe, mirroring the matrix path
+            # (_run_one_model: orchestrator.py:143-148). Model-agnostic — no Qwen/Ollama branch.
+            from localharness.bench.config import MatrixEntry
+            entry = MatrixEntry(
+                name=cfg.provider.default_model,
+                provider=cfg.provider.provider_type,
+                model_id=cfg.provider.default_model,
+                base_url=cfg.provider.base_url,
+            )
+            probed_client = _build_bench_client(entry)
+            await probed_client.detect_capabilities()
+            client_factory = lambda _scen: probed_client
+        else:
+            client_factory = build_llm_client_factory(_synthesize_default_entry())
         # The bench resolves each arm's AgentConfig from the worktree cascade. with_overlay
         # (NOT the filesystem) decides whether the candidate experiment-overlay layer is included
         # — both arms share the same worktree where the overlay is materialized (experiment.py:355).
@@ -406,7 +426,7 @@ async def run_experiment(
         if run_slice is None:
             model = cfg.provider.default_model
             run_slice = _build_default_run_slice(
-                model, None, annotation=annotation, component=component, after=after
+                model, None, cfg=cfg, annotation=annotation, component=component, after=after
             )
 
         # 3. One throwaway worktree for the whole run.
