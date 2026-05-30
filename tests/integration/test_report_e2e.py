@@ -49,7 +49,6 @@ async def _seed_rows(specs: list[dict]) -> None:
     await store.close()
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_report_end_to_end(components_home, tmp_git_repo, seeded_archive):
     """Seeded inbox (adopted/held/holdout_rejected + a promoted gap-row) ⇒ report exits 0 and writes a markdown snapshot with the inbox sections."""
     await _seed_rows(

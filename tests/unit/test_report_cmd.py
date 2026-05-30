@@ -58,7 +58,6 @@ async def _seed_rows(specs: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_report_shows_trajectory(components_home):
     """A promoted lineage over rising ts/train_score ⇒ report exits 0 and emits a sparkline + 'train'."""
     await _seed_rows(
@@ -79,7 +78,6 @@ async def test_report_shows_trajectory(components_home):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_top_mutations_and_lineage(components_home):
     """Top-mutations table lists a Pareto child; `--show <child>` prints lineage child→root."""
     parent_id = "parent00deadbeef"
