@@ -47,7 +47,6 @@ def _as_jsonable(obj):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 def test_sparkline_mapping():
     """sparkline maps a [0,1] ramp onto the 8-block glyph string; empty→"" ; None skipped."""
     _RAMP = "▁▂▃▄▅▆▇█"
@@ -69,7 +68,6 @@ def test_sparkline_mapping():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_overfit_gap_fires(archive_store, seeded_archive, bus):
     """A row with train 0.9 / holdout 0.7 (gap 0.20 > 0.10) fires; a 0.02-gap row does not."""
     rows = await seeded_archive(
@@ -100,7 +98,6 @@ async def test_overfit_gap_fires(archive_store, seeded_archive, bus):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_near_duplicate_collapse(archive_store, seeded_archive):
     """K=3 consecutive same-component near-identical diffs collapse-alert; a diverse run does not."""
     import difflib
@@ -144,7 +141,6 @@ async def test_near_duplicate_collapse(archive_store, seeded_archive):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=False)  # impl-pending-19
 async def test_saturation_rotation_suggestion(archive_store, seeded_archive):
     """Last K=5 rows all ceiling fx_a (1.0) but not fx_b (0.4) ⇒ suggest fx_a; never a holdout name."""
     rows = await seeded_archive(
