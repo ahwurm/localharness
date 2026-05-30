@@ -210,12 +210,23 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     Mirrors adoption.py:83-103 (the agent.* -> AgentConfig validate precedent) but RETURNS the
     built runtime config. The `agent` subtree is the registry addressing namespace; scenario
     identity (name) is synthesized, role/everything-else comes from the overlay when present.
+
+    ARM-01: widened to the FULL config cascade so non-agent.* mutations (org.*, provider.*,
+    compaction.*) also reach the resolved per-arm AgentConfig. Cascade priority (low→high):
+    identity < org-inherited < agent. Only AgentConfig-compatible subtrees are extracted from org.
     """
     root = Path(root)
     merged = deep_merge({}, load_overlay(root / ".localharness" / "overrides.yaml"))
     if include_experiment_overlay:
         merged = deep_merge(merged, load_overlay(root / ".localharness" / "experiment-overlay.yaml"))
     agent_overlay = merged.get("agent", {})
+    # ARM-01: extract org-level subtrees that are also valid AgentConfig fields (agents inherit
+    # from org by default). Only pull AgentConfig-compatible keys to avoid extra="forbid" rejects.
+    org_overlay = merged.get("org", {})
+    org_base: dict = {}
+    for field in ("context", "permissions"):
+        if field in org_overlay:
+            org_base[field] = org_overlay[field]
     identity = {
         "name": f"bench-{scenario.name}",
         "role": f"Bench harness execution for scenario {scenario.name}",
@@ -227,9 +238,9 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
             "max_duration_minutes": scenario.budget.max_duration_minutes,
         }},
     }
-    # Scenario identity is the base; the overlay's agent subtree wins (so an agent.role
-    # mutation is observable). name is always synthesized last to satisfy the validator.
-    built = deep_merge(identity, agent_overlay)
+    # Cascade: identity < org-inherited (lower priority than agent) < agent overlay (wins).
+    # name is always synthesized last to satisfy the validator.
+    built = deep_merge(deep_merge(identity, org_base), agent_overlay)
     built["name"] = f"bench-{scenario.name}"
     return AgentConfig.model_validate(built)
 
