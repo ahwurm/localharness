@@ -85,12 +85,6 @@ def _never_completes_read_plan(n: int):
 # ---------------------------------------------------------------------------
 # AUDIT-02a: scenario.budget.max_actions is never threaded into the loop.
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="AUDIT-02: scenario.budget.max_actions is never threaded into the loop; "
-    "the default AgentConfig max_actions=100 is used (runner.py:273-279 builds a default "
-    "BudgetConfig; only max_context_tokens reaches the runtime at runner.py:281-282)",
-)
 async def test_scenario_max_actions_not_enforced(tool_scenario_corpus, faithful_fake_llm, tmp_path):
     # RED today (loop built with default max_actions=100). xfail strict flips to a real pass when
     # a future phase threads scenario.budget.max_actions onto the AgentConfig the bench builds.
