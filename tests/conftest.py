@@ -722,3 +722,27 @@ def tool_scenario_corpus(tmp_path: Path) -> dict:
         "read_target": read_target,
         "write_target": write_target,
     }
+
+
+# -----------------------------------------------------------------------------
+# Phase 21: live_vllm opt-in marker + env-gate skip
+#
+# The marker is registered HERE (conftest pytest_configure), NOT in pyproject.toml:
+# the Phase 21 boundary is tests/** + planning docs only, and pyproject is a non-test
+# config file. addinivalue_line is the in-conftest equivalent of the pyproject `markers =`
+# list and avoids PytestUnknownMarkWarning.
+# -----------------------------------------------------------------------------
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live_vllm: opt-in real-model spine test hitting a live vLLM endpoint; "
+        "skipped by default unless LOCALHARNESS_LIVE_VLLM=1 is set",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _skip_live_vllm(request):
+    if request.node.get_closest_marker("live_vllm") and not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
+        pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
