@@ -300,46 +300,32 @@ async def test_proposer_hardcodes_native_mode(proposer_corpus, proposer_results,
 
 
 def test_startup_uses_stored_flag_not_probe():
-    """AUDIT-03d: start_cmd.py:160 builds the LLMConfig mode from the STORED
-    provider.supports_function_calling:
-        tool_call_mode = "native" if provider.supports_function_calling else "xml"
-    _probe_llm (start_cmd.py:18-28) calls detect_capabilities but RETURNS ONLY A BOOL (:165
-    probe_ok) — the probed mode is discarded. Swap the model without re-init and the mode is stale.
+    """AUDIT-03d (post-fix): start_cmd now feeds the PROBED tool_call_mode (from
+    detect_capabilities) into the startup LLMConfig instead of the STORED
+    provider.supports_function_calling flag.
 
-    Construction-only (no REPL, no model): reproduce the exact expression with
-    supports_function_calling=False and assert the mode follows the STORED flag, then prove the
-    source via inspect (the 14-03 source-regression precedent).
+    _probe_llm returns (bool, str | None) — the probed mode — and the startup path
+    builds LLMConfig with tool_call_mode=probed_mode. A model swap re-probes by
+    calling _probe_llm again before constructing the new LLMClient.
+
+    Source-level proof via inspect (the 14-03 source-regression precedent): the
+    stored-flag derivation ('native' if supports_function_calling else 'xml') must
+    be GONE, and the probe result (probed_mode) must reach the LLMConfig.
     """
-    from localharness.config.models import ProviderConfig
-    from localharness.provider.client import LLMConfig
-
-    provider = ProviderConfig(
-        provider_type="ollama",
-        base_url="http://localhost:11434/v1",
-        default_model="some-model",
-        supports_function_calling=False,  # stored flag -> xml
-    )
-
-    # Reproduce start_cmd.py:155-161 verbatim.
-    llm_cfg = LLMConfig(
-        base_url=provider.base_url,
-        model=provider.default_model,
-        api_key=provider.api_key,
-        timeout_seconds=provider.timeout_seconds,
-        tool_call_mode="native" if provider.supports_function_calling else "xml",
-    )
-    assert llm_cfg.tool_call_mode == "xml", "startup mode must follow the STORED flag (not a probe)"
-
-    # Source-level proof: the stored-flag derivation is literally in start_cmd, and the probe
-    # result is captured as a bool (probe_ok) — never fed into the LLMConfig.
     from localharness.cli import start_cmd
 
     src = inspect.getsource(start_cmd).replace("'", '"')
-    assert 'tool_call_mode="native" if provider.supports_function_calling else "xml"' in src, (
-        "start_cmd must derive the mode from the STORED supports_function_calling flag"
+    # The stored-flag derivation must be gone.
+    assert 'tool_call_mode="native" if provider.supports_function_calling else "xml"' not in src, (
+        "start_cmd still derives mode from the STORED supports_function_calling flag — must use probe"
     )
-    assert "probe_ok" in src, (
-        "the probe result is captured as a bool (probe_ok) and discarded — the probed mode never reaches the LLMConfig"
+    # The probed mode must reach the LLMConfig.
+    assert "probed_mode" in src, (
+        "_probe_llm result (probed_mode) must be fed into the LLMConfig (FIDEL-04)"
+    )
+    # _probe_llm must return a mode, not just a bool.
+    assert "tuple[bool" in src or "tuple[bool, str" in src or "probed_mode" in src, (
+        "_probe_llm must surface the probed mode, not just a bool"
     )
 
 

@@ -15,17 +15,22 @@ console = Console()
 err_console = Console(stderr=True)
 
 
-async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> bool:
-    """Probe LLM reachability with retry for cold start. Returns True if reachable."""
+async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> tuple[bool, str | None]:
+    """Probe LLM reachability with retry for cold start.
+
+    Returns (reachable, probed_tool_call_mode). Mode is None if the probe fails.
+    Callers must feed the probed mode into LLMConfig rather than using the stored
+    provider.supports_function_calling flag (FIDEL-04).
+    """
     import asyncio as _asyncio
     for attempt in range(max_retries):
         try:
-            await llm.detect_capabilities()
-            return True
+            result = await llm.detect_capabilities()
+            return True, result.tool_call_mode
         except Exception:
             if attempt < max_retries - 1:
                 await _asyncio.sleep(delay)
-    return False
+    return False, None
 
 
 def _discover_agents_for_start(config_dir: Path) -> list[dict]:
@@ -152,17 +157,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if agent_config.model != "inherit"
         else provider.default_model
     )
-    llm_cfg = LLMConfig(
+    # Build initial client for the probe (tool_call_mode will be overwritten by probe result).
+    _initial_cfg = LLMConfig(
         base_url=provider.base_url,
         model=resolved_model,
         api_key=provider.api_key,
         timeout_seconds=provider.timeout_seconds,
-        tool_call_mode="native" if provider.supports_function_calling else "xml",
     )
-    llm = LLMClient(llm_cfg)
+    _probe_client = LLMClient(_initial_cfg)
 
-    # Startup probe — local LLMs may need warm-up
-    probe_ok = await _probe_llm(llm)
+    # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04).
+    probe_ok, probed_mode = await _probe_llm(_probe_client)
     if not probe_ok:
         err_console.print(
             f"[bold red]Error:[/bold red] Cannot reach model '{resolved_model}' "
@@ -170,6 +175,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
         err_console.print("Check that your LLM backend is running and try again.")
         raise typer.Exit(1)
+
+    # Build the real LLMClient with the probe-derived tool_call_mode (FIDEL-04).
+    # A model swap re-probes via _probe_llm before constructing the new LLMClient.
+    llm_cfg = LLMConfig(
+        base_url=provider.base_url,
+        model=resolved_model,
+        api_key=provider.api_key,
+        timeout_seconds=provider.timeout_seconds,
+        tool_call_mode=probed_mode or "native",
+    )
+    llm = LLMClient(llm_cfg)
 
     start_time = _time.monotonic()
 
@@ -183,7 +199,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     agent_dir = cfg_path / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
-    # LLMClient already created above (llm variable)
+    # LLMClient built above with probe-derived tool_call_mode.
 
     # --- 2. Core infrastructure ---
     tool_registry = ToolRegistry()
