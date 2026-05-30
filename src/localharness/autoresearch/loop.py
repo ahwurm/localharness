@@ -154,6 +154,21 @@ class RunJournal:
 # ---------------------------------------------------------------------------
 
 
+def _diff_blob(proposal, cfg) -> str:
+    """Single-encoded archive diff blob incl. rationale + kind (GAP-1)."""
+    try:
+        type_name = build_catalogue(cfg)[proposal.component].type_name
+    except Exception:
+        type_name = ""
+    kind = "hyperparameter" if type_name in ("int", "float") else "prompt"
+    return json.dumps({
+        "before": proposal.before,
+        "after": proposal.after,
+        "rationale": proposal.rationale,
+        "kind": kind,
+    })
+
+
 async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
     """Pick (component, run_ids, branch) for this iteration.
 
@@ -325,7 +340,7 @@ async def run_loop(
         else:
             pid = (await store.write(ArchiveEntry(
                 id=uuid.uuid4().hex, parent_id=parent_id, component=proposal.component,
-                diff=json.dumps(proposal.diff), train_score=None,
+                diff=_diff_blob(proposal, cfg), train_score=None,
                 train_scores_per_fixture=None, holdout_score=None, p_value=None, cost=None,
                 ts=int(time.time()), approved_by=None, status="in_flight",
             ))).id
