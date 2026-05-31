@@ -257,32 +257,32 @@ def test_provenance_fixed_sites_reflect_live_overlay(components_home):
 
 
 def test_provenance_bare_sites_use_model_construct_default(components_home):
-    """RED-characterize the STILL-bare sites (adoption.py:138, loop.py:231/257, propose_cmd.py:137).
+    """ARM-02 post-fix: the 4 previously-bare sites now use agent_cfg=_provenance_agent_cfg().
 
-    Those four sites call build_catalogue(cfg) with NO agent_cfg, so agent.* provenance falls back
-    to AgentConfig.model_construct(name="<default>", role="<default>") (catalogue.py:149-153) — the
-    live adopted role is NOT reflected (the residual WARNING-2 gap at these sites). This PASSES
-    today (the bare call DOES return the default), documenting the gap; a fix that adds agent_cfg=
-    at those sites would flip it.
+    adoption.py:138, loop.py:231/257, propose_cmd.py:137 now call
+    build_catalogue(cfg, agent_cfg=_provenance_agent_cfg(), overlays={"user": ...}) — the live
+    adopted agent.role IS reflected (WARNING-2 gap closed at these sites).
     """
     _stage_live_agent_role(components_home)
     cfg = _cfg()
 
-    # EXACTLY as adoption.py:138 / loop.py:231,257 / propose_cmd.py:137 call it (no agent_cfg).
-    bare = build_catalogue(cfg).get("agent.role")
-    assert bare is not None
-    # The bare call returns the model_construct default, NOT the live adopted role.
-    assert bare.current_value == "<default>", (
-        "bare build_catalogue(cfg) unexpectedly reflected the live overlay — if a fix added "
-        "agent_cfg= at the bare sites, retarget this characterization"
+    from localharness.autoresearch.experiment import _provenance_agent_cfg
+
+    prov = _provenance_agent_cfg()
+    assert prov is not None, "user overlay seeded agent.role but _provenance_agent_cfg returned None"
+
+    # With agent_cfg=_provenance_agent_cfg() the adopted role is now reflected (post-fix).
+    fixed = build_catalogue(cfg, agent_cfg=prov).get("agent.role")
+    assert fixed is not None
+    assert fixed.current_value == _ADOPTED_ROLE, (
+        "provenance-bearing build_catalogue call must reflect the live adopted agent.role — "
+        "the 4 bare sites now pass agent_cfg=_provenance_agent_cfg() (ARM-02 fix)"
     )
-    assert bare.current_value != _ADOPTED_ROLE, (
-        "bare build_catalogue must NOT reflect the live overlay (documents the WARNING-2 gap at "
-        "adoption.py:138 / loop.py:231,257 / propose_cmd.py:137)"
+    assert fixed.current_value != "<default>", (
+        "current_value collapsed to the model_construct default — agent_cfg= wiring regressed"
     )
 
-    # Source-level regression guard (14-03 precedent): a flat `build_catalogue(cfg)` call (no
-    # agent_cfg) is still present at the bare sites. Flips the day a fix threads agent_cfg= in.
+    # Source-level regression guard: bare build_catalogue(cfg) calls are GONE from the fixed sites.
     from localharness.autoresearch import adoption
     from localharness.autoresearch import loop as aloop
     from localharness.cli import propose_cmd
@@ -291,29 +291,41 @@ def test_provenance_bare_sites_use_model_construct_default(components_home):
         src = inspect.getsource(mod)
         return "build_catalogue(cfg)" in src
 
-    assert _has_bare_call(adoption), "adoption.py no longer has a bare build_catalogue(cfg) — retarget"
-    assert _has_bare_call(aloop), "loop.py no longer has a bare build_catalogue(cfg) — retarget"
-    assert _has_bare_call(propose_cmd), "propose_cmd.py no longer has a bare build_catalogue(cfg) — retarget"
+    def _has_provenance_call(mod) -> bool:
+        src = inspect.getsource(mod)
+        return "_provenance_agent_cfg" in src
+
+    assert not _has_bare_call(adoption), "adoption.py still has a bare build_catalogue(cfg) — ARM-02 fix incomplete"
+    assert not _has_bare_call(aloop), "loop.py still has a bare build_catalogue(cfg) — ARM-02 fix incomplete"
+    assert not _has_bare_call(propose_cmd), "propose_cmd.py still has a bare build_catalogue(cfg) — ARM-02 fix incomplete"
+    assert _has_provenance_call(adoption), "adoption.py missing _provenance_agent_cfg — ARM-02 fix not applied"
+    assert _has_provenance_call(aloop), "loop.py missing _provenance_agent_cfg — ARM-02 fix not applied"
+    assert _has_provenance_call(propose_cmd), "propose_cmd.py missing _provenance_agent_cfg — ARM-02 fix not applied"
 
 
 def test_winning_layer_default_at_gate_sites(components_home):
-    """Characterize winning_layer == 'default' at every non-CLI build_catalogue call.
+    """ARM-02 post-fix: non-CLI sites pass overlays={"user": ...} — winning_layer is truthful.
 
-    winning_layer is driven by overlays= (catalogue._detect_layer). Only components_cmd.py
-    (138/192/260, the CLI list/get/set) passes overlays=; the gate / proposer / adoption sites
-    never do. So even with a live agent.role overlay active, build_catalogue WITHOUT overlays=
-    reports winning_layer == 'default' (the attribution half of WARNING-2 that still holds).
+    After ARM-02, the bare sites (adoption/loop/propose_cmd) pass overlays={"user": user_dict}
+    so winning_layer correctly attributes the override layer when a user overlay exists.
+    With a staged agent.role in the user overlay, the winning_layer is "user", not "default".
     """
     _stage_live_agent_role(components_home)
     cfg = _cfg()
 
-    # No overlays= (as every non-CLI site calls it) -> winning_layer is 'default' regardless of
-    # an active overlay, because layer attribution is never fed the overlay dicts.
-    entry = build_catalogue(cfg).get("agent.role")
+    from localharness.config.overlay import _resolve_user_overlay_path, load_overlay as _load
+
+    user_dict = _load(_resolve_user_overlay_path())
+    # Mirroring what adoption/loop/propose_cmd now do: pass overlays={"user": user_dict}.
+    entry = build_catalogue(cfg, overlays={"user": user_dict}).get("agent.role")
     assert entry is not None
-    assert entry.winning_layer == "default", (
-        "winning_layer is non-'default' without overlays= — a non-CLI site started passing "
-        "overlays= (only components_cmd.py:138/192/260 should)"
+    assert entry.winning_layer == "user", (
+        "winning_layer must be 'user' when overlays={'user': ...} is passed and agent.role is in "
+        "the user overlay — ARM-02 wires overlays= at the non-CLI provenance sites"
+    )
+    assert entry.winning_layer != "default", (
+        "winning_layer collapsed to 'default' — overlays= is not being passed at the sites "
+        "(adoption.py/loop.py/propose_cmd.py) after ARM-02"
     )
 
 

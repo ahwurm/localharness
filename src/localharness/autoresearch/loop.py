@@ -53,7 +53,9 @@ from localharness.autoresearch.experiment import (
     EXIT_PROMOTE,
     EXIT_REJECT_HOLDOUT,
     EXIT_REJECT_TRAIN,
+    _provenance_agent_cfg,
 )
+from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
 from localharness.autoresearch.budget import BudgetController, WindowMeter
 from localharness.autoresearch.sampler import BASELINE_ROOT, ParentSampler
 from localharness.registry import build_catalogue
@@ -228,7 +230,12 @@ async def run_inline_sentinel(store, cfg, journal, bus, component):
 def _diff_blob(proposal, cfg) -> str:
     """Single-encoded archive diff blob incl. rationale + kind (GAP-1)."""
     try:
-        type_name = build_catalogue(cfg)[proposal.component].type_name
+        _user_ov = load_overlay(_resolve_user_overlay_path())
+        type_name = build_catalogue(
+            cfg,
+            agent_cfg=_provenance_agent_cfg(),
+            overlays={"user": _user_ov},
+        )[proposal.component].type_name
     except Exception:
         type_name = ""
     kind = "hyperparameter" if type_name in ("int", "float") else "prompt"
@@ -254,7 +261,12 @@ async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
     """
     if parent is not BASELINE_ROOT and parent is not None:
         return parent.component, [], "sampled"
-    catalogue = build_catalogue(cfg)
+    _user_ov = load_overlay(_resolve_user_overlay_path())
+    catalogue = build_catalogue(
+        cfg,
+        agent_cfg=_provenance_agent_cfg(),
+        overlays={"user": _user_ov},
+    )
     touched = {e.component for e in await store.query(ArchiveQuery(limit=10_000))}
     untouched = [p for p in catalogue if p not in touched]
     component = untouched[0] if untouched else next(iter(catalogue))
