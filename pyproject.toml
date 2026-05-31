@@ -41,6 +41,9 @@ packages = ["src/localharness"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live_vllm: opt-in real-model spine test hitting a live vLLM endpoint; skipped by default unless LOCALHARNESS_LIVE_VLLM=1 is set",
+]
 
 [tool.ruff.lint]
 extend-select = ["S506"]
