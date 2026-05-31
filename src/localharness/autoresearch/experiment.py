@@ -237,7 +237,11 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
         # The overlay wins (deep_merge below), so an explicit agent.permissions overlay
         # can still override the scenario default.
         "permissions": {"budget": {
-            "max_actions": scenario.budget.max_actions,
+            # Mirror runner.py:286 — clamp to >=1 and take the tighter of the two caps. Toolless
+            # scenarios set limits.max_tool_calls=0 (and pure_qa budget.max_actions=0); without the
+            # max(1, ...) floor the cascade AgentConfig gets max_actions=0 and fails its ge=1
+            # validator, crashing the gate on the real train corpus (the bench already clamps).
+            "max_actions": max(1, min(scenario.budget.max_actions, scenario.limits.max_tool_calls)),
             "max_duration_minutes": scenario.budget.max_duration_minutes,
         }},
     }
