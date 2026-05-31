@@ -482,6 +482,10 @@ async def run_experiment(
             base_hold = await _maybe_await(run_slice(wt, slice="holdout", with_overlay=False))
             head_hold = await _maybe_await(run_slice(wt, slice="holdout", with_overlay=True))
             hnames, bh_vec, hh_vec = _pair_vectors(base_hold, head_hold)
+            # STATS-01: symmetric holdout inconclusive guard (mirrors train guard above).
+            if len(hnames) < 2:
+                await store.update_verdict(proposal_id, status="in_flight")
+                return EXIT_INCONCLUSIVE
             alpha_corr = 0.05 / trials  # Bonferroni multi-TRIAL (NOT multi-metric).
             regressed = welch_regression(bh_vec, hh_vec, alpha=alpha_corr)
             holdout_score = statistics.mean(hh_vec) if hh_vec else None

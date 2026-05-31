@@ -56,32 +56,32 @@ def test_welch_regression_empty_and_size1_returns_false_not_raises():
 
 
 def test_holdout_path_lacks_train_guard_asymmetry():
-    """Source-level pin: the TRAIN path is guarded; the HOLDOUT welch_regression call is not.
+    """STATS-01 post-fix: the HOLDOUT path now has a symmetric len(hnames) < 2 guard.
 
     The 14-03 / test_agent_loop_uses_config_recovery_message_not_hardcoded precedent:
-    prove the guard asymmetry via ``inspect.getsource`` WITHOUT executing anything.
-    GREEN characterization that PINS the asymmetry — it flips the instant a fix adds
-    a symmetric ``len(hnames) < 2`` guard, alerting the fix phase.
+    prove the guard via ``inspect.getsource`` WITHOUT executing anything.
+    After STATS-01, the source-level pin finds the symmetric guard present — the asymmetry
+    documented by AUDIT-05b is now closed.
     """
     src = inspect.getsource(experiment.run_experiment)
     # TRAIN path HAS the inconclusive guard (experiment.py:428-430):
     assert "len(names) < 2" in src, (
-        "train inconclusive guard (experiment.py:428-430) missing — finding stale"
+        "train inconclusive guard missing — finding stale"
     )
-    # HOLDOUT path calls welch_regression with NO symmetric len(hnames) < 2 guard
-    # (experiment.py:448):
+    # HOLDOUT path calls welch_regression:
     assert "welch_regression(bh_vec, hh_vec" in src, (
-        "holdout welch_regression call (experiment.py:448) moved — re-anchor"
+        "holdout welch_regression call moved — re-anchor"
     )
-    assert "len(hnames) < 2" not in src, (
-        "a symmetric holdout guard now EXISTS — the AUDIT-05b asymmetry is FIXED; "
-        "flip this characterization"
+    # STATS-01: the symmetric holdout guard NOW EXISTS (AUDIT-05b closed):
+    assert "len(hnames) < 2" in src, (
+        "symmetric holdout guard (STATS-01) is MISSING — len(hnames) < 2 must appear BEFORE "
+        "the holdout welch_regression call (experiment.py) to mirror the train guard"
     )
-    # statistics.mean IS guarded on the holdout side (experiment.py:449) — this refines
-    # the PRD: the unguarded callee is welch_regression, NOT statistics.mean.
+    # statistics.mean IS guarded on the holdout side — refines AUDIT-05b: the unguarded
+    # callee was welch_regression, NOT statistics.mean.
     assert "statistics.mean(hh_vec) if hh_vec else None" in src
-    # NOTE (intended, NOT a finding): alpha_corr = 0.05 / trials (experiment.py:447) is
-    # Bonferroni across concurrent TRIALS (EXP-04 design) — confirmed intended.
+    # NOTE (intended, NOT a finding): alpha_corr = 0.05 / trials is Bonferroni across
+    # concurrent TRIALS (EXP-04 design) — confirmed intended.
 
 
 # ---------------------------------------------------------------------------
