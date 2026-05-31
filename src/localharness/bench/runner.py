@@ -295,7 +295,7 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
         agent_id=session_id,
         session_id=session_id,
     )
-    tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry)
+    tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
 
     # Plan 12-04 Task 1: register AgentTool stub when 'agent' is in tools_allowed.
     # The stub agent_runner returns a canned summary containing STUB_SUBAGENT_OK
