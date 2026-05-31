@@ -7,8 +7,9 @@ results_path: bench/results
 # Each entry: discriminator + concrete model identifier + optional overrides.
 matrix:
   - name: qwen-3.6-27b
-    provider: ollama
-    model_id: qwen2.5:27b
+    provider: vllm
+    model_id: qwen3.6-27b
+    base_url: http://localhost:8000/v1
   - name: gpt-oss-120b
     provider: ollama
     model_id: gpt-oss:120b

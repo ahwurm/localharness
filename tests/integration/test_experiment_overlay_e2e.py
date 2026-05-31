@@ -99,7 +99,7 @@ async def test_overlay_diverges_arms(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def _capture(bus, llm_client, scenario, session_id="", agent_config=None):
+    def _capture(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         resolved = agent_config if agent_config is not None else AgentConfig(
             name=f"bench-{scenario.name}",
             role=f"Bench harness execution for scenario {scenario.name}",

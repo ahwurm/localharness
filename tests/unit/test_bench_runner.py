@@ -138,7 +138,7 @@ async def test_execute_one_run_subscribes_observation_and_compaction(monkeypatch
             pre_usage_fraction=0.9, post_usage_fraction=0.4, stages_modified=[],
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None):
+    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
@@ -252,7 +252,7 @@ async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
             error="Permission denied: bash_exec(rm -rf *)",
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None):
+    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
@@ -420,7 +420,7 @@ async def test_compaction_event_counter(monkeypatch, tmp_path):
             stages_modified=[],
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None):
+    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
