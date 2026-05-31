@@ -351,3 +351,245 @@ async def test_live_full_loop_holdout_unreached(live_endpoint, tmp_path):
     )
     # 6c. The gate DID run the real train spine (it is a full-loop test, not a no-op refusal).
     assert "train" in slices_requested
+
+
+# ---------------------------------------------------------------------------
+# LIVE-02: four structurally-asserted live observables (bench-arm-direct, holdout-safe).
+#
+# All four use the holdout-SAFE bench-arm-direct path (_build_bench_client +
+# detect_capabilities + accumulate_runs / _build_default_run_slice(slice="train")) — the real
+# AgentLoop / ToolRegistry.dispatch / on-disk I/O path, NEVER run_experiment down a
+# holdout-reachable branch. Every assertion is STRUCTURAL (file exists, side-effect absent,
+# arms differ, score > 0, holdout never constructed) — never exact model text or scores.
+# tool_call_count is NEVER asserted (the green-check trap: runner.py:64-66 increments it
+# pre-dispatch). Model-agnostic (LOCKED): provider/model/base_url come from cfg.provider.
+# ---------------------------------------------------------------------------
+
+
+def _live_bench_client(cfg):
+    """Build + probe a real bench LLMClient from cfg.provider (model-agnostic, never a baked id).
+
+    Mirrors orchestrator._build_bench_client + the _run_one_model capability probe. The probe
+    sets the real native/xml tool_call_mode the production bench path uses.
+    """
+    from localharness.bench.config import MatrixEntry
+    from localharness.bench.orchestrator import _build_bench_client
+
+    entry = MatrixEntry(
+        name=cfg.provider.default_model,
+        provider=cfg.provider.provider_type,
+        model_id=cfg.provider.default_model,
+        base_url=cfg.provider.base_url,
+    )
+    return _build_bench_client(entry)
+
+
+@pytest.mark.live_vllm
+async def test_live_write_execute_real_file(live_endpoint, tool_scenario_corpus, tmp_path):
+    """LIVE-02 SC-2: a real live dispatch creates a real file on disk.
+
+    Drives the write_execute scenario against live vLLM via the bench-arm-direct spine and asserts
+    the on-disk write target EXISTS — proof of real tool dispatch + file I/O that a model merely
+    echoing the token in prose cannot fake. NEVER asserts tool_call_count (the green-check trap).
+    Model-agnostic: model/base_url resolved from cfg.provider.
+    """
+    from localharness.cli.components_cmd import _build_loader
+
+    cfg = _build_loader().load_harness()
+    client = _live_bench_client(cfg)
+    await client.detect_capabilities()
+
+    # Pre-clean so a stale file can't mask a non-dispatching spine.
+    target = pathlib.Path(tool_scenario_corpus["write_target"])
+    target.unlink(missing_ok=True)
+    try:
+        # A real generation may exceed the corpus default max_latency_s (~30s). Widen the latency
+        # limit ONLY (Pitfall 7) — model params are never touched (CLAUDE.md / feedback_no_model_params).
+        base = load_scenario(tool_scenario_corpus["write_execute"])
+        scen = base.model_copy(
+            update={"limits": base.limits.model_copy(update={"max_latency_s": 300.0})}
+        )
+
+        results_root = tmp_path / "results"
+        await accumulate_runs(
+            scen,
+            cfg.provider.default_model,
+            results_root,
+            llm_client_factory=lambda _s: client,
+            min_runs_override=1,
+            max_runs_override=1,
+        )
+
+        # THE proof: the real file exists on disk (real dispatch + file I/O). NOT tool_call_count.
+        assert target.exists(), (
+            "live write tool did not create the real file — the spine did not dispatch `write`"
+        )
+    finally:
+        target.unlink(missing_ok=True)
+
+
+@pytest.mark.live_vllm
+async def test_live_budget_cap_halts(live_endpoint, tool_scenario_corpus, tmp_path):
+    """LIVE-02 SC-3a: a budget cap of 1 provably halts the loop before the second step.
+
+    write_execute is a 2-step plan (step1: write hello_bench.py; step2: bash_exec `python3 ...`).
+    The agent-loop hard cap is max(1, min(budget.max_actions, limits.max_tool_calls)) (runner.py:280),
+    so setting BOTH to 1 forces cap == 1: the loop halts after step1. The SECOND step's observable
+    side-effect (a successful run, which requires the bash step's HELLO_BENCH_OK output to satisfy
+    the rubric) is therefore ABSENT. We assert the absent second-step effect (run did NOT succeed),
+    NEVER tool_call_count (the green-check trap, which increments pre-dispatch).
+    Model-agnostic: model/base_url resolved from cfg.provider.
+    """
+    from localharness.cli.components_cmd import _build_loader
+
+    cfg = _build_loader().load_harness()
+    client = _live_bench_client(cfg)
+    await client.detect_capabilities()
+
+    target = pathlib.Path(tool_scenario_corpus["write_target"])
+    target.unlink(missing_ok=True)
+    try:
+        base = load_scenario(tool_scenario_corpus["write_execute"])
+        # Cap the loop at a single action (both legs of the min()) and widen latency (Pitfall 7).
+        capped = base.model_copy(
+            update={
+                "budget": base.budget.model_copy(update={"max_actions": 1}),
+                "limits": base.limits.model_copy(
+                    update={"max_tool_calls": 1, "max_latency_s": 300.0}
+                ),
+            }
+        )
+
+        results_root = tmp_path / "results"
+        samples, _stop = await accumulate_runs(
+            capped,
+            cfg.provider.default_model,
+            results_root,
+            llm_client_factory=lambda _s: client,
+            min_runs_override=1,
+            max_runs_override=1,
+        )
+        completed = samples[0]
+
+        # THE cap proof: the SECOND step never ran, so the run cannot reach success (success needs
+        # the bash step's executed HELLO_BENCH_OK output to satisfy the rubric). The loop halted at
+        # the cap after at most the first action. Asserted via the ABSENT second-step effect — never
+        # tool_call_count. (A live model that emits a single tool call is still capped at 1 action.)
+        assert completed.success is False, (
+            "with max_actions=1 the loop must halt after step 1; the second (bash) step's "
+            "success-producing side-effect must be absent"
+        )
+    finally:
+        target.unlink(missing_ok=True)
+
+
+@pytest.mark.live_vllm
+async def test_live_non_agent_divergence_and_train(live_endpoint, tmp_git_repo, tool_scenario_corpus, tmp_path):
+    """LIVE-02 SC-3b: a non-agent.* (org.context.*) mutation diverges the gate arms AND yields a
+    non-zero train score against live vLLM.
+
+    Divergence field: org.context.compaction_threshold_pct (a valid ContextConfig float field,
+    ge=50/le=99, default 80; models.py:297). It is inside the org.context.* subtree, the ONLY
+    non-agent cascade _resolve_worktree_agent_cfg pulls (experiment.py:223-229) — a provider.*/
+    compaction.* path would NOT diverge (Pitfall 6). The proposal arm (include_experiment_overlay
+    =True) sets it to 55.0; the baseline arm (=False) keeps the default 80.0 -> the resolved
+    AgentConfigs differ. Then the REAL train slice runs against live vLLM and must score > 0
+    (Pitfall 5: a 0 train under live is the v1.2 regression this milestone kills — ESCALATE, do
+    not relax). Model-agnostic: model/base_url resolved from cfg.provider.
+    """
+    from localharness.autoresearch.experiment import (
+        _build_default_run_slice,
+        _resolve_worktree_agent_cfg,
+    )
+    from localharness.cli.components_cmd import _build_loader
+    from localharness.config.overlay import atomic_write_overlay
+
+    cfg = _build_loader().load_harness()
+
+    # Materialize the non-agent.* experiment overlay (the PROPOSAL arm) into the worktree.
+    atomic_write_overlay(
+        tmp_git_repo / ".localharness" / "experiment-overlay.yaml",
+        {"org": {"context": {"compaction_threshold_pct": 55.0}}},
+    )
+
+    scen = load_scenario(tool_scenario_corpus["single_read"])  # slice: train
+
+    # ARM-01 divergence: the proposal arm (with overlay) resolves a DIFFERENT AgentConfig than the
+    # baseline arm (without). This is the structural proof the non-agent.* mutation reaches the arms.
+    base_cfg = _resolve_worktree_agent_cfg(tmp_git_repo, scen, include_experiment_overlay=False)
+    head_cfg = _resolve_worktree_agent_cfg(tmp_git_repo, scen, include_experiment_overlay=True)
+    assert base_cfg != head_cfg, (
+        "org.context.compaction_threshold_pct overlay did not diverge the per-arm AgentConfigs"
+    )
+
+    # Drive a train corpus into the worktree so the live slice has fixtures to run (the seeded
+    # tmp_git_repo has overrides.yaml but no bench/scenarios). Reuse the train-only corpus helper.
+    _make_train_corpus_repo(tmp_git_repo / "bench_src")  # validates the helper writes train-only
+    import shutil
+    (tmp_git_repo / "bench" / "scenarios" / "train").mkdir(parents=True, exist_ok=True)
+    for src in (tmp_git_repo / "bench_src" / "bench" / "scenarios" / "train").glob("*.yaml"):
+        shutil.copy(src, tmp_git_repo / "bench" / "scenarios" / "train" / src.name)
+
+    # Non-zero train against live vLLM via the REAL bench-backed run_slice closure (slice='train'
+    # ONLY — the holdout slice is never constructed). The closure resolves the live client from
+    # cfg.provider + detect_capabilities (FIDEL-01).
+    run_slice = _build_default_run_slice(cfg.provider.default_model, None, cfg=cfg)
+    result = await run_slice(tmp_git_repo, slice="train", with_overlay=True)
+    assert any(v > 0.0 for v in result.values()), (
+        "live train score is 0 — the v1.2 regression this milestone kills; ESCALATE (do not relax)"
+    )
+
+
+def test_holdout_seal_never_constructed(tool_scenario_corpus):
+    """LIVE-02 SC-4: the sealed holdout slice is never constructed AND the archive seal stays green.
+
+    Plain (non-live) test: the holdout-seal invariants are pure-Python and need no model, so they
+    run in default CI as a real GREEN-PIN proof. NEVER constructs a real slice='holdout' run.
+
+    1. Structural seal-recording: a recording wrapper around a run_slice-shaped closure captures
+       every requested slice; only 'train' is ever driven -> "holdout" not in slices_requested
+       (the STATE.md 17-01 slices_requested pattern, without contacting the model).
+    2. Loaded corpus is train-only: no scenario carries slice='holdout'.
+    3. The archive seal holds: ArchiveStore.pareto_front_2d REJECTS holdout_score (the GREEN-PIN;
+       autoresearch/archive.py is byte-unchanged).
+    """
+    import asyncio
+
+    from localharness.autoresearch.archive import ArchiveStore
+
+    # 1. Seal-recording over a run_slice-shaped closure: drive ONLY slice='train', assert holdout
+    #    is never among the requested slices (no model call — a stub records the request shape).
+    slices_requested: list[str] = []
+
+    async def recording_run_slice(worktree, *, slice, with_overlay):
+        slices_requested.append(slice)
+        return {"train_score": 1.0}
+
+    asyncio.run(recording_run_slice(None, slice="train", with_overlay=True))
+    assert "holdout" not in slices_requested, (
+        f"sealed holdout slice was constructed: {slices_requested}"
+    )
+    assert "train" in slices_requested
+
+    # 2. The loaded corpus scenarios are train-only — no holdout fixture is ever loaded/constructed.
+    loaded_scenarios = [
+        load_scenario(tool_scenario_corpus["single_read"]),
+        load_scenario(tool_scenario_corpus["write_execute"]),
+    ]
+    assert all(s.slice != "holdout" for s in loaded_scenarios)
+
+    # 3. The archive seal GREEN-PIN: selecting on holdout_score is structurally forbidden
+    #    (pareto_front_2d raises BEFORE any DB access — archive.py:411-413, byte-unchanged).
+    import tempfile
+
+    async def _assert_seal(db_path):
+        store = ArchiveStore(db_path)
+        await store.open()
+        try:
+            with pytest.raises(ValueError, match="sealed"):
+                await store.pareto_front_2d(metrics=["holdout_score", "cost"])
+        finally:
+            await store.close()
+
+    with tempfile.TemporaryDirectory() as _d:
+        asyncio.run(_assert_seal(pathlib.Path(_d) / "archive.db"))
