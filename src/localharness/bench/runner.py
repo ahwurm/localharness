@@ -27,6 +27,56 @@ log = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------------------
+# EVAL-01: bench-side memory seed map for stateful_behavior scenarios.
+#
+# Keyed by scenario NAME (NOT a ScenarioSpec field — this is bench-internal
+# data, the minimum needed because the on-disk seed DB lacks facts for the
+# two_facts/overwrite scenarios authored ahead of this wiring). For
+# overwrite_recall ORDER MATTERS: the second favorite_color write wins via
+# MemoryStore's ON CONFLICT(agent_id,key) upsert (latest-write-wins).
+# -------------------------------------------------------------------------
+
+_MEMORY_SEEDS: dict[str, list[tuple[str, str]]] = {
+    "memory_recall": [("codename", "The codename from a previous session is STARFRUIT_42.")],
+    "stateful_behavior_two_facts": [
+        ("codename_1", "The first codename from a previous session is STARFRUIT_42."),
+        ("codename_2", "The second codename from a previous session is MOONFRUIT_88."),
+    ],
+    "stateful_behavior_overwrite_recall": [
+        ("favorite_color", "blue"),
+        ("favorite_color", "amber"),
+    ],
+}
+
+
+async def _seed_memory_store(agent_id: str, seeds: list[tuple[str, str]]) -> Any:
+    """Build a seeded, flushed v1.0 MemoryStore under a per-call tmp base_dir.
+
+    Constructed under the SAME agent_id as the loop's AgentConfig.name so
+    load_context() resolves the facts (building fresh — rather than copying
+    tests/fixtures/bench/memory_seed.db — resolves BOTH the underscore/hyphen
+    agent_id mismatch AND the flat-file vs agents/{id}/memory.db layout
+    mismatch in one stroke).
+
+    flush_memory_md() is REQUIRED: AgentLoop injects load_context().agent_memory_md
+    (the MEMORY.md "## Persistent Facts" text), NOT the raw facts table — so
+    store_fact() without the flush would inject nothing.
+    """
+    import tempfile
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(
+        agent_id=agent_id, division_id="", org_id="",
+        base_dir=tempfile.mkdtemp(prefix="bench-mem-"),
+    )
+    await store.open()
+    for key, value in seeds:
+        await store.store_fact(key, value, confidence=1.0)  # >=0.7 so flush includes it
+    await store.flush_memory_md()  # load_context reads MEMORY.md, not the facts table
+    return store
+
+
+# -------------------------------------------------------------------------
 # MetricAccumulator — subscribes to events, computes SCEN-02 fields per run
 # -------------------------------------------------------------------------
 
@@ -170,7 +220,7 @@ async def execute_one_run(
 
     try:
         base_registry = await _get_base_registry()
-        loop = _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
+        loop = await _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
         try:
             await asyncio.wait_for(
                 _run_loop(loop, scen.prompt, _on_token),
@@ -239,8 +289,13 @@ async def _get_base_registry() -> Any:
     return _BASE_REGISTRY
 
 
-def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None, base_registry: Any = None) -> Any:
+async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None, base_registry: Any = None) -> Any:
     """Construct an AgentLoop instance for the given scenario.
+
+    Async because EVAL-01 hydration seeds a MemoryStore (async open/store/flush)
+    for the stateful_behavior scenarios; awaited from execute_one_run, which is
+    already async — so both the seed and the loop's later load_context() run on
+    the same event loop (no cross-loop aiosqlite hazard).
 
     AgentLoop signature (verified from src/localharness/agent/loop.py, lines 271-285):
         AgentLoop(
@@ -319,6 +374,15 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
     # to `evaluate(...)` at call time, not at construction.)
     perm_evaluator = PermissionEvaluator()
 
+    # EVAL-01: hydrate a seeded MemoryStore ONLY for the stateful_behavior
+    # scenarios, keyed by scenario.name, under the loop's own agent_id
+    # (agent_config.name) so load_context() resolves the seeded facts. Stays
+    # None for every other scenario — no /agents dir is created for them.
+    memory_loader = None
+    seeds = _MEMORY_SEEDS.get(scenario.name)
+    if seeds is not None:
+        memory_loader = await _seed_memory_store(agent_config.name, seeds)
+
     try:
         return AgentLoop(
             config=agent_config,
@@ -327,7 +391,7 @@ def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, se
             context_manager=ctx_manager,
             tool_registry=tool_registry,
             permission_evaluator=perm_evaluator,
-            memory_loader=None,
+            memory_loader=memory_loader,
             kill_file_path=None,
             compact_md_path=None,
         )

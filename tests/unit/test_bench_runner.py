@@ -138,7 +138,7 @@ async def test_execute_one_run_subscribes_observation_and_compaction(monkeypatch
             pre_usage_fraction=0.9, post_usage_fraction=0.4, stages_modified=[],
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
+    async def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
@@ -208,7 +208,8 @@ def test_plugin_prefix_dispatch_resolves():
     )
 
 
-def test_build_agent_loop_registers_agent_tool(monkeypatch):
+@pytest.mark.asyncio
+async def test_build_agent_loop_registers_agent_tool(monkeypatch):
     """_build_agent_loop with 'agent' in tools_allowed registers the stub AgentTool."""
     from localharness.bench import runner as bench_runner
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
@@ -233,9 +234,116 @@ def test_build_agent_loop_registers_agent_tool(monkeypatch):
         slice="train",
         category="tool_basics",
     )
-    bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     tr = captured["tool_registry"]
     assert tr.has("agent"), "AgentTool stub was not registered"
+
+
+# ---------------------------------------------------------------------------
+# Phase 24 EVAL-01: MemoryStore hydration in _build_agent_loop for the
+# stateful_behavior scenarios. The REAL _build_agent_loop is awaited; we then
+# introspect the constructed AgentLoop's seeded memory store (loop._memory)
+# and assert load_context().agent_memory_md (the text injected into the system
+# prompt at agent/loop.py:464-465) carries the scenario anchor tokens. The
+# store's agent_id MUST equal the loop's AgentConfig.name or load_context
+# would resolve to an empty fact set.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _mem_scen(name: str):
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+    return ScenarioSpec(
+        name=name,
+        prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=[],
+        slice="train",
+        category="stateful_behavior",
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_hydration_injects_starfruit(tmp_path):
+    """Test A — memory_recall: the seeded store injects STARFRUIT_42, and its
+    agent_id equals the loop's AgentConfig.name so load_context resolves."""
+    from localharness.bench import runner as bench_runner
+
+    loop = await bench_runner._build_agent_loop(
+        bus=None, llm_client=None, scenario=_mem_scen("memory_recall")
+    )
+    store = loop._memory
+    assert store is not None, "memory_loader was not seeded for memory_recall"
+    # agent_id of the store must match the loop's config name (underscore→hyphen)
+    assert store._agent_id == loop._config.name == "bench-memory-recall"
+    ctx = await store.load_context()
+    assert "STARFRUIT_42" in ctx.agent_memory_md
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_hydration_two_facts(tmp_path):
+    """Test B — stateful_behavior_two_facts: both STARFRUIT_42 and MOONFRUIT_88
+    land in the injected MEMORY.md text."""
+    from localharness.bench import runner as bench_runner
+
+    loop = await bench_runner._build_agent_loop(
+        bus=None, llm_client=None, scenario=_mem_scen("stateful_behavior_two_facts")
+    )
+    store = loop._memory
+    assert store is not None
+    ctx = await store.load_context()
+    assert "STARFRUIT_42" in ctx.agent_memory_md
+    assert "MOONFRUIT_88" in ctx.agent_memory_md
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_hydration_overwrite_latest_wins(tmp_path):
+    """Test C — stateful_behavior_overwrite_recall: favorite_color seeded blue
+    THEN amber; latest-write-wins via MemoryStore upsert, so the injected text
+    matches (?i)\\bamber\\b and carries no standalone 'blue' fact line."""
+    from localharness.bench import runner as bench_runner
+
+    loop = await bench_runner._build_agent_loop(
+        bus=None, llm_client=None, scenario=_mem_scen("stateful_behavior_overwrite_recall")
+    )
+    store = loop._memory
+    assert store is not None
+    ctx = await store.load_context()
+    md = ctx.agent_memory_md
+    assert _re.search(r"(?i)\bamber\b", md), f"amber not in injected memory: {md!r}"
+    # latest-write-wins: the overwritten 'blue' fact must not survive as its own line
+    fact_lines = [ln for ln in md.splitlines() if ln.lstrip().startswith("- favorite_color")]
+    assert len(fact_lines) == 1, f"expected one favorite_color line, got {fact_lines!r}"
+    assert _re.search(r"(?i)\bblue\b", fact_lines[0]) is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_non_memory_scenario_has_no_store(tmp_path):
+    """Test D — pure_qa (tool_basics): memory_loader stays None and no /agents
+    directory is created under any bench tmp base_dir for this scenario."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    scen = ScenarioSpec(
+        name="pure_qa",
+        prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(),
+        tools_allowed=[],
+        slice="train",
+        category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._memory is None
 
 @pytest.mark.asyncio
 async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
@@ -252,7 +360,7 @@ async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
             error="Permission denied: bash_exec(rm -rf *)",
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
+    async def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)
@@ -420,7 +528,7 @@ async def test_compaction_event_counter(monkeypatch, tmp_path):
             stages_modified=[],
         ))
 
-    def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
+    async def fake_build(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         return {"bus": bus}
 
     monkeypatch.setattr(bench_runner, "_build_agent_loop", fake_build)

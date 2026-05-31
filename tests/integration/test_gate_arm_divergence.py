@@ -356,8 +356,8 @@ async def test_overlay_divergence_real_loop(tmp_path, monkeypatch, faithful_fake
     real_build = bench_runner._build_agent_loop
     built = []
 
-    def _spy_build(*a, **kw):
-        loop = real_build(*a, **kw)  # the REAL AgentLoop is constructed
+    async def _spy_build(*a, **kw):
+        loop = await real_build(*a, **kw)  # the REAL AgentLoop is constructed (builder is async — Phase 24)
         built.append(loop)
         return loop
 

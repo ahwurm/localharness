@@ -8,13 +8,20 @@ prompt: |
   Then run the script with `python3 /tmp/bench_fixtures/hello_bench.py`
   and report the output.
 expected_outcome: |
-  Agent uses the `write` tool to create the file, then `bash_exec` to run
-  it. The script's stdout is the invariant anchor token HELLO_BENCH_OK.
-  Rubric uses contains: on that token — case- and substring-stable across
-  LLM wrapping ("The output was: HELLO_BENCH_OK", "Output: HELLO_BENCH_OK").
+  Agent uses the `write` tool to create the file, then `bash_exec` to run it.
+  Success is keyed on the agent actually DOING the work — dispatching write
+  then bash_exec (>=2 tool calls via event_counts) — not on echoing the
+  HELLO_BENCH_OK token, which a say-only answer could fake without writing.
 success_criteria:
-  rubric:
-    - "contains:HELLO_BENCH_OK"
+  # EVAL-02: the old rubric matched the HELLO_BENCH_OK token in the agent's final TEXT, so
+  # merely SAYING the token passed without writing/running the file (a say-not-do reward hack).
+  # The frozen SuccessCriteria schema has no on-disk file-check and does not capture bash
+  # stdout into counts, so we assert the REAL ACTIONS via event_counts: the agent must
+  # dispatch the write tool then bash_exec (>=2 tool calls). A say-only answer dispatches
+  # 0 tools and now FAILS; performing the write+execute dispatches 2 and PASSES.
+  event_counts:
+    tool_call_count:
+      min: 2
 budget:
   max_actions: 5
   max_duration_minutes: 1.5
