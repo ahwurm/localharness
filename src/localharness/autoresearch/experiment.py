@@ -227,8 +227,11 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     for field in ("context", "permissions"):
         if field in org_overlay:
             org_base[field] = org_overlay[field]
+    # Sanitize scenario name for the AgentConfig name validator (mirror runner.py:246 —
+    # underscores are rejected; e.g. 'single_read' -> 'single-read').
+    base_name = scenario.name.replace("_", "-")
     identity = {
-        "name": f"bench-{scenario.name}",
+        "name": f"bench-{base_name}",
         "role": f"Bench harness execution for scenario {scenario.name}",
         # Thread scenario budget so the cascade AgentConfig enforces the scenario cap.
         # The overlay wins (deep_merge below), so an explicit agent.permissions overlay
@@ -241,7 +244,7 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     # Cascade: identity < org-inherited (lower priority than agent) < agent overlay (wins).
     # name is always synthesized last to satisfy the validator.
     built = deep_merge(deep_merge(identity, org_base), agent_overlay)
-    built["name"] = f"bench-{scenario.name}"
+    built["name"] = f"bench-{base_name}"
     return AgentConfig.model_validate(built)
 
 
