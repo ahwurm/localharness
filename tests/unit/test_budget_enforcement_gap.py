@@ -176,10 +176,11 @@ async def test_scenario_max_duration_not_threaded(tool_scenario_corpus, faithful
     captured: dict = {}
     real_build = bench_runner._build_agent_loop
 
-    def _capture(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
+    async def _capture(bus, llm_client, scenario, session_id="", agent_config=None, base_registry=None):
         # Build the loop exactly as production does (so the captured config is the genuine one the
         # live loop would read its budget from), then record the AgentConfig it was built with.
-        loop = real_build(
+        # _build_agent_loop is async (Phase 24 EVAL-01 memory hydration) — await the real builder.
+        loop = await real_build(
             bus=bus,
             llm_client=llm_client,
             scenario=scenario,

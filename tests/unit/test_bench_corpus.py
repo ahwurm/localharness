@@ -91,7 +91,9 @@ KNOWN_GOOD: dict[str, tuple[str, dict[str, int]]] = {
     # rubric fixtures — final_message satisfies the regex/contains anchor
     "pure_qa": ("The answer is 42.", {}),
     "single_read": ("The file mentions an apricot.", {}),
-    "write_execute": ("Script output was: HELLO_BENCH_OK", {}),
+    # EVAL-02: write_execute is now an event-count fixture — success is keyed on the agent
+    # dispatching write + bash_exec (tool_call_count >= 2), not on echoing HELLO_BENCH_OK.
+    "write_execute": ("Wrote and ran the script.", {"tool_call_count": 2}),
     "fibonacci_sort": ("Sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34", {}),
     "file_exploration": ("Found MAGIC_VALUE_777 inside values.txt", {}),
     "agent_creation": ("Subagent returned: STUB_SUBAGENT_OK ...", {}),
@@ -126,7 +128,7 @@ KNOWN_BAD: dict[str, tuple[str, dict[str, int]]] = {
     # rubric fixtures — final_message fails the rubric anchor
     "pure_qa": ("The answer is 41.", {}),                          # rubric expects 42
     "single_read": ("The file mentions a banana.", {}),            # rubric expects apricot
-    "write_execute": ("Script output was: WRONG_TOKEN", {}),       # rubric expects HELLO_BENCH_OK
+    "write_execute": ("Script output was: HELLO_BENCH_OK", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "fibonacci_sort": ("Sequence: 1, 2, 3, 4, 5", {}),             # rubric expects fibonacci
     "file_exploration": ("Found NOTHING in values.txt", {}),       # rubric expects MAGIC_VALUE_777
     "agent_creation": ("Subagent failed silently", {}),            # rubric expects STUB_SUBAGENT_OK
