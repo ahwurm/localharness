@@ -192,3 +192,162 @@ async def test_spine_single_read_live_vllm(tool_scenario_corpus, tmp_path):
 
     # 3. A real model, with real tools + the apricot rubric, reads the staged file.
     assert completed.success is True
+
+
+# ---------------------------------------------------------------------------
+# LIVE-01: the full-spine + autoresearch-loop dimension.
+#
+# This invokes the REAL two-stage gate (run_experiment) ONCE against live vLLM, but is
+# constructed so the TRAIN arm CANNOT improve — the gate returns a train-reject verdict
+# (EXIT_REJECT_TRAIN, experiment.py:479) or, with too few paired fixtures, EXIT_INCONCLUSIVE —
+# BEFORE the sealed HOLDOUT stage (experiment.py:482-483) is ever reached. The holdout seal is
+# proven structurally: a recording wrapper over the run_slice closure captures every requested
+# slice and we assert "holdout" was NEVER among them.
+#
+# Holdout-unreached construction (RESEARCH Pitfall 3, option (b)): the proposal is a NO-OP
+# mutation — the experiment overlay sets agent.role to the SAME value already adopted in the
+# worktree overrides.yaml — so both arms resolve the identical AgentConfig and the proposal
+# CANNOT outperform the baseline. welch_improvement -> False -> train-reject before holdout.
+# Model-agnostic (LOCKED): provider/model/base_url come from cfg.provider; no baked model id.
+# ---------------------------------------------------------------------------
+
+
+def _make_train_corpus_repo(path):
+    """git init a repo with a committed TRAIN-ONLY bench corpus (two scenarios, never holdout).
+
+    The corpus is intentionally train-only: even a logic slip in the gate cannot load a holdout
+    scenario because none exists on disk. Two fixtures so the Welch pair-count path is reachable.
+    """
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True, capture_output=True)
+    scen_dir = path / "bench" / "scenarios" / "train"
+    scen_dir.mkdir(parents=True)
+    for n in ("noop_01", "noop_02"):
+        # A COMPLETE valid ScenarioSpec (minimal name:/slice: stubs are dropped by
+        # _load_scenarios_from_paths). A zero-tool, trivially-satisfiable scenario keeps the
+        # live generation cheap while still driving the real spine.
+        (scen_dir / f"{n}.yaml").write_text(
+            "\n".join(
+                [
+                    f"name: {n}",
+                    "slice: train",
+                    "category: tool_selection",
+                    "prompt: 'Reply however you like, then end your turn.'",
+                    "success_criteria:",
+                    "  - kind: contains",
+                    "    value: ''",
+                    "tools_allowed: []",
+                    "budget:",
+                    "  max_actions: 1",
+                    "  max_duration_minutes: 1",
+                    "limits:",
+                    "  max_tool_calls: 1",
+                    "  max_latency_s: 120",
+                    "min_runs: 1",
+                    "max_runs: 1",
+                    "tags: []",
+                    "context_files: []",
+                    "expected_outcome: 'noop'",
+                    "ts: 0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init train corpus"], cwd=path, check=True, capture_output=True)
+    return path
+
+
+@pytest.mark.live_vllm
+async def test_live_full_loop_holdout_unreached(live_endpoint, tmp_path):
+    """LIVE-01: the REAL run_experiment gate runs e2e against live vLLM and train-rejects a no-op
+    mutation, so the sealed HOLDOUT stage is provably never reached.
+
+    Skipped by default (autouse _skip_live_vllm); the live_endpoint preflight hard-fails if the
+    user opted in but the endpoint is down. EXIT_* are imported from experiment.py (single source
+    of truth) — no integer exit-code literal is asserted for the verdict.
+    """
+    import uuid
+
+    from localharness.autoresearch.archive import ArchiveEntry, ArchiveStore
+    from localharness.autoresearch.experiment import (
+        EXIT_INCONCLUSIVE,
+        EXIT_REJECT_TRAIN,
+        _build_default_run_slice,
+        run_experiment,
+    )
+    from localharness.cli.components_cmd import _build_loader
+    from localharness.config.overlay import atomic_write_overlay
+
+    cfg = _build_loader().load_harness()  # provider/model/base_url resolved from config
+
+    # 1. A real train-only worktree-source repo (holdout fixtures do not exist on disk).
+    repo = _make_train_corpus_repo(tmp_path / "repo")
+
+    # 2. The NO-OP mutation: adopt agent.role=<X> as baseline (BOTH arms) AND make the proposal's
+    #    after=<X> too. Both arms then resolve the identical AgentConfig -> the proposal cannot
+    #    outperform the baseline -> welch_improvement is False -> train-reject before holdout.
+    noop_role = "Bench harness execution baseline role"
+    atomic_write_overlay(repo / ".localharness" / "overrides.yaml", {"agent": {"role": noop_role}})
+
+    # 3. Seed a real in_flight proposal in a temp archive (agent.role IS in the mutable catalogue).
+    store = ArchiveStore(tmp_path / "archive.db")
+    await store.open()
+    proposal_id = uuid.uuid4().hex
+    await store.write(
+        ArchiveEntry(
+            id=proposal_id,
+            parent_id=None,
+            component="agent.role",
+            diff=__import__("json").dumps({"before": noop_role, "after": noop_role}),  # no-op
+            train_score=None,
+            train_scores_per_fixture=None,
+            holdout_score=None,
+            p_value=None,
+            cost=None,
+            ts=0,
+            approved_by=None,
+            status="in_flight",
+        )
+    )
+
+    # 4. Wrap the REAL bench-backed run_slice closure in a recorder so every requested slice is
+    #    captured — the structural proof that the holdout slice is NEVER constructed. The inner
+    #    closure resolves the live client from cfg.provider + detect_capabilities (FIDEL-01).
+    real_slice = _build_default_run_slice(cfg.provider.default_model, None, cfg=cfg)
+    slices_requested: list[str] = []
+
+    async def recording_run_slice(worktree, *, slice, with_overlay):
+        slices_requested.append(slice)
+        return await real_slice(worktree, slice=slice, with_overlay=with_overlay)
+
+    try:
+        # 5. Drive the REAL two-stage gate ONCE against live vLLM via the recording closure.
+        exit_code = await run_experiment(
+            proposal_id,
+            trials=1,
+            store=store,
+            run_slice=recording_run_slice,
+            repo_root=repo,
+            cfg=cfg,
+            bus=None,
+        )
+    finally:
+        await store.close()
+
+    # 6. STRUCTURAL assertions only (model output is non-deterministic).
+    # 6a. Verdict is in the train-reject band — NOT EXIT_PROMOTE(0)/EXIT_REJECT_HOLDOUT(2),
+    #     which would imply the holdout stage ran. Named constants, no integer literal.
+    assert exit_code in (EXIT_REJECT_TRAIN, EXIT_INCONCLUSIVE), (
+        f"expected a train-reject-band verdict (no holdout), got exit {exit_code}"
+    )
+    # 6b. THE SEAL: the holdout slice was never requested by the gate (STATE.md 17-01 pattern).
+    assert "holdout" not in slices_requested, (
+        f"sealed holdout slice was constructed: {slices_requested}"
+    )
+    # 6c. The gate DID run the real train spine (it is a full-loop test, not a no-op refusal).
+    assert "train" in slices_requested
