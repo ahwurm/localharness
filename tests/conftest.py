@@ -746,3 +746,32 @@ def pytest_configure(config):
 def _skip_live_vllm(request):
     if request.node.get_closest_marker("live_vllm") and not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
+
+
+# -----------------------------------------------------------------------------
+# Phase 23 (LIVE-01): reachability preflight for opted-in live runs.
+#
+# TWO INDEPENDENT GATES (they do NOT conflict — checker ISSUE 4):
+#   1. ENV-GATE (_skip_live_vllm, above): env var UNSET -> the whole test SKIPS.
+#      This fires FIRST, so default/network-less CI never reaches this fixture and
+#      can never be reddened by it.
+#   2. REACHABILITY-GATE (this fixture): runs ONLY when the user opted in (env SET).
+#      An unreachable endpoint is then a REAL failure of an explicit request, so it
+#      HARD-FAILS via pytest.fail() — it does NOT skip and does NOT leak a bare
+#      exception. base_url is resolved from the loaded cfg (model-agnostic — never a
+#      baked :8000 literal or model id).
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def live_endpoint():
+    import httpx
+
+    from localharness.cli.components_cmd import _build_loader
+
+    base = _build_loader().load_harness().provider.base_url  # model-agnostic; NEVER bake the URL
+    try:
+        httpx.get(base.rstrip("/") + "/models", timeout=3.0).raise_for_status()
+    except Exception as e:  # noqa: BLE001 — any failure to reach the opted-in endpoint is a hard fail
+        pytest.fail(f"LOCALHARNESS_LIVE_VLLM is set but vLLM is unreachable at {base}: {e}")
+    return base
