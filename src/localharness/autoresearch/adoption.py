@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from localharness.config.models import AgentConfig, HarnessConfig
-from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay
+from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay, _resolve_user_overlay_path
 from localharness.registry import build_catalogue, coerce_value, set_value_in_dict
 
 # Defense-in-depth: re-assert the gate's anti-reward-hacking seal before committing to LIVE
@@ -135,7 +135,13 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
     # 1. Seal re-check (defense-in-depth — guards archive corruption / future schema slip).
     #    MUST run BEFORE any overlay write: adoption can NEVER widen the mutable surface to the
     #    grader/bench/holdout/multi-component surface.
-    catalogue = build_catalogue(cfg)
+    from localharness.autoresearch.experiment import _provenance_agent_cfg
+    _user_overlay = load_overlay(_resolve_user_overlay_path())
+    catalogue = build_catalogue(
+        cfg,
+        agent_cfg=_provenance_agent_cfg(),
+        overlays={"user": _user_overlay},
+    )
     cat_entry = catalogue.get(component)
     if (
         _is_multi_component(component, after_raw)

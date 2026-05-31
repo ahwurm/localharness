@@ -131,10 +131,17 @@ def _diff_blob(proposal, cfg) -> str:
     """Single-encoded archive diff blob incl. rationale + kind (GAP-1)."""
     import json
 
+    from localharness.autoresearch.experiment import _provenance_agent_cfg
+    from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
     from localharness.registry.catalogue import build_catalogue
 
     try:
-        type_name = build_catalogue(cfg)[proposal.component].type_name
+        _user_ov = load_overlay(_resolve_user_overlay_path())
+        type_name = build_catalogue(
+            cfg,
+            agent_cfg=_provenance_agent_cfg(),
+            overlays={"user": _user_ov},
+        )[proposal.component].type_name
     except Exception:
         type_name = ""
     kind = "hyperparameter" if type_name in ("int", "float") else "prompt"
