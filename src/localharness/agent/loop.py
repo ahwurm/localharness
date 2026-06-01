@@ -268,6 +268,25 @@ def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
             return []
 
 
+def _assemble_role(cfg) -> str:
+    """Assemble the agent system prompt from `role` + optional orthogonal sections (MODP-01).
+
+    Byte-identity invariant (ROADMAP success criterion 4): when every section is "" (the
+    default), this returns `cfg.role` UNCHANGED — the SAME object, no extra whitespace, no
+    headers, no joins. The only behavioral delta is opt-in: it appears solely when an
+    experiment overlay populates a section. Populated sections are appended in the fixed
+    order base -> identity -> tool_use -> stopping -> output, joined with "\n\n" (matching
+    the memory-block join idiom below at :468) — but that path is never taken in the
+    unmutated baseline, so it cannot affect criterion 4.
+    """
+    base = cfg.role
+    sec = cfg.role_sections
+    extra = [s for s in (sec.identity, sec.tool_use, sec.stopping, sec.output) if s]
+    if not extra:
+        return base                       # byte-identity: same object, zero mutation
+    return "\n\n".join([base, *extra])
+
+
 class AgentLoop:
     """ReAct while-loop agent executor. One instance per agent."""
 
@@ -449,7 +468,7 @@ class AgentLoop:
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
-        system_prompt = self._config.role
+        system_prompt = _assemble_role(self._config)
         if tool_call_mode != "native":
             system_prompt += (
                 "\n\nWhen you have finished using tools, respond directly to the user. "
