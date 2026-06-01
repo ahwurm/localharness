@@ -79,10 +79,63 @@ def _parse(raw: str) -> _RawProposal:
         ) from exc
 
 
+def _render_pareto_evidence(front: list) -> str:
+    """Render the per-fixture Pareto front into a compact reflection block (MODP-03).
+
+    One line per train fixture: the best rate currently achieved and the mutation
+    (component) that holds it — the GEPA "reflect across the front" signal so the
+    proposer does not regress a fixture another mutation already wins. Sealed-slice-safe:
+    reads ONLY each entry's train_scores_per_fixture (the sealed train slice; the sealed
+    columns are never referenced). Returns "" for an empty/absent front (the back-compat
+    sentinel — no Pareto block is then injected).
+    """
+    best: dict[str, tuple[float, str]] = {}   # fixture -> (best_rate, holder_component)
+    for e in front:
+        scores = getattr(e, "train_scores_per_fixture", None) or {}
+        for fixture, rate in scores.items():
+            if fixture not in best or rate > best[fixture][0]:
+                best[fixture] = (rate, e.component)
+    if not best:
+        return ""
+    return "\n".join(
+        f"- {fixture}: best rate {rate:.2f} ({component})"
+        for fixture, (rate, component) in sorted(best.items())
+    )
+
+
+async def _fetch_pareto_front(store) -> list:
+    """Fetch the EXISTING per-fixture Pareto front for MODP-03 reflection.
+
+    ``store=None`` ⇒ ``[]`` (the back-compat no-evidence path). When a store is given it
+    is opened if not already open (a missing/empty archive DB is created empty by
+    ``open()`` ⇒ the front is just ``[]``); a store this helper opened is closed again,
+    while an already-open caller-owned store is left untouched. The front is the existing
+    ``ArchiveStore.pareto_front_per_fixture()`` — never recomputed, sealed-slice-safe.
+    """
+    if store is None:
+        return []
+    opened_here = getattr(store, "_db", None) is None
+    if opened_here:
+        await store.open()
+    try:
+        return await store.pareto_front_per_fixture()
+    finally:
+        if opened_here:
+            await store.close()
+
+
 def _build_reflection_messages(
-    component: str, before: object, type_name: str, traces: list[list]
+    component: str, before: object, type_name: str, traces: list[list],
+    *, pareto_evidence: str = "",
 ) -> list[dict]:
-    """Reflection prompt: failed-trace evidence + current value → one typed change."""
+    """Reflection prompt: failed-trace evidence + current value → one typed change.
+
+    When ``pareto_evidence`` is non-empty (the per-fixture Pareto front rendered by
+    ``_render_pareto_evidence``), it is injected as an ADDITIONAL evidence block and the
+    rationale contract is augmented to require tying the change to BOTH the failures AND
+    the front (MODP-03 — GEPA "reflect across the front"). With the default empty string
+    the built messages are byte-identical to the pre-MODP-03 builder (back-compat).
+    """
     system = (
         "You propose ONE change to a single config component. "
         'Return ONLY JSON {"after": <new value>, "rationale": <why>}. '
@@ -99,8 +152,19 @@ def _build_reflection_messages(
         f"Component: {component} (type {type_name})\n"
         f"Current value:\n{json.dumps(before)}\n\n"
         f"Failed TRAIN traces (the change must address these failures):\n{evidence}\n\n"
-        'Respond with JSON only: {"after": <new value for this component>, '
-        '"rationale": <one sentence tying the change to the failures>}.'
+        + (
+            "Pareto front — current best per fixture (reflect across these; do NOT regress "
+            f"a fixture another mutation already wins):\n{pareto_evidence}\n\n"
+            if pareto_evidence
+            else ""
+        )
+        + 'Respond with JSON only: {"after": <new value for this component>, '
+        + (
+            '"rationale": <one sentence tying the change to the failures AND the per-fixture '
+            'Pareto evidence>}.'
+            if pareto_evidence
+            else '"rationale": <one sentence tying the change to the failures>}.'
+        )
     )
     return [
         {"role": "system", "content": system},
@@ -196,6 +260,7 @@ async def propose(
     corpus_path: Path,
     results_path: Path,
     llm=None,
+    store=None,
     archive: bool = False,
 ) -> Proposal:
     """Generate ONE typed mutation Proposal for ONE component from failed train traces.
@@ -241,7 +306,14 @@ async def propose(
         )
 
     # (C) Call the model (AFTER the seal + after `before` is read), parse, coerce.
-    messages = _build_reflection_messages(component, before, entry.type_name, failed)
+    #     Reflect across the per-fixture Pareto front (MODP-03) when a store is given —
+    #     the EXISTING ArchiveStore.pareto_front_per_fixture() (sealed-slice-safe), never
+    #     recomputed. No store ⇒ [] ⇒ pareto_evidence="" ⇒ today's messages (back-compat).
+    front = await _fetch_pareto_front(store)
+    pareto_evidence = _render_pareto_evidence(front)
+    messages = _build_reflection_messages(
+        component, before, entry.type_name, failed, pareto_evidence=pareto_evidence
+    )
     msg, usage = await llm.complete(messages)
     raw = msg.content or ""
     parsed = _parse(raw)
