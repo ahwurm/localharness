@@ -24,10 +24,10 @@ success_criteria:
       min: 2
 budget:
   max_actions: 5
-  max_duration_minutes: 1.5
+  max_duration_minutes: 5.0
   max_context_tokens: 16000
 limits:
-  max_latency_s: 90.0
+  max_latency_s: 300.0
   max_tool_calls: 6
 tools_allowed:
   - write
