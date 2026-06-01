@@ -442,6 +442,8 @@ class AgentLoop:
             recovery_threshold=sd_cfg.recovery_threshold,
             escalation_threshold=sd_cfg.escalation_threshold,
         )
+        sc_cfg = self._config.self_check
+        self_check_passes_used = 0
 
         # Build system prompt
         tool_call_mode = getattr(
@@ -681,6 +683,21 @@ class AgentLoop:
 
                 # Natural completion — reset parse retries
                 session.parse_retries = 0
+
+                # Self-check (MECH-01): one bounded review pass before finalizing.
+                # A loop-structure mechanism — re-enters the while-loop for one more
+                # LLM round-trip (using the recovery-injection "append user turn +
+                # continue" idiom, loop.py:548-551). Bounded by max_passes (ge=1,le=3)
+                # so it provably terminates. Use the "user" role — vLLM rejects
+                # mid-conversation system messages.
+                if sc_cfg.enabled and self_check_passes_used < sc_cfg.max_passes:
+                    self_check_passes_used += 1
+                    session.push({"role": "user", "content": (
+                        "Review your answer above for correctness and completeness. "
+                        "If it is correct, repeat it exactly. If not, give the corrected answer."
+                    )})
+                    continue
+
                 summary = _clean_summary(
                     _format_completion_summary(session, content)
                 )
