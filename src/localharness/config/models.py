@@ -491,6 +491,49 @@ class SelfCheckConfig(BaseModel):
     )
 
 
+class RoleSectionsConfig(BaseModel):
+    """Orthogonal, individually-addressable sections of the agent system prompt (MODP-01/02).
+
+    Each section is an OPTIONAL append to `agent.role`. All default to "" so that with
+    NO section set the assembled system prompt is BYTE-IDENTICAL to the bare `role`
+    monolith (ROADMAP success criterion 4 — the load-bearing safety rail). `role` itself
+    stays the canonical full text (it is required and has no default; there is no fixed
+    monolith to carve, so the decomposition is ADDITIVE, never subtractive). A prompt
+    experiment mutates exactly ONE section via its dot-path, e.g.
+    `agent.role_sections.tool_use`, without rewriting the whole role (MODP-02).
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    identity: str = Field(
+        default="",
+        description=(
+            "Identity / mandate section (who the agent is). "
+            "Mutable via `localharness components set agent.role_sections.identity \"<text>\"`."
+        ),
+    )
+    tool_use: str = Field(
+        default="",
+        description=(
+            "Tool-use policy section (how/when to call tools). "
+            "Mutable via `localharness components set agent.role_sections.tool_use \"<text>\"`."
+        ),
+    )
+    stopping: str = Field(
+        default="",
+        description=(
+            "Stopping & persistence section (when to stop vs. keep going / ask). "
+            "Mutable via `localharness components set agent.role_sections.stopping \"<text>\"`."
+        ),
+    )
+    output: str = Field(
+        default="",
+        description=(
+            "Output discipline section (answer format / terseness). "
+            "Mutable via `localharness components set agent.role_sections.output \"<text>\"`."
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Complete configuration for one agent.
@@ -620,6 +663,15 @@ class AgentConfig(BaseModel):
         description=(
             "Optional self-review step (loop-structure mechanism, MECH-01). "
             "Addressable via `agent.self_check.{enabled,max_passes}`."
+        ),
+    )
+
+    role_sections: RoleSectionsConfig = Field(
+        default_factory=RoleSectionsConfig,
+        description=(
+            "Orthogonal system-prompt sections (MODP-01/02). All default to '' so the "
+            "unmutated assembly is byte-identical to `role`. Addressable via "
+            "`agent.role_sections.{identity,tool_use,stopping,output}`."
         ),
     )
 
