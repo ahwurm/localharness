@@ -209,8 +209,14 @@ def propose(
     try:
         from localharness.cli.components_cmd import _build_loader
 
+        from localharness.autoresearch.archive import ArchiveStore
+
         cfg = _build_loader().load_harness()
         corpus_path, results_path = _resolve_bench_paths()
+        # Reflect across the per-fixture Pareto front (MODP-03): pass the existing
+        # archive so a real run cites which mutation already wins each train fixture.
+        # A missing/empty archive ⇒ empty front ⇒ pareto_evidence="" (no new flag, no crash).
+        store = ArchiveStore(_archive_db_path())
         proposal = _run(
             propose_pipeline(
                 component,
@@ -218,6 +224,7 @@ def propose(
                 cfg=cfg,
                 corpus_path=corpus_path,
                 results_path=results_path,
+                store=store,
             )
         )
     except ProposerError as exc:

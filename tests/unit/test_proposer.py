@@ -285,3 +285,75 @@ async def test_no_failed_traces_refuses(proposer_corpus, proposer_results, tmp_p
             corpus_path=proposer_corpus,
             results_path=proposer_results["results"],
         )
+
+
+# --------------------------------------------------------------------------- #
+# MODP-03 — propose() threads the per-fixture Pareto front end-to-end
+#
+# The deterministic CITATION proof (the rendered prompt contains the per-fixture
+# lines) lives in tests/unit/test_proposer_reflection.py on the pure builder. These
+# tests prove propose() ACCEPTS an optional store, fetches the existing front, and
+# stays back-compatible when no store is given. All offline (FakeLLMClient injected).
+# --------------------------------------------------------------------------- #
+
+
+async def test_store_threads_front_end_to_end(
+    proposer_corpus, proposer_results, archive_store, seeded_archive
+):
+    """MODP-03: propose(store=<seeded archive>) succeeds and calls the model once with the
+    enriched messages (the front is fetched + threaded; no crash on the front path)."""
+    await seeded_archive(
+        archive_store,
+        [{"status": "promoted", "train_scores_per_fixture": {"prop_train_fx": 0.4}}],
+    )
+    cfg = _cfg()
+    spy = FakeLLMClient(_good_payload())
+    proposal = await propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=spy,
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+        store=archive_store,
+    )
+    assert proposal.component == "agent.role"
+    assert spy.complete_calls == 1
+
+
+async def test_absent_store_is_back_compat(proposer_corpus, proposer_results):
+    """MODP-03 back-compat: store=None (the existing default path) behaves EXACTLY as today
+    — succeeds, the model is called once, no Pareto block (pareto_evidence="")."""
+    cfg = _cfg()
+    spy = FakeLLMClient(_good_payload())
+    proposal = await propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=spy,
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+        store=None,
+    )
+    assert proposal.component == "agent.role"
+    assert spy.complete_calls == 1
+
+
+async def test_empty_archive_front_is_safe(
+    proposer_corpus, proposer_results, archive_store
+):
+    """MODP-03: an archive with NO eligible entries ⇒ empty front ⇒ pareto_evidence="" ⇒
+    the proposer does not crash (the missing/empty-archive path the CLI relies on)."""
+    cfg = _cfg()
+    spy = FakeLLMClient(_good_payload())
+    proposal = await propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=spy,
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+        store=archive_store,
+    )
+    assert proposal.component == "agent.role"
+    assert spy.complete_calls == 1
