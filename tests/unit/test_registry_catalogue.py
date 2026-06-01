@@ -209,8 +209,8 @@ def test_self_check_leaves_enumerate(components_home):
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
-    assert len(entries) == 82, (
-        f"catalogue should be 82 entries (80 + the two new self_check leaves), got {len(entries)}"
+    assert len(entries) == 86, (
+        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
     )
 
 
@@ -245,3 +245,46 @@ def test_self_check_defaults_and_bounds():
             AgentConfig.model_validate(
                 {"name": "x", "role": "y", "self_check": {"max_passes": bad}}
             )
+
+
+# ---------------------------------------------------------------------------
+# MODP-01 — RoleSectionsConfig auto-enumerates as four orthogonal mutable axes.
+# Adding `role_sections: RoleSectionsConfig` (four str fields) to AgentConfig makes
+# walk_model_fields recurse the nested BaseModel into
+# agent.role_sections.{identity,tool_use,stopping,output} with ZERO catalogue edit
+# (mirrors agent.self_check.* and agent.stuck_detector.*). Catalogue 82 -> 86.
+# ---------------------------------------------------------------------------
+
+
+def test_role_sections_leaves_enumerate(components_home):
+    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 86."""
+    from localharness.config.models import AgentConfig
+    from localharness.registry.catalogue import build_catalogue
+
+    cfg = _make_minimal_harness_cfg()
+    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"))
+
+    leaves = [f"agent.role_sections.{s}" for s in ("identity", "tool_use", "stopping", "output")]
+    missing = [leaf for leaf in leaves if leaf not in entries]
+    assert not missing, f"Missing role_sections leaves: {missing}"
+
+    # Test C: each section is a str leaf (mirrors agent.role itself being a str leaf).
+    for leaf in leaves:
+        assert entries[leaf].annotation is str, (
+            f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
+        )
+
+    assert len(entries) == 86, (
+        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
+    )
+
+
+def test_role_sections_defaults_empty():
+    """MODP-01 Test D: all four sections default to '' — the structural basis of byte-identity."""
+    from localharness.config.models import AgentConfig
+
+    a = AgentConfig(name="x", role="y")
+    assert a.role_sections.identity == ""
+    assert a.role_sections.tool_use == ""
+    assert a.role_sections.stopping == ""
+    assert a.role_sections.output == ""
