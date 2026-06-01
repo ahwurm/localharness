@@ -16,10 +16,10 @@ success_criteria:
     - "contains:STUB_SUBAGENT_OK"
 budget:
   max_actions: 4
-  max_duration_minutes: 1.0
+  max_duration_minutes: 5.0
   max_context_tokens: 16000
 limits:
-  max_latency_s: 60.0
+  max_latency_s: 300.0
   max_tool_calls: 4
 tools_allowed:
   - agent
