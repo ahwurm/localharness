@@ -98,7 +98,9 @@ KNOWN_GOOD: dict[str, tuple[str, dict[str, int]]] = {
     "file_exploration": ("Found MAGIC_VALUE_777 inside values.txt", {}),
     "agent_creation": ("Subagent returned: STUB_SUBAGENT_OK ...", {}),
     "brave_search_subagent": ("Subagent reported STUB_SUBAGENT_OK summary", {}),
-    "plugin_mcp_tool": ("Looked it up - Internet Engineering Task Force", {}),
+    # EVAL-02 (v1.3 audit): success now also requires a real tool dispatch (tool_call_count >= 1),
+    # not just echoing the org name — so the known-good case fetched (1 dispatch).
+    "plugin_mcp_tool": ("Looked it up - Internet Engineering Task Force", {"tool_call_count": 1}),
     "memory_recall": ("The codename was STARFRUIT_42.", {}),
     # event-count fixtures — final_message can be anything; counts satisfy assertions
     "stuck_recovery": ("Gave up.", {"stuck_recoveries": 1}),
@@ -133,7 +135,7 @@ KNOWN_BAD: dict[str, tuple[str, dict[str, int]]] = {
     "file_exploration": ("Found NOTHING in values.txt", {}),       # rubric expects MAGIC_VALUE_777
     "agent_creation": ("Subagent failed silently", {}),            # rubric expects STUB_SUBAGENT_OK
     "brave_search_subagent": ("Search returned no results", {}),   # rubric expects STUB_SUBAGENT_OK
-    "plugin_mcp_tool": ("Could not look it up", {}),               # rubric expects "Internet Engineering Task Force"
+    "plugin_mcp_tool": ("Internet Engineering Task Force", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "memory_recall": ("I do not remember.", {}),                   # rubric expects STARFRUIT_42
     # event-count fixtures — counts fail the assertion (empty counts when min: 1 asserted)
     "stuck_recovery": ("Gave up.", {}),                            # asserts stuck_recoveries min: 1

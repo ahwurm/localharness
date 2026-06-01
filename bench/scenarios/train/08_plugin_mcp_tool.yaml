@@ -2,21 +2,30 @@ name: plugin_mcp_tool
 prompt: |
   You have access to one MCP tool (mcp:fetch) and one plugin tool
   (plugin:research_tools.exa_search). Use either of them once to look up
-  the canonical homepage of the IETF (https://www.ietf.org). Return the
-  organization's full name verbatim — "Internet Engineering Task Force"
-  — in your final response.
+  the canonical homepage of the IETF (https://www.ietf.org). The page
+  states the organization's full name; report that full name verbatim
+  in your final response.
 expected_outcome: |
   Agent dispatches one of the prefixed tools. The plugin-prefix dispatch
   path was verified in 12-04 Task 1. The MCP fetch tool is also available
-  (mcp: prefix). The fixture's rubric anchors on the invariant org name —
-  either tool can satisfy by returning the IETF homepage which mentions
-  the full name in its title and content. If neither tool is callable in
+  (mcp: prefix). Success now requires BOTH a real tool dispatch
+  (tool_call_count>=1, EVAL-02) AND the rubric's invariant org name — so
+  echoing the name without fetching fails; a real fetch returns the IETF
+  homepage which mentions the full name in its title and content. If neither tool is callable in
   the test environment, the fixture is exercised only at parse time via
   test_corpus_dry_run + test_known_good_pass — manual calibration runs
   validate live behavior.
 success_criteria:
+  # EVAL-02 (hardened in the v1.3 milestone audit): the old rubric-only criterion let a
+  # model pass by SAYING the org name without dispatching either tool (a say-not-do reward
+  # hack — the prompt also leaked the name). tool_call_count>=1 now ties the pass to a real
+  # mcp:fetch / exa_search dispatch; the rubric still anchors on the org name so the fetched
+  # content is correct. Echoing the name with 0 tool calls now FAILS.
   rubric:
     - "contains:Internet Engineering Task Force"
+  event_counts:
+    tool_call_count:
+      min: 1
 budget:
   max_actions: 4
   max_duration_minutes: 1.5
