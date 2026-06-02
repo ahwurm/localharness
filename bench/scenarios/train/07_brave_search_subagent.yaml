@@ -6,15 +6,17 @@ prompt: |
   in your final response.
 expected_outcome: |
   Agent invokes the real Explore subagent via the `agent` tool to research the
-  fixture tree (read-only {read, glob, grep}). The child globs/reads README.md and
-  returns a structured "[explore findings]" summary. The verdict requires the
-  findings header AND tool_call_count >= 2 (1 parent agent-call + >=1 child
-  read/glob). The real read-only subagent has a fixed toolset, so the prior
-  plugin-research framing is dropped — this exercises genuine delegation, not a
-  canned plugin-call shape (real plugin/MCP execution is fixture 08, out of scope).
+  fixture tree (read-only {read, glob, grep}). The child globs/reads README.md (which
+  says the tree "holds bench fixture data for 05_file_exploration") and reports what it
+  is for; the parent surfaces "fixture data" in its final message. The verdict anchors
+  on that ANSWER (not the "[explore findings]" header, which a live model paraphrases
+  away) AND tool_call_count >= 2 (1 parent agent-call + >=1 child read/glob). The parent
+  has NO read tool, so "fixture data" reaches its final message only THROUGH the
+  subagent's findings — answer + floor prove genuine delegation, not a canned plugin-call
+  shape (real plugin/MCP execution is fixture 08, out of scope).
 success_criteria:
   rubric:
-    - "contains:[explore findings]"
+    - "contains:fixture data"
   event_counts:
     tool_call_count: { min: 2 }
 budget:
