@@ -21,6 +21,7 @@ from localharness.core.events import (
     ScenarioCompleted,
     StuckRecovered,
     TurnCompleted,
+    TurnFailed,
 )
 
 log = logging.getLogger(__name__)
@@ -111,6 +112,16 @@ class MetricAccumulator:
         if event.summary:
             self.final_message = event.summary
 
+    def on_turn_failed(self, event: TurnFailed) -> None:
+        # Failed runs never emit TurnCompleted; capture their real iterations/tokens.
+        # success/verdict is unaffected (scored from the rubric); final_message is
+        # left untouched so scoring cannot change.
+        self.tokens_in += int(getattr(event, "input_tokens", 0) or 0)
+        self.tokens_out += int(getattr(event, "output_tokens", 0) or 0)
+        self.iterations = max(self.iterations, int(event.iterations))
+        if getattr(event, "tokens_estimated", False):
+            self.tokens_estimated = True
+
     def on_action(self, event: Action) -> None:
         if event.tool_name:
             self.tool_call_count += 1
@@ -183,6 +194,9 @@ async def execute_one_run(
     async def _h_turn(ev: TurnCompleted) -> None:
         acc.on_turn_completed(ev)
 
+    async def _h_turn_failed(ev: TurnFailed) -> None:
+        acc.on_turn_failed(ev)
+
     async def _h_action(ev: Action) -> None:
         acc.on_action(ev)
 
@@ -202,6 +216,7 @@ async def execute_one_run(
         acc.on_compaction_triggered(ev)
 
     bus.subscribe(TurnCompleted, _h_turn)
+    bus.subscribe(TurnFailed, _h_turn_failed)
     bus.subscribe(Action, _h_action)
     bus.subscribe(ParseFailed, _h_parse)
     bus.subscribe(StuckRecovered, _h_stuck)
