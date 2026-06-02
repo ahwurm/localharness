@@ -103,6 +103,9 @@ class TurnFailed(BaseEvent):
     detail: str
     iterations: int
     duration_seconds: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_estimated: bool = False
 
 
 class UserMessage(BaseEvent):

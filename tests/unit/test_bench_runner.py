@@ -32,6 +32,25 @@ def test_accumulate_iterations_from_turn_completed():
     assert acc.iterations == 5
 
 
+def test_accumulate_metrics_from_turn_failed():
+    """Regression: failed runs (TurnFailed) must report real iterations/tokens.
+
+    The accumulator originally subscribed only to TurnCompleted, so runs ending
+    in TurnFailed (budget_exceeded, stuck_detected) logged iterations/tokens as 0
+    despite having run — masking real work and skewing per-run telemetry.
+    """
+    from localharness.bench.runner import MetricAccumulator
+    from localharness.core.events import TurnFailed
+    acc = MetricAccumulator()
+    acc.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="budget_exceeded", detail="hit cap",
+        iterations=3, duration_seconds=1.0, input_tokens=120, output_tokens=45,
+    ))
+    assert acc.iterations == 3
+    assert acc.tokens_in == 120
+    assert acc.tokens_out == 45
+
+
 def test_accumulate_tool_call_count_from_actions():
     """MetricAccumulator.on_action increments tool_call_count when tool_name set."""
     from localharness.bench.runner import MetricAccumulator

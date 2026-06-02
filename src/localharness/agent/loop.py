@@ -388,6 +388,9 @@ class AgentLoop:
                 detail=str(exc),
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
             ))
             return summary
 
@@ -401,6 +404,9 @@ class AgentLoop:
                 detail=summary,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
             ))
         elif reason == "stuck":
             await self._bus.publish(TurnFailed(
@@ -410,6 +416,9 @@ class AgentLoop:
                 detail=summary,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
             ))
         elif reason == "kill_file":
             await self._bus.publish(TurnFailed(
@@ -419,6 +428,9 @@ class AgentLoop:
                 detail=summary,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
             ))
         elif reason == "error":
             await self._bus.publish(TurnFailed(
@@ -428,6 +440,9 @@ class AgentLoop:
                 detail=summary,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
             ))
         else:
             await self._bus.publish(TurnCompleted(
