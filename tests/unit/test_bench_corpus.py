@@ -96,8 +96,13 @@ KNOWN_GOOD: dict[str, tuple[str, dict[str, int]]] = {
     "write_execute": ("Wrote and ran the script.", {"tool_call_count": 2}),
     "fibonacci_sort": ("Sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34", {}),
     "file_exploration": ("Found MAGIC_VALUE_777 inside values.txt", {}),
-    "agent_creation": ("Subagent returned: STUB_SUBAGENT_OK ...", {}),
-    "brave_search_subagent": ("Subagent reported STUB_SUBAGENT_OK summary", {}),
+    # Phase 28 (SUBAGENT-05): real Explore-subagent delegation. Success now requires the
+    # structural "[explore findings]" header AND a real delegation count (1 parent agent-call
+    # + >=1 child read/glob) — mirroring write_execute/plugin_mcp_tool. 15 is two-step (min: 4).
+    "agent_creation": ("Subagent returned: [explore findings] ...", {"tool_call_count": 2}),
+    "brave_search_subagent": ("[explore findings] task: ... | tool calls: 1", {"tool_call_count": 2}),
+    "agent_orchestration_two_step": ("[explore findings] first ... [explore findings] second", {"tool_call_count": 4}),
+    "agent_orchestration_named_role": ("explorer returned: [explore findings] ...", {"tool_call_count": 2}),
     # EVAL-02 (v1.3 audit): success now also requires a real tool dispatch (tool_call_count >= 1),
     # not just echoing the org name — so the known-good case fetched (1 dispatch).
     "plugin_mcp_tool": ("Looked it up - Internet Engineering Task Force", {"tool_call_count": 1}),
@@ -133,8 +138,12 @@ KNOWN_BAD: dict[str, tuple[str, dict[str, int]]] = {
     "write_execute": ("Script output was: HELLO_BENCH_OK", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "fibonacci_sort": ("Sequence: 1, 2, 3, 4, 5", {}),             # rubric expects fibonacci
     "file_exploration": ("Found NOTHING in values.txt", {}),       # rubric expects MAGIC_VALUE_777
-    "agent_creation": ("Subagent failed silently", {}),            # rubric expects STUB_SUBAGENT_OK
-    "brave_search_subagent": ("Search returned no results", {}),   # rubric expects STUB_SUBAGENT_OK
+    # Phase 28: say-not-do — emits the right "[explore findings]" text but did NO real
+    # delegation (tool_call_count 0) => FAILS the floor. Proves "no say-not-do pass" (SC3).
+    "agent_creation": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
+    "brave_search_subagent": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
+    "agent_orchestration_two_step": ("[explore findings] [explore findings]", {"tool_call_count": 0}),
+    "agent_orchestration_named_role": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
     "plugin_mcp_tool": ("Internet Engineering Task Force", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "memory_recall": ("I do not remember.", {}),                   # rubric expects STARFRUIT_42
     # event-count fixtures — counts fail the assertion (empty counts when min: 1 asserted)

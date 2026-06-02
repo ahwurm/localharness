@@ -1,19 +1,22 @@
 name: brave_search_subagent
 prompt: |
-  Build a small research subagent using the `agent` tool. Give it the
-  tool whitelist [plugin:research_tools.exa_search] and the prompt:
-  "Search for the meaning of LocalHarness". Return the subagent's summary
-  verbatim in your final response.
+  Use the `agent` tool to delegate a read-only research task: ask the subagent to
+  explore /tmp/bench_fixtures/exploration_root, locate the README.md file, read it,
+  and report what the fixture tree is for. Return the subagent's findings verbatim
+  in your final response.
 expected_outcome: |
-  Agent calls the `agent` tool (registered by _build_agent_loop's stub
-  in 12-04 Task 1) with the requested whitelist. The stub returns a
-  canned summary containing STUB_SUBAGENT_OK. Rubric anchors on that
-  invariant token. This fixture exercises the tool-CALL shape (with a
-  plugin-prefixed entry inside the subagent's whitelist), not real
-  plugin execution. Real plugin/MCP execution is in fixture 08.
+  Agent invokes the real Explore subagent via the `agent` tool to research the
+  fixture tree (read-only {read, glob, grep}). The child globs/reads README.md and
+  returns a structured "[explore findings]" summary. The verdict requires the
+  findings header AND tool_call_count >= 2 (1 parent agent-call + >=1 child
+  read/glob). The real read-only subagent has a fixed toolset, so the prior
+  plugin-research framing is dropped — this exercises genuine delegation, not a
+  canned plugin-call shape (real plugin/MCP execution is fixture 08, out of scope).
 success_criteria:
   rubric:
-    - "contains:STUB_SUBAGENT_OK"
+    - "contains:[explore findings]"
+  event_counts:
+    tool_call_count: { min: 2 }
 budget:
   max_actions: 4
   max_duration_minutes: 5.0
@@ -23,6 +26,5 @@ limits:
   max_tool_calls: 4
 tools_allowed:
   - agent
-  - plugin:research_tools.exa_search
 slice: train
 category: agent_orchestration

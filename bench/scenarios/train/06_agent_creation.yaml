@@ -1,18 +1,21 @@
 name: agent_creation
 prompt: |
-  Create a subagent using the `agent` tool with a prompt asking it to
-  summarize the phrase "the quick brown fox". Use the empty tool whitelist
-  (the subagent does not need tools for this task). Return the subagent's
-  summary verbatim in your final response.
+  Use the `agent` tool to delegate a read-only exploration: ask the subagent
+  to explore /tmp/bench_fixtures/exploration_root, find the file data/values.txt,
+  read it, and report the value it holds. Return the subagent's findings verbatim
+  in your final response.
 expected_outcome: |
-  Agent invokes the AgentTool registered by _build_agent_loop with the
-  stub agent_runner (12-04 Task 1). The stub returns a canned dict whose
-  'subagent_summary' field contains "STUB_SUBAGENT_OK". Rubric anchors on
-  that token. The fixture exercises the tool-call shape, not real subagent
-  execution.
+  Agent invokes the real Explore subagent (read-only {read, glob, grep}) via the
+  `agent` tool. The child explores the fixture tree, reads data/values.txt
+  (containing MAGIC_VALUE_777), and returns a structured findings summary whose
+  header is "[explore findings]". The verdict requires BOTH the findings header in
+  the final message AND tool_call_count >= 2 (1 parent agent-call + >=1 child
+  read/glob) — proving genuine delegation, not a canned pass.
 success_criteria:
   rubric:
-    - "contains:STUB_SUBAGENT_OK"
+    - "contains:[explore findings]"
+  event_counts:
+    tool_call_count: { min: 2 }
 budget:
   max_actions: 4
   max_duration_minutes: 5.0
