@@ -306,46 +306,34 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             pass  # skip agents that fail to load — non-fatal
     orchestrator = Orchestrator(card_registry=card_registry)
 
-    # --- 9b. Agent delegation tool (ORCH-04) ---
+    # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
+    # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
+    # and the AgentTool is registered at GLOBAL scope. The parent loop's agent is the `default`
+    # agent (agent_name_str), and get_tools_for_agent resolves agent-scoped tools by that name —
+    # an agent_id="orchestrator" registration was NEVER offered to `default`, so delegation was
+    # dead. Global scope matches the bench semantics (runner.py registers `agent` globally) and
+    # makes the running parent actually see + use the tool. No global-name collision: the builtins
+    # are read/glob/grep/write/bash_exec. parent_session_id is read at call time via the getter
+    # (agent_loop is constructed just below, before any turn runs / the model can delegate).
     from localharness.tools.builtin.agent_tool import AgentTool
-    from localharness.agent.subagent import dispatch_explore_subagent, _sanitize_agent_name
+    from localharness.agent.subagent import make_explore_agent_runner
 
     perm_eval = PermissionEvaluator()
 
-    async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
-        """Closure for AgentTool: dispatch a subagent (SUBAGENT-01..04).
-
-        Currently the read-only `explore` subagent is the only wired child: it runs its own
-        bounded AgentLoop (read/glob/grep only) on the shared bus and returns structured
-        findings. The child publishes with parent_id = the parent's session_id. `depth`
-        guards against recursion — the read-only child has no spawn tool (primary guard)
-        and an explicit re-entry at depth >= 1 is refused here (belt-and-suspenders).
-        Write-capable / general / nested subagents come later (v1.5+).
-        """
-        if _sanitize_agent_name(agent_id) != "explore":
-            raise ValueError(
-                f"Agent '{agent_id}' dispatch not yet wired (only 'explore' is available)"
-            )
-        return await dispatch_explore_subagent(
-            task,
-            llm=llm,
-            bus=bus,
-            base_registry=tool_registry,
-            parent_session_id=agent_loop.current_session_id,
-            permission_evaluator=perm_eval,
-            depth=depth,
-        )
+    _run_agent = make_explore_agent_runner(
+        llm=llm,
+        bus=bus,
+        base_registry=tool_registry,
+        permission_evaluator=perm_eval,
+        get_parent_session_id=lambda: agent_loop.current_session_id,
+    )
 
     available_agent_names = [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
         agent_runner=_run_agent,
         available_agents=available_agent_names,
     )
-    await tool_registry.register(
-        agent_tool,
-        scope="agent",
-        agent_id="orchestrator",
-    )
+    await tool_registry.register(agent_tool, scope="global")
 
     # --- 10. Agent loop ---
     agent_loop = AgentLoop(

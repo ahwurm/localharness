@@ -14,6 +14,7 @@ Design:
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
@@ -181,3 +182,43 @@ def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
     except Exception:
         return 0
     return sum(1 for e in actions if getattr(e, "tool_name", None))
+
+
+def make_explore_agent_runner(
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    permission_evaluator: Any,
+    get_parent_session_id: Callable[[], str | None],
+) -> Callable[[str, str, int], Awaitable[str]]:
+    """Build the AgentTool runner for the read-only Explore subagent (module-level seam, T1).
+
+    Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
+    (the same way Phase 27 extracted `dispatch_explore_subagent` from this closure). The returned
+    async runner is what `AgentTool(agent_runner=...)` invokes. Behavior is identical to the closure:
+
+    - Only `explore` is wired (after `_` -> `-` sanitization); any other agent_id raises a clear
+      ValueError so the model gets an actionable "not yet wired" error (AgentTool maps it to not_found).
+    - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
+      parent loop's current session_id when the model delegates — matching the closure's late read of
+      `agent_loop.current_session_id`.
+    - `depth` threads through to `dispatch_explore_subagent` (the belt-and-suspenders recursion guard).
+    """
+
+    async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
+        if _sanitize_agent_name(agent_id) != "explore":
+            raise ValueError(
+                f"Agent '{agent_id}' dispatch not yet wired (only 'explore' is available)"
+            )
+        return await dispatch_explore_subagent(
+            task,
+            llm=llm,
+            bus=bus,
+            base_registry=base_registry,
+            parent_session_id=get_parent_session_id(),
+            permission_evaluator=permission_evaluator,
+            depth=depth,
+        )
+
+    return _run_agent
