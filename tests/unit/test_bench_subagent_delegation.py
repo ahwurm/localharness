@@ -8,9 +8,16 @@ and child consume scripted responses strictly in order (single `_index`), and as
 
   (a) real delegation  => ScenarioCompleted.tool_call_count >= 2 (1 parent agent-call + >=1 child
       read), child Actions carry parent_id == run session_id, success is True;
-  (b) say-not-do       => the parent emits the right "[explore findings]" text WITHOUT calling
+  (b) say-not-do       => the parent emits the right ANSWER (MAGIC_VALUE_777) WITHOUT calling
       `agent`, so tool_call_count <= 1 and success is False (the event_counts floor rejects it
       even though the rubric text matches) — "no say-not-do pass" (ROADMAP SC3).
+
+Bug#2 note (28-02): the scenario rubric is ANSWER-anchored ("contains:MAGIC_VALUE_777"), NOT the
+"[explore findings]" header — a live qwen run proved the parent paraphrases the header away while
+still delegating correctly, so the header echo was a false-negative. Both mocks below already
+surface MAGIC_VALUE_777 in the parent's final message, so (a) still PASSES on answer+floor and (b)
+still FAILS on the floor (it states the answer but never delegates — exactly the say-not-do the
+answer-anchor must still reject).
 
 No live model, no placeholder data: the child reads a REAL staged fixture file (its content is the
 data; the bench_fixtures_staged session fixture in conftest stages it under /tmp/bench_fixtures/).
@@ -31,7 +38,8 @@ FIXTURE_VALUES = "/tmp/bench_fixtures/exploration_root/data/values.txt"
 
 
 def _agent_creation_scenario():
-    """The real, converted 06_agent_creation scenario (rubric '[explore findings]', floor min: 2)."""
+    """The real, converted 06_agent_creation scenario (Bug#2 answer-anchor rubric
+    'contains:MAGIC_VALUE_777', floor min: 2)."""
     return load_scenario(CORPUS_DIR / "train" / "06_agent_creation.yaml")
 
 
@@ -50,7 +58,8 @@ async def test_real_delegation_records_subagent_tool_calls_and_passes(
     #   1) parent  -> `agent` tool call (delegate the explore task)
     #   2) child   -> `read` on the REAL staged values.txt
     #   3) child   -> summary content (no tool calls) => child completes
-    #   4) parent  -> final message echoing the subagent's findings header (rubric anchor)
+    #   4) parent  -> final message surfacing the subagent's ANSWER (MAGIC_VALUE_777 rubric anchor,
+    #                 Bug#2 — paraphrased, NOT the literal "[explore findings]" header)
     llm = mock_llm_client([
         Response(content=None, tool_calls=[
             ToolCall(id="p-1", name="agent",
@@ -60,7 +69,7 @@ async def test_real_delegation_records_subagent_tool_calls_and_passes(
             ToolCall(id="c-1", name="read", arguments={"path": FIXTURE_VALUES}),
         ]),
         Response(content="The file holds MAGIC_VALUE_777."),
-        Response(content="Subagent returned: [explore findings] task: explore | the value is MAGIC_VALUE_777."),
+        Response(content="The subagent reported that the value is MAGIC_VALUE_777."),
     ])
 
     run_path = tmp_path / "real.jsonl"
@@ -89,15 +98,16 @@ async def test_real_delegation_records_subagent_tool_calls_and_passes(
 async def test_say_not_do_delegation_fails_the_count_floor(
     mock_llm_client, tmp_path, bench_fixtures_staged
 ):
-    """Say-not-do path: parent emits the right text but NEVER calls `agent` => count <=1, success False."""
+    """Say-not-do path: parent emits the right ANSWER but NEVER calls `agent` => count <=1, success False."""
     scen = _agent_creation_scenario()
 
     Response = mock_llm_client.Response
 
-    # Parent emits a final message that SATISFIES the rubric ("[explore findings]") but performs
-    # NO tool call at all — the canonical say-not-do. The event_counts floor (min: 2) must reject it.
+    # Parent emits a final message that SATISFIES the answer-anchor rubric (contains MAGIC_VALUE_777)
+    # but performs NO tool call at all — the canonical say-not-do, and the STRONGEST one under Bug#2:
+    # it states the right answer yet never delegated. The event_counts floor (min: 2) must reject it.
     llm = mock_llm_client([
-        Response(content="Subagent returned: [explore findings] task: explore | the value is MAGIC_VALUE_777."),
+        Response(content="The value is MAGIC_VALUE_777 (answering directly, no delegation)."),
     ])
 
     run_path = tmp_path / "saynotdo.jsonl"

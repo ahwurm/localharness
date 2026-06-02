@@ -96,13 +96,17 @@ KNOWN_GOOD: dict[str, tuple[str, dict[str, int]]] = {
     "write_execute": ("Wrote and ran the script.", {"tool_call_count": 2}),
     "fibonacci_sort": ("Sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34", {}),
     "file_exploration": ("Found MAGIC_VALUE_777 inside values.txt", {}),
-    # Phase 28 (SUBAGENT-05): real Explore-subagent delegation. Success now requires the
-    # structural "[explore findings]" header AND a real delegation count (1 parent agent-call
-    # + >=1 child read/glob) — mirroring write_execute/plugin_mcp_tool. 15 is two-step (min: 4).
-    "agent_creation": ("Subagent returned: [explore findings] ...", {"tool_call_count": 2}),
-    "brave_search_subagent": ("[explore findings] task: ... | tool calls: 1", {"tool_call_count": 2}),
-    "agent_orchestration_two_step": ("[explore findings] first ... [explore findings] second", {"tool_call_count": 4}),
-    "agent_orchestration_named_role": ("explorer returned: [explore findings] ...", {"tool_call_count": 2}),
+    # Phase 28-02 (Bug#2): real Explore-subagent delegation, ANSWER-anchored. A LIVE qwen run
+    # proved the parent delegates correctly yet PARAPHRASES the child's findings (it does NOT
+    # echo the literal "[explore findings]" header) — so the rubric now anchors on the REAL
+    # answer the parent surfaces (MAGIC_VALUE_777 / "fixture data"), which can only reach the
+    # parent's final message THROUGH the subagent (the parent has no read tool). Success still
+    # requires the delegation count floor (mirrors write_execute/plugin_mcp_tool; 05_file_exploration's
+    # MAGIC_VALUE_777 precedent). 15 is two-step (min: 4): the 2nd child reads values.txt.
+    "agent_creation": ("The subagent found MAGIC_VALUE_777 in values.txt", {"tool_call_count": 2}),
+    "brave_search_subagent": ("The fixture tree holds bench fixture data for 05_file_exploration", {"tool_call_count": 2}),
+    "agent_orchestration_two_step": ("First: alpha. Second subagent reported MAGIC_VALUE_777.", {"tool_call_count": 4}),
+    "agent_orchestration_named_role": ("explorer reported the value is MAGIC_VALUE_777", {"tool_call_count": 2}),
     # EVAL-02 (v1.3 audit): success now also requires a real tool dispatch (tool_call_count >= 1),
     # not just echoing the org name — so the known-good case fetched (1 dispatch).
     "plugin_mcp_tool": ("Looked it up - Internet Engineering Task Force", {"tool_call_count": 1}),
@@ -138,12 +142,14 @@ KNOWN_BAD: dict[str, tuple[str, dict[str, int]]] = {
     "write_execute": ("Script output was: HELLO_BENCH_OK", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "fibonacci_sort": ("Sequence: 1, 2, 3, 4, 5", {}),             # rubric expects fibonacci
     "file_exploration": ("Found NOTHING in values.txt", {}),       # rubric expects MAGIC_VALUE_777
-    # Phase 28: say-not-do — emits the right "[explore findings]" text but did NO real
-    # delegation (tool_call_count 0) => FAILS the floor. Proves "no say-not-do pass" (SC3).
-    "agent_creation": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
-    "brave_search_subagent": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
-    "agent_orchestration_two_step": ("[explore findings] [explore findings]", {"tool_call_count": 0}),
-    "agent_orchestration_named_role": ("[explore findings] task: ... | tool calls: 0", {"tool_call_count": 0}),
+    # Phase 28-02 (Bug#2): the STRONGEST say-not-do — the final message CONTAINS the right answer
+    # token (MAGIC_VALUE_777 / "fixture data") but tool_call_count is 0 (NEVER delegated). The
+    # rubric text matches, yet the event_counts floor REJECTS it => still FAILS. This is the whole
+    # point of the answer-anchor: knowing/stating the answer without delegating cannot pass.
+    "agent_creation": ("The value is MAGIC_VALUE_777 (I just know it).", {"tool_call_count": 0}),
+    "brave_search_subagent": ("It holds bench fixture data, no need to look.", {"tool_call_count": 0}),
+    "agent_orchestration_two_step": ("alpha and MAGIC_VALUE_777, answered directly.", {"tool_call_count": 0}),
+    "agent_orchestration_named_role": ("The value is MAGIC_VALUE_777, answered directly.", {"tool_call_count": 0}),
     "plugin_mcp_tool": ("Internet Engineering Task Force", {"tool_call_count": 0}),  # EVAL-02: say-only (0 dispatches) FAILS even saying the token
     "memory_recall": ("I do not remember.", {}),                   # rubric expects STARFRUIT_42
     # event-count fixtures — counts fail the assertion (empty counts when min: 1 asserted)

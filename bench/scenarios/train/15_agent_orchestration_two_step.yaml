@@ -7,14 +7,16 @@ prompt: |
   return BOTH sets of findings concatenated in your final response.
 expected_outcome: |
   Agent invokes the real Explore subagent (read-only {read, glob, grep}) TWICE in
-  sequence. Each child explores the fixture tree, reads its target file, and
-  returns a structured "[explore findings]" summary. The verdict requires the
-  findings header AND tool_call_count >= 4 (2 parent agent-calls + >=1 child
-  read/glob each) — proving sequential delegation, distinct from 06's single step
-  and impossible to satisfy with one delegation or a say-not-do.
+  sequence. The first child reads alpha.txt, the second reads data/values.txt; the
+  parent surfaces the second child's MAGIC_VALUE_777 in its final message. The verdict
+  anchors on that ANSWER (not the "[explore findings]" header, which a live model
+  paraphrases away) AND tool_call_count >= 4 (2 parent agent-calls + >=1 child
+  read/glob each) — proving SEQUENTIAL delegation: MAGIC_VALUE_777 only reaches the
+  parent (which has no read tool) through the 2nd subagent, and the >= 4 floor is
+  impossible with one delegation or a say-not-do.
 success_criteria:
   rubric:
-    - "contains:[explore findings]"
+    - "contains:MAGIC_VALUE_777"
   event_counts:
     tool_call_count: { min: 4 }
 budget:

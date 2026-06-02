@@ -6,14 +6,17 @@ prompt: |
   in your final response.
 expected_outcome: |
   Agent invokes the real Explore subagent (read-only {read, glob, grep}) via the
-  `agent` tool. The child explores the fixture tree, reads data/values.txt
-  (containing MAGIC_VALUE_777), and returns a structured findings summary whose
-  header is "[explore findings]". The verdict requires BOTH the findings header in
-  the final message AND tool_call_count >= 2 (1 parent agent-call + >=1 child
-  read/glob) — proving genuine delegation, not a canned pass.
+  `agent` tool. The child explores the fixture tree, reads data/values.txt, and
+  reports its value; the parent surfaces MAGIC_VALUE_777 in its final message. The
+  verdict anchors on that ANSWER (not the literal "[explore findings]" header, which
+  a live model paraphrases away) AND tool_call_count >= 2 (1 parent agent-call + >=1
+  child read/glob). Because the parent has NO read tool of its own, MAGIC_VALUE_777
+  can only reach its final message THROUGH the subagent's findings — so the answer +
+  the count floor together prove genuine end-to-end delegation, not a canned pass.
+  (Mirrors 05_file_exploration's MAGIC_VALUE_777 answer-anchor precedent.)
 success_criteria:
   rubric:
-    - "contains:[explore findings]"
+    - "contains:MAGIC_VALUE_777"
   event_counts:
     tool_call_count: { min: 2 }
 budget:

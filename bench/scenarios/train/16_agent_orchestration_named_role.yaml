@@ -7,13 +7,16 @@ prompt: |
 expected_outcome: |
   Agent invokes the real Explore subagent via the `agent` tool with a named role.
   The child (read-only {read, glob, grep}) locates data/values.txt, reads its
-  MAGIC_VALUE_777 content, and returns a structured "[explore findings]" summary.
-  The verdict requires the findings header AND tool_call_count >= 2 (1 parent
+  MAGIC_VALUE_777 content, and reports it; the parent surfaces MAGIC_VALUE_777 in its
+  final message. The verdict anchors on that ANSWER (not the "[explore findings]"
+  header, which a live model paraphrases away) AND tool_call_count >= 2 (1 parent
   agent-call + >=1 child read/glob), distinct from 06's unnamed delegation —
-  exercising the named-role configuration path against a genuine subagent.
+  exercising the named-role configuration path against a genuine subagent. The parent
+  has NO read tool, so MAGIC_VALUE_777 reaches its final message only THROUGH the
+  subagent's findings — answer + floor prove genuine end-to-end delegation.
 success_criteria:
   rubric:
-    - "contains:[explore findings]"
+    - "contains:MAGIC_VALUE_777"
   event_counts:
     tool_call_count: { min: 2 }
 budget:

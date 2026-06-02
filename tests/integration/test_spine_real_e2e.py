@@ -429,6 +429,71 @@ async def test_live_write_execute_real_file(live_endpoint, tool_scenario_corpus,
 
 
 @pytest.mark.live_vllm
+async def test_live_explore_subagent_delegation(live_endpoint, tmp_path):
+    """Bug#2 live regression: a REAL single Explore delegation against live vLLM, closing the
+    mock-only gap that hid the false-negative.
+
+    Drives the converted 06_agent_creation scenario via execute_one_run with a real probed bench
+    client (the same way the bench builds it). The fix's answer-anchor rubric (contains
+    MAGIC_VALUE_777) + the tool_call_count >= 2 floor mean success is causally dependent on the
+    child actually reading data/values.txt and the parent surfacing the value through the findings
+    (the parent has no read tool). Asserts the live observables the mock could only script:
+      - tool_call_count >= 2 (1 parent agent-call + >=1 child read) — genuine delegation;
+      - the child's read Action carries parent_id == the run/parent session_id (Phase 27 stamping);
+      - the final result contains MAGIC_VALUE_777 (success is True under the answer-anchor rubric).
+    Skipped by default (autouse _skip_live_vllm); live_endpoint hard-fails if opted-in but down.
+    Model-agnostic (LOCKED): provider/model/base_url resolved from cfg.provider, never a baked id.
+    Train-slice only (06_agent_creation is slice='train') — the holdout seal is untouched.
+    """
+    from localharness.bench.runner import execute_one_run
+    from localharness.cli.components_cmd import _build_loader
+    from localharness.core.events import Action, deserialize_event
+
+    corpus_dir = pathlib.Path(__file__).resolve().parents[2] / "bench" / "scenarios"
+    scen = load_scenario(corpus_dir / "train" / "06_agent_creation.yaml")
+    fixture_values = pathlib.Path("/tmp/bench_fixtures/exploration_root/data/values.txt")
+    assert fixture_values.is_file(), f"fixture not staged: {fixture_values}"
+
+    cfg = _build_loader().load_harness()
+    client = _live_bench_client(cfg)
+    await client.detect_capabilities()
+
+    # A real generation may exceed the corpus default max_latency_s; widen the latency limit ONLY
+    # (Pitfall 7) — model params are never touched (CLAUDE.md / feedback_no_model_params).
+    scen = scen.model_copy(
+        update={"limits": scen.limits.model_copy(update={"max_latency_s": 360.0})}
+    )
+
+    run_path = tmp_path / "live_delegation.jsonl"
+    completed = await execute_one_run(scen, cfg.provider.default_model, run_path, client)
+
+    # 1. Genuine delegation: 1 parent `agent` Action + >=1 child `read` Action on the SAME bus.
+    assert completed.tool_call_count >= 2, (
+        f"expected >=2 tool calls (parent agent + child read), got {completed.tool_call_count}"
+    )
+
+    # 2. The child's read Action is attributed to the run session via parent_id (Phase 27 _ParentIdBus).
+    events = [
+        deserialize_event(ln)
+        for ln in run_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    child_reads = [e for e in events if isinstance(e, Action) and e.tool_name == "read"]
+    assert child_reads, "expected at least one child `read` Action in the live trace"
+    run_session_id = f"{scen.name}:{run_path.stem}"
+    assert all(e.parent_id == run_session_id for e in child_reads), (
+        "child read Actions must carry parent_id == run/parent session_id (Phase 27 stamping)"
+    )
+
+    # 3. The final result surfaces MAGIC_VALUE_777 — success is True ONLY under the answer-anchor
+    #    rubric (contains:MAGIC_VALUE_777) when the value reached the parent THROUGH the subagent.
+    assert completed.success is True, (
+        "live delegation must surface MAGIC_VALUE_777 in the final message (answer-anchor rubric) — "
+        "the value can only reach the parent via the subagent's findings (parent has no read tool)"
+    )
+
+
+@pytest.mark.live_vllm
 async def test_live_budget_cap_halts(live_endpoint, tool_scenario_corpus, tmp_path):
     """LIVE-02 SC-3a: a budget cap of 1 provably halts the loop before the second step.
 
