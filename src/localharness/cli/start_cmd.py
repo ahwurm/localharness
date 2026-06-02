@@ -308,14 +308,33 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # --- 9b. Agent delegation tool (ORCH-04) ---
     from localharness.tools.builtin.agent_tool import AgentTool
+    from localharness.agent.subagent import dispatch_explore_subagent, _sanitize_agent_name
 
-    async def _run_agent(agent_id: str, task: str) -> str:
-        """Closure for AgentTool: resolve agent_id and run.
+    perm_eval = PermissionEvaluator()
 
-        Raises ValueError for unknown agents. Full multi-agent loop creation
-        will come with context graph phase (MULTI-02, v2).
+    async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
+        """Closure for AgentTool: dispatch a subagent (SUBAGENT-01..04).
+
+        Currently the read-only `explore` subagent is the only wired child: it runs its own
+        bounded AgentLoop (read/glob/grep only) on the shared bus and returns structured
+        findings. The child publishes with parent_id = the parent's session_id. `depth`
+        guards against recursion — the read-only child has no spawn tool (primary guard)
+        and an explicit re-entry at depth >= 1 is refused here (belt-and-suspenders).
+        Write-capable / general / nested subagents come later (v1.5+).
         """
-        raise ValueError(f"Agent '{agent_id}' dispatch not yet wired")
+        if _sanitize_agent_name(agent_id) != "explore":
+            raise ValueError(
+                f"Agent '{agent_id}' dispatch not yet wired (only 'explore' is available)"
+            )
+        return await dispatch_explore_subagent(
+            task,
+            llm=llm,
+            bus=bus,
+            base_registry=tool_registry,
+            parent_session_id=agent_loop.current_session_id,
+            permission_evaluator=perm_eval,
+            depth=depth,
+        )
 
     available_agent_names = [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
@@ -329,7 +348,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     )
 
     # --- 10. Agent loop ---
-    perm_eval = PermissionEvaluator()
     agent_loop = AgentLoop(
         config=agent_config,
         llm=llm,
