@@ -229,7 +229,13 @@ def test_plugin_prefix_dispatch_resolves():
 
 @pytest.mark.asyncio
 async def test_build_agent_loop_registers_agent_tool(monkeypatch):
-    """_build_agent_loop with 'agent' in tools_allowed registers the stub AgentTool."""
+    """_build_agent_loop with 'agent' in tools_allowed registers the real Explore-subagent AgentTool.
+
+    Phase 28 (SUBAGENT-05): the runner is no longer a canned STUB_SUBAGENT_OK stub — it delegates to
+    dispatch_explore_subagent. The closure is captured (not invoked) at build time, so the registry
+    still simply `has("agent")` after construction; genuine delegation + the tool_call_count floor are
+    proven in test_bench_subagent_delegation.py.
+    """
     from localharness.bench import runner as bench_runner
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
     from localharness.core.events import BudgetSpec

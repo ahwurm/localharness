@@ -1,18 +1,21 @@
 name: agent_orchestration_named_role
 prompt: |
-  Create a subagent using the `agent` tool. The subagent's role should be
-  "json-formatter" and its prompt should be "respond with the literal
-  token READY". Use an empty subagent tool whitelist. Return the subagent's
-  response verbatim in your final response.
+  Use the `agent` tool to delegate work to a subagent you name "explorer".
+  Ask it to search /tmp/bench_fixtures/exploration_root for the file named
+  values.txt under the data/ subdirectory, read it, and report the exact value
+  it contains. Return the subagent's findings verbatim in your final response.
 expected_outcome: |
-  Agent invokes AgentTool stub with a role/name argument. Stub returns
-  canned "STUB_SUBAGENT_OK agent_id=... task=..." payload. Rubric anchors
-  on STUB_SUBAGENT_OK — distinct call-shape from 06 (named role param)
-  and from 07 (plugin in subagent whitelist). Exercises orchestration's
-  named-role configuration path.
+  Agent invokes the real Explore subagent via the `agent` tool with a named role.
+  The child (read-only {read, glob, grep}) locates data/values.txt, reads its
+  MAGIC_VALUE_777 content, and returns a structured "[explore findings]" summary.
+  The verdict requires the findings header AND tool_call_count >= 2 (1 parent
+  agent-call + >=1 child read/glob), distinct from 06's unnamed delegation —
+  exercising the named-role configuration path against a genuine subagent.
 success_criteria:
   rubric:
-    - "contains:STUB_SUBAGENT_OK"
+    - "contains:[explore findings]"
+  event_counts:
+    tool_call_count: { min: 2 }
 budget:
   max_actions: 4
   max_duration_minutes: 5.0

@@ -1,19 +1,22 @@
 name: agent_orchestration_two_step
 prompt: |
-  Create two subagents in sequence using the `agent` tool. First subagent:
-  prompt "summarize the phrase 'lazy dog jumps'". Second subagent: prompt
-  "summarize the phrase 'quick brown fox'". Both subagents use an empty
-  tool whitelist. After both complete, return BOTH summaries concatenated
-  with a comma in your final response.
+  Use the `agent` tool TWICE in sequence to delegate two read-only explorations.
+  First subagent: explore /tmp/bench_fixtures/exploration_root and read alpha.txt,
+  reporting its contents. Second subagent: explore the same root and read
+  data/values.txt, reporting the value it holds. After both subagents complete,
+  return BOTH sets of findings concatenated in your final response.
 expected_outcome: |
-  Agent invokes the AgentTool stub TWICE in sequence. Each stub call
-  returns "STUB_SUBAGENT_OK agent_id=... task=...". Both responses must
-  appear in the final message. Rubric asserts at least TWO occurrences
-  of the invariant STUB_SUBAGENT_OK token (one per subagent). Exercises
-  sequential delegation orchestration — distinct from 06's single-step shape.
+  Agent invokes the real Explore subagent (read-only {read, glob, grep}) TWICE in
+  sequence. Each child explores the fixture tree, reads its target file, and
+  returns a structured "[explore findings]" summary. The verdict requires the
+  findings header AND tool_call_count >= 4 (2 parent agent-calls + >=1 child
+  read/glob each) — proving sequential delegation, distinct from 06's single step
+  and impossible to satisfy with one delegation or a say-not-do.
 success_criteria:
   rubric:
-    - "regex:STUB_SUBAGENT_OK.*STUB_SUBAGENT_OK"
+    - "contains:[explore findings]"
+  event_counts:
+    tool_call_count: { min: 4 }
 budget:
   max_actions: 6
   max_duration_minutes: 5.0

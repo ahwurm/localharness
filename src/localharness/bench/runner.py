@@ -367,27 +367,38 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
 
-    # Plan 12-04 Task 1: register AgentTool stub when 'agent' is in tools_allowed.
-    # The stub agent_runner returns a canned summary containing STUB_SUBAGENT_OK
-    # so fixtures exercising the agent-creation tool-call shape complete
-    # deterministically — NOT a real subagent (does not invoke another LLM).
-    if "agent" in scenario.tools_allowed:
-        from localharness.tools.builtin.agent_tool import AgentTool
-
-        async def _stub_agent_runner(agent_id: str, task: str) -> str:
-            return (
-                f"STUB_SUBAGENT_OK agent_id={agent_id} task={task[:80]}"
-            )
-
-        tool_registry._tools["global"]["agent"] = AgentTool(agent_runner=_stub_agent_runner)
-        tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
-
     # PermissionEvaluator is stateless; constructor takes no args. (Plan 12-04
     # Rule 3 fix — the prior `from_config(agent_config)` referenced a method
     # that does not exist on PermissionEvaluator and would have crashed at
     # runtime. The evaluator reads deny_patterns from the config object passed
     # to `evaluate(...)` at call time, not at construction.)
+    # Defined before the `agent` block below so the real subagent runner can capture it.
     perm_evaluator = PermissionEvaluator()
+
+    # Phase 28 (SUBAGENT-05): register the REAL read-only Explore subagent when
+    # 'agent' is in tools_allowed. The runner delegates to dispatch_explore_subagent
+    # (Phase 27), which spawns a child AgentLoop on the SAME bus — so the child's
+    # read/glob/grep Actions land on this run's bus and are counted unfiltered by
+    # MetricAccumulator.on_action (real delegation => tool_call_count >= 2). agent_id
+    # is ignored for routing (v1.4 has ONE subagent type, read-only Explore); the
+    # model's `task` passes straight through.
+    if "agent" in scenario.tools_allowed:
+        from localharness.agent.subagent import dispatch_explore_subagent
+        from localharness.tools.builtin.agent_tool import AgentTool
+
+        async def _explore_agent_runner(agent_id: str, task: str) -> str:
+            return await dispatch_explore_subagent(
+                task,
+                llm=llm_client,
+                bus=bus,
+                base_registry=base_registry,
+                parent_session_id=session_id,
+                permission_evaluator=perm_evaluator,
+                depth=0,
+            )
+
+        tool_registry._tools["global"]["agent"] = AgentTool(agent_runner=_explore_agent_runner)
+        tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
 
     # EVAL-01: hydrate a seeded MemoryStore ONLY for the stateful_behavior
     # scenarios, keyed by scenario.name, under the loop's own agent_id
