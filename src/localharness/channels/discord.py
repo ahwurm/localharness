@@ -229,8 +229,11 @@ class DiscordChannel(ChannelAdapter):
         is_error: bool,
         agent_id: str | None = None,
     ) -> None:
-        if is_error:
-            await self._send(f"⚠️ {tool_name} failed: {(result or '')[:300]}")
+        # Intentionally silent: intermediate tool results (incl. recoverable failures the agent
+        # works around, and empty-error false positives) shouldn't reach the user mid-turn — they
+        # read as crashes. The user sees the ack reaction and the final reply; genuinely fatal
+        # failures surface via the turn-end path. (Status messaging is a future enhancement.)
+        return
 
     async def send_error(
         self,
