@@ -7,11 +7,14 @@ from localharness.channels.errors import (
     ChannelStartError,
     NotInteractiveError,
 )
+from localharness.channels.discord import DiscordChannel, discord_config_from_env
 from localharness.channels.terminal import TerminalChannel
 
 __all__ = [
     "ChannelAdapter",
     "TerminalChannel",
+    "DiscordChannel",
+    "discord_config_from_env",
     "ChannelError",
     "ChannelStartError",
     "ChannelOutputError",

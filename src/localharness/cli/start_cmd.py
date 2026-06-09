@@ -63,7 +63,8 @@ def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     return list(agents.values())
 
 
-async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str) -> None:
+async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
+                       channel_mode: str = "terminal") -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
 
@@ -346,7 +347,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         memory_loader=memory_store,
         compact_md_path=compact_md_path,
     )
-    channel = TerminalChannel(bus=bus, config={})
+    if channel_mode == "discord":
+        from localharness.channels.discord import DiscordChannel, discord_config_from_env
+        channel = DiscordChannel(bus=bus, config=discord_config_from_env())
+        console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
+    else:
+        channel = TerminalChannel(bus=bus, config={})
 
     # --- Determine returning user ---
     is_returning = events_path.exists() and events_path.stat().st_size > 0
@@ -422,9 +428,10 @@ def start_app(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show per-component startup detail")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
+    channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
