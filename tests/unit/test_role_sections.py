@@ -86,16 +86,22 @@ def _make_loop(llm, bus) -> AgentLoop:
 
 @pytest.mark.asyncio
 async def test_loop_system_prompt_unchanged_for_default_sections(faithful_fake_llm, bus):
-    """Test D: a default-sections AgentLoop run yields messages[0]['content'] == cfg.role exactly.
+    """Test D: a default-sections AgentLoop run yields messages[0]['content'] == cfg.role + the
+    date line exactly.
 
     Native tool_call_mode (no non-native suffix) + memory_loader=None (no Phase-24 block) means the
-    only contribution to the system message is the assembled role — so the seam at loop.py:452 must
-    leave it byte-identical to cfg.role.
+    only contributions to the system message are the assembled role (byte-identical to cfg.role —
+    the role_sections inertness invariant) and the always-on date injection. Asserting the full
+    string still catches any other perturbation of the baseline prompt.
     """
+    from datetime import datetime
+
     loop = _make_loop(faithful_fake_llm(tool_plan=[]), bus)  # final-answer fake -> natural completion
     session = Session(agent_id="rolesec-agent", session_id="s-rolesec", messages=[])
 
     await loop._execute_loop(session, "do the task", None)
 
+    now = datetime.now().astimezone()
+    date_line = f"\n\nToday's date: {now.strftime('%A, %Y-%m-%d')} ({now.tzname()})"
     assert session.messages[0]["role"] == "system"
-    assert session.messages[0]["content"] == loop._config.role
+    assert session.messages[0]["content"] == loop._config.role + date_line
