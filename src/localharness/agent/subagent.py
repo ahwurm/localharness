@@ -36,6 +36,22 @@ EXPLORE_ROLE = (
     "When you have what you need, stop and reply with a concise summary of your findings."
 )
 
+# Web-research child: searches + reads pages in ITS OWN context, returns only a distilled
+# summary so raw pages never enter the parent's context window.
+WEB_TOOLS: list[str] = ["web_search", "web_fetch"]
+WEB_MAX_ACTIONS = 12
+WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 13 — kept above the budget so max_actions binds
+WEB_MAX_DURATION_MINUTES = 5.0
+
+WEB_RESEARCHER_ROLE = (
+    "You are a web-research subagent. Use web_search to find sources and web_fetch to read them. "
+    "Research the delegated question thoroughly but efficiently — prefer a few high-quality sources "
+    "over many, and don't re-fetch the same page. You cannot write, execute, or delegate. When done, "
+    "stop and reply with a CONCISE, well-organized summary of your findings WITH the source URLs you "
+    "used. This summary is the ONLY thing the parent agent sees, so include the key facts, figures, "
+    "and citations it needs — never paste raw page text."
+)
+
 
 def _sanitize_agent_name(name: str) -> str:
     """AgentConfig.name rejects underscores — map `_` -> `-` (recurring localharness gotcha)."""
@@ -55,6 +71,25 @@ def build_explore_config(name: str = "explore", kill_file: str | None = None) ->
             budget=BudgetConfig(
                 max_actions=EXPLORE_MAX_ACTIONS,
                 max_duration_minutes=EXPLORE_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
+
+def build_web_researcher_config(name: str = "web-researcher", kill_file: str | None = None) -> AgentConfig:
+    """Build the web-researcher-child AgentConfig with its own bounded budget.
+
+    `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
+    pass a path to honor an external kill file.
+    """
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=WEB_RESEARCHER_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=WEB_MAX_ACTIONS,
+                max_duration_minutes=WEB_MAX_DURATION_MINUTES,
                 kill_file=kill_file,
             ),
         ),
@@ -93,6 +128,13 @@ class _ParentIdBus:
 def format_findings(task: str, summary: str, tool_calls_used: int) -> str:
     """Structured findings return (SUBAGENT-04): short header + child summary, NOT the transcript."""
     header = f"[explore findings] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+def format_web_findings(task: str, summary: str, tool_calls_used: int) -> str:
+    """Structured web-research findings return: short header + child summary, NOT the transcript."""
+    header = f"[web research] task: {task} | tool calls: {tool_calls_used}"
     body = (summary or "").strip() or "(no findings)"
     return f"{header}\n\n{body}"
 
@@ -166,6 +208,58 @@ async def dispatch_explore_subagent(
     return format_findings(task, summary, tool_calls_used)
 
 
+async def dispatch_web_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "web-researcher",
+    depth: int = 0,
+) -> str:
+    """Spawn a web-research child (web_search/web_fetch only), run one turn, return distilled findings.
+
+    Mirrors dispatch_explore_subagent but with the web toolset and budget. The child does all the
+    searching/fetching in ITS OWN context and returns only a summary, so raw pages never reach the
+    parent's window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"web-researcher subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_web_researcher_config(agent_name)
+
+    # Web-only registry: builtins {web_search, web_fetch} — no write/bash/spawn.
+    child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
+
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+
+    child_session_id = child_loop.current_session_id
+    tool_calls_used = _count_session_tool_calls(bus, child_session_id)
+
+    return format_web_findings(task, summary, tool_calls_used)
+
+
 def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
     """Count tool-call Actions for `session_id` from the bus's in-memory history.
 
@@ -198,8 +292,8 @@ def make_explore_agent_runner(
     (the same way Phase 27 extracted `dispatch_explore_subagent` from this closure). The returned
     async runner is what `AgentTool(agent_runner=...)` invokes. Behavior is identical to the closure:
 
-    - Only `explore` is wired (after `_` -> `-` sanitization); any other agent_id raises a clear
-      ValueError so the model gets an actionable "not yet wired" error (AgentTool maps it to not_found).
+    - Wires `explore` and `web-researcher` (after `_` -> `-` sanitization); any other agent_id raises
+      a clear ValueError so the model gets an actionable error (AgentTool maps it to not_found).
     - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
       parent loop's current session_id when the model delegates — matching the closure's late read of
       `agent_loop.current_session_id`.
@@ -207,11 +301,16 @@ def make_explore_agent_runner(
     """
 
     async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
-        if _sanitize_agent_name(agent_id) != "explore":
+        name = _sanitize_agent_name(agent_id)
+        if name == "explore":
+            dispatch = dispatch_explore_subagent
+        elif name == "web-researcher":
+            dispatch = dispatch_web_subagent
+        else:
             raise ValueError(
-                f"Agent '{agent_id}' dispatch not yet wired (only 'explore' is available)"
+                f"Agent '{agent_id}' dispatch not wired (available: explore, web-researcher)"
             )
-        return await dispatch_explore_subagent(
+        return await dispatch(
             task,
             llm=llm,
             bus=bus,

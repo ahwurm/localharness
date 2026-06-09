@@ -21,9 +21,13 @@ from localharness.agent.subagent import (
     EXPLORE_MAX_TOOL_CALLS,
     EXPLORE_TOOLS,
     MAX_DEPTH,
+    WEB_TOOLS,
     build_explore_config,
+    build_web_researcher_config,
     dispatch_explore_subagent,
+    dispatch_web_subagent,
     format_findings,
+    format_web_findings,
 )
 from localharness.core.events import Action, Observation
 from localharness.tools.builtin import register_builtin_tools
@@ -232,3 +236,48 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
     # Transcript/event-log artifacts must not leak into the returned string.
     for leaked in ("Action(", "Observation(", "TaskComplete(", "event_type", "role='tool'", '"role":'):
         assert leaked not in result
+
+
+# ---------------------------------------------------------------------------
+# 6. Web-researcher subagent — web-only toolset, depth guard, distilled findings
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_web_child_registry_is_web_only():
+    base = await _builtin_registry()
+    child = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base)
+    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch"}
+    # No write / execute / spawn in the web child.
+    assert child.has("write") is False
+    assert child.has("bash_exec") is False
+    assert child.has("agent") is False
+
+
+def test_web_researcher_config_has_distinct_budget():
+    cfg = build_web_researcher_config("web-researcher")
+    assert cfg.name == "web-researcher"
+    assert cfg.permissions.budget.max_actions == 12
+
+
+def test_format_web_findings_is_structured_summary():
+    out = format_web_findings("anthropic june 15 pricing", "It splits headless billing.", 3)
+    lines = out.splitlines()
+    assert lines[0].startswith("[web research]")
+    assert "tool calls: 3" in lines[0]
+    assert "It splits headless billing." in out
+
+
+@pytest.mark.asyncio
+async def test_web_dispatch_at_depth_one_refuses(mock_llm_client, bus):
+    base = await _builtin_registry()
+    llm = mock_llm_client([mock_llm_client.Response(content="unused")])
+    with pytest.raises(ValueError):
+        await dispatch_web_subagent(
+            "research X",
+            llm=llm,
+            bus=bus,
+            base_registry=base,
+            parent_session_id="p",
+            permission_evaluator=PermissionEvaluator(),
+            depth=MAX_DEPTH,
+        )
