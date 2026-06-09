@@ -78,7 +78,7 @@ def discord_config_from_env() -> dict[str, Any]:
         "token": token,
         "allow_users": _split("LOCALHARNESS_DISCORD_ALLOW"),
         "allow_channels": _split("LOCALHARNESS_DISCORD_CHANNELS"),
-        "ack_emoji": os.environ.get("LOCALHARNESS_DISCORD_ACK", "\U0001f440"),
+        "ack_emoji": os.environ.get("LOCALHARNESS_DISCORD_ACK", "✅"),
     }
 
 
@@ -96,7 +96,7 @@ class DiscordChannel(ChannelAdapter):
         self._token: str = config.get("token") or ""
         self._allow_users: set[str] = {str(u) for u in config.get("allow_users", []) if str(u).strip()}
         self._allow_channels: set[str] = {str(c) for c in config.get("allow_channels", []) if str(c).strip()}
-        self._ack_emoji: str = config.get("ack_emoji", "\U0001f440")
+        self._ack_emoji: str = config.get("ack_emoji", "✅")
         self._client: Any = None
         self._client_task: asyncio.Task | None = None
         self._queue: asyncio.Queue = asyncio.Queue()
