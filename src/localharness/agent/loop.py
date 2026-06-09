@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -484,6 +485,9 @@ class AgentLoop:
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
         system_prompt = _assemble_role(self._config)
+        # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
+        _now = datetime.now().astimezone()
+        system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
         if tool_call_mode != "native":
             system_prompt += (
                 "\n\nWhen you have finished using tools, respond directly to the user. "
