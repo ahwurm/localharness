@@ -487,10 +487,10 @@ async def test_bash_exec_tool_captures_stderr():
 
 
 @pytest.mark.asyncio
-async def test_register_builtin_tools_registers_all_five():
+async def test_register_builtin_tools_registers_all():
     from localharness.tools.builtin import register_builtin_tools
 
     reg = ToolRegistry()
     await register_builtin_tools(reg)
     names = set(reg._tools["global"].keys())
-    assert {"glob", "grep", "read", "write", "bash_exec"} == names
+    assert {"glob", "grep", "read", "write", "bash_exec", "web_search", "web_fetch"} == names
