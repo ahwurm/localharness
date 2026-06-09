@@ -11,3 +11,14 @@ bench/results/
 
 # Local runtime state (autoresearch mutation archive, etc.)
 .localharness/
+
+# Secrets — never commit
+.env
+.env.*
+
+# Internal-only docs (GSD planning, competitive notes)
+.planning/
+docs/competitive/
+
+# Local tool settings
+.claude/
