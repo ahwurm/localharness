@@ -229,6 +229,83 @@ def _clean_summary(text: str) -> str:
     return text.strip()
 
 
+def _repair_json_object(s: str) -> str | None:
+    """Coerce a truncated JSON object string (generation cut mid-arguments) into
+    parseable JSON: drop a dangling escape, close an open string, close open
+    braces/brackets. Returns parseable JSON or None if unrepairable."""
+    try:
+        json.loads(s)
+        return s
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if not isinstance(s, str):
+        return None
+    t = s.strip()
+    if t.endswith("\\") and not t.endswith("\\\\"):
+        t = t[:-1]
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    for ch in t:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    if in_str:
+        t += '"'
+    t += "".join(reversed(stack))
+    try:
+        json.loads(t)
+        return t
+    except json.JSONDecodeError:
+        return None
+
+
+def _sanitize_raw_tool_calls(raw: Any) -> Any:
+    """Repair or drop tool calls whose arguments JSON is malformed BEFORE they enter
+    session history. vLLM's chat template json-parses historical tool_call arguments,
+    so one truncated generation otherwise 400s every subsequent request (observed:
+    finish-mid-string -> 'Unterminated string' BadRequest -> turn death). Repaired
+    arguments are re-serialized normalized; unrepairable calls are dropped. Returns
+    the cleaned list, or None if nothing survives (preserves no-tool-call semantics)."""
+    if not raw:
+        return raw
+    clean = []
+    for tc in raw:
+        fn = getattr(tc, "function", None) if not isinstance(tc, dict) else tc.get("function", {})
+        if fn is None:
+            continue
+        args = (getattr(fn, "arguments", None) if not isinstance(fn, dict)
+                else fn.get("arguments")) or "{}"
+        repaired = _repair_json_object(args)
+        if repaired is None:
+            name = (getattr(fn, "name", "?") if not isinstance(fn, dict) else fn.get("name", "?"))
+            log.warning("dropping tool call '%s': arguments JSON unrepairable (%d chars)",
+                        name, len(args))
+            continue
+        if repaired is not args:
+            normalized = json.dumps(json.loads(repaired))
+            if isinstance(fn, dict):
+                fn["arguments"] = normalized
+            else:
+                fn.arguments = normalized
+            name = (getattr(fn, "name", "?") if not isinstance(fn, dict) else fn.get("name", "?"))
+            log.warning("repaired truncated arguments JSON for tool call '%s'", name)
+        clean.append(tc)
+    return clean or None
+
+
 def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
     """Extract tool calls from an LLM response regardless of mode."""
     from localharness.core.types import ToolCall
@@ -660,7 +737,11 @@ class AgentLoop:
             from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
             raw_content = getattr(response_message, "content", None)
             content = strip_thinking_tags(raw_content) if raw_content else raw_content
-            raw_tool_calls = getattr(response_message, "tool_calls", None)
+            raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
+            try:
+                response_message.tool_calls = raw_tool_calls  # extraction must match history
+            except Exception:
+                pass
             session.push({
                 "role": "assistant",
                 "content": content,
@@ -933,7 +1014,11 @@ class AgentLoop:
             session.tokens_estimated = True
 
         content = getattr(response_message, "content", None)
-        raw_tool_calls = getattr(response_message, "tool_calls", None)
+        raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
+        try:
+            response_message.tool_calls = raw_tool_calls  # extraction must match history
+        except Exception:
+            pass
         session.push({
             "role": "assistant",
             "content": content,

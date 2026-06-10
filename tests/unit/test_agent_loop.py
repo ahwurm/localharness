@@ -979,3 +979,78 @@ def test_agent_loop_uses_config_recovery_message_not_hardcoded():
     assert "self._config.recovery_injection.message" in src
     # Old call-site replaced (we no longer pass repeated_sig into recovery_message)
     assert "stuck_detector.recovery_message(repeated_sig)" not in src
+
+
+# ---------------------------------------------------------------------------
+# Tool-call JSON guard (_repair_json_object / _sanitize_raw_tool_calls)
+# ---------------------------------------------------------------------------
+
+import json as _json
+from types import SimpleNamespace
+
+from localharness.agent.loop import _repair_json_object, _sanitize_raw_tool_calls
+
+
+def test_repair_json_valid_passthrough():
+    s = '{"a": 1}'
+    assert _repair_json_object(s) is s
+
+
+def test_repair_json_unterminated_string():
+    # Tonight's live failure shape: generation cut mid-arguments string.
+    s = '{"agent_id": "web-researcher", "task": "Read these pages and summar'
+    repaired = _repair_json_object(s)
+    assert repaired is not None
+    parsed = _json.loads(repaired)
+    assert parsed["agent_id"] == "web-researcher"
+    assert parsed["task"].startswith("Read these pages")
+
+
+def test_repair_json_open_structures():
+    repaired = _repair_json_object('{"a": [1, 2, {"b": "c"')
+    assert repaired is not None
+    assert _json.loads(repaired) == {"a": [1, 2, {"b": "c"}]}
+
+
+def test_repair_json_dangling_escape():
+    repaired = _repair_json_object('{"path": "C:\\\\dir\\')
+    assert repaired is not None
+    _json.loads(repaired)
+
+
+def test_repair_json_unrepairable():
+    assert _repair_json_object('{"a": twelve}') is None
+
+
+def _dict_call(args: str, name: str = "agent", id: str = "tc-1"):
+    return {"id": id, "type": "function", "function": {"name": name, "arguments": args}}
+
+
+def test_sanitize_keeps_valid_calls():
+    calls = [_dict_call('{"x": 1}')]
+    out = _sanitize_raw_tool_calls(calls)
+    assert out == calls
+    assert out[0]["function"]["arguments"] == '{"x": 1}'
+
+
+def test_sanitize_repairs_truncated_dict_call():
+    calls = [_dict_call('{"agent_id": "web-researcher", "task": "do thi')]
+    out = _sanitize_raw_tool_calls(calls)
+    assert len(out) == 1
+    args = _json.loads(out[0]["function"]["arguments"])  # normalized, parseable
+    assert args["agent_id"] == "web-researcher"
+
+
+def test_sanitize_repairs_object_style_call():
+    fn = SimpleNamespace(name="agent", arguments='{"task": "x')
+    tc = SimpleNamespace(id="tc-2", function=fn)
+    out = _sanitize_raw_tool_calls([tc])
+    assert len(out) == 1
+    assert _json.loads(out[0].function.arguments) == {"task": "x"}
+
+
+def test_sanitize_drops_unrepairable_and_preserves_none_semantics():
+    out = _sanitize_raw_tool_calls([_dict_call('{"a": twelve}')])
+    assert out is None
+    assert _sanitize_raw_tool_calls(None) is None
+    assert _sanitize_raw_tool_calls([]) == []
