@@ -41,6 +41,7 @@ class Session:
     input_tokens: int = 0
     output_tokens: int = 0
     tokens_estimated: bool = False
+    act_nudge_used: bool = False
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -823,6 +824,24 @@ class AgentLoop:
                             "and try again with your intended tool call."
                         ),
                     })
+                    continue
+
+                # 9b. Act-guard: a first response that would END the turn with ZERO
+                # actions taken is, empirically, usually announce-then-halt ("I'll
+                # research X..." + stop) — sampling-dependent on small local models
+                # (observed live: fail/succeed/fail across identical prompts). Give
+                # it exactly one deterministic push before accepting a tool-less
+                # completion; a genuine no-tool answer just gets repeated.
+                if (session.actions_taken == 0 and not session.act_nudge_used
+                        and tool_schemas):
+                    session.act_nudge_used = True
+                    log.info("Act-guard: tool-less first completion — nudging once")
+                    session.push({"role": "user", "content": (
+                        "You ended your reply with stated intentions but took no action. "
+                        "Execute your plan NOW: make the tool call in this response. "
+                        "If the task genuinely needs no tools, give the complete final "
+                        "answer instead."
+                    )})
                     continue
 
                 # Natural completion — reset parse retries
