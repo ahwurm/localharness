@@ -657,7 +657,6 @@ class AgentLoop:
             violation = budget.check(session)
             if violation is not None:
                 session.terminated_reason = f"budget_{violation.reason}"
-                self._conversation = list(session.messages)
                 log.info(
                     "Budget exceeded for %s: %s (limit=%s, current=%s)",
                     self._config.name,
@@ -665,7 +664,9 @@ class AgentLoop:
                     violation.limit,
                     violation.current,
                 )
-                return _format_budget_summary(session, violation)
+                summary = await self._final_summary_on_budget(session, violation, on_token)
+                self._conversation = list(session.messages)
+                return summary
 
             # 3. Build request messages first (runs compaction if needed)
             request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
@@ -983,6 +984,45 @@ class AgentLoop:
                     session.iteration,
                 )
                 return _format_stuck_summary(session)
+
+    async def _final_summary_on_budget(
+        self, session: Session, violation: BudgetViolation, on_token: Callable | None,
+    ) -> str:
+        """One forced no-tools generation so a budget-exhausted agent returns its
+        FINDINGS instead of a task echo. Children previously died with only
+        '[Budget limit reached]' after a full gather phase, so the parent received
+        zero facts. Falls back to the plain budget notice on any provider error."""
+        instruction = (
+            f"[{violation.message}] You are out of tool budget — do NOT call any tools. "
+            "In ONE reply, summarize everything you found relevant to the original task: "
+            "concrete facts, names, numbers, and source URLs. Partial findings are valuable. "
+            "If you found nothing, state in one line what you tried."
+        )
+        try:
+            request_messages, _ = await self._ctx.build_messages(
+                session.messages + [{"role": "user", "content": instruction}], None
+            )
+            response_message, usage = await self._llm.stream_complete(
+                request_messages, tools=None, on_token=on_token,
+            )
+            if usage is not None:
+                session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+            from localharness.provider.fn_call import strip_thinking_tags
+            text = strip_thinking_tags(getattr(response_message, "content", None) or "").strip()
+            if not text:
+                return _format_budget_summary(session, violation)
+            session.push({"role": "user", "content": instruction})
+            session.push({"role": "assistant", "content": text})
+            return (
+                f"{_clean_summary(text)}\n\n"
+                f"[Budget limit reached: {violation.message} "
+                f"Completed {session.actions_taken} tool calls in "
+                f"{session.elapsed_minutes():.1f} minutes.]"
+            )
+        except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
+            log.warning("final-summary-on-budget failed (%s); returning plain notice", exc)
+            return _format_budget_summary(session, violation)
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
         """Single iteration for testing/debugging."""
