@@ -183,6 +183,15 @@ def format_data_findings(task: str, summary: str, tool_calls_used: int) -> str:
 CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
 
 
+def prepend_toolset(task: str, allowed: list[str]) -> str:
+    """Prefix a config-child brief with its exact toolset (capability fact, not inference)."""
+    names = ", ".join(allowed) if allowed else "none"
+    return (
+        f"(Your ONLY available tools: {names}. You cannot delegate or use anything else — "
+        f"if the task needs a tool you lack, say so immediately instead of improvising.)\n\n{task}"
+    )
+
+
 def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_used: int) -> str:
     """Generic findings return for config-defined children: header + summary, NOT the transcript."""
     header = f"[{agent_name}] task: {task} | tool calls: {tool_calls_used}"
@@ -226,6 +235,10 @@ async def dispatch_config_subagent(
     deny = set(getattr(tool_cfg, "deny", None) or [])
     allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
+    # Make the toolset explicit in the brief — small models attend weakly to absent
+    # tools (observed live: a bash-less child globbed for `pip` instead of saying
+    # "I have no shell"). One line turns capability inference into capability fact.
+    task = prepend_toolset(task, allowed)
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     child_loop = AgentLoop(

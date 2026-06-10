@@ -422,3 +422,11 @@ async def test_runner_without_loader_keeps_old_refusal():
     )
     with pytest.raises(ValueError, match="not wired"):
         await runner("youtube-summarizer", "x", 0)
+
+
+def test_prepend_toolset_states_capabilities():
+    from localharness.agent.subagent import prepend_toolset
+    out = prepend_toolset("do the thing", ["bash_exec", "read"])
+    assert out.startswith("(Your ONLY available tools: bash_exec, read.")
+    assert out.endswith("do the thing")
+    assert "say so immediately" in out
