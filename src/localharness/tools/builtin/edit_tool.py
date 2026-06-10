@@ -39,7 +39,7 @@ class EditTool(Tool):
 
     async def _execute(self, path: str, old_string: str, new_string: str,
                        replace_all: bool = False) -> ToolResult:
-        target = Path(path).resolve()
+        target = Path(path).expanduser().resolve()
 
         forbidden_suffixes = {".env", ".secret", ".token", ".pem", ".key"}
         if target.suffix in forbidden_suffixes or target.name.startswith(".env"):

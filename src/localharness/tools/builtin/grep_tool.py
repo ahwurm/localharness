@@ -71,7 +71,7 @@ class GrepTool(Tool):
         except re.error as exc:
             return self.err(f"Invalid regex: {exc}", error_type="validation_error")
 
-        target = Path(path).resolve()
+        target = Path(path).expanduser().resolve()
         if not target.exists():
             return self.err(f"Path does not exist: {target}")
 
