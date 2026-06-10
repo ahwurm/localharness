@@ -1184,3 +1184,52 @@ async def test_budget_exhaust_falls_back_when_model_yields_no_text(faithful_fake
 
     assert session.terminated_reason == "budget_actions"
     assert "[Budget limit reached:" in summary
+
+
+# ---------------------------------------------------------------------------
+# Tool error forwarding + agent tool timeout contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_error_text_reaches_model(faithful_fake_llm, bus, tmp_path):
+    """Error results carry their message in .error with output='' — the loop must
+    forward the message or the model sees an empty result it can't react to
+    (observed live: every fetch failure and the 600s agent timeout surfaced as '')."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "err-fwd-agent",
+        "role": "Test agent.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+    })
+    # invalid URL -> WebFetchTool returns err("Invalid URL ...") with output ""
+    loop = AgentLoop(
+        config=cfg, llm=faithful_fake_llm(tool_plan=[("web_fetch", {"url": "notaurl"})]),
+        bus=bus, context_manager=ContextManager(), tool_registry=reg,
+        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+    )
+    session = Session(agent_id="err-fwd-agent", session_id="s-errfwd", messages=[])
+    await loop._execute_loop(session, "fetch something", None)
+
+    tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "[tool error]" in tool_msgs[0]["content"]
+    assert "Invalid URL" in tool_msgs[0]["content"]
+
+
+def test_agent_tool_timeout_exceeds_child_budget_and_summary_headroom():
+    """600s cancelled children mid-final-summary (no terminal event, '' to parent).
+    The timeout must stay >= child max duration + slow-model summary headroom."""
+    from localharness.agent.subagent import WEB_MAX_DURATION_MINUTES
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    assert AgentTool.timeout_s >= 1800.0
+    assert AgentTool.timeout_s >= (WEB_MAX_DURATION_MINUTES * 60) * 2
