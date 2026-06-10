@@ -281,3 +281,62 @@ async def test_web_dispatch_at_depth_one_refuses(mock_llm_client, bus):
             permission_evaluator=PermissionEvaluator(),
             depth=MAX_DEPTH,
         )
+
+
+# ---------------------------------------------------------------------------
+# data-analyst subagent (mirror of web-researcher wiring)
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+def test_data_analyst_config_budget_and_role():
+    from localharness.agent.subagent import (
+        DATA_MAX_ACTIONS, DATA_MAX_DURATION_MINUTES, build_data_analyst_config,
+    )
+    cfg = build_data_analyst_config()
+    assert cfg.name == "data-analyst"
+    assert cfg.permissions.budget.max_actions == DATA_MAX_ACTIONS
+    assert cfg.permissions.budget.max_duration_minutes == DATA_MAX_DURATION_MINUTES
+    assert "source of truth" in cfg.role
+    assert "never paste raw file dumps" in cfg.role.lower()
+
+
+@pytest.mark.asyncio
+async def test_data_analyst_registry_is_local_tools_only():
+    from localharness.agent.subagent import DATA_TOOLS
+    from localharness.tools.registry import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    child = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base)
+    assert set(child._tools["global"].keys()) == {"bash_exec", "read", "glob", "grep"}
+
+
+@pytest.mark.asyncio
+async def test_runner_dispatches_data_analyst(monkeypatch):
+    import localharness.agent.subagent as subagent
+
+    captured = {}
+    async def _fake_dispatch(task, **kwargs):
+        captured["task"] = task
+        captured["depth"] = kwargs.get("depth")
+        return "[data analysis] ok"
+    monkeypatch.setattr(subagent, "dispatch_data_subagent", _fake_dispatch)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    out = await runner("data_analyst", "compute the thing", 0)   # `_`->`-` sanitization
+    assert out == "[data analysis] ok"
+    assert captured["task"] == "compute the thing"
+    assert captured["depth"] == 0
+
+
+def test_format_data_findings_header():
+    from localharness.agent.subagent import format_data_findings
+    out = format_data_findings("task x", "answer 42", 7)
+    assert out.startswith("[data analysis] task: task x | tool calls: 7")
+    assert "answer 42" in out
