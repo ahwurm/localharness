@@ -147,6 +147,10 @@ class LLMClient:
                 write=config.timeout_seconds,
             ),
             default_headers=config.extra_headers,
+            # Local single-tenant GPU: a timed-out generation will time out again on
+            # retry — the SDK's silent default (2 retries) turned one 600s failure
+            # into 30 min of dead air. Fail fast and let the agent loop react.
+            max_retries=0 if config.is_local else 2,
         )
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
