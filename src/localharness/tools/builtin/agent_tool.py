@@ -35,7 +35,10 @@ class AgentTool(Tool):
             description=(
                 f"Delegate a task to a subagent. Available agents: {agent_list}. "
                 "Use this when a specialized agent would handle the task better than you. "
-                "Returns the agent's summary response."
+                "Returns the agent's summary response. You can also BUILD a new specialist: "
+                "write ~/.localharness/agents/<name>.yaml (fields: name, role, "
+                "tools: {add: [tool names]}, permissions: {budget: {max_actions, "
+                "max_duration_minutes}}), then delegate to that name immediately."
             ),
             parameters={
                 "type": "object",
