@@ -340,3 +340,85 @@ def test_format_data_findings_header():
     out = format_data_findings("task x", "answer 42", 7)
     assert out.startswith("[data analysis] task: task x | tool calls: 7")
     assert "answer 42" in out
+
+
+# ---------------------------------------------------------------------------
+# Config-defined children (dispatch_config_subagent + runner load_agent seam)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_child_registry_respects_add_and_strips_agent():
+    from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS
+    from localharness.config.models import AgentConfig
+    from localharness.tools.registry import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+
+    # The allow-list semantics live inside dispatch_config_subagent; replicate its filter
+    cfg = AgentConfig.model_validate({
+        "name": "yt-summarizer", "role": "Test specialist.",
+        "tools": {"add": ["bash_exec", "web_fetch", "agent"], "deny": ["web_fetch"]},
+    })
+    add = list(cfg.tools.add or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
+    deny = set(cfg.tools.deny or [])
+    allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    assert allowed == ["bash_exec"]  # deny wins; `agent` always stripped
+
+
+@pytest.mark.asyncio
+async def test_runner_dispatches_yaml_defined_agent(monkeypatch):
+    import localharness.agent.subagent as subagent
+    from localharness.config.models import AgentConfig
+
+    yt_cfg = AgentConfig.model_validate({
+        "name": "youtube-summarizer", "role": "Fetch transcripts and summarize.",
+        "tools": {"add": ["bash_exec"]},
+        "permissions": {"budget": {"max_actions": 8, "max_duration_minutes": 6.0}},
+    })
+
+    captured = {}
+    async def _fake_config_dispatch(task, *, agent_config, **kwargs):
+        captured["task"] = task
+        captured["name"] = agent_config.name
+        return f"[{agent_config.name}] done"
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", _fake_config_dispatch)
+
+    loads = []
+    def _load_agent(name):
+        loads.append(name)
+        if name == "youtube-summarizer":
+            return yt_cfg
+        raise FileNotFoundError(name)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=_load_agent,
+    )
+    out = await runner("youtube_summarizer", "summarize video X", 0)  # `_`->`-` sanitize
+    assert out == "[youtube-summarizer] done"
+    assert captured["task"] == "summarize video X"
+    assert loads == ["youtube-summarizer"]
+
+    # unknown name still refuses, with builder guidance in the message
+    with pytest.raises(ValueError, match="CREATE one"):
+        await runner("nonexistent-agent", "do thing", 0)
+
+    # "default" is never loadable as a child (self-delegation guard)
+    with pytest.raises(ValueError, match="not wired"):
+        await runner("default", "do thing", 0)
+
+
+@pytest.mark.asyncio
+async def test_runner_without_loader_keeps_old_refusal():
+    import localharness.agent.subagent as subagent
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    with pytest.raises(ValueError, match="not wired"):
+        await runner("youtube-summarizer", "x", 0)

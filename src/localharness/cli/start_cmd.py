@@ -327,6 +327,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_registry=tool_registry,
         permission_evaluator=perm_eval,
         get_parent_session_id=lambda: agent_loop.current_session_id,
+        # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
+        load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
     )
 
     # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them

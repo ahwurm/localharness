@@ -179,6 +179,69 @@ def format_data_findings(task: str, summary: str, tool_calls_used: int) -> str:
     return f"{header}\n\n{body}"
 
 
+# YAML-defined children with no tools.add get a safe read-only set.
+CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
+
+
+def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_used: int) -> str:
+    """Generic findings return for config-defined children: header + summary, NOT the transcript."""
+    header = f"[{agent_name}] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+async def dispatch_config_subagent(
+    task: str,
+    *,
+    agent_config: Any,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    depth: int = 0,
+) -> str:
+    """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
+
+    This is the 'ability scales with defined subagents' seam: any agents/<name>.yaml becomes a
+    dispatchable specialist — role + tools.add (its allowlist; bare, mcp:TOOL and plugin:P.TOOL
+    forms all resolve) + its own budget — without touching harness code. The parent (or the
+    model itself, by WRITING the yaml first) composes new specialists at runtime. The child runs
+    in its own context and returns only a summary; the `agent` tool is always stripped so
+    config children can never delegate further (belt to the MAX_DEPTH suspenders).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"subagent '{getattr(agent_config, 'name', '?')}' cannot spawn at depth {depth} "
+            f"(max depth {MAX_DEPTH}): subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    tool_cfg = getattr(agent_config, "tools", None)
+    add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
+    deny = set(getattr(tool_cfg, "deny", None) or [])
+    allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
+
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+    child_loop = AgentLoop(
+        config=agent_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+    return format_child_findings(agent_config.name, task, summary, tool_calls_used)
+
+
 async def dispatch_data_subagent(
     task: str,
     *,
@@ -374,19 +437,23 @@ def make_explore_agent_runner(
     base_registry: Any,
     permission_evaluator: Any,
     get_parent_session_id: Callable[[], str | None],
+    load_agent: Callable[[str], Any] | None = None,
 ) -> Callable[[str, str, int], Awaitable[str]]:
-    """Build the AgentTool runner for the read-only Explore subagent (module-level seam, T1).
+    """Build the AgentTool runner for delegation (module-level seam, T1).
 
     Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
     (the same way Phase 27 extracted `dispatch_explore_subagent` from this closure). The returned
-    async runner is what `AgentTool(agent_runner=...)` invokes. Behavior is identical to the closure:
+    async runner is what `AgentTool(agent_runner=...)` invokes.
 
-    - Wires `explore` and `web-researcher` (after `_` -> `-` sanitization); any other agent_id raises
-      a clear ValueError so the model gets an actionable error (AgentTool maps it to not_found).
+    - Wires the built-ins (`explore`, `web-researcher`, `data-analyst`, after `_` -> `-`
+      sanitization). Any OTHER agent_id is resolved through `load_agent` (when provided) — the
+      ConfigLoader seam that turns agents/<name>.yaml into a dispatchable specialist. Pass a
+      cache-bypassing loader so a yaml the model JUST WROTE is dispatchable in the same turn.
+      Unresolvable names raise a clear ValueError so the model gets an actionable error.
     - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
       parent loop's current session_id when the model delegates — matching the closure's late read of
       `agent_loop.current_session_id`.
-    - `depth` threads through to `dispatch_explore_subagent` (the belt-and-suspenders recursion guard).
+    - `depth` threads through to every dispatch (the belt-and-suspenders recursion guard).
     """
 
     async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
@@ -398,9 +465,27 @@ def make_explore_agent_runner(
         elif name == "data-analyst":
             dispatch = dispatch_data_subagent
         else:
-            raise ValueError(
-                f"Agent '{agent_id}' dispatch not wired "
-                "(available: explore, web-researcher, data-analyst)"
+            cfg = None
+            if load_agent is not None and name != "default":
+                try:
+                    cfg = load_agent(name)
+                except Exception:
+                    cfg = None
+            if cfg is None:
+                raise ValueError(
+                    f"Agent '{agent_id}' dispatch not wired (available: explore, "
+                    "web-researcher, data-analyst, or any agents/<name>.yaml definition — "
+                    "you can CREATE one with the write tool, then delegate to it by name)"
+                )
+            return await dispatch_config_subagent(
+                task,
+                agent_config=cfg,
+                llm=llm,
+                bus=bus,
+                base_registry=base_registry,
+                parent_session_id=get_parent_session_id(),
+                permission_evaluator=permission_evaluator,
+                depth=depth,
             )
         return await dispatch(
             task,
