@@ -1054,3 +1054,71 @@ def test_sanitize_drops_unrepairable_and_preserves_none_semantics():
     assert out is None
     assert _sanitize_raw_tool_calls(None) is None
     assert _sanitize_raw_tool_calls([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Budget notes on tool results (_budget_note + loop wiring)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch
+
+from localharness.agent.loop import BudgetTracker, _budget_note
+
+
+def _session_for_note(actions: int) -> Session:
+    s = Session(agent_id="a", session_id="s", messages=[])
+    s.actions_taken = actions
+    return s
+
+
+def test_budget_note_reports_usage():
+    note = _budget_note(_session_for_note(3), BudgetTracker(max_actions=12, max_duration_minutes=0))
+    assert "3/12 tool calls used" in note
+    assert "wrap up" not in note
+
+
+def test_budget_note_warns_near_action_limit():
+    note = _budget_note(_session_for_note(10), BudgetTracker(max_actions=12, max_duration_minutes=0))
+    assert "wrap up NOW" in note
+    assert "final summary" in note
+
+
+def test_budget_note_warns_near_time_limit():
+    s = _session_for_note(1)
+    with patch.object(Session, "elapsed_minutes", return_value=2.5):
+        note = _budget_note(s, BudgetTracker(max_actions=0, max_duration_minutes=3.0))
+    assert "2.5/3 min elapsed" in note
+    assert "wrap up NOW" in note
+
+
+def test_budget_note_empty_when_unlimited():
+    assert _budget_note(_session_for_note(5), BudgetTracker(max_actions=0, max_duration_minutes=0)) == ""
+
+
+@pytest.mark.asyncio
+async def test_loop_appends_budget_note_to_tool_result(faithful_fake_llm, bus, tmp_path):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "budget-note-agent",
+        "role": "Test agent.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+    })
+    loop = AgentLoop(
+        config=cfg, llm=faithful_fake_llm(tool_plan=[("glob", {"pattern": "*.py"})]),
+        bus=bus, context_manager=ContextManager(), tool_registry=reg,
+        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+    )
+    session = Session(agent_id="budget-note-agent", session_id="s-note", messages=[])
+    await loop._execute_loop(session, "list python files", None)
+
+    tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+    assert tool_msgs, "expected at least one tool result"
+    assert "[budget: 1/5 tool calls used" in tool_msgs[-1]["content"]
