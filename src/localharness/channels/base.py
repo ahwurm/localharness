@@ -132,7 +132,15 @@ class ChannelAdapter(ABC):
         )
 
     async def on_task_complete(self, event: TaskComplete) -> None:
-        """Default handler for TaskComplete events. Sends the summary."""
+        """Default handler for TaskComplete events. Sends the summary.
+
+        Child-turn completions (parent_id stamped by _ParentIdBus) stay internal:
+        a child's summary returns to the PARENT via the agent tool result — posting
+        it to the channel reads as a premature, often contradictory 'final answer'
+        (observed live: a subagent's failure apology landed in Discord minutes
+        before the parent's actual answer)."""
+        if getattr(event, "parent_id", None):
+            return
         await self.send_message(
             content=event.summary,
             agent_id=event.agent_id,
