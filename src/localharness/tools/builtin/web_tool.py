@@ -14,7 +14,7 @@ import httpx
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
-_FETCH_DEFAULT_CHARS = 8000   # ~2k tokens — safe default
+_FETCH_DEFAULT_CHARS = 5000   # ~1.2k tokens — page through with start_index instead of raising
 _FETCH_MAX_CHARS = 20000      # hard ceiling regardless of caller request
 _UA = "Mozilla/5.0 (compatible; LocalHarness/0.1; +https://localharness.dev)"
 
@@ -93,8 +93,9 @@ class WebFetchTool(Tool):
             name="web_fetch",
             description=(
                 "Fetch a URL and return its readable text content (HTML stripped). Output is "
-                "CLIPPED to a character budget so large pages can't overflow context — increase "
-                "max_chars only if you truly need more. Use after web_search to read a page."
+                "CLIPPED to a character window so large pages can't overflow context. To read "
+                "more of a long page, call again with start_index as instructed in the clip "
+                "notice — page through; don't raise max_chars. Use after web_search."
             ),
             parameters={
                 "type": "object",
@@ -102,9 +103,15 @@ class WebFetchTool(Tool):
                     "url": {"type": "string", "description": "The URL to fetch (http/https)."},
                     "max_chars": {
                         "type": "integer",
-                        "description": f"Max characters to return (default {_FETCH_DEFAULT_CHARS}, "
+                        "description": f"Window size in characters (default {_FETCH_DEFAULT_CHARS}, "
                                        f"hard cap {_FETCH_MAX_CHARS}).",
                         "default": _FETCH_DEFAULT_CHARS, "minimum": 500, "maximum": _FETCH_MAX_CHARS,
+                    },
+                    "start_index": {
+                        "type": "integer",
+                        "description": "Character offset to start reading from (default 0). "
+                                       "Use the value suggested in a previous clip notice.",
+                        "default": 0, "minimum": 0,
                     },
                 },
                 "required": ["url"],
@@ -113,10 +120,13 @@ class WebFetchTool(Tool):
             estimated_tokens=_FETCH_DEFAULT_CHARS // 4,
         )
 
-    async def _execute(self, url: str, max_chars: int = _FETCH_DEFAULT_CHARS) -> ToolResult:
+    async def _execute(
+        self, url: str, max_chars: int = _FETCH_DEFAULT_CHARS, start_index: int = 0,
+    ) -> ToolResult:
         if not re.match(r"^https?://", url):
             return self.err(f"Invalid URL (must be http/https): {url}", error_type="validation_error")
         cap = max(500, min(int(max_chars), _FETCH_MAX_CHARS))
+        start = max(0, int(start_index))
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=20.0,
                                          headers={"User-Agent": _UA}) as client:
@@ -128,11 +138,21 @@ class WebFetchTool(Tool):
         body = resp.text
         text = body if ("text/plain" in ctype or "json" in ctype) else _html_to_text(body)
         full_len = len(text)
-        if full_len > cap:
+        if start >= full_len:
+            return self.err(
+                f"start_index {start} is past the end of the page ({full_len} chars total)",
+                error_type="validation_error",
+            )
+        window = text[start:start + cap]
+        end = start + len(window)
+        if start > 0 or end < full_len:
+            head = f"[chars {start}-{end} of {full_len}]\n" if start > 0 else ""
+            tail = (f"\n\n[... {full_len - end} chars remain; call web_fetch again with "
+                    f"start_index={end} to continue reading]") if end < full_len else ""
             return ToolResult(
-                output=text[:cap] + f"\n\n[... clipped {full_len - cap} of {full_len} chars; "
-                                    f"call web_fetch with a higher max_chars to read more]",
-                success=True, truncated=True, original_length=full_len,
-                metadata={"url": str(resp.url), "content_type": ctype},
+                output=head + window + tail,
+                success=True, truncated=end < full_len, original_length=full_len,
+                metadata={"url": str(resp.url), "content_type": ctype,
+                          "start_index": start, "next_start_index": end if end < full_len else None},
             )
         return self.ok(text, url=str(resp.url), content_type=ctype, original_length=full_len)
