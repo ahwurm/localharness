@@ -1122,3 +1122,65 @@ async def test_loop_appends_budget_note_to_tool_result(faithful_fake_llm, bus, t
     tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
     assert tool_msgs, "expected at least one tool result"
     assert "[budget: 1/5 tool calls used" in tool_msgs[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Final summary on budget exhaustion (_final_summary_on_budget)
+# ---------------------------------------------------------------------------
+
+
+def _budget_loop(faithful_fake_llm, bus, tmp_path, tool_plan, max_actions):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+
+    async def _make():
+        from localharness.tools.builtin import register_builtin_tools
+        reg = ToolRegistry()
+        await register_builtin_tools(reg)
+        cfg = AgentConfig.model_validate({
+            "name": "budget-final-agent",
+            "role": "Test agent.",
+            "permissions": {"budget": {"max_actions": max_actions, "max_duration_minutes": 5.0,
+                                       "kill_file": str(tmp_path / "KILL")}},
+        })
+        return AgentLoop(
+            config=cfg, llm=faithful_fake_llm(tool_plan=tool_plan),
+            bus=bus, context_manager=ContextManager(), tool_registry=reg,
+            permission_evaluator=PermissionEvaluator(), memory_loader=None,
+        )
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaust_returns_model_findings(faithful_fake_llm, bus, tmp_path):
+    """Exhausted budget triggers ONE no-tools pass; the summary carries findings
+    (here: the fake echoes the last tool result) plus the budget notice."""
+    make = _budget_loop(faithful_fake_llm, bus, tmp_path,
+                        tool_plan=[("glob", {"pattern": "*.py"})], max_actions=1)
+    loop = await make()
+    session = Session(agent_id="budget-final-agent", session_id="s-bf", messages=[])
+    summary = await loop._execute_loop(session, "list python files", None)
+
+    assert session.terminated_reason == "budget_actions"
+    assert "[Budget limit reached:" in summary
+    # the echoed tool result (real glob output incl. budget note) — not a bare notice
+    assert "[budget: 1/1 tool calls used" in summary
+    # the forced pass also lands in history for session continuity
+    assert session.messages[-1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaust_falls_back_when_model_yields_no_text(faithful_fake_llm, bus, tmp_path):
+    """If the final pass produces no usable text (fake still wants to emit a tool call,
+    content=None), fall back to the plain budget notice — never crash."""
+    make = _budget_loop(faithful_fake_llm, bus, tmp_path,
+                        tool_plan=[("glob", {"pattern": "*.py"}), ("glob", {"pattern": "*.md"})],
+                        max_actions=1)
+    loop = await make()
+    session = Session(agent_id="budget-final-agent", session_id="s-bf2", messages=[])
+    summary = await loop._execute_loop(session, "list files", None)
+
+    assert session.terminated_reason == "budget_actions"
+    assert "[Budget limit reached:" in summary
