@@ -182,7 +182,10 @@ class LLMClient:
                     {"role": "user", "content": "What files are in the current directory?"},
                 ],
                 tools=probe_tools,
-                max_tokens=64,
+                # Generous cap: preamble-prone models spend 30+ tokens narrating before
+                # the call; at 64 the call got truncated and the probe misread a
+                # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
+                max_tokens=256,
                 temperature=0.0,
             )
             msg = response.choices[0].message

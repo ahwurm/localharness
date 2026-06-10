@@ -1233,3 +1233,61 @@ def test_agent_tool_timeout_exceeds_child_budget_and_summary_headroom():
 
     assert AgentTool.timeout_s >= 1800.0
     assert AgentTool.timeout_s >= (WEB_MAX_DURATION_MINUTES * 60) * 2
+
+
+# ---------------------------------------------------------------------------
+# Act-guard: announce-then-halt gets one deterministic nudge
+# ---------------------------------------------------------------------------
+
+
+class _AnnounceThenActLLM:
+    """First call: pure intent text, no tool calls. After the nudge: emits the tool
+    call, then echoes (FaithfulFakeLLM-style) on the final call."""
+
+    def __init__(self):
+        self.calls = 0
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.calls += 1
+        if self.calls == 1:
+            return NS(content="I'll list the files and then summarize.", tool_calls=None), None
+        if self.calls == 2:
+            return NS(content=None, tool_calls=[
+                {"id": "tc-1", "type": "function",
+                 "function": {"name": "glob", "arguments": '{"pattern": "*.py"}'}}]), None
+        last = next((m.get("content") for m in reversed(messages or []) if m.get("role") == "tool"), "done")
+        return NS(content=str(last)[:100], tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "act-guard-agent", "role": "Test.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    llm = _AnnounceThenActLLM()
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="act-guard-agent", session_id="s-ag", messages=[])
+    await loop._execute_loop(session, "list the python files", None)
+
+    assert session.act_nudge_used is True
+    assert session.actions_taken == 1          # the glob actually ran after the nudge
+    nudges = [m for m in session.messages if m.get("role") == "user"
+              and "took no action" in (m.get("content") or "")]
+    assert len(nudges) == 1                    # exactly one nudge, persisted in history
+    assert session.terminated_reason == "complete"
