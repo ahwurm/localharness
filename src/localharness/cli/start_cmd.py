@@ -331,7 +331,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
     # alongside any configured agent cards so the model knows it can delegate to them.
-    available_agent_names = ["explore", "web-researcher"] + [c.name for c in card_registry.all_cards()]
+    available_agent_names = ["explore", "web-researcher", "data-analyst"] + [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
         agent_runner=_run_agent,
         available_agents=available_agent_names,

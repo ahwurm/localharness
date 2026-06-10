@@ -52,6 +52,24 @@ WEB_RESEARCHER_ROLE = (
     "and citations it needs — never paste raw page text."
 )
 
+# Data-analyst child: local files + computation, no web, no write. Heavier budget than web —
+# real analysis iterates (inspect format -> compute -> sanity-check); observed ~17 calls on a
+# vault-sized task. Raw file dumps and intermediate outputs stay in the child's context.
+DATA_TOOLS: list[str] = ["bash_exec", "read", "glob", "grep"]
+DATA_MAX_ACTIONS = 16
+DATA_MAX_TOOL_CALLS = DATA_MAX_ACTIONS + 1  # 17 — kept above the budget so max_actions binds
+DATA_MAX_DURATION_MINUTES = 12.0
+
+DATA_ANALYST_ROLE = (
+    "You are a data-analyst subagent. Investigate LOCAL files and compute precise answers using "
+    "bash_exec (python3/pandas where helpful), read, glob, and grep. If your brief names a data "
+    "contract, README, or index doc, READ IT FIRST and honor what it says is the source of truth — "
+    "do not re-derive facts the contract already settles. Sanity-check your numbers (signs, totals, "
+    "currencies) before reporting. You cannot write files or delegate. When done, stop and reply "
+    "with a CONCISE summary: the numbers, how you computed them, and the file paths used. This "
+    "summary is the ONLY thing the parent agent sees — never paste raw file dumps."
+)
+
 
 def _sanitize_agent_name(name: str) -> str:
     """AgentConfig.name rejects underscores — map `_` -> `-` (recurring localharness gotcha)."""
@@ -137,6 +155,77 @@ def format_web_findings(task: str, summary: str, tool_calls_used: int) -> str:
     header = f"[web research] task: {task} | tool calls: {tool_calls_used}"
     body = (summary or "").strip() or "(no findings)"
     return f"{header}\n\n{body}"
+
+
+def build_data_analyst_config(name: str = "data-analyst", kill_file: str | None = None) -> AgentConfig:
+    """Build the data-analyst-child AgentConfig with its own bounded budget."""
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=DATA_ANALYST_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=DATA_MAX_ACTIONS,
+                max_duration_minutes=DATA_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
+
+def format_data_findings(task: str, summary: str, tool_calls_used: int) -> str:
+    """Structured data-analysis findings return: short header + child summary, NOT the transcript."""
+    header = f"[data analysis] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+async def dispatch_data_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "data-analyst",
+    depth: int = 0,
+) -> str:
+    """Spawn a data-analysis child (bash/read/glob/grep, no web/write), run one turn, return findings.
+
+    Mirrors dispatch_web_subagent: the child inspects files and computes in ITS OWN context and
+    returns only a summary, so raw file dumps and intermediate outputs never reach the parent's
+    window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"data-analyst subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_data_analyst_config(agent_name)
+    child_registry = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base_registry)
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+
+    child_session_id = child_loop.current_session_id
+    tool_calls_used = _count_session_tool_calls(bus, child_session_id)
+
+    return format_data_findings(task, summary, tool_calls_used)
 
 
 async def dispatch_explore_subagent(
@@ -306,9 +395,12 @@ def make_explore_agent_runner(
             dispatch = dispatch_explore_subagent
         elif name == "web-researcher":
             dispatch = dispatch_web_subagent
+        elif name == "data-analyst":
+            dispatch = dispatch_data_subagent
         else:
             raise ValueError(
-                f"Agent '{agent_id}' dispatch not wired (available: explore, web-researcher)"
+                f"Agent '{agent_id}' dispatch not wired "
+                "(available: explore, web-researcher, data-analyst)"
             )
         return await dispatch(
             task,
