@@ -217,6 +217,30 @@ def _format_error_summary(session: Session, exc: Exception) -> str:
     )
 
 
+def _budget_note(session: Session, budget: BudgetTracker) -> str:
+    """One-line budget status appended to each iteration's last tool result so the
+    model can pace itself and summarize BEFORE the wall (Claude Code-style running
+    usage warnings). Empty string when both budgets are unlimited."""
+    parts = []
+    nearly = False
+    if budget.max_actions > 0:
+        parts.append(f"{session.actions_taken}/{budget.max_actions} tool calls used")
+        nearly = nearly or (budget.max_actions - session.actions_taken) <= 2
+    if budget.max_duration_minutes > 0:
+        elapsed = session.elapsed_minutes()
+        parts.append(f"{elapsed:.1f}/{budget.max_duration_minutes:.0f} min elapsed")
+        nearly = nearly or (budget.max_duration_minutes - elapsed) <= max(
+            1.0, 0.2 * budget.max_duration_minutes
+        )
+    if not parts:
+        return ""
+    note = f"\n\n[budget: {', '.join(parts)}]"
+    if nearly:
+        note = (note[:-1] + " — wrap up NOW: give your final summary in your next reply,"
+                            " before the limit cuts you off]")
+    return note
+
+
 def _clean_summary(text: str) -> str:
     """Remove XML tool call remnants and thinking tags from summary text."""
     import re
@@ -916,6 +940,11 @@ class AgentLoop:
                 ))
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)
+
+            # 11b. Append budget status to the iteration's last tool result
+            note = _budget_note(session, budget)
+            if note and session.messages and session.messages[-1].get("role") == "tool":
+                session.messages[-1]["content"] = (session.messages[-1]["content"] or "") + note
 
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
