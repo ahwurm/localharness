@@ -39,7 +39,14 @@ class GlobTool(Tool):
         )
 
     async def _execute(self, pattern: str, base_dir: str = ".", limit: int = 500) -> ToolResult:
-        base = Path(base_dir).resolve()
+        # Models routinely pass ~ or absolute patterns (observed live) — normalize both.
+        if pattern.startswith("~"):
+            pattern = str(Path(pattern).expanduser())
+        if pattern.startswith("/"):
+            base = Path("/")
+            pattern = pattern.lstrip("/")
+        else:
+            base = Path(base_dir).expanduser().resolve()
         if not base.exists():
             return self.err(f"base_dir does not exist: {base}")
         matches = sorted(base.glob(pattern))[:limit]

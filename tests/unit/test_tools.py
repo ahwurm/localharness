@@ -570,3 +570,20 @@ async def test_web_fetch_start_index_past_end_errors(monkeypatch):
     result = await WebFetchTool().run(url="https://example.test/page", start_index=999)
     assert result.success is False
     assert "past the end" in result.error
+
+
+@pytest.mark.asyncio
+async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
+    """Models routinely pass ~ paths (observed live: read + glob both failed on them)."""
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.txt").write_text("tilde works")
+
+    from localharness.tools.builtin.read_tool import ReadTool
+    r = await ReadTool().run(path="~/notes/a.txt")
+    assert r.success and "tilde works" in r.output
+
+    from localharness.tools.builtin.glob_tool import GlobTool
+    g = await GlobTool().run(pattern="~/notes/*.txt")
+    assert g.success and "a.txt" in g.output

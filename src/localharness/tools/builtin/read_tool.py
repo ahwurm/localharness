@@ -41,7 +41,7 @@ class ReadTool(Tool):
         )
 
     async def _execute(self, path: str, offset: int = 1, limit: int = 2000) -> ToolResult:
-        target = Path(path).resolve()
+        target = Path(path).expanduser().resolve()
         if not target.exists():
             return self.err(f"File not found: {target}", error_type="not_found")
         if target.is_dir():
