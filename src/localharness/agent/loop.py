@@ -915,8 +915,11 @@ class AgentLoop:
                             self._config.division or "",
                             self._config.tools,
                         )
-                        result_content = result.output
                         is_error = not result.success
+                        # Error results carry their message in .error with output "" —
+                        # forward it or the model sees an empty result it can't react to.
+                        result_content = (result.output if result.success
+                                          else f"[tool error] {result.error or 'unknown error'}")
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True

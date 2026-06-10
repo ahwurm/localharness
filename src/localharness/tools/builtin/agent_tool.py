@@ -14,7 +14,11 @@ class AgentTool(Tool):
     should handle a task. This is the runtime delegation path for ORCH-04.
     """
 
-    timeout_s: float | None = 600.0  # 10 min — subagent may run many iterations
+    # Must exceed the child's time budget PLUS a worst-case final-summary generation
+    # on a slow local model (observed: 600s cancelled children 7 min into generating
+    # their summary, returning "" with no terminal event). The parent's own turn
+    # budget is the real backstop.
+    timeout_s: float | None = 1800.0
 
     def __init__(
         self,
