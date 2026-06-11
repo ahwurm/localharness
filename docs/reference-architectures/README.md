@@ -65,3 +65,7 @@ vLLM and Ollama must both work out of the box harness-wide:
 - [mac-mini.md](mac-mini.md) — architecture B, proposed config + validation checklist
 - [gaps.md](gaps.md) — development items blocking out-of-box support for both
 - [../../CONTEXT-MODEL.md](../../CONTEXT-MODEL.md) — historical model-selection analysis (superseded)
+
+---
+
+**Planned:** a Gemma reference architecture (backup family; Qwen remains primary).
