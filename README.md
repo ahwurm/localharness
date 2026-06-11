@@ -58,10 +58,24 @@ LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # opt-in tests against a 
 
 Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. pytest stages these automatically from `tests/fixtures/bench/`; before standalone `bench run` invocations, run the test suite once or copy that directory there yourself.
 
+## Reference architectures
+
+LocalHarness is developed against two maintainer-tested hardware targets, both tracking
+the latest Qwen family (currently Qwen 3.6):
+
+| | Hardware | Model / Runtime | Status |
+|---|---|---|---|
+| [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.6-27B NVFP4 / vLLM, 64k ctx, 9.5 tok/s | TESTED |
+| [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.6-35B-A3B GGUF / llama.cpp `--mmap`, 16k ctx | PROPOSED |
+
+Start at [docs/reference-architectures/](docs/reference-architectures/README.md);
+known out-of-box gaps are tracked in [gaps.md](docs/reference-architectures/gaps.md).
+
 ## Documentation
 
+- [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and gaps
 - [CONTEXT-HARNESS.md](CONTEXT-HARNESS.md) — architecture and design rationale
-- [CONTEXT-MODEL.md](CONTEXT-MODEL.md) — model selection notes for the reference hardware (NVIDIA DGX Spark)
+- [CONTEXT-MODEL.md](CONTEXT-MODEL.md) — historical model-selection analysis (superseded by reference architectures)
 - [docs/specs/](docs/specs/) — component specs
 
 ## Status

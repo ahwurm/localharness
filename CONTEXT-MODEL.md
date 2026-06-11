@@ -1,5 +1,12 @@
 # Context: Model & Runtime Selection
 
+> **⚠️ SUPERSEDED (2026-06-11)** by [docs/reference-architectures/](docs/reference-architectures/README.md).
+> Current tested config: **Qwen3.6-27B / NVFP4 / vLLM @ 9.5 tok/s, 64k KV cache** on DGX Spark
+> ([dgx-spark.md](docs/reference-architectures/dgx-spark.md)), plus a base Mac mini architecture
+> running **Qwen3.6-35B-A3B / llama.cpp `--mmap`** ([mac-mini.md](docs/reference-architectures/mac-mini.md)).
+> The analysis below (Qwen3.5-122B-A10B selection) is retained as historical evaluation data —
+> its candidate table and runtime comparison are still referenced by the current docs.
+
 ## Decision
 
 **Primary Model:** Qwen3.5-122B-A10B (MoE, 122B total / 10B active per token)
