@@ -18,7 +18,7 @@ from rich.theme import Theme
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete
+from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
 
 log = structlog.get_logger(__name__)
 
@@ -118,6 +118,7 @@ class TerminalChannel(ChannelAdapter):
         self._task_complete_handle = None
         self._escalation_handle = None
         self._heartbeat_handle = None
+        self._turn_failed_handle = None
 
     async def start(self) -> None:
         """Initialize prompt_toolkit session and subscribe to bus events."""
@@ -132,6 +133,7 @@ class TerminalChannel(ChannelAdapter):
         self._action_handle = self.bus.subscribe(Action, self.on_action)
         self._observation_handle = self.bus.subscribe(Observation, self.on_observation)
         self._task_complete_handle = self.bus.subscribe(TaskComplete, self.on_task_complete)
+        self._turn_failed_handle = self.bus.subscribe(TurnFailed, self.on_turn_failed)
         self._escalation_handle = self.bus.subscribe(Escalation, self.on_escalation)
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
 
@@ -141,6 +143,7 @@ class TerminalChannel(ChannelAdapter):
             self._action_handle,
             self._observation_handle,
             self._task_complete_handle,
+            self._turn_failed_handle,
             self._escalation_handle,
             self._heartbeat_handle,
         ):

@@ -23,7 +23,7 @@ import structlog
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete
+from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
 
 log = structlog.get_logger(__name__)
 
@@ -150,6 +150,7 @@ class DiscordChannel(ChannelAdapter):
             self.bus.subscribe(Action, self.on_action),
             self.bus.subscribe(Observation, self.on_observation),
             self.bus.subscribe(TaskComplete, self.on_task_complete),
+            self.bus.subscribe(TurnFailed, self.on_turn_failed),
             self.bus.subscribe(Escalation, self.on_escalation),
             self.bus.subscribe(Heartbeat, self.on_heartbeat),
         ]
