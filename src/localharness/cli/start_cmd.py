@@ -33,6 +33,26 @@ async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> tupl
     return False, None
 
 
+def _ensure_packaged_tools(config_dir: Path) -> None:
+    """Install packaged helper scripts into <config-dir>/tools (idempotent).
+
+    The frontend-designer builtin shells out to design-screenshot.js by path —
+    ship it with the package so the builtin works out of the box. A missing or
+    uncopyable asset must never block start; the agent reports the gap itself."""
+    tools_dir = config_dir / "tools"
+    dest = tools_dir / "design-screenshot.js"
+    if dest.exists():
+        return
+    try:
+        from importlib import resources
+        src = resources.files("localharness").joinpath("assets", "design-screenshot.js")
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.chmod(0o755)
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[yellow]⚠ could not install design-screenshot.js: {exc}[/yellow]")
+
+
 def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     """Return agents from global config dir and local .localharness/agents/, local overrides."""
     global_dir = config_dir / "agents"
@@ -101,6 +121,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+
+    _ensure_packaged_tools(cfg_path)
 
     # Discover agents
     agents = _discover_agents_for_start(cfg_path)
@@ -333,7 +355,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
     # alongside any configured agent cards so the model knows it can delegate to them.
-    available_agent_names = ["explore", "web-researcher", "data-analyst"] + [c.name for c in card_registry.all_cards()]
+    available_agent_names = ["explore", "web-researcher", "data-analyst", "frontend-designer"] + [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
         agent_runner=_run_agent,
         available_agents=available_agent_names,
