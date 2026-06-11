@@ -60,13 +60,14 @@ Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. pytest stag
 
 ## Reference architectures
 
-LocalHarness is developed against two maintainer-tested hardware targets, both tracking
-the latest Qwen family (currently Qwen 3.6):
+LocalHarness is developed against two maintainer-tested hardware targets. Both must meet
+the practicality bar — **64k of KV-cache headroom and ≥9.5 tok/s single-stream** — with
+the newest Qwen model that fits it:
 
 | | Hardware | Model / Runtime | Status |
 |---|---|---|---|
 | [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.6-27B NVFP4 / vLLM, 64k ctx, 9.5 tok/s | TESTED |
-| [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.6-35B-A3B GGUF / llama.cpp `--mmap`, 16k ctx | PROPOSED |
+| [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.5-9B 4-bit / vLLM (vllm-metal), 64k ctx | PROPOSED |
 
 Start at [docs/reference-architectures/](docs/reference-architectures/README.md);
 known out-of-box gaps are tracked in [gaps.md](docs/reference-architectures/gaps.md).
