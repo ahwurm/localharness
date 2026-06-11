@@ -430,3 +430,37 @@ def test_prepend_toolset_states_capabilities():
     assert out.startswith("(Your ONLY available tools: bash_exec, read.")
     assert out.endswith("do the thing")
     assert "say so immediately" in out
+
+
+# ---------------------------------------------------------------------------
+# frontend-designer subagent (built-in, mirror of data-analyst wiring)
+# ---------------------------------------------------------------------------
+
+def test_frontend_designer_builtin_config_shape():
+    from localharness.agent.subagent import (
+        FRONTEND_MAX_ACTIONS,
+        FRONTEND_MAX_DURATION_MINUTES,
+        FRONTEND_TOOLS,
+        build_frontend_designer_config,
+    )
+    cfg = build_frontend_designer_config()
+    assert cfg.name == "frontend-designer"
+    assert cfg.permissions.budget.max_actions == FRONTEND_MAX_ACTIONS
+    assert cfg.permissions.budget.max_duration_minutes == FRONTEND_MAX_DURATION_MINUTES
+    # The role must teach the visual-verification loop and the packaged helper.
+    assert "design-screenshot.js" in cfg.role
+    assert "agent" not in FRONTEND_TOOLS  # child cannot delegate
+
+
+@pytest.mark.asyncio
+async def test_runner_routes_frontend_designer_to_builtin_dispatch():
+    """'frontend-designer' is a built-in: the runner must route it to its dispatcher
+    (depth guard fires) rather than fall through to the yaml-loader 'not wired' path."""
+    import localharness.agent.subagent as subagent
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    with pytest.raises(ValueError, match="depth"):
+        await runner("frontend-designer", "build a landing page", subagent.MAX_DEPTH)

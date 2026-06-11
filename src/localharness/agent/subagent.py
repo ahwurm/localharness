@@ -70,6 +70,45 @@ DATA_ANALYST_ROLE = (
     "summary is the ONLY thing the parent agent sees — never paste raw file dumps."
 )
 
+# Frontend-designer child: builds self-contained HTML/CSS and verifies it VISUALLY via the
+# packaged playwright screenshot helper before delivering. Budgets sized from live usage
+# (landing-page + architecture-diagram builds ran 25-35 actions incl. screenshot iterations).
+FRONTEND_TOOLS: list[str] = ["read", "write", "edit", "glob", "grep", "bash_exec"]
+FRONTEND_MAX_ACTIONS = 40
+FRONTEND_MAX_TOOL_CALLS = FRONTEND_MAX_ACTIONS + 1  # 41 — kept above the budget so max_actions binds
+FRONTEND_MAX_DURATION_MINUTES = 20.0
+
+FRONTEND_DESIGNER_ROLE = (
+    "You are a frontend-designer subagent. Build beautiful, self-contained HTML/CSS/JS and "
+    "verify it VISUALLY before delivering. Avoid generic AI-slop aesthetics: no default Inter, "
+    "no purple-gradient templates — pick distinctive typography, commit to a cohesive palette "
+    "via CSS custom properties, and prefer one well-orchestrated CSS animation over scattered "
+    "micro-interactions. Workflow: PLAN the layout, palette, and type; BUILD a single "
+    "self-contained responsive file under /tmp/designs/ (semantic HTML, no external "
+    "dependencies unless asked); SCREENSHOT it with "
+    "`node ~/.localharness/tools/design-screenshot.js <html-file> <output-prefix>` "
+    "(captures 1440x900 and 375x812 by default and waits ~2s for fonts and CSS animations to "
+    "settle — pass --wait <ms> for longer entrances); REVIEW the screenshots for layout, "
+    "contrast, overflow, and responsive issues; ITERATE until polished. You cannot delegate. "
+    "When done, stop and reply with the HTML file path, every screenshot path, and a brief "
+    "note on the design decisions — this summary is the ONLY thing the parent agent sees."
+)
+
+
+def build_frontend_designer_config(name: str = "frontend-designer", kill_file: str | None = None) -> AgentConfig:
+    """Build the frontend-designer-child AgentConfig with its own bounded budget."""
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=FRONTEND_DESIGNER_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=FRONTEND_MAX_ACTIONS,
+                max_duration_minutes=FRONTEND_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
 
 def _sanitize_agent_name(name: str) -> str:
     """AgentConfig.name rejects underscores — map `_` -> `-` (recurring localharness gotcha)."""
@@ -304,6 +343,52 @@ async def dispatch_data_subagent(
     return format_data_findings(task, summary, tool_calls_used)
 
 
+async def dispatch_frontend_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "frontend-designer",
+    depth: int = 0,
+) -> str:
+    """Spawn a frontend-designer child (read/write/edit/glob/grep/bash), run one turn, return findings.
+
+    The child builds HTML under /tmp/designs/ and verifies it visually via the packaged
+    design-screenshot.js helper (installed to <config-dir>/tools by start_cmd) in ITS OWN
+    context — only the summary (file + screenshot paths, design notes) reaches the parent.
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_frontend_designer_config(agent_name)
+    child_registry = ToolRegistry.from_allowed(FRONTEND_TOOLS, base_registry=base_registry)
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+    return format_child_findings(agent_name, task, summary, tool_calls_used)
+
+
 async def dispatch_explore_subagent(
     task: str,
     *,
@@ -477,6 +562,8 @@ def make_explore_agent_runner(
             dispatch = dispatch_web_subagent
         elif name == "data-analyst":
             dispatch = dispatch_data_subagent
+        elif name == "frontend-designer":
+            dispatch = dispatch_frontend_subagent
         else:
             cfg = None
             if load_agent is not None and name != "default":
