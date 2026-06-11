@@ -399,7 +399,7 @@ class ContextManager:
 
     def __init__(
         self,
-        max_context_tokens: int = 128_000,
+        max_context_tokens: int = 61_440,
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         pipeline: CompactionPipeline | None = None,
