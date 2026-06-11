@@ -33,6 +33,20 @@ uv run localharness start   # interactive session
 
 `init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
 
+### Running the harness on a different machine than the model
+
+The harness and the model server are separate processes talking HTTP — they don't need to
+share a machine. A laptop can run agents against a model served elsewhere on your network:
+`localharness init --endpoint http://<server-ip>:8000/v1`. Two things to know:
+
+- **Tools run where the harness runs.** bash/file tools execute on the client machine; the
+  model server only sees text in, text out. Pointing a harness at a server doesn't let
+  anyone act on the server.
+- **Secure the endpoint.** Inference servers ship with no authentication by default. On a
+  network with untrusted devices, start the server with an API key (e.g. vLLM `--api-key`)
+  and set `provider.api_key` to match; for access from outside your LAN use a private
+  overlay network (Tailscale/WireGuard). Never port-forward a bare endpoint to the internet.
+
 ## CLI
 
 | Command | Purpose |
