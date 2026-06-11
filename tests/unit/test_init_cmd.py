@@ -15,6 +15,20 @@ from localharness.provider.detector import DetectorResult
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _no_window_probe(monkeypatch):
+    """Keep init tests hermetic — the live-window probe makes a real HTTP call."""
+    import localharness.cli.init_cmd as init_cmd
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
+
+
+def test_fit_context_tokens_reserves_output():
+    from localharness.cli.init_cmd import _fit_context_tokens
+    assert _fit_context_tokens(65_536) == 61_440    # reference 64K window
+    assert _fit_context_tokens(131_072) == 126_976  # 128K window
+    assert _fit_context_tokens(8_000) == 8_192      # floor for tiny windows
+
+
 def _make_detector_result(found: bool = True, models: list[str] | None = None) -> DetectorResult:
     models = models or ["test-model:7b"]
     return DetectorResult(

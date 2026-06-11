@@ -129,7 +129,10 @@ def test_memory_config_defaults():
 def test_context_config_defaults():
     from localharness.config.models import ContextConfig
     cfg = ContextConfig()
-    assert cfg.max_context_tokens == 128_000
+    # 61,440 = reference 64K vLLM window minus the 4,096-token output reservation;
+    # a default above the served window disables compaction (observed live: turns
+    # died at the provider's input cap with the old 128_000 default on a 64K model).
+    assert cfg.max_context_tokens == 61_440
     assert cfg.compaction_threshold_pct == 80.0
 
 
