@@ -19,7 +19,7 @@ def sloth() -> Text:
     t.append("──────────────────────────\n", style=_BRANCH)
     t.append("   \\\\       //", style=_FUR)
     t.append("    Z\n", style=_ZZZ)
-    t.append("    ( - ᴥ - )", style=_FUR)
+    t.append("    ( - ω - )", style=_FUR)
     t.append("  z\n", style=_ZZZ)
     t.append("     `~~~~~`", style=_FUR)
     return t
