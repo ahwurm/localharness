@@ -6,9 +6,14 @@ import os
 from typing import Any, AsyncIterator
 
 import structlog
-from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
@@ -28,15 +33,63 @@ _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
 
-# Input bubble (Claude Code style): top border + left wall in the prompt message,
-# bottom border lives in the bottom_toolbar while typing, reprinted on accept so
-# scrollback keeps a closed box. "noreverse" kills the toolbar's default reverse video.
+# Input bubble (Claude Code style): an inline prompt_toolkit Application drawing a
+# fully closed rounded box around the buffer — bottom border hugs the input line
+# (a PromptSession bottom_toolbar would pin it to the screen bottom instead).
 INPUT_STYLE = Style.from_dict({
-    "bottom-toolbar": "noreverse",
     "frame": "ansibrightblack",
     "caret": "ansicyan bold",
-    "placeholder": "ansibrightblack italic",
+    "hint": "ansibrightblack italic",
 })
+
+
+def _build_input_app(history: FileHistory, prompt: str, hint: str) -> Application:
+    """Inline application: ╭─╮ │ > input │ ╰─ hint ─╯. Exits with the entered line."""
+    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
+    control = BufferControl(
+        buffer=buf,
+        input_processors=[
+            BeforeInput([("class:caret", f" {prompt} ")]),
+            AppendAutoSuggestion(),
+        ],
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _accept(event) -> None:
+        buf.append_to_history()
+        event.app.exit(result=buf.text)
+
+    @kb.add("c-c")
+    def _interrupt(event) -> None:
+        event.app.exit(exception=KeyboardInterrupt(), style="class:aborting")
+
+    @kb.add("c-d")
+    def _eof(event) -> None:
+        if not buf.text:
+            event.app.exit(exception=EOFError(), style="class:exiting")
+
+    def _wall(char: str) -> Window:
+        return Window(width=1, char=char)
+
+    hint_text = f" {hint} "
+    body = HSplit([
+        VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True), _wall("│")]),
+        VSplit([
+            _wall("╰"), Window(char="─", height=1, width=1),
+            Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1),
+            Window(char="─", height=1), _wall("╯"),
+        ]),
+    ], style="class:frame")
+
+    return Application(
+        layout=Layout(body, focused_element=control),
+        key_bindings=kb,
+        style=INPUT_STYLE,
+        mouse_support=False,
+    )
 
 TERMINAL_THEME = Theme({
     "agent.name":   "bold cyan",
@@ -118,7 +171,7 @@ class TerminalChannel(ChannelAdapter):
         super().__init__(bus, config)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
         self._err_console = Console(stderr=True, theme=TERMINAL_THEME, highlight=False)
-        self._session: PromptSession | None = None
+        self._history: FileHistory | None = None
         self._history_file = history_file
         self._live: Live | None = None
         self._state: str = "IDLE"
@@ -132,14 +185,11 @@ class TerminalChannel(ChannelAdapter):
         self._turn_failed_handle = None
 
     async def start(self) -> None:
-        """Initialize prompt_toolkit session and subscribe to bus events."""
+        """Initialize input history and subscribe to bus events."""
         history_path = os.path.expanduser(self._history_file)
         os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
-        self._session = PromptSession(
-            history=FileHistory(history_path),
-            auto_suggest=AutoSuggestFromHistory(),
-        )
+        self._history = FileHistory(history_path)
 
         self._action_handle = self.bus.subscribe(Action, self.on_action)
         self._observation_handle = self.bus.subscribe(Observation, self.on_observation)
@@ -261,29 +311,16 @@ class TerminalChannel(ChannelAdapter):
 
     async def read_input(self, prompt: str = ">") -> str:
         """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
-        if self._session is None:
+        if self._history is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
         self._state = "WAITING_INPUT"
-        width = max(self._console.width, 20)
-        bottom = "╰" + "─" * (width - 2) + "╯"
-        message = [
-            ("class:frame", "╭" + "─" * (width - 2) + "╮\n│"),
-            ("class:caret", f" {prompt} "),
-        ]
+        app = _build_input_app(self._history, prompt, hint="describe a task · /help for commands")
         try:
-            line = await self._session.prompt_async(
-                message,
-                default="",
-                placeholder=[("class:placeholder", "describe a task  (/help for commands)")],
-                bottom_toolbar=[("class:frame", bottom)],
-                style=INPUT_STYLE,
-            )
-            return line.strip()
+            line = await app.run_async()
+            return (line or "").strip()
         except KeyboardInterrupt:
             return ""
         finally:
-            # prompt_toolkit erases the toolbar on exit — close the box in scrollback.
-            self._console.print(bottom, style="bright_black", highlight=False)
             self._state = "IDLE"
 
     def _ensure_idle(self) -> None:
