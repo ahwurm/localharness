@@ -383,11 +383,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # --- Determine returning user ---
     is_returning = events_path.exists() and events_path.stat().st_size > 0
 
-    # --- Startup greeting ---
+    # --- Startup banner ---
     elapsed = _time.monotonic() - start_time
-    greeting = orchestrator.compose_greeting(is_returning=is_returning, model_name=resolved_model)
-    if greeting:
-        console.print(greeting)
+    from localharness.cli.ui import startup_banner
+    console.print(startup_banner(model=resolved_model, is_returning=is_returning))
 
     # --- Startup summary line ---
     parts = [f"({elapsed:.1f}s startup)"]

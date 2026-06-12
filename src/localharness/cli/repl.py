@@ -53,7 +53,7 @@ class OrchestratorREPL:
         try:
             while True:
                 try:
-                    user_input = await self._channel.read_input("you> ")
+                    user_input = await self._channel.read_input()
                 except EOFError:
                     break
                 if not user_input:
