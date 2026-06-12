@@ -8,18 +8,19 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# Sprite cells: S=fur, F=cream face, E=dark eye-stripe, N=nose, space=transparent.
-_PALETTE = {
-    "S": "on tan",
-    "F": "on navajo_white1",
-    "E": "on grey27",
-    "N": "on grey15",
+# Sprite cells map to (glyph, style): S=fur, F=cream face, space=transparent.
+_ON_FACE = "grey15 on navajo_white1"
+_GLYPHS = {
+    "S": (" ", "on tan"),
+    "F": (" ", "on navajo_white1"),
+    "~": ("~", _ON_FACE),   # zen eyes
+    "(": ("╰", _ON_FACE),   # smile
+    ")": ("╯", _ON_FACE),
 }
 _SPRITE = [
     "  SSSSSSSSSSSS",    # head top
-    "  SFEEFFFFEEFS",    # eyes inside dark patches
-    "  SEEFFFFFFEES",    # patches angle down-and-out (sloth mask)
-    "  SFFFFNNFFFFS",    # snout
+    "  SFF~FFFF~FFS",    # zen eyes
+    "  SFFFF()FFFFS",    # sloth smile
     "SSSSSSSSSSSSSSSS",  # arms out
     "   SS  SS  SS",     # legs
 ]
@@ -31,7 +32,8 @@ def sloth() -> Text:
     t = Text()
     for i, row in enumerate(_SPRITE):
         for ch in row:
-            t.append(" ", style=_PALETTE.get(ch))
+            glyph, style = _GLYPHS.get(ch, (" ", None))
+            t.append(glyph, style=style)
         if i in _ZZZ:
             t.append(_ZZZ[i], style="dim cyan")
         t.append("\n")
