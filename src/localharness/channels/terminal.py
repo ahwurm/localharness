@@ -9,6 +9,7 @@ import structlog
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -26,6 +27,16 @@ log = structlog.get_logger(__name__)
 _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
+
+# Input bubble (Claude Code style): top border + left wall in the prompt message,
+# bottom border lives in the bottom_toolbar while typing, reprinted on accept so
+# scrollback keeps a closed box. "noreverse" kills the toolbar's default reverse video.
+INPUT_STYLE = Style.from_dict({
+    "bottom-toolbar": "noreverse",
+    "frame": "ansibrightblack",
+    "caret": "ansicyan bold",
+    "placeholder": "ansibrightblack italic",
+})
 
 TERMINAL_THEME = Theme({
     "agent.name":   "bold cyan",
@@ -248,17 +259,31 @@ class TerminalChannel(ChannelAdapter):
             for line in detail.split("\n"):
                 self._err_console.print(f"  {line}")
 
-    async def read_input(self, prompt: str = "you> ") -> str:
-        """Read a line from the user via prompt_toolkit. Raises ChannelStartError if not started."""
+    async def read_input(self, prompt: str = ">") -> str:
+        """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
         if self._session is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
         self._state = "WAITING_INPUT"
+        width = max(self._console.width, 20)
+        bottom = "╰" + "─" * (width - 2) + "╯"
+        message = [
+            ("class:frame", "╭" + "─" * (width - 2) + "╮\n│"),
+            ("class:caret", f" {prompt} "),
+        ]
         try:
-            line = await self._session.prompt_async(prompt, default="")
+            line = await self._session.prompt_async(
+                message,
+                default="",
+                placeholder=[("class:placeholder", "describe a task  (/help for commands)")],
+                bottom_toolbar=[("class:frame", bottom)],
+                style=INPUT_STYLE,
+            )
             return line.strip()
         except KeyboardInterrupt:
             return ""
         finally:
+            # prompt_toolkit erases the toolbar on exit — close the box in scrollback.
+            self._console.print(bottom, style="bright_black", highlight=False)
             self._state = "IDLE"
 
     def _ensure_idle(self) -> None:
