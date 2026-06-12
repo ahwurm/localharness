@@ -8,49 +8,35 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-_FUR = "on tan"          # solid body cells (background color, Clawd-style)
-_TIPS = "tan"            # foreground half-blocks for claw tips
-_EYES = "bold grey15 on tan"
-_ZZZ = "dim cyan"
+# Sprite cells: S=fur, F=cream face, E=dark eye-stripe, N=nose, space=transparent.
+_PALETTE = {
+    "S": "on tan",
+    "F": "on navajo_white1",
+    "E": "on grey27",
+    "N": "on grey15",
+}
+_SPRITE = [
+    "  SSSSSSSSSSSS",    # head top
+    "  SFEEFFFFEEFS",    # eyes inside dark patches
+    "  SEEFFFFFFEES",    # patches angle down-and-out (sloth mask)
+    "  SFFFFNNFFFFS",    # snout
+    "SSSSSSSSSSSSSSSS",  # arms out
+    "   SS  SS  SS",     # legs
+]
+_ZZZ = {0: "   Z", 1: "  z"}
 
 
 def sloth() -> Text:
     """The mascot: a solid blocky sloth (Clawd-style), asleep on the job (it's local)."""
     t = Text()
-    # head top
-    t.append("  ")
-    t.append(" " * 12, style=_FUR)
-    t.append("   Z\n", style=_ZZZ)
-    # face: wide-set sleepy eyes
-    t.append("  ")
-    t.append("   ", style=_FUR)
-    t.append("-", style=_EYES)
-    t.append("    ", style=_FUR)
-    t.append("-", style=_EYES)
-    t.append("   ", style=_FUR)
-    t.append("  z\n", style=_ZZZ)
-    # arms out
-    t.append(" " * 16, style=_FUR)
-    t.append("\n")
-    # body
-    t.append("  ")
-    t.append(" " * 12, style=_FUR)
-    t.append("\n")
-    # three legs
+    for i, row in enumerate(_SPRITE):
+        for ch in row:
+            t.append(" ", style=_PALETTE.get(ch))
+        if i in _ZZZ:
+            t.append(_ZZZ[i], style="dim cyan")
+        t.append("\n")
     t.append("   ")
-    t.append("  ", style=_FUR)
-    t.append("  ")
-    t.append("  ", style=_FUR)
-    t.append("  ")
-    t.append("  ", style=_FUR)
-    t.append("\n")
-    # long claw tips
-    t.append("   ")
-    t.append("▀▀", style=_TIPS)
-    t.append("  ")
-    t.append("▀▀", style=_TIPS)
-    t.append("  ")
-    t.append("▀▀", style=_TIPS)
+    t.append("▀▀  ▀▀  ▀▀", style="tan")  # long claw tips
     return t
 
 
