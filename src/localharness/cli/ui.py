@@ -8,20 +8,49 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-_BRANCH = "grey42"
-_FUR = "tan"
+_FUR = "on tan"          # solid body cells (background color, Clawd-style)
+_TIPS = "tan"            # foreground half-blocks for claw tips
+_EYES = "bold grey15 on tan"
 _ZZZ = "dim cyan"
 
 
 def sloth() -> Text:
-    """The mascot: a sloth hanging from a branch, asleep on the job (it's local)."""
+    """The mascot: a solid blocky sloth (Clawd-style), asleep on the job (it's local)."""
     t = Text()
-    t.append("──────────────────────────\n", style=_BRANCH)
-    t.append("   \\\\       //", style=_FUR)
-    t.append("    Z\n", style=_ZZZ)
-    t.append("    ( - ω - )", style=_FUR)
+    # head top
+    t.append("  ")
+    t.append(" " * 12, style=_FUR)
+    t.append("   Z\n", style=_ZZZ)
+    # face: wide-set sleepy eyes
+    t.append("  ")
+    t.append("   ", style=_FUR)
+    t.append("-", style=_EYES)
+    t.append("    ", style=_FUR)
+    t.append("-", style=_EYES)
+    t.append("   ", style=_FUR)
     t.append("  z\n", style=_ZZZ)
-    t.append("     `~~~~~`", style=_FUR)
+    # arms out
+    t.append(" " * 16, style=_FUR)
+    t.append("\n")
+    # body
+    t.append("  ")
+    t.append(" " * 12, style=_FUR)
+    t.append("\n")
+    # three legs
+    t.append("   ")
+    t.append("  ", style=_FUR)
+    t.append("  ")
+    t.append("  ", style=_FUR)
+    t.append("  ")
+    t.append("  ", style=_FUR)
+    t.append("\n")
+    # long claw tips
+    t.append("   ")
+    t.append("▀▀", style=_TIPS)
+    t.append("  ")
+    t.append("▀▀", style=_TIPS)
+    t.append("  ")
+    t.append("▀▀", style=_TIPS)
     return t
 
 
