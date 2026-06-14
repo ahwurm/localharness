@@ -29,6 +29,32 @@ def test_fit_context_tokens_reserves_output():
     assert _fit_context_tokens(8_000) == 8_192      # floor for tiny windows
 
 
+def test_detect_llamacpp_nctx_parses_props(monkeypatch):
+    """llama.cpp /props.default_generation_settings.n_ctx is read as the served window."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    class _Resp:
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": 65536}}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    # base_url carries the /v1 suffix; /props lives at the server root
+    assert init_cmd._detect_llamacpp_nctx("http://localhost:8080/v1") == 65536
+
+
+def test_detect_llamacpp_nctx_returns_none_on_error(monkeypatch):
+    """A llama.cpp probe failure falls back to None (→ safe context default)."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert init_cmd._detect_llamacpp_nctx("http://localhost:8080/v1") is None
+
+
 def _make_detector_result(found: bool = True, models: list[str] | None = None) -> DetectorResult:
     models = models or ["test-model:7b"]
     return DetectorResult(
@@ -67,6 +93,22 @@ def test_init_writes_config(mock_client_cls, mock_detect, tmp_path):
     content = config_file.read_text()
     assert "test-model" in content
     assert "base_url" in content
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_writes_local_decode_timeout(mock_client_cls, mock_detect, tmp_path):
+    """Written config uses the 600s local-decode timeout, not the old too-tight 300s
+    (a 4096-token completion at ~10 tok/s is ~410s)."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    content = (tmp_path / "config.yaml").read_text()
+    assert "timeout_seconds: 600" in content
 
 
 @patch("localharness.cli.init_cmd.detect_provider")

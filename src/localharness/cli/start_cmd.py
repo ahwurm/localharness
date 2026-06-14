@@ -33,6 +33,15 @@ async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> tupl
     return False, None
 
 
+def _resolve_timeout(agent_timeout: float | None, provider_timeout: float) -> float:
+    """Per-agent timeout override wins when set; otherwise the provider default.
+
+    AgentConfig.timeout_seconds was previously never read at runtime — the start
+    path always passed provider.timeout_seconds — so the per-agent override the
+    reference-architecture docs tell slow-decode users to set was dead config."""
+    return agent_timeout if agent_timeout is not None else provider_timeout
+
+
 def _ensure_packaged_tools(config_dir: Path) -> None:
     """Install packaged helper scripts into <config-dir>/tools (idempotent).
 
@@ -185,7 +194,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_url=provider.base_url,
         model=resolved_model,
         api_key=provider.api_key,
-        timeout_seconds=provider.timeout_seconds,
+        timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
     )
     _probe_client = LLMClient(_initial_cfg)
 
@@ -205,7 +214,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_url=provider.base_url,
         model=resolved_model,
         api_key=provider.api_key,
-        timeout_seconds=provider.timeout_seconds,
+        timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         tool_call_mode=probed_mode or "native",
     )
     llm = LLMClient(llm_cfg)
