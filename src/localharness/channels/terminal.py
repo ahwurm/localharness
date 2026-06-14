@@ -40,11 +40,38 @@ INPUT_STYLE = Style.from_dict({
     "frame": "ansibrightblack",
     "caret": "ansicyan bold",
     "hint": "ansibrightblack italic",
+    # context meter — GSD thresholds (green → yellow → orange → red at compaction)
+    "ctx-low": "ansigreen",
+    "ctx-mid": "ansiyellow",
+    "ctx-high": "#ff8700",
+    "ctx-crit": "ansired bold",
+    "ctx-track": "ansibrightblack",
 })
 
 
-def _build_input_app(history: FileHistory, prompt: str, hint: str) -> Application:
-    """Inline application: ╭─╮ │ > input │ ╰─ hint ─╯. Exits with the entered line."""
+def _ctx_segments(pct: float) -> tuple[list[tuple[str, str]], int]:
+    """GSD-style 10-cell context meter: ████░░░░░░ 42%. Returns (fragments, plain width).
+
+    Color steps match gsd-statusline thresholds; localharness summary-compaction fires
+    at 80% (ctx-crit), so red == "compacting now," not "out of room."
+    """
+    pct = max(0.0, min(100.0, pct))
+    level = ("ctx-low" if pct < 50 else "ctx-mid" if pct < 65
+             else "ctx-high" if pct < 80 else "ctx-crit")
+    filled = min(10, int(pct // 10))
+    label = f" {pct:.0f}%"
+    frags = [
+        (f"class:{level}", "█" * filled),
+        ("class:ctx-track", "░" * (10 - filled)),
+        (f"class:{level}", label),
+    ]
+    return frags, 10 + len(label)
+
+
+def _build_input_app(
+    history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
+) -> Application:
+    """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
     control = BufferControl(
         buffer=buf,
@@ -74,14 +101,22 @@ def _build_input_app(history: FileHistory, prompt: str, hint: str) -> Applicatio
         return Window(width=1, char=char)
 
     hint_text = f" {hint} "
+    bottom = [
+        _wall("╰"), Window(char="─", height=1, width=1),
+        Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1),
+        Window(char="─", height=1),  # stretchy filler right-aligns the meter
+    ]
+    if context_pct is not None:
+        frags, w = _ctx_segments(context_pct)
+        bottom += [
+            Window(FormattedTextControl(frags), width=w, height=1),
+            Window(char="─", height=1, width=1),
+        ]
+    bottom.append(_wall("╯"))
     body = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
         VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True), _wall("│")]),
-        VSplit([
-            _wall("╰"), Window(char="─", height=1, width=1),
-            Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1),
-            Window(char="─", height=1), _wall("╯"),
-        ]),
+        VSplit(bottom),
     ], style="class:frame")
 
     return Application(
@@ -177,6 +212,7 @@ class TerminalChannel(ChannelAdapter):
         self._state: str = "IDLE"
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._heartbeat_counter: int = 0
+        self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
@@ -314,7 +350,11 @@ class TerminalChannel(ChannelAdapter):
         if self._history is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
         self._state = "WAITING_INPUT"
-        app = _build_input_app(self._history, prompt, hint="describe a task · /help for commands")
+        app = _build_input_app(
+            self._history, prompt,
+            hint="describe a task · /help for commands",
+            context_pct=self._context_pct,
+        )
         try:
             line = await app.run_async()
             return (line or "").strip()
@@ -329,7 +369,8 @@ class TerminalChannel(ChannelAdapter):
             self._err_console.print("[warning]Warning: output during streaming state[/warning]")
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
-        """Show a spinner update on every 3rd heartbeat."""
+        """Track context utilization (shown in the next input bubble) + spin every 3rd beat."""
+        self._context_pct = event.context_utilization_pct
         self._heartbeat_counter += 1
         if self._heartbeat_counter % 3 == 0:
             spinner_chars = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
