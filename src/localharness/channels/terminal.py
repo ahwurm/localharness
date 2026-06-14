@@ -100,12 +100,13 @@ def _build_input_app(
     def _wall(char: str) -> Window:
         return Window(width=1, char=char)
 
-    hint_text = f" {hint} "
-    bottom = [
-        _wall("╰"), Window(char="─", height=1, width=1),
-        Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1),
-        Window(char="─", height=1),  # stretchy filler right-aligns the meter
-    ]
+    bottom = [_wall("╰"), Window(char="─", height=1, width=1)]
+    if hint:
+        hint_text = f" {hint} "
+        bottom.append(
+            Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1)
+        )
+    bottom.append(Window(char="─", height=1))  # stretchy filler right-aligns the meter
     if context_pct is not None:
         frags, w = _ctx_segments(context_pct)
         bottom += [
@@ -351,9 +352,7 @@ class TerminalChannel(ChannelAdapter):
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
         self._state = "WAITING_INPUT"
         app = _build_input_app(
-            self._history, prompt,
-            hint="describe a task · /help for commands",
-            context_pct=self._context_pct,
+            self._history, prompt, hint="", context_pct=self._context_pct,
         )
         try:
             line = await app.run_async()
