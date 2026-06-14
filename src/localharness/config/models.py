@@ -865,8 +865,12 @@ class ProviderConfig(BaseModel):
         ),
     )
     timeout_seconds: float = Field(
-        default=300.0,
-        description="HTTP timeout for LLM API calls. Extended for local models.",
+        default=600.0,
+        description=(
+            "HTTP timeout for LLM API calls. Default 600s suits slow local "
+            "single-stream decode — a 4096-token completion at ~10 tok/s is ~410s, "
+            "which the previous 300s default killed mid-generation."
+        ),
     )
 
 
