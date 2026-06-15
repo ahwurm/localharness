@@ -39,6 +39,8 @@ _CROSS = "\u2717"     # ✗  tool result error
 INPUT_STYLE = Style.from_dict({
     "frame": "ansibrightblack",
     "caret": "ansicyan bold",
+    "input": "ansidefault",                # typed text: terminal default fg (else inherits the dim frame class)
+    "auto-suggestion": "ansibrightblack",  # ghost history completion stays dim
     "hint": "ansibrightblack italic",
     # context meter — GSD thresholds (green → yellow → orange → red at compaction)
     "ctx-low": "ansigreen",
@@ -90,7 +92,10 @@ def _build_input_app(
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
-        event.app.exit(exception=KeyboardInterrupt(), style="class:aborting")
+        if buf.text:
+            buf.reset()  # first Ctrl+C clears the line, like Claude Code / most shells
+        else:
+            event.app.exit(exception=KeyboardInterrupt(), style="class:aborting")
 
     @kb.add("c-d")
     def _eof(event) -> None:
@@ -116,7 +121,7 @@ def _build_input_app(
     bottom.append(_wall("╯"))
     body = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
-        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True), _wall("│")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
         VSplit(bottom),
     ], style="class:frame")
 
@@ -211,6 +216,7 @@ class TerminalChannel(ChannelAdapter):
         self._history_file = history_file
         self._live: Live | None = None
         self._state: str = "IDLE"
+        self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._heartbeat_counter: int = 0
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
@@ -356,8 +362,13 @@ class TerminalChannel(ChannelAdapter):
         )
         try:
             line = await app.run_async()
+            self._sigint_armed = False
             return (line or "").strip()
         except KeyboardInterrupt:
+            if self._sigint_armed:
+                raise EOFError  # second consecutive Ctrl+C on an empty line → exit the REPL
+            self._sigint_armed = True
+            self._console.print("[system.info](Press Ctrl+C again to exit)[/system.info]")
             return ""
         finally:
             self._state = "IDLE"
