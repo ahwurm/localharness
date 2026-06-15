@@ -318,3 +318,87 @@ def test_default_deny_patterns_use_bash_exec():
     assert "bash_exec(chmod 777 *)" in patterns
     assert "bash(sudo:*)" not in patterns
     assert "bash(rm -rf *)" not in patterns
+
+
+# ---------------------------------------------------------------------------
+# Stale web-result eviction (_evict_stale_web_results + build_messages gate)
+# ---------------------------------------------------------------------------
+
+import json
+
+from localharness.agent.context import (
+    WEB_EVICT_KEEP_LAST,
+    _evict_stale_web_results,
+)
+
+
+def _web_exchange(i: int, tool: str = "web_fetch", body_chars: int = 3000):
+    """One assistant tool-call + tool-result pair for a web tool."""
+    hint = {"url": f"https://example.test/p{i}"} if tool == "web_fetch" else {"query": f"q{i}"}
+    return [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": f"wc-{i}", "type": "function",
+            "function": {"name": tool, "arguments": json.dumps(hint)},
+        }]},
+        {"role": "tool", "tool_call_id": f"wc-{i}", "content": "x" * body_chars},
+    ]
+
+
+def test_evict_stubs_all_but_newest_keeping_hint():
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
+    for i in range(4):
+        msgs += _web_exchange(i)
+    out, evicted = _evict_stale_web_results(msgs, keep_last=2)
+    assert evicted == 2
+    stubbed = [m for m in out if m.get("role") == "tool" and "omitted" in m["content"]]
+    assert len(stubbed) == 2
+    # oldest two stubbed, URL hint preserved, newest two intact
+    assert "https://example.test/p0" in stubbed[0]["content"]
+    assert out[-1]["content"] == "x" * 3000
+    # original list untouched (no mutation)
+    assert msgs[3]["content"] == "x" * 3000
+
+
+def test_evict_skips_small_and_non_web_results():
+    msgs = [
+        *_web_exchange(0, body_chars=100),               # small web result — skip
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "rc-1", "type": "function",
+            "function": {"name": "read", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "rc-1", "content": "y" * 5000},  # non-web — skip
+        *_web_exchange(1),
+        *_web_exchange(2),
+        *_web_exchange(3),
+    ]
+    out, evicted = _evict_stale_web_results(msgs, keep_last=2)
+    assert evicted == 1  # only exchange 1 (oldest big web beyond keep-last)
+    assert out[1]["content"] == "x" * 100          # small survives
+    assert any(m.get("content") == "y" * 5000 for m in out)  # read result survives
+
+
+def test_evict_idempotent_on_stubs():
+    msgs = []
+    for i in range(4):
+        msgs += _web_exchange(i)
+    once, n1 = _evict_stale_web_results(msgs, keep_last=1)
+    twice, n2 = _evict_stale_web_results(once, keep_last=1)
+    assert n1 == 3 and n2 == 0
+    assert once == twice
+
+
+@pytest.mark.asyncio
+async def test_build_messages_evicts_only_over_threshold():
+    from localharness.agent.context import ContextManager
+
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(4):
+        msgs += _web_exchange(i, body_chars=4000)
+    # tiny window -> usage fraction far over 0.50 -> eviction fires
+    cm_small = ContextManager(max_context_tokens=2000)
+    built, _ = await cm_small.build_messages(list(msgs), None)
+    assert sum("omitted" in (m.get("content") or "") for m in built) == 4 - WEB_EVICT_KEEP_LAST
+    # huge window -> under threshold -> untouched
+    cm_big = ContextManager(max_context_tokens=1_000_000)
+    built2, _ = await cm_big.build_messages(list(msgs), None)
+    assert all("omitted" not in (m.get("content") or "") for m in built2)

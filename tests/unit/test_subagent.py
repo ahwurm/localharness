@@ -21,9 +21,13 @@ from localharness.agent.subagent import (
     EXPLORE_MAX_TOOL_CALLS,
     EXPLORE_TOOLS,
     MAX_DEPTH,
+    WEB_TOOLS,
     build_explore_config,
+    build_web_researcher_config,
     dispatch_explore_subagent,
+    dispatch_web_subagent,
     format_findings,
+    format_web_findings,
 )
 from localharness.core.events import Action, Observation
 from localharness.tools.builtin import register_builtin_tools
@@ -232,3 +236,231 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
     # Transcript/event-log artifacts must not leak into the returned string.
     for leaked in ("Action(", "Observation(", "TaskComplete(", "event_type", "role='tool'", '"role":'):
         assert leaked not in result
+
+
+# ---------------------------------------------------------------------------
+# 6. Web-researcher subagent — web-only toolset, depth guard, distilled findings
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_web_child_registry_is_web_only():
+    base = await _builtin_registry()
+    child = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base)
+    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch"}
+    # No write / execute / spawn in the web child.
+    assert child.has("write") is False
+    assert child.has("bash_exec") is False
+    assert child.has("agent") is False
+
+
+def test_web_researcher_config_has_distinct_budget():
+    cfg = build_web_researcher_config("web-researcher")
+    assert cfg.name == "web-researcher"
+    assert cfg.permissions.budget.max_actions == 12
+
+
+def test_format_web_findings_is_structured_summary():
+    out = format_web_findings("anthropic june 15 pricing", "It splits headless billing.", 3)
+    lines = out.splitlines()
+    assert lines[0].startswith("[web research]")
+    assert "tool calls: 3" in lines[0]
+    assert "It splits headless billing." in out
+
+
+@pytest.mark.asyncio
+async def test_web_dispatch_at_depth_one_refuses(mock_llm_client, bus):
+    base = await _builtin_registry()
+    llm = mock_llm_client([mock_llm_client.Response(content="unused")])
+    with pytest.raises(ValueError):
+        await dispatch_web_subagent(
+            "research X",
+            llm=llm,
+            bus=bus,
+            base_registry=base,
+            parent_session_id="p",
+            permission_evaluator=PermissionEvaluator(),
+            depth=MAX_DEPTH,
+        )
+
+
+# ---------------------------------------------------------------------------
+# data-analyst subagent (mirror of web-researcher wiring)
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+def test_data_analyst_config_budget_and_role():
+    from localharness.agent.subagent import (
+        DATA_MAX_ACTIONS, DATA_MAX_DURATION_MINUTES, build_data_analyst_config,
+    )
+    cfg = build_data_analyst_config()
+    assert cfg.name == "data-analyst"
+    assert cfg.permissions.budget.max_actions == DATA_MAX_ACTIONS
+    assert cfg.permissions.budget.max_duration_minutes == DATA_MAX_DURATION_MINUTES
+    assert "source of truth" in cfg.role
+    assert "never paste raw file dumps" in cfg.role.lower()
+
+
+@pytest.mark.asyncio
+async def test_data_analyst_registry_is_local_tools_only():
+    from localharness.agent.subagent import DATA_TOOLS
+    from localharness.tools.registry import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    child = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base)
+    assert set(child._tools["global"].keys()) == {"bash_exec", "read", "glob", "grep"}
+
+
+@pytest.mark.asyncio
+async def test_runner_dispatches_data_analyst(monkeypatch):
+    import localharness.agent.subagent as subagent
+
+    captured = {}
+    async def _fake_dispatch(task, **kwargs):
+        captured["task"] = task
+        captured["depth"] = kwargs.get("depth")
+        return "[data analysis] ok"
+    monkeypatch.setattr(subagent, "dispatch_data_subagent", _fake_dispatch)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    out = await runner("data_analyst", "compute the thing", 0)   # `_`->`-` sanitization
+    assert out == "[data analysis] ok"
+    assert captured["task"] == "compute the thing"
+    assert captured["depth"] == 0
+
+
+def test_format_data_findings_header():
+    from localharness.agent.subagent import format_data_findings
+    out = format_data_findings("task x", "answer 42", 7)
+    assert out.startswith("[data analysis] task: task x | tool calls: 7")
+    assert "answer 42" in out
+
+
+# ---------------------------------------------------------------------------
+# Config-defined children (dispatch_config_subagent + runner load_agent seam)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_child_registry_respects_add_and_strips_agent():
+    from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS
+    from localharness.config.models import AgentConfig
+    from localharness.tools.registry import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+
+    # The allow-list semantics live inside dispatch_config_subagent; replicate its filter
+    cfg = AgentConfig.model_validate({
+        "name": "yt-summarizer", "role": "Test specialist.",
+        "tools": {"add": ["bash_exec", "web_fetch", "agent"], "deny": ["web_fetch"]},
+    })
+    add = list(cfg.tools.add or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
+    deny = set(cfg.tools.deny or [])
+    allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    assert allowed == ["bash_exec"]  # deny wins; `agent` always stripped
+
+
+@pytest.mark.asyncio
+async def test_runner_dispatches_yaml_defined_agent(monkeypatch):
+    import localharness.agent.subagent as subagent
+    from localharness.config.models import AgentConfig
+
+    yt_cfg = AgentConfig.model_validate({
+        "name": "youtube-summarizer", "role": "Fetch transcripts and summarize.",
+        "tools": {"add": ["bash_exec"]},
+        "permissions": {"budget": {"max_actions": 8, "max_duration_minutes": 6.0}},
+    })
+
+    captured = {}
+    async def _fake_config_dispatch(task, *, agent_config, **kwargs):
+        captured["task"] = task
+        captured["name"] = agent_config.name
+        return f"[{agent_config.name}] done"
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", _fake_config_dispatch)
+
+    loads = []
+    def _load_agent(name):
+        loads.append(name)
+        if name == "youtube-summarizer":
+            return yt_cfg
+        raise FileNotFoundError(name)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=_load_agent,
+    )
+    out = await runner("youtube_summarizer", "summarize video X", 0)  # `_`->`-` sanitize
+    assert out == "[youtube-summarizer] done"
+    assert captured["task"] == "summarize video X"
+    assert loads == ["youtube-summarizer"]
+
+    # unknown name still refuses, with builder guidance in the message
+    with pytest.raises(ValueError, match="CREATE one"):
+        await runner("nonexistent-agent", "do thing", 0)
+
+    # "default" is never loadable as a child (self-delegation guard)
+    with pytest.raises(ValueError, match="not wired"):
+        await runner("default", "do thing", 0)
+
+
+@pytest.mark.asyncio
+async def test_runner_without_loader_keeps_old_refusal():
+    import localharness.agent.subagent as subagent
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    with pytest.raises(ValueError, match="not wired"):
+        await runner("youtube-summarizer", "x", 0)
+
+
+def test_prepend_toolset_states_capabilities():
+    from localharness.agent.subagent import prepend_toolset
+    out = prepend_toolset("do the thing", ["bash_exec", "read"])
+    assert out.startswith("(Your ONLY available tools: bash_exec, read.")
+    assert out.endswith("do the thing")
+    assert "say so immediately" in out
+
+
+# ---------------------------------------------------------------------------
+# frontend-designer subagent (built-in, mirror of data-analyst wiring)
+# ---------------------------------------------------------------------------
+
+def test_frontend_designer_builtin_config_shape():
+    from localharness.agent.subagent import (
+        FRONTEND_MAX_ACTIONS,
+        FRONTEND_MAX_DURATION_MINUTES,
+        FRONTEND_TOOLS,
+        build_frontend_designer_config,
+    )
+    cfg = build_frontend_designer_config()
+    assert cfg.name == "frontend-designer"
+    assert cfg.permissions.budget.max_actions == FRONTEND_MAX_ACTIONS
+    assert cfg.permissions.budget.max_duration_minutes == FRONTEND_MAX_DURATION_MINUTES
+    # The role must teach the visual-verification loop and the packaged helper.
+    assert "design-screenshot.js" in cfg.role
+    assert "agent" not in FRONTEND_TOOLS  # child cannot delegate
+
+
+@pytest.mark.asyncio
+async def test_runner_routes_frontend_designer_to_builtin_dispatch():
+    """'frontend-designer' is a built-in: the runner must route it to its dispatcher
+    (depth guard fires) rather than fall through to the yaml-loader 'not wired' path."""
+    import localharness.agent.subagent as subagent
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+    )
+    with pytest.raises(ValueError, match="depth"):
+        await runner("frontend-designer", "build a landing page", subagent.MAX_DEPTH)

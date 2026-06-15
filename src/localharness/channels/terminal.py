@@ -6,9 +6,15 @@ import os
 from typing import Any, AsyncIterator
 
 import structlog
-from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -18,7 +24,7 @@ from rich.theme import Theme
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete
+from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
 
 log = structlog.get_logger(__name__)
 
@@ -26,6 +32,100 @@ log = structlog.get_logger(__name__)
 _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
+
+# Input bubble (Claude Code style): an inline prompt_toolkit Application drawing a
+# fully closed rounded box around the buffer — bottom border hugs the input line
+# (a PromptSession bottom_toolbar would pin it to the screen bottom instead).
+INPUT_STYLE = Style.from_dict({
+    "frame": "ansibrightblack",
+    "caret": "ansicyan bold",
+    "hint": "ansibrightblack italic",
+    # context meter — GSD thresholds (green → yellow → orange → red at compaction)
+    "ctx-low": "ansigreen",
+    "ctx-mid": "ansiyellow",
+    "ctx-high": "#ff8700",
+    "ctx-crit": "ansired bold",
+    "ctx-track": "ansibrightblack",
+})
+
+
+def _ctx_segments(pct: float) -> tuple[list[tuple[str, str]], int]:
+    """GSD-style 10-cell context meter: ████░░░░░░ 42%. Returns (fragments, plain width).
+
+    Color steps match gsd-statusline thresholds; localharness summary-compaction fires
+    at 80% (ctx-crit), so red == "compacting now," not "out of room."
+    """
+    pct = max(0.0, min(100.0, pct))
+    level = ("ctx-low" if pct < 50 else "ctx-mid" if pct < 65
+             else "ctx-high" if pct < 80 else "ctx-crit")
+    filled = min(10, int(pct // 10))
+    label = f" {pct:.0f}%"
+    frags = [
+        (f"class:{level}", "█" * filled),
+        ("class:ctx-track", "░" * (10 - filled)),
+        (f"class:{level}", label),
+    ]
+    return frags, 10 + len(label)
+
+
+def _build_input_app(
+    history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
+) -> Application:
+    """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
+    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
+    control = BufferControl(
+        buffer=buf,
+        input_processors=[
+            BeforeInput([("class:caret", f" {prompt} ")]),
+            AppendAutoSuggestion(),
+        ],
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _accept(event) -> None:
+        buf.append_to_history()
+        event.app.exit(result=buf.text)
+
+    @kb.add("c-c")
+    def _interrupt(event) -> None:
+        event.app.exit(exception=KeyboardInterrupt(), style="class:aborting")
+
+    @kb.add("c-d")
+    def _eof(event) -> None:
+        if not buf.text:
+            event.app.exit(exception=EOFError(), style="class:exiting")
+
+    def _wall(char: str) -> Window:
+        return Window(width=1, char=char)
+
+    bottom = [_wall("╰"), Window(char="─", height=1, width=1)]
+    if hint:
+        hint_text = f" {hint} "
+        bottom.append(
+            Window(FormattedTextControl([("class:hint", hint_text)]), width=len(hint_text), height=1)
+        )
+    bottom.append(Window(char="─", height=1))  # stretchy filler right-aligns the meter
+    if context_pct is not None:
+        frags, w = _ctx_segments(context_pct)
+        bottom += [
+            Window(FormattedTextControl(frags), width=w, height=1),
+            Window(char="─", height=1, width=1),
+        ]
+    bottom.append(_wall("╯"))
+    body = HSplit([
+        VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True), _wall("│")]),
+        VSplit(bottom),
+    ], style="class:frame")
+
+    return Application(
+        layout=Layout(body, focused_element=control),
+        key_bindings=kb,
+        style=INPUT_STYLE,
+        mouse_support=False,
+    )
 
 TERMINAL_THEME = Theme({
     "agent.name":   "bold cyan",
@@ -107,31 +207,31 @@ class TerminalChannel(ChannelAdapter):
         super().__init__(bus, config)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
         self._err_console = Console(stderr=True, theme=TERMINAL_THEME, highlight=False)
-        self._session: PromptSession | None = None
+        self._history: FileHistory | None = None
         self._history_file = history_file
         self._live: Live | None = None
         self._state: str = "IDLE"
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._heartbeat_counter: int = 0
+        self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
         self._escalation_handle = None
         self._heartbeat_handle = None
+        self._turn_failed_handle = None
 
     async def start(self) -> None:
-        """Initialize prompt_toolkit session and subscribe to bus events."""
+        """Initialize input history and subscribe to bus events."""
         history_path = os.path.expanduser(self._history_file)
         os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
-        self._session = PromptSession(
-            history=FileHistory(history_path),
-            auto_suggest=AutoSuggestFromHistory(),
-        )
+        self._history = FileHistory(history_path)
 
         self._action_handle = self.bus.subscribe(Action, self.on_action)
         self._observation_handle = self.bus.subscribe(Observation, self.on_observation)
         self._task_complete_handle = self.bus.subscribe(TaskComplete, self.on_task_complete)
+        self._turn_failed_handle = self.bus.subscribe(TurnFailed, self.on_turn_failed)
         self._escalation_handle = self.bus.subscribe(Escalation, self.on_escalation)
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
 
@@ -141,6 +241,7 @@ class TerminalChannel(ChannelAdapter):
             self._action_handle,
             self._observation_handle,
             self._task_complete_handle,
+            self._turn_failed_handle,
             self._escalation_handle,
             self._heartbeat_handle,
         ):
@@ -245,14 +346,17 @@ class TerminalChannel(ChannelAdapter):
             for line in detail.split("\n"):
                 self._err_console.print(f"  {line}")
 
-    async def read_input(self, prompt: str = "you> ") -> str:
-        """Read a line from the user via prompt_toolkit. Raises ChannelStartError if not started."""
-        if self._session is None:
+    async def read_input(self, prompt: str = ">") -> str:
+        """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
+        if self._history is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
         self._state = "WAITING_INPUT"
+        app = _build_input_app(
+            self._history, prompt, hint="", context_pct=self._context_pct,
+        )
         try:
-            line = await self._session.prompt_async(prompt, default="")
-            return line.strip()
+            line = await app.run_async()
+            return (line or "").strip()
         except KeyboardInterrupt:
             return ""
         finally:
@@ -264,7 +368,8 @@ class TerminalChannel(ChannelAdapter):
             self._err_console.print("[warning]Warning: output during streaming state[/warning]")
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
-        """Show a spinner update on every 3rd heartbeat."""
+        """Track context utilization (shown in the next input bubble) + spin every 3rd beat."""
+        self._context_pct = event.context_utilization_pct
         self._heartbeat_counter += 1
         if self._heartbeat_counter % 3 == 0:
             spinner_chars = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"

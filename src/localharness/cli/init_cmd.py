@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.prompt import Confirm, IntPrompt
 
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import HarnessConfig, OrgConfig, ProviderConfig
+from localharness.config.models import ContextConfig, HarnessConfig, OrgConfig, ProviderConfig
 from localharness.provider.client import LLMClient, LLMConfig
 from localharness.provider.detector import DEFAULT_PORTS, DetectorResult, detect_provider
 
@@ -21,6 +21,41 @@ err_console = Console(stderr=True)
 
 def _build_base_url_for_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/")
+
+
+def _detect_max_model_len(base_url: str) -> int | None:
+    """vLLM's /v1/models exposes max_model_len — fit the context budget to the live window.
+
+    Returns None when the endpoint doesn't report it (Ollama, LM Studio, llama.cpp)."""
+    try:
+        import httpx
+        data = httpx.get(f"{base_url.rstrip('/')}/models", timeout=2.0).json()
+        val = data["data"][0].get("max_model_len")
+        return int(val) if val else None
+    except Exception:
+        return None
+
+
+def _fit_context_tokens(max_model_len: int, output_reserve: int = 4_096) -> int:
+    """Context budget that compacts BEFORE the served window's input cap."""
+    return max(8_192, max_model_len - output_reserve)
+
+
+def _detect_llamacpp_nctx(base_url: str) -> int | None:
+    """llama.cpp's /props exposes the served context window (n_ctx).
+
+    base_url is OpenAI-compat (…/v1); /props lives at the server root.
+    Returns None on any error. (Ollama is handled by the safe default — its
+    /v1/models reports no window and /api/show gives the model's trained max,
+    not the served num_ctx, so clamping to it would overshoot.)"""
+    try:
+        import httpx
+        native = base_url.removesuffix("/v1")
+        props = httpx.get(f"{native}/props", timeout=2.0).json()
+        val = props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx")
+        return int(val) if val else None
+    except Exception:
+        return None
 
 
 def init_app(
@@ -144,6 +179,21 @@ def init_app(
     # ------------------------------------------------------------------ #
     from pydantic_yaml import to_yaml_str
 
+    # Fit the context budget to the served window when the provider reports it —
+    # a budget above the real window disables compaction and kills long turns.
+    org_kwargs: dict = {"default_model": selected_model}
+    if result.provider_type == "llamacpp":
+        max_len = _detect_llamacpp_nctx(result.base_url)
+    else:
+        max_len = _detect_max_model_len(result.base_url)
+    if max_len:
+        fitted = _fit_context_tokens(max_len)
+        org_kwargs["context"] = ContextConfig(max_context_tokens=fitted)
+        console.print(
+            f"  [green]✓[/green] Context budget: {fitted:,} tokens "
+            f"(served window {max_len:,} − 4,096 output reservation)"
+        )
+
     harness = HarnessConfig(
         version="1",
         provider=ProviderConfig(
@@ -153,9 +203,9 @@ def init_app(
             default_model=selected_model,
             available_models=result.models,
             supports_function_calling=(cap.tool_call_mode == "native"),
-            timeout_seconds=300.0,
+            timeout_seconds=600.0,
         ),
-        org=OrgConfig(default_model=selected_model),
+        org=OrgConfig(**org_kwargs),
     )
     config_file.write_text(to_yaml_str(harness), encoding="utf-8")
     console.print(f"\n[green]✓[/green] LocalHarness configured at {config_file}.")

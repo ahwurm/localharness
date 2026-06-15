@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,6 +41,7 @@ class Session:
     input_tokens: int = 0
     output_tokens: int = 0
     tokens_estimated: bool = False
+    act_nudge_used: bool = False
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -216,6 +218,30 @@ def _format_error_summary(session: Session, exc: Exception) -> str:
     )
 
 
+def _budget_note(session: Session, budget: BudgetTracker) -> str:
+    """One-line budget status appended to each iteration's last tool result so the
+    model can pace itself and summarize BEFORE the wall (Claude Code-style running
+    usage warnings). Empty string when both budgets are unlimited."""
+    parts = []
+    nearly = False
+    if budget.max_actions > 0:
+        parts.append(f"{session.actions_taken}/{budget.max_actions} tool calls used")
+        nearly = nearly or (budget.max_actions - session.actions_taken) <= 2
+    if budget.max_duration_minutes > 0:
+        elapsed = session.elapsed_minutes()
+        parts.append(f"{elapsed:.1f}/{budget.max_duration_minutes:.0f} min elapsed")
+        nearly = nearly or (budget.max_duration_minutes - elapsed) <= max(
+            1.0, 0.2 * budget.max_duration_minutes
+        )
+    if not parts:
+        return ""
+    note = f"\n\n[budget: {', '.join(parts)}]"
+    if nearly:
+        note = (note[:-1] + " — wrap up NOW: give your final summary in your next reply,"
+                            " before the limit cuts you off]")
+    return note
+
+
 def _clean_summary(text: str) -> str:
     """Remove XML tool call remnants and thinking tags from summary text."""
     import re
@@ -226,6 +252,83 @@ def _clean_summary(text: str) -> str:
     # Remove orphaned opening <tool_call> blocks (truncated)
     text = re.sub(r"<tool_call>.*", "", text, flags=re.DOTALL)
     return text.strip()
+
+
+def _repair_json_object(s: str) -> str | None:
+    """Coerce a truncated JSON object string (generation cut mid-arguments) into
+    parseable JSON: drop a dangling escape, close an open string, close open
+    braces/brackets. Returns parseable JSON or None if unrepairable."""
+    try:
+        json.loads(s)
+        return s
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if not isinstance(s, str):
+        return None
+    t = s.strip()
+    if t.endswith("\\") and not t.endswith("\\\\"):
+        t = t[:-1]
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    for ch in t:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    if in_str:
+        t += '"'
+    t += "".join(reversed(stack))
+    try:
+        json.loads(t)
+        return t
+    except json.JSONDecodeError:
+        return None
+
+
+def _sanitize_raw_tool_calls(raw: Any) -> Any:
+    """Repair or drop tool calls whose arguments JSON is malformed BEFORE they enter
+    session history. vLLM's chat template json-parses historical tool_call arguments,
+    so one truncated generation otherwise 400s every subsequent request (observed:
+    finish-mid-string -> 'Unterminated string' BadRequest -> turn death). Repaired
+    arguments are re-serialized normalized; unrepairable calls are dropped. Returns
+    the cleaned list, or None if nothing survives (preserves no-tool-call semantics)."""
+    if not raw:
+        return raw
+    clean = []
+    for tc in raw:
+        fn = getattr(tc, "function", None) if not isinstance(tc, dict) else tc.get("function", {})
+        if fn is None:
+            continue
+        args = (getattr(fn, "arguments", None) if not isinstance(fn, dict)
+                else fn.get("arguments")) or "{}"
+        repaired = _repair_json_object(args)
+        if repaired is None:
+            name = (getattr(fn, "name", "?") if not isinstance(fn, dict) else fn.get("name", "?"))
+            log.warning("dropping tool call '%s': arguments JSON unrepairable (%d chars)",
+                        name, len(args))
+            continue
+        if repaired is not args:
+            normalized = json.dumps(json.loads(repaired))
+            if isinstance(fn, dict):
+                fn["arguments"] = normalized
+            else:
+                fn.arguments = normalized
+            name = (getattr(fn, "name", "?") if not isinstance(fn, dict) else fn.get("name", "?"))
+            log.warning("repaired truncated arguments JSON for tool call '%s'", name)
+        clean.append(tc)
+    return clean or None
 
 
 def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
@@ -484,6 +587,9 @@ class AgentLoop:
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
         system_prompt = _assemble_role(self._config)
+        # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
+        _now = datetime.now().astimezone()
+        system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
         if tool_call_mode != "native":
             system_prompt += (
                 "\n\nWhen you have finished using tools, respond directly to the user. "
@@ -552,7 +658,6 @@ class AgentLoop:
             violation = budget.check(session)
             if violation is not None:
                 session.terminated_reason = f"budget_{violation.reason}"
-                self._conversation = list(session.messages)
                 log.info(
                     "Budget exceeded for %s: %s (limit=%s, current=%s)",
                     self._config.name,
@@ -560,7 +665,9 @@ class AgentLoop:
                     violation.limit,
                     violation.current,
                 )
-                return _format_budget_summary(session, violation)
+                summary = await self._final_summary_on_budget(session, violation, on_token)
+                self._conversation = list(session.messages)
+                return summary
 
             # 3. Build request messages first (runs compaction if needed)
             request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
@@ -656,7 +763,11 @@ class AgentLoop:
             from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
             raw_content = getattr(response_message, "content", None)
             content = strip_thinking_tags(raw_content) if raw_content else raw_content
-            raw_tool_calls = getattr(response_message, "tool_calls", None)
+            raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
+            try:
+                response_message.tool_calls = raw_tool_calls  # extraction must match history
+            except Exception:
+                pass
             session.push({
                 "role": "assistant",
                 "content": content,
@@ -713,6 +824,24 @@ class AgentLoop:
                             "and try again with your intended tool call."
                         ),
                     })
+                    continue
+
+                # 9b. Act-guard: a first response that would END the turn with ZERO
+                # actions taken is, empirically, usually announce-then-halt ("I'll
+                # research X..." + stop) — sampling-dependent on small local models
+                # (observed live: fail/succeed/fail across identical prompts). Give
+                # it exactly one deterministic push before accepting a tool-less
+                # completion; a genuine no-tool answer just gets repeated.
+                if (session.actions_taken == 0 and not session.act_nudge_used
+                        and tool_schemas):
+                    session.act_nudge_used = True
+                    log.info("Act-guard: tool-less first completion — nudging once")
+                    session.push({"role": "user", "content": (
+                        "You ended your reply with stated intentions but took no action. "
+                        "Execute your plan NOW: make the tool call in this response. "
+                        "If the task genuinely needs no tools, give the complete final "
+                        "answer instead."
+                    )})
                     continue
 
                 # Natural completion — reset parse retries
@@ -805,8 +934,11 @@ class AgentLoop:
                             self._config.division or "",
                             self._config.tools,
                         )
-                        result_content = result.output
                         is_error = not result.success
+                        # Error results carry their message in .error with output "" —
+                        # forward it or the model sees an empty result it can't react to.
+                        result_content = (result.output if result.success
+                                          else f"[tool error] {result.error or 'unknown error'}")
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -831,6 +963,11 @@ class AgentLoop:
                 ))
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)
+
+            # 11b. Append budget status to the iteration's last tool result
+            note = _budget_note(session, budget)
+            if note and session.messages and session.messages[-1].get("role") == "tool":
+                session.messages[-1]["content"] = (session.messages[-1]["content"] or "") + note
 
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
@@ -869,6 +1006,45 @@ class AgentLoop:
                     session.iteration,
                 )
                 return _format_stuck_summary(session)
+
+    async def _final_summary_on_budget(
+        self, session: Session, violation: BudgetViolation, on_token: Callable | None,
+    ) -> str:
+        """One forced no-tools generation so a budget-exhausted agent returns its
+        FINDINGS instead of a task echo. Children previously died with only
+        '[Budget limit reached]' after a full gather phase, so the parent received
+        zero facts. Falls back to the plain budget notice on any provider error."""
+        instruction = (
+            f"[{violation.message}] You are out of tool budget — do NOT call any tools. "
+            "In ONE reply, summarize everything you found relevant to the original task: "
+            "concrete facts, names, numbers, and source URLs. Partial findings are valuable. "
+            "If you found nothing, state in one line what you tried."
+        )
+        try:
+            request_messages, _ = await self._ctx.build_messages(
+                session.messages + [{"role": "user", "content": instruction}], None
+            )
+            response_message, usage = await self._llm.stream_complete(
+                request_messages, tools=None, on_token=on_token,
+            )
+            if usage is not None:
+                session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+            from localharness.provider.fn_call import strip_thinking_tags
+            text = strip_thinking_tags(getattr(response_message, "content", None) or "").strip()
+            if not text:
+                return _format_budget_summary(session, violation)
+            session.push({"role": "user", "content": instruction})
+            session.push({"role": "assistant", "content": text})
+            return (
+                f"{_clean_summary(text)}\n\n"
+                f"[Budget limit reached: {violation.message} "
+                f"Completed {session.actions_taken} tool calls in "
+                f"{session.elapsed_minutes():.1f} minutes.]"
+            )
+        except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
+            log.warning("final-summary-on-budget failed (%s); returning plain notice", exc)
+            return _format_budget_summary(session, violation)
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
         """Single iteration for testing/debugging."""
@@ -929,7 +1105,11 @@ class AgentLoop:
             session.tokens_estimated = True
 
         content = getattr(response_message, "content", None)
-        raw_tool_calls = getattr(response_message, "tool_calls", None)
+        raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
+        try:
+            response_message.tool_calls = raw_tool_calls  # extraction must match history
+        except Exception:
+            pass
         session.push({
             "role": "assistant",
             "content": content,
