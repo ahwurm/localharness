@@ -24,6 +24,5 @@ cp examples/agents/hn-monitor.yaml ~/.localharness/agents/
 uv run localharness start                             # interactive session
 ```
 
-See [CONTEXT-HARNESS.md](../CONTEXT-HARNESS.md) for how agents, divisions, and
-the orchestrator fit together, and the tool model used by `tools.add` /
-`tools.mcp_servers`.
+See [docs/specs/](../docs/specs/) for how agents, divisions, and the orchestrator
+fit together, and the tool model used by `tools.add` / `tools.mcp_servers`.
