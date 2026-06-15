@@ -33,6 +33,35 @@ async def _probe_llm(llm: Any, max_retries: int = 3, delay: float = 2.0) -> tupl
     return False, None
 
 
+def _resolve_timeout(agent_timeout: float | None, provider_timeout: float) -> float:
+    """Per-agent timeout override wins when set; otherwise the provider default.
+
+    AgentConfig.timeout_seconds was previously never read at runtime — the start
+    path always passed provider.timeout_seconds — so the per-agent override the
+    reference-architecture docs tell slow-decode users to set was dead config."""
+    return agent_timeout if agent_timeout is not None else provider_timeout
+
+
+def _ensure_packaged_tools(config_dir: Path) -> None:
+    """Install packaged helper scripts into <config-dir>/tools (idempotent).
+
+    The frontend-designer builtin shells out to design-screenshot.js by path —
+    ship it with the package so the builtin works out of the box. A missing or
+    uncopyable asset must never block start; the agent reports the gap itself."""
+    tools_dir = config_dir / "tools"
+    dest = tools_dir / "design-screenshot.js"
+    if dest.exists():
+        return
+    try:
+        from importlib import resources
+        src = resources.files("localharness").joinpath("assets", "design-screenshot.js")
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.chmod(0o755)
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[yellow]⚠ could not install design-screenshot.js: {exc}[/yellow]")
+
+
 def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     """Return agents from global config dir and local .localharness/agents/, local overrides."""
     global_dir = config_dir / "agents"
@@ -63,7 +92,8 @@ def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     return list(agents.values())
 
 
-async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str) -> None:
+async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
+                       channel_mode: str = "terminal") -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
 
@@ -100,6 +130,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+
+    _ensure_packaged_tools(cfg_path)
 
     # Discover agents
     agents = _discover_agents_for_start(cfg_path)
@@ -162,7 +194,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_url=provider.base_url,
         model=resolved_model,
         api_key=provider.api_key,
-        timeout_seconds=provider.timeout_seconds,
+        timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
     )
     _probe_client = LLMClient(_initial_cfg)
 
@@ -182,7 +214,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_url=provider.base_url,
         model=resolved_model,
         api_key=provider.api_key,
-        timeout_seconds=provider.timeout_seconds,
+        timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         tool_call_mode=probed_mode or "native",
     )
     llm = LLMClient(llm_cfg)
@@ -326,9 +358,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         base_registry=tool_registry,
         permission_evaluator=perm_eval,
         get_parent_session_id=lambda: agent_loop.current_session_id,
+        # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
+        load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
     )
 
-    available_agent_names = [c.name for c in card_registry.all_cards()]
+    # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
+    # alongside any configured agent cards so the model knows it can delegate to them.
+    available_agent_names = ["explore", "web-researcher", "data-analyst", "frontend-designer"] + [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
         agent_runner=_run_agent,
         available_agents=available_agent_names,
@@ -346,16 +382,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         memory_loader=memory_store,
         compact_md_path=compact_md_path,
     )
-    channel = TerminalChannel(bus=bus, config={})
+    if channel_mode == "discord":
+        from localharness.channels.discord import DiscordChannel, discord_config_from_env
+        channel = DiscordChannel(bus=bus, config=discord_config_from_env())
+        console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
+    else:
+        channel = TerminalChannel(bus=bus, config={})
 
     # --- Determine returning user ---
     is_returning = events_path.exists() and events_path.stat().st_size > 0
 
-    # --- Startup greeting ---
+    # --- Startup banner ---
     elapsed = _time.monotonic() - start_time
-    greeting = orchestrator.compose_greeting(is_returning=is_returning, model_name=resolved_model)
-    if greeting:
-        console.print(greeting)
+    from localharness.cli.ui import startup_banner
+    console.print(startup_banner(model=resolved_model, is_returning=is_returning))
 
     # --- Startup summary line ---
     parts = [f"({elapsed:.1f}s startup)"]
@@ -422,9 +462,10 @@ def start_app(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show per-component startup detail")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
+    channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")

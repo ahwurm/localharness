@@ -147,6 +147,10 @@ class LLMClient:
                 write=config.timeout_seconds,
             ),
             default_headers=config.extra_headers,
+            # Local single-tenant GPU: a timed-out generation will time out again on
+            # retry — the SDK's silent default (2 retries) turned one 600s failure
+            # into 30 min of dead air. Fail fast and let the agent loop react.
+            max_retries=0 if config.is_local else 2,
         )
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
@@ -178,7 +182,10 @@ class LLMClient:
                     {"role": "user", "content": "What files are in the current directory?"},
                 ],
                 tools=probe_tools,
-                max_tokens=64,
+                # Generous cap: preamble-prone models spend 30+ tokens narrating before
+                # the call; at 64 the call got truncated and the probe misread a
+                # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
+                max_tokens=256,
                 temperature=0.0,
             )
             msg = response.choices[0].message
@@ -253,15 +260,27 @@ class LLMClient:
         on_token: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage)."""
-        return await self.complete(messages, tools, stream=True)
+        if self.config.tool_call_mode == "native":
+            return await self._complete_native(messages, tools, stream=True, on_token=on_token)
+        return await self._complete_xml(messages, tools, stream=True)
 
     async def _complete_native(
         self,
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[Any, Any]:
-        """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage)."""
+        """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
+
+        stream=True uses TRUE HTTP streaming. This is load-bearing for slow local
+        models, not a UX nicety: with a non-streaming request the client read-timeout
+        races the WHOLE generation (a long completion at single-digit tok/s times out,
+        and vLLM never notices the hangup — the orphan keeps eating GPU, slowing the
+        retry into the same timeout: the observed zombie cascade). With streaming, the
+        read-timeout applies BETWEEN chunks, so a healthy generation can run as long
+        as the budget allows, and a client disconnect aborts engine-side generation.
+        """
         try:
             kwargs: dict[str, Any] = {
                 "model": self.config.model,
@@ -280,10 +299,67 @@ class LLMClient:
             # model-agnostic: it disables thinking where supported, is ignored elsewhere.
             if self.config.is_local:
                 kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            if stream:
+                kwargs["stream"] = True
+                kwargs["stream_options"] = {"include_usage": True}
+                response = await self._client.chat.completions.create(**kwargs)
+                return await self._consume_native_stream(response, on_token)
             response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
+
+    @staticmethod
+    async def _consume_native_stream(
+        response: Any,
+        on_token: Callable[[str], Awaitable[None]] | None,
+    ) -> tuple[Any, Any]:
+        """Assemble a chat-completions chunk stream into (message, usage).
+
+        Tool calls are accumulated as plain dicts (index-keyed deltas: id/name arrive
+        on the first fragment, arguments accrete across fragments) — dicts re-serialize
+        cleanly when the assistant message is replayed in later request history. Usage
+        arrives on the final chunk when stream_options.include_usage is set; None if
+        the provider omits it (loop falls back to tiktoken estimation).
+        """
+        from types import SimpleNamespace
+
+        content_parts: list[str] = []
+        calls: dict[int, dict] = {}
+        usage = None
+        async for chunk in response:
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if piece:
+                content_parts.append(piece)
+                if on_token is not None:
+                    await on_token(piece)
+            for tc in getattr(delta, "tool_calls", None) or []:
+                idx = getattr(tc, "index", 0) or 0
+                slot = calls.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["function"]["name"] = fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["function"]["arguments"] += fn.arguments
+        tool_calls = [calls[i] for i in sorted(calls)] or None
+        message = SimpleNamespace(
+            content="".join(content_parts) or None,
+            tool_calls=tool_calls,
+        )
+        return message, usage
 
     async def _complete_xml(
         self,

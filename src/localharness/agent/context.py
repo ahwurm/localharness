@@ -13,6 +13,62 @@ log = logging.getLogger("localharness.agent.context")
 
 RESPONSE_RESERVE_TOKENS: int = 4096
 
+# Stale-web-result eviction (OpenHands BrowserOutputCondenser pattern): cheap first
+# line of defense, applied well before LLM summary-compaction (0.80) kicks in.
+WEB_EVICT_USAGE_FRACTION: float = 0.50
+WEB_EVICT_KEEP_LAST: int = 2
+_WEB_EVICT_MIN_CHARS: int = 500          # stubbing tiny results saves nothing
+_WEB_TOOLS = frozenset({"web_fetch", "web_search"})
+_WEB_STUB_PREFIX = "[web output omitted"
+
+
+def _evict_stale_web_results(
+    messages: list[Message], keep_last: int = WEB_EVICT_KEEP_LAST,
+) -> tuple[list[Message], int]:
+    """Replace the bodies of all but the newest `keep_last` web tool results with a
+    restorable stub (URL/query preserved — the agent can re-fetch). Web pages are the
+    bulkiest, least re-read observations; dropping their bodies is lossless in practice
+    (Manus rule). Returns (new list, evicted count); input messages are never mutated.
+    Deterministic: same input -> same stubs, so the rendered prompt stays prefix-cache
+    stable between turns that add no new web results."""
+    id_meta: dict[str, tuple[str, str]] = {}
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
+            name = (fn.get("name", "") if isinstance(fn, dict) else getattr(fn, "name", "")) or ""
+            if name not in _WEB_TOOLS:
+                continue
+            raw = (fn.get("arguments") if isinstance(fn, dict)
+                   else getattr(fn, "arguments", None)) or "{}"
+            try:
+                args = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            hint = args.get("url") or args.get("query") or ""
+            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+            id_meta[tc_id] = (name, hint)
+    web_idxs = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "tool" and m.get("tool_call_id") in id_meta
+        and len(m.get("content") or "") >= _WEB_EVICT_MIN_CHARS
+        and not (m.get("content") or "").startswith(_WEB_STUB_PREFIX)
+    ]
+    stale = web_idxs[:-keep_last] if keep_last > 0 else web_idxs
+    if not stale:
+        return messages, 0
+    out = list(messages)
+    for i in stale:
+        m = out[i]
+        name, hint = id_meta[m["tool_call_id"]]
+        target = f" {hint}" if hint else ""
+        out[i] = {**m, "content": (
+            f"{_WEB_STUB_PREFIX} — {name}{target}; {len(m.get('content') or '')} chars "
+            f"dropped to free context; call {name} again to re-read]"
+        )}
+    return out, len(stale)
+
 
 class TokenCounter:
     """Token counting with tiktoken (preferred) or char heuristic fallback."""
@@ -343,7 +399,7 @@ class ContextManager:
 
     def __init__(
         self,
-        max_context_tokens: int = 128_000,
+        max_context_tokens: int = 61_440,
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         pipeline: CompactionPipeline | None = None,
@@ -390,6 +446,22 @@ class ContextManager:
         tool_tokens = self._token_counter.count_messages(
             [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
         ) if tool_schemas else 0
+
+        # Stale-web eviction: cheap, deterministic, runs BEFORE LLM compaction so bulky
+        # page bodies never trigger the expensive path. Threshold-gated (Manus caveat:
+        # don't rewrite history — and invalidate the KV cache — every turn).
+        evict_check = TokenBudget(
+            total_limit=self.max_context_tokens,
+            current_usage=self._token_counter.count_messages(repaired),
+            tool_schema_tokens=tool_tokens,
+        )
+        if evict_check.usage_fraction >= WEB_EVICT_USAGE_FRACTION:
+            repaired, evicted = _evict_stale_web_results(repaired)
+            if evicted:
+                log.info(
+                    "evicted %d stale web result(s) at %.0f%% context usage",
+                    evicted, evict_check.usage_fraction * 100,
+                )
 
         if self._pipeline is not None:
             pre_usage = self._token_counter.count_messages(repaired)

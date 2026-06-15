@@ -487,10 +487,103 @@ async def test_bash_exec_tool_captures_stderr():
 
 
 @pytest.mark.asyncio
-async def test_register_builtin_tools_registers_all_five():
+async def test_register_builtin_tools_registers_all():
     from localharness.tools.builtin import register_builtin_tools
 
     reg = ToolRegistry()
     await register_builtin_tools(reg)
     names = set(reg._tools["global"].keys())
-    assert {"glob", "grep", "read", "write", "bash_exec"} == names
+    assert {"glob", "grep", "read", "write", "edit", "bash_exec", "web_search", "web_fetch"} == names
+
+
+# ---------------------------------------------------------------------------
+# web_fetch pagination
+# ---------------------------------------------------------------------------
+
+
+def _fake_httpx_client(monkeypatch, page_text: str):
+    """Patch web_tool's httpx.AsyncClient to return a fixed text/plain body."""
+    from localharness.tools.builtin import web_tool
+
+    class _Resp:
+        text = page_text
+        headers = {"content-type": "text/plain"}
+        url = "https://example.test/page"
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url): return _Resp()
+
+    monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_short_page_no_clip(monkeypatch):
+    from localharness.tools.builtin.web_tool import WebFetchTool
+
+    _fake_httpx_client(monkeypatch, "short page")
+    result = await WebFetchTool().run(url="https://example.test/page")
+    assert result.success is True
+    assert result.output == "short page"
+    assert not result.truncated
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_clips_with_cursor_notice(monkeypatch):
+    from localharness.tools.builtin.web_tool import WebFetchTool
+
+    _fake_httpx_client(monkeypatch, "x" * 12000)
+    result = await WebFetchTool().run(url="https://example.test/page", max_chars=5000)
+    assert result.success is True
+    assert result.truncated is True
+    assert "start_index=5000" in result.output
+    assert result.metadata["next_start_index"] == 5000
+    # window itself is 5000 chars of body
+    assert result.output.startswith("x" * 100)
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_resumes_from_start_index(monkeypatch):
+    from localharness.tools.builtin.web_tool import WebFetchTool
+
+    page = "a" * 5000 + "b" * 3000
+    _fake_httpx_client(monkeypatch, page)
+    result = await WebFetchTool().run(
+        url="https://example.test/page", max_chars=5000, start_index=5000
+    )
+    assert result.success is True
+    assert "[chars 5000-8000 of 8000]" in result.output
+    assert "b" * 3000 in result.output
+    assert "start_index=" not in result.output.split("]", 1)[1]  # no further-read notice
+    assert result.truncated is False
+    assert result.metadata["next_start_index"] is None
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_start_index_past_end_errors(monkeypatch):
+    from localharness.tools.builtin.web_tool import WebFetchTool
+
+    _fake_httpx_client(monkeypatch, "tiny")
+    result = await WebFetchTool().run(url="https://example.test/page", start_index=999)
+    assert result.success is False
+    assert "past the end" in result.error
+
+
+@pytest.mark.asyncio
+async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
+    """Models routinely pass ~ paths (observed live: read + glob both failed on them)."""
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.txt").write_text("tilde works")
+
+    from localharness.tools.builtin.read_tool import ReadTool
+    r = await ReadTool().run(path="~/notes/a.txt")
+    assert r.success and "tilde works" in r.output
+
+    from localharness.tools.builtin.glob_tool import GlobTool
+    g = await GlobTool().run(pattern="~/notes/*.txt")
+    assert g.success and "a.txt" in g.output

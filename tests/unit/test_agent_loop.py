@@ -979,3 +979,315 @@ def test_agent_loop_uses_config_recovery_message_not_hardcoded():
     assert "self._config.recovery_injection.message" in src
     # Old call-site replaced (we no longer pass repeated_sig into recovery_message)
     assert "stuck_detector.recovery_message(repeated_sig)" not in src
+
+
+# ---------------------------------------------------------------------------
+# Tool-call JSON guard (_repair_json_object / _sanitize_raw_tool_calls)
+# ---------------------------------------------------------------------------
+
+import json as _json
+from types import SimpleNamespace
+
+from localharness.agent.loop import _repair_json_object, _sanitize_raw_tool_calls
+
+
+def test_repair_json_valid_passthrough():
+    s = '{"a": 1}'
+    assert _repair_json_object(s) is s
+
+
+def test_repair_json_unterminated_string():
+    # Tonight's live failure shape: generation cut mid-arguments string.
+    s = '{"agent_id": "web-researcher", "task": "Read these pages and summar'
+    repaired = _repair_json_object(s)
+    assert repaired is not None
+    parsed = _json.loads(repaired)
+    assert parsed["agent_id"] == "web-researcher"
+    assert parsed["task"].startswith("Read these pages")
+
+
+def test_repair_json_open_structures():
+    repaired = _repair_json_object('{"a": [1, 2, {"b": "c"')
+    assert repaired is not None
+    assert _json.loads(repaired) == {"a": [1, 2, {"b": "c"}]}
+
+
+def test_repair_json_dangling_escape():
+    repaired = _repair_json_object('{"path": "C:\\\\dir\\')
+    assert repaired is not None
+    _json.loads(repaired)
+
+
+def test_repair_json_unrepairable():
+    assert _repair_json_object('{"a": twelve}') is None
+
+
+def _dict_call(args: str, name: str = "agent", id: str = "tc-1"):
+    return {"id": id, "type": "function", "function": {"name": name, "arguments": args}}
+
+
+def test_sanitize_keeps_valid_calls():
+    calls = [_dict_call('{"x": 1}')]
+    out = _sanitize_raw_tool_calls(calls)
+    assert out == calls
+    assert out[0]["function"]["arguments"] == '{"x": 1}'
+
+
+def test_sanitize_repairs_truncated_dict_call():
+    calls = [_dict_call('{"agent_id": "web-researcher", "task": "do thi')]
+    out = _sanitize_raw_tool_calls(calls)
+    assert len(out) == 1
+    args = _json.loads(out[0]["function"]["arguments"])  # normalized, parseable
+    assert args["agent_id"] == "web-researcher"
+
+
+def test_sanitize_repairs_object_style_call():
+    fn = SimpleNamespace(name="agent", arguments='{"task": "x')
+    tc = SimpleNamespace(id="tc-2", function=fn)
+    out = _sanitize_raw_tool_calls([tc])
+    assert len(out) == 1
+    assert _json.loads(out[0].function.arguments) == {"task": "x"}
+
+
+def test_sanitize_drops_unrepairable_and_preserves_none_semantics():
+    out = _sanitize_raw_tool_calls([_dict_call('{"a": twelve}')])
+    assert out is None
+    assert _sanitize_raw_tool_calls(None) is None
+    assert _sanitize_raw_tool_calls([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Budget notes on tool results (_budget_note + loop wiring)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch
+
+from localharness.agent.loop import BudgetTracker, _budget_note
+
+
+def _session_for_note(actions: int) -> Session:
+    s = Session(agent_id="a", session_id="s", messages=[])
+    s.actions_taken = actions
+    return s
+
+
+def test_budget_note_reports_usage():
+    note = _budget_note(_session_for_note(3), BudgetTracker(max_actions=12, max_duration_minutes=0))
+    assert "3/12 tool calls used" in note
+    assert "wrap up" not in note
+
+
+def test_budget_note_warns_near_action_limit():
+    note = _budget_note(_session_for_note(10), BudgetTracker(max_actions=12, max_duration_minutes=0))
+    assert "wrap up NOW" in note
+    assert "final summary" in note
+
+
+def test_budget_note_warns_near_time_limit():
+    s = _session_for_note(1)
+    with patch.object(Session, "elapsed_minutes", return_value=2.5):
+        note = _budget_note(s, BudgetTracker(max_actions=0, max_duration_minutes=3.0))
+    assert "2.5/3 min elapsed" in note
+    assert "wrap up NOW" in note
+
+
+def test_budget_note_empty_when_unlimited():
+    assert _budget_note(_session_for_note(5), BudgetTracker(max_actions=0, max_duration_minutes=0)) == ""
+
+
+@pytest.mark.asyncio
+async def test_loop_appends_budget_note_to_tool_result(faithful_fake_llm, bus, tmp_path):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "budget-note-agent",
+        "role": "Test agent.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+    })
+    loop = AgentLoop(
+        config=cfg, llm=faithful_fake_llm(tool_plan=[("glob", {"pattern": "*.py"})]),
+        bus=bus, context_manager=ContextManager(), tool_registry=reg,
+        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+    )
+    session = Session(agent_id="budget-note-agent", session_id="s-note", messages=[])
+    await loop._execute_loop(session, "list python files", None)
+
+    tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+    assert tool_msgs, "expected at least one tool result"
+    assert "[budget: 1/5 tool calls used" in tool_msgs[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Final summary on budget exhaustion (_final_summary_on_budget)
+# ---------------------------------------------------------------------------
+
+
+def _budget_loop(faithful_fake_llm, bus, tmp_path, tool_plan, max_actions):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+
+    async def _make():
+        from localharness.tools.builtin import register_builtin_tools
+        reg = ToolRegistry()
+        await register_builtin_tools(reg)
+        cfg = AgentConfig.model_validate({
+            "name": "budget-final-agent",
+            "role": "Test agent.",
+            "permissions": {"budget": {"max_actions": max_actions, "max_duration_minutes": 5.0,
+                                       "kill_file": str(tmp_path / "KILL")}},
+        })
+        return AgentLoop(
+            config=cfg, llm=faithful_fake_llm(tool_plan=tool_plan),
+            bus=bus, context_manager=ContextManager(), tool_registry=reg,
+            permission_evaluator=PermissionEvaluator(), memory_loader=None,
+        )
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaust_returns_model_findings(faithful_fake_llm, bus, tmp_path):
+    """Exhausted budget triggers ONE no-tools pass; the summary carries findings
+    (here: the fake echoes the last tool result) plus the budget notice."""
+    make = _budget_loop(faithful_fake_llm, bus, tmp_path,
+                        tool_plan=[("glob", {"pattern": "*.py"})], max_actions=1)
+    loop = await make()
+    session = Session(agent_id="budget-final-agent", session_id="s-bf", messages=[])
+    summary = await loop._execute_loop(session, "list python files", None)
+
+    assert session.terminated_reason == "budget_actions"
+    assert "[Budget limit reached:" in summary
+    # the echoed tool result (real glob output incl. budget note) — not a bare notice
+    assert "[budget: 1/1 tool calls used" in summary
+    # the forced pass also lands in history for session continuity
+    assert session.messages[-1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaust_falls_back_when_model_yields_no_text(faithful_fake_llm, bus, tmp_path):
+    """If the final pass produces no usable text (fake still wants to emit a tool call,
+    content=None), fall back to the plain budget notice — never crash."""
+    make = _budget_loop(faithful_fake_llm, bus, tmp_path,
+                        tool_plan=[("glob", {"pattern": "*.py"}), ("glob", {"pattern": "*.md"})],
+                        max_actions=1)
+    loop = await make()
+    session = Session(agent_id="budget-final-agent", session_id="s-bf2", messages=[])
+    summary = await loop._execute_loop(session, "list files", None)
+
+    assert session.terminated_reason == "budget_actions"
+    assert "[Budget limit reached:" in summary
+
+
+# ---------------------------------------------------------------------------
+# Tool error forwarding + agent tool timeout contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_error_text_reaches_model(faithful_fake_llm, bus, tmp_path):
+    """Error results carry their message in .error with output='' — the loop must
+    forward the message or the model sees an empty result it can't react to
+    (observed live: every fetch failure and the 600s agent timeout surfaced as '')."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "err-fwd-agent",
+        "role": "Test agent.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+    })
+    # invalid URL -> WebFetchTool returns err("Invalid URL ...") with output ""
+    loop = AgentLoop(
+        config=cfg, llm=faithful_fake_llm(tool_plan=[("web_fetch", {"url": "notaurl"})]),
+        bus=bus, context_manager=ContextManager(), tool_registry=reg,
+        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+    )
+    session = Session(agent_id="err-fwd-agent", session_id="s-errfwd", messages=[])
+    await loop._execute_loop(session, "fetch something", None)
+
+    tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "[tool error]" in tool_msgs[0]["content"]
+    assert "Invalid URL" in tool_msgs[0]["content"]
+
+
+def test_agent_tool_timeout_exceeds_child_budget_and_summary_headroom():
+    """600s cancelled children mid-final-summary (no terminal event, '' to parent).
+    The timeout must stay >= child max duration + slow-model summary headroom."""
+    from localharness.agent.subagent import WEB_MAX_DURATION_MINUTES
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    assert AgentTool.timeout_s >= 1800.0
+    assert AgentTool.timeout_s >= (WEB_MAX_DURATION_MINUTES * 60) * 2
+
+
+# ---------------------------------------------------------------------------
+# Act-guard: announce-then-halt gets one deterministic nudge
+# ---------------------------------------------------------------------------
+
+
+class _AnnounceThenActLLM:
+    """First call: pure intent text, no tool calls. After the nudge: emits the tool
+    call, then echoes (FaithfulFakeLLM-style) on the final call."""
+
+    def __init__(self):
+        self.calls = 0
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.calls += 1
+        if self.calls == 1:
+            return NS(content="I'll list the files and then summarize.", tool_calls=None), None
+        if self.calls == 2:
+            return NS(content=None, tool_calls=[
+                {"id": "tc-1", "type": "function",
+                 "function": {"name": "glob", "arguments": '{"pattern": "*.py"}'}}]), None
+        last = next((m.get("content") for m in reversed(messages or []) if m.get("role") == "tool"), "done")
+        return NS(content=str(last)[:100], tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "act-guard-agent", "role": "Test.",
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    llm = _AnnounceThenActLLM()
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="act-guard-agent", session_id="s-ag", messages=[])
+    await loop._execute_loop(session, "list the python files", None)
+
+    assert session.act_nudge_used is True
+    assert session.actions_taken == 1          # the glob actually ran after the nudge
+    nudges = [m for m in session.messages if m.get("role") == "user"
+              and "took no action" in (m.get("content") or "")]
+    assert len(nudges) == 1                    # exactly one nudge, persisted in history
+    assert session.terminated_reason == "complete"

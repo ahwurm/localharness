@@ -36,6 +36,79 @@ EXPLORE_ROLE = (
     "When you have what you need, stop and reply with a concise summary of your findings."
 )
 
+# Web-research child: searches + reads pages in ITS OWN context, returns only a distilled
+# summary so raw pages never enter the parent's context window.
+WEB_TOOLS: list[str] = ["web_search", "web_fetch"]
+WEB_MAX_ACTIONS = 12
+WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 13 — kept above the budget so max_actions binds
+WEB_MAX_DURATION_MINUTES = 5.0
+
+WEB_RESEARCHER_ROLE = (
+    "You are a web-research subagent. Use web_search to find sources and web_fetch to read them. "
+    "Research the delegated question thoroughly but efficiently — prefer a few high-quality sources "
+    "over many, and don't re-fetch the same page. You cannot write, execute, or delegate. When done, "
+    "stop and reply with a CONCISE, well-organized summary of your findings WITH the source URLs you "
+    "used. This summary is the ONLY thing the parent agent sees, so include the key facts, figures, "
+    "and citations it needs — never paste raw page text."
+)
+
+# Data-analyst child: local files + computation, no web, no write. Heavier budget than web —
+# real analysis iterates (inspect format -> compute -> sanity-check); observed ~17 calls on a
+# vault-sized task. Raw file dumps and intermediate outputs stay in the child's context.
+DATA_TOOLS: list[str] = ["bash_exec", "read", "glob", "grep"]
+DATA_MAX_ACTIONS = 16
+DATA_MAX_TOOL_CALLS = DATA_MAX_ACTIONS + 1  # 17 — kept above the budget so max_actions binds
+DATA_MAX_DURATION_MINUTES = 12.0
+
+DATA_ANALYST_ROLE = (
+    "You are a data-analyst subagent. Investigate LOCAL files and compute precise answers using "
+    "bash_exec (python3/pandas where helpful), read, glob, and grep. If your brief names a data "
+    "contract, README, or index doc, READ IT FIRST and honor what it says is the source of truth — "
+    "do not re-derive facts the contract already settles. Sanity-check your numbers (signs, totals, "
+    "currencies) before reporting. You cannot write files or delegate. When done, stop and reply "
+    "with a CONCISE summary: the numbers, how you computed them, and the file paths used. This "
+    "summary is the ONLY thing the parent agent sees — never paste raw file dumps."
+)
+
+# Frontend-designer child: builds self-contained HTML/CSS and verifies it VISUALLY via the
+# packaged playwright screenshot helper before delivering. Budgets sized from live usage
+# (landing-page + architecture-diagram builds ran 25-35 actions incl. screenshot iterations).
+FRONTEND_TOOLS: list[str] = ["read", "write", "edit", "glob", "grep", "bash_exec"]
+FRONTEND_MAX_ACTIONS = 40
+FRONTEND_MAX_TOOL_CALLS = FRONTEND_MAX_ACTIONS + 1  # 41 — kept above the budget so max_actions binds
+FRONTEND_MAX_DURATION_MINUTES = 20.0
+
+FRONTEND_DESIGNER_ROLE = (
+    "You are a frontend-designer subagent. Build beautiful, self-contained HTML/CSS/JS and "
+    "verify it VISUALLY before delivering. Avoid generic AI-slop aesthetics: no default Inter, "
+    "no purple-gradient templates — pick distinctive typography, commit to a cohesive palette "
+    "via CSS custom properties, and prefer one well-orchestrated CSS animation over scattered "
+    "micro-interactions. Workflow: PLAN the layout, palette, and type; BUILD a single "
+    "self-contained responsive file under /tmp/designs/ (semantic HTML, no external "
+    "dependencies unless asked); SCREENSHOT it with "
+    "`node ~/.localharness/tools/design-screenshot.js <html-file> <output-prefix>` "
+    "(captures 1440x900 and 375x812 by default and waits ~2s for fonts and CSS animations to "
+    "settle — pass --wait <ms> for longer entrances); REVIEW the screenshots for layout, "
+    "contrast, overflow, and responsive issues; ITERATE until polished. You cannot delegate. "
+    "When done, stop and reply with the HTML file path, every screenshot path, and a brief "
+    "note on the design decisions — this summary is the ONLY thing the parent agent sees."
+)
+
+
+def build_frontend_designer_config(name: str = "frontend-designer", kill_file: str | None = None) -> AgentConfig:
+    """Build the frontend-designer-child AgentConfig with its own bounded budget."""
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=FRONTEND_DESIGNER_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=FRONTEND_MAX_ACTIONS,
+                max_duration_minutes=FRONTEND_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
 
 def _sanitize_agent_name(name: str) -> str:
     """AgentConfig.name rejects underscores — map `_` -> `-` (recurring localharness gotcha)."""
@@ -55,6 +128,25 @@ def build_explore_config(name: str = "explore", kill_file: str | None = None) ->
             budget=BudgetConfig(
                 max_actions=EXPLORE_MAX_ACTIONS,
                 max_duration_minutes=EXPLORE_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
+
+def build_web_researcher_config(name: str = "web-researcher", kill_file: str | None = None) -> AgentConfig:
+    """Build the web-researcher-child AgentConfig with its own bounded budget.
+
+    `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
+    pass a path to honor an external kill file.
+    """
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=WEB_RESEARCHER_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=WEB_MAX_ACTIONS,
+                max_duration_minutes=WEB_MAX_DURATION_MINUTES,
                 kill_file=kill_file,
             ),
         ),
@@ -95,6 +187,206 @@ def format_findings(task: str, summary: str, tool_calls_used: int) -> str:
     header = f"[explore findings] task: {task} | tool calls: {tool_calls_used}"
     body = (summary or "").strip() or "(no findings)"
     return f"{header}\n\n{body}"
+
+
+def format_web_findings(task: str, summary: str, tool_calls_used: int) -> str:
+    """Structured web-research findings return: short header + child summary, NOT the transcript."""
+    header = f"[web research] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+def build_data_analyst_config(name: str = "data-analyst", kill_file: str | None = None) -> AgentConfig:
+    """Build the data-analyst-child AgentConfig with its own bounded budget."""
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=DATA_ANALYST_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=DATA_MAX_ACTIONS,
+                max_duration_minutes=DATA_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
+
+def format_data_findings(task: str, summary: str, tool_calls_used: int) -> str:
+    """Structured data-analysis findings return: short header + child summary, NOT the transcript."""
+    header = f"[data analysis] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+# YAML-defined children with no tools.add get a safe read-only set.
+CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
+
+
+def prepend_toolset(task: str, allowed: list[str]) -> str:
+    """Prefix a config-child brief with its exact toolset (capability fact, not inference)."""
+    names = ", ".join(allowed) if allowed else "none"
+    return (
+        f"(Your ONLY available tools: {names}. You cannot delegate or use anything else — "
+        f"if the task needs a tool you lack, say so immediately instead of improvising.)\n\n{task}"
+    )
+
+
+def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_used: int) -> str:
+    """Generic findings return for config-defined children: header + summary, NOT the transcript."""
+    header = f"[{agent_name}] task: {task} | tool calls: {tool_calls_used}"
+    body = (summary or "").strip() or "(no findings)"
+    return f"{header}\n\n{body}"
+
+
+async def dispatch_config_subagent(
+    task: str,
+    *,
+    agent_config: Any,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    depth: int = 0,
+) -> str:
+    """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
+
+    This is the 'ability scales with defined subagents' seam: any agents/<name>.yaml becomes a
+    dispatchable specialist — role + tools.add (its allowlist; bare, mcp:TOOL and plugin:P.TOOL
+    forms all resolve) + its own budget — without touching harness code. The parent (or the
+    model itself, by WRITING the yaml first) composes new specialists at runtime. The child runs
+    in its own context and returns only a summary; the `agent` tool is always stripped so
+    config children can never delegate further (belt to the MAX_DEPTH suspenders).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"subagent '{getattr(agent_config, 'name', '?')}' cannot spawn at depth {depth} "
+            f"(max depth {MAX_DEPTH}): subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    tool_cfg = getattr(agent_config, "tools", None)
+    add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
+    deny = set(getattr(tool_cfg, "deny", None) or [])
+    allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
+    # Make the toolset explicit in the brief — small models attend weakly to absent
+    # tools (observed live: a bash-less child globbed for `pip` instead of saying
+    # "I have no shell"). One line turns capability inference into capability fact.
+    task = prepend_toolset(task, allowed)
+
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+    child_loop = AgentLoop(
+        config=agent_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+    return format_child_findings(agent_config.name, task, summary, tool_calls_used)
+
+
+async def dispatch_data_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "data-analyst",
+    depth: int = 0,
+) -> str:
+    """Spawn a data-analysis child (bash/read/glob/grep, no web/write), run one turn, return findings.
+
+    Mirrors dispatch_web_subagent: the child inspects files and computes in ITS OWN context and
+    returns only a summary, so raw file dumps and intermediate outputs never reach the parent's
+    window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"data-analyst subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_data_analyst_config(agent_name)
+    child_registry = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base_registry)
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+
+    child_session_id = child_loop.current_session_id
+    tool_calls_used = _count_session_tool_calls(bus, child_session_id)
+
+    return format_data_findings(task, summary, tool_calls_used)
+
+
+async def dispatch_frontend_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "frontend-designer",
+    depth: int = 0,
+) -> str:
+    """Spawn a frontend-designer child (read/write/edit/glob/grep/bash), run one turn, return findings.
+
+    The child builds HTML under /tmp/designs/ and verifies it visually via the packaged
+    design-screenshot.js helper (installed to <config-dir>/tools by start_cmd) in ITS OWN
+    context — only the summary (file + screenshot paths, design notes) reaches the parent.
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_frontend_designer_config(agent_name)
+    child_registry = ToolRegistry.from_allowed(FRONTEND_TOOLS, base_registry=base_registry)
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+    return format_child_findings(agent_name, task, summary, tool_calls_used)
 
 
 async def dispatch_explore_subagent(
@@ -166,6 +458,58 @@ async def dispatch_explore_subagent(
     return format_findings(task, summary, tool_calls_used)
 
 
+async def dispatch_web_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "web-researcher",
+    depth: int = 0,
+) -> str:
+    """Spawn a web-research child (web_search/web_fetch only), run one turn, return distilled findings.
+
+    Mirrors dispatch_explore_subagent but with the web toolset and budget. The child does all the
+    searching/fetching in ITS OWN context and returns only a summary, so raw pages never reach the
+    parent's window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    """
+    if depth >= MAX_DEPTH:
+        raise ValueError(
+            f"web-researcher subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_web_researcher_config(agent_name)
+
+    # Web-only registry: builtins {web_search, web_fetch} — no write/bash/spawn.
+    child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
+
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+
+    child_session_id = child_loop.current_session_id
+    tool_calls_used = _count_session_tool_calls(bus, child_session_id)
+
+    return format_web_findings(task, summary, tool_calls_used)
+
+
 def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
     """Count tool-call Actions for `session_id` from the bus's in-memory history.
 
@@ -191,27 +535,59 @@ def make_explore_agent_runner(
     base_registry: Any,
     permission_evaluator: Any,
     get_parent_session_id: Callable[[], str | None],
+    load_agent: Callable[[str], Any] | None = None,
 ) -> Callable[[str, str, int], Awaitable[str]]:
-    """Build the AgentTool runner for the read-only Explore subagent (module-level seam, T1).
+    """Build the AgentTool runner for delegation (module-level seam, T1).
 
     Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
     (the same way Phase 27 extracted `dispatch_explore_subagent` from this closure). The returned
-    async runner is what `AgentTool(agent_runner=...)` invokes. Behavior is identical to the closure:
+    async runner is what `AgentTool(agent_runner=...)` invokes.
 
-    - Only `explore` is wired (after `_` -> `-` sanitization); any other agent_id raises a clear
-      ValueError so the model gets an actionable "not yet wired" error (AgentTool maps it to not_found).
+    - Wires the built-ins (`explore`, `web-researcher`, `data-analyst`, after `_` -> `-`
+      sanitization). Any OTHER agent_id is resolved through `load_agent` (when provided) — the
+      ConfigLoader seam that turns agents/<name>.yaml into a dispatchable specialist. Pass a
+      cache-bypassing loader so a yaml the model JUST WROTE is dispatchable in the same turn.
+      Unresolvable names raise a clear ValueError so the model gets an actionable error.
     - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
       parent loop's current session_id when the model delegates — matching the closure's late read of
       `agent_loop.current_session_id`.
-    - `depth` threads through to `dispatch_explore_subagent` (the belt-and-suspenders recursion guard).
+    - `depth` threads through to every dispatch (the belt-and-suspenders recursion guard).
     """
 
     async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
-        if _sanitize_agent_name(agent_id) != "explore":
-            raise ValueError(
-                f"Agent '{agent_id}' dispatch not yet wired (only 'explore' is available)"
+        name = _sanitize_agent_name(agent_id)
+        if name == "explore":
+            dispatch = dispatch_explore_subagent
+        elif name == "web-researcher":
+            dispatch = dispatch_web_subagent
+        elif name == "data-analyst":
+            dispatch = dispatch_data_subagent
+        elif name == "frontend-designer":
+            dispatch = dispatch_frontend_subagent
+        else:
+            cfg = None
+            if load_agent is not None and name != "default":
+                try:
+                    cfg = load_agent(name)
+                except Exception:
+                    cfg = None
+            if cfg is None:
+                raise ValueError(
+                    f"Agent '{agent_id}' dispatch not wired (available: explore, "
+                    "web-researcher, data-analyst, or any agents/<name>.yaml definition — "
+                    "you can CREATE one with the write tool, then delegate to it by name)"
+                )
+            return await dispatch_config_subagent(
+                task,
+                agent_config=cfg,
+                llm=llm,
+                bus=bus,
+                base_registry=base_registry,
+                parent_session_id=get_parent_session_id(),
+                permission_evaluator=permission_evaluator,
+                depth=depth,
             )
-        return await dispatch_explore_subagent(
+        return await dispatch(
             task,
             llm=llm,
             bus=bus,

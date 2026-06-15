@@ -216,6 +216,44 @@ class TestTerminalChannelBasics:
         with pytest.raises(ChannelStartError):
             await ch.read_input()
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_captures_context_pct_for_input_bubble(self):
+        from localharness.core.events import Heartbeat
+        ch = make_terminal_channel()
+        assert ch._context_pct is None  # nothing shown before the first measurement
+        await ch.on_heartbeat(Heartbeat(
+            agent_id="a", session_id="s", iteration=1, context_utilization_pct=42.0,
+        ))
+        assert ch._context_pct == 42.0
+
+
+class TestContextMeter:
+    def test_levels_step_with_usage(self):
+        from localharness.channels.terminal import _ctx_segments
+        levels = {p: _ctx_segments(p)[0][0][0] for p in (20, 55, 72, 88)}
+        assert levels == {
+            20: "class:ctx-low", 55: "class:ctx-mid",
+            72: "class:ctx-high", 88: "class:ctx-crit",
+        }
+
+    def test_crit_at_compaction_threshold(self):
+        from localharness.channels.terminal import _ctx_segments
+        assert _ctx_segments(80)[0][0][0] == "class:ctx-crit"  # summary compaction fires at 80%
+
+    def test_bar_fills_and_width_matches_plaintext(self):
+        from localharness.channels.terminal import _ctx_segments
+        for pct in (0, 5, 50, 100):
+            frags, width = _ctx_segments(pct)
+            plain = "".join(text for _, text in frags)
+            assert plain.count("█") == min(10, pct // 10)  # filled cells
+            assert len(plain) == width  # width must match for border alignment
+
+    def test_clamps_out_of_range(self):
+        from localharness.channels.terminal import _ctx_segments
+        assert "120%" not in "".join(t for _, t in _ctx_segments(120.0)[0])
+        assert _ctx_segments(120.0)[0][0][1].count("█") == 10
+        assert _ctx_segments(-5.0)[0][0][1] == ""  # no filled cells below zero
+
 
 class TestFormatArgsCompact:
     def test_string_truncation(self):

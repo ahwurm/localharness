@@ -284,13 +284,15 @@ class ContextConfig(BaseModel):
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     max_context_tokens: int = Field(
-        default=128_000,
+        default=61_440,
         ge=1_000,
         le=2_000_000,
         description=(
-            "Maximum context window size in tokens. "
-            "Set to match your model's actual context length. "
-            "The ContextManager uses this to determine when to compact."
+            "Context budget in tokens. Must be at most the served model's window "
+            "minus the output reservation (default_max_tokens) — the 61,440 default "
+            "fits the reference 64K vLLM window with 4,096 reserved for output. "
+            "If this exceeds the real window, compaction never triggers and long "
+            "turns die at the provider's input cap instead of compacting."
         ),
     )
 
@@ -863,8 +865,12 @@ class ProviderConfig(BaseModel):
         ),
     )
     timeout_seconds: float = Field(
-        default=300.0,
-        description="HTTP timeout for LLM API calls. Extended for local models.",
+        default=600.0,
+        description=(
+            "HTTP timeout for LLM API calls. Default 600s suits slow local "
+            "single-stream decode — a 4096-token completion at ~10 tok/s is ~410s, "
+            "which the previous 300s default killed mid-generation."
+        ),
     )
 
 

@@ -538,6 +538,17 @@ def test_start_single_agent_no_picker(tmp_path):
     assert agents[0]["name"] == "solo"
 
 
+def test_resolve_timeout_precedence():
+    """Per-agent timeout override wins when set; None falls back to the provider default.
+
+    Regression: AgentConfig.timeout_seconds was dead config — the start path always
+    used provider.timeout_seconds, so slow-decode users could not override out of a
+    too-tight timeout."""
+    from localharness.cli.start_cmd import _resolve_timeout
+    assert _resolve_timeout(900.0, 600.0) == 900.0   # explicit agent override wins
+    assert _resolve_timeout(None, 600.0) == 600.0     # unset → provider default
+
+
 # ---------------------------------------------------------------------------
 # Task 1: Import path regression tests
 # ---------------------------------------------------------------------------

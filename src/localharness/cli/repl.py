@@ -53,7 +53,7 @@ class OrchestratorREPL:
         try:
             while True:
                 try:
-                    user_input = await self._channel.read_input("you> ")
+                    user_input = await self._channel.read_input()
                 except EOFError:
                     break
                 if not user_input:
@@ -84,13 +84,16 @@ class OrchestratorREPL:
                         )
                         continue
 
-                    # Publish user message for memory pipeline
+                    # Publish user message for memory pipeline. channel_id is the
+                    # adapter's class attribute ("terminal", "discord", ...) — history
+                    # rows must carry the REAL channel, not a hardcoded "terminal".
+                    ch_id = getattr(self._channel, "channel_id", None)
                     await self._bus.publish(
                         UserMessage(
                             agent_id=self._agent._config.name,
                             session_id=self._agent.current_session_id,
                             content=user_input,
-                            channel="terminal",
+                            channel=ch_id if isinstance(ch_id, str) else "terminal",
                         )
                     )
                     # Route through orchestrator

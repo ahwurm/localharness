@@ -138,16 +138,17 @@ async def test_runner_routes_explore_and_threads_session_and_depth(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runner_refuses_non_explore_agent_with_clear_error(monkeypatch):
-    """A non-explore agent_id is REFUSED with a clear, actionable ValueError (only `explore` is
-    wired in v1.4); dispatch_explore_subagent is never reached. Underscore->dash sanitization
-    means an `_`-bearing name that is not `explore` also refuses."""
+async def test_runner_refuses_unknown_agent_with_clear_error(monkeypatch):
+    """An unknown agent_id is REFUSED with a clear, actionable ValueError (`explore` and
+    `web-researcher` are wired); neither dispatch is ever reached. Underscore->dash
+    sanitization means an `_`-bearing name that matches no wired agent also refuses."""
     import localharness.agent.subagent as subagent
 
     async def _must_not_run(task, **kwargs):  # pragma: no cover - asserted never called
-        raise AssertionError("dispatch_explore_subagent must not run for a non-explore agent_id")
+        raise AssertionError("no dispatch may run for an unknown agent_id")
 
     monkeypatch.setattr(subagent, "dispatch_explore_subagent", _must_not_run)
+    monkeypatch.setattr(subagent, "dispatch_web_subagent", _must_not_run)
 
     runner = subagent.make_explore_agent_runner(
         llm=object(),
@@ -157,9 +158,9 @@ async def test_runner_refuses_non_explore_agent_with_clear_error(monkeypatch):
         get_parent_session_id=lambda: "sid",
     )
 
-    with pytest.raises(ValueError, match="not yet wired"):
+    with pytest.raises(ValueError, match="not wired"):
         await runner("researcher", "do a thing", 0)
 
-    # `explore` IS accepted (sanitizer maps `_`->`-`; bare `explore` already matches).
-    with pytest.raises(ValueError, match="not yet wired"):
+    # Sanitizer maps `_`->`-`; a dashed-but-unknown name still refuses.
+    with pytest.raises(ValueError, match="not wired"):
         await runner("writer_agent", "do a thing", 0)

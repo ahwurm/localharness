@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete
+from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
 
 
 class ChannelAdapter(ABC):
@@ -132,9 +132,39 @@ class ChannelAdapter(ABC):
         )
 
     async def on_task_complete(self, event: TaskComplete) -> None:
-        """Default handler for TaskComplete events. Sends the summary."""
+        """Default handler for TaskComplete events. Sends the summary.
+
+        Child-turn completions (parent_id stamped by _ParentIdBus) stay internal:
+        a child's summary returns to the PARENT via the agent tool result — posting
+        it to the channel reads as a premature, often contradictory 'final answer'
+        (observed live: a subagent's failure apology landed in Discord minutes
+        before the parent's actual answer)."""
+        if getattr(event, "parent_id", None):
+            return
         await self.send_message(
             content=event.summary,
+            agent_id=event.agent_id,
+        )
+
+    async def on_turn_failed(self, event: TurnFailed) -> None:
+        """Default handler for TurnFailed events. A failed turn must never die silently.
+
+        Root-turn failures are fatal to the reply the user is waiting for — surface
+        them as an error with the reason. Child (delegated) turns carry parent_id:
+        the parent continues and still owes the real answer, so emit a one-line
+        status note instead (child completions stay internal — see on_task_complete —
+        but child failures surface; silence is indistinguishable from progress)."""
+        if getattr(event, "parent_id", None):
+            await self.send_message(
+                f"⚠️ subagent {event.agent_id} failed ({event.reason}) after "
+                f"{event.iterations} iterations — continuing with partial results",
+                agent_id=event.agent_id,
+            )
+            return
+        detail = (event.detail or "").strip()
+        await self.send_error(
+            error=f"turn failed — {event.reason}",
+            detail=detail[:400] or None,
             agent_id=event.agent_id,
         )
 
