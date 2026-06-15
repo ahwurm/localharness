@@ -3,6 +3,19 @@ name = "localharness"
 version = "0.1.0"
 description = "Model-agnostic hierarchical agent harness for local LLMs"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+readme = "README.md"
+authors = [{ name = "ahwurm" }]
+keywords = ["llm", "agents", "local-llm", "agent-harness", "vllm", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.13,<3",
     "pydantic-yaml>=1.4,<2",
@@ -34,6 +47,11 @@ dev = [
 
 [project.scripts]
 localharness = "localharness.cli.app:main"
+
+[project.urls]
+Homepage = "https://github.com/ahwurm/localharness"
+Repository = "https://github.com/ahwurm/localharness"
+Issues = "https://github.com/ahwurm/localharness/issues"
 
 [build-system]
 requires = ["hatchling"]
