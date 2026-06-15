@@ -83,7 +83,9 @@ class TokenCounter:
 
     def count(self, text: str) -> int:
         if self._encoder is not None:
-            return len(self._encoder.encode(text))
+            # disallowed_special=() so literal special-token text (e.g. "<|endoftext|>"
+            # in fetched web content) is counted as ordinary text instead of raising.
+            return len(self._encoder.encode(text, disallowed_special=()))
         return len(text) // 4  # char heuristic fallback
 
     def count_messages(self, messages: list[dict]) -> int:
