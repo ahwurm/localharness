@@ -64,7 +64,7 @@ class WebSearchTool(Tool):
             from ddgs import DDGS
         except ImportError:
             return self.err(
-                "web search unavailable: 'ddgs' not installed (install the 'dispatch' extra)",
+                "web search unavailable: 'ddgs' package missing from this install — run 'uv sync'",
                 error_type="execution_error",
             )
         loop = asyncio.get_running_loop()
