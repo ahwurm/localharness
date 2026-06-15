@@ -93,7 +93,7 @@ def _discover_agents_for_start(config_dir: Path) -> list[dict]:
 
 
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
-                       channel_mode: str = "terminal") -> None:
+                       channel_mode: str = "terminal", subagents: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
 
@@ -155,10 +155,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
         agents = [default_data]
         selected_data = default_data
-    elif len(agents) == 1:
-        selected_data = agents[0]
+    elif len(agents) == 1 or not subagents:
+        # Default: open straight to the banner. Prefer the "default" agent, else the
+        # first discovered. Pass --subagents to pick from the multi-agent table instead.
+        selected_data = next((a for a in agents if a.get("name") == "default"), agents[0])
     else:
-        # Multiple agents: show picker
+        # --subagents + multiple agents: show picker
         table = Table(title="Available Agents")
         table.add_column("No.")
         table.add_column("Name")
@@ -463,9 +465,10 @@ def start_app(
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
     channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
+    subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
