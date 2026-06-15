@@ -22,3 +22,11 @@ docs/competitive/
 
 # Local tool settings
 .claude/
+
+# Internal-only docs and scratch (not part of the public project)
+/CLAUDE.md
+/INDEX.md
+/sessiontask.md
+/test-brief.md
+/gtm-plan-*.md
+/MACMINI-*.md
