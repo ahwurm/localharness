@@ -17,6 +17,7 @@ from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
@@ -271,7 +272,7 @@ class TerminalChannel(ChannelAdapter):
             self._ensure_idle()
             if agent_id:
                 self._console.print(Panel(
-                    Text(content, style="agent.text"),
+                    Markdown(content),
                     title=f"[agent.name]{agent_id}[/agent.name]",
                     border_style="cyan",
                 ))
@@ -302,9 +303,10 @@ class TerminalChannel(ChannelAdapter):
                     live.update(live_panel)
                 self._live = None
 
-            # Final non-live panel with green border
+            # Final non-live panel with green border — render markdown (tables,
+            # headers, bold) instead of raw text so the answer reads cleanly.
             self._console.print(Panel(
-                Text(full_text, style="agent.text"),
+                Markdown(full_text),
                 title=f"[agent.name]{agent_id or 'agent'}[/agent.name]",
                 border_style="green",
             ))
