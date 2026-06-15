@@ -22,6 +22,7 @@ dependencies = [
     "scipy>=1.17,<2",
     "pyyaml>=6.0,<7",
     "bubus>=1.5,<2",
+    "pluggy>=1.5,<2",
     "aiosqlite>=0.22,<1",
     "structlog>=25.5,<26",
     "typer>=0.25,<1",
