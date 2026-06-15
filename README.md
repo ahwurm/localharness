@@ -4,9 +4,9 @@ Model-agnostic hierarchical agent harness for local LLMs.
 
 Define agents in YAML — system prompt, tools, permissions, memory — and run them as a coordinated org (orchestrator → divisions → agents) against any OpenAI-compatible local endpoint: vLLM, Ollama, LM Studio, llama.cpp. The thesis: the harness, not the model, is where most of the capability lives — the same model can swing tens of benchmark points depending on the harness around it.
 
-![LocalHarness — detect your local model, define an agent in YAML, validate it](assets/demo.gif)
+![LocalHarness — detect your local model with init, then start drops you into a ready default agent](assets/demo.gif)
 
-> `localharness init` auto-detects your running endpoint (here, vLLM serving Qwen), an agent is plain YAML with deny-first tool permissions, and `validate` checks it before you run.
+> `localharness init` auto-detects your running endpoint (here, vLLM serving Qwen) and probes its tool-calling. Then `localharness start` is zero-config: it creates a default general-purpose agent and drops you straight into the REPL, ready for a task.
 
 ## Features
 
