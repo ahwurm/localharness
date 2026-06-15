@@ -22,8 +22,7 @@ Qwen3.6-27B (released 2026-04-22) is the dense flagship of the latest Qwen famil
 
 - 262,144-token native context; hybrid attention (Gated DeltaNet linear attention 3:1
   with gated self-attention) keeps KV cost low — ~64 KB/token FP16, ≈ 4.2 GB at 64k.
-- Strongest agentic-coding model that fits this hardware: 77.2% SWE-bench Verified
-  (see [CONTEXT-MODEL.md](../../CONTEXT-MODEL.md) candidate table).
+- Strongest agentic-coding model that fits this hardware: 77.2% SWE-bench Verified.
 - Thinking preservation: retains reasoning traces across turns (see
   [gaps.md](gaps.md) §6 for token-accounting implications).
 - **No published BFCL tool-calling score**, and a known tool-call format-drift issue

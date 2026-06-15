@@ -89,8 +89,6 @@ known out-of-box gaps are tracked in [gaps.md](docs/reference-architectures/gaps
 ## Documentation
 
 - [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and gaps
-- [CONTEXT-HARNESS.md](CONTEXT-HARNESS.md) — architecture and design rationale
-- [CONTEXT-MODEL.md](CONTEXT-MODEL.md) — historical model-selection analysis (superseded by reference architectures)
 - [docs/specs/](docs/specs/) — component specs
 
 ## Status

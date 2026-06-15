@@ -19,7 +19,7 @@ The tool system is the execution layer between the agent loop and the external w
 
 The tool system does **not** manage hook implementations, MCP transport (spec 04b), or the agent loop ReAct cycle. It is a pure service: given a tool name and arguments, validate and execute.
 
-**Source pattern:** OpenCode minimal `info()/run()` interface. OpenHands typed tool system (V1 Nov 2025). Tool scope pattern from CONTEXT-HARNESS.md.
+**Source pattern:** OpenCode minimal `info()/run()` interface. OpenHands typed tool system (V1 Nov 2025).
 
 ---
 

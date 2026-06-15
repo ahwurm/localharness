@@ -514,7 +514,7 @@ All core functionality runs on local hardware. No telemetry, no external API cal
 
 **Violation:** Using LangGraph, state machines, or directed acyclic graphs to drive agent execution steps.
 
-**Why wrong:** Adds indirection without benefit. "NOT a graph." — CONTEXT-HARNESS.md.
+**Why wrong:** Adds indirection without benefit. The agent loop is a plain loop, not a graph.
 
 **Correct:** Plain Python `while True` loop with explicit `break` conditions.
 
