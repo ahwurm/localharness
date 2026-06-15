@@ -1,0 +1,48 @@
+# Example LocalHarness agent definition.
+#
+# An agent is defined entirely in YAML — no Python. This one is a small,
+# read-only "Hacker News monitor": give it stories or comment threads and it
+# returns a tight, link-preserving digest. It shows the anatomy every agent
+# shares: identity, model knobs, tool access, deny-first permissions, and the
+# capability keywords the orchestrator routes on.
+#
+#   Validate:  uv run localharness validate examples/agents/hn-monitor.yaml
+#   Run:       see examples/README.md
+
+# --- Identity ---
+name: hn-monitor
+role: >-
+  Monitors Hacker News activity and produces a concise digest. Given a set of
+  stories or comment threads, it summarizes each in one or two sentences,
+  preserves the source link, flags anything relevant to local LLM inference,
+  and never invents details that are not present in the source.
+
+# --- Model ---
+model: inherit          # use the model from `localharness init` (org/division default)
+temperature: 0.3        # low — this is summarization, not brainstorming
+max_tokens: 2048
+
+# --- Tool access ---
+# `inherit: [global]` grants the built-ins (read, write, glob, grep, bash).
+# `deny` always wins: a summarizer has no business running a shell, so we drop
+# bash — least privilege by construction.
+tools:
+  inherit: [global]
+  deny: [bash]
+  # add: [<registered-or-mcp-tool>]   # e.g. a web-fetch MCP tool to pull HN live
+
+# --- Permissions (deny-first) ---
+# Mode `auto` allows every tool call except the deny patterns. These are ADDED
+# to the deny patterns inherited from the org/division (which already block
+# things like writing .env/secrets and `sudo`/`rm -rf` shell calls) — an agent
+# can only ever narrow its policy, never broaden it. Pattern form: tool(arg_glob).
+permissions:
+  mode: auto
+  deny_patterns:
+    - "write(*/.env)"
+    - "write(*.secret)"
+    - "write(*/MEMORY.md)"   # don't let a digest clobber the agent's own memory
+
+# --- Agent Card (orchestrator routing) ---
+capabilities: [hacker-news, summarization, monitoring]
+tags: [example, read-only]
