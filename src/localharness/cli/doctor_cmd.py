@@ -142,6 +142,15 @@ def doctor(
         else:
             console.print(f"{_INFO}  Tool calling: unknown (run 'localharness init' to probe)")
 
+    # 9. Web search dependency (builtin web_search tool needs ddgs)
+    try:
+        import ddgs  # noqa: F401
+        console.print(f"{_PASS} Web search ready (ddgs installed)")
+    except ImportError:
+        console.print(f"{_FAIL} Web search unavailable: 'ddgs' not installed")
+        console.print(f"       Run 'uv sync' to install it.")
+        failures.append("ddgs-missing")
+
     _summarize_and_exit(failures)
 
 

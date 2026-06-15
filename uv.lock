@@ -981,6 +981,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "bubus" },
+    { name = "ddgs" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
@@ -1004,7 +1005,6 @@ dev = [
     { name = "ruff" },
 ]
 dispatch = [
-    { name = "ddgs" },
     { name = "discord-py" },
 ]
 
@@ -1012,7 +1012,7 @@ dispatch = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22,<1" },
     { name = "bubus", specifier = ">=1.5,<2" },
-    { name = "ddgs", marker = "extra == 'dispatch'", specifier = ">=6.0" },
+    { name = "ddgs", specifier = ">=6.0" },
     { name = "discord-py", marker = "extra == 'dispatch'", specifier = ">=2.3" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.27.1" },
