@@ -35,25 +35,44 @@ def bus_with_persistence(tmp_path: Path) -> EventBus:
     return EventBus(persist_path=tmp_path / "events.jsonl")
 
 
+_MINIMAL_CONFIG_YAML = (
+    "version: '1'\n"
+    "provider:\n"
+    "  provider_type: vllm\n"
+    "  base_url: http://localhost:8000/v1\n"
+    "  default_model: test-model\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_localharness_home(tmp_path_factory, monkeypatch):
+    """Hermetic home for EVERY test (autouse).
+
+    Points LOCALHARNESS_HOME at a dedicated tmp dir (NOT the test's own
+    tmp_path, so it never collides with paths a test builds) seeded with a
+    minimal valid config.yaml. Keeps the suite from reading the developer's
+    real ~/.localharness — the "works on my machine" CI break where config-
+    loading tests passed locally but errored on a runner with no config.
+    Tests that need an unset/custom env (test_overlay, test_config_loader,
+    components_home) delenv/setenv it themselves; those run after this.
+    """
+    home = tmp_path_factory.mktemp("lh_home") / ".localharness"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def components_home(tmp_path, monkeypatch):
-    """Hermetic LocalHarness home dir.
+    """Hermetic LocalHarness home dir under the test's tmp_path.
 
-    Creates tmp_path/.localharness/ with empty config.yaml and audit.jsonl;
-    sets LOCALHARNESS_HOME so ConfigLoader, overlay writer, and EventBus
-    all isolate to tmp_path. Yields the home Path.
+    For tests that assert on the home contents directly. Overrides the
+    autouse isolation with a path the test can inspect. Yields the home Path.
     """
     home = tmp_path / ".localharness"
     home.mkdir(parents=True, exist_ok=True)
-    # Minimal valid HarnessConfig YAML for loader smoke
-    (home / "config.yaml").write_text(
-        "version: '1'\n"
-        "provider:\n"
-        "  provider_type: ollama\n"
-        "  base_url: http://localhost:11434/v1\n"
-        "  default_model: test-model\n",
-        encoding="utf-8",
-    )
+    (home / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("LOCALHARNESS_HOME", str(home))
     return home
 
@@ -768,6 +787,13 @@ def live_endpoint():
     import httpx
 
     from localharness.cli.components_cmd import _build_loader
+
+    # ENV-GATE first: this fixture is module-scoped, so it sets up BEFORE the
+    # function-scoped _skip_live_vllm autouse gate — without this self-skip it
+    # would call load_harness() and ConfigNotFound-error at setup in default/CI
+    # runs (no ~/.localharness) before the skip could fire.
+    if not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
+        pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
 
     base = _build_loader().load_harness().provider.base_url  # model-agnostic; NEVER bake the URL
     try:

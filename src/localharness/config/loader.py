@@ -1,6 +1,7 @@
 """ConfigLoader: YAML parse, validate, inheritance resolve, write."""
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -179,7 +180,9 @@ class ConfigLoader:
         config_dir: Optional[Path] = None,
         local_config_dir: Optional[Path] = None,
     ) -> None:
-        self._config_dir = Path(config_dir or "~/.localharness").expanduser()
+        self._config_dir = Path(
+            config_dir or os.environ.get("LOCALHARNESS_HOME") or "~/.localharness"
+        ).expanduser()
         self._local_dir = Path(local_config_dir or ".localharness")
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
