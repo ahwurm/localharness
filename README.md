@@ -8,6 +8,19 @@ Define agents in YAML — system prompt, tools, permissions, memory — and run 
 
 > `localharness init` auto-detects your running endpoint (here, vLLM serving Qwen) and probes its tool-calling. Then `localharness start` is zero-config: it creates a default general-purpose agent and drops you straight into the REPL. Ask it a real question and watch the agent work — here it chains `web_search` → `web_fetch` across several iterations to research the best open-source model for a 128 GB machine, the tool-call loop visible the whole way.
 
+## Why local
+
+Frontier coding agents are great when you're sitting there driving them, but the metering and rate limits make them an awkward fit for the routine, recurring jobs you'd actually want an agent to own: the nightly report, the scheduled cleanup, the watch-and-react task. LocalHarness keeps the Claude Code / OpenCode workflow you already know and points it at a model running on hardware you control.
+
+- **No metering.** A job that fires every hour runs on hardware you already own, with no per-token bill.
+- **Your data stays put.** Code, files, and prompts never leave the machine.
+- **Always on.** No quota or rate caps to budget around for unattended runs.
+- **Familiar.** Same agent, tool, and permission model as the cloud tools, just local.
+
+A frontier agent like Claude Code is still the easy way to set the harness up and compose a bespoke subagent for a task. The split that works: frontier to design, local to run.
+
+**Migrating existing headless work?** [LocalShift](https://github.com/ahwurm/localshift) is the companion project. Point Claude Code at a cron job, skill, or bare prompt and it builds a per-workload quality eval, proves the local model is good enough (or honestly says keep-frontier), then cuts the job over to run claude-free on LocalHarness.
+
 ## Features
 
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
