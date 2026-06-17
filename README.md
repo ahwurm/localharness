@@ -1,8 +1,8 @@
 # LocalHarness
 
-Model-agnostic hierarchical agent harness for local LLMs — the agent layer that runs on top of your inference engine (vLLM, Ollama, LM Studio, llama.cpp), not another one.
+**An open-source agent harness for local LLMs** — run AI agents on local models, defined in YAML, against any OpenAI-compatible endpoint. LocalHarness is the *agent layer* that runs on top of your inference engine (vLLM, Ollama, LM Studio, llama.cpp) — not another inference engine.
 
-Define agents in YAML — system prompt, tools, permissions, memory — and run them as a coordinated org (orchestrator → divisions → agents) against any OpenAI-compatible local endpoint: vLLM, Ollama, LM Studio, llama.cpp. The thesis: the harness, not the model, is where most of the capability lives — the same model can swing tens of benchmark points depending on the harness around it.
+It's model-agnostic and hierarchical: define agents in YAML — system prompt, tools, permissions, memory — and run them as a coordinated org (orchestrator → divisions → agents) against any OpenAI-compatible local endpoint. The thesis: the harness, not the model, is where most of the capability lives — the same model can swing tens of benchmark points depending on the harness around it.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
@@ -27,10 +27,24 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
 - **Isolated memory per agent** — SQLite-backed, scoped per agent
 - **Deny-first permissions** — policies inherit down the hierarchy and can only narrow
-- **Tool-call fallback** — native function calling where the model supports it, XML fallback where it doesn't
+- **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
+- **MCP support** — connect Model Context Protocol servers and expose their tools to agents
+- **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
 - **Pluggable channels** — CLI today; Discord adapter in development
+
+## How it compares
+
+LocalHarness is an *agent layer* — not an inference engine, and not a cloud SaaS. It sits on top of whatever serves your model and gives that model agents, tools, memory, and permissions.
+
+| | What it is | LocalHarness relationship |
+|---|---|---|
+| **Ollama / vLLM / LM Studio / llama.cpp** | Inference engines — they *serve* a model over an API | LocalHarness runs on top; point it at their endpoint |
+| **Cloud agent frameworks** (hosted assistants / SaaS) | Agents that run against a vendor's metered API | Same agent / tool / permission model, but against a model on *your* hardware — no metering, data stays local |
+| **Agent libraries** (write-your-own in Python) | Code-first SDKs for building agents | Config-first: agents, divisions, and permissions in YAML, no Python required |
+
+If you already serve a model with Ollama or vLLM and want to run real agents against it — with tools, isolated memory, and deny-first permissions — that's the gap LocalHarness fills.
 
 ## Requirements
 
