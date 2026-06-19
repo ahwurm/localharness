@@ -209,8 +209,8 @@ def test_self_check_leaves_enumerate(components_home):
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
-    assert len(entries) == 86, (
-        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
+    assert len(entries) == 88, (
+        f"catalogue should be 88 entries (86 + the two new agent.rlm leaves), got {len(entries)}"
     )
 
 
@@ -257,7 +257,7 @@ def test_self_check_defaults_and_bounds():
 
 
 def test_role_sections_leaves_enumerate(components_home):
-    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 86."""
+    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 88 (incl. agent.rlm.*)."""
     from localharness.config.models import AgentConfig
     from localharness.registry.catalogue import build_catalogue
 
@@ -274,8 +274,8 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 86, (
-        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
+    assert len(entries) == 88, (
+        f"catalogue should be 88 entries (86 + the two new agent.rlm leaves), got {len(entries)}"
     )
 
 

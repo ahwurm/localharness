@@ -583,11 +583,40 @@ class AgentLoop:
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
 
+        # RLM mode (additive; byte-identical when disabled): seed the input as `ctx` in a
+        # per-session python_exec REPL and let the model drive it with code, rather than
+        # placing the (possibly huge) input into the prompt. See agent.rlm config.
+        rlm_cfg = self._config.rlm
+        rlm_tool = None
+        _rlm_section = _rlm_directive = ""
+        if rlm_cfg.enabled:
+            from localharness.tools.builtin.python_tool import PythonExecTool
+            rlm_tool = PythonExecTool(namespace={"ctx": task})
+            if getattr(self._llm, "config", None) is not None:
+                # Generous output budget — a reasoning model narrates a plan THEN emits the
+                # tool call; a tight cap starves it mid-thought.
+                self._llm.config.max_tokens = rlm_cfg.root_max_tokens
+            _rlm_section = (
+                "\n\n## Working over a large input (`ctx`)\n"
+                "Your input is NOT in this conversation — it is loaded as a string variable "
+                "`ctx` in the `python_exec` REPL (a stateful Python environment; variables and "
+                "imports persist across your python_exec calls). It may be far larger than your "
+                "context window, so never try to read it whole.\n"
+                "Use `python_exec` to inspect `ctx` with code — `len(ctx)`, regex (`import re`), "
+                "slicing — to locate what you need. For a chunk that needs understanding rather "
+                "than search, delegate it to a fresh reader via the `agent` tool if you have it. "
+                "Compose your answer from what you find, then reply to the user directly."
+            )
+            _rlm_directive = (
+                "Your full input (instructions and any data) is loaded in the `ctx` variable in "
+                "the python_exec REPL. Inspect it with code to complete the request."
+            )
+
         # Build system prompt
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
-        system_prompt = _assemble_role(self._config)
+        system_prompt = _assemble_role(self._config) + _rlm_section
         # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
         _now = datetime.now().astimezone()
         system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
@@ -621,6 +650,8 @@ class AgentLoop:
                 tool_schemas = list(tool_schemas_dict.values())
             except Exception:
                 tool_schemas = []
+        if rlm_tool is not None:
+            tool_schemas.append(rlm_tool.info())
 
         # Initialize or continue session messages
         has_prior_turns = any(m.get("role") == "user" for m in session.messages)
@@ -630,7 +661,10 @@ class AgentLoop:
         else:
             # First turn (may have compact.md already) — insert system prompt at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
-        session.push({"role": "user", "content": task})
+        if rlm_tool is not None:
+            session.push({"role": "user", "content": _rlm_directive})
+        else:
+            session.push({"role": "user", "content": task})
 
         recovery_injection: str | None = None
 
@@ -923,10 +957,19 @@ class AgentLoop:
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
 
-                # Dispatch via registry
+                # Dispatch: the per-session RLM python_exec tool, else the registry
                 result_content = ""
                 is_error = False
-                if self._tools is not None:
+                if rlm_tool is not None and tool_call.name == "python_exec":
+                    try:
+                        result = await rlm_tool.run(**tool_call.arguments)
+                        is_error = not result.success
+                        result_content = (result.output if result.success
+                                          else f"[tool error] {result.error or 'unknown error'}")
+                    except Exception as exc:
+                        result_content = f"Error: {exc}"
+                        is_error = True
+                elif self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
                             tool_call.name,
