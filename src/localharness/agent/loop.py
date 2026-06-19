@@ -475,6 +475,7 @@ class AgentLoop:
             budget=BudgetSpec(
                 max_actions=budget_cfg.max_actions,
                 max_duration_minutes=budget_cfg.max_duration_minutes,
+                max_context_tokens=self._config.context.max_context_tokens,
             ),
         ))
 
