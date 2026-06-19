@@ -536,6 +536,39 @@ class RoleSectionsConfig(BaseModel):
     )
 
 
+class RLMConfig(BaseModel):
+    """RLM (Recursive Language Model) mode — drive a stateful Python REPL over the input.
+
+    When enabled, the agent's input is seeded as a `ctx` variable inside the persistent
+    `python_exec` REPL (NOT placed in the prompt), and the agent inspects/decomposes it
+    with code — optionally delegating chunk comprehension to recursive sub-calls (the
+    `agent`/Explore tool). Lets the agent work over inputs far larger than its context
+    window. This is an additive MODE: with `enabled=False` the agent path is unchanged.
+    Addressable via the component registry as `agent.rlm.{enabled,root_max_tokens}`.
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable RLM mode: seed the input as `ctx` in the python_exec REPL and drive "
+            "it with code, instead of placing the input in the prompt. "
+            "Mutable via `localharness components set agent.rlm.enabled <true|false>`."
+        ),
+    )
+    root_max_tokens: int = Field(
+        default=8000,
+        ge=2000,
+        le=128_000,
+        description=(
+            "Output-token budget for the RLM root model's turns. Generous on purpose: a "
+            "reasoning model narrates a plan THEN emits the code block, so a tight budget "
+            "starves it mid-thought (the cause of an early prototype failure). "
+            "Mutable via `localharness components set agent.rlm.root_max_tokens <int>`."
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Complete configuration for one agent.
@@ -674,6 +707,16 @@ class AgentConfig(BaseModel):
             "Orthogonal system-prompt sections (MODP-01/02). All default to '' so the "
             "unmutated assembly is byte-identical to `role`. Addressable via "
             "`agent.role_sections.{identity,tool_use,stopping,output}`."
+        ),
+    )
+
+    rlm: RLMConfig = Field(
+        default_factory=RLMConfig,
+        description=(
+            "Optional RLM mode — drive a stateful python_exec REPL over a `ctx` variable "
+            "instead of placing the input in the prompt (for inputs larger than the "
+            "context window). Default disabled → agent path unchanged. Addressable via "
+            "`agent.rlm.{enabled,root_max_tokens}`."
         ),
     )
 
