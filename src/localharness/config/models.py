@@ -539,12 +539,14 @@ class RoleSectionsConfig(BaseModel):
 class RLMConfig(BaseModel):
     """RLM (Recursive Language Model) mode — drive a stateful Python REPL over the input.
 
-    When enabled, the agent's input is seeded as a `ctx` variable inside the persistent
+    When active, the agent's input is seeded as a `ctx` variable inside the persistent
     `python_exec` REPL (NOT placed in the prompt), and the agent inspects/decomposes it
-    with code — optionally delegating chunk comprehension to recursive sub-calls (the
-    `agent`/Explore tool). Lets the agent work over inputs far larger than its context
-    window. This is an additive MODE: with `enabled=False` the agent path is unchanged.
-    Addressable via the component registry as `agent.rlm.{enabled,root_max_tokens}`.
+    with code — optionally delegating a chunk to a fresh model instance via an in-REPL
+    `llm(prompt)` call (the chunk is passed by reference in Python, so it never enters the
+    root's context). Lets the agent work over inputs far larger than its context window.
+    Activated either always (`enabled`) or per-turn by the `auto` router when the input is
+    too big. This is an additive MODE: inactive => the agent path is byte-identical.
+    Addressable as `agent.rlm.{enabled,root_max_tokens,auto,auto_threshold}`.
     """
     model_config = ConfigDict(frozen=False, extra="forbid")
 
@@ -565,6 +567,29 @@ class RLMConfig(BaseModel):
             "reasoning model narrates a plan THEN emits the code block, so a tight budget "
             "starves it mid-thought (the cause of an early prototype failure). "
             "Mutable via `localharness components set agent.rlm.root_max_tokens <int>`."
+        ),
+    )
+    auto: bool = Field(
+        default=False,
+        description=(
+            "Auto-router. When True (and `enabled` is False), a turn is routed to RLM mode "
+            "ONLY if the input exceeds `auto_threshold` of the agent's context window — the "
+            "lossless alternative to the summarize-middle compaction the same over-budget "
+            "input would otherwise trigger. Within-window inputs stay on the normal direct "
+            "path (faster + more accurate). Decided pre-prompt (the model can't sense input "
+            "size once it is already in the prompt). "
+            "Mutable via `localharness components set agent.rlm.auto <true|false>`."
+        ),
+    )
+    auto_threshold: float = Field(
+        default=0.80,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fraction of the context window above which `auto` routes the input to RLM mode. "
+            "Default 0.80 = the harness's summary-compaction trigger, so RLM takes over "
+            "exactly when the normal path would otherwise start compacting. "
+            "Mutable via `localharness components set agent.rlm.auto_threshold <float>`."
         ),
     )
 
