@@ -524,10 +524,12 @@ def _fake_httpx_client(monkeypatch, page_text: str):
 async def test_web_fetch_short_page_no_clip(monkeypatch):
     from localharness.tools.builtin.web_tool import WebFetchTool
 
+    from localharness.tools.builtin.web_tool import _UNTRUSTED
+
     _fake_httpx_client(monkeypatch, "short page")
     result = await WebFetchTool().run(url="https://example.test/page")
     assert result.success is True
-    assert result.output == "short page"
+    assert result.output == _UNTRUSTED + "short page"
     assert not result.truncated
 
 
@@ -541,8 +543,8 @@ async def test_web_fetch_clips_with_cursor_notice(monkeypatch):
     assert result.truncated is True
     assert "start_index=5000" in result.output
     assert result.metadata["next_start_index"] == 5000
-    # window itself is 5000 chars of body
-    assert result.output.startswith("x" * 100)
+    # window itself is 5000 chars of body (after the untrusted-content banner)
+    assert ("x" * 5000) in result.output
 
 
 @pytest.mark.asyncio
