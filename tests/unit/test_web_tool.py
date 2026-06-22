@@ -7,7 +7,7 @@ import types
 import pytest
 
 from localharness.tools.builtin import web_tool
-from localharness.tools.builtin.web_tool import WebFetchTool, WebSearchTool
+from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
 
 
 def _fake_httpx(monkeypatch, *, text="", json_data=None, content_type="text/html"):
@@ -79,7 +79,7 @@ async def test_web_fetch_short_plaintext_is_not_js_salvaged(monkeypatch):
     result = await WebFetchTool().run(url="https://example.test/api")
     assert result.success is True
     assert "low extractable text" not in result.output
-    assert result.output == web_tool._UNTRUSTED + "ok"
+    assert result.output.startswith(web_tool._UNTRUSTED + "ok")  # body shown, then the fetch_id tail
 
 
 # --- search backends ----------------------------------------------------------
@@ -110,3 +110,70 @@ async def test_web_search_searxng_when_env_set(monkeypatch):
     assert result.output.startswith(web_tool._UNTRUSTED)
     assert "https://sx.test/1" in result.output
     assert "sx snippet" in result.output
+
+
+# --- P4: lossless retrieve-and-verify (page store + web_page_query) ------------
+
+@pytest.mark.asyncio
+async def test_web_fetch_retains_full_page_and_returns_fetch_id(monkeypatch):
+    web_tool._reset_page_store()
+    page = "lorem ipsum " * 800  # ~9600 chars — well past the 5000 inline window
+    _fake_httpx(monkeypatch, text=page, content_type="text/plain")
+    result = await WebFetchTool().run(url="https://example.test/big")
+    assert result.success is True
+    assert result.truncated is True
+    fid = result.metadata["fetch_id"]
+    assert fid and f"fetch_id={fid}" in result.output
+    # retained length == FULL page, not the inline cap
+    assert len(web_tool._PAGE_STORE[fid]) == len(page)
+
+
+@pytest.mark.asyncio
+async def test_web_page_query_surfaces_content_past_the_inline_cap(monkeypatch):
+    web_tool._reset_page_store()
+    filler = "background prose. " * 400          # ~7200 chars of filler
+    needle = "SPCX was added to the S&P 500 index on 2026-01-15."
+    page = filler + needle + " and some trailing text."
+    _fake_httpx(monkeypatch, text=page, content_type="text/plain")
+
+    fetched = await WebFetchTool().run(url="https://example.test/article")
+    fid = fetched.metadata["fetch_id"]
+    assert needle not in fetched.output, "the disconfirming sentence is PAST the inline preview"
+
+    q = await WebPageQueryTool().run(fetch_id=fid, pattern="S&P 500")
+    assert q.success is True
+    assert needle in q.output, "web_page_query must surface past-cap content losslessly"
+    assert q.output.startswith(web_tool._UNTRUSTED)
+
+
+@pytest.mark.asyncio
+async def test_web_page_query_unknown_fetch_id_errors():
+    web_tool._reset_page_store()
+    q = await WebPageQueryTool().run(fetch_id="pg-does-not-exist", pattern="x")
+    assert q.success is False
+    assert "no retained page" in q.error
+
+
+@pytest.mark.asyncio
+async def test_web_page_query_no_match_is_explicit(monkeypatch):
+    web_tool._reset_page_store()
+    _fake_httpx(monkeypatch, text="a page about cats and dogs. " * 50, content_type="text/plain")
+    fetched = await WebFetchTool().run(url="https://example.test/pets")
+    q = await WebPageQueryTool().run(fetch_id=fetched.metadata["fetch_id"], pattern="quarterly earnings")
+    assert q.success is True
+    assert "no match" in q.output
+
+
+@pytest.mark.asyncio
+async def test_web_page_query_pages_under_registry_cap(monkeypatch):
+    web_tool._reset_page_store()
+    # 20 well-separated matches; with a wide window their combined context exceeds the output
+    # budget, so the tool PAGES (drops the tail with a note) rather than returning a lossy 50k cut.
+    block = "NEEDLE" + ("filler " * 700)  # ~4900 chars apart so windows don't all merge
+    page = block * 20
+    _fake_httpx(monkeypatch, text=page, content_type="text/plain")
+    fetched = await WebFetchTool().run(url="https://example.test/many")
+    q = await WebPageQueryTool().run(fetch_id=fetched.metadata["fetch_id"], pattern="NEEDLE", window=8000)
+    assert q.success is True
+    assert len(q.output) < 50_000, "must stay under the 50k registry cap (no lossy truncation)"
+    assert "stay under the size cap" in q.output
