@@ -792,6 +792,18 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    max_subagent_depth: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description=(
+            "How deep delegation may nest. Depth 0 = this agent; a subagent it spawns runs at "
+            "depth 1, a sub-subagent (e.g. a web-researcher's search-verifier) at depth 2. A "
+            "subagent at depth d may delegate iff d < max_subagent_depth; =1 disables nesting "
+            "(kill-switch). Addressable via `agent.max_subagent_depth`."
+        ),
+    )
+
     # --- Agent Card (for orchestrator routing) ---
     capabilities: list[str] = Field(
         default_factory=list,

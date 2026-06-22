@@ -428,6 +428,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     perm_eval = PermissionEvaluator()
 
+    # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
+    # alongside any configured agent cards so the model knows it can delegate to them. (search-verifier
+    # is nested under web-researcher, not advertised to the orchestrator.)
+    available_agent_names = ["explore", "web-researcher", "data-analyst", "frontend-designer"] + [c.name for c in card_registry.all_cards()]
+
     _run_agent = make_explore_agent_runner(
         llm=llm,
         bus=bus,
@@ -440,11 +445,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
         token_counter=token_counter,
         max_context_tokens=agent_config.context.max_context_tokens,
+        # Real, config-capped recursion depth: the orchestrator is depth 0; a non-leaf child
+        # (e.g. web-researcher) may nest a grandchild (search-verifier) up to this cap.
+        depth=0,
+        max_subagent_depth=agent_config.max_subagent_depth,
+        available_agents=available_agent_names,
     )
 
-    # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
-    # alongside any configured agent cards so the model knows it can delegate to them.
-    available_agent_names = ["explore", "web-researcher", "data-analyst", "frontend-designer"] + [c.name for c in card_registry.all_cards()]
     agent_tool = AgentTool(
         agent_runner=_run_agent,
         available_agents=available_agent_names,
