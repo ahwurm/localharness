@@ -692,7 +692,11 @@ class AgentLoop:
             )
         if self._memory is not None:
             try:
-                ctx = await self._memory.load_context()
+                _mem_cfg = getattr(self._config, "memory", None)
+                ctx = await self._memory.load_context(
+                    index_mode=getattr(_mem_cfg, "index_mode", True),
+                    max_session_history=getattr(_mem_cfg, "max_session_history_entries", 10),
+                )
                 parts = [system_prompt]
                 if ctx.guardrails_md:
                     parts.append("## Guardrails\n" + ctx.guardrails_md)

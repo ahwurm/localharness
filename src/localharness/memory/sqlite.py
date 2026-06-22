@@ -429,10 +429,26 @@ class MemoryStore:
         """Replace a named MEMORY.md section. Delegates to MarkdownMemory."""
         self._markdown_memory.update_section(section, content)
 
-    async def load_context(self) -> MemoryContext:
-        """Load three-tier context for system prompt injection."""
+    async def load_context(
+        self,
+        index_mode: bool = True,
+        max_session_history: int = 10,
+    ) -> MemoryContext:
+        """Load three-tier context for system prompt injection.
+
+        When `index_mode` is True (default), the agent-memory block is an INDEX — one line
+        per persistent fact (name + one-line description, NOT the full body) plus the most
+        recent `max_session_history` session-history entries — instead of the entire
+        MEMORY.md file. The full body of any fact is served on demand via the memory_get /
+        memory_search tools. When False, the legacy behaviour (whole MEMORY.md inlined)
+        is used.
+        """
         assert self._db is not None
-        agent_md = self._markdown_memory.read()
+
+        if index_mode:
+            agent_md = await self._render_memory_index(max_session_history)
+        else:
+            agent_md = self._markdown_memory.read()
 
         division_md = ""
         if self._division_md_path.exists():
@@ -455,6 +471,35 @@ class MemoryStore:
             guardrails_md=guardrails_md,
             fact_count=fact_count,
             token_estimate=token_estimate,
+        )
+
+    async def _render_memory_index(self, max_session_history: int) -> str:
+        """Render the agent-memory INDEX: fact names + one-line descriptions (not full
+        bodies) and the last `max_session_history` session-history entries. The model is
+        told it can call memory_get(name) / memory_search(query) for the full detail."""
+        assert self._db is not None
+        now = int(time.time())
+        async with self._db.execute(
+            "SELECT key, value FROM facts "
+            "WHERE agent_id = ? AND confidence >= 0.7 "
+            "AND (expires_at IS NULL OR expires_at > ?) "
+            "ORDER BY updated_at DESC",
+            (self._agent_id, now),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        fact_lines = [f"- {r[0]}: {_one_line(r[1])}" for r in rows]
+        facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
+
+        history_full = self._markdown_memory.get_section("session_history")
+        history_block = _last_n_entries(history_full, max_session_history)
+
+        return (
+            "This is an INDEX, not the full memory. Each line below is one persistent fact "
+            "(name: short description). Call `memory_get(name)` for a fact's full body, or "
+            "`memory_search(query)` to search fact contents.\n\n"
+            f"### Persistent Facts ({len(fact_lines)})\n{facts_block}\n\n"
+            f"### Recent Session History (last {max_session_history})\n{history_block}"
         )
 
     # ------------------------------------------------------------------
@@ -682,6 +727,21 @@ class MemoryStore:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _one_line(value: str, max_chars: int = 100) -> str:
+    """First line of a fact value, truncated — the index carries a description, not the body."""
+    first = (value or "").strip().splitlines()[0] if (value or "").strip() else ""
+    return first if len(first) <= max_chars else first[: max_chars - 1].rstrip() + "…"
+
+
+def _last_n_entries(history: str, n: int) -> str:
+    """Keep the last `n` non-empty session-history lines. Entries are prepended newest-first
+    in MEMORY.md (markdown.py), so the most-recent n are the FIRST n lines."""
+    if not history.strip():
+        return "(no sessions recorded)"
+    lines = [ln for ln in history.splitlines() if ln.strip()]
+    return "\n".join(lines[: max(0, n)]) if n > 0 else "(session history omitted)"
+
 
 def _row_to_fact(row: aiosqlite.Row) -> Fact:
     tags_raw = row["tags"] if isinstance(row, aiosqlite.Row) else row[5]

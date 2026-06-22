@@ -211,8 +211,16 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.self_check.max_passes" in entries
     assert "agent.rlm.auto" in entries
     assert "agent.rlm.auto_threshold" in entries
-    assert len(entries) == 90, (
-        f"catalogue should be 90 entries (88 + the two new agent.rlm.auto* leaves), got {len(entries)}"
+    # New context-efficiency leaves: memory.{index_mode,max_session_history_entries} +
+    # context.{tool_result_eviction,tool_result_evict_threshold_chars}. The two context.*
+    # leaves enumerate under BOTH agent.context.* and org.context.* (shared ContextConfig),
+    # so 90 -> 96 (+2 memory agent leaves, +2 context leaves x2 scopes).
+    assert "agent.memory.index_mode" in entries
+    assert "agent.memory.max_session_history_entries" in entries
+    assert "agent.context.tool_result_eviction" in entries
+    assert "agent.context.tool_result_evict_threshold_chars" in entries
+    assert len(entries) == 96, (
+        f"catalogue should be 96 entries (90 + the new context-efficiency leaves), got {len(entries)}"
     )
 
 
@@ -276,8 +284,8 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 90, (
-        f"catalogue should be 90 entries (88 + the two new agent.rlm.auto* leaves), got {len(entries)}"
+    assert len(entries) == 96, (
+        f"catalogue should be 96 entries (90 + the new context-efficiency leaves), got {len(entries)}"
     )
 
 

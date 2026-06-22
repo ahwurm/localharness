@@ -263,6 +263,22 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"memory: {exc} (in-memory mode)")
         memory_store = None
 
+    # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
+    # tool_result_get (restore evicted tool-result bodies). The EvictionStore is shared with
+    # the ContextManager below so eviction-writes and restore-reads hit the same map.
+    from localharness.agent.context import EvictionStore
+    eviction_store = EvictionStore()
+    try:
+        if memory_store is not None and agent_config.memory.inject_into_context:
+            from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
+            await tool_registry.register(MemorySearchTool(memory_store), scope="global")
+            await tool_registry.register(MemoryGetTool(memory_store), scope="global")
+        if agent_config.context.tool_result_eviction:
+            from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+            await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
+    except Exception as exc:
+        warnings.append(f"queryable-handle tools: {exc}")
+
     # --- 5. Plugin loader (soft) ---
     plugin_loader: PluginLoader | None = None
     try:
@@ -325,6 +341,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         preserve_first_n=agent_config.context.preserve_first_n_messages,
         preserve_last_n=agent_config.context.preserve_last_n_messages,
         pipeline=pipeline,
+        eviction_store=eviction_store,
+        tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
+        tool_evict_enabled=agent_config.context.tool_result_eviction,
     )
 
     # --- 9. Orchestrator ---
