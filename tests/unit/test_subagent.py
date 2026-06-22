@@ -256,7 +256,19 @@ async def test_web_child_registry_is_web_only():
 def test_web_researcher_config_has_distinct_budget():
     cfg = build_web_researcher_config("web-researcher")
     assert cfg.name == "web-researcher"
-    assert cfg.permissions.budget.max_actions == 12
+    assert cfg.permissions.budget.max_actions == 28  # aligned to the forked runner (P3)
+
+
+def test_web_researcher_role_rigor_gating(monkeypatch):
+    from localharness.agent.subagent import build_web_researcher_config as _build
+
+    monkeypatch.setenv("RESEARCH_RIGOR", "high")
+    high = _build("web-researcher")
+    assert "search-verifier" in high.role and "DISPUTED" in high.role
+
+    monkeypatch.setenv("RESEARCH_RIGOR", "fast")
+    fast = _build("web-researcher")
+    assert "search-verifier" not in fast.role  # fast skips verification (speed dial)
 
 
 def test_format_web_findings_is_structured_summary():
