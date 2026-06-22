@@ -536,6 +536,8 @@ def make_explore_agent_runner(
     permission_evaluator: Any,
     get_parent_session_id: Callable[[], str | None],
     load_agent: Callable[[str], Any] | None = None,
+    token_counter: Any = None,
+    max_context_tokens: int | None = None,
 ) -> Callable[[str, str, int], Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -553,6 +555,18 @@ def make_explore_agent_runner(
       `agent_loop.current_session_id`.
     - `depth` threads through to every dispatch (the belt-and-suspenders recursion guard).
     """
+
+    def _make_child_ctx() -> Any:
+        """Fresh ContextManager per child, carrying the parent's model-aware token_counter
+        (exact /tokenize counts, not tiktoken) and resolved window — so children account
+        for context the same way the parent does instead of falling to bare defaults."""
+        from localharness.agent.context import ContextManager
+        kwargs: dict[str, Any] = {}
+        if token_counter is not None:
+            kwargs["token_counter"] = token_counter
+        if max_context_tokens is not None:
+            kwargs["max_context_tokens"] = max_context_tokens
+        return ContextManager(**kwargs)
 
     async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
         name = _sanitize_agent_name(agent_id)
@@ -585,6 +599,7 @@ def make_explore_agent_runner(
                 base_registry=base_registry,
                 parent_session_id=get_parent_session_id(),
                 permission_evaluator=permission_evaluator,
+                context_manager=_make_child_ctx(),
                 depth=depth,
             )
         return await dispatch(
@@ -594,6 +609,7 @@ def make_explore_agent_runner(
             base_registry=base_registry,
             parent_session_id=get_parent_session_id(),
             permission_evaluator=permission_evaluator,
+            context_manager=_make_child_ctx(),
             depth=depth,
         )
 
