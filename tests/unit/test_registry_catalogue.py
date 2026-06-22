@@ -209,8 +209,19 @@ def test_self_check_leaves_enumerate(components_home):
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
-    assert len(entries) == 86, (
-        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
+    assert "agent.rlm.auto" in entries
+    assert "agent.rlm.auto_threshold" in entries
+    # New context-efficiency leaves: memory.{index_mode,max_session_history_entries} +
+    # context.{tool_result_eviction,tool_result_evict_threshold_chars}. The two context.*
+    # leaves enumerate under BOTH agent.context.* and org.context.* (shared ContextConfig),
+    # so 90 -> 96 (+2 memory agent leaves, +2 context leaves x2 scopes).
+    assert "agent.memory.index_mode" in entries
+    assert "agent.memory.max_session_history_entries" in entries
+    assert "agent.context.tool_result_eviction" in entries
+    assert "agent.context.tool_result_evict_threshold_chars" in entries
+    assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
+    assert len(entries) == 97, (
+        f"catalogue should be 97 entries (96 + agent.max_subagent_depth), got {len(entries)}"
     )
 
 
@@ -257,7 +268,7 @@ def test_self_check_defaults_and_bounds():
 
 
 def test_role_sections_leaves_enumerate(components_home):
-    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 86."""
+    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 90 (incl. agent.rlm.*)."""
     from localharness.config.models import AgentConfig
     from localharness.registry.catalogue import build_catalogue
 
@@ -274,8 +285,8 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 86, (
-        f"catalogue should be 86 entries (82 + the four new role_sections leaves), got {len(entries)}"
+    assert len(entries) == 97, (
+        f"catalogue should be 97 entries (96 + agent.max_subagent_depth), got {len(entries)}"
     )
 
 

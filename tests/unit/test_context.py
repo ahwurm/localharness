@@ -92,6 +92,57 @@ def test_token_counter_messages():
     assert count < 200  # sanity
 
 
+def test_token_counter_remote_unreachable_fails_loud():
+    """base_url+model whose /tokenize is unreachable -> HARD error, no silent fallback.
+    An approximate meter on the live path is what hid the context-overflow bug, so the
+    counter refuses to construct rather than degrade."""
+    import pytest
+    from localharness.agent.context import TokenCounter
+    with pytest.raises(RuntimeError, match="exact token counting unavailable"):
+        TokenCounter(base_url="http://127.0.0.1:1/v1", model="nope")
+
+
+def test_token_counter_remote_path_and_cache(monkeypatch):
+    """When /tokenize works, count() uses the server count and caches by content hash."""
+    from localharness.agent import context as ctxmod
+    calls = {"n": 0}
+
+    def fake_remote(self, text):
+        calls["n"] += 1
+        return 999  # server-truth count, distinct from any tiktoken value
+
+    monkeypatch.setattr(ctxmod.TokenCounter, "_remote_count", fake_remote)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen")
+    assert tc._tokenize_url == "http://localhost:8000/tokenize"  # /v1 stripped, root path
+    n1 = calls["n"]  # probe consumed one call
+    assert tc.count("some digits 123456") == 999
+    assert tc.count("some digits 123456") == 999  # cached
+    assert calls["n"] == n1 + 1  # exactly one new remote call (second was cached)
+
+
+def test_token_counter_remote_count_strips_v1_and_reads_count(monkeypatch):
+    """_remote_count POSTs to {root}/tokenize and reads the 'count' field."""
+    from localharness.agent import context as ctxmod
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"count": 42}'
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["body"] = req.data
+        return _Resp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen")
+    assert captured["url"] == "http://localhost:8000/tokenize"
+    assert tc.count("x") == 42
+
+
 def test_token_budget_usage_fraction():
     from localharness.agent.context import TokenBudget
     budget = TokenBudget(total_limit=100_000, current_usage=70_000, tool_schema_tokens=10_000)
@@ -109,14 +160,47 @@ def test_token_budget_below_threshold():
 
 # --- Phase 4: CompactionPipeline ---
 
-def test_tool_result_cap_truncates():
+def test_tool_result_cap_keeps_head_and_tail():
+    # Oversized result: head+tail keep must preserve BOTH ends — the tail (where exit codes /
+    # errors live) is exactly what the old head-only truncation discarded.
     from localharness.agent.context import ToolResultCapStage, TokenBudget, TokenCounter
     stage = ToolResultCapStage(max_chars=100)
-    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": "x" * 200}]
+    content = "H" * 100 + "T" * 100  # head-only would drop every T
+    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": content}]
     budget = TokenBudget(total_limit=128000, current_usage=1000, tool_schema_tokens=0)
     result, modified = stage.apply(messages, budget, TokenCounter())
+    out = result[0]["content"]
     assert modified is True
-    assert len(result[0]["content"]) <= 150  # 100 + truncation suffix
+    assert out.startswith("H" * 60)   # 60% head
+    assert out.endswith("T" * 40)     # 40% tail preserved
+    assert "elided" in out
+
+
+def test_tool_result_cap_strips_ansi_and_whitespace():
+    from localharness.agent.context import ToolResultCapStage, TokenBudget, TokenCounter
+    stage = ToolResultCapStage(max_chars=10_000)
+    content = "\x1b[31mERROR\x1b[0m   \n\n\n\ndone"
+    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": content}]
+    budget = TokenBudget(total_limit=128000, current_usage=1000, tool_schema_tokens=0)
+    result, modified = stage.apply(messages, budget, TokenCounter())
+    out = result[0]["content"]
+    assert modified is True
+    assert "\x1b" not in out             # ANSI stripped
+    assert out == "ERROR\n\ndone"        # trailing ws dropped, blank-line run → one blank line
+
+
+def test_tool_result_cap_clean_can_avoid_truncation():
+    # A result over cap only because of ANSI/whitespace cleans back under cap → no elision.
+    from localharness.agent.context import ToolResultCapStage, TokenBudget, TokenCounter
+    stage = ToolResultCapStage(max_chars=20)
+    content = "abc" + "\x1b[0m" * 20 + "xyz"  # >20 raw, ~6 once stripped
+    messages = [{"role": "tool", "tool_call_id": "tc-1", "content": content}]
+    budget = TokenBudget(total_limit=128000, current_usage=1000, tool_schema_tokens=0)
+    result, modified = stage.apply(messages, budget, TokenCounter())
+    out = result[0]["content"]
+    assert modified is True
+    assert out == "abcxyz"
+    assert "elided" not in out
 
 
 def test_tool_result_cap_no_op_when_short():

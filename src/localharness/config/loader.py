@@ -292,6 +292,31 @@ class ConfigLoader:
         self._division_cache[name] = result
         return result
 
+    def _raw_org_context(self) -> dict:
+        """Explicitly-set org-level `context:` block. The org config lives in config.yaml's
+        `org:` section — the single user-facing source of truth — so read it there first; a
+        standalone org.yaml is only a legacy override."""
+        try:
+            org_section = self.raw_harness_dict().get("org") or {}
+        except Exception:
+            org_section = {}
+        ctx = org_section.get("context") if isinstance(org_section, dict) else None
+        if isinstance(ctx, dict) and ctx:
+            return ctx
+        org_path = self._config_dir / "org.yaml"
+        if org_path.exists():
+            legacy = _load_yaml_file(org_path).get("context")
+            return legacy if isinstance(legacy, dict) else {}
+        return {}
+
+    def _raw_division_context(self, name: str) -> dict:
+        """Explicitly-set `context:` block from a division yaml (empty if absent)."""
+        path = self._find_file("divisions", name)
+        if path is None:
+            return {}
+        ctx = _load_yaml_file(path).get("context")
+        return ctx if isinstance(ctx, dict) else {}
+
     def load_agent(self, name: str, *, bypass_cache: bool = False) -> AgentConfig:
         if not bypass_cache and name in self._agent_cache:
             return self._agent_cache[name]
@@ -343,6 +368,19 @@ class ConfigLoader:
         div_mt = division.max_tokens if division else None
         org_mt = org.default_max_tokens
         merged["max_tokens"] = _resolve_scalar("max_tokens", agent_mt, div_mt, org_mt, 4096)
+
+        # Resolve the `context` block agent->division->org (per-field). Previously the
+        # agent's raw context (or the schema default) was the ONLY source, so an org-level
+        # `context:` (e.g. the window init fits to the served max_model_len) was write-only
+        # and never reached a context-less agent. Read EXPLICIT yaml context blocks only —
+        # parsed org/division ContextConfig objects always carry schema defaults, which
+        # would otherwise shadow a more-specific value with a generic default.
+        org_ctx = self._raw_org_context()
+        div_ctx = self._raw_division_context(div_name) if div_name else {}
+        agent_ctx = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+        merged_ctx = {**org_ctx, **div_ctx, **(agent_ctx or {})}
+        if merged_ctx:
+            merged["context"] = merged_ctx
 
         # 5. Union deny_patterns: org + division + agent (additive)
         agent_perms = raw.get("permissions") or {}

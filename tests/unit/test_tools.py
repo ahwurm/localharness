@@ -493,7 +493,8 @@ async def test_register_builtin_tools_registers_all():
     reg = ToolRegistry()
     await register_builtin_tools(reg)
     names = set(reg._tools["global"].keys())
-    assert {"glob", "grep", "read", "write", "edit", "bash_exec", "web_search", "web_fetch"} == names
+    assert {"glob", "grep", "read", "write", "edit", "bash_exec",
+            "web_search", "web_fetch", "web_page_query"} == names
 
 
 # ---------------------------------------------------------------------------
@@ -524,10 +525,13 @@ def _fake_httpx_client(monkeypatch, page_text: str):
 async def test_web_fetch_short_page_no_clip(monkeypatch):
     from localharness.tools.builtin.web_tool import WebFetchTool
 
+    from localharness.tools.builtin.web_tool import _UNTRUSTED
+
     _fake_httpx_client(monkeypatch, "short page")
     result = await WebFetchTool().run(url="https://example.test/page")
     assert result.success is True
-    assert result.output == "short page"
+    assert result.output.startswith(_UNTRUSTED + "short page")
+    assert "fetch_id=" in result.output  # full page retained + queryable even when fully shown
     assert not result.truncated
 
 
@@ -541,8 +545,8 @@ async def test_web_fetch_clips_with_cursor_notice(monkeypatch):
     assert result.truncated is True
     assert "start_index=5000" in result.output
     assert result.metadata["next_start_index"] == 5000
-    # window itself is 5000 chars of body
-    assert result.output.startswith("x" * 100)
+    # window itself is 5000 chars of body (after the untrusted-content banner)
+    assert ("x" * 5000) in result.output
 
 
 @pytest.mark.asyncio
@@ -555,9 +559,9 @@ async def test_web_fetch_resumes_from_start_index(monkeypatch):
         url="https://example.test/page", max_chars=5000, start_index=5000
     )
     assert result.success is True
-    assert "[chars 5000-8000 of 8000]" in result.output
+    assert "chars 5000-8000 of 8000" in result.output
     assert "b" * 3000 in result.output
-    assert "start_index=" not in result.output.split("]", 1)[1]  # no further-read notice
+    assert "start_index=" not in result.output  # last window: no further-read cursor
     assert result.truncated is False
     assert result.metadata["next_start_index"] is None
 

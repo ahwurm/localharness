@@ -30,7 +30,8 @@ def test_llm_config_defaults():
     assert config.tool_call_mode == "native"
     assert config.api_key == "none"
     assert config.connect_timeout_seconds == 5.0
-    assert config.context_window == 128_000
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+    assert config.context_window == DEFAULT_MAX_CONTEXT_TOKENS  # 131_072 (served truth)
     assert config.is_local is True
     assert config.extra_headers == {}
     assert config.stop_sequences == []

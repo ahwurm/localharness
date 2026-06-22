@@ -1,12 +1,15 @@
 """ContextManager: build_messages with repair_tool_pairing boundary guard."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message
 
 log = logging.getLogger("localharness.agent.context")
@@ -20,6 +23,85 @@ WEB_EVICT_KEEP_LAST: int = 2
 _WEB_EVICT_MIN_CHARS: int = 500          # stubbing tiny results saves nothing
 _WEB_TOOLS = frozenset({"web_fetch", "web_search"})
 _WEB_STUB_PREFIX = "[web output omitted"
+
+# Large-tool-result eviction (generalizes web eviction to ALL bulky tool outputs).
+# A tool result whose char size exceeds the threshold has its body replaced with a
+# restorable stub; the full body is kept in an EvictionStore keyed by a DETERMINISTIC
+# content hash (NOT random/timestamp) so the rendered prompt stays prefix-cache stable.
+# The model re-pulls the body with tool_result_get('<id>').
+TOOL_EVICT_USAGE_FRACTION: float = 0.50
+TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
+TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
+_TOOL_STUB_PREFIX = "[tool result evicted"
+
+
+def _evict_id(content: str) -> str:
+    """Deterministic restorable id for an evicted body: content hash, no randomness/time.
+    Same body -> same id across turns, so the stub text is prefix-cache stable."""
+    return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+class EvictionStore:
+    """Durable id -> full-body map for evicted tool results. Shared between the
+    ContextManager (writes on eviction) and the tool_result_get tool (reads on restore).
+    Keyed by a deterministic content hash so a given body always restores under the same id."""
+
+    def __init__(self) -> None:
+        self._bodies: dict[str, str] = {}
+
+    def put(self, content: str) -> str:
+        rid = _evict_id(content)
+        self._bodies[rid] = content
+        return rid
+
+    def get(self, rid: str) -> str | None:
+        return self._bodies.get(rid)
+
+
+def _evict_large_tool_results(
+    messages: list[Message],
+    store: "EvictionStore",
+    threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
+    keep_last: int = TOOL_EVICT_KEEP_LAST,
+) -> tuple[list[Message], int]:
+    """Replace the bodies of bulky NON-web tool results with a restorable stub keyed by a
+    deterministic content hash; the full body is stashed in `store` for tool_result_get.
+    Web results are handled by _evict_stale_web_results (URL-restorable, no store needed).
+    The newest `keep_last` evictable results are left verbatim for immediate reasoning.
+    Returns (new list, evicted count); input messages are never mutated. Deterministic:
+    same input -> same stubs (same id), so the prompt stays prefix-cache stable."""
+    # tool_call_ids that resolve to web tools — those go through the web path, skip here.
+    web_ids: set[str] = set()
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
+            name = (fn.get("name", "") if isinstance(fn, dict) else getattr(fn, "name", "")) or ""
+            if name in _WEB_TOOLS:
+                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                web_ids.add(tc_id)
+    evictable = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "tool"
+        and m.get("tool_call_id") not in web_ids
+        and len(m.get("content") or "") > threshold_chars
+        and not (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)
+    ]
+    stale = evictable[:-keep_last] if keep_last > 0 else evictable
+    if not stale:
+        return messages, 0
+    out = list(messages)
+    for i in stale:
+        m = out[i]
+        body = m.get("content") or ""
+        rid = store.put(body)
+        approx_tokens = len(body) // 4
+        out[i] = {**m, "content": (
+            f"{_TOOL_STUB_PREFIX} — ~{approx_tokens} tokens — "
+            f"call tool_result_get('{rid}') to restore the full body]"
+        )}
+    return out, len(stale)
 
 
 def _evict_stale_web_results(
@@ -71,9 +153,17 @@ def _evict_stale_web_results(
 
 
 class TokenCounter:
-    """Token counting with tiktoken (preferred) or char heuristic fallback."""
+    """Token counting. Prefers the SERVED model's exact tokenizer via vLLM's
+    POST {server_root}/tokenize (model-truth) when base_url+model are given; falls
+    back to tiktoken cl100k, then a char heuristic. Counts are content-hash cached.
 
-    def __init__(self) -> None:
+    cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the
+    only accurate source for non-cl100k models. The remote call is sync (urllib) — the
+    agent loop is serial and model-bottlenecked, so a ~9ms round-trip is acceptable —
+    and is probed once at construction; on any failure it self-disables and never retries.
+    """
+
+    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
         self._encoder = None
         try:
             import tiktoken
@@ -81,12 +171,66 @@ class TokenCounter:
         except (ImportError, Exception):
             pass
 
+        # /tokenize lives at the SERVER ROOT, not under /v1.
+        self._tokenize_url: str | None = None
+        self._model = model
+        self._cache: dict[str, int] = {}
+        if base_url and model:
+            root = base_url.rstrip("/")
+            if root.endswith("/v1"):
+                root = root[: -len("/v1")]
+            self._tokenize_url = f"{root}/tokenize"
+            # Server-or-fail: NO silent fallback. An exact count is mandatory on the live
+            # path, so a probe failure is a HARD error — running on an approximate meter is
+            # exactly what hid the context-overflow bug. The start path surfaces this.
+            if self._remote_count("token") is None:
+                raise RuntimeError(
+                    f"TokenCounter: exact token counting unavailable — /tokenize unreachable "
+                    f"at {self._tokenize_url}. Refusing to fall back to an approximate tokenizer."
+                )
+
+    def _remote_count(self, text: str) -> int | None:
+        """Exact server-side count via vLLM /tokenize, or None on ANY failure."""
+        if not self._tokenize_url:
+            return None
+        import json as _json
+        import urllib.request
+        try:
+            body = _json.dumps({"model": self._model, "prompt": text}).encode("utf-8")
+            req = urllib.request.Request(
+                self._tokenize_url, data=body, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            count = data.get("count")
+            return int(count) if count is not None else None
+        except Exception:
+            return None
+
     def count(self, text: str) -> int:
-        if self._encoder is not None:
-            # disallowed_special=() so literal special-token text (e.g. "<|endoftext|>"
-            # in fetched web content) is counted as ordinary text instead of raising.
-            return len(self._encoder.encode(text, disallowed_special=()))
-        return len(text) // 4  # char heuristic fallback
+        if not text:
+            return 0
+        key = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        if self._tokenize_url is not None:
+            # Live mode: the server tokenizer is the only source of truth. Fail loud on a miss.
+            n = self._remote_count(text)
+            if n is None:
+                raise RuntimeError(
+                    f"TokenCounter: /tokenize call failed mid-session at {self._tokenize_url}; "
+                    f"refusing to substitute an approximate count."
+                )
+        elif self._encoder is not None:
+            # Non-live estimator (unit tests / bench, no server) — explicit, not a fallback.
+            # disallowed_special=() so literal special-token text is counted as ordinary text.
+            n = len(self._encoder.encode(text, disallowed_special=()))
+        else:
+            raise RuntimeError("TokenCounter: no tokenizer available (tiktoken missing, no server).")
+        if len(self._cache) < 50_000:
+            self._cache[key] = n
+        return n
 
     def count_messages(self, messages: list[dict]) -> int:
         total = 0
@@ -149,8 +293,37 @@ def _repair_tool_pairing(messages: list[Message]) -> list[Message]:
     return result
 
 
+# ANSI escape sequences (CSI + OSC) — terminal colour/cursor noise with no signal for the
+# model; stripping them is free bytes under the same cap.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _clean_tool_output(text: str) -> str:
+    """Deterministic, signal-preserving pre-clean for tool output: strip ANSI escapes,
+    drop trailing per-line whitespace, collapse 3+ blank lines. Cheap (no model call), run
+    before length measurement so the cap reflects real content."""
+    text = _ANSI_RE.sub("", text)
+    text = re.sub(r"[ \t]+(?=\n)", "", text)   # trailing whitespace
+    text = re.sub(r"\n{3,}", "\n\n", text)     # blank-line runs
+    return text
+
+
+def _head_tail(text: str, max_chars: int) -> str:
+    """Keep the head AND tail of oversized output. Head-only truncation throws away the tail
+    — exactly where exit codes, errors and test summaries live. 60% head / 40% tail."""
+    head_chars = (max_chars * 6) // 10
+    tail_chars = max_chars - head_chars
+    elided = len(text) - head_chars - tail_chars
+    return (
+        text[:head_chars]
+        + f"\n... [{elided} chars elided — head+tail kept] ...\n"
+        + text[-tail_chars:]
+    )
+
+
 class ToolResultCapStage:
-    """Stage 1: Cap oversized tool result messages."""
+    """Stage 1: Pre-clean every tool result (ANSI/whitespace) and cap oversized ones with a
+    head+tail keep (lossy first defense; the restorable page-out is the eviction stage)."""
 
     def __init__(self, max_chars: int = 50_000) -> None:
         self.max_chars = max_chars
@@ -166,9 +339,11 @@ class ToolResultCapStage:
         for m in messages:
             if m.get("role") == "tool":
                 content = m.get("content") or ""
-                if len(content) > self.max_chars:
-                    truncated = content[: self.max_chars] + f"\n... [truncated at {self.max_chars} chars]"
-                    result.append({**m, "content": truncated})
+                cleaned = _clean_tool_output(content)
+                if len(cleaned) > self.max_chars:
+                    cleaned = _head_tail(cleaned, self.max_chars)
+                if cleaned != content:
+                    result.append({**m, "content": cleaned})
                     modified = True
                     continue
             result.append(m)
@@ -401,19 +576,26 @@ class ContextManager:
 
     def __init__(
         self,
-        max_context_tokens: int = 61_440,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         pipeline: CompactionPipeline | None = None,
         bus: Any = None,
         agent_id: str = "",
         session_id: str = "",
+        eviction_store: "EvictionStore | None" = None,
+        tool_evict_threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
+        tool_evict_enabled: bool = True,
+        token_counter: "TokenCounter | None" = None,
     ) -> None:
         self.max_context_tokens = max_context_tokens
         self.preserve_first_n = preserve_first_n
         self.preserve_last_n = preserve_last_n
         self._pipeline = pipeline
-        self._token_counter = TokenCounter()
+        self._eviction_store = eviction_store
+        self._tool_evict_threshold_chars = tool_evict_threshold_chars
+        self._tool_evict_enabled = tool_evict_enabled
+        self._token_counter = token_counter or TokenCounter()
         self._bus = bus
         self._agent_id = agent_id
         self._session_id = session_id
@@ -463,6 +645,25 @@ class ContextManager:
                 log.info(
                     "evicted %d stale web result(s) at %.0f%% context usage",
                     evicted, evict_check.usage_fraction * 100,
+                )
+
+        # Generalized large-tool-result eviction: any bulky non-web result body is moved to
+        # the EvictionStore (deterministic content-hash id) and replaced with a restorable
+        # stub the model can re-pull via tool_result_get. Same threshold gate keeps the KV
+        # cache stable. Skipped if no store wired or the toggle is off.
+        if (
+            self._tool_evict_enabled
+            and self._eviction_store is not None
+            and evict_check.usage_fraction >= TOOL_EVICT_USAGE_FRACTION
+        ):
+            repaired, t_evicted = _evict_large_tool_results(
+                repaired, self._eviction_store,
+                threshold_chars=self._tool_evict_threshold_chars,
+            )
+            if t_evicted:
+                log.info(
+                    "evicted %d large tool result(s) to restorable stubs at %.0f%% usage",
+                    t_evicted, evict_check.usage_fraction * 100,
                 )
 
         if self._pipeline is not None:
