@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from localharness.orchestrator.cards import AgentCard, AgentCardRegistry, RoutingDecision
 
@@ -17,10 +17,12 @@ class OrchestratorContextGuard:
     Strategy: always preserve system message (index 0), trim-to-last-N-turns.
     """
 
-    def __init__(self, max_tokens: int = 16_000) -> None:
+    def __init__(self, max_tokens: int = 16_000, token_counter: "Any | None" = None) -> None:
         self._max_tokens = max_tokens
-        from localharness.agent.context import TokenCounter
-        self._counter = TokenCounter()
+        if token_counter is None:
+            from localharness.agent.context import TokenCounter
+            token_counter = TokenCounter()
+        self._counter = token_counter
 
     def trim(self, messages: list[dict]) -> list[dict]:
         usage = self._counter.count_messages(messages)

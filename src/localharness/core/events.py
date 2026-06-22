@@ -14,6 +14,8 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
 from .types import AgentID, DivisionID, EventSeq, OrgID, SessionID, ToolCallID  # noqa: F401
 
 
@@ -64,7 +66,7 @@ class BudgetSpec(BaseModel):
 
     max_actions: int = 100
     max_duration_minutes: float = 30.0
-    max_context_tokens: int = 128_000
+    max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
     kill_file_path: Optional[str] = None
 
 
