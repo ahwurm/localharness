@@ -246,7 +246,7 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
 async def test_web_child_registry_is_web_only():
     base = await _builtin_registry()
     child = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base)
-    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch"}
+    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch", "web_page_query"}
     # No write / execute / spawn in the web child.
     assert child.has("write") is False
     assert child.has("bash_exec") is False
@@ -256,7 +256,19 @@ async def test_web_child_registry_is_web_only():
 def test_web_researcher_config_has_distinct_budget():
     cfg = build_web_researcher_config("web-researcher")
     assert cfg.name == "web-researcher"
-    assert cfg.permissions.budget.max_actions == 12
+    assert cfg.permissions.budget.max_actions == 28  # aligned to the forked runner (P3)
+
+
+def test_web_researcher_role_rigor_gating(monkeypatch):
+    from localharness.agent.subagent import build_web_researcher_config as _build
+
+    monkeypatch.setenv("RESEARCH_RIGOR", "high")
+    high = _build("web-researcher")
+    assert "search-verifier" in high.role and "DISPUTED" in high.role
+
+    monkeypatch.setenv("RESEARCH_RIGOR", "fast")
+    fast = _build("web-researcher")
+    assert "search-verifier" not in fast.role  # fast skips verification (speed dial)
 
 
 def test_format_web_findings_is_structured_summary():
@@ -322,17 +334,45 @@ async def test_runner_dispatches_data_analyst(monkeypatch):
     async def _fake_dispatch(task, **kwargs):
         captured["task"] = task
         captured["depth"] = kwargs.get("depth")
+        captured["cap"] = kwargs.get("max_subagent_depth")
         return "[data analysis] ok"
     monkeypatch.setattr(subagent, "dispatch_data_subagent", _fake_dispatch)
 
     runner = subagent.make_explore_agent_runner(
         llm=object(), bus=object(), base_registry=object(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        max_subagent_depth=2,
     )
-    out = await runner("data_analyst", "compute the thing", 0)   # `_`->`-` sanitization
+    out = await runner("data_analyst", "compute the thing")   # `_`->`-` sanitization
     assert out == "[data analysis] ok"
     assert captured["task"] == "compute the thing"
-    assert captured["depth"] == 0
+    assert captured["depth"] == 0          # runner serves depth 0 (the orchestrator)
+    assert captured["cap"] == 2            # config cap threads to the dispatch
+
+
+@pytest.mark.asyncio
+async def test_runner_threads_token_counter_and_window_into_child(monkeypatch):
+    """Children must inherit the parent's model-aware counter + resolved window, not bare
+    defaults — the sub-agent fleet was silently running on 131,072 + tiktoken."""
+    import localharness.agent.subagent as subagent
+
+    captured = {}
+    async def _fake_dispatch(task, **kwargs):
+        captured["ctx"] = kwargs.get("context_manager")
+        return "ok"
+    monkeypatch.setattr(subagent, "dispatch_explore_subagent", _fake_dispatch)
+
+    sentinel_counter = object()
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        token_counter=sentinel_counter, max_context_tokens=126_976,
+    )
+    await runner("explore", "find X")
+    ctx = captured["ctx"]
+    assert ctx is not None
+    assert ctx.max_context_tokens == 126_976          # resolved window, not the 131072 default
+    assert ctx._token_counter is sentinel_counter      # exact /tokenize counter, not bare tiktoken
 
 
 def test_format_data_findings_header():
@@ -398,18 +438,18 @@ async def test_runner_dispatches_yaml_defined_agent(monkeypatch):
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         load_agent=_load_agent,
     )
-    out = await runner("youtube_summarizer", "summarize video X", 0)  # `_`->`-` sanitize
+    out = await runner("youtube_summarizer", "summarize video X")  # `_`->`-` sanitize
     assert out == "[youtube-summarizer] done"
     assert captured["task"] == "summarize video X"
     assert loads == ["youtube-summarizer"]
 
     # unknown name still refuses, with builder guidance in the message
     with pytest.raises(ValueError, match="CREATE one"):
-        await runner("nonexistent-agent", "do thing", 0)
+        await runner("nonexistent-agent", "do thing")
 
     # "default" is never loadable as a child (self-delegation guard)
     with pytest.raises(ValueError, match="not wired"):
-        await runner("default", "do thing", 0)
+        await runner("default", "do thing")
 
 
 @pytest.mark.asyncio
@@ -421,7 +461,7 @@ async def test_runner_without_loader_keeps_old_refusal():
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
     )
     with pytest.raises(ValueError, match="not wired"):
-        await runner("youtube-summarizer", "x", 0)
+        await runner("youtube-summarizer", "x")
 
 
 def test_prepend_toolset_states_capabilities():
@@ -458,9 +498,12 @@ async def test_runner_routes_frontend_designer_to_builtin_dispatch():
     (depth guard fires) rather than fall through to the yaml-loader 'not wired' path."""
     import localharness.agent.subagent as subagent
 
+    # A runner already serving at the cap: any dispatch it attempts hits the belt-and-suspenders
+    # depth>=cap guard (depth now rides in via the factory, not a per-call arg).
     runner = subagent.make_explore_agent_runner(
         llm=object(), bus=object(), base_registry=object(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        depth=subagent.MAX_DEPTH, max_subagent_depth=subagent.MAX_DEPTH,
     )
     with pytest.raises(ValueError, match="depth"):
-        await runner("frontend-designer", "build a landing page", subagent.MAX_DEPTH)
+        await runner("frontend-designer", "build a landing page")

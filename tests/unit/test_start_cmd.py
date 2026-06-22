@@ -51,6 +51,35 @@ def test_app_registers_agent_subcommand():
 
 
 # ---------------------------------------------------------------------------
+# single-source window derivation: served -> effective -> override
+# ---------------------------------------------------------------------------
+
+def test_effective_max_context_served_minus_reserve():
+    """No explicit cap below served-reserve -> derive from served window."""
+    from localharness.cli.start_cmd import _effective_max_context
+    # cfg at schema default (131072) on a 131072 server -> clamps to served-reserve.
+    assert _effective_max_context(131_072, 131_072, 4_096) == 126_976
+
+
+def test_effective_max_context_honors_fitting_override():
+    """An explicit cap that fits under served-reserve wins (override)."""
+    from localharness.cli.start_cmd import _effective_max_context
+    assert _effective_max_context(131_072, 32_000, 4_096) == 32_000
+
+
+def test_effective_max_context_clamps_oversized_config():
+    """A config larger than served-reserve is clamped down to the served value."""
+    from localharness.cli.start_cmd import _effective_max_context
+    assert _effective_max_context(64_000, 200_000, 4_096) == 59_904
+
+
+def test_effective_max_context_no_served_uses_config():
+    """Server didn't report a window -> config value is the only signal."""
+    from localharness.cli.start_cmd import _effective_max_context
+    assert _effective_max_context(None, 61_440, 4_096) == 61_440
+
+
+# ---------------------------------------------------------------------------
 # start — no agents → init flow + default agent creation
 # ---------------------------------------------------------------------------
 

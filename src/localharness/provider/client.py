@@ -10,6 +10,7 @@ from typing import Any, Literal
 import openai
 from openai import AsyncOpenAI
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, ToolCall, ToolSchema
 from localharness.provider.detector import LOCAL_INFERENCE_TIMEOUT_MIN
 from localharness.provider.fn_call import FnCallConverter
@@ -31,7 +32,7 @@ class LLMConfig:
     temperature: float = 0.6
     max_tokens: int = 4096
     tool_call_mode: Literal["native", "xml", "text"] = "native"
-    context_window: int = 128_000
+    context_window: int = DEFAULT_MAX_CONTEXT_TOKENS
     is_local: bool = True
     extra_headers: dict[str, str] = field(default_factory=dict)
     stop_sequences: list[str] = field(default_factory=list)

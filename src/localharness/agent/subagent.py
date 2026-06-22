@@ -14,6 +14,8 @@ Design:
 """
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -27,8 +29,18 @@ EXPLORE_MAX_ACTIONS = 8
 EXPLORE_MAX_TOOL_CALLS = EXPLORE_MAX_ACTIONS + 1  # 9 — kept above the budget so max_actions binds
 EXPLORE_MAX_DURATION_MINUTES = 3.0
 
-# Recursion limit: the parent runs at depth 0, the explore child at depth 1.
+# Recursion limit fallback when no AgentConfig.max_subagent_depth is threaded (the parent runs
+# at depth 0, a subagent at depth 1, ...). The real cap is config-driven (AgentConfig.max_subagent_depth)
+# and passed into the runner/dispatches; MAX_DEPTH is the conservative default for bare callers.
 MAX_DEPTH = 1
+
+# Builtin children permitted to delegate, mapped to the agents they may spawn. A child of name N
+# is given its own (fresh, depth+1) `agent` tool ONLY if N is listed here AND there is room under
+# the cap — so it can nest a grandchild (e.g. web-researcher -> search-verifier, wired in P3).
+# Every other builtin/config child is a leaf: it gets no `agent` tool and its role says it cannot
+# delegate. Keep this in sync with the roles — a name here whose role still says "cannot delegate"
+# would be a contradiction.
+NON_LEAF_AGENTS: dict[str, list[str]] = {"web-researcher": ["search-verifier"]}
 
 EXPLORE_ROLE = (
     "You are a read-only Explore subagent. Use read, glob, and grep to investigate the "
@@ -37,19 +49,61 @@ EXPLORE_ROLE = (
 )
 
 # Web-research child: searches + reads pages in ITS OWN context, returns only a distilled
-# summary so raw pages never enter the parent's context window.
-WEB_TOOLS: list[str] = ["web_search", "web_fetch"]
-WEB_MAX_ACTIONS = 12
-WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 13 — kept above the budget so max_actions binds
-WEB_MAX_DURATION_MINUTES = 5.0
+# summary so raw pages never enter the parent's context window. web_page_query (P4) lets it
+# ground a claim in the FULL retained page, not just the clipped inline preview.
+WEB_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
+WEB_MAX_ACTIONS = 28
+WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 29 — kept above the budget so max_actions binds
+WEB_MAX_DURATION_MINUTES = 14.0
 
-WEB_RESEARCHER_ROLE = (
-    "You are a web-research subagent. Use web_search to find sources and web_fetch to read them. "
-    "Research the delegated question thoroughly but efficiently — prefer a few high-quality sources "
-    "over many, and don't re-fetch the same page. You cannot write, execute, or delegate. When done, "
-    "stop and reply with a CONCISE, well-organized summary of your findings WITH the source URLs you "
-    "used. This summary is the ONLY thing the parent agent sees, so include the key facts, figures, "
-    "and citations it needs — never paste raw page text."
+# Shared research discipline (ported from the localshift forked runner, tuned for ~28 calls).
+WEB_RESEARCHER_ROLE_BASE = (
+    "You are a web-research subagent. Use web_search to find sources, web_fetch to read them, and "
+    "web_page_query(fetch_id, pattern) to search the FULL text of a fetched page (not just the clipped "
+    "inline preview). BUDGET DISCIPLINE — you have ~28 tool calls; cap yourself at ~4 searches total, "
+    "then FETCH the best results immediately — do NOT keep hunting. By roughly your 22nd call you MUST "
+    "emit your final summary with whatever real facts you have gathered. Don't re-fetch a page you "
+    "already read. You cannot write or execute. When done, stop and reply with a CONCISE, well-organized "
+    "summary of your findings WITH the source URLs you used — the key facts, figures, and citations the "
+    "parent needs. This summary is the ONLY thing the parent agent sees; never paste raw page text."
+)
+
+# Rigor=high addendum: nest a blind search-verifier for each material claim (JTBD #1, #5).
+WEB_RESEARCHER_VERIFY_ADDENDUM = (
+    "\n\nVERIFY MATERIAL CLAIMS (rigor=high): before reporting any MATERIAL factual claim about a "
+    "specific entity (e.g. 'X was added to the S&P 500', a headline figure, a key date), delegate it "
+    "to the search-verifier: agent(agent_id='search-verifier', task='claim: <the claim>\\nentity: "
+    "<the entity it is about>\\nsource_url: <the page you got it from>'). The verifier independently "
+    "re-checks entity + recency + support and returns a verdict. If the verdict is NOT SUPPORTED, KEEP "
+    "the claim in your summary but TAG it (e.g. '[DISPUTED: source is about SPCX, not QNT]') — never "
+    "silently drop it. Verify only MATERIAL claims; skip background/color."
+)
+
+# Back-compat alias (the unverified / fast-path role). build_web_researcher_config assembles the
+# effective role from RESEARCH_RIGOR.
+WEB_RESEARCHER_ROLE = WEB_RESEARCHER_ROLE_BASE
+
+# Blind claim-verifier grandchild (P3): re-fetches the source itself, grounds in the full page via
+# web_page_query, checks entity + recency, emits a strict JSON verdict. Leaf (never delegates).
+SEARCH_VERIFIER_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
+SEARCH_VERIFIER_MAX_ACTIONS = 12
+SEARCH_VERIFIER_MAX_TOOL_CALLS = SEARCH_VERIFIER_MAX_ACTIONS + 1  # 13
+SEARCH_VERIFIER_MAX_DURATION_MINUTES = 6.0
+
+SEARCH_VERIFIER_ROLE = (
+    "You are a BLIND search-verifier. You are given exactly a claim, the entity it is supposedly "
+    "about, and a source_url — nothing else (you cannot see the researcher's notes or page store, by "
+    "design). Verify for yourself: (1) web_fetch the source_url, then use web_page_query(fetch_id, "
+    "pattern) to locate the claim's subject in the FULL page text and confirm the claim is actually "
+    "about the STATED entity — a claim like 'added to the S&P 500' that the page attributes to a "
+    "DIFFERENT ticker (e.g. SPCX) is NOT support for the stated entity (e.g. QNT). (2) Run ONE fresh "
+    "web_search to check recency / supersession. (3) Reply with STRICT JSON ONLY — no prose before or "
+    "after:\n"
+    '{"verdict":"SUPPORTED|WRONG_ENTITY|UNSUPPORTED|STALE|CONFLICTING|UNVERIFIABLE",'
+    '"entity_in_source":true,"source_date":"<date or null>","evidence":"<short quote from the full '
+    'text>","fresh_search_note":"<one line>"}\n'
+    "Use WRONG_ENTITY when the source supports the claim for a DIFFERENT entity than the one stated. "
+    "You cannot write, execute, or delegate further."
 )
 
 # Data-analyst child: local files + computation, no web, no write. Heavier budget than web —
@@ -134,19 +188,44 @@ def build_explore_config(name: str = "explore", kill_file: str | None = None) ->
     )
 
 
+def _research_rigor() -> str:
+    """`high` (default) verifies material claims via the nested search-verifier; `fast` skips it
+    (the sequential-local speed/consistency dial). Read from RESEARCH_RIGOR at dispatch time."""
+    return os.environ.get("RESEARCH_RIGOR", "high").strip().lower()
+
+
 def build_web_researcher_config(name: str = "web-researcher", kill_file: str | None = None) -> AgentConfig:
-    """Build the web-researcher-child AgentConfig with its own bounded budget.
+    """Build the web-researcher-child AgentConfig. The role gains the verify-material-claims
+    addendum under RESEARCH_RIGOR=high (default); `fast` keeps the plain research role.
 
     `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
     pass a path to honor an external kill file.
     """
+    role = WEB_RESEARCHER_ROLE_BASE
+    if _research_rigor() != "fast":
+        role += WEB_RESEARCHER_VERIFY_ADDENDUM
     return AgentConfig(
         name=_sanitize_agent_name(name),
-        role=WEB_RESEARCHER_ROLE,
+        role=role,
         permissions=PermissionConfig(
             budget=BudgetConfig(
                 max_actions=WEB_MAX_ACTIONS,
                 max_duration_minutes=WEB_MAX_DURATION_MINUTES,
+                kill_file=kill_file,
+            ),
+        ),
+    )
+
+
+def build_search_verifier_config(name: str = "search-verifier", kill_file: str | None = None) -> AgentConfig:
+    """Build the blind search-verifier child AgentConfig with its own bounded budget (leaf)."""
+    return AgentConfig(
+        name=_sanitize_agent_name(name),
+        role=SEARCH_VERIFIER_ROLE,
+        permissions=PermissionConfig(
+            budget=BudgetConfig(
+                max_actions=SEARCH_VERIFIER_MAX_ACTIONS,
+                max_duration_minutes=SEARCH_VERIFIER_MAX_DURATION_MINUTES,
                 kill_file=kill_file,
             ),
         ),
@@ -249,6 +328,7 @@ async def dispatch_config_subagent(
     permission_evaluator: Any,
     context_manager: Any = None,
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
 ) -> str:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -259,10 +339,10 @@ async def dispatch_config_subagent(
     in its own context and returns only a summary; the `agent` tool is always stripped so
     config children can never delegate further (belt to the MAX_DEPTH suspenders).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
             f"subagent '{getattr(agent_config, 'name', '?')}' cannot spawn at depth {depth} "
-            f"(max depth {MAX_DEPTH}): subagents may not delegate further."
+            f"(max depth {max_subagent_depth}): subagents may not delegate further."
         )
 
     from localharness.agent.context import ContextManager
@@ -305,16 +385,18 @@ async def dispatch_data_subagent(
     context_manager: Any = None,
     agent_name: str = "data-analyst",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a data-analysis child (bash/read/glob/grep, no web/write), run one turn, return findings.
 
     Mirrors dispatch_web_subagent: the child inspects files and computes in ITS OWN context and
     returns only a summary, so raw file dumps and intermediate outputs never reach the parent's
-    window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    window. Same depth>=cap guard (a child cannot delegate unless handed a child_agent_tool).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"data-analyst subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"data-analyst subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -324,6 +406,8 @@ async def dispatch_data_subagent(
 
     child_config = build_data_analyst_config(agent_name)
     child_registry = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     child_loop = AgentLoop(
@@ -354,6 +438,8 @@ async def dispatch_frontend_subagent(
     context_manager: Any = None,
     agent_name: str = "frontend-designer",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a frontend-designer child (read/write/edit/glob/grep/bash), run one turn, return findings.
 
@@ -361,9 +447,9 @@ async def dispatch_frontend_subagent(
     design-screenshot.js helper (installed to <config-dir>/tools by start_cmd) in ITS OWN
     context — only the summary (file + screenshot paths, design notes) reaches the parent.
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -373,6 +459,8 @@ async def dispatch_frontend_subagent(
 
     child_config = build_frontend_designer_config(agent_name)
     child_registry = ToolRegistry.from_allowed(FRONTEND_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     child_loop = AgentLoop(
@@ -400,6 +488,8 @@ async def dispatch_explore_subagent(
     context_manager: Any = None,
     agent_name: str = "explore",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -421,9 +511,9 @@ async def dispatch_explore_subagent(
     Raises:
         ValueError: if invoked at depth >= MAX_DEPTH (a child trying to spawn a grandchild).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"explore subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"explore subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "read-only subagents may not delegate further."
         )
 
@@ -435,6 +525,8 @@ async def dispatch_explore_subagent(
 
     # Read-only registry: builtins {read, glob, grep} only — no write/bash/spawn.
     child_registry = ToolRegistry.from_allowed(EXPLORE_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
 
     # Stamp parent_id on every child event while publishing on the shared bus.
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
@@ -469,16 +561,20 @@ async def dispatch_web_subagent(
     context_manager: Any = None,
     agent_name: str = "web-researcher",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
-    """Spawn a web-research child (web_search/web_fetch only), run one turn, return distilled findings.
+    """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
     Mirrors dispatch_explore_subagent but with the web toolset and budget. The child does all the
     searching/fetching in ITS OWN context and returns only a summary, so raw pages never reach the
-    parent's window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    parent's window. When handed a `child_agent_tool` (room left under the depth cap), the child
+    becomes NON-LEAF and may dispatch a nested search-verifier; otherwise it is a leaf. The
+    depth>=cap guard is the belt-and-suspenders backstop.
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"web-researcher subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"web-researcher subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -488,8 +584,13 @@ async def dispatch_web_subagent(
 
     child_config = build_web_researcher_config(agent_name)
 
-    # Web-only registry: builtins {web_search, web_fetch} — no write/bash/spawn.
+    # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
     child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
+    # Non-leaf web-researcher: inject its own (fresh, depth+1) `agent` tool so it can spawn a
+    # nested search-verifier. Registered global so the running child resolves it (same invariant
+    # as start_cmd's global agent-tool registration).
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
@@ -508,6 +609,151 @@ async def dispatch_web_subagent(
     tool_calls_used = _count_session_tool_calls(bus, child_session_id)
 
     return format_web_findings(task, summary, tool_calls_used)
+
+
+# --- search-verifier (P3): blind claim verification + keep-flag ledger --------------------------
+
+def _parse_verifier_task(task: str) -> tuple[str, str, str]:
+    """Pull claim / entity / source_url out of the labeled task the web-researcher hands the verifier."""
+    def _grab(label: str) -> str:
+        m = re.search(rf"(?im)^\s*{label}\s*:\s*(.+?)\s*$", task or "")
+        return m.group(1).strip() if m else ""
+    return _grab("claim"), _grab("entity"), _grab("source_url")
+
+
+def _parse_verifier_verdict(summary: str) -> dict:
+    """Extract the verifier's strict-JSON verdict from its reply, tolerating wrapping prose.
+
+    Scans for the first balanced {...} block that parses to a dict carrying a "verdict" key.
+    Falls back to UNVERIFIABLE so a malformed reply still produces a (kept, flagged) ledger row.
+    """
+    import json
+
+    text = summary or ""
+    for s, ch in enumerate(text):
+        if ch != "{":
+            continue
+        depth = 0
+        for e in range(s, len(text)):
+            if text[e] == "{":
+                depth += 1
+            elif text[e] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[s:e + 1])
+                    except Exception:
+                        break  # not valid JSON from here — try the next "{"
+                    if isinstance(obj, dict) and "verdict" in obj:
+                        return obj
+                    break
+    return {"verdict": "UNVERIFIABLE", "entity_in_source": False, "evidence": ""}
+
+
+def _verification_ledger_path() -> Any:
+    """`LOCALHARNESS_VERIFICATION_LEDGER_DIR` or `reports/<UTC-date>/`, relative to cwd."""
+    import datetime
+    from pathlib import Path
+
+    base = os.environ.get("LOCALHARNESS_VERIFICATION_LEDGER_DIR")
+    if base:
+        d = Path(base)
+    else:
+        day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        d = Path("reports") / day
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "verification-ledger.jsonl"
+
+
+def write_verification_ledger(*, run_id: str | None, claim: str, entity: str,
+                              source_url: str, verdict: dict) -> dict:
+    """Append one keep-flag JSONL row per verdict (JTBD #5). Disputed claims are KEPT + flagged,
+    never dropped. Never fails the run on a write error — the ledger is an RL signal, not a gate."""
+    import datetime
+    import json
+
+    verd = verdict.get("verdict", "UNVERIFIABLE") if isinstance(verdict, dict) else "UNVERIFIABLE"
+    row = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "run_id": run_id,
+        "ticker": entity,
+        "claim": claim,
+        "entity": entity,
+        "source_url": source_url,
+        "verdict": verd,
+        "flags": [] if verd == "SUPPORTED" else [verd],
+        "evidence": (verdict.get("evidence") if isinstance(verdict, dict) else "") or "",
+        "kept_in_report": True,
+    }
+    try:
+        with _verification_ledger_path().open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    return row
+
+
+def format_verifier_flag(claim: str, entity: str, verdict: dict, tool_calls_used: int) -> str:
+    """Compact per-claim flag returned to the web-researcher (verdict + one-liner, NOT the transcript)."""
+    verd = verdict.get("verdict", "UNVERIFIABLE")
+    evidence = (verdict.get("evidence") or "").strip().replace("\n", " ")[:160]
+    return (f"[search-verifier] verdict={verd} | entity={entity} | claim: {claim[:120]} | "
+            f"evidence: {evidence} | tool calls: {tool_calls_used}")
+
+
+async def dispatch_search_verifier_subagent(
+    task: str,
+    *,
+    llm: Any,
+    bus: Any,
+    base_registry: Any,
+    parent_session_id: str | None,
+    permission_evaluator: Any,
+    context_manager: Any = None,
+    agent_name: str = "search-verifier",
+    depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,  # accepted for a uniform dispatch signature; verifier is ALWAYS a leaf
+) -> str:
+    """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
+    keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
+
+    The verifier re-fetches source_url ITSELF and grounds in the full page via web_page_query
+    (lossless per-agent, blindness intact). It is a leaf: child_agent_tool is ignored by contract.
+    """
+    if depth >= max_subagent_depth:
+        raise ValueError(
+            f"search-verifier subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
+            "subagents may not delegate further."
+        )
+
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+
+    child_config = build_search_verifier_config(agent_name)
+    # Read-only web subset — no write/bash/spawn, and (by contract) no `agent` tool: leaf.
+    child_registry = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base_registry)
+    child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+
+    child_loop = AgentLoop(
+        config=child_config,
+        llm=llm,
+        bus=child_bus,
+        context_manager=context_manager or ContextManager(),
+        tool_registry=child_registry,
+        permission_evaluator=permission_evaluator,
+    )
+
+    summary = await child_loop.run_turn(task)
+    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+
+    claim, entity, source_url = _parse_verifier_task(task)
+    verdict = _parse_verifier_verdict(summary)
+    write_verification_ledger(
+        run_id=parent_session_id, claim=claim, entity=entity, source_url=source_url, verdict=verdict
+    )
+    return format_verifier_flag(claim, entity, verdict, tool_calls_used)
 
 
 def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
@@ -536,7 +782,12 @@ def make_explore_agent_runner(
     permission_evaluator: Any,
     get_parent_session_id: Callable[[], str | None],
     load_agent: Callable[[str], Any] | None = None,
-) -> Callable[[str, str, int], Awaitable[str]]:
+    token_counter: Any = None,
+    max_context_tokens: int | None = None,
+    depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    available_agents: list[str] | None = None,
+) -> Callable[[str, str], Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
     Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
@@ -551,11 +802,49 @@ def make_explore_agent_runner(
     - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
       parent loop's current session_id when the model delegates — matching the closure's late read of
       `agent_loop.current_session_id`.
-    - `depth` threads through to every dispatch (the belt-and-suspenders recursion guard).
+    - This runner serves an agent at `depth`; a child it spawns runs at `depth+1`. A child listed
+      in NON_LEAF_AGENTS is handed its OWN fresh runner+AgentTool closed over `depth+1` (injected
+      into its registry) so it can nest a grandchild — this is the only way depth increments, since
+      AgentTool calls the runner 2-arg. Nesting stops at `max_subagent_depth` (cap); `=1` disables it.
     """
 
-    async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
+    def _make_child_ctx() -> Any:
+        """Fresh ContextManager per child, carrying the parent's model-aware token_counter
+        (exact /tokenize counts, not tiktoken) and resolved window — so children account
+        for context the same way the parent does instead of falling to bare defaults."""
+        from localharness.agent.context import ContextManager
+        kwargs: dict[str, Any] = {}
+        if token_counter is not None:
+            kwargs["token_counter"] = token_counter
+        if max_context_tokens is not None:
+            kwargs["max_context_tokens"] = max_context_tokens
+        return ContextManager(**kwargs)
+
+    def _build_child_agent_tool(name: str) -> Any:
+        """A fresh, depth+1 `agent` tool for a non-leaf child — or None (leaf / no room under cap)."""
+        child_depth = depth + 1
+        delegatees = NON_LEAF_AGENTS.get(name)
+        if not delegatees or child_depth >= max_subagent_depth:
+            return None
+        from localharness.tools.builtin.agent_tool import AgentTool
+        child_runner = make_explore_agent_runner(
+            llm=llm,
+            bus=bus,
+            base_registry=base_registry,
+            permission_evaluator=permission_evaluator,
+            get_parent_session_id=get_parent_session_id,
+            load_agent=load_agent,
+            token_counter=token_counter,
+            max_context_tokens=max_context_tokens,
+            depth=child_depth,
+            max_subagent_depth=max_subagent_depth,
+            available_agents=available_agents,
+        )
+        return AgentTool(agent_runner=child_runner, available_agents=delegatees)
+
+    async def _run_agent(agent_id: str, task: str) -> str:
         name = _sanitize_agent_name(agent_id)
+        child_agent_tool = _build_child_agent_tool(name)
         if name == "explore":
             dispatch = dispatch_explore_subagent
         elif name == "web-researcher":
@@ -564,6 +853,8 @@ def make_explore_agent_runner(
             dispatch = dispatch_data_subagent
         elif name == "frontend-designer":
             dispatch = dispatch_frontend_subagent
+        elif name == "search-verifier":
+            dispatch = dispatch_search_verifier_subagent
         else:
             cfg = None
             if load_agent is not None and name != "default":
@@ -585,7 +876,9 @@ def make_explore_agent_runner(
                 base_registry=base_registry,
                 parent_session_id=get_parent_session_id(),
                 permission_evaluator=permission_evaluator,
+                context_manager=_make_child_ctx(),
                 depth=depth,
+                max_subagent_depth=max_subagent_depth,
             )
         return await dispatch(
             task,
@@ -594,7 +887,10 @@ def make_explore_agent_runner(
             base_registry=base_registry,
             parent_session_id=get_parent_session_id(),
             permission_evaluator=permission_evaluator,
+            context_manager=_make_child_ctx(),
             depth=depth,
+            max_subagent_depth=max_subagent_depth,
+            child_agent_tool=child_agent_tool,
         )
 
     return _run_agent

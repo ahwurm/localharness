@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
 
 class ToolConfig(BaseModel):
     """
@@ -278,19 +280,42 @@ class MemoryConfig(BaseModel):
         ),
     )
 
+    index_mode: bool = Field(
+        default=True,
+        description=(
+            "If True (default), inline only a MEMORY INDEX — one line per persistent fact "
+            "(name + one-line description, not the full body) plus the most recent "
+            "`max_session_history_entries` session entries. Full fact bodies are served on "
+            "demand via the memory_get / memory_search tools, so the per-turn memory tax "
+            "stays small instead of growing with the whole MEMORY.md. If False, the entire "
+            "MEMORY.md is inlined every turn (legacy behaviour)."
+        ),
+    )
+
+    max_session_history_entries: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "When index_mode is True, how many of the most recent Session History entries to "
+            "inline. Older entries stay in MEMORY.md / history.jsonl and are not injected."
+        ),
+    )
+
 
 class ContextConfig(BaseModel):
     """Context window management configuration."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     max_context_tokens: int = Field(
-        default=61_440,
+        default=DEFAULT_MAX_CONTEXT_TOKENS,
         ge=1_000,
         le=2_000_000,
         description=(
-            "Context budget in tokens. Must be at most the served model's window "
-            "minus the output reservation (default_max_tokens) — the 61,440 default "
-            "fits the reference 64K vLLM window with 4,096 reserved for output. "
+            "Context budget in tokens. At runtime `start` derives the effective window "
+            "from the SERVED max_model_len minus the output reservation; this config value "
+            "acts only as an explicit cap/override (used when set and <= served-reserve). "
+            "The default tracks the served reference window (single source of truth). "
             "If this exceeds the real window, compaction never triggers and long "
             "turns die at the provider's input cap instead of compacting."
         ),
@@ -332,6 +357,28 @@ class ContextConfig(BaseModel):
         description=(
             "Maximum characters of tool output to include in a single Observation. "
             "Output exceeding this limit is truncated with a '... [truncated]' suffix."
+        ),
+    )
+
+    tool_result_eviction: bool = Field(
+        default=True,
+        description=(
+            "If True (default), once context usage passes 50% any bulky tool result "
+            "(over `tool_result_evict_threshold_chars`, beyond the most recent few) has its "
+            "body replaced with a restorable stub keyed by a deterministic content hash; the "
+            "model re-pulls the full body on demand with tool_result_get('<id>'). This frees "
+            "the largest, fastest-growing context consumer long before LLM summary-compaction "
+            "(0.80) would otherwise fire. Deterministic ids keep the vLLM prefix cache stable."
+        ),
+    )
+
+    tool_result_evict_threshold_chars: int = Field(
+        default=8_000,
+        ge=500,
+        le=500_000,
+        description=(
+            "Char size above which a tool result becomes eligible for eviction to a restorable "
+            "stub (see `tool_result_eviction`). Smaller results aren't worth stubbing."
         ),
     )
 
@@ -536,6 +583,64 @@ class RoleSectionsConfig(BaseModel):
     )
 
 
+class RLMConfig(BaseModel):
+    """RLM (Recursive Language Model) mode — drive a stateful Python REPL over the input.
+
+    When active, the agent's input is seeded as a `ctx` variable inside the persistent
+    `python_exec` REPL (NOT placed in the prompt), and the agent inspects/decomposes it
+    with code — optionally delegating a chunk to a fresh model instance via an in-REPL
+    `llm(prompt)` call (the chunk is passed by reference in Python, so it never enters the
+    root's context). Lets the agent work over inputs far larger than its context window.
+    Activated either always (`enabled`) or per-turn by the `auto` router when the input is
+    too big. This is an additive MODE: inactive => the agent path is byte-identical.
+    Addressable as `agent.rlm.{enabled,root_max_tokens,auto,auto_threshold}`.
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable RLM mode: seed the input as `ctx` in the python_exec REPL and drive "
+            "it with code, instead of placing the input in the prompt. "
+            "Mutable via `localharness components set agent.rlm.enabled <true|false>`."
+        ),
+    )
+    root_max_tokens: int = Field(
+        default=8000,
+        ge=2000,
+        le=128_000,
+        description=(
+            "Output-token budget for the RLM root model's turns. Generous on purpose: a "
+            "reasoning model narrates a plan THEN emits the code block, so a tight budget "
+            "starves it mid-thought (the cause of an early prototype failure). "
+            "Mutable via `localharness components set agent.rlm.root_max_tokens <int>`."
+        ),
+    )
+    auto: bool = Field(
+        default=False,
+        description=(
+            "Auto-router. When True (and `enabled` is False), a turn is routed to RLM mode "
+            "ONLY if the input exceeds `auto_threshold` of the agent's context window — the "
+            "lossless alternative to the summarize-middle compaction the same over-budget "
+            "input would otherwise trigger. Within-window inputs stay on the normal direct "
+            "path (faster + more accurate). Decided pre-prompt (the model can't sense input "
+            "size once it is already in the prompt). "
+            "Mutable via `localharness components set agent.rlm.auto <true|false>`."
+        ),
+    )
+    auto_threshold: float = Field(
+        default=0.80,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fraction of the context window above which `auto` routes the input to RLM mode. "
+            "Default 0.80 = the harness's summary-compaction trigger, so RLM takes over "
+            "exactly when the normal path would otherwise start compacting. "
+            "Mutable via `localharness components set agent.rlm.auto_threshold <float>`."
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Complete configuration for one agent.
@@ -674,6 +779,28 @@ class AgentConfig(BaseModel):
             "Orthogonal system-prompt sections (MODP-01/02). All default to '' so the "
             "unmutated assembly is byte-identical to `role`. Addressable via "
             "`agent.role_sections.{identity,tool_use,stopping,output}`."
+        ),
+    )
+
+    rlm: RLMConfig = Field(
+        default_factory=RLMConfig,
+        description=(
+            "Optional RLM mode — drive a stateful python_exec REPL over a `ctx` variable "
+            "instead of placing the input in the prompt (for inputs larger than the "
+            "context window). Default disabled → agent path unchanged. Addressable via "
+            "`agent.rlm.{enabled,root_max_tokens}`."
+        ),
+    )
+
+    max_subagent_depth: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description=(
+            "How deep delegation may nest. Depth 0 = this agent; a subagent it spawns runs at "
+            "depth 1, a sub-subagent (e.g. a web-researcher's search-verifier) at depth 2. A "
+            "subagent at depth d may delegate iff d < max_subagent_depth; =1 disables nesting "
+            "(kill-switch). Addressable via `agent.max_subagent_depth`."
         ),
     )
 

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
 if TYPE_CHECKING:
     from localharness.config.models import AgentConfig
 
@@ -46,7 +48,7 @@ class AgentCard(BaseModel):
     last_session_at: str | None = None
 
     # Constraints declared by the agent
-    max_context_tokens: int = 128_000
+    max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
     budget_max_actions: int = 100
     budget_max_duration_minutes: float = 30.0
 
@@ -127,7 +129,7 @@ class AgentCardRegistry:
             capabilities=config.capabilities,
             keywords=keywords,
             model=config.model,
-            max_context_tokens=config.context.max_context_tokens if config.context else 128_000,
+            max_context_tokens=config.context.max_context_tokens if config.context else DEFAULT_MAX_CONTEXT_TOKENS,
             budget_max_actions=(
                 config.permissions.budget.max_actions
                 if config.permissions and config.permissions.budget

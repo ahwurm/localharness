@@ -121,7 +121,7 @@ async def test_runner_routes_explore_and_threads_session_and_depth(monkeypatch):
     # Set the session id only NOW (after build) — the late-bound getter must observe it.
     session_holder["sid"] = "parent-session-xyz"
 
-    out = await runner("explore", "find values.txt", 0)
+    out = await runner("explore", "find values.txt")
     assert out.startswith("[explore findings]")
     assert captured["task"] == "find values.txt"
     assert captured["llm"] is sentinel_llm
@@ -131,10 +131,17 @@ async def test_runner_routes_explore_and_threads_session_and_depth(monkeypatch):
     assert captured["parent_session_id"] == "parent-session-xyz", "session id must be read at call time"
     assert captured["depth"] == 0
 
-    # depth threads through (belt-and-suspenders recursion guard).
+    # depth now rides in via the factory (AgentTool calls the runner 2-arg, so it can't carry depth):
+    # a runner built to serve depth 1 threads depth=1 + the cap to its dispatch.
     captured.clear()
-    await runner("explore", "again", 1)
+    runner_d1 = subagent.make_explore_agent_runner(
+        llm=sentinel_llm, bus=sentinel_bus, base_registry=sentinel_registry,
+        permission_evaluator=sentinel_perm, get_parent_session_id=lambda: session_holder["sid"],
+        depth=1, max_subagent_depth=2,
+    )
+    await runner_d1("explore", "again")
     assert captured["depth"] == 1
+    assert captured["max_subagent_depth"] == 2
 
 
 @pytest.mark.asyncio
@@ -159,8 +166,82 @@ async def test_runner_refuses_unknown_agent_with_clear_error(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="not wired"):
-        await runner("researcher", "do a thing", 0)
+        await runner("researcher", "do a thing")
 
     # Sanitizer maps `_`->`-`; a dashed-but-unknown name still refuses.
     with pytest.raises(ValueError, match="not wired"):
-        await runner("writer_agent", "do a thing", 0)
+        await runner("writer_agent", "do a thing")
+
+
+# ---------------------------------------------------------------------------
+# (d) P2: real, config-capped recursion depth via a per-child injected AgentTool.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grandchild_runs_at_depth_two_via_injected_tool(monkeypatch):
+    """The depth-2 grandchild runs via the REAL recursion path — a fresh AgentTool injected into
+    the non-leaf child's registry (NOT a hand-passed depth= arg). `from_allowed` copies the shared
+    depth-0 tool, so depth can only increment through this per-child tool. (search-verifier lands in
+    P3; here we make web-researcher a non-leaf that may spawn `explore` to prove the mechanic.)"""
+    import localharness.agent.subagent as subagent
+
+    monkeypatch.setattr(subagent, "NON_LEAF_AGENTS", {"web-researcher": ["explore"]})
+
+    web_seen: dict = {}
+    explore_seen: dict = {}
+
+    async def _spy_web(task, **kw):
+        web_seen.update(kw)
+        tool = kw["child_agent_tool"]
+        assert tool is not None, "non-leaf web-researcher must receive its own `agent` tool"
+        assert tool._available_agents == ["explore"], "it may only delegate to its declared grandchild"
+        # Exactly what the real web-researcher loop does: invoke its injected `agent` tool.
+        return await tool._agent_runner("explore", "verify the claim")
+
+    async def _spy_explore(task, **kw):
+        explore_seen.update(kw)
+        return "[explore findings] ok"
+
+    monkeypatch.setattr(subagent, "dispatch_web_subagent", _spy_web)
+    monkeypatch.setattr(subagent, "dispatch_explore_subagent", _spy_explore)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        depth=0, max_subagent_depth=2, available_agents=["web-researcher"],
+    )
+    out = await runner("web-researcher", "research QNT")
+
+    assert web_seen["depth"] == 0 and web_seen["max_subagent_depth"] == 2
+    # The grandchild dispatch was reached one level deeper (web-researcher's runner is at depth 1),
+    # proving depth incremented through the injected tool instead of staying pinned at 0.
+    assert explore_seen["depth"] == 1, "grandchild dispatched from depth-1 runner (runs at depth 2)"
+    assert explore_seen["child_agent_tool"] is None, "grandchild is a leaf at the cap"
+    assert out == "[explore findings] ok"
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_cap_one_makes_child_leaf(monkeypatch):
+    """`max_subagent_depth=1` is the kill-switch: a would-be non-leaf child gets NO `agent` tool, so
+    nesting is disabled (web research still runs, just without a nested verifier)."""
+    import localharness.agent.subagent as subagent
+
+    monkeypatch.setattr(subagent, "NON_LEAF_AGENTS", {"web-researcher": ["explore"]})
+
+    seen: dict = {}
+
+    async def _spy_web(task, **kw):
+        seen.update(kw)
+        return "[web research] ok"
+
+    monkeypatch.setattr(subagent, "dispatch_web_subagent", _spy_web)
+
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        depth=0, max_subagent_depth=1, available_agents=["web-researcher"],
+    )
+    out = await runner("web-researcher", "research QNT")
+    assert seen["child_agent_tool"] is None, "cap=1 => no nesting (leaf), the kill-switch"
+    assert out == "[web research] ok"

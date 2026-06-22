@@ -35,9 +35,14 @@ def test_doctor_all_pass(mock_httpx, tmp_path):
 
     mock_response = MagicMock()
     mock_response.json.return_value = {
-        "data": [{"id": "test-model:7b"}]
+        "data": [{"id": "test-model:7b", "max_model_len": 131072}]
     }
     mock_httpx.get.return_value = mock_response
+    # /tokenize reachability check (FIX 3): return a valid 200 count response.
+    mock_tok = MagicMock()
+    mock_tok.status_code = 200
+    mock_tok.json.return_value = {"count": 1}
+    mock_httpx.post.return_value = mock_tok
 
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
