@@ -19,11 +19,11 @@ async def register_builtin_tools(
     from localharness.tools.builtin.glob_tool import GlobTool
     from localharness.tools.builtin.grep_tool import GrepTool
     from localharness.tools.builtin.read_tool import ReadTool
-    from localharness.tools.builtin.web_tool import WebFetchTool, WebSearchTool
+    from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
     from localharness.tools.builtin.write_tool import WriteTool
 
     for tool in [GlobTool(), GrepTool(), ReadTool(), WriteTool(), EditTool(), BashExecTool(),
-                 WebSearchTool(), WebFetchTool()]:
+                 WebSearchTool(), WebFetchTool(), WebPageQueryTool()]:
         await registry.register(tool, scope="global")
 
     if memory_store is not None:

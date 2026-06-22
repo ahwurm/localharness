@@ -47,8 +47,9 @@ EXPLORE_ROLE = (
 )
 
 # Web-research child: searches + reads pages in ITS OWN context, returns only a distilled
-# summary so raw pages never enter the parent's context window.
-WEB_TOOLS: list[str] = ["web_search", "web_fetch"]
+# summary so raw pages never enter the parent's context window. web_page_query (P4) lets it
+# ground a claim in the FULL retained page, not just the clipped inline preview.
+WEB_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
 WEB_MAX_ACTIONS = 12
 WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 13 — kept above the budget so max_actions binds
 WEB_MAX_DURATION_MINUTES = 5.0

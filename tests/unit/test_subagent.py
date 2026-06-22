@@ -246,7 +246,7 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
 async def test_web_child_registry_is_web_only():
     base = await _builtin_registry()
     child = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base)
-    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch"}
+    assert set(child._tools["global"].keys()) == {"web_search", "web_fetch", "web_page_query"}
     # No write / execute / spawn in the web child.
     assert child.has("write") is False
     assert child.has("bash_exec") is False
