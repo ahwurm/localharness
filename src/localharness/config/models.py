@@ -278,6 +278,28 @@ class MemoryConfig(BaseModel):
         ),
     )
 
+    index_mode: bool = Field(
+        default=True,
+        description=(
+            "If True (default), inline only a MEMORY INDEX — one line per persistent fact "
+            "(name + one-line description, not the full body) plus the most recent "
+            "`max_session_history_entries` session entries. Full fact bodies are served on "
+            "demand via the memory_get / memory_search tools, so the per-turn memory tax "
+            "stays small instead of growing with the whole MEMORY.md. If False, the entire "
+            "MEMORY.md is inlined every turn (legacy behaviour)."
+        ),
+    )
+
+    max_session_history_entries: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "When index_mode is True, how many of the most recent Session History entries to "
+            "inline. Older entries stay in MEMORY.md / history.jsonl and are not injected."
+        ),
+    )
+
 
 class ContextConfig(BaseModel):
     """Context window management configuration."""
@@ -332,6 +354,28 @@ class ContextConfig(BaseModel):
         description=(
             "Maximum characters of tool output to include in a single Observation. "
             "Output exceeding this limit is truncated with a '... [truncated]' suffix."
+        ),
+    )
+
+    tool_result_eviction: bool = Field(
+        default=True,
+        description=(
+            "If True (default), once context usage passes 50% any bulky tool result "
+            "(over `tool_result_evict_threshold_chars`, beyond the most recent few) has its "
+            "body replaced with a restorable stub keyed by a deterministic content hash; the "
+            "model re-pulls the full body on demand with tool_result_get('<id>'). This frees "
+            "the largest, fastest-growing context consumer long before LLM summary-compaction "
+            "(0.80) would otherwise fire. Deterministic ids keep the vLLM prefix cache stable."
+        ),
+    )
+
+    tool_result_evict_threshold_chars: int = Field(
+        default=8_000,
+        ge=500,
+        le=500_000,
+        description=(
+            "Char size above which a tool result becomes eligible for eviction to a restorable "
+            "stub (see `tool_result_eviction`). Smaller results aren't worth stubbing."
         ),
     )
 
