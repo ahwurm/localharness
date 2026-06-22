@@ -154,6 +154,17 @@ def test_stuck_detector_override():
     assert cfg.stuck_detector.window_size == 7
 
 
+def test_max_subagent_depth_default_and_bounds():
+    import pytest as _pytest
+    from pydantic import ValidationError
+    from localharness.config.models import AgentConfig
+    assert AgentConfig(name="t", role="t").max_subagent_depth == 2  # nesting on by default
+    assert AgentConfig(name="t", role="t", max_subagent_depth=1).max_subagent_depth == 1  # kill-switch
+    for bad in (0, 5):
+        with _pytest.raises(ValidationError):
+            AgentConfig(name="t", role="t", max_subagent_depth=bad)
+
+
 def test_recovery_injection_default_matches_loop_string():
     from localharness.config.models import AgentConfig
     cfg = AgentConfig(name="t", role="t")

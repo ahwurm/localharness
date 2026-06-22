@@ -27,8 +27,18 @@ EXPLORE_MAX_ACTIONS = 8
 EXPLORE_MAX_TOOL_CALLS = EXPLORE_MAX_ACTIONS + 1  # 9 — kept above the budget so max_actions binds
 EXPLORE_MAX_DURATION_MINUTES = 3.0
 
-# Recursion limit: the parent runs at depth 0, the explore child at depth 1.
+# Recursion limit fallback when no AgentConfig.max_subagent_depth is threaded (the parent runs
+# at depth 0, a subagent at depth 1, ...). The real cap is config-driven (AgentConfig.max_subagent_depth)
+# and passed into the runner/dispatches; MAX_DEPTH is the conservative default for bare callers.
 MAX_DEPTH = 1
+
+# Builtin children permitted to delegate, mapped to the agents they may spawn. A child of name N
+# is given its own (fresh, depth+1) `agent` tool ONLY if N is listed here AND there is room under
+# the cap — so it can nest a grandchild (e.g. web-researcher -> search-verifier, wired in P3).
+# Every other builtin/config child is a leaf: it gets no `agent` tool and its role says it cannot
+# delegate. Keep this in sync with the roles — a name here whose role still says "cannot delegate"
+# would be a contradiction. (P3 adds the "web-researcher": ["search-verifier"] entry.)
+NON_LEAF_AGENTS: dict[str, list[str]] = {}
 
 EXPLORE_ROLE = (
     "You are a read-only Explore subagent. Use read, glob, and grep to investigate the "
@@ -249,6 +259,7 @@ async def dispatch_config_subagent(
     permission_evaluator: Any,
     context_manager: Any = None,
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
 ) -> str:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -259,10 +270,10 @@ async def dispatch_config_subagent(
     in its own context and returns only a summary; the `agent` tool is always stripped so
     config children can never delegate further (belt to the MAX_DEPTH suspenders).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
             f"subagent '{getattr(agent_config, 'name', '?')}' cannot spawn at depth {depth} "
-            f"(max depth {MAX_DEPTH}): subagents may not delegate further."
+            f"(max depth {max_subagent_depth}): subagents may not delegate further."
         )
 
     from localharness.agent.context import ContextManager
@@ -305,16 +316,18 @@ async def dispatch_data_subagent(
     context_manager: Any = None,
     agent_name: str = "data-analyst",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a data-analysis child (bash/read/glob/grep, no web/write), run one turn, return findings.
 
     Mirrors dispatch_web_subagent: the child inspects files and computes in ITS OWN context and
     returns only a summary, so raw file dumps and intermediate outputs never reach the parent's
-    window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    window. Same depth>=cap guard (a child cannot delegate unless handed a child_agent_tool).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"data-analyst subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"data-analyst subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -324,6 +337,8 @@ async def dispatch_data_subagent(
 
     child_config = build_data_analyst_config(agent_name)
     child_registry = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     child_loop = AgentLoop(
@@ -354,6 +369,8 @@ async def dispatch_frontend_subagent(
     context_manager: Any = None,
     agent_name: str = "frontend-designer",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a frontend-designer child (read/write/edit/glob/grep/bash), run one turn, return findings.
 
@@ -361,9 +378,9 @@ async def dispatch_frontend_subagent(
     design-screenshot.js helper (installed to <config-dir>/tools by start_cmd) in ITS OWN
     context — only the summary (file + screenshot paths, design notes) reaches the parent.
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"frontend-designer subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -373,6 +390,8 @@ async def dispatch_frontend_subagent(
 
     child_config = build_frontend_designer_config(agent_name)
     child_registry = ToolRegistry.from_allowed(FRONTEND_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     child_loop = AgentLoop(
@@ -400,6 +419,8 @@ async def dispatch_explore_subagent(
     context_manager: Any = None,
     agent_name: str = "explore",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -421,9 +442,9 @@ async def dispatch_explore_subagent(
     Raises:
         ValueError: if invoked at depth >= MAX_DEPTH (a child trying to spawn a grandchild).
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"explore subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"explore subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "read-only subagents may not delegate further."
         )
 
@@ -435,6 +456,8 @@ async def dispatch_explore_subagent(
 
     # Read-only registry: builtins {read, glob, grep} only — no write/bash/spawn.
     child_registry = ToolRegistry.from_allowed(EXPLORE_TOOLS, base_registry=base_registry)
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
 
     # Stamp parent_id on every child event while publishing on the shared bus.
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
@@ -469,16 +492,20 @@ async def dispatch_web_subagent(
     context_manager: Any = None,
     agent_name: str = "web-researcher",
     depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    child_agent_tool: Any = None,
 ) -> str:
-    """Spawn a web-research child (web_search/web_fetch only), run one turn, return distilled findings.
+    """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
     Mirrors dispatch_explore_subagent but with the web toolset and budget. The child does all the
     searching/fetching in ITS OWN context and returns only a summary, so raw pages never reach the
-    parent's window. Same depth>=MAX_DEPTH guard (a child cannot delegate further).
+    parent's window. When handed a `child_agent_tool` (room left under the depth cap), the child
+    becomes NON-LEAF and may dispatch a nested search-verifier; otherwise it is a leaf. The
+    depth>=cap guard is the belt-and-suspenders backstop.
     """
-    if depth >= MAX_DEPTH:
+    if depth >= max_subagent_depth:
         raise ValueError(
-            f"web-researcher subagent cannot spawn at depth {depth} (max depth {MAX_DEPTH}): "
+            f"web-researcher subagent cannot spawn at depth {depth} (max depth {max_subagent_depth}): "
             "subagents may not delegate further."
         )
 
@@ -488,8 +515,13 @@ async def dispatch_web_subagent(
 
     child_config = build_web_researcher_config(agent_name)
 
-    # Web-only registry: builtins {web_search, web_fetch} — no write/bash/spawn.
+    # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
     child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
+    # Non-leaf web-researcher: inject its own (fresh, depth+1) `agent` tool so it can spawn a
+    # nested search-verifier. Registered global so the running child resolves it (same invariant
+    # as start_cmd's global agent-tool registration).
+    if child_agent_tool is not None:
+        await child_registry.register(child_agent_tool, scope="global")
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
@@ -538,7 +570,10 @@ def make_explore_agent_runner(
     load_agent: Callable[[str], Any] | None = None,
     token_counter: Any = None,
     max_context_tokens: int | None = None,
-) -> Callable[[str, str, int], Awaitable[str]]:
+    depth: int = 0,
+    max_subagent_depth: int = MAX_DEPTH,
+    available_agents: list[str] | None = None,
+) -> Callable[[str, str], Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
     Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
@@ -553,7 +588,10 @@ def make_explore_agent_runner(
     - `get_parent_session_id` is read AT CALL TIME (not captured at build time), so it reflects the
       parent loop's current session_id when the model delegates — matching the closure's late read of
       `agent_loop.current_session_id`.
-    - `depth` threads through to every dispatch (the belt-and-suspenders recursion guard).
+    - This runner serves an agent at `depth`; a child it spawns runs at `depth+1`. A child listed
+      in NON_LEAF_AGENTS is handed its OWN fresh runner+AgentTool closed over `depth+1` (injected
+      into its registry) so it can nest a grandchild — this is the only way depth increments, since
+      AgentTool calls the runner 2-arg. Nesting stops at `max_subagent_depth` (cap); `=1` disables it.
     """
 
     def _make_child_ctx() -> Any:
@@ -568,8 +606,31 @@ def make_explore_agent_runner(
             kwargs["max_context_tokens"] = max_context_tokens
         return ContextManager(**kwargs)
 
-    async def _run_agent(agent_id: str, task: str, depth: int = 0) -> str:
+    def _build_child_agent_tool(name: str) -> Any:
+        """A fresh, depth+1 `agent` tool for a non-leaf child — or None (leaf / no room under cap)."""
+        child_depth = depth + 1
+        delegatees = NON_LEAF_AGENTS.get(name)
+        if not delegatees or child_depth >= max_subagent_depth:
+            return None
+        from localharness.tools.builtin.agent_tool import AgentTool
+        child_runner = make_explore_agent_runner(
+            llm=llm,
+            bus=bus,
+            base_registry=base_registry,
+            permission_evaluator=permission_evaluator,
+            get_parent_session_id=get_parent_session_id,
+            load_agent=load_agent,
+            token_counter=token_counter,
+            max_context_tokens=max_context_tokens,
+            depth=child_depth,
+            max_subagent_depth=max_subagent_depth,
+            available_agents=available_agents,
+        )
+        return AgentTool(agent_runner=child_runner, available_agents=delegatees)
+
+    async def _run_agent(agent_id: str, task: str) -> str:
         name = _sanitize_agent_name(agent_id)
+        child_agent_tool = _build_child_agent_tool(name)
         if name == "explore":
             dispatch = dispatch_explore_subagent
         elif name == "web-researcher":
@@ -601,6 +662,7 @@ def make_explore_agent_runner(
                 permission_evaluator=permission_evaluator,
                 context_manager=_make_child_ctx(),
                 depth=depth,
+                max_subagent_depth=max_subagent_depth,
             )
         return await dispatch(
             task,
@@ -611,6 +673,8 @@ def make_explore_agent_runner(
             permission_evaluator=permission_evaluator,
             context_manager=_make_child_ctx(),
             depth=depth,
+            max_subagent_depth=max_subagent_depth,
+            child_agent_tool=child_agent_tool,
         )
 
     return _run_agent
