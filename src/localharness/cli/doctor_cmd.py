@@ -105,6 +105,74 @@ def doctor(
                 console.print(f"       Available: {', '.join(model_ids[:5])}")
                 failures.append("model-not-found")
 
+            # 5b. Window reconciliation: configured budget vs served max_model_len.
+            served = None
+            try:
+                entries = data.get("data", []) if isinstance(data, dict) else []
+                for m in entries:
+                    if m.get("id") == default_model or len(entries) == 1:
+                        served = m.get("max_model_len") or m.get("context_length")
+                        break
+            except Exception:
+                served = None
+
+            cfg_ctx = None
+            try:
+                cfg_ctx = loader.load_agent("default").context.max_context_tokens
+            except Exception:
+                cfg_ctx = None
+
+            if served and cfg_ctx:
+                reserve = 4_096
+                if cfg_ctx > served:
+                    console.print(
+                        f"{_FAIL} Context budget {cfg_ctx:,} EXCEEDS served window "
+                        f"{served:,} — compaction can't fire, long turns will 400 at the "
+                        f"provider input cap. `start` clamps to {served - reserve:,}."
+                    )
+                    failures.append("context-budget-too-high")
+                elif cfg_ctx < (served - reserve) * 0.75:
+                    console.print(
+                        f"{_FAIL} Context budget {cfg_ctx:,} is far BELOW served window "
+                        f"{served:,} — wasting >25% of the window. Run 'localharness init' "
+                        f"to refit (e.g. {served - reserve:,})."
+                    )
+                    failures.append("context-budget-too-low")
+                else:
+                    console.print(
+                        f"{_PASS} Context budget {cfg_ctx:,} fits served window {served:,}"
+                    )
+            elif served is None:
+                console.print(
+                    f"{_INFO}  Served max_model_len not reported — can't reconcile context budget"
+                )
+
+            # 5c. Real tokenizer (vLLM /tokenize) reachability — token counts are only
+            # accurate when this works; otherwise gates fire on a cl100k undercount.
+            root = base_url.rstrip("/")
+            if root.endswith("/v1"):
+                root = root[: -len("/v1")]
+            try:
+                tk = httpx.post(
+                    f"{root}/tokenize",
+                    json={"model": default_model, "prompt": "token"},
+                    timeout=5.0,
+                )
+                if tk.status_code == 200 and "count" in tk.json():
+                    console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
+                else:
+                    console.print(
+                        f"{_FAIL} /tokenize returned {tk.status_code} — token accounting "
+                        f"falls back to tiktoken cl100k (inaccurate for non-cl100k models)."
+                    )
+                    failures.append("tokenize-unreachable")
+            except Exception:
+                console.print(
+                    f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "
+                    f"falls back to tiktoken cl100k (inaccurate for Qwen et al.)."
+                )
+                failures.append("tokenize-unreachable")
+
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             console.print(f"{_FAIL} LLM endpoint unreachable: {base_url}")
             console.print(f"       {exc}")

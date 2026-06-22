@@ -157,6 +157,48 @@ def test_budget_agent_wins(config_dir: Path) -> None:
 
 
 # ------------------------------------------------------------------ #
+# 7b. context block inherits org -> division -> agent (was write-only)
+# ------------------------------------------------------------------ #
+def test_org_context_reaches_contextless_agent(config_dir: Path) -> None:
+    """org.context.max_context_tokens must reach an agent with no context block.
+
+    Previously the loader resolved only model/temperature/max_tokens, so a fitted
+    org-level window was write-only and the agent fell to the schema default."""
+    _write_yaml(config_dir / "org.yaml", {
+        "context": {"max_context_tokens": 126_976},
+    })
+    _write_yaml(config_dir / "agents" / "plain.yaml", {
+        "name": "plain", "role": "Plain agent",
+    })
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg = loader.load_agent("plain")
+    assert cfg.context.max_context_tokens == 126_976
+
+
+def test_agent_context_overrides_org(config_dir: Path) -> None:
+    _write_yaml(config_dir / "org.yaml", {
+        "context": {"max_context_tokens": 126_976},
+    })
+    _write_yaml(config_dir / "agents" / "override.yaml", {
+        "name": "override", "role": "Agent role",
+        "context": {"max_context_tokens": 32_000},
+    })
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg = loader.load_agent("override")
+    assert cfg.context.max_context_tokens == 32_000
+
+
+def test_no_context_anywhere_uses_schema_default(config_dir: Path) -> None:
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+    _write_yaml(config_dir / "agents" / "bare.yaml", {
+        "name": "bare", "role": "Bare agent",
+    })
+    loader = ConfigLoader(config_dir=config_dir)
+    cfg = loader.load_agent("bare")
+    assert cfg.context.max_context_tokens == DEFAULT_MAX_CONTEXT_TOKENS
+
+
+# ------------------------------------------------------------------ #
 # 8. sqlite_path auto-filled from agent name
 # ------------------------------------------------------------------ #
 def test_memory_defaults_filled(config_dir: Path) -> None:

@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
 
 class ToolConfig(BaseModel):
     """
@@ -306,13 +308,14 @@ class ContextConfig(BaseModel):
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     max_context_tokens: int = Field(
-        default=61_440,
+        default=DEFAULT_MAX_CONTEXT_TOKENS,
         ge=1_000,
         le=2_000_000,
         description=(
-            "Context budget in tokens. Must be at most the served model's window "
-            "minus the output reservation (default_max_tokens) — the 61,440 default "
-            "fits the reference 64K vLLM window with 4,096 reserved for output. "
+            "Context budget in tokens. At runtime `start` derives the effective window "
+            "from the SERVED max_model_len minus the output reservation; this config value "
+            "acts only as an explicit cap/override (used when set and <= served-reserve). "
+            "The default tracks the served reference window (single source of truth). "
             "If this exceeds the real window, compaction never triggers and long "
             "turns die at the provider's input cap instead of compacting."
         ),

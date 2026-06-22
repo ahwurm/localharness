@@ -128,11 +128,13 @@ def test_memory_config_defaults():
 
 def test_context_config_defaults():
     from localharness.config.models import ContextConfig
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
     cfg = ContextConfig()
-    # 61,440 = reference 64K vLLM window minus the 4,096-token output reservation;
-    # a default above the served window disables compaction (observed live: turns
-    # died at the provider's input cap with the old 128_000 default on a 64K model).
-    assert cfg.max_context_tokens == 61_440
+    # Single source of truth: the schema default now tracks the served reference window
+    # (131_072). At runtime `start` derives the EFFECTIVE budget from the probed
+    # max_model_len minus the output reservation; this config value is only an explicit
+    # cap/override. The old 61_440 default silently capped a 131K-window agent at <half.
+    assert cfg.max_context_tokens == DEFAULT_MAX_CONTEXT_TOKENS
     assert cfg.compaction_threshold_pct == 80.0
 
 

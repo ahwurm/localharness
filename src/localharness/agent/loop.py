@@ -634,8 +634,9 @@ class AgentLoop:
         # Router fires PRE-prompt (the model can't sense input size once it's in-prompt).
         # Tokenize the input ONLY when auto-routing needs it — keeps the disabled path free.
         if rlm_cfg.auto and not rlm_cfg.enabled:
-            from localharness.agent.context import TokenCounter
-            _input_tokens = TokenCounter().count(task)
+            # Reuse the ContextManager's injected (model-aware) counter — newing a bare
+            # TokenCounter here would tokenize with cl100k and misjudge the RLM threshold.
+            _input_tokens = self._ctx._token_counter.count(task)
         else:
             _input_tokens = 0
         rlm_active = _rlm_should_activate(rlm_cfg, _input_tokens, self._ctx.max_context_tokens)

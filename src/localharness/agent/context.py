@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message
 
 log = logging.getLogger("localharness.agent.context")
@@ -152,9 +153,17 @@ def _evict_stale_web_results(
 
 
 class TokenCounter:
-    """Token counting with tiktoken (preferred) or char heuristic fallback."""
+    """Token counting. Prefers the SERVED model's exact tokenizer via vLLM's
+    POST {server_root}/tokenize (model-truth) when base_url+model are given; falls
+    back to tiktoken cl100k, then a char heuristic. Counts are content-hash cached.
 
-    def __init__(self) -> None:
+    cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the
+    only accurate source for non-cl100k models. The remote call is sync (urllib) — the
+    agent loop is serial and model-bottlenecked, so a ~9ms round-trip is acceptable —
+    and is probed once at construction; on any failure it self-disables and never retries.
+    """
+
+    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
         self._encoder = None
         try:
             import tiktoken
@@ -162,12 +171,66 @@ class TokenCounter:
         except (ImportError, Exception):
             pass
 
+        # /tokenize lives at the SERVER ROOT, not under /v1.
+        self._tokenize_url: str | None = None
+        self._model = model
+        self._cache: dict[str, int] = {}
+        if base_url and model:
+            root = base_url.rstrip("/")
+            if root.endswith("/v1"):
+                root = root[: -len("/v1")]
+            self._tokenize_url = f"{root}/tokenize"
+            # Server-or-fail: NO silent fallback. An exact count is mandatory on the live
+            # path, so a probe failure is a HARD error — running on an approximate meter is
+            # exactly what hid the context-overflow bug. The start path surfaces this.
+            if self._remote_count("token") is None:
+                raise RuntimeError(
+                    f"TokenCounter: exact token counting unavailable — /tokenize unreachable "
+                    f"at {self._tokenize_url}. Refusing to fall back to an approximate tokenizer."
+                )
+
+    def _remote_count(self, text: str) -> int | None:
+        """Exact server-side count via vLLM /tokenize, or None on ANY failure."""
+        if not self._tokenize_url:
+            return None
+        import json as _json
+        import urllib.request
+        try:
+            body = _json.dumps({"model": self._model, "prompt": text}).encode("utf-8")
+            req = urllib.request.Request(
+                self._tokenize_url, data=body, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            count = data.get("count")
+            return int(count) if count is not None else None
+        except Exception:
+            return None
+
     def count(self, text: str) -> int:
-        if self._encoder is not None:
-            # disallowed_special=() so literal special-token text (e.g. "<|endoftext|>"
-            # in fetched web content) is counted as ordinary text instead of raising.
-            return len(self._encoder.encode(text, disallowed_special=()))
-        return len(text) // 4  # char heuristic fallback
+        if not text:
+            return 0
+        key = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        if self._tokenize_url is not None:
+            # Live mode: the server tokenizer is the only source of truth. Fail loud on a miss.
+            n = self._remote_count(text)
+            if n is None:
+                raise RuntimeError(
+                    f"TokenCounter: /tokenize call failed mid-session at {self._tokenize_url}; "
+                    f"refusing to substitute an approximate count."
+                )
+        elif self._encoder is not None:
+            # Non-live estimator (unit tests / bench, no server) — explicit, not a fallback.
+            # disallowed_special=() so literal special-token text is counted as ordinary text.
+            n = len(self._encoder.encode(text, disallowed_special=()))
+        else:
+            raise RuntimeError("TokenCounter: no tokenizer available (tiktoken missing, no server).")
+        if len(self._cache) < 50_000:
+            self._cache[key] = n
+        return n
 
     def count_messages(self, messages: list[dict]) -> int:
         total = 0
@@ -513,7 +576,7 @@ class ContextManager:
 
     def __init__(
         self,
-        max_context_tokens: int = 61_440,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         pipeline: CompactionPipeline | None = None,
@@ -523,6 +586,7 @@ class ContextManager:
         eviction_store: "EvictionStore | None" = None,
         tool_evict_threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
         tool_evict_enabled: bool = True,
+        token_counter: "TokenCounter | None" = None,
     ) -> None:
         self.max_context_tokens = max_context_tokens
         self.preserve_first_n = preserve_first_n
@@ -531,7 +595,7 @@ class ContextManager:
         self._eviction_store = eviction_store
         self._tool_evict_threshold_chars = tool_evict_threshold_chars
         self._tool_evict_enabled = tool_evict_enabled
-        self._token_counter = TokenCounter()
+        self._token_counter = token_counter or TokenCounter()
         self._bus = bus
         self._agent_id = agent_id
         self._session_id = session_id
