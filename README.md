@@ -1,5 +1,7 @@
 # LocalHarness
 
+[![GitHub stars](https://img.shields.io/github/stars/ahwurm/localharness?style=social)](https://github.com/ahwurm/localharness/stargazers) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **An open-source agent harness for local LLMs** — run AI agents on local models, defined in YAML, against any OpenAI-compatible endpoint. LocalHarness is the *agent layer* that runs on top of your inference engine (vLLM, Ollama, LM Studio, llama.cpp) — not another inference engine.
 
 It's model-agnostic and hierarchical: define agents in YAML — system prompt, tools, permissions, memory — and run them as a coordinated org (orchestrator → divisions → agents) against any OpenAI-compatible local endpoint. The thesis: the harness, not the model, is where most of the capability lives — the same model can swing tens of benchmark points depending on the harness around it.
@@ -63,6 +65,8 @@ uv run localharness start   # interactive session
 ```
 
 `init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
+
+> Got it running? If LocalHarness saved you an API bill, a [star](https://github.com/ahwurm/localharness/stargazers) helps other local-LLM folks find it.
 
 ### Running the harness on a different machine than the model
 

@@ -210,6 +210,10 @@ def init_app(
     config_file.write_text(to_yaml_str(harness), encoding="utf-8")
     console.print(f"\n[green]✓[/green] LocalHarness configured at {config_file}.")
     console.print("  Run 'localharness start' to begin.")
+    console.print(
+        "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
+        "[cyan]https://github.com/ahwurm/localharness[/cyan]"
+    )
 
 
 def _select_model(result: DetectorResult) -> str:
