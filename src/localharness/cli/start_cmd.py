@@ -436,6 +436,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         get_parent_session_id=lambda: agent_loop.current_session_id,
         # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
         load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
+        # Children inherit the parent's exact /tokenize counter + resolved window so the
+        # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
+        token_counter=token_counter,
+        max_context_tokens=agent_config.context.max_context_tokens,
     )
 
     # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them

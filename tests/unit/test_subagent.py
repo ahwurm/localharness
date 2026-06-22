@@ -335,6 +335,31 @@ async def test_runner_dispatches_data_analyst(monkeypatch):
     assert captured["depth"] == 0
 
 
+@pytest.mark.asyncio
+async def test_runner_threads_token_counter_and_window_into_child(monkeypatch):
+    """Children must inherit the parent's model-aware counter + resolved window, not bare
+    defaults — the sub-agent fleet was silently running on 131,072 + tiktoken."""
+    import localharness.agent.subagent as subagent
+
+    captured = {}
+    async def _fake_dispatch(task, **kwargs):
+        captured["ctx"] = kwargs.get("context_manager")
+        return "ok"
+    monkeypatch.setattr(subagent, "dispatch_explore_subagent", _fake_dispatch)
+
+    sentinel_counter = object()
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        token_counter=sentinel_counter, max_context_tokens=126_976,
+    )
+    await runner("explore", "find X", 0)
+    ctx = captured["ctx"]
+    assert ctx is not None
+    assert ctx.max_context_tokens == 126_976          # resolved window, not the 131072 default
+    assert ctx._token_counter is sentinel_counter      # exact /tokenize counter, not bare tiktoken
+
+
 def test_format_data_findings_header():
     from localharness.agent.subagent import format_data_findings
     out = format_data_findings("task x", "answer 42", 7)
