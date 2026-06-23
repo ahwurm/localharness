@@ -27,7 +27,7 @@ _WEB_STUB_PREFIX = "[web output omitted"
 
 # Large-tool-result eviction (generalizes web eviction to ALL bulky tool outputs).
 # A tool result whose char size exceeds the threshold has its body replaced with a
-# restorable stub; the full body is kept in an EvictionStore keyed by a DETERMINISTIC
+# restorable stub; the full body is kept in the ContentStore keyed by a DETERMINISTIC
 # content hash (NOT random/timestamp) so the rendered prompt stays prefix-cache stable.
 # The model re-pulls the body with tool_result_get('<id>').
 TOOL_EVICT_USAGE_FRACTION: float = 0.50
@@ -47,14 +47,10 @@ def _content_handle(content: str) -> str:
     return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-# Back-compat alias: an evicted-tool-result id IS a content handle (same hash, same value).
-_evict_id = _content_handle
-
-
 class ContentStore:
     """One per-agent content-addressable store: handle -> (body, origin).
 
-    Generalizes the old EvictionStore (durable, non-web restorable tool bodies) and absorbs the
+    Generalizes the prior evicted-body store (durable, non-web restorable tool bodies) and absorbs
     web page store (LRU-bounded, re-fetchable web bodies) onto a single substrate. Handles are a
     deterministic content hash, so identical bodies dedupe and a given body always restores under
     the same handle.
@@ -152,13 +148,9 @@ class ContentStore:
         self._fetch_seq = 0
 
 
-# Back-compat alias: EvictionStore was the durable evicted-body store; ContentStore is its superset.
-EvictionStore = ContentStore
-
-
 def _evict_large_tool_results(
     messages: list[Message],
-    store: "EvictionStore",
+    store: "ContentStore",
     threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
     keep_last: int = TOOL_EVICT_KEEP_LAST,
 ) -> tuple[list[Message], int]:
@@ -681,7 +673,7 @@ class ContextManager:
         bus: Any = None,
         agent_id: str = "",
         session_id: str = "",
-        eviction_store: "EvictionStore | None" = None,
+        eviction_store: "ContentStore | None" = None,
         content_store: "ContentStore | None" = None,
         tool_evict_threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
         tool_evict_enabled: bool = True,
@@ -754,7 +746,7 @@ class ContextManager:
                 )
 
         # Generalized large-tool-result eviction: any bulky non-web result body is moved to
-        # the EvictionStore (deterministic content-hash id) and replaced with a restorable
+        # the ContentStore (deterministic content-hash id) and replaced with a restorable
         # stub the model can re-pull via tool_result_get. Same threshold gate keeps the KV
         # cache stable. Skipped if no store wired or the toggle is off.
         if (

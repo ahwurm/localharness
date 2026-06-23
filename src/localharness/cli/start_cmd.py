@@ -301,10 +301,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         memory_store = None
 
     # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
-    # tool_result_get (restore evicted tool-result bodies). The EvictionStore is shared with
+    # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
     # the ContextManager below so eviction-writes and restore-reads hit the same map.
-    from localharness.agent.context import EvictionStore
-    eviction_store = EvictionStore()
+    from localharness.agent.context import ContentStore
+    eviction_store = ContentStore()
     try:
         if memory_store is not None and agent_config.memory.inject_into_context:
             from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
