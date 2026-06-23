@@ -5,9 +5,10 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message
@@ -35,27 +36,124 @@ TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbi
 _TOOL_STUB_PREFIX = "[tool result evicted"
 
 
-def _evict_id(content: str) -> str:
-    """Deterministic restorable id for an evicted body: content hash, no randomness/time.
-    Same body -> same id across turns, so the stub text is prefix-cache stable."""
+Origin = Literal["trusted", "untrusted"]
+_STORE_WEB_MAX: int = 32  # web (re-fetchable) bodies are LRU-bounded in the unified store
+
+
+def _content_handle(content: str) -> str:
+    """Deterministic content-addressable handle for a body: content hash, no randomness/time.
+    Same body -> same handle across turns AND across agents, so a stub stays prefix-cache stable
+    and identical bodies dedupe to one entry."""
     return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-class EvictionStore:
-    """Durable id -> full-body map for evicted tool results. Shared between the
-    ContextManager (writes on eviction) and the tool_result_get tool (reads on restore).
-    Keyed by a deterministic content hash so a given body always restores under the same id."""
+# Back-compat alias: an evicted-tool-result id IS a content handle (same hash, same value).
+_evict_id = _content_handle
 
-    def __init__(self) -> None:
-        self._bodies: dict[str, str] = {}
 
-    def put(self, content: str) -> str:
-        rid = _evict_id(content)
-        self._bodies[rid] = content
-        return rid
+class ContentStore:
+    """One per-agent content-addressable store: handle -> (body, origin).
 
-    def get(self, rid: str) -> str | None:
-        return self._bodies.get(rid)
+    Generalizes the old EvictionStore (durable, non-web restorable tool bodies) and absorbs the
+    web page store (LRU-bounded, re-fetchable web bodies) onto a single substrate. Handles are a
+    deterministic content hash, so identical bodies dedupe and a given body always restores under
+    the same handle.
+
+    - origin: a body is 'trusted' unless it came from the web, was read back from memory, or was
+      derived from an untrusted handle. Taint is STICKY and monotonic — once untrusted, a handle
+      (and anything derived from it) never relaunders. Only a clean-origin handle may ever be bound
+      into an exec namespace (the injection floor).
+    - pg-N aliases: per-agent, so each agent's OWN first web fetch is deterministically pg-1 (the
+      blind-verifier gate depends on this). No module-global counter.
+    - web LRU: web (re-fetchable) bodies are bounded; if one ages out, web_page_query just asks to
+      re-fetch (the 're-fetch-stub lever'). Trusted bodies are durable — a restore must not fail.
+    - grant view: a child built with (parent, granted) may read ONLY the granted parent handles —
+      the per-delegation capability, no global registry. Leaves get parent=None / granted=∅.
+    """
+
+    def __init__(
+        self,
+        max_web: int = _STORE_WEB_MAX,
+        parent: "ContentStore | None" = None,
+        granted: "frozenset[str] | None" = None,
+    ) -> None:
+        self._bodies: dict[str, tuple[str, Origin]] = {}
+        self._web: "OrderedDict[str, None]" = OrderedDict()
+        self._aliases: dict[str, str] = {}
+        self._fetch_seq = 0
+        self._max_web = max_web
+        self._parent = parent
+        self._granted = frozenset(granted or ())
+
+    def put(self, body: str, origin: Origin = "trusted", derived_from: str | None = None) -> str:
+        """Store a body, return its handle. Origin is sticky: untrusted if explicitly untrusted,
+        derived from an untrusted handle, or this exact body was already stored untrusted."""
+        h = _content_handle(body)
+        prev = self._bodies.get(h)
+        tainted = (
+            origin == "untrusted"
+            or (derived_from is not None and self.origin(derived_from) == "untrusted")
+            or (prev is not None and prev[1] == "untrusted")
+        )
+        self._bodies[h] = (body, "untrusted" if tainted else "trusted")
+        return h
+
+    def put_web(self, body: str) -> str:
+        """Retain a web body (ALWAYS untrusted), mint a per-agent pg-N alias, LRU-bound the web set.
+        Returns the pg-N alias — callers keep using pg-N exactly as before."""
+        self._fetch_seq += 1
+        alias = f"pg-{self._fetch_seq}"
+        h = self.put(body, origin="untrusted")
+        self._aliases[alias] = h
+        self._web[h] = None
+        self._web.move_to_end(h)
+        while len(self._web) > self._max_web:
+            old, _ = self._web.popitem(last=False)
+            self._bodies.pop(old, None)
+            for a in [a for a, hh in self._aliases.items() if hh == old]:
+                self._aliases.pop(a, None)
+        return alias
+
+    def get(self, ref: str) -> str | None:
+        """Resolve a handle OR a pg-N alias to its body. Reads through to a GRANTED parent handle
+        only (the capability); never an ambient cross-agent read."""
+        h = self._aliases.get(ref, ref)
+        v = self._bodies.get(h)
+        if v is not None:
+            if h in self._web:
+                self._web.move_to_end(h)  # LRU touch
+            return v[0]
+        if self._parent is not None and h in self._granted:
+            return self._parent.get(h)
+        return None
+
+    def origin(self, ref: str) -> Origin | None:
+        h = self._aliases.get(ref, ref)
+        v = self._bodies.get(h)
+        if v is not None:
+            return v[1]
+        if self._parent is not None and h in self._granted:
+            return self._parent.origin(h)
+        return None
+
+    def stub_meta(self, ref: str) -> tuple[int, Origin] | None:
+        """(byte size, origin) for a handle/alias — used to size the inline stub for the trigger."""
+        h = self._aliases.get(ref, ref)
+        v = self._bodies.get(h)
+        if v is None and self._parent is not None and h in self._granted:
+            v = self._parent._bodies.get(h)
+        return (len(v[0]), v[1]) if v else None
+
+    def reset(self) -> None:
+        """Test/seam hook: clear all bodies, the web LRU, and the pg-N alias sequence."""
+        self._bodies.clear()
+        self._web.clear()
+        self._aliases.clear()
+        self._fetch_seq = 0
+
+
+# Back-compat alias: EvictionStore was the durable evicted-body store; ContentStore is its superset.
+EvictionStore = ContentStore
 
 
 def _evict_large_tool_results(
