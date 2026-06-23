@@ -371,9 +371,13 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     _cfg = getattr(llm_client, "config", None)
     _tc_base = getattr(_cfg, "base_url", None)
     _tc_model = getattr(_cfg, "model", None)
-    try:
-        token_counter = TokenCounter(base_url=_tc_base, model=_tc_model) if (_tc_base and _tc_model) else TokenCounter()
-    except Exception:
+    # When an endpoint is configured, use the exact server tokenizer and DO NOT swallow a /tokenize
+    # failure into a silent tiktoken fallback — that would fire the window gate on wrong counts while
+    # claiming "real counts". TokenCounter is server-or-fail by design; fall back to the approximate
+    # tokenizer ONLY when there is no endpoint at all (test mocks with no base_url/model).
+    if _tc_base and _tc_model:
+        token_counter = TokenCounter(base_url=_tc_base, model=_tc_model)
+    else:
         token_counter = TokenCounter()
     bench_store = ContentStore()
 
