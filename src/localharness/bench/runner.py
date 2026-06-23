@@ -378,8 +378,10 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
                 f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in msgs
             )},
         ]
-        resp = await llm_client.complete(prompt, tools=None)
-        return resp.content or ""
+        result = await llm_client.complete(prompt, tools=None)
+        # complete() returns (message, usage) — unpack the tuple (robust to either shape).
+        msg = result[0] if isinstance(result, tuple) else result
+        return (getattr(msg, "content", "") or "")
 
     bench_pipeline = CompactionPipeline(
         token_counter=token_counter,
