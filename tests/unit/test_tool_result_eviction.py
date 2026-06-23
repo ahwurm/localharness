@@ -8,8 +8,8 @@
 import pytest
 
 from localharness.agent.context import (
-    EvictionStore,
-    _evict_id,
+    ContentStore,
+    _content_handle,
     _evict_large_tool_results,
 )
 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
@@ -31,7 +31,7 @@ def _msgs(big_body: str, n_results: int = 4):
 
 
 def test_large_result_evicted_to_stub():
-    store = EvictionStore()
+    store = ContentStore()
     big = "X" * 20_000
     msgs = _msgs(big, n_results=4)
     out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=1)
@@ -47,7 +47,7 @@ def test_large_result_evicted_to_stub():
 
 @pytest.mark.asyncio
 async def test_tool_result_get_restores_exact_body():
-    store = EvictionStore()
+    store = ContentStore()
     big = "lorem ipsum dolor\n" * 1_000
     msgs = _msgs(big, n_results=2)
     out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
@@ -64,7 +64,7 @@ async def test_tool_result_get_restores_exact_body():
 
 @pytest.mark.asyncio
 async def test_tool_result_get_unknown_id():
-    tool = ToolResultGetTool(EvictionStore())
+    tool = ToolResultGetTool(ContentStore())
     res = await tool.run(id="deadbeef")
     assert not res.success
     assert res.error_type == "not_found"
@@ -73,17 +73,17 @@ async def test_tool_result_get_unknown_id():
 def test_ids_are_deterministic():
     # Same body -> same id, independent of store instance/time (no randomness).
     body = "deterministic body content"
-    assert _evict_id(body) == _evict_id(body)
-    s1, s2 = EvictionStore(), EvictionStore()
+    assert _content_handle(body) == _content_handle(body)
+    s1, s2 = ContentStore(), ContentStore()
     assert s1.put(body) == s2.put(body)
     # Different body -> different id.
-    assert _evict_id(body) != _evict_id(body + "!")
+    assert _content_handle(body) != _content_handle(body + "!")
 
 
 def test_eviction_preserves_tool_pairing():
     """Every evicted tool message keeps its tool_call_id, and every tool message still has a
     matching preceding assistant tool_call — no orphaned pairs introduced by eviction."""
-    store = EvictionStore()
+    store = ContentStore()
     big = "Y" * 12_000
     msgs = _msgs(big, n_results=3)
     out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
@@ -102,7 +102,7 @@ def test_eviction_preserves_tool_pairing():
 
 def test_web_results_skipped():
     """Web tool results are handled by the web-eviction path; the generic path skips them."""
-    store = EvictionStore()
+    store = ContentStore()
     big = "Z" * 20_000
     msgs = [
         {"role": "assistant", "content": None,

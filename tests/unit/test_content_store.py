@@ -2,22 +2,17 @@
 
 Locks the keystone invariants the rest of the milestone rests on, all deterministic (no model):
 - content-hash handles (same body -> same handle, across instances/agents)
-- back-compat: EvictionStore IS ContentStore; the 1-arg put / get path is byte-identical
+- the legacy 1-arg put / get path (the eviction-restore surface) is byte-identical
 - sticky, monotonic origin taint (web/untrusted never relaunders; derived stays tainted)
 - per-agent pg-N aliases (each store's own first fetch is pg-1) + web LRU bound
 - the GRANT read-through: a child reads ONLY granted parent handles, never ambient
 """
 from __future__ import annotations
 
-from localharness.agent.context import (
-    ContentStore,
-    EvictionStore,
-    _content_handle,
-    _evict_id,
-)
+from localharness.agent.context import ContentStore, _content_handle
 
 
-# --- content-hash handles + EvictionStore back-compat -------------------------
+# --- content-hash handles + legacy put/get surface ---------------------------
 
 def test_handle_is_deterministic_content_hash():
     body = "deterministic body content"
@@ -27,14 +22,8 @@ def test_handle_is_deterministic_content_hash():
     assert ContentStore().put(body) == ContentStore().put(body)
 
 
-def test_eviction_store_is_content_store_alias():
-    # The old name resolves to the new class; the old import surface is preserved.
-    assert EvictionStore is ContentStore
-    assert _evict_id is _content_handle
-
-
 def test_legacy_put_get_roundtrip_is_byte_identical():
-    s = EvictionStore()
+    s = ContentStore()
     big = "X" * 20_000
     rid = s.put(big)                 # 1-arg form (origin defaults trusted)
     assert rid == _content_handle(big)

@@ -1,5 +1,5 @@
 """ToolResultGetTool: restore the full body of an evicted tool result by its id."""
-from localharness.agent.context import EvictionStore
+from localharness.agent.context import ContentStore
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 
@@ -8,9 +8,9 @@ class ToolResultGetTool(Tool):
 
     Bulky tool results are replaced in-context with a stub like
     `[tool result evicted — ~N tokens — call tool_result_get('<id>') to restore]`.
-    This tool returns the exact original body for that id from the EvictionStore."""
+    This tool returns the exact original body for that id from the ContentStore."""
 
-    def __init__(self, store: EvictionStore) -> None:
+    def __init__(self, store: ContentStore) -> None:
         self._store = store
 
     def info(self) -> ToolSchema:

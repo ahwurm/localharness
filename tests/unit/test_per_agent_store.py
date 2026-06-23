@@ -63,3 +63,89 @@ async def test_tool_result_get_scoped_per_agent():
     res = await tool.run(id=handle)
     assert not res.success and res.error_type == "not_found"   # cannot see the root's body
     assert root_store.get(handle) == "ROOT-ONLY evicted body"  # but the root still can
+
+
+# --- dispatch-level isolation (8.6): per-agent stores never share bodies ------
+
+def _fake_httpx_by_url(monkeypatch, mapping):
+    from localharness.tools.builtin import web_tool
+
+    class _Resp:
+        def __init__(self, text):
+            self.text = text
+            self.headers = {"content-type": "text/plain"}
+            self.url = "https://x.test/"
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return None
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **k):
+            for key, text in mapping.items():
+                if key in url:
+                    return _Resp(text)
+            return _Resp("unmapped")
+
+    monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.asyncio
+async def test_per_agent_store_isolation_across_dispatch(mock_llm_client, bus, tmp_path, monkeypatch):
+    """Two dispatched agents fetch different pages into their OWN stores; neither store ever holds
+    the other agent's body. This is the per-agent isolation that keeps the blind verifier blind."""
+    from localharness.agent.context import ContextManager, _content_handle
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.agent.subagent import (
+        dispatch_search_verifier_subagent,
+        dispatch_web_subagent,
+    )
+
+    monkeypatch.setenv("RESEARCH_RIGOR", "fast")  # no nested verifier; keep the researcher a leaf
+    monkeypatch.setenv("LOCALHARNESS_VERIFICATION_LEDGER_DIR", str(tmp_path))
+    page_r = "RESEARCHER PAGE about alpha widgets. " * 50
+    page_v = "VERIFIER PAGE: SPCX joined the S&P 500. " * 50
+    _fake_httpx_by_url(monkeypatch, {"r.test": page_r, "v.test": page_v})
+
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    llm_r = mock_llm_client([
+        Response(content=None, tool_calls=[ToolCall(id="f1", name="web_fetch",
+                 arguments={"url": "https://r.test/a"})]),
+        Response(content="summary: widgets"),
+    ])
+    llm_v = mock_llm_client([
+        Response(content=None, tool_calls=[ToolCall(id="f1", name="web_fetch",
+                 arguments={"url": "https://v.test/b"})]),
+        Response(content='{"verdict":"SUPPORTED","evidence":"on page"}'),
+    ])
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    store_r, store_v = ContentStore(), ContentStore()
+    await dispatch_web_subagent(
+        "research widgets", llm=llm_r, bus=bus, base_registry=base, parent_session_id="run",
+        permission_evaluator=PermissionEvaluator(), context_manager=ContextManager(content_store=store_r),
+    )
+    await dispatch_search_verifier_subagent(
+        "claim: SPCX in S&P 500\nentity: SPCX\nsource_url: https://v.test/b",
+        llm=llm_v, bus=bus, base_registry=base, parent_session_id="run",
+        permission_evaluator=PermissionEvaluator(), context_manager=ContextManager(content_store=store_v),
+    )
+
+    # each agent retained ITS OWN page under its own pg-1
+    assert "RESEARCHER PAGE" in (store_r.get("pg-1") or "")
+    assert "VERIFIER PAGE" in (store_v.get("pg-1") or "")
+    # and neither store holds the other's body (by content handle) — no cross-agent leak
+    assert store_v.get(_content_handle(page_r)) is None
+    assert store_r.get(_content_handle(page_v)) is None
