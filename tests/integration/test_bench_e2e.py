@@ -100,14 +100,14 @@ def test_bench_slice_holdout_lists_only_holdout_fixtures():
         "graceful_failure", "self_correction", "constraint_satisfaction",
     }, f"unexpected holdout categories: {sorted({s.category for s in holdout})}"
 
-    # Symmetric check: --slice train yields exactly the 24 train fixtures.
+    # Symmetric check: --slice train yields exactly the 25 train fixtures.
     train = _filter_scenarios_by_slice(all_scens, "train")
-    assert len(train) == 24, (
-        f"expected exactly 24 train fixtures, got {len(train)}: "
+    assert len(train) == 25, (
+        f"expected exactly 25 train fixtures, got {len(train)}: "
         f"{[s.name for s in train]}"
     )
     assert all(s.slice == "train" for s in train)
 
-    # --slice all is the no-op bypass: 34 fixtures total.
+    # --slice all is the no-op bypass: 35 fixtures total.
     full = _filter_scenarios_by_slice(all_scens, "all")
-    assert len(full) == 34, f"expected 34 total fixtures, got {len(full)}"
+    assert len(full) == 35, f"expected 35 total fixtures, got {len(full)}"
