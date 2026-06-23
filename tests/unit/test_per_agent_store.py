@@ -149,3 +149,53 @@ async def test_per_agent_store_isolation_across_dispatch(mock_llm_client, bus, t
     # and neither store holds the other's body (by content handle) — no cross-agent leak
     assert store_v.get(_content_handle(page_r)) is None
     assert store_r.get(_content_handle(page_v)) is None
+
+
+# --- the capability grant (P-CRUNCH A): read-through ONLY granted parent handles ----
+
+@pytest.mark.asyncio
+async def test_tool_result_get_reads_granted_parent_handle():
+    """The cruncher grant end-to-end: a child whose store is built with (parent, granted={h})
+    resolves the GRANTED parent handle via tool_result_get, but NOT an ungranted one."""
+    parent = ContentStore()
+    granted_h = parent.put("granted parent body")
+    secret_h = parent.put("ungranted secret body")
+
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    child = ToolRegistry.from_allowed(["tool_result_get"], base_registry=base)
+    bind_agent_store_tools(child, ContentStore(parent=parent, granted=frozenset({granted_h})))
+
+    tool = child._tools["global"]["tool_result_get"]
+    ok = await tool.run(id=granted_h)
+    assert ok.success and ok.output == "granted parent body"   # the capability
+    denied = await tool.run(id=secret_h)
+    assert not denied.success and denied.error_type == "not_found"  # ungranted stays invisible
+
+
+@pytest.mark.asyncio
+async def test_leaf_child_ctx_revokes_grant_nonleaf_keeps_it():
+    """Leaf blindness: _child_ctx_with_store_tools(leaf=True) strips any read-through grant, so a
+    leaf handed a pre-granted store stays blind; a non-leaf with the same grant can read through."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.subagent import _child_ctx_with_store_tools
+
+    parent = ContentStore()
+    h = parent.put("parent body the leaf must not see")
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    web = ["web_search", "web_fetch", "web_page_query"]
+
+    leaf_reg = ToolRegistry.from_allowed(web, base_registry=base)
+    leaf_ctx = _child_ctx_with_store_tools(
+        ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h}))),
+        leaf_reg, leaf=True,
+    )
+    assert leaf_ctx._content_store.get(h) is None   # grant revoked → blind
+
+    non_leaf_reg = ToolRegistry.from_allowed(web, base_registry=base)
+    non_leaf_ctx = _child_ctx_with_store_tools(
+        ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h}))),
+        non_leaf_reg, leaf=False,
+    )
+    assert non_leaf_ctx._content_store.get(h) == "parent body the leaf must not see"
