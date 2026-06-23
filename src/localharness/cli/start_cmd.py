@@ -204,6 +204,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             model=selected_data.get("model", "inherit"),
         )
 
+    # --- Capability floor (P-A): sync the module flag from config, then strip web ingestion from
+    # the ROOT agent. Root inherits 'global' scope where web_* are registered, so without this it
+    # would co-resident web ingestion with bash/write/edit (prompt-injection->host hole). It delegates
+    # ingestion to the web-researcher subagent (no bash). KEEP tool_result_get — not untrusted-ingest.
+    from localharness.tools.capabilities import apply_root_capability_floor, set_floor_enabled
+    set_floor_enabled(harness.org.enforce_capability_floor)
+    apply_root_capability_floor(agent_config.tools)
+
     # Wire dependencies
     provider = harness.provider
     resolved_model = (

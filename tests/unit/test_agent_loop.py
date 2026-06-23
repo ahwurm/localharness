@@ -1108,6 +1108,8 @@ async def test_loop_appends_budget_note_to_tool_result(faithful_fake_llm, bus, t
     cfg = AgentConfig.model_validate({
         "name": "budget-note-agent",
         "role": "Test agent.",
+        # P-A floor: host-tool agent, web ingestion stripped so it resolves clean (uses glob).
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
     })
@@ -1142,6 +1144,8 @@ def _budget_loop(faithful_fake_llm, bus, tmp_path, tool_plan, max_actions):
         cfg = AgentConfig.model_validate({
             "name": "budget-final-agent",
             "role": "Test agent.",
+            # P-A floor: host-tool agent, web ingestion stripped so it resolves clean (uses glob).
+            "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
             "permissions": {"budget": {"max_actions": max_actions, "max_duration_minutes": 5.0,
                                        "kill_file": str(tmp_path / "KILL")}},
         })
@@ -1207,6 +1211,8 @@ async def test_failed_tool_error_text_reaches_model(faithful_fake_llm, bus, tmp_
     cfg = AgentConfig.model_validate({
         "name": "err-fwd-agent",
         "role": "Test agent.",
+        # P-A floor: this test drives web_fetch, so deny host-dangerous => web-only clean topology.
+        "tools": {"deny": ["bash_exec", "write", "edit", "python_exec"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
     })
@@ -1274,6 +1280,8 @@ async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
     await register_builtin_tools(reg)
     cfg = AgentConfig.model_validate({
         "name": "act-guard-agent", "role": "Test.",
+        # P-A floor: host-tool agent, web ingestion stripped so it resolves clean (uses glob).
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
         "self_check": {"enabled": False},

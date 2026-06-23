@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from localharness.core.types import Message
+from localharness.tools.capabilities import CoResidenceError
 
 log = logging.getLogger("localharness.agent.loop")
 
@@ -623,6 +624,8 @@ class AgentLoop:
                 tool_config = self._config.tools
                 tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
                 tool_schemas = list(tool_schemas_dict.values())
+            except CoResidenceError:
+                raise  # capability floor must fail LOUD, never be swallowed into an empty toolset
             except Exception:
                 tool_schemas = []
 
@@ -1081,6 +1084,8 @@ class AgentLoop:
                 tool_config = self._config.tools
                 tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
                 tool_schemas = list(tool_schemas_dict.values())
+            except CoResidenceError:
+                raise  # capability floor must fail LOUD, never be swallowed into an empty toolset
             except Exception:
                 pass
 
