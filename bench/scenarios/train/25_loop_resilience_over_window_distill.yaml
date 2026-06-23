@@ -1,6 +1,6 @@
 name: over_window_distill
 prompt: |
-  The following is a long set of public-domain essays from The Federalist Papers. Read all of it. In the FINAL essay (No. 51), Madison closes by describing the will that a properly structured government must NOT depend on. Quote that closing characterization of the will verbatim, exactly as the text phrases it.
+  The following is a long set of public-domain essays from The Federalist Papers. Read all of it. In the MIDDLE of this body (essay No. 39), Madison notes that the title of "republic" has been wrongly bestowed on Venice, and describes WHO exercises absolute power over the people there. Quote that exact characterization verbatim, exactly as the text phrases it.
 
   FEDERALIST No. 10
 
@@ -970,10 +970,12 @@ prompt: |
   PUBLIUS
 
 expected_outcome: |
-  The naive over-window path (truncate-tail or summarize-middle) drops Federalist No. 51's closing characterization, which sits in the last ~1% of a 58k-char body that far exceeds the 10k-token window; only a faithful lossless/cruncher reduction preserves the final-essay conclusion and surfaces the verbatim phrase.
+  The graded fact ("a small body of hereditary nobles", Venice's rulers) sits at ~56% depth — squarely in the MIDDLE of essay No. 39 of a 58.5k-char body that far exceeds the 10k-token window. A naive summarize-middle compaction (preserve-first-N + preserve-last-N, drop/summarize the middle) would lose exactly this region; only a faithful lossless/cruncher reduction that does not discard the middle preserves the mid-document phrase verbatim.
+
+  KNOWN LIMITATION (2026-06-23, measured live vs qwen3.6-27b): this scenario does NOT yet establish the J3 over-window gap when run through the current bench runner. The runner builds ContextManager with pipeline=None (runner.py:362), so NO summary compaction ever runs; and even if it did, the entire body arrives as ONE user message, while summarize-middle operates on message boundaries (preserve-first/last N MESSAGES) and cannot split a single oversized message. The 10k max_context_tokens drives only a telemetry warning ("overflow 125%"); nothing truncates, so the subject's real ~131k vLLM window receives the full document and answers correctly (success=True, 20/20). Closing the gap requires either wiring a real compaction pipeline into the bench runner OR a hard pre-send truncation at max_context_tokens — neither exists today. The phrase is now correctly mid-document (the prior closing-sentence rubric was an additional mis-calibration), so this scenario is the right SHAPE; it will start failing on the naive path only once over-window reduction is actually enforced.
 success_criteria:
   rubric:
-    - "contains:a will independent of the society itself"
+    - "contains:a small body of hereditary nobles"
 budget:
   max_actions: 0
   max_duration_minutes: 5.0
