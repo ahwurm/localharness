@@ -365,7 +365,16 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # model's real window (the "no CompactionPipeline in runner" bench bug; J3 was unmeasurable).
     # This mirrors cli/start_cmd.py:391-409 so the bench enforces the window the way production does.
     cctx = agent_config.context
-    token_counter = TokenCounter()
+    # Count with the SERVED model's exact tokenizer (vLLM /tokenize) so the window gates fire on
+    # real token counts — tiktoken undercounts Qwen and let over-window content slip past. Falls
+    # back to the approximate tokenizer only when there is no reachable /tokenize (test mocks).
+    _cfg = getattr(llm_client, "config", None)
+    _tc_base = getattr(_cfg, "base_url", None)
+    _tc_model = getattr(_cfg, "model", None)
+    try:
+        token_counter = TokenCounter(base_url=_tc_base, model=_tc_model) if (_tc_base and _tc_model) else TokenCounter()
+    except Exception:
+        token_counter = TokenCounter()
     bench_store = ContentStore()
 
     async def _bench_summarize(msgs: list) -> str:
