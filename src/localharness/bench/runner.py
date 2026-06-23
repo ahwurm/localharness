@@ -335,7 +335,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # Imports are local to avoid module-import-time cycles and to keep the
     # bench package importable even when these optional modules shift.
     from localharness.agent.loop import AgentLoop
-    from localharness.agent.context import ContextManager
+    from localharness.agent.context import CompactionPipeline, ContentStore, ContextManager, TokenCounter
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.config.models import AgentConfig
     from localharness.tools.registry import ToolRegistry
@@ -359,11 +359,50 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             ),
         )
 
+    # Wire the live harness's context machinery (CompactionPipeline + ContentStore) into the bench
+    # runner. Previously omitted (pipeline=None, no store), so NO compaction/eviction ran and
+    # max_context_tokens was never enforced — over-window content sailed straight through to the
+    # model's real window (the "no CompactionPipeline in runner" bench bug; J3 was unmeasurable).
+    # This mirrors cli/start_cmd.py:391-409 so the bench enforces the window the way production does.
+    cctx = agent_config.context
+    token_counter = TokenCounter()
+    bench_store = ContentStore()
+
+    async def _bench_summarize(msgs: list) -> str:
+        prompt = [
+            {"role": "system", "content": (
+                "Summarize the following conversation history concisely. Preserve key facts, "
+                "decisions, and tool results. Output a dense summary paragraph."
+            )},
+            {"role": "user", "content": "\n".join(
+                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in msgs
+            )},
+        ]
+        resp = await llm_client.complete(prompt, tools=None)
+        return resp.content or ""
+
+    bench_pipeline = CompactionPipeline(
+        token_counter=token_counter,
+        tool_result_cap=cctx.max_tool_output_chars,
+        preserve_first_n=cctx.preserve_first_n_messages,
+        preserve_last_n=cctx.preserve_last_n_messages,
+        llm_summarize_fn=_bench_summarize,
+        compact_md_path=None,
+    )
+    # eviction_store only when the scenario can RESTORE an evicted stub (has tool_result_get) — a
+    # context that cannot re-pull must not stub bodies it could never recover (context.py:687-690).
+    can_restore = "tool_result_get" in (scenario.tools_allowed or [])
     ctx_manager = ContextManager(
         max_context_tokens=scenario.budget.max_context_tokens,
+        preserve_first_n=cctx.preserve_first_n_messages,
+        preserve_last_n=cctx.preserve_last_n_messages,
+        pipeline=bench_pipeline,
         bus=bus,
         agent_id=session_id,
         session_id=session_id,
+        content_store=bench_store,
+        eviction_store=bench_store if can_restore else None,
+        token_counter=token_counter,
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
 

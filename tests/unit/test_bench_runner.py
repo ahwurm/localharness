@@ -264,6 +264,31 @@ async def test_build_agent_loop_registers_agent_tool(monkeypatch):
     assert tr.has("agent"), "AgentTool stub was not registered"
 
 
+@pytest.mark.asyncio
+async def test_build_agent_loop_wires_compaction_pipeline():
+    """Regression guard for the 'no CompactionPipeline in runner' bench bug: _build_agent_loop MUST
+    build a ContextManager WITH a compaction pipeline + content store. Without it (pipeline=None),
+    max_context_tokens is never enforced — over-window content sails through to the model's real
+    window and J3 (lossless over-window reduction) is unmeasurable. Pipeline construction must not
+    require a live client (llm_client=None here): the summarize fn is only invoked during compaction."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    scen = ScenarioSpec(
+        name="overwindow-guard", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._ctx._pipeline is not None, (
+        "bench runner built ContextManager WITHOUT a compaction pipeline — over-window enforcement "
+        "regressed to the 'pipeline=None' bug; max_context_tokens would not be enforced"
+    )
+    assert loop._ctx._content_store is not None, "bench runner ContextManager has no content store"
+
+
 # ---------------------------------------------------------------------------
 # Phase 24 EVAL-01: MemoryStore hydration in _build_agent_loop for the
 # stateful_behavior scenarios. The REAL _build_agent_loop is awaited; we then
