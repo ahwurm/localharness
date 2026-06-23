@@ -27,6 +27,8 @@ from localharness.tools.registry import ToolRegistry
         {"web_fetch", "bash_exec"},
         {"web_search", "write"},
         {"web_page_query", "python_exec"},
+        {"mcp:fetch", "bash_exec"},                          # MCP ingestion + host-dangerous
+        {"plugin:research_tools.exa_search", "write"},       # plugin ingestion + host-dangerous
     ],
 )
 def test_coresidence_raises(names):
@@ -40,6 +42,7 @@ def test_coresidence_raises(names):
         {"web_fetch", "web_page_query"},               # web-only
         {"bash_exec", "write", "edit"},                # danger-only
         {"memory_search", "memory_get", "bash_exec"},  # memory is NOT ingest (the clean invariant)
+        {"mcp:fetch", "web_page_query"},               # ingest-only (mcp + web), no host-dangerous
     ],
 )
 def test_no_coresidence_passes(names):
@@ -54,6 +57,20 @@ async def test_from_allowed_rejects_coresident():
     await register_builtin_tools(full)
     with pytest.raises(CoResidenceError):
         ToolRegistry.from_allowed(["web_fetch", "bash_exec"], base_registry=full)
+
+
+@pytest.mark.asyncio
+async def test_from_allowed_rejects_mcp_ingest_plus_bash():
+    """The MCP/plugin ingestion bypass the floor previously MISSED: an mcp: ingestion tool
+    co-resident with a host-dangerous tool must be REJECTED (declared-intent check by source),
+    not just the 3 built-in web verbs. mcp:fetch need not resolve to a live MCP server."""
+    full = ToolRegistry()
+    await register_builtin_tools(full)
+    with pytest.raises(CoResidenceError):
+        ToolRegistry.from_allowed(["mcp:fetch", "bash_exec"], base_registry=full)
+    # plugin ingestion + host-dangerous likewise
+    with pytest.raises(CoResidenceError):
+        ToolRegistry.from_allowed(["plugin:research_tools.exa_search", "write"], base_registry=full)
 
 
 @pytest.mark.asyncio

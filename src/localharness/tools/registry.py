@@ -200,7 +200,11 @@ class ToolRegistry:
 
         from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
         if floor_enabled():
-            assert_no_coresidence(resolved.keys(), agent_id=agent_id)
+            # Mark mcp-bucket tools so an MCP ingestion tool (e.g. fetch) co-resident with a
+            # host-dangerous tool is caught here too. (Plugins resolved via 'global' scope register
+            # bare and are a named residual — see capabilities.assert_no_coresidence.)
+            check_names = {("mcp:" + n if n in self._tools["mcp"] else n) for n in resolved}
+            assert_no_coresidence(check_names, agent_id=agent_id)
 
         return {name: tool.info() for name, tool in resolved.items()}
 
@@ -413,15 +417,17 @@ class ToolRegistry:
 
         from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
         if floor_enabled():
-            # Dedupe to bare names — from_allowed may register both bare + prefixed forms, so a
-            # prefixed duplicate must not change the co-residence check.
-            bare: set[str] = set()
-            for name in out._tools["global"]:
+            # Detect ingest by SOURCE: keep the mcp:/plugin: prefix so an MCP/plugin ingestion tool
+            # (e.g. mcp:fetch, plugin:research_tools.exa_search) is flagged untrusted-ingest — not
+            # just the 3 built-in web verbs. Intent-based (checks the declared `allowed`) so a
+            # co-resident config is rejected regardless of whether each tool happens to be installed.
+            check_names: set[str] = set()
+            for entry in allowed:
                 try:
-                    _s, t, _p = parse_tool_name(name)
+                    source, tool_name, _p = parse_tool_name(entry)
                 except ValueError:
-                    t = name
-                bare.add(t)
-            assert_no_coresidence(bare)
+                    source, tool_name = "builtin", entry
+                check_names.add(entry if source in ("mcp", "plugin") else tool_name)
+            assert_no_coresidence(check_names)
 
         return out

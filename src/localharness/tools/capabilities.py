@@ -5,6 +5,13 @@ Closes the live prompt-injection->bash hole. An agent that ingests attacker-cont
 Split into delegated roles: an ingestion agent (no host-dangerous) hands results to a host-acting
 agent. Enforced at both toolset-resolution chokepoints (registry.get_tools_for_agent + from_allowed),
 gated by a default-on flag (enforce_capability_floor; module-level mirror set from config at startup).
+
+COVERAGE (stated honestly, not overclaimed): untrusted-ingest = the built-in web verbs below PLUS
+any mcp:/plugin: tool (external content is attacker-controllable). MCP is detected on BOTH paths
+(it lives in the registry's mcp bucket). PLUGIN tools are detected on the from_allowed/dispatch path
+(prefix visible) but NOT when resolved via inherited 'global' scope (registered bare) — a NAMED
+RESIDUAL; closing it fully needs a per-tool `ingest` config tag. The floor does not claim to cover
+an arbitrary tool that ingests attacker text without an mcp:/plugin: source or a web-verb name.
 """
 from __future__ import annotations
 
@@ -45,9 +52,15 @@ class CoResidenceError(ValueError):
 
 
 def assert_no_coresidence(tool_names: Iterable[str], *, agent_id: str = "") -> None:
+    # A tool counts as untrusted-ingest if it is a built-in web verb OR any mcp:/plugin: tool
+    # (external/3rd-party content is attacker-controllable). Callers pass mcp tools with an "mcp:"
+    # marker and plugin tools with a "plugin:" marker where the source is known.
+    # RESIDUAL (named, not hidden): a PLUGIN tool resolved via inherited 'global' scope is registered
+    # under a bare name and is NOT prefix-detectable on the get_tools_for_agent path — full coverage
+    # needs a per-tool `ingest` config tag (see module docstring). MCP is covered on both paths.
     names = set(tool_names)
-    ingest = names & UNTRUSTED_INGEST
-    danger = names & HOST_DANGEROUS
+    ingest = {n for n in names if n.startswith("mcp:") or n.startswith("plugin:") or n in UNTRUSTED_INGEST}
+    danger = {n for n in names if n in HOST_DANGEROUS}
     if ingest and danger:
         who = f" for agent '{agent_id}'" if agent_id else ""
         raise CoResidenceError(
