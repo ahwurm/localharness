@@ -384,8 +384,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                         for m in messages
                     )},
                 ]
-                response = await llm_client.complete(prompt, tools=None)
-                return response.content or ""
+                result = await llm_client.complete(prompt, tools=None)
+                # complete() returns (message, usage) — unpack (robust to either shape).
+                msg = result[0] if isinstance(result, tuple) else result
+                return (getattr(msg, "content", "") or "")
             return summarize
 
         pipeline = CompactionPipeline(
