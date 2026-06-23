@@ -147,12 +147,6 @@ class ContentStore:
         self._aliases.clear()
         self._fetch_seq = 0
 
-    def revoke_grant(self) -> None:
-        """Drop any read-through grant — the leaf blindness guarantee (a leaf is NEVER granted a
-        parent handle), enforced even if a caller passed a pre-granted store."""
-        self._parent = None
-        self._granted = frozenset()
-
 
 def _evict_large_tool_results(
     messages: list[Message],
