@@ -218,8 +218,9 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.context.tool_result_eviction" in entries
     assert "agent.context.tool_result_evict_threshold_chars" in entries
     assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
-    assert len(entries) == 93, (
-        f"catalogue should be 93 entries (was 97; agent.rlm.* removed), got {len(entries)}"
+    assert "agent.cruncher.exec_enabled" in entries  # P-CRUNCH B: cruncher exec is addressable
+    assert len(entries) == 96, (
+        f"catalogue should be 96 entries (93 after RLM removal + agent.cruncher.* x3), got {len(entries)}"
     )
 
 
@@ -283,8 +284,8 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 93, (
-        f"catalogue should be 93 entries (was 97; agent.rlm.* removed), got {len(entries)}"
+    assert len(entries) == 96, (
+        f"catalogue should be 96 entries (93 after RLM removal + agent.cruncher.* x3), got {len(entries)}"
     )
 
 
