@@ -583,6 +583,46 @@ class RoleSectionsConfig(BaseModel):
     )
 
 
+class CruncherConfig(BaseModel):
+    """Cruncher capability — a trusted (clean-origin) sub-agent's bounded code-exec for the
+    composition the verbs can't express (two-body joins, numeric/structured aggregation,
+    build-an-index-then-query). Restricted + sandboxed (restricted builtins, no __import__/open,
+    RLIMIT_AS, cancellable subprocess) and seeded ONLY with clean-origin handle bodies — untrusted
+    (web/memory) content is never bound into exec. Default off. Addressable as `agent.cruncher.*`.
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    exec_enabled: bool = Field(
+        default=False,
+        description=(
+            "Grant a trusted (clean-origin) cruncher the bounded restricted python_exec for "
+            "joins/aggregation/index over its granted handles. Web/memory crunchers are always "
+            "verbs-only regardless. Default off (opt-in). "
+            "Mutable via `localharness components set agent.cruncher.exec_enabled <true|false>`."
+        ),
+    )
+    cell_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=600.0,
+        description=(
+            "Per-exec-cell wall-clock cap (seconds), enforced by a cancellable subprocess — on "
+            "breach the cell is killed and returns a flagged partial, never spins. "
+            "Mutable via `localharness components set agent.cruncher.cell_timeout_s <float>`."
+        ),
+    )
+    mem_limit_mb: int = Field(
+        default=512,
+        ge=64,
+        le=8192,
+        description=(
+            "Address-space cap (RLIMIT_AS, in MB) for an exec cell's subprocess, so a runaway "
+            "allocation can't exhaust host memory. "
+            "Mutable via `localharness components set agent.cruncher.mem_limit_mb <int>`."
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """
     Complete configuration for one agent.
@@ -733,6 +773,15 @@ class AgentConfig(BaseModel):
             "depth 1, a sub-subagent (e.g. a web-researcher's search-verifier) at depth 2. A "
             "subagent at depth d may delegate iff d < max_subagent_depth; =1 disables nesting "
             "(kill-switch). Addressable via `agent.max_subagent_depth`."
+        ),
+    )
+
+    cruncher: CruncherConfig = Field(
+        default_factory=CruncherConfig,
+        description=(
+            "Cruncher capability config — a trusted clean-origin sub-agent's bounded restricted "
+            "code-exec for composition the verbs can't express. Default off. Addressable via "
+            "`agent.cruncher.{exec_enabled,cell_timeout_s,mem_limit_mb}`."
         ),
     )
 
