@@ -209,8 +209,6 @@ def test_self_check_leaves_enumerate(components_home):
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
-    assert "agent.rlm.auto" in entries
-    assert "agent.rlm.auto_threshold" in entries
     # New context-efficiency leaves: memory.{index_mode,max_session_history_entries} +
     # context.{tool_result_eviction,tool_result_evict_threshold_chars}. The two context.*
     # leaves enumerate under BOTH agent.context.* and org.context.* (shared ContextConfig),
@@ -220,8 +218,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.context.tool_result_eviction" in entries
     assert "agent.context.tool_result_evict_threshold_chars" in entries
     assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
-    assert len(entries) == 97, (
-        f"catalogue should be 97 entries (96 + agent.max_subagent_depth), got {len(entries)}"
+    assert len(entries) == 93, (
+        f"catalogue should be 93 entries (was 97; agent.rlm.* removed), got {len(entries)}"
     )
 
 
@@ -268,7 +266,7 @@ def test_self_check_defaults_and_bounds():
 
 
 def test_role_sections_leaves_enumerate(components_home):
-    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 90 (incl. agent.rlm.*)."""
+    """MODP-01 Test A/B/C: all four agent.role_sections.* str leaves appear; catalogue is 93 (agent.rlm.* removed)."""
     from localharness.config.models import AgentConfig
     from localharness.registry.catalogue import build_catalogue
 
@@ -285,8 +283,8 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 97, (
-        f"catalogue should be 97 entries (96 + agent.max_subagent_depth), got {len(entries)}"
+    assert len(entries) == 93, (
+        f"catalogue should be 93 entries (was 97; agent.rlm.* removed), got {len(entries)}"
     )
 
 

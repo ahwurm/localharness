@@ -1,4 +1,4 @@
-"""Unit tests for PythonExecTool — the stateful REPL that backs RLM mode."""
+"""Unit tests for PythonExecTool — the stateful REPL (re-pointed as the trusted cruncher exec)."""
 import pytest
 
 from localharness.tools.base import ToolResult
@@ -34,7 +34,7 @@ async def test_imports_persist_across_calls():
 
 @pytest.mark.asyncio
 async def test_seeded_ctx_namespace():
-    """RLM mode seeds the input as `ctx`; the model reads it with code."""
+    """A caller seeds the input as `ctx`; the model reads it with code."""
     tool = PythonExecTool(namespace={"ctx": "the vault access code is MAGIC-7731"})
     r = await tool.run(code=r"import re; print(re.search(r'MAGIC-\d+', ctx).group())")
     assert r.success is True

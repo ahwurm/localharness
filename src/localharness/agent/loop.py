@@ -390,48 +390,6 @@ def _assemble_role(cfg) -> str:
     return "\n\n".join([base, *extra])
 
 
-def _rlm_should_activate(cfg: Any, input_tokens: int, max_context_tokens: int) -> bool:
-    """Whether RLM mode is active for a turn. `enabled` => always. `auto` => when the input
-    exceeds `auto_threshold` of the context window — the point where the normal path would
-    start lossy summary-compaction, so RLM (lossless: work over `ctx` with code) takes over
-    instead. Within-window inputs stay on the faster, more accurate direct path."""
-    if cfg.enabled:
-        return True
-    if cfg.auto and max_context_tokens > 0:
-        return input_tokens > int(max_context_tokens * cfg.auto_threshold)
-    return False
-
-
-RLM_SUBCALL_MAX_TOKENS = 2048  # leaf chunk-comprehension is short; capping avoids slow-box latency
-
-
-def _make_rlm_recursion_fn(llm: Any, loop: asyncio.AbstractEventLoop) -> Callable[[str], str]:
-    """Build the in-REPL `llm(prompt) -> str` callable for RLM mode. The root model calls it
-    from inside python_exec (which runs in a worker thread via asyncio.to_thread) to delegate
-    a chunk to a fresh model instance; we bridge that thread back to the agent's event loop
-    with run_coroutine_threadsafe. Uses stream_complete (not complete) so a slow local model's
-    long sub-generation isn't raced by the non-streaming read-timeout.
-
-    The sub-call output is capped at RLM_SUBCALL_MAX_TOKENS — a chunk summary/extraction is
-    short, so the root's generous root_max_tokens is the wrong budget for a leaf call (needless
-    latency on a slow box). Mutating the shared config in place is safe: within a turn the root
-    is blocked awaiting this tool result, so root and sub-calls never generate concurrently."""
-    def _call(prompt: str) -> str:
-        cfg = getattr(llm, "config", None)
-        saved = getattr(cfg, "max_tokens", None) if cfg is not None else None
-        if saved is not None:
-            cfg.max_tokens = min(saved, RLM_SUBCALL_MAX_TOKENS)
-        try:
-            coro = llm.stream_complete(messages=[{"role": "user", "content": str(prompt)}])
-            message, _usage = asyncio.run_coroutine_threadsafe(coro, loop).result()
-            return getattr(message, "content", None) or ""
-        finally:
-            if saved is not None:
-                cfg.max_tokens = saved
-
-    return _call
-
-
 class AgentLoop:
     """ReAct while-loop agent executor. One instance per agent."""
 
@@ -625,64 +583,11 @@ class AgentLoop:
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
 
-        # RLM mode (additive; byte-identical when inactive). Active either always
-        # (agent.rlm.enabled) or per-turn via the auto-router (agent.rlm.auto) when the
-        # input is too big for the context window. When active, seed the input as `ctx` in a
-        # per-session python_exec REPL and let the model drive it with code (and delegate
-        # chunks via an in-REPL llm()), rather than placing the huge input into the prompt.
-        rlm_cfg = self._config.rlm
-        # Router fires PRE-prompt (the model can't sense input size once it's in-prompt).
-        # Tokenize the input ONLY when auto-routing needs it — keeps the disabled path free.
-        if rlm_cfg.auto and not rlm_cfg.enabled:
-            # Reuse the ContextManager's injected (model-aware) counter — newing a bare
-            # TokenCounter here would tokenize with cl100k and misjudge the RLM threshold.
-            _input_tokens = self._ctx._token_counter.count(task)
-        else:
-            _input_tokens = 0
-        rlm_active = _rlm_should_activate(rlm_cfg, _input_tokens, self._ctx.max_context_tokens)
-        if rlm_active and not rlm_cfg.enabled:
-            log.info(
-                "RLM auto-route engaged: input ~%d tok > %d%% of %d-tok context window",
-                _input_tokens, int(rlm_cfg.auto_threshold * 100), self._ctx.max_context_tokens,
-            )
-
-        rlm_tool = None
-        _rlm_section = _rlm_directive = ""
-        if rlm_active:
-            from localharness.tools.builtin.python_tool import PythonExecTool
-            if getattr(self._llm, "config", None) is not None:
-                # Generous output budget — a reasoning model narrates a plan THEN emits the
-                # tool call; a tight cap starves it mid-thought.
-                self._llm.config.max_tokens = rlm_cfg.root_max_tokens
-            # In-REPL recursion: the model writes `llm(prompt)` inside python_exec to delegate
-            # a chunk to a fresh model instance. The chunk is passed BY REFERENCE in Python, so
-            # it never enters the root's context (the property that lets RLM beat a flat prompt).
-            _rlm_llm = _make_rlm_recursion_fn(self._llm, asyncio.get_running_loop())
-            rlm_tool = PythonExecTool(namespace={"ctx": task, "llm": _rlm_llm})
-            _rlm_section = (
-                "\n\n## Working over a large input (`ctx`)\n"
-                "Your input is NOT in this conversation — it is loaded as a string variable "
-                "`ctx` in the `python_exec` REPL (a stateful Python environment; variables and "
-                "imports persist across your python_exec calls). It may be far larger than your "
-                "context window, so never try to read it whole.\n"
-                "Use `python_exec` to inspect `ctx` with code — `len(ctx)`, regex (`import re`), "
-                "slicing — to locate what you need. For a chunk too large or nuanced to interpret "
-                "inline, delegate it WITHIN the REPL: call `llm(prompt)` (e.g. "
-                "`summary = llm('Summarize the key facts:\\n' + ctx[start:end])`). It runs a fresh "
-                "model on exactly the text you pass and returns its reply as a string, so the chunk "
-                "stays in Python and never fills your own context. Compose your answer from what "
-                "you gather, then reply to the user directly."
-            )
-            _rlm_directive = (
-                "Your full input (instructions and any data) is loaded in the `ctx` variable in "
-                "the python_exec REPL. Inspect it with code to complete the request."
-            )
-
         # Build system prompt
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
-        system_prompt = _assemble_role(self._config) + _rlm_section
+        system_prompt = _assemble_role(self._config)
         # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
         _now = datetime.now().astimezone()
         system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
@@ -720,8 +625,6 @@ class AgentLoop:
                 tool_schemas = list(tool_schemas_dict.values())
             except Exception:
                 tool_schemas = []
-        if rlm_tool is not None:
-            tool_schemas.append(rlm_tool.info())
 
         # Initialize or continue session messages
         has_prior_turns = any(m.get("role") == "user" for m in session.messages)
@@ -731,10 +634,7 @@ class AgentLoop:
         else:
             # First turn (may have compact.md already) — insert system prompt at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
-        if rlm_tool is not None:
-            session.push({"role": "user", "content": _rlm_directive})
-        else:
-            session.push({"role": "user", "content": task})
+        session.push({"role": "user", "content": task})
 
         recovery_injection: str | None = None
 
@@ -1027,19 +927,10 @@ class AgentLoop:
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
 
-                # Dispatch: the per-session RLM python_exec tool, else the registry
+                # Dispatch the tool call against the agent's registry.
                 result_content = ""
                 is_error = False
-                if rlm_tool is not None and tool_call.name == "python_exec":
-                    try:
-                        result = await rlm_tool.run(**tool_call.arguments)
-                        is_error = not result.success
-                        result_content = (result.output if result.success
-                                          else f"[tool error] {result.error or 'unknown error'}")
-                    except Exception as exc:
-                        result_content = f"Error: {exc}"
-                        is_error = True
-                elif self._tools is not None:
+                if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
                             tool_call.name,

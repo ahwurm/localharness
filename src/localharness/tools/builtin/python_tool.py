@@ -2,8 +2,9 @@
 
 Unlike bash_exec (a one-shot subprocess), this holds a long-lived namespace dict, so
 variables, imports, and function definitions survive between calls within a session.
-It is the substrate for RLM mode: the long input is seeded as a `ctx` variable that the
-model inspects with code (regex/slice/decompose) instead of receiving it in its prompt.
+It is a general stateful REPL: a long input or a handle body can be seeded as a variable the
+model inspects with code (regex/slice/decompose/join) instead of receiving it in its prompt.
+(Re-pointed as the trusted cruncher's bounded exec in P-CRUNCH.)
 
 No sandbox/isolation — same trust posture as the existing bash_exec (the model already
 runs arbitrary shell on the host). Run an isolated VM/container if that matters.
@@ -21,7 +22,7 @@ class PythonExecTool(Tool):
     timeout_s: float = 120.0
 
     def __init__(self, namespace: dict[str, Any] | None = None) -> None:
-        # Per-instance, persistent namespace. RLM mode seeds e.g. {"ctx": <input>}.
+        # Per-instance, persistent namespace; a caller seeds e.g. {"ctx": <body>} for code over it.
         # One instance per session/agent-loop keeps state from leaking across sessions.
         self._ns: dict[str, Any] = namespace if namespace is not None else {}
 
