@@ -935,6 +935,18 @@ class OrgConfig(BaseModel):
         description="Structlog log level for the harness process.",
     )
 
+    enforce_capability_floor: bool = Field(
+        default=True,
+        description=(
+            "Capability floor (P-A security spine). When True (default): no single agent's "
+            "resolved toolset may combine an untrusted-ingest tool (web_*) with a host-dangerous "
+            "one (bash_exec/write/edit/python_exec), enforced at both toolset-resolution "
+            "chokepoints; and the root agent has web ingestion stripped (it delegates ingestion "
+            "to the web-researcher subagent). When False: floor checks + the root web-strip are "
+            "skipped (loud warning) — migration escape hatch only."
+        ),
+    )
+
     audit_log_path: Optional[str] = Field(
         default="~/.localharness/audit.jsonl",
         description=(

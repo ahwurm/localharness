@@ -198,6 +198,10 @@ class ToolRegistry:
                 stacklevel=2,
             )
 
+        from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
+        if floor_enabled():
+            assert_no_coresidence(resolved.keys(), agent_id=agent_id)
+
         return {name: tool.info() for name, tool in resolved.items()}
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
@@ -406,5 +410,18 @@ class ToolRegistry:
             if entry != tool_name and entry not in out._tools["global"]:
                 out._tools["global"][entry] = tool
                 out._schemas[entry] = tool.info()
+
+        from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
+        if floor_enabled():
+            # Dedupe to bare names — from_allowed may register both bare + prefixed forms, so a
+            # prefixed duplicate must not change the co-residence check.
+            bare: set[str] = set()
+            for name in out._tools["global"]:
+                try:
+                    _s, t, _p = parse_tool_name(name)
+                except ValueError:
+                    t = name
+                bare.add(t)
+            assert_no_coresidence(bare)
 
         return out

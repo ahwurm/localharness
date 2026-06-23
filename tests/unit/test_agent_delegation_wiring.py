@@ -44,9 +44,11 @@ async def test_global_agent_tool_visible_and_dispatchable_as_default():
     # THE FIX under test: global scope (drop agent_id="orchestrator").
     await registry.register(agent_tool, scope="global")
 
-    # Visibility: the `default` agent's resolved toolset INCLUDES `agent` (default ToolConfig
-    # inherits global). Old agent/orchestrator scope would NOT appear here for `default`.
-    tools = registry.get_tools_for_agent("default", "default", ToolConfig())
+    # Visibility: the `default` agent's resolved toolset INCLUDES `agent` (ToolConfig inherits
+    # global). Web ingestion denied so the host-tool agent resolves clean under the P-A floor.
+    # Old agent/orchestrator scope would NOT appear here for `default`.
+    _clean = ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])
+    tools = registry.get_tools_for_agent("default", "default", _clean)
     assert "agent" in tools, "global-scope `agent` tool must be visible to the `default` parent"
 
     # Dispatchability: dispatch as the `default` agent resolves the tool and runs the runner.
@@ -55,7 +57,7 @@ async def test_global_agent_tool_visible_and_dispatchable_as_default():
         {"agent_id": "explore", "task": "go look"},
         agent_id="default",
         division_id="default",
-        tool_config=ToolConfig(),
+        tool_config=_clean,
     )
     assert result.success is True, f"dispatch as `default` must succeed, got {result.error!r}"
     assert result.output == "delegated-ok"
@@ -76,7 +78,11 @@ async def test_agent_scoped_orchestrator_registration_is_invisible_to_default():
     agent_tool = AgentTool(agent_runner=_spy_runner, available_agents=["explore"])
     await registry.register(agent_tool, scope="agent", agent_id="orchestrator")
 
-    tools = registry.get_tools_for_agent("default", "default", ToolConfig())
+    # Web denied so the host-tool agent resolves clean under the P-A floor (irrelevant to the
+    # invisibility contract under test, but required to pass the co-residence check).
+    tools = registry.get_tools_for_agent(
+        "default", "default", ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])
+    )
     assert "agent" not in tools, (
         "agent-scoped/orchestrator `agent` tool must NOT resolve for `default` "
         "(this invisibility is exactly Bug#1)"
