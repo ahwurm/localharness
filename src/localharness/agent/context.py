@@ -682,6 +682,7 @@ class ContextManager:
         agent_id: str = "",
         session_id: str = "",
         eviction_store: "EvictionStore | None" = None,
+        content_store: "ContentStore | None" = None,
         tool_evict_threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
         tool_evict_enabled: bool = True,
         token_counter: "TokenCounter | None" = None,
@@ -691,6 +692,13 @@ class ContextManager:
         self.preserve_last_n = preserve_last_n
         self._pipeline = pipeline
         self._eviction_store = eviction_store
+        # The unified per-agent content store: web pages, evicted bodies, granted handles. ALWAYS
+        # present (the web/verb tools bind to it). `_eviction_store` stays the explicit-only signal
+        # that gates large-tool-result eviction — the root has a tool_result_get to restore; a child
+        # does not, so a child must not stub bodies it could never re-pull.
+        self._content_store = content_store if content_store is not None else (
+            eviction_store if eviction_store is not None else ContentStore()
+        )
         self._tool_evict_threshold_chars = tool_evict_threshold_chars
         self._tool_evict_enabled = tool_evict_enabled
         self._token_counter = token_counter or TokenCounter()

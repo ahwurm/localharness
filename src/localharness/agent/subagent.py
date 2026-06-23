@@ -169,6 +169,20 @@ def _sanitize_agent_name(name: str) -> str:
     return name.replace("_", "-")
 
 
+def _child_ctx_with_store_tools(context_manager: Any, child_registry: Any) -> Any:
+    """Resolve the child's ContextManager (build one if None) and bind its store-backed verb tools
+    (web_fetch / web_page_query / tool_result_get) onto the child registry — so the child's verbs hit
+    ITS OWN ContentStore. This is the per-agent isolation cutover AND the fix for the latent
+    tool_result_get root-store leak (a child no longer reads the root's evicted bodies). Only tools
+    the child actually has are rebound; leaves with no web/get tools are unaffected. Returns the
+    ContextManager to hand the child loop."""
+    from localharness.agent.context import ContextManager
+    from localharness.tools.builtin import bind_agent_store_tools
+    ctx = context_manager or ContextManager()
+    bind_agent_store_tools(child_registry, ctx._content_store)
+    return ctx
+
+
 def build_explore_config(name: str = "explore", kill_file: str | None = None) -> AgentConfig:
     """Build the read-only explore-child AgentConfig with its own bounded budget.
 
@@ -345,7 +359,6 @@ async def dispatch_config_subagent(
             f"(max depth {max_subagent_depth}): subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -364,7 +377,7 @@ async def dispatch_config_subagent(
         config=agent_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )
@@ -400,7 +413,6 @@ async def dispatch_data_subagent(
             "subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -414,7 +426,7 @@ async def dispatch_data_subagent(
         config=child_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )
@@ -453,7 +465,6 @@ async def dispatch_frontend_subagent(
             "subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -467,7 +478,7 @@ async def dispatch_frontend_subagent(
         config=child_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )
@@ -517,7 +528,6 @@ async def dispatch_explore_subagent(
             "read-only subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -535,7 +545,7 @@ async def dispatch_explore_subagent(
         config=child_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )
@@ -578,7 +588,6 @@ async def dispatch_web_subagent(
             "subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -598,7 +607,7 @@ async def dispatch_web_subagent(
         config=child_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )
@@ -727,7 +736,6 @@ async def dispatch_search_verifier_subagent(
             "subagents may not delegate further."
         )
 
-    from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
@@ -740,7 +748,7 @@ async def dispatch_search_verifier_subagent(
         config=child_config,
         llm=llm,
         bus=child_bus,
-        context_manager=context_manager or ContextManager(),
+        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
     )

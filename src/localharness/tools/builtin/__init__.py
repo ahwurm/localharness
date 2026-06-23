@@ -1,4 +1,6 @@
 """Built-in tools registration."""
+from typing import Any
+
 from localharness.tools.registry import ToolRegistry
 
 
@@ -34,3 +36,14 @@ async def register_builtin_tools(
     if eviction_store is not None:
         from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
         await registry.register(ToolResultGetTool(eviction_store), scope="global")
+
+
+def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
+    """Re-bind this agent's store-backed verb tools onto its registry so each agent's verbs hit ITS
+    OWN ContentStore (per-agent isolation; closes the latent tool_result_get root-store leak). Only
+    rebinds tools the agent ALREADY has — never adds a withheld capability. Call after from_allowed
+    (a child) or after registering builtins (the root)."""
+    from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+    from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
+    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store)):
+        registry.rebind_global(tool)

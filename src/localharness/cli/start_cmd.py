@@ -316,6 +316,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         warnings.append(f"queryable-handle tools: {exc}")
 
+    # Bind the root agent's store-backed verb tools (web_fetch / web_page_query / tool_result_get)
+    # to the root ContentStore, so the root has ONE per-agent store (web pages + evicted bodies) and
+    # children — which rebind to their OWN store in dispatch — are isolated from it.
+    from localharness.tools.builtin import bind_agent_store_tools
+    bind_agent_store_tools(tool_registry, eviction_store)
+
     # --- 5. Plugin loader (soft) ---
     plugin_loader: PluginLoader | None = None
     try:
