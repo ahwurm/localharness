@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from localharness.agent.context import ContentStore, ContextManager
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent import subagent
 from localharness.agent.subagent import (
@@ -176,9 +177,13 @@ async def test_deterministic_gate_wrong_entity_past_inline_cap(mock_llm_client, 
     base = ToolRegistry()
     await register_builtin_tools(base)
     task = "claim: QNT added to S&P 500\nentity: QNT\nsource_url: https://news.test/article"
+    # Per-agent store cutover: hand the verifier a known ContentStore so the test can assert the
+    # lossless past-cap retrieval against the SAME store the verifier's own web_fetch wrote to.
+    store = ContentStore()
     flag = await dispatch_search_verifier_subagent(
         task, llm=llm, bus=bus, base_registry=base, parent_session_id="run-qnt",
         permission_evaluator=PermissionEvaluator(),
+        context_manager=ContextManager(content_store=store),
     )
 
     # 1) verdict surfaced to the parent as a compact flag
@@ -187,7 +192,7 @@ async def test_deterministic_gate_wrong_entity_past_inline_cap(mock_llm_client, 
     # 2) lossless: the verifier's own fetch (pg-1) retained the FULL page, and web_page_query
     #    surfaces the PAST-cap disconfirming sentence (the inline preview clips it at 5000 chars).
     assert len(early) > 5000, "fixture must push the needle past the inline cap to be a real gate"
-    q = await WebPageQueryTool().run(fetch_id="pg-1", pattern="S&P 500")
+    q = await WebPageQueryTool(store).run(fetch_id="pg-1", pattern="S&P 500")
     assert needle in q.output, "web_page_query must surface the disconfirming sentence past the cap"
 
     # 3) keep-flag ledger row written (kept + flagged, not dropped)

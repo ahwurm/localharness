@@ -6,6 +6,7 @@ import types
 
 import pytest
 
+from localharness.agent.context import ContentStore
 from localharness.tools.builtin import web_tool
 from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
 
@@ -116,16 +117,16 @@ async def test_web_search_searxng_when_env_set(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_web_fetch_retains_full_page_and_returns_fetch_id(monkeypatch):
-    web_tool._reset_page_store()
+    store = ContentStore()
     page = "lorem ipsum " * 800  # ~9600 chars — well past the 5000 inline window
     _fake_httpx(monkeypatch, text=page, content_type="text/plain")
-    result = await WebFetchTool().run(url="https://example.test/big")
+    result = await WebFetchTool(store).run(url="https://example.test/big")
     assert result.success is True
     assert result.truncated is True
     fid = result.metadata["fetch_id"]
     assert fid and f"fetch_id={fid}" in result.output
     # retained length == FULL page, not the inline cap
-    assert len(web_tool._PAGE_STORE[fid]) == len(page)
+    assert len(store.get(fid)) == len(page)
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections import OrderedDict
+from typing import Any
 
 import httpx
 
@@ -37,39 +37,29 @@ _SSRF_BLOCK = re.compile(
     re.I,
 )
 
-# Lossless retention (P4): web_fetch CLIPS its inline return to a window so a big page can't blow
-# context, but the FULL extracted text is kept here, keyed by a short fetch_id, so web_page_query
-# can search past the inline cap. Module-level (one process) so every in-process subagent sees the
-# same store regardless of instance copying; bounded LRU so a long session can't grow it unbounded.
-_PAGE_STORE: "OrderedDict[str, str]" = OrderedDict()
-_PAGE_STORE_MAX = 32
-_fetch_seq = 0
+# Lossless retention (P4 → unified store): web_fetch CLIPS its inline return to a window so a big
+# page can't blow context, but the FULL extracted text is retained in a per-agent ContentStore
+# keyed by a per-agent pg-N alias, so web_page_query can search past the inline cap. The store is
+# bound onto each agent's registry via bind_agent_store_tools (isolation + the re-fetch-stub lever
+# live there). A bare-constructed tool (tests / the bench base registry) falls back to one shared
+# default store, which preserves the old module-global single-process sharing for those paths.
+_DEFAULT_STORE: Any = None
 
 
-def _store_page(text: str) -> str:
-    """Retain the full page text; return a short fetch_id. Evicts the oldest beyond the LRU bound."""
-    global _fetch_seq
-    _fetch_seq += 1
-    fid = f"pg-{_fetch_seq}"
-    _PAGE_STORE[fid] = text
-    _PAGE_STORE.move_to_end(fid)
-    while len(_PAGE_STORE) > _PAGE_STORE_MAX:
-        _PAGE_STORE.popitem(last=False)
-    return fid
-
-
-def _get_page(fid: str) -> str | None:
-    text = _PAGE_STORE.get(fid)
-    if text is not None:
-        _PAGE_STORE.move_to_end(fid)  # LRU touch
-    return text
+def _get_default_store() -> Any:
+    """Shared fallback ContentStore for bare-constructed web tools (no per-agent store bound). Lazy
+    so importing web_tool never imports agent.context at module load (cycle-proof)."""
+    global _DEFAULT_STORE
+    if _DEFAULT_STORE is None:
+        from localharness.agent.context import ContentStore
+        _DEFAULT_STORE = ContentStore()
+    return _DEFAULT_STORE
 
 
 def _reset_page_store() -> None:
-    """Test/seam hook: clear the retained pages (and the id sequence)."""
-    global _fetch_seq
-    _PAGE_STORE.clear()
-    _fetch_seq = 0
+    """Test/seam hook: clear the shared default store's pages and pg-N sequence. (Per-agent stores
+    are reset via their own ContentStore.reset().)"""
+    _get_default_store().reset()
 
 
 def _html_to_text(html: str) -> str:
@@ -150,6 +140,10 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     timeout_s = 25.0
 
+    def __init__(self, store: Any = None) -> None:
+        # Per-agent ContentStore (bound via bind_agent_store_tools); bare tools share the default.
+        self._store = store if store is not None else _get_default_store()
+
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="web_fetch",
@@ -222,7 +216,7 @@ class WebFetchTool(Tool):
         # Retain the FULL page (lossless) and return only a window inline. The tail folds the
         # paging cursor and the fetch_id query into ONE notice (truncation is a display decision,
         # never data-loss — the whole page stays queryable via web_page_query).
-        fid = _store_page(text)
+        fid = self._store.put_web(text)
         window = text[start:start + cap]
         end = start + len(window)
         more = end < full_len
@@ -252,6 +246,10 @@ class WebPageQueryTool(Tool):
 
     timeout_s = 10.0
 
+    def __init__(self, store: Any = None) -> None:
+        # Same per-agent ContentStore the paired web_fetch wrote to (bound together per agent).
+        self._store = store if store is not None else _get_default_store()
+
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="web_page_query",
@@ -279,7 +277,7 @@ class WebPageQueryTool(Tool):
         )
 
     async def _execute(self, fetch_id: str, pattern: str, window: int = 2000) -> ToolResult:
-        text = _get_page(fetch_id)
+        text = self._store.get(fetch_id)
         if text is None:
             return self.err(
                 f"no retained page for fetch_id={fetch_id!r} (it may have aged out of the LRU store; "

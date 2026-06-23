@@ -138,6 +138,18 @@ class ToolRegistry:
                 self._agent_tools.get(agent_id, {}).pop(name, None)
                 self._schemas.pop(f"agent:{agent_id}:{name}", None)
 
+    def rebind_global(self, tool: ToolProtocol) -> None:
+        """Overwrite a global-scope tool IN PLACE (per-agent store binding).
+
+        Unlike register(), this REPLACES an existing global entry instead of raising — used to bind
+        store-backed verb tools (web_fetch / web_page_query / tool_result_get) to an agent's OWN
+        ContentStore. No-ops if the tool isn't already present, so it never grants a capability the
+        agent's toolset withheld. Synchronous direct-write (mirrors from_allowed)."""
+        name = tool.info().name
+        if name in self._tools["global"]:
+            self._tools["global"][name] = tool
+            self._schemas[name] = tool.info()
+
     def get_tools_for_agent(
         self,
         agent_id: str,
