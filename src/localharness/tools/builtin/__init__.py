@@ -17,6 +17,7 @@ async def register_builtin_tools(
     evicted to stubs by the ContextManager). Both are wired only when their backing store
     exists so the bench/test paths that pass neither keep the original builtin set."""
     from localharness.tools.builtin.bash_tool import BashExecTool
+    from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.edit_tool import EditTool
     from localharness.tools.builtin.glob_tool import GlobTool
     from localharness.tools.builtin.grep_tool import GrepTool
@@ -25,7 +26,7 @@ async def register_builtin_tools(
     from localharness.tools.builtin.write_tool import WriteTool
 
     for tool in [GlobTool(), GrepTool(), ReadTool(), WriteTool(), EditTool(), BashExecTool(),
-                 WebSearchTool(), WebFetchTool(), WebPageQueryTool()]:
+                 WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool()]:
         await registry.register(tool, scope="global")
 
     if memory_store is not None:
@@ -43,7 +44,8 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     OWN ContentStore (per-agent isolation; closes the latent tool_result_get root-store leak). Only
     rebinds tools the agent ALREADY has — never adds a withheld capability. Call after from_allowed
     (a child) or after registering builtins (the root)."""
+    from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
-    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store)):
+    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store), ChunkTool(store)):
         registry.rebind_global(tool)
