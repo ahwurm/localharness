@@ -471,6 +471,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # model delegates with grant_handles (it IS `eviction_store` — start_cmd:315/406 — so an
         # evicted/handle id the model sees in a stub is exactly what it can grant to a cruncher).
         parent_store=eviction_store,
+        # Cruncher exec policy (agent.cruncher.*): offered to a clean-origin cruncher iff exec_enabled.
+        cruncher_config=agent_config.cruncher,
     )
 
     agent_tool = AgentTool(

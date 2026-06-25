@@ -595,7 +595,7 @@ class CruncherConfig(BaseModel):
     exec_enabled: bool = Field(
         default=False,
         description=(
-            "Grant a trusted (clean-origin) cruncher the bounded restricted python_exec for "
+            "Grant a trusted (clean-origin) cruncher the bounded restricted cruncher_exec for "
             "joins/aggregation/index over its granted handles. Web/memory crunchers are always "
             "verbs-only regardless. Default off (opt-in). "
             "Mutable via `localharness components set agent.cruncher.exec_enabled <true|false>`."
