@@ -159,3 +159,66 @@ async def test_load_document_retains_full_body_and_returns_handle(tmp_path):
 async def test_load_document_not_found(tmp_path):
     res = await LoadDocumentTool(ContentStore()).run(path=str(tmp_path / "missing.txt"))
     assert not res.success and res.error_type == "not_found"
+
+
+# --- Decision C: cruncher_exec wired, exec_enabled-gated, F3 origin-gated (no green-on-dead-code) ---
+
+
+@pytest.mark.asyncio
+async def test_cruncher_exec_offered_for_clean_and_withheld_for_untrusted(monkeypatch, mock_llm_client, bus):
+    """exec_enabled + a CLEAN-origin granted handle => cruncher_exec is offered (constructed); an
+    UNTRUSTED granted handle => bind_clean_origin_bodies refuses and exec is WITHHELD. This makes
+    agent.cruncher.exec_enabled real and F3 a LIVE check, not a unit test on an unwired tool."""
+    import localharness.tools.builtin.cruncher_exec as ce
+    from localharness.config.models import CruncherConfig
+
+    constructed: list = []
+    real = ce.CruncherExecTool
+    monkeypatch.setattr(ce, "CruncherExecTool",
+                        lambda seed, **kw: (constructed.append(seed) or real(seed, **kw)))
+
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    cfg = CruncherConfig(exec_enabled=True)
+
+    async def _run(origin: str):
+        parent = ContentStore()
+        h = parent.put("a small body to aggregate over", origin=origin)
+        ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                             max_context_tokens=8_000)
+        await subagent.dispatch_cruncher_subagent(
+            "summarize", grant_handles=[h], llm=_reactive_cruncher_llm(Response, ToolCall), bus=bus,
+            base_registry=base, parent_session_id="run", permission_evaluator=PermissionEvaluator(),
+            context_manager=ctx, cruncher_config=cfg, max_subagent_depth=2,
+        )
+
+    await _run("trusted")
+    assert len(constructed) == 1, "clean-origin grant + exec_enabled => cruncher_exec offered"
+    constructed.clear()
+    await _run("untrusted")
+    assert constructed == [], "untrusted grant => cruncher_exec WITHHELD (F3 refuses to bind it)"
+
+
+@pytest.mark.asyncio
+async def test_cruncher_exec_not_offered_when_disabled(monkeypatch, mock_llm_client, bus):
+    """Default (exec_enabled=False): cruncher_exec is never constructed — verbs-only."""
+    import localharness.tools.builtin.cruncher_exec as ce
+    from localharness.config.models import CruncherConfig
+    constructed: list = []
+    real = ce.CruncherExecTool
+    monkeypatch.setattr(ce, "CruncherExecTool",
+                        lambda seed, **kw: (constructed.append(seed) or real(seed, **kw)))
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    parent = ContentStore()
+    h = parent.put("clean body", origin="trusted")
+    ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                         max_context_tokens=8_000)
+    await subagent.dispatch_cruncher_subagent(
+        "q", grant_handles=[h], llm=_reactive_cruncher_llm(Response, ToolCall), bus=bus,
+        base_registry=base, parent_session_id="run", permission_evaluator=PermissionEvaluator(),
+        context_manager=ctx, cruncher_config=CruncherConfig(exec_enabled=False), max_subagent_depth=2,
+    )
+    assert constructed == []

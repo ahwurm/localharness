@@ -956,6 +956,7 @@ async def dispatch_cruncher_subagent(
     context_manager: Any = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
+    cruncher_config: Any = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1023,7 +1024,27 @@ async def dispatch_cruncher_subagent(
     # bounded and the model can't accidentally re-pull the whole over-window body.
     combine_registry = ToolRegistry.from_allowed([], base_registry=base_registry)
     combine_config = build_cruncher_config()
-    combine_config.tools = ToolConfig(add=[])  # tool-less reduce: matches the empty registry, no false tool claim
+    combine_config.tools = ToolConfig(add=[])  # reduce over inline extracts; exec added below iff enabled+clean
+    # Decision C: offer cruncher_exec to the cruncher IFF exec is enabled AND every granted handle is
+    # clean-origin — bind_clean_origin_bodies REFUSES untrusted handles (F3), so attacker bytes are
+    # never code-bound. Off the J3 critical path (the distill needs no exec); this makes agent.cruncher.*
+    # real config + F3 a LIVE check instead of dead code. A web/untrusted cruncher stays verbs-only.
+    if cruncher_config is not None and getattr(cruncher_config, "exec_enabled", False) and handles:
+        from localharness.tools.builtin.cruncher_exec import (
+            CruncherExecTool,
+            UntrustedHandleError,
+            bind_clean_origin_bodies,
+        )
+        try:
+            seed = bind_clean_origin_bodies(cruncher_store, handles)
+            await combine_registry.register(
+                CruncherExecTool(seed, cell_timeout_s=cruncher_config.cell_timeout_s,
+                                 mem_limit_mb=cruncher_config.mem_limit_mb),
+                scope="global",
+            )
+            log.info("cruncher_exec offered (%d clean-origin granted handle(s))", len(handles))
+        except UntrustedHandleError:
+            log.info("cruncher_exec withheld — a granted handle is untrusted-origin (verbs-only)")
     combine_loop = AgentLoop(
         config=combine_config, llm=llm, bus=child_bus,
         context_manager=ctx, tool_registry=combine_registry, permission_evaluator=permission_evaluator,
@@ -1049,6 +1070,7 @@ def make_explore_agent_runner(
     max_subagent_depth: int = MAX_DEPTH,
     available_agents: list[str] | None = None,
     parent_store: Any = None,
+    cruncher_config: Any = None,
 ) -> Callable[..., Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1137,6 +1159,7 @@ def make_explore_agent_runner(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
+                cruncher_config=cruncher_config,
             )
         if name == "explore":
             dispatch = dispatch_explore_subagent
