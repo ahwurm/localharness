@@ -13,8 +13,18 @@ _DEFAULT_MAX_CHARS = 12_000
 
 
 def split_lossless(body: str, max_chars: int) -> list[str]:
-    """Split `body` into contiguous pieces each ≤ max_chars, preferring a newline boundary. LOSSLESS:
-    "".join(split_lossless(b, n)) == b for any b, n≥1 (pieces are adjacent slices, nothing dropped)."""
+    """Split `body` into contiguous pieces each ≤ max_chars, cutting at the most STRUCTURAL boundary
+    available so a fact is not severed from its label / column-header / row / footnote. LOSSLESS:
+    "".join(split_lossless(b, n)) == b for any b, n≥1 — pieces are adjacent slices, nothing dropped or
+    duplicated; only the CUT POSITION is chosen. Boundary preference inside the window, highest first:
+      1) a blank line (paragraph / section / table-block boundary) — keeps a table or financial
+         statement whole instead of stranding its data rows from their header;
+      2) a single newline (line boundary) — never cuts mid-line;
+      3) a hard char cut (only when a single block alone already exceeds max_chars).
+    Plain fixed-char cutting (the prior behavior) ranks WORST for a no-missed-facts bar — it severs a
+    value from its column header. Block-boundary splitting is the cheap structural fix the evidence
+    favors (structural ≈ semantic on factoid QA, far cheaper than embedding clustering); it strictly
+    dominates the old line-cut (same losslessness, never a worse boundary)."""
     if max_chars < 1:
         max_chars = 1
     pieces: list[str] = []
@@ -22,9 +32,16 @@ def split_lossless(body: str, max_chars: int) -> list[str]:
     while i < n:
         end = min(i + max_chars, n)
         if end < n:
-            nl = body.rfind("\n", i + 1, end)  # back up to a newline for a cleaner cut (keeps it)
-            if nl != -1:
-                end = nl + 1
+            # Prefer a blank-line (block) boundary within (i, end]; "\n\n" rfind returns the first
+            # newline of the pair — cut AFTER it so the blank line opens the NEXT piece (still adjacent,
+            # nothing dropped). Fall back to any newline, then to the hard char cut.
+            para = body.rfind("\n\n", i + 1, end)
+            if para != -1:
+                end = para + 1
+            else:
+                nl = body.rfind("\n", i + 1, end)  # back up to a newline for a cleaner cut (keeps it)
+                if nl != -1:
+                    end = nl + 1
         pieces.append(body[i:end])
         i = end
     return pieces

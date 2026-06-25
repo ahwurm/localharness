@@ -28,6 +28,37 @@ def test_split_lossless_min_chars_guard():
     assert "".join(split_lossless("abc", 0)) == "abc"   # max_chars<1 coerced to 1, still lossless
 
 
+def test_split_lossless_keeps_a_table_block_intact():
+    """Structure-aware split (#2): when a char-cut would land MID-TABLE but the table block fits within
+    max_chars, the cut backs up to the blank line BEFORE the block — so the table (header + every data
+    row) stays whole in one piece and a value is never stranded from its column header. The old line-cut
+    severed it (it would back up only to the newline between two rows, splitting the header off the later
+    rows). Losslessness is preserved (adjacent slices)."""
+    prefix = "Intro paragraph about the filing.\n\n"
+    table = ("Segment        FY2024   FY2023\n"
+             "Memory          12750     15400\n"
+             "Compute         45200     38100")        # one contiguous block, NO blank line inside
+    suffix = "\n\nNotes: figures are in thousands."
+    doc = prefix + table + suffix
+
+    # max_chars lands the hard window-end 5 chars short of the table's end (squarely mid-table), yet
+    # the whole block still fits within max_chars — so block-preference must back up to the blank line
+    # before the table rather than cut a row off its header.
+    max_chars = len(prefix) + len(table) - 5
+    assert max_chars >= len(table)                      # block can fit -> preservation must hold
+    pieces = split_lossless(doc, max_chars)
+
+    assert "".join(pieces) == doc                       # still lossless
+    assert all(len(p) <= max_chars for p in pieces)
+    assert sum(table in p for p in pieces) == 1, (
+        "structure-aware split severed the table block; a data row was stranded from its header — "
+        f"pieces={[p[:30] for p in pieces]}"
+    )
+    # And the value 12750 is never separated from its 'Memory' row label within its piece.
+    holder = next(p for p in pieces if "12750" in p)
+    assert "Memory" in holder and "FY2024" in holder
+
+
 @pytest.mark.asyncio
 async def test_chunk_tool_reconstructs_and_inherits_trusted_origin():
     store = ContentStore()

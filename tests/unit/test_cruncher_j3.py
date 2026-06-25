@@ -195,6 +195,38 @@ async def test_cruncher_routed_and_granted_via_run_agent(monkeypatch):
     assert captured["context_manager"]._content_store.get(h) == "the granted over-window doc"  # read-through
 
 
+@pytest.mark.asyncio
+async def test_chunk_summarizer_prepends_contextual_header(monkeypatch):
+    """#1 contextual tagging: the leaf task carries a 'section i of N of a larger document' header so a
+    leaf keeps cross-reference orientation and doesn't over-claim about the whole document from one
+    slice. The header is added to the PROMPT only — the stored chunk bytes stay byte-identical
+    (lossless). This is the AUTHORITATIVE check: live session traces don't persist the leaf prompt, so
+    the header is invisible to trace-grep even though it IS sent to the leaf."""
+    captured: dict = {}
+
+    class _FakeLeafLoop:
+        def __init__(self, **kw):
+            pass
+
+        async def run_turn(self, task, *a, **k):
+            captured["task"] = task
+            return "EXTRACT-OK"
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _FakeLeafLoop)
+
+    store = ContentStore()
+    h = store.put("the section body text", origin="trusted")
+    out = await subagent._run_chunk_summarizer(
+        h, "what governs Venice?", store, llm=None, bus=None, base_registry=ToolRegistry(),
+        parent_session_id=None, permission_evaluator=None, token_counter=None,
+        max_context_tokens=8000, depth=1, max_subagent_depth=3,
+        section_label="section 4 of 12 of a larger document; you are reading ONE section",
+    )
+    assert out == "EXTRACT-OK"
+    assert "section 4 of 12 of a larger document" in captured["task"]   # header reached the leaf prompt
+    assert store.get(h) == "the section body text"                      # stored chunk NOT mutated
+
+
 # --- store-aware delivery (Decision B): retain full body, return a grantable handle, no bytes inline
 
 
