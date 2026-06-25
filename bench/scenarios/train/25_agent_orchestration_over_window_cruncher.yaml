@@ -1,0 +1,44 @@
+name: over_window_cruncher
+prompt: |
+  There is a large reference document on the local disk at
+  {FIXTURES}/over_window_federalist.txt — it is far too big to read inline.
+
+  Working from the WHOLE document (the relevant passage is buried in the middle, not near the
+  start or end), find the place where the text explains WHO exercises absolute power over the
+  people of Venice. Quote that exact characterization verbatim, exactly as the document phrases it.
+expected_outcome: |
+  The graded fact ("a small body of hereditary nobles", Venice's rulers, in Federalist No. 39) sits
+  at ~56% depth of a 58.5k-char public-domain body. This scenario is TOOL-DELIVERED and HANDLE-ONLY:
+  tools_allowed gives the root only `load_document` + `agent`. load_document RETAINS the full body in
+  the per-agent ContentStore and returns only a stub+handle — the bytes never enter the root window —
+  and there is NO read_file / tool_result_get at the root, so the ONLY path to the document's content
+  is to delegate to the cruncher (agent('cruncher', grant_handles=[handle])), which reads the body by
+  handle, splits it into bounded leaves, and faithfully reduces. A model that answers from the stub
+  alone CANNOT know the mid-document fact => fails. So a pass proves BOTH (a) the root routed a plain
+  question to the cruncher unprompted (no "use the cruncher" hand-holding), and (b) the faithful
+  over-window reduce surfaced a needle that lives past the first section — naive-read-fails by
+  construction. SCOPE (honest): this exercises the routing + map-reduce path and the mid-doc-needle
+  bar; it is NOT a >real-model-window stress test (the body fits the 27B's ~131k window — only the
+  handle-only delivery, not raw size, forces the cruncher). A genuinely >window fixture is a named
+  follow-up. Requires the bench runner's cruncher wiring (make_explore_agent_runner + bind_agent_store_tools);
+  before that wiring every agent() routed to Explore and this scenario was unrunnable.
+success_criteria:
+  rubric:
+    - "contains:a small body of hereditary nobles"
+budget:
+  max_actions: 8
+  max_duration_minutes: 10.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 600.0
+  max_tool_calls: 12
+tools_allowed:
+  - load_document
+  - agent
+slice: train
+category: agent_orchestration
+tags:
+  - j3
+  - cruncher
+  - over_window
+  - faithfulness
