@@ -71,6 +71,31 @@ def assert_no_coresidence(tool_names: Iterable[str], *, agent_id: str = "") -> N
         )
 
 
+class GrantTargetError(ValueError):
+    pass
+
+
+def assert_grant_target_safe(tool_names: Iterable[str], *, agent_id: str = "") -> None:
+    """Refuse a cross-agent content-handle grant to a HOST-DANGEROUS target (fail closed).
+
+    A granted handle resolves via tool_result_get / chunk, which are NOT untrusted-ingest, so
+    assert_no_coresidence would NOT catch a bash/write/edit/exec holder handed an *untrusted*
+    granted handle — that would put attacker-controllable bytes one tool_result_get away from a
+    host action. So grants may target ONLY no-host-dangerous agents (the cruncher/summarizer
+    pattern). This makes "grants flow down into no-danger agents only" a CHECKED invariant, not a
+    convention. The caller gates on floor_enabled() (mirrors assert_no_coresidence)."""
+    danger = {n for n in set(tool_names) if n in HOST_DANGEROUS}
+    if danger:
+        who = f" '{agent_id}'" if agent_id else ""
+        raise GrantTargetError(
+            f"refusing to grant content handle(s) to subagent{who}: its toolset holds host-dangerous "
+            f"{sorted(danger)}. A granted handle is readable (tool_result_get/chunk — not untrusted-"
+            f"ingest), so granting to a bash/write/edit/exec holder would put attacker-controllable "
+            f"bytes one call from a host action. Grants may target only no-host-dangerous agents (the "
+            f"cruncher). Split the work: a no-danger processor reads the handle and returns a summary."
+        )
+
+
 def apply_root_capability_floor(tool_config: Any, *, enabled: bool | None = None) -> None:
     """Strip untrusted-ingest (web_*) from a host-acting agent's toolset by denying it.
 

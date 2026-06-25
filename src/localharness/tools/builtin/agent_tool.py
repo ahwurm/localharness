@@ -22,7 +22,7 @@ class AgentTool(Tool):
 
     def __init__(
         self,
-        agent_runner: Callable[[str, str], Coroutine[Any, Any, str]],
+        agent_runner: Callable[..., Coroutine[Any, Any, str]],
         available_agents: list[str] | None = None,
     ) -> None:
         self._agent_runner = agent_runner
@@ -38,7 +38,11 @@ class AgentTool(Tool):
                 "Returns the agent's summary response. You can also BUILD a new specialist: "
                 "write ~/.localharness/agents/<name>.yaml (fields: name, role, "
                 "tools: {add: [tool names]}, permissions: {budget: {max_actions, "
-                "max_duration_minutes}}), then delegate to that name immediately."
+                "max_duration_minutes}}), then delegate to that name immediately. "
+                "If you only hold a LARGE document as a handle (you saw a stub like "
+                "\"[tool result evicted — call tool_result_get('<id>')]\" or a 'pg-N' page), pass "
+                "that id in grant_handles to let the subagent read the full body by handle — the "
+                "bytes never enter your or its prompt. Delegate over-window analysis to 'cruncher'."
             ),
             parameters={
                 "type": "object",
@@ -51,6 +55,16 @@ class AgentTool(Tool):
                         "type": "string",
                         "description": "The task description to give the agent.",
                     },
+                    "grant_handles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional handle id(s) (from an eviction stub or a 'pg-N' page alias) to "
+                            "hand the subagent, so it can read that large content by reference without "
+                            "the bytes entering any prompt. Grants are refused for host-dangerous "
+                            "agents; use a no-danger processor like 'cruncher'."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task"],
             },
@@ -59,9 +73,9 @@ class AgentTool(Tool):
             destructive=False,
         )
 
-    async def _execute(self, agent_id: str, task: str) -> ToolResult:
+    async def _execute(self, agent_id: str, task: str, grant_handles: list[str] | None = None) -> ToolResult:
         try:
-            summary = await self._agent_runner(agent_id, task)
+            summary = await self._agent_runner(agent_id, task, grant_handles)
             return self.ok(summary, delegated_to=agent_id)
         except (KeyError, ValueError):
             return self.err(

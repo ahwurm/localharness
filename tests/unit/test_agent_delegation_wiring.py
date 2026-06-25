@@ -36,7 +36,7 @@ async def test_global_agent_tool_visible_and_dispatchable_as_default():
 
     calls: list[tuple[str, str]] = []
 
-    async def _spy_runner(agent_id: str, task: str) -> str:
+    async def _spy_runner(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
         calls.append((agent_id, task))
         return "delegated-ok"
 
@@ -72,7 +72,7 @@ async def test_agent_scoped_orchestrator_registration_is_invisible_to_default():
     registry = ToolRegistry()
     await register_builtin_tools(registry)
 
-    async def _spy_runner(agent_id: str, task: str) -> str:
+    async def _spy_runner(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
         return "x"
 
     agent_tool = AgentTool(agent_runner=_spy_runner, available_agents=["explore"])
