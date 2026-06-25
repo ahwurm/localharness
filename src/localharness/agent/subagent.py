@@ -320,6 +320,44 @@ def format_data_findings(task: str, summary: str, tool_calls_used: int) -> str:
 CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
 
 
+def _config_child_allowed(agent_config: Any) -> list[str]:
+    """Resolve a config child's effective allowlist: tools.add (or the safe default) minus deny,
+    with `agent` always stripped (config children never delegate further). One source of truth so
+    the grant-target safety check and dispatch_config_subagent can't drift."""
+    tool_cfg = getattr(agent_config, "tools", None)
+    add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
+    deny = set(getattr(tool_cfg, "deny", None) or [])
+    return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+
+
+# Builtin dispatch toolsets keyed by sanitized agent name — used ONLY by the grant-target safety
+# gate (assert_grant_target_safe) so a grant to a host-dangerous builtin (data-analyst/frontend hold
+# bash/write/edit) is refused. The cruncher/chunk-summarizer (Phase C, no host-dangerous) are added
+# alongside their dispatch wiring.
+_BUILTIN_TOOLSETS: dict[str, list[str]] = {
+    "explore": EXPLORE_TOOLS,
+    "web-researcher": WEB_TOOLS,
+    "data-analyst": DATA_TOOLS,
+    "frontend-designer": FRONTEND_TOOLS,
+    "search-verifier": SEARCH_VERIFIER_TOOLS,
+}
+
+
+def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None) -> list[str]:
+    """Best-effort resolve a delegation target's toolset for the grant-target safety gate. Builtins
+    use their module constant; a config child uses its yaml allowlist. Unknown → [] (dispatch then
+    raises its own clear unknown-agent error). Conservative by omission is safe here: the gate only
+    REFUSES on a positive host-dangerous match, and an unknown name can't be granted to anyway."""
+    if name in _BUILTIN_TOOLSETS:
+        return list(_BUILTIN_TOOLSETS[name])
+    if load_agent is not None and name != "default":
+        try:
+            return _config_child_allowed(load_agent(name))
+        except Exception:
+            return []
+    return []
+
+
 def prepend_toolset(task: str, allowed: list[str]) -> str:
     """Prefix a config-child brief with its exact toolset (capability fact, not inference)."""
     names = ", ".join(allowed) if allowed else "none"
@@ -367,10 +405,7 @@ async def dispatch_config_subagent(
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
-    tool_cfg = getattr(agent_config, "tools", None)
-    add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
-    deny = set(getattr(tool_cfg, "deny", None) or [])
-    allowed = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    allowed = _config_child_allowed(agent_config)
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
     # Make the toolset explicit in the brief — small models attend weakly to absent
     # tools (observed live: a bash-less child globbed for `pip` instead of saying
@@ -800,8 +835,14 @@ def make_explore_agent_runner(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     available_agents: list[str] | None = None,
-) -> Callable[[str, str], Awaitable[str]]:
+    parent_store: Any = None,
+) -> Callable[..., Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
+
+    `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
+    the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
+    it reads ONLY those handles' bodies by reference (the grant keystone) — never an ambient
+    cross-agent read. None (e.g. nested grandchild runners) disables model-driven granting.
 
     Mirrors the old `start_cmd._run_agent` closure exactly, but as a unit-testable factory
     (the same way Phase 27 extracted `dispatch_explore_subagent` from this closure). The returned
@@ -821,16 +862,25 @@ def make_explore_agent_runner(
       AgentTool calls the runner 2-arg. Nesting stops at `max_subagent_depth` (cap); `=1` disables it.
     """
 
-    def _make_child_ctx() -> Any:
+    def _make_child_ctx(grant_handles: list[str] | None = None) -> Any:
         """Fresh ContextManager per child, carrying the parent's model-aware token_counter
         (exact /tokenize counts, not tiktoken) and resolved window — so children account
-        for context the same way the parent does instead of falling to bare defaults."""
-        from localharness.agent.context import ContextManager
+        for context the same way the parent does instead of falling to bare defaults.
+
+        When grant_handles are passed AND a parent_store exists, the child's ContentStore is built
+        with (parent=parent_store, granted=frozenset(handles)) — the grant keystone: the child reads
+        ONLY those parent handles via read-through (ContentStore.get/origin), a per-delegation
+        capability, never an ambient cross-agent read."""
+        from localharness.agent.context import ContentStore, ContextManager
         kwargs: dict[str, Any] = {}
         if token_counter is not None:
             kwargs["token_counter"] = token_counter
         if max_context_tokens is not None:
             kwargs["max_context_tokens"] = max_context_tokens
+        if grant_handles and parent_store is not None:
+            kwargs["content_store"] = ContentStore(
+                parent=parent_store, granted=frozenset(grant_handles)
+            )
         return ContextManager(**kwargs)
 
     def _build_child_agent_tool(name: str) -> Any:
@@ -855,9 +905,18 @@ def make_explore_agent_runner(
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
-    async def _run_agent(agent_id: str, task: str) -> str:
+    async def _run_agent(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
         name = _sanitize_agent_name(agent_id)
+        # Grant-target safety (the keystone's structural floor): a granted handle is readable via
+        # tool_result_get/chunk (NOT untrusted-ingest), so refuse handing one to a host-dangerous
+        # target — else attacker-controllable bytes sit one call from a host action. Fail closed,
+        # BEFORE dispatch. Gated by the same flag as the co-residence floor.
+        if grant_handles:
+            from localharness.tools.capabilities import assert_grant_target_safe, floor_enabled
+            if floor_enabled():
+                assert_grant_target_safe(_resolve_target_toolset(name, load_agent), agent_id=name)
         child_agent_tool = _build_child_agent_tool(name)
+        child_ctx = _make_child_ctx(grant_handles)
         if name == "explore":
             dispatch = dispatch_explore_subagent
         elif name == "web-researcher":
@@ -889,7 +948,7 @@ def make_explore_agent_runner(
                 base_registry=base_registry,
                 parent_session_id=get_parent_session_id(),
                 permission_evaluator=permission_evaluator,
-                context_manager=_make_child_ctx(),
+                context_manager=child_ctx,
                 depth=depth,
                 max_subagent_depth=max_subagent_depth,
             )
@@ -900,7 +959,7 @@ def make_explore_agent_runner(
             base_registry=base_registry,
             parent_session_id=get_parent_session_id(),
             permission_evaluator=permission_evaluator,
-            context_manager=_make_child_ctx(),
+            context_manager=child_ctx,
             depth=depth,
             max_subagent_depth=max_subagent_depth,
             child_agent_tool=child_agent_tool,

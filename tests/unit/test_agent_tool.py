@@ -35,7 +35,7 @@ async def test_agent_tool_delegates_to_runner():
     result = await tool._execute(agent_id="coder", task="write hello.py")
     assert result.success is True
     assert "Done: created hello.py" in result.output
-    runner.assert_awaited_once_with("coder", "write hello.py")
+    runner.assert_awaited_once_with("coder", "write hello.py", None)  # 3-arg runner contract (grant_handles)
 
 
 @pytest.mark.asyncio

@@ -440,7 +440,10 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         from localharness.agent.subagent import dispatch_explore_subagent
         from localharness.tools.builtin.agent_tool import AgentTool
 
-        async def _explore_agent_runner(agent_id: str, task: str) -> str:
+        async def _explore_agent_runner(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
+            # grant_handles accepted for the 3-arg runner contract (AgentTool passes it); the bench
+            # explore path does not wire cross-agent grants — a scored J3/grant scenario would build
+            # this runner via make_explore_agent_runner(parent_store=...) like the live start path.
             return await dispatch_explore_subagent(
                 task,
                 llm=llm_client,
