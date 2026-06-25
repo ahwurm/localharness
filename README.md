@@ -128,7 +128,7 @@ known out-of-box gaps are tracked in [gaps.md](docs/reference-architectures/gaps
 
 ## Status
 
-Early stage (v0.1). Interfaces and config schema may change without notice.
+Early stage (v0.5, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
