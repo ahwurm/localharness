@@ -657,6 +657,31 @@ def load_compact_md(compact_md_path: Path) -> Message | None:
     return None
 
 
+def make_compaction_summarize_fn(llm: Any) -> Any:
+    """Build the `llm_summarize_fn` for SummaryCompactionStage: render the middle messages and ask
+    the model for a dense summary.
+
+    The (message, usage) unpack is LOAD-BEARING and shared by start_cmd + the bench runner so it
+    lives in ONE tested place: `complete()` returns a (message, usage) TUPLE, and a bare
+    `result.content` on that tuple silently raised → SummaryCompactionStage.apply swallowed it →
+    summary-compaction was DEAD in prod AND bench (caught only by a live dogfood, no regression
+    test). test_compaction_summarize_unpacks_tuple pins it OUTSIDE the swallow."""
+    async def summarize(messages: list) -> str:
+        prompt = [
+            {"role": "system", "content": (
+                "Summarize the following conversation history concisely. Preserve key facts, "
+                "decisions, and tool results. Output a dense summary paragraph."
+            )},
+            {"role": "user", "content": "\n".join(
+                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in messages
+            )},
+        ]
+        result = await llm.complete(prompt, tools=None)
+        msg = result[0] if isinstance(result, tuple) else result  # (message, usage) tuple — DO NOT regress
+        return (getattr(msg, "content", "") or "")
+    return summarize
+
+
 class ContextManager:
     """Manages message list preparation for LLM requests.
 
