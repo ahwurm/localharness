@@ -21,12 +21,13 @@ async def register_builtin_tools(
     from localharness.tools.builtin.edit_tool import EditTool
     from localharness.tools.builtin.glob_tool import GlobTool
     from localharness.tools.builtin.grep_tool import GrepTool
+    from localharness.tools.builtin.load_document_tool import LoadDocumentTool
     from localharness.tools.builtin.read_tool import ReadTool
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
     from localharness.tools.builtin.write_tool import WriteTool
 
     for tool in [GlobTool(), GrepTool(), ReadTool(), WriteTool(), EditTool(), BashExecTool(),
-                 WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool()]:
+                 WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool(), LoadDocumentTool()]:
         await registry.register(tool, scope="global")
 
     if memory_store is not None:
@@ -45,7 +46,9 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     rebinds tools the agent ALREADY has — never adds a withheld capability. Call after from_allowed
     (a child) or after registering builtins (the root)."""
     from localharness.tools.builtin.chunk_tool import ChunkTool
+    from localharness.tools.builtin.load_document_tool import LoadDocumentTool
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
-    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store), ChunkTool(store)):
+    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store),
+                 ChunkTool(store), LoadDocumentTool(store)):
         registry.rebind_global(tool)
