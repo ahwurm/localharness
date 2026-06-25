@@ -494,7 +494,7 @@ async def test_register_builtin_tools_registers_all():
     await register_builtin_tools(reg)
     names = set(reg._tools["global"].keys())
     assert {"glob", "grep", "read", "write", "edit", "bash_exec",
-            "web_search", "web_fetch", "web_page_query", "chunk"} == names
+            "web_search", "web_fetch", "web_page_query", "chunk", "load_document"} == names
 
 
 # ---------------------------------------------------------------------------
