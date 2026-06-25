@@ -891,11 +891,15 @@ def build_chunk_summarizer_config(name: str = "chunk-summarizer", kill_file: str
 
 _CRUNCHER_DEFAULT_CHUNK_CHARS = 8_000
 _CRUNCHER_MAX_LEAVES = 64  # bound the fan-out; an over-long doc is NOTED, never silently truncated
+_CRUNCHER_MAP_CONCURRENCY = 8  # leaves are independent → run this many at once (vLLM batches them)
 
 
 def _cruncher_chunk_chars(max_context_tokens: int | None) -> int:
-    """Chunk size in chars sized to a fraction of the leaf window so a chunk + the question always
-    fits (conservative: ~0.5 char-per-token of the window, clamped). Smaller window => smaller chunks."""
+    """Chunk size in chars: small enough that a leaf RELIABLY extracts a needle from it. Live finding
+    (2026-06-25): a 27B misses buried facts in ~50k-token chunks (lost-in-the-middle WITHIN the
+    chunk), so chunks must stay modest (~6k tokens cap) regardless of how big the window is —
+    faithfulness beats fewer-leaves. A big over-window doc therefore yields MANY small chunks; the
+    map runs them CONCURRENTLY (see dispatch) so wall-clock stays low. Smaller window => smaller chunks."""
     if not max_context_tokens:
         return _CRUNCHER_DEFAULT_CHUNK_CHARS
     return max(2_000, min(16_000, int(max_context_tokens * 0.5)))
@@ -1005,31 +1009,38 @@ async def dispatch_cruncher_subagent(
     chunk_chars = _cruncher_chunk_chars(max_ctx)
     question = task.strip()
 
-    # --- MAP: split each granted body; summarize each chunk in a fresh, bounded leaf window ---
-    extracts: list[str] = []
-    n_sections = 0
+    # --- MAP: split each granted body into reliably-attended chunks; summarize each in a FRESH leaf
+    # window granted ONLY that chunk. Chunks must be small for reliable extraction (the 27B misses
+    # needles in huge chunks), so a big doc yields MANY leaves — but leaves are independent, so run
+    # them CONCURRENTLY (bounded) and vLLM batches them: faithful AND fast in wall-clock. ---
+    import asyncio
+    piece_handles: list[str] = []
     truncated_note = ""
     for h in handles:
         body = cruncher_store.get(h)  # read-through to the granted parent handle
         if body is None:
             continue
-        piece_handles = [cruncher_store.put(p, derived_from=h) for p in split_lossless(body, chunk_chars)]
-        for idx, ph in enumerate(piece_handles):
-            if n_sections >= _CRUNCHER_MAX_LEAVES:
-                truncated_note = (f"\n[NOTE: document exceeded {_CRUNCHER_MAX_LEAVES} sections; "
-                                  f"{len(piece_handles) - idx} section(s) were not processed]")
+        for p in split_lossless(body, chunk_chars):
+            if len(piece_handles) >= _CRUNCHER_MAX_LEAVES:
+                truncated_note = (f" [NOTE: document exceeded {_CRUNCHER_MAX_LEAVES} sections at this "
+                                  f"chunk size; tail sections were not processed]")
                 break
-            n_sections += 1
-            extract = await _run_chunk_summarizer(
+            piece_handles.append(cruncher_store.put(p, derived_from=h))
+        if truncated_note:
+            break
+    n_sections = len(piece_handles)
+
+    sem = asyncio.Semaphore(_CRUNCHER_MAP_CONCURRENCY)
+    async def _summarize(ph: str) -> str:
+        async with sem:
+            return await _run_chunk_summarizer(
                 ph, question, cruncher_store, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=parent_session_id, permission_evaluator=permission_evaluator,
                 token_counter=token_counter, max_context_tokens=max_ctx,
                 depth=depth + 1, max_subagent_depth=max_subagent_depth,
             )
-            if extract and extract.strip().upper() != "NONE":
-                extracts.append(f"[section {n_sections}]\n{extract.strip()}")
-        if truncated_note:
-            break
+    raw = await asyncio.gather(*[_summarize(ph) for ph in piece_handles])
+    extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
 
     if not handles:
         return ("[cruncher] no grant_handles given — call agent('cruncher', task=..., "

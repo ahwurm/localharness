@@ -132,8 +132,9 @@ async def test_cruncher_broad_query_hierarchical_reduce_preserves_needle(mock_ll
     body = filler[:21000] + f" {marker} " + filler[21000:]
     parent = ContentStore()
     h = parent.put(body, origin="trusted")
+    # Small window => small chunks => many sections => extracts exceed the combine budget => batches.
     ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
-                         max_context_tokens=8_000)
+                         max_context_tokens=4_000)
     base = ToolRegistry()
     await register_builtin_tools(base, eviction_store=ContentStore())
 
