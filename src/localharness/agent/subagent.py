@@ -944,6 +944,33 @@ async def _run_chunk_summarizer(
     return (answer or "").strip()
 
 
+async def _cruncher_combine_turn(
+    question: str, items: list[str], *, partial: bool, llm: Any, child_bus: Any, base_registry: Any,
+    permission_evaluator: Any, ctx: Any, exec_seed: Any = None, exec_cfg: Any = None,
+) -> str:
+    """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
+    higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
+    supplied for the FINAL combine (Decision C). Returns the raw answer."""
+    from localharness.agent.loop import AgentLoop
+    from localharness.tools.registry import ToolRegistry
+    reg = ToolRegistry.from_allowed([], base_registry=base_registry)
+    if exec_seed is not None and exec_cfg is not None:
+        from localharness.tools.builtin.cruncher_exec import CruncherExecTool
+        await reg.register(CruncherExecTool(exec_seed, cell_timeout_s=exec_cfg.cell_timeout_s,
+                                            mem_limit_mb=exec_cfg.mem_limit_mb), scope="global")
+    cfg = build_cruncher_config()
+    cfg.tools = ToolConfig(add=[])  # reduce over inline text; exec (if any) resolves via inherited global
+    loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
+                     tool_registry=reg, permission_evaluator=permission_evaluator)
+    label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
+    goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
+            if partial else "one accurate, grounded answer to the question")
+    task = (f"QUESTION:\n{question}\n\n{label} (faithful copies):\n\n{chr(10).join(items)}\n\n"
+            f"Combine these into {goal}. Quote exact figures/phrases; invent nothing not present; if "
+            f"they don't contain the answer, say so plainly.")
+    return (await loop.run_turn(task) or "").strip()
+
+
 async def dispatch_cruncher_subagent(
     task: str,
     *,
@@ -1008,52 +1035,64 @@ async def dispatch_cruncher_subagent(
         return ("[cruncher] no grant_handles given — call agent('cruncher', task=..., "
                 "grant_handles=['<handle>']) with the document handle to analyze.")
 
-    # --- REDUCE: the cruncher's tool-less loop combines the extracts into a faithful answer ---
-    if extracts:
-        combine_task = (
-            f"QUESTION:\n{question}\n\nEXTRACTS pulled from the document's sections (faithful "
-            f"copies):\n\n{chr(10).join(extracts)}{truncated_note}\n\nCombine these into one accurate, "
-            f"grounded answer to the question. Quote exact figures/phrases; invent nothing not present."
-        )
-    else:
-        combine_task = (
-            f"QUESTION:\n{question}\n\nThe document's sections contained nothing relevant to the "
-            f"question.{truncated_note} State plainly that the answer was not found in the document."
-        )
-    # Tool-less combine: the reduce is pure reasoning over SHORT inline extracts, so the window stays
-    # bounded and the model can't accidentally re-pull the whole over-window body.
-    combine_registry = ToolRegistry.from_allowed([], base_registry=base_registry)
-    combine_config = build_cruncher_config()
-    combine_config.tools = ToolConfig(add=[])  # reduce over inline extracts; exec added below iff enabled+clean
-    # Decision C: offer cruncher_exec to the cruncher IFF exec is enabled AND every granted handle is
-    # clean-origin — bind_clean_origin_bodies REFUSES untrusted handles (F3), so attacker bytes are
-    # never code-bound. Off the J3 critical path (the distill needs no exec); this makes agent.cruncher.*
-    # real config + F3 a LIVE check instead of dead code. A web/untrusted cruncher stays verbs-only.
-    if cruncher_config is not None and getattr(cruncher_config, "exec_enabled", False) and handles:
-        from localharness.tools.builtin.cruncher_exec import (
-            CruncherExecTool,
-            UntrustedHandleError,
-            bind_clean_origin_bodies,
-        )
+    # --- REDUCE: hierarchically combine the per-section extracts into a faithful answer ---
+    # Decision C: build the clean-origin exec seed IFF exec_enabled AND every granted handle is clean
+    # (bind_clean_origin_bodies REFUSES untrusted — F3); offered ONLY on the FINAL combine, off the
+    # critical path. Makes agent.cruncher.* real + F3 a live check (not dead code).
+    exec_seed = None
+    if cruncher_config is not None and getattr(cruncher_config, "exec_enabled", False):
+        from localharness.tools.builtin.cruncher_exec import UntrustedHandleError, bind_clean_origin_bodies
         try:
-            seed = bind_clean_origin_bodies(cruncher_store, handles)
-            await combine_registry.register(
-                CruncherExecTool(seed, cell_timeout_s=cruncher_config.cell_timeout_s,
-                                 mem_limit_mb=cruncher_config.mem_limit_mb),
-                scope="global",
-            )
+            exec_seed = bind_clean_origin_bodies(cruncher_store, handles)
             log.info("cruncher_exec offered (%d clean-origin granted handle(s))", len(handles))
         except UntrustedHandleError:
             log.info("cruncher_exec withheld — a granted handle is untrusted-origin (verbs-only)")
-    combine_loop = AgentLoop(
-        config=combine_config, llm=llm, bus=child_bus,
-        context_manager=ctx, tool_registry=combine_registry, permission_evaluator=permission_evaluator,
+
+    combine_ctx_kwargs: dict[str, Any] = {}
+    if token_counter is not None:
+        combine_ctx_kwargs["token_counter"] = token_counter
+    if max_ctx is not None:
+        combine_ctx_kwargs["max_context_tokens"] = max_ctx
+
+    # Hierarchical reduce so a combine turn NEVER overflows the window: if the extracts don't fit a
+    # char budget (< window), pre-reduce them in batches (faithful partial summaries), then combine
+    # those — looping until they fit. A TARGETED query (few relevant sections) does ONE final combine;
+    # a BROAD query (many sections) reduces in levels. This keeps the reduce bounded for ANY query
+    # (the single-pass combine could overflow on broad queries — seen in the live injection dogfood).
+    items = extracts or ["(no document section contained anything relevant to the question)"]
+    budget = max(3_000, (max_ctx or 8_000) * 2)
+    level = 0
+    while len("\n\n".join(items)) > budget and len(items) > 1 and level < 4:
+        level += 1
+        batches: list[list[str]] = []
+        cur: list[str] = []
+        clen = 0
+        for e in items:
+            if cur and clen + len(e) > budget:
+                batches.append(cur)
+                cur, clen = [], 0
+            cur.append(e)
+            clen += len(e)
+        if cur:
+            batches.append(cur)
+        log.info("cruncher reduce L%d: %d items -> %d batches (budget %d chars)", level, len(items), len(batches), budget)
+        items = [
+            await _cruncher_combine_turn(
+                question, b, partial=True, llm=llm, child_bus=child_bus, base_registry=base_registry,
+                permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+            )
+            for b in batches
+        ]
+
+    answer = await _cruncher_combine_turn(
+        question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
+        permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+        exec_seed=exec_seed, exec_cfg=cruncher_config,
     )
-    answer = await combine_loop.run_turn(combine_task)
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
-    tool_calls_used = _count_session_tool_calls(bus, combine_loop.current_session_id)
-    header = f"[cruncher] sections: {n_sections} | tool calls: {tool_calls_used}"
-    return f"{header}\n\n{(answer or '').strip() or '(no answer)'}"
+    note = truncated_note.strip()
+    header = f"[cruncher] sections: {n_sections}{(' | ' + note) if note else ''}"
+    return f"{header}\n\n{answer or '(no answer)'}"
 
 
 def make_explore_agent_runner(
