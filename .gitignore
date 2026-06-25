@@ -26,6 +26,7 @@ docs/competitive/
 # Internal-only docs and scratch (not part of the public project)
 /CLAUDE.md
 /INDEX.md
+/ARCHITECT-REVIEW.md
 /sessiontask.md
 /test-brief.md
 /gtm-plan-*.md
