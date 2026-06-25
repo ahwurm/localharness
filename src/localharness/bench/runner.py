@@ -238,7 +238,7 @@ async def execute_one_run(
         loop = await _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
         try:
             await asyncio.wait_for(
-                _run_loop(loop, scen.prompt, _on_token),
+                _run_loop(loop, _render_prompt(scen.prompt), _on_token),
                 timeout=scen.limits.max_latency_s,
             )
         except asyncio.TimeoutError:
@@ -290,16 +290,25 @@ _BASE_REGISTRY: Any = None
 
 async def _get_base_registry() -> Any:
     """Cached base registry populated with the builtin tools (read/write/glob/grep/
-    bash_exec). from_allowed() returns an EMPTY registry when given no base, so the
-    bench MUST supply one or the agent gets zero tools and hallucinates on every
-    tool scenario. Built once (builtin tools are stateless) and reused across runs."""
+    bash_exec + tool_result_get). from_allowed() returns an EMPTY registry when given no
+    base, so the bench MUST supply one or the agent gets zero tools and hallucinates on
+    every tool scenario. Built once (builtin tools are stateless) and reused across runs.
+
+    tool_result_get is registered too: register_builtin_tools gates it on an eviction_store, and
+    the cruncher's chunk-summarizer leaves read their granted chunk via tool_result_get (it is the
+    sole entry in CHUNK_SUMMARIZER_TOOLS). from_allowed can only surface a tool that EXISTS in this
+    base, so without it every leaf gets an empty toolset, cannot read its chunk, and emits the call
+    as text — the cruncher then reduces empty extracts and silently misses every fact. The store
+    passed here is a placeholder: bind_agent_store_tools rebinds tool_result_get to each agent's REAL
+    ContentStore per delegation (the leaf to its granted-chunk store, the root to bench_store)."""
     global _BASE_REGISTRY
     if _BASE_REGISTRY is None:
+        from localharness.agent.context import ContentStore
         from localharness.tools.builtin import register_builtin_tools
         from localharness.tools.registry import ToolRegistry
 
         reg = ToolRegistry()
-        await register_builtin_tools(reg)
+        await register_builtin_tools(reg, eviction_store=ContentStore())
         _BASE_REGISTRY = reg
     return _BASE_REGISTRY
 
@@ -407,6 +416,15 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
 
+    # J3: bind the store-backed verbs (load_document / chunk / tool_result_get / web verbs) onto this
+    # per-scenario registry so they hit bench_store — the SAME store the cruncher reads THROUGH on a
+    # grant. Without this, load_document would mint its handle in its own private default ContentStore
+    # and a cross-agent grant_handles=[H] would resolve to nothing (the cruncher path is then silently
+    # unreachable from the bench). rebind_global only touches tools already present, never adds a held-
+    # back capability. Mirrors cli/start_cmd.py:317-329.
+    from localharness.tools.builtin import bind_agent_store_tools
+    bind_agent_store_tools(tool_registry, bench_store)
+
     # PermissionEvaluator is stateless; constructor takes no args. (Plan 12-04
     # Rule 3 fix — the prior `from_config(agent_config)` referenced a method
     # that does not exist on PermissionEvaluator and would have crashed at
@@ -415,32 +433,42 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # Defined before the `agent` block below so the real subagent runner can capture it.
     perm_evaluator = PermissionEvaluator()
 
-    # Phase 28 (SUBAGENT-05): register the REAL read-only Explore subagent when
-    # 'agent' is in tools_allowed. The runner delegates to dispatch_explore_subagent
-    # (Phase 27), which spawns a child AgentLoop on the SAME bus — so the child's
-    # read/glob/grep Actions land on this run's bus and are counted unfiltered by
-    # MetricAccumulator.on_action (real delegation => tool_call_count >= 2). agent_id
-    # is ignored for routing (v1.4 has ONE subagent type, read-only Explore); the
-    # model's `task` passes straight through.
+    # SUBAGENT-05 / J3: register the REAL delegation runner when 'agent' is in tools_allowed, built via
+    # the SAME module-level seam the live start path uses (make_explore_agent_runner) so the bench
+    # exercises PRODUCTION routing — crucially including the cruncher. The factory routes by agent_id:
+    # 'cruncher' -> dispatch_cruncher_subagent (faithful over-window reduce), 'explore' -> Explore, etc.
+    # The child runs a real AgentLoop on the SAME bus, so its Actions are counted (real delegation =>
+    # tool_call_count >= 2). parent_store=bench_store is the grant keystone: when the model delegates
+    # with grant_handles=[H], the child reads ONLY H through bench_store (where load_document retained
+    # it). PRIOR BUG: the bench hard-routed EVERY agent() to Explore (agent_id ignored), so a scored
+    # agent('cruncher') scenario silently ran Explore and the cruncher was UNREACHABLE from the bench —
+    # every "faithful over-window" claim rested on mocked unit tests with no scored regression signal.
     if "agent" in scenario.tools_allowed:
-        from localharness.agent.subagent import dispatch_explore_subagent
+        from localharness.agent.subagent import make_explore_agent_runner
         from localharness.tools.builtin.agent_tool import AgentTool
 
-        async def _explore_agent_runner(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
-            # grant_handles accepted for the 3-arg runner contract (AgentTool passes it); the bench
-            # explore path does not wire cross-agent grants — a scored J3/grant scenario would build
-            # this runner via make_explore_agent_runner(parent_store=...) like the live start path.
-            return await dispatch_explore_subagent(
-                task,
-                llm=llm_client,
-                bus=bus,
-                base_registry=base_registry,
-                parent_session_id=session_id,
-                permission_evaluator=perm_evaluator,
-                depth=0,
-            )
-
-        tool_registry._tools["global"]["agent"] = AgentTool(agent_runner=_explore_agent_runner)
+        _bench_agents = ["explore", "web-researcher", "data-analyst",
+                         "frontend-designer", "cruncher", "search-verifier"]
+        _agent_runner = make_explore_agent_runner(
+            llm=llm_client,
+            bus=bus,
+            base_registry=base_registry,
+            permission_evaluator=perm_evaluator,
+            # session_id is fixed for a bench run (no per-turn re-keying), so a constant getter matches
+            # the live path's late-read lambda without a not-yet-built loop reference.
+            get_parent_session_id=lambda: session_id,
+            # Children inherit the bench's exact /tokenize counter + the scenario's declared window so
+            # the cruncher's chunk sizing (_cruncher_chunk_chars) tracks the scenario, not bare defaults.
+            token_counter=token_counter,
+            max_context_tokens=scenario.budget.max_context_tokens,
+            depth=0,
+            available_agents=_bench_agents,
+            parent_store=bench_store,
+            # cruncher exec policy (default off): the faithful reduce never needs host exec.
+            cruncher_config=agent_config.cruncher,
+        )
+        tool_registry._tools["global"]["agent"] = AgentTool(
+            agent_runner=_agent_runner, available_agents=_bench_agents)
         tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
 
     # EVAL-01: hydrate a seeded MemoryStore ONLY for the stateful_behavior
@@ -472,6 +500,17 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             f"(config, llm, bus, context_manager, tool_registry, permission_evaluator). "
             f"Original error: {e!r}"
         ) from e
+
+
+def _render_prompt(prompt: str) -> str:
+    """Substitute scenario-prompt placeholders. `{FIXTURES}` -> absolute path of bench/fixtures, so a
+    scenario can hand load_document a real absolute path to a committed over-window fixture (the tool
+    requires an absolute path). bench/ is resolved relative to the repo-root cwd — the same assumption
+    the categories loader already makes (schema.py). No-op when the token is absent."""
+    if "{FIXTURES}" in prompt:
+        import os
+        return prompt.replace("{FIXTURES}", os.path.abspath("bench/fixtures"))
+    return prompt
 
 
 async def _run_loop(loop: Any, prompt: str, on_token: Callable) -> None:

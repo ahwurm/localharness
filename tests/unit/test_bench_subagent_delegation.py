@@ -55,15 +55,18 @@ async def test_real_delegation_records_subagent_tool_calls_and_passes(
     ToolCall = mock_llm_client.ToolCall
 
     # Shared queue consumed strictly in order across parent + child (one MockLLMClient _index):
-    #   1) parent  -> `agent` tool call (delegate the explore task)
+    #   1) parent  -> `agent` tool call (delegate to the built-in `explore` subagent by name)
     #   2) child   -> `read` on the REAL staged values.txt
     #   3) child   -> summary content (no tool calls) => child completes
     #   4) parent  -> final message surfacing the subagent's ANSWER (MAGIC_VALUE_777 rubric anchor,
     #                 Bug#2 — paraphrased, NOT the literal "[explore findings]" header)
+    # NOTE: agent_id is the EXACT built-in name "explore". The bench now routes by agent_id (via the
+    # live make_explore_agent_runner seam) instead of ignoring it and always running Explore, so a
+    # bogus name would raise unknown-agent and desync this shared queue — this asserts real routing.
     llm = mock_llm_client([
         Response(content=None, tool_calls=[
             ToolCall(id="p-1", name="agent",
-                     arguments={"agent_id": "explorer", "task": f"Read {FIXTURE_VALUES} and report it"}),
+                     arguments={"agent_id": "explore", "task": f"Read {FIXTURE_VALUES} and report it"}),
         ]),
         Response(content=None, tool_calls=[
             ToolCall(id="c-1", name="read", arguments={"path": FIXTURE_VALUES}),

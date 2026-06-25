@@ -229,12 +229,14 @@ def test_plugin_prefix_dispatch_resolves():
 
 @pytest.mark.asyncio
 async def test_build_agent_loop_registers_agent_tool(monkeypatch):
-    """_build_agent_loop with 'agent' in tools_allowed registers the real Explore-subagent AgentTool.
+    """_build_agent_loop with 'agent' in tools_allowed registers a real delegation AgentTool.
 
-    Phase 28 (SUBAGENT-05): the runner is no longer a canned STUB_SUBAGENT_OK stub — it delegates to
-    dispatch_explore_subagent. The closure is captured (not invoked) at build time, so the registry
-    still simply `has("agent")` after construction; genuine delegation + the tool_call_count floor are
-    proven in test_bench_subagent_delegation.py.
+    SUBAGENT-05 / J3: the runner is built via make_explore_agent_runner (the live seam), which routes
+    by agent_id (cruncher / explore / …) — no longer a hard-wired Explore-only runner. The closure is
+    captured (not invoked) at build time, so the registry simply `has("agent")` after construction;
+    cruncher routing + the grant keystone resolving through bench_store are proven in
+    test_build_agent_loop_routes_cruncher_and_resolves_grant; the tool_call_count delegation floor in
+    test_bench_subagent_delegation.py.
     """
     from localharness.bench import runner as bench_runner
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
@@ -287,6 +289,119 @@ async def test_build_agent_loop_wires_compaction_pipeline():
         "regressed to the 'pipeline=None' bug; max_context_tokens would not be enforced"
     )
     assert loop._ctx._content_store is not None, "bench runner ContextManager has no content store"
+
+
+@pytest.mark.asyncio
+async def test_build_agent_loop_routes_cruncher_and_resolves_grant(monkeypatch, tmp_path):
+    """J3 keystone guard: the bench must (1) route agent('cruncher') to the CRUNCHER, not Explore, and
+    (2) resolve a load_document handle to the cruncher through bench_store on grant. Before the runner
+    fix, every agent() hard-routed to dispatch_explore_subagent (agent_id ignored) and load_document
+    minted its handle in a private store, so a scored agent('cruncher', grant_handles=[H]) scenario
+    silently ran Explore over a handle that resolved to NOTHING — the cruncher path was unreachable
+    from the bench and "faithful over-window" rested on mocks. This asserts the WIRING (routing + grant
+    resolution); faithfulness itself is gated by the live scored scenario 25_..._over_window_cruncher.
+    """
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+    from localharness.agent import subagent as subagent_mod
+
+    # Spy both dispatchers (module-global names resolved at call time inside the factory's runner).
+    calls: dict = {}
+
+    async def _cruncher_spy(task, **kwargs):
+        calls["cruncher"] = kwargs
+        return "spy-cruncher-answer"
+
+    async def _explore_spy(task, **kwargs):
+        calls["explore"] = kwargs
+        return "spy-explore-answer"
+
+    monkeypatch.setattr(subagent_mod, "dispatch_cruncher_subagent", _cruncher_spy)
+    monkeypatch.setattr(subagent_mod, "dispatch_explore_subagent", _explore_spy)
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    scen = ScenarioSpec(
+        name="cruncher-wiring", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(max_context_tokens=16000), limits=LimitsSpec(),
+        tools_allowed=["load_document", "agent"], slice="train",
+        category="agent_orchestration",
+    )
+    base_registry = await bench_runner._get_base_registry()  # has the builtin load_document
+    await bench_runner._build_agent_loop(
+        bus=None, llm_client=None, scenario=scen, session_id="s1", base_registry=base_registry)
+
+    bench_store = captured["context_manager"]._content_store
+    tr = captured["tool_registry"]
+
+    # (1) load_document's handle must land in bench_store (proves bind_agent_store_tools, not a private
+    #     default ContentStore). A unique body makes the read-through assertion unambiguous.
+    body = "ALPHA top section\n" + ("filler line\n" * 50) + "ZULU buried mid fact\n" + ("tail\n" * 50)
+    doc = tmp_path / "doc.txt"
+    doc.write_text(body, encoding="utf-8")
+    ld = tr._tools["global"]["load_document"]
+    res = await ld.run(path=str(doc))
+    handle = res.metadata["doc_handle"]
+    assert bench_store.get(handle) == body, (
+        "load_document handle did not resolve in bench_store — store-backed verbs were not bound to "
+        "the per-scenario store (bind_agent_store_tools regressed); a grant would resolve to nothing"
+    )
+
+    # (2) agent('cruncher', grant_handles=[H]) must route to the cruncher (not Explore) AND hand it a
+    #     ctx whose store resolves H through bench_store (the grant keystone, parent_store=bench_store).
+    agent_tool = tr._tools["global"]["agent"]
+    await agent_tool.run(agent_id="cruncher", task="find the buried fact", grant_handles=[handle])
+    assert "cruncher" in calls, "agent('cruncher') did NOT route to dispatch_cruncher_subagent"
+    assert "explore" not in calls, "agent('cruncher') wrongly routed to Explore (agent_id ignored)"
+    child_ctx = calls["cruncher"].get("context_manager")
+    assert child_ctx is not None and child_ctx._content_store.get(handle) == body, (
+        "cruncher's granted ctx could not read the handle through bench_store — grant keystone "
+        "(parent_store=bench_store) not wired in the bench runner"
+    )
+    assert calls["cruncher"].get("grant_handles") == [handle]
+
+
+def test_render_prompt_substitutes_fixtures_token():
+    """_render_prompt swaps {FIXTURES} for an absolute bench/fixtures path (so load_document, which
+    requires an absolute path, gets one) and leaves token-free prompts untouched."""
+    import os
+    from localharness.bench import runner as bench_runner
+
+    rendered = bench_runner._render_prompt("load {FIXTURES}/over_window_federalist.txt now")
+    assert "{FIXTURES}" not in rendered
+    assert os.path.isabs(rendered.split("load ", 1)[1].split("/over_window")[0])
+    assert rendered.endswith("bench/fixtures/over_window_federalist.txt now")
+    assert bench_runner._render_prompt("no token here") == "no token here"
+
+
+@pytest.mark.asyncio
+async def test_base_registry_has_cruncher_leaf_tools():
+    """Regression guard for a LIVE-caught cruncher bug: the bench base_registry MUST contain every tool
+    the cruncher's chunk-summarizer leaf needs (CHUNK_SUMMARIZER_TOOLS = ['tool_result_get']). The leaf
+    builds its toolset via from_allowed(CHUNK_SUMMARIZER_TOOLS, base_registry=base), and from_allowed can
+    only surface a tool that EXISTS in base. register_builtin_tools gates tool_result_get on an
+    eviction_store, so a base built without one leaves every leaf TOOL-LESS: it can't read its granted
+    chunk, emits the read call as literal text, and the cruncher reduces empty extracts and silently
+    misses every fact (observed live: routing looked perfect, needle recall was 0% — 'extracts do not
+    contain the answer ... only tool_result_get(...) stubs'). The unit wiring test cannot catch this (it
+    stubs dispatch_cruncher_subagent, so the real leaves never run); this asserts the base directly."""
+    from localharness.bench import runner as bench_runner
+    from localharness.agent.subagent import CHUNK_SUMMARIZER_TOOLS
+
+    base = await bench_runner._get_base_registry()
+    for tool in CHUNK_SUMMARIZER_TOOLS:
+        assert tool in base._tools["global"], (
+            f"bench base_registry missing cruncher-leaf tool {tool!r}: chunk-summarizer leaves would get "
+            f"an empty toolset and the cruncher would silently miss every fact"
+        )
 
 
 # ---------------------------------------------------------------------------
