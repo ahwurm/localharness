@@ -908,11 +908,16 @@ def _cruncher_chunk_chars(max_context_tokens: int | None) -> int:
 async def _run_chunk_summarizer(
     chunk_handle: str, question: str, cruncher_store: Any, *, llm: Any, bus: Any, base_registry: Any,
     parent_session_id: str | None, permission_evaluator: Any, token_counter: Any,
-    max_context_tokens: int | None, depth: int, max_subagent_depth: int,
+    max_context_tokens: int | None, depth: int, max_subagent_depth: int, section_label: str = "",
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
-    section — never the whole document. A leaf failure degrades to '' (logged), never aborts the run."""
+    section — never the whole document. A leaf failure degrades to '' (logged), never aborts the run.
+
+    section_label (#1, contextual tagging): a short prefix telling the leaf WHERE this section sits
+    (e.g. 'section 4 of 12 of a larger document') so it keeps cross-reference orientation and does not
+    over-claim about the whole document from one slice. It is added to the PROMPT only — never to the
+    stored chunk bytes (those stay losslessly reconstructable)."""
     from localharness.agent.context import ContentStore, ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.builtin import bind_agent_store_tools
@@ -928,8 +933,9 @@ async def _run_chunk_summarizer(
     )
     leaf_registry = ToolRegistry.from_allowed(list(CHUNK_SUMMARIZER_TOOLS), base_registry=base_registry)
     bind_agent_store_tools(leaf_registry, leaf_ctx._content_store)  # tool_result_get -> the granted store
+    header = f"[{section_label}]\n\n" if section_label else ""
     leaf_task = prepend_toolset(
-        f"QUESTION:\n{question}\n\nYour granted section handle is '{chunk_handle}'. Read it with "
+        f"{header}QUESTION:\n{question}\n\nYour granted section handle is '{chunk_handle}'. Read it with "
         f"tool_result_get('{chunk_handle}'), then extract everything relevant to the question above "
         f"(verbatim figures/sentences). If nothing is relevant, reply with exactly: NONE.",
         list(CHUNK_SUMMARIZER_TOOLS),
@@ -1031,15 +1037,17 @@ async def dispatch_cruncher_subagent(
     n_sections = len(piece_handles)
 
     sem = asyncio.Semaphore(_CRUNCHER_MAP_CONCURRENCY)
-    async def _summarize(ph: str) -> str:
+    async def _summarize(idx: int, ph: str) -> str:
         async with sem:
             return await _run_chunk_summarizer(
                 ph, question, cruncher_store, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=parent_session_id, permission_evaluator=permission_evaluator,
                 token_counter=token_counter, max_context_tokens=max_ctx,
                 depth=depth + 1, max_subagent_depth=max_subagent_depth,
+                section_label=f"section {idx + 1} of {n_sections} of a larger document; you are reading "
+                              f"ONE section, not the whole document",
             )
-    raw = await asyncio.gather(*[_summarize(ph) for ph in piece_handles])
+    raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
 
     if not handles:
