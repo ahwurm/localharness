@@ -90,6 +90,65 @@ async def test_cruncher_reduces_granted_overwindow_body_faithfully(mock_llm_clie
     assert m and int(m.group(1)) >= 2, "must have split the over-window body into multiple sections"
 
 
+def _extract_all_llm(Response, ToolCall, marker):
+    """A reactive fake whose leaves extract EVERY chunk (forcing many extracts → a broad query),
+    and whose combine echoes whether the marker is present — so we can assert the needle survives
+    the hierarchical (batched) reduce."""
+    class _LLM:
+        def __init__(self):
+            class _C:
+                tool_call_mode = "native"
+                context_window = 128_000
+            self.config = _C()
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            msgs = messages or []
+            last_tool = next((m for m in reversed(msgs) if m.get("role") == "tool"), None)
+            users = [m for m in msgs if m.get("role") == "user"]
+            task = (users[-1].get("content") if users else "") or ""
+            hm = re.search(r"tool_result_get\('([0-9a-f]{6,})'\)", task)
+            if last_tool is None and hm:
+                r = Response(content=None, tool_calls=[ToolCall(id="t", name="tool_result_get",
+                                                                arguments={"id": hm.group(1)})])
+                return r, r.usage
+            if last_tool is not None:
+                r = Response(content=str(last_tool.get("content") or "")[:1500])  # every chunk -> an extract
+                return r, r.usage
+            joined = "\n".join(str(m.get("content") or "") for m in msgs)
+            r = Response(content=f"COMBINED[{'HAS:' + marker if marker in joined else 'none'}]")
+            return r, r.usage
+    return _LLM()
+
+
+@pytest.mark.asyncio
+async def test_cruncher_broad_query_hierarchical_reduce_preserves_needle(mock_llm_client, bus, caplog):
+    """A broad query makes MANY sections relevant → the extracts exceed one window → the reduce must
+    BATCH (hierarchical) and still preserve a needle buried in one section. Guards the single-pass
+    combine overflow seen in the live injection dogfood."""
+    import logging
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    marker = "NEEDLE-7Q"
+    filler = "alpha beta gamma delta epsilon. " * 1400  # ~43k chars, no newlines -> hard chunks
+    body = filler[:21000] + f" {marker} " + filler[21000:]
+    parent = ContentStore()
+    h = parent.put(body, origin="trusted")
+    ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                         max_context_tokens=8_000)
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+
+    with caplog.at_level(logging.INFO, logger="localharness.agent.subagent"):
+        res = await subagent.dispatch_cruncher_subagent(
+            "Summarize every point in the document.", grant_handles=[h],
+            llm=_extract_all_llm(Response, ToolCall, marker), bus=bus, base_registry=base,
+            parent_session_id="run", permission_evaluator=PermissionEvaluator(), context_manager=ctx,
+            max_subagent_depth=2,
+        )
+
+    assert marker in res, f"needle must survive the hierarchical reduce; got: {res[:300]!r}"
+    assert any("reduce L1" in r.message for r in caplog.records), "batched (hierarchical) reduce must trigger on a broad query"
+
+
 @pytest.mark.asyncio
 async def test_cruncher_reports_not_found_when_fact_absent(mock_llm_client, bus):
     """If no section is relevant, the cruncher says so plainly — never fabricates the buried fact."""
