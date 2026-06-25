@@ -371,31 +371,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     try:
         compact_md_path = agent_dir / "compact.md"
 
-        def _make_summarize_fn(llm_client: LLMClient):
-            async def summarize(messages: list) -> str:
-                prompt = [
-                    {"role": "system", "content": (
-                        "Summarize the following conversation history concisely. "
-                        "Preserve key facts, decisions, and tool results. "
-                        "Output a dense summary paragraph."
-                    )},
-                    {"role": "user", "content": "\n".join(
-                        f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}"
-                        for m in messages
-                    )},
-                ]
-                result = await llm_client.complete(prompt, tools=None)
-                # complete() returns (message, usage) — unpack (robust to either shape).
-                msg = result[0] if isinstance(result, tuple) else result
-                return (getattr(msg, "content", "") or "")
-            return summarize
-
+        from localharness.agent.context import make_compaction_summarize_fn
         pipeline = CompactionPipeline(
             token_counter=token_counter,
             tool_result_cap=agent_config.context.max_tool_output_chars,
             preserve_first_n=agent_config.context.preserve_first_n_messages,
             preserve_last_n=agent_config.context.preserve_last_n_messages,
-            llm_summarize_fn=_make_summarize_fn(llm),
+            llm_summarize_fn=make_compaction_summarize_fn(llm),  # shared, tuple-unpack tested
             compact_md_path=compact_md_path,
         )
     except Exception as exc:

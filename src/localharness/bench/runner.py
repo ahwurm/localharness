@@ -381,27 +381,13 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         token_counter = TokenCounter()
     bench_store = ContentStore()
 
-    async def _bench_summarize(msgs: list) -> str:
-        prompt = [
-            {"role": "system", "content": (
-                "Summarize the following conversation history concisely. Preserve key facts, "
-                "decisions, and tool results. Output a dense summary paragraph."
-            )},
-            {"role": "user", "content": "\n".join(
-                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in msgs
-            )},
-        ]
-        result = await llm_client.complete(prompt, tools=None)
-        # complete() returns (message, usage) — unpack the tuple (robust to either shape).
-        msg = result[0] if isinstance(result, tuple) else result
-        return (getattr(msg, "content", "") or "")
-
+    from localharness.agent.context import make_compaction_summarize_fn
     bench_pipeline = CompactionPipeline(
         token_counter=token_counter,
         tool_result_cap=cctx.max_tool_output_chars,
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
-        llm_summarize_fn=_bench_summarize,
+        llm_summarize_fn=make_compaction_summarize_fn(llm_client),  # shared, tuple-unpack tested
         compact_md_path=None,
     )
     # eviction_store only when the scenario can RESTORE an evicted stub (has tool_result_get) — a
