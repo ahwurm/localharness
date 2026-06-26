@@ -981,6 +981,55 @@ async def _cruncher_combine_turn(
     return (await loop.run_turn(task) or "").strip()
 
 
+# --- R2: post-hoc number-provenance net for the hierarchical reduce ----------------------------
+# On a BROAD query the reduce inserts lossy partial-summary nodes (partial=True) BETWEEN the leaf
+# extracts and the final combine, so a figure in the final answer can originate from a lossy node
+# rather than a leaf — violating the spine ("answer numbers from a leaf, never a lossy node"). This
+# is a post-hoc SAFETY NET, not a structural guarantee: it FLAGS (WARNING, never rejects) any numeric
+# token in the final answer absent from EVERY leaf extract. Honest scope/residuals:
+#   - `extracts` are the LEAF MODEL's paraphrase, not source substrings, so this fences the
+#     partial->final lossy leak (the R2 bug) — NOT a digit transposed inside a leaf itself.
+#   - Normalization is lossy and has an unmeasured false-POSITIVE rate (a faithful answer that
+#     reformats a figure: "15.0%"vs"15%", "$5,140M"vs"5,140 million") — hence WARNING, not reject.
+_NUM_TOKEN_RE = re.compile(
+    r"\$?\d[\d,]*(?:\.\d+)?\s*(?:%|(?:million|billion|thousand|[mbk])(?![a-z]))?",
+    re.IGNORECASE,
+)
+
+
+def _norm_num(tok: str) -> str:
+    """Canonicalize a numeric token for provenance comparison. Lossy ON PURPOSE — favors
+    false-NEGATIVES over false-positives (this feeds a WARNING, not a gate): drops $ , % and spaces,
+    unifies magnitude words to single letters, strips trailing-zero decimals (15.0 -> 15)."""
+    s = tok.strip().lower()
+    s = s.replace("million", "m").replace("billion", "b").replace("thousand", "k")
+    s = s.replace(",", "").replace("$", "").replace(" ", "")
+    pct = s.endswith("%")
+    s = s.rstrip("%")
+    mag = ""
+    if s[-1:] in {"m", "b", "k"}:
+        mag, s = s[-1], s[:-1]
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return f"{s}{mag}{'%' if pct else ''}"
+
+
+def _cruncher_unverified_numbers(answer: str, extracts: list[str]) -> list[str]:
+    """Surface figures in `answer` absent from EVERY leaf extract (normalized). Empty == all grounded.
+    De-dups by normalized form; returns the original surface tokens (for the human-readable warning)."""
+    grounded = {_norm_num(m) for e in extracts for m in _NUM_TOKEN_RE.findall(e)}
+    grounded.discard("")
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _NUM_TOKEN_RE.findall(answer or ""):
+        n = _norm_num(m)
+        if not n or n in grounded or n in seen:
+            continue
+        seen.add(n)
+        out.append(m.strip())
+    return out
+
+
 async def dispatch_cruncher_subagent(
     task: str,
     *,
@@ -1109,6 +1158,17 @@ async def dispatch_cruncher_subagent(
         exec_seed=exec_seed, exec_cfg=cruncher_config,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
+    # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
+    # combine saw the raw extracts, so there is no lossy node to fence — skip (don't import the
+    # normalization false-positive rate where there is no bug to catch).
+    if level >= 1 and answer:
+        unverified = _cruncher_unverified_numbers(answer, extracts)
+        if unverified:
+            shown = ", ".join(unverified[:10])
+            log.warning("cruncher: %d figure(s) in the final answer not found in any leaf extract "
+                        "(possible lossy-summary-node leak): %s", len(unverified), shown)
+            answer = (f"{answer}\n\n⚠️ unverified figures (absent from every section extract — may "
+                      f"originate from a lossy summary node): {shown}")
     note = truncated_note.strip()
     header = f"[cruncher] sections: {n_sections}{(' | ' + note) if note else ''}"
     return f"{header}\n\n{answer or '(no answer)'}"

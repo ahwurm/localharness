@@ -314,3 +314,101 @@ async def test_cruncher_exec_not_offered_when_disabled(monkeypatch, mock_llm_cli
         context_manager=ctx, cruncher_config=CruncherConfig(exec_enabled=False), max_subagent_depth=2,
     )
     assert constructed == []
+
+
+# --- R2: number-provenance net (a figure in the final answer must trace to a leaf, not a lossy node) ---
+
+
+def test_cruncher_unverified_numbers_flags_only_ungrounded():
+    """R2 pure-unit (tests the CODE, no LLM): a figure absent from every leaf extract is flagged; a
+    grounded figure — including a reformatted one — is not; same number two ways de-dups to one flag."""
+    extracts = [
+        "[section 1]\nRevenue was $5,140 million for the quarter.",
+        "[section 2]\nThe effective tax rate was 15% in Q3 2026.",
+    ]
+    # grounded incl. reformatting ($5,140M==$5,140 million, 15.0%==15%) -> no flag
+    assert subagent._cruncher_unverified_numbers("Revenue hit $5,140M at a 15.0% tax rate.", extracts) == []
+    # a figure in NO leaf extract -> flagged (returns the surface token)
+    flagged = subagent._cruncher_unverified_numbers("The consolidated total was $9,999M.", extracts)
+    assert len(flagged) == 1 and "9,999" in flagged[0]
+    # de-dup by normalized form: the same number written two ways -> a single flag
+    assert len(subagent._cruncher_unverified_numbers("$9,999M, i.e. 9,999 million", extracts)) == 1
+
+
+def _fabricating_combine_llm(Response, ToolCall, answer_text):
+    """Leaves echo their chunk body (number-free filler -> number-free extracts); every combine turn
+    (partial AND final) returns `answer_text` -> the final answer's figure originates from a NODE, not
+    a leaf — exactly reproducing the R2 lossy leak the number-provenance net must catch."""
+    class _LLM:
+        def __init__(self):
+            class _C:
+                tool_call_mode = "native"
+                context_window = 128_000
+            self.config = _C()
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            msgs = messages or []
+            last_tool = next((m for m in reversed(msgs) if m.get("role") == "tool"), None)
+            users = [m for m in msgs if m.get("role") == "user"]
+            task = (users[-1].get("content") if users else "") or ""
+            hm = re.search(r"tool_result_get\('([0-9a-f]{6,})'\)", task)
+            if last_tool is None and hm:  # leaf turn 1: read the granted chunk for real
+                r = Response(content=None, tool_calls=[ToolCall(id="t", name="tool_result_get",
+                                                                arguments={"id": hm.group(1)})])
+                return r, r.usage
+            if last_tool is not None:  # leaf turn 2: echo the chunk body -> an extract
+                r = Response(content=str(last_tool.get("content") or "")[:1500])
+                return r, r.usage
+            r = Response(content=answer_text)  # combine turn (partial + final): inject the figure
+            return r, r.usage
+    return _LLM()
+
+
+@pytest.mark.asyncio
+async def test_cruncher_flags_unverified_figure_on_broad_query(mock_llm_client, bus, caplog):
+    """R2 WIRING: on a broad query (level>=1, lossy partial nodes inserted) a fabricated figure in the
+    final combine — absent from every leaf extract — is flagged in the RETURNED result + a log.warning.
+    Proves the check is reachable end-to-end, not a green unit test on code nothing calls."""
+    import logging
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    filler = "alpha beta gamma delta epsilon. " * 1400  # ~43k chars, NO digits anywhere
+    parent = ContentStore()
+    h = parent.put(filler, origin="trusted")
+    # Tiny window => many sections => extracts exceed the combine budget => level>=1 (lossy partials).
+    ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                         max_context_tokens=4_000)
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.subagent"):
+        res = await subagent.dispatch_cruncher_subagent(
+            "Summarize every figure in the document.", grant_handles=[h],
+            llm=_fabricating_combine_llm(Response, ToolCall, "Final: the consolidated total is $9,999."),
+            bus=bus, base_registry=base, parent_session_id="run",
+            permission_evaluator=PermissionEvaluator(), context_manager=ctx, max_subagent_depth=2,
+        )
+    assert "unverified figures" in res and "9,999" in res, f"R2 flag must reach the result; got {res[:300]!r}"
+    assert any("not found in any leaf extract" in r.message for r in caplog.records), "log.warning must fire"
+
+
+@pytest.mark.asyncio
+async def test_cruncher_skips_number_check_on_targeted_query(mock_llm_client, bus):
+    """R2 GATE: a TARGETED query does ONE final combine over the raw extracts (level==0, no lossy
+    node), so the check must NOT fire — even on an ungrounded figure — to avoid importing the
+    normalization false-positive rate where there is no bug to catch."""
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    body = "A short note about widgets and gadgets. " * 8  # ~320 chars -> ONE section -> level 0
+    parent = ContentStore()
+    h = parent.put(body, origin="trusted")
+    ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                         max_context_tokens=8_000)
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    res = await subagent.dispatch_cruncher_subagent(
+        "What is the widget count?", grant_handles=[h],
+        llm=_fabricating_combine_llm(Response, ToolCall, "There are $9,999 widgets."),
+        bus=bus, base_registry=base, parent_session_id="run",
+        permission_evaluator=PermissionEvaluator(), context_manager=ctx, max_subagent_depth=2,
+    )
+    assert "9,999" in res, f"combine must have run + emitted the ungrounded figure; got {res[:200]!r}"  # non-vacuous
+    assert "unverified figures" not in res, f"targeted query (level 0) must skip the check; got {res[:200]!r}"
