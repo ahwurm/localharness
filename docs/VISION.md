@@ -36,7 +36,7 @@ The harness, not the model, is most of the capability. The same model swings dra
 
 **Wired but gated / off by default** — the trusted restricted exec (`cruncher_exec`) + its origin binder are now reached by the cruncher's final-combine, but ONLY when `agent.cruncher.exec_enabled` is set (default off) AND every granted handle is clean-origin (`bind_clean_origin_bodies` refuses untrusted — the F3 gate); the faithful reduce never needs it. Off the J3 critical path by design.
 
-**Aspirational / not built (don't cite as real)** — divisions as a runtime construct, per-agent Discord subchannels, FTS5 cross-agent memory index, hash-chained audit log, three-tier shared memory, native scheduled execution, a guardian-review layer.
+**On the roadmap (not built yet)** — divisions as a runtime construct, per-agent Discord subchannels, FTS5 cross-agent memory index, hash-chained audit log, three-tier shared memory, native scheduled execution, a guardian-review layer. Listed so contributors don't build on them as if they exist; none are load-bearing for the current milestone.
 
 ## The current milestone (J3) and its jobs
 
@@ -66,7 +66,7 @@ The boundary is **host-dangerous capability** (`bash`/`write`/`edit`/trusted-`ex
 
 A sealed **train/holdout** scenario corpus + the **autoresearch loop**: a stronger proposer reads *only* train traces, emits one atomic component mutation, an experiment runs it in a git-isolated worktree, and a promotion gate demands Welch p<0.05 on train **then** Bonferroni non-regression on holdout before reversible auto-adoption. The holdout is **never** executed during proposing.
 
-**Known measurement gaps (honest):** no scenario yet exercises web-ingestion or injection. **J3 now HAS a bench path** — scored scenario `25_..._over_window_cruncher` (train slice) is tool-delivered + handle-only, so a mid-doc needle is reachable ONLY by routing to the cruncher (naive-read-fails by construction); it discriminated live (with cruncher pass / naive-baseline fail, no memory-recitation) and is wired through the SAME `make_explore_agent_runner` seam production uses. *Remaining gap:* it forces the cruncher via handle-only delivery, not raw over-window size (the body fits the 27B window) — a genuinely >window fixture is a named follow-up; and its discrimination depends on the model not having the public-domain text memorized. The autoresearch spine also still lives on a long-running branch, not `main`; that integration debt understates the project's real capability to anyone reading `main`.
+**Known measurement gaps (honest):** no scenario yet exercises web-ingestion or injection. **J3 now HAS a bench path** — scored scenario `25_..._over_window_cruncher` (train slice) is tool-delivered + handle-only, so a mid-doc needle is reachable ONLY by routing to the cruncher (naive-read-fails by construction); it discriminated live (with cruncher pass / naive-baseline fail, no memory-recitation) and is wired through the SAME `make_explore_agent_runner` seam production uses. *Remaining gap:* it forces the cruncher via handle-only delivery, not raw over-window size (the body fits the 27B window) — a genuinely >window fixture is a named follow-up; and its discrimination depends on the model not having the public-domain text memorized.
 
 ## The proving workload
 

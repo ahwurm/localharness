@@ -1,8 +1,8 @@
 # Reference Architectures
 
 LocalHarness is developed and tested against two concrete hardware targets. Every harness
-default should work out of the box on both; anything that doesn't is tracked in
-[gaps.md](gaps.md) as a development item.
+default should work out of the box on both; per-hardware setup and tuning notes are in
+[gaps.md](gaps.md).
 
 ## Practicality bar
 
