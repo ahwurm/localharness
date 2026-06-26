@@ -1,18 +1,18 @@
-# Gaps — Out-of-Box Support for Both Reference Architectures
+# Setup & Tuning Notes — Reference Architectures
 
-Development items required before [architecture A](dgx-spark.md) (DGX Spark) and
-[architecture B](mac-mini.md) (base Mac mini) work with **zero per-agent overrides**.
-Each item cites the harness default that conflicts. Numbering is stable — reference
-these as "gaps §N" from other docs and issues.
+Per-hardware tuning items to run [architecture A](dgx-spark.md) (DGX Spark) and
+[architecture B](mac-mini.md) (base Mac mini) with **zero per-agent overrides**. Each item
+names the harness default it adjusts and the one-line workaround. Numbering is stable —
+other docs reference these as "gaps §N".
 
 ## §1 Timeout math breaks on slow single-stream decode
 
 **Conflict:** `provider/client.py` — `timeout_seconds: 300.0` (also enforced as
 `LOCAL_INFERENCE_TIMEOUT_MIN`), `max_tokens: 4096`.
 
-A full 4096-token completion takes **~431s at architecture A's measured 9.5 tok/s** —
-the default timeout kills healthy generations. Architecture B at 64k depth
-(est. 10–15 tok/s) lands at 273–410s: same breach.
+A full 4096-token completion takes **~431s at architecture A's measured 9.5 tok/s**, so
+the default 300s timeout can cut a healthy generation off before it finishes. Architecture B
+at 64k depth (est. 10–15 tok/s) lands at 273–410s: the same adjustment applies.
 
 - **Workaround (documented in both arch docs):** per-agent `timeout_seconds: 600` or `max_tokens: 2048`.
 - **Fix:** derive the read timeout from `max_tokens / measured_decode_rate` (with floor),

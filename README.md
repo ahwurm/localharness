@@ -2,9 +2,18 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/ahwurm/localharness?style=social)](https://github.com/ahwurm/localharness/stargazers) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**An open-source agent harness for local LLMs** — run AI agents on local models, defined in YAML, against any OpenAI-compatible endpoint. LocalHarness is the *agent layer* that runs on top of your inference engine (vLLM, Ollama, LM Studio, llama.cpp) — not another inference engine.
+**Run AI agents on the models you already run locally.**
 
-It's model-agnostic and hierarchical: define agents in YAML — system prompt, tools, permissions, memory — and run them as a coordinated org (orchestrator → divisions → agents) against any OpenAI-compatible local endpoint. The thesis: the harness, not the model, is where most of the capability lives — the same model can swing tens of benchmark points depending on the harness around it.
+LocalHarness is the *agent layer* on top of your inference engine: vLLM, Ollama, LM Studio, or llama.cpp. It doesn't serve models. It gives the model you already serve real agents, with tools, memory, and deny-first permissions, all defined in YAML instead of Python.
+
+It's model-agnostic. Point it at any OpenAI-compatible endpoint and the same agent runs. Agents are hierarchical: an orchestrator routes work to subagents, each with its own fresh context, tools, and memory.
+
+The bet: the harness, not the model, is where most of the capability lives. The same model can swing tens of benchmark points depending on the harness around it.
+
+Two things it does that are hard to find anywhere else:
+
+- **Read documents bigger than the context window — losslessly.** Every section is actually read, never truncated, and every number in the answer traces back to the source text it came from. Built for long filings, contracts, and reports, on hardware you control.
+- **Structural defense against prompt injection.** Untrusted web content can never share an agent with host-mutating tools like bash, write, or edit. The boundary is enforced in the agent topology and fails closed — not left to the model to refuse.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
@@ -12,7 +21,7 @@ It's model-agnostic and hierarchical: define agents in YAML — system prompt, t
 
 ## Why local
 
-Frontier coding agents are great when you're sitting there driving them, but the metering and rate limits make them an awkward fit for the routine, recurring jobs you'd actually want an agent to own: the nightly report, the scheduled cleanup, the watch-and-react task. LocalHarness keeps the Claude Code / OpenCode workflow you already know and points it at a model running on hardware you control.
+Frontier coding agents are great when you're driving them. But metering and rate limits make them an awkward fit for the recurring jobs you'd actually want an agent to *own*: the nightly report, the scheduled cleanup, the watch-and-react task. LocalHarness keeps the Claude Code / OpenCode workflow you already know, pointed at a model running on hardware you control.
 
 - **No metering.** A job that fires every hour runs on hardware you already own, with no per-token bill.
 - **Your data stays put.** Code, files, and prompts never leave the machine.
@@ -118,17 +127,16 @@ the newest Qwen model that fits it:
 | [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.6-27B NVFP4 / vLLM, 64k ctx, 9.5 tok/s | TESTED |
 | [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.5-9B 4-bit / vLLM (vllm-metal), 64k ctx | PROPOSED |
 
-Start at [docs/reference-architectures/](docs/reference-architectures/README.md);
-known out-of-box gaps are tracked in [gaps.md](docs/reference-architectures/gaps.md).
+Start at [docs/reference-architectures/](docs/reference-architectures/README.md). Per-hardware setup and tuning notes — timeouts, context budgets, runtime parity — are in [gaps.md](docs/reference-architectures/gaps.md).
 
 ## Documentation
 
-- [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and gaps
+- [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and setup notes
 - [docs/specs/](docs/specs/) — component specs
 
 ## Status
 
-Early stage (v0.5, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.5.1, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
