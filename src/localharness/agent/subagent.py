@@ -895,14 +895,18 @@ _CRUNCHER_MAP_CONCURRENCY = 8  # leaves are independent → run this many at onc
 
 
 def _cruncher_chunk_chars(max_context_tokens: int | None) -> int:
-    """Chunk size in chars: small enough that a leaf RELIABLY extracts a needle from it. Live finding
-    (2026-06-25): a 27B misses buried facts in ~50k-token chunks (lost-in-the-middle WITHIN the
-    chunk), so chunks must stay modest (~6k tokens cap) regardless of how big the window is —
-    faithfulness beats fewer-leaves. A big over-window doc therefore yields MANY small chunks; the
-    map runs them CONCURRENTLY (see dispatch) so wall-clock stays low. Smaller window => smaller chunks."""
+    """Chunk size in chars, capped so a leaf RELIABLY extracts needles from it. Live finding
+    (2026-06-29 v1.7 sweep, real 27B, 18-needle dense doc): recall is 100% at 24-32k-char chunks but
+    DROPS at the old 16k cap (89% — more chunk boundaries fragment needles, and more leaves => more
+    hierarchical-reduction loss) and CLIFFS just past 32k (48k=78%, 64k=17% — lost-in-the-middle
+    WITHIN a chunk). So 32k is the knee: BETTER recall than the old 16k AND ~half the leaves (less
+    token cost), at ~neutral wall-clock (leaves run concurrently, so fewer leaves != proportionally
+    faster). Stay at/under 32k — the cliff above is sharp. Smaller window => smaller chunks (0.5x). A
+    genuine min FLOOR is a follow-up (sub-~8k chunks risk boundary-split misses; the 2k floor is
+    tiny-window safety only)."""
     if not max_context_tokens:
         return _CRUNCHER_DEFAULT_CHUNK_CHARS
-    return max(2_000, min(16_000, int(max_context_tokens * 0.5)))
+    return max(2_000, min(32_000, int(max_context_tokens * 0.5)))
 
 
 async def _run_chunk_summarizer(

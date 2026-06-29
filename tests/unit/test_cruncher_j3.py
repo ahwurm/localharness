@@ -412,3 +412,15 @@ async def test_cruncher_skips_number_check_on_targeted_query(mock_llm_client, bu
     )
     assert "9,999" in res, f"combine must have run + emitted the ungrounded figure; got {res[:200]!r}"  # non-vacuous
     assert "unverified figures" not in res, f"targeted query (level 0) must skip the check; got {res[:200]!r}"
+
+
+def test_cruncher_chunk_chars_knee():
+    """v1.7 speed<->quality: the chunk-size cap is 32k — the validated knee (real-27B sweep: 100%
+    needle recall at 24-32k, 89% at the old 16k cap on a dense doc, cliff past 32k). Half the window
+    for mid sizes; floored for tiny windows; never above the 32k knee (the cliff above is sharp)."""
+    f = subagent._cruncher_chunk_chars
+    assert f(126_976) == 32_000, "prod window -> capped at the 32k knee (was 16k)"
+    assert f(40_000) == 20_000, "mid window -> 0.5x, under the cap"
+    assert f(2_000) == 2_000, "tiny window -> floor (tiny-window safety)"
+    assert f(None) == subagent._CRUNCHER_DEFAULT_CHUNK_CHARS, "no window -> default"
+    assert f(1_000_000) <= 32_000, "never exceed the 32k knee — the recall cliff above is sharp"
