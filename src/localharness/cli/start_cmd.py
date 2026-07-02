@@ -320,6 +320,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             warnings.append(f"memory write-gate: {exc}")
             write_gate = None
 
+    # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
+    # idle timer, cooperatively cancelled by any user turn. llm=None on purpose — the
+    # deterministic pass (fold/promote/decay/cap-trim/proxies) needs no model; the LLM
+    # replay seam stays off until its output quality is iterated live.
+    consolidation_scheduler = None
+    _cons_cfg = getattr(agent_config.memory, "consolidation", None)
+    if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
+        try:
+            from localharness.memory.consolidation import ConsolidationScheduler
+            consolidation_scheduler = ConsolidationScheduler(
+                memory_store, bus, agent_name_str, _cons_cfg
+            )
+            await consolidation_scheduler.start()
+        except Exception as exc:
+            warnings.append(f"memory consolidation: {exc}")
+            consolidation_scheduler = None
+
     # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
     # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
     # the ContextManager below so eviction-writes and restore-reads hit the same map.
@@ -552,11 +569,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
     finally:
-        # --- Ordered shutdown: MCP -> WriteGate -> MemoryStore ---
+        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> MemoryStore ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
+            except Exception:
+                pass
+        if consolidation_scheduler:
+            try:
+                await consolidation_scheduler.stop()
             except Exception:
                 pass
         if write_gate:

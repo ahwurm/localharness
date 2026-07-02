@@ -224,6 +224,54 @@ class PermissionConfig(BaseModel):
         return patterns
 
 
+class MemoryConsolidationConfig(BaseModel):
+    """Idle-time memory consolidation (v2.0 CONS-01..06) — the CLS slow-integrate pass.
+
+    An in-harness feature (default-on, config-off; NO cron job, no daemon assumption):
+    triggered by a session-start staleness check + an in-session idle timer, and
+    cooperatively cancelled the instant a user turn arrives. All fields auto-enumerate
+    as `agent.memory.consolidation.*` registry axes."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "If True (default), the harness consolidates memory during idle: folds staged "
+            "read-counters, promotes cross-episode recurring candidates, decays retrieval "
+            "strength, and trims the active tier back under the soft cap. Set False to "
+            "disable all background memory work (like disabling the cruncher)."
+        ),
+    )
+    idle_minutes: float = Field(
+        default=10.0, ge=0.5, le=1440.0,
+        description="In-session idle trigger: minutes with no user activity before a pass may fire.",
+    )
+    staleness_hours: float = Field(
+        default=6.0, ge=0.1, le=720.0,
+        description="Session-start trigger: run a pass at startup when the last one is older than this.",
+    )
+    max_active_facts: int = Field(
+        default=256, ge=8, le=100_000,
+        description=(
+            "SOFT cap on the ACTIVE tier (index-eligible facts). Admission never blocks — "
+            "the consolidation pass trims back under the bound by demoting the lowest-"
+            "activation facts below the index gate (never deleting). The forcing function "
+            "that makes the store structure knowledge instead of hoarding it."
+        ),
+    )
+    decay_half_life_days: float = Field(
+        default=30.0, ge=0.1, le=3650.0,
+        description=(
+            "Retrieval-strength half-life: accessibility halves after this many idle days "
+            "(trust/confidence never decays — the storage-vs-retrieval strength split)."
+        ),
+    )
+    iteration_cap: int = Field(
+        default=200, ge=1, le=10_000,
+        description="Hard per-pass work cap (letta #957 infinite-loop class guardrail).",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory backend configuration for an agent."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -312,6 +360,11 @@ class MemoryConfig(BaseModel):
             "them. Set False to disable all harness-initiated memory writes (the `remember` "
             "tool is unaffected)."
         ),
+    )
+
+    consolidation: MemoryConsolidationConfig = Field(
+        default_factory=MemoryConsolidationConfig,
+        description="Idle-time consolidation pass (v2.0 CONS) — see MemoryConsolidationConfig.",
     )
 
 
