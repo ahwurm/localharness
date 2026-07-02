@@ -205,8 +205,16 @@ class ConsolidationPass:
                        if not (b in seen_b or seen_b.add(b))]
             shown = bullets[:5]
             dropped = len(bullets) - len(shown)
+            # The FIRST LINE carries the lesson essence (dogfood 2026-07-02: the
+            # injected index renders one line per fact — a bare "Recurring (2
+            # episodes)" header told the model nothing; the actual lesson was buried
+            # in bullet 2 behind a memory_get).
+            lesson_preview = " ".join(shown[0].split())[:110] if shown else ""
+            plural = "s" if total_n != 1 else ""
+            # No tool in the header — the payload-first bullet already names it, and
+            # every header char steals lesson chars from the 100-char index line.
             merged = (
-                f"Recurring ({total_n} episodes): {tier} on `{tool}`.\n"
+                f"Recurring ({total_n} episode{plural}): {tier} — {lesson_preview}\n"
                 + "\n".join(f"- {b}" for b in shown)
                 + (f"\n- … (+{dropped} earlier example(s) consolidated away)" if dropped else "")
             )

@@ -125,10 +125,11 @@ class WriteGate:
                         f"gate/resolved_error/{event.tool_name}/"
                         f"{_h8(event.tool_name, prior_error)}/{_h8(event.session_id)}"
                     ),
+                    # Payload-first (dogfood 2026-07-02): the index/search render ~100
+                    # chars — the error text must lead, not boilerplate.
                     value=(
-                        f"Tool `{event.tool_name}` failed then later succeeded "
-                        f"(a resolved mistake). Error was: {prior_error} "
-                        f"Success followed: {_preview(event.output)} "
+                        f"`{event.tool_name}` error resolved: {prior_error} "
+                        f"→ then succeeded: {_preview(event.output)} "
                         "(auto-captured by the prediction-error gate; pending consolidation)"
                     ),
                     detail=prior_error,
