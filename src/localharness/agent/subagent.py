@@ -1176,8 +1176,9 @@ async def dispatch_cruncher_subagent(
             answer = (f"{answer}\n\n⚠️ unverified figures (absent from every section extract — may "
                       f"originate from a lossy summary node): {shown}")
     # HIER-02: persist the gist tree (schema node + per-level gists + final, with
-    # derived_from/member_of edges and the HIER-04 figure net) — fire-and-forget for the
-    # answer path: persistence failure never degrades the cruncher's result.
+    # derived_from/member_of edges and the HIER-04 figure net). Exception-ISOLATED, not
+    # detached (critic m2): awaited inline — a few WAL-mode SQLite writes on the answer
+    # path — but a persistence failure never degrades the cruncher's result.
     if memory_store is not None:
         try:
             from localharness.memory.hierarchy import persist_gist_tree
@@ -1276,6 +1277,13 @@ def make_explore_agent_runner(
             depth=child_depth,
             max_subagent_depth=max_subagent_depth,
             available_agents=available_agents,
+            # Whole-milestone critic M3: available_agents is advisory (AgentTool takes a
+            # free-form agent_id), so a nested agent CAN reach the cruncher — thread
+            # cruncher_config + memory_store so a grandchild cruncher run behaves and
+            # persists identically to a root-dispatched one. (parent_store stays dropped
+            # deliberately: model-driven granting is a root-only capability by design.)
+            cruncher_config=cruncher_config,
+            memory_store=memory_store,
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 

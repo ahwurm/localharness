@@ -31,9 +31,12 @@ def _cfg(**over) -> MemoryConsolidationConfig:
 
 
 async def _seed_candidate(store, tool: str, session: str, detail: str, tier="resolved_error"):
-    """A gate candidate exactly as WriteGate writes them (key shape + tags + provenance)."""
+    """A gate candidate exactly as WriteGate writes them — key shape MIRRORS gate.py
+    (whole-milestone critic B1: a fixture with its own key scheme made composition
+    bugs invisible): gate/<tier>/<tool>/<LESSON=h8(tool,detail)>/<SESSION=h8(session)>."""
+    from localharness.memory.gate import _h8 as _gate_h8
     await store.store_fact(
-        key=f"gate/{tier}/{tool}/{abs(hash(session + detail)) % 10**8}",
+        key=f"gate/{tier}/{tool}/{_gate_h8(tool, detail)}/{_gate_h8(session)}",
         value=f"Tool `{tool}` failed then succeeded. Error was: {detail}",
         tags=["gate", f"tier:{tier}", "pending_consolidation"],
         confidence=0.65,
@@ -49,21 +52,22 @@ async def _seed_candidate(store, tool: str, session: str, detail: str, tier="res
 @pytest.mark.asyncio
 async def test_two_episode_recurrence_promotes_one_off_does_not(store: MemoryStore):
     await _seed_candidate(store, "bash_exec", "sess-1", "command not found: uvx")
-    await _seed_candidate(store, "bash_exec", "sess-2", "command not found: uvx (again)")
+    await _seed_candidate(store, "bash_exec", "sess-2", "command not found: uvx")  # SAME lesson, new episode
     await _seed_candidate(store, "grep", "sess-1", "bad regex")  # one episode only
 
     report = await ConsolidationPass(store, _cfg()).run()
     assert report.promoted == 1
 
-    promoted = await store.get_fact("learned/bash_exec/resolved_error")
+    assert report.promoted_keys[0].startswith("learned/bash_exec/resolved_error/")
+    promoted = await store.get_fact(report.promoted_keys[0])
     assert promoted is not None
     assert promoted.confidence >= 0.7  # crosses the injection threshold
     assert "2 episodes" in promoted.value
-    assert await store.get_fact("learned/grep/resolved_error") is None  # one-off stays candidate
+    assert not [k for k in report.promoted_keys if "/grep/" in k]  # one-off stays candidate
 
     # Index now carries the promoted lesson; candidates left the index-eligible set.
     index = await store._render_memory_index(10)
-    assert "learned/bash_exec/resolved_error" in index
+    assert report.promoted_keys[0] in index
     assert "gate/resolved_error/bash_exec" not in index
 
     # derived_from edges link the promoted record to its source candidates.
@@ -83,12 +87,12 @@ async def test_pass_folds_staged_reads(store: MemoryStore):
 @pytest.mark.asyncio
 async def test_re_promotion_with_new_episode_supersedes(store: MemoryStore):
     await _seed_candidate(store, "web_fetch", "s1", "timeout")
-    await _seed_candidate(store, "web_fetch", "s2", "timeout too")
-    await ConsolidationPass(store, _cfg()).run()
-    await _seed_candidate(store, "web_fetch", "s3", "fresh third failure")
+    await _seed_candidate(store, "web_fetch", "s2", "timeout")
+    r1 = await ConsolidationPass(store, _cfg()).run()
+    await _seed_candidate(store, "web_fetch", "s3", "timeout")  # same lesson, 3rd episode
     await ConsolidationPass(store, _cfg()).run()
 
-    history = await store.get_fact_history("learned/web_fetch/resolved_error")
+    history = await store.get_fact_history(r1.promoted_keys[0])
     assert len(history) == 2  # merged record changed → superseded, never overwritten
     assert history[0].status == "active" or history[1].status == "active"
 
@@ -228,14 +232,14 @@ async def test_same_run_promotion_survives_cap_trim(store: MemoryStore):
         (now,),
     )
     await store._db.commit()
-    await _seed_candidate(store, "bash_exec", "s1", "err one")
-    await _seed_candidate(store, "bash_exec", "s2", "err two")
+    await _seed_candidate(store, "bash_exec", "s1", "same err")
+    await _seed_candidate(store, "bash_exec", "s2", "same err")
 
     report = await ConsolidationPass(store, cfg).run()
     assert report.promoted == 1 and report.demoted > 0
-    promoted = await store.get_fact("learned/bash_exec/resolved_error")
+    promoted = await store.get_fact(report.promoted_keys[0])
     assert promoted.retrieval_strength >= 0.2  # visible in the index, NOT self-demoted
-    assert "learned/bash_exec/resolved_error" in await store._render_memory_index(10)
+    assert report.promoted_keys[0] in await store._render_memory_index(10)
 
 
 @pytest.mark.asyncio
@@ -292,13 +296,13 @@ async def test_churn_metric_and_sample_hook(store: MemoryStore):
         samples.extend(facts)
 
     await _seed_candidate(store, "bash_exec", "s1", "err A")
-    await _seed_candidate(store, "bash_exec", "s2", "err B")
+    await _seed_candidate(store, "bash_exec", "s2", "err A")
     report = await ConsolidationPass(store, _cfg(), on_promotion_sample=hook).run()
     assert report.promoted == 1
-    assert samples and samples[0].key == "learned/bash_exec/resolved_error"
+    assert samples and samples[0].key == report.promoted_keys[0]
 
     # Supersede the promoted fact → next pass's churn rate reflects it (junk signal).
-    await store.store_fact("learned/bash_exec/resolved_error", "manually corrected")
+    await store.store_fact(report.promoted_keys[0], "manually corrected")
     report2 = await ConsolidationPass(store, _cfg()).run()
     assert report2.churn_rate > 0.0
 
@@ -351,3 +355,51 @@ async def test_disabled_scheduler_is_inert(store: MemoryStore):
     assert sched._timer_task is None and not sched._handles
     assert not await sched.should_run()
     await sched.stop()
+
+
+# ---------------------------------------------------------------------------
+# Whole-milestone critic B1: the COMPOSED gate→consolidation path (real WriteGate
+# keys, not fixture keys) — recurrence semantics must hold in both directions.
+# ---------------------------------------------------------------------------
+
+class _NullBus:
+    def subscribe(self, *a, **k):
+        return object()
+
+    def unsubscribe(self, h):
+        pass
+
+    async def publish(self, e):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_composed_gate_consolidation_recurrence_semantics(store: MemoryStore):
+    """Same lesson across 2 sessions → promotes; two DIFFERENT one-off errors on one
+    tool → must NOT merge into a fabricated 'recurring' record (critic B1's false
+    positive), and the recurring lesson must not self-supersede into invisibility
+    (B1's false negative)."""
+    from localharness.core.events import Observation
+    from localharness.memory.gate import WriteGate
+
+    gate = WriteGate(store, _NullBus(), "cons-agent")
+
+    async def cycle(sess: str, tool: str, err: str):
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name=tool, output="", error=err))
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name=tool, output="ok", error=None))
+
+    await cycle("s1", "bash_exec", "permission denied: /etc/passwd")
+    await cycle("s2", "bash_exec", "permission denied: /etc/passwd")  # SAME lesson recurs
+    await cycle("s1", "edit", "old_string not found")                 # two DIFFERENT
+    await cycle("s2", "edit", "target file missing")                  # one-offs
+
+    report = await ConsolidationPass(store, _cfg()).run()
+    assert report.promoted == 1  # exactly the recurring bash_exec lesson
+    assert report.promoted_keys[0].startswith("learned/bash_exec/resolved_error/")
+    promoted = await store.get_fact(report.promoted_keys[0])
+    assert "2 episodes" in promoted.value
+    assert not [k for k in report.promoted_keys if "/edit/" in k]
