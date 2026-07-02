@@ -60,7 +60,11 @@ async def persist_gist_tree(
     """Persist one cruncher run's gist tree into the memory graph. Returns nodes written.
     Never raises into the cruncher (caller guards); every write goes through the
     supersede-safe, read-back-verified store_fact path."""
-    run = _h8(question, session_id or "", str(len(leaf_extracts)))
+    # Run identity includes leaf CONTENT (whole-milestone critic B3): question + count
+    # alone collided two different documents analyzed under the same question in one
+    # session — Company B's gist tree silently superseded Company A's (the exact
+    # cross-entity misattribution shape the number-net exists for).
+    run = _h8(question, session_id or "", *[e[:500] for e in leaf_extracts[:8]])
     prov = f"session:{session_id};handles:{','.join(source_handles[:4])}"
 
     schema = await store.store_fact(
@@ -74,11 +78,15 @@ async def persist_gist_tree(
     )
     written = 1
 
-    # content → node id of the PREVIOUS level's gists (level 1's inputs are leaf
-    # extracts — no rows, so level-1 gists link only member_of the schema).
-    prev_out_ids: dict[str, int] = {}
+    # content → node idS of the PREVIOUS level's gists (level 1's inputs are leaf
+    # extracts — no rows, so level-1 gists link only member_of the schema). LIST values
+    # (critic M1): two same-level batches can reduce to byte-identical text (sparse
+    # broad queries → "(nothing relevant)" boilerplate); a scalar dict silently dropped
+    # the earlier twin's outgoing edge. Content match is a proxy, so ambiguity attaches
+    # to ALL matching parents — a conservative superset, never a lost edge.
+    prev_out_ids: dict[str, list[int]] = {}
     for lvl in trace:
-        this_ids: dict[str, int] = {}
+        this_ids: dict[str, list[int]] = {}
         for i, out in enumerate(lvl.outputs):
             flags = flag_unverified_figures(out, lvl.batches[i])
             tags = ["gist", f"level:{lvl.level}"] + (["unverified-figures"] if flags else [])
@@ -99,10 +107,9 @@ async def persist_gist_tree(
             written += 1
             await store.add_edge(gist.id, schema.id, "member_of")
             for item in lvl.batches[i]:
-                parent_id = prev_out_ids.get(item)
-                if parent_id is not None:
+                for parent_id in prev_out_ids.get(item, []):
                     await store.add_edge(gist.id, parent_id, "derived_from")
-            this_ids[out] = gist.id
+            this_ids.setdefault(out, []).append(gist.id)
         prev_out_ids = this_ids
 
     if final_answer.strip():
@@ -119,8 +126,9 @@ async def persist_gist_tree(
         )
         written += 1
         await store.add_edge(final.id, schema.id, "member_of")
-        for parent_id in prev_out_ids.values():
-            await store.add_edge(final.id, parent_id, "derived_from")
+        for parent_ids in prev_out_ids.values():
+            for parent_id in parent_ids:
+                await store.add_edge(final.id, parent_id, "derived_from")
 
     log.info("gist tree persisted: run=%s nodes=%d levels=%d", run, written, len(trace))
     return written

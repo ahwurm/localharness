@@ -158,3 +158,52 @@ async def test_memory_search_surfaces_graph_neighborhood(store: MemoryStore):
     assert result.success
     assert "Related (graph neighborhood of top hit):" in result.output
     assert "gist/run1/L1-0 [gist]" in result.output  # the hit's gist context surfaced
+
+
+@pytest.mark.asyncio
+async def test_search_neighborhood_never_renders_superseded_nodes(store: MemoryStore):
+    """Whole-milestone critic B2: a superseded gist reachable through edges must NOT
+    surface in the hot-path Related line — a stale gist with a current gist's authority
+    is the cross-entity misattribution class the number-net exists for. History stays
+    on the explicit path (memory_get history=true)."""
+    from localharness.tools.builtin.memory_tools import MemorySearchTool
+
+    leaf = await store.store_fact("hbm-leaf", "Micron HBM supply is tight", confidence=0.9)
+    old_gist = await store.store_fact(
+        "gist/r2/L1-0", "old-company gist body", confidence=0.6,
+        source="cruncher", node_kind="gist",
+    )
+    await store.add_edge(old_gist.id, leaf.id, "derived_from")
+    # New analysis supersedes the gist (new row, new id — the edge stays on the old id).
+    await store.store_fact(
+        "gist/r2/L1-0", "new-company gist body", confidence=0.6,
+        source="cruncher", node_kind="gist",
+    )
+
+    result = await MemorySearchTool(store)._execute(query="HBM supply")
+    assert result.success
+    assert "old-company" not in result.output
+    assert "Related (graph neighborhood of top hit):" not in result.output  # only stale ids reachable → no line
+
+
+@pytest.mark.asyncio
+async def test_two_documents_same_question_get_distinct_runs(store: MemoryStore):
+    """Whole-milestone critic B3: run identity must include leaf CONTENT — two different
+    documents under the same question/session must not supersede each other's trees."""
+    trace_a = [ReduceLevel(level=1, batches=[["[section 1] Company A revenue $10M"]],
+                           outputs=["gist: Company A revenue $10M"])]
+    trace_b = [ReduceLevel(level=1, batches=[["[section 1] Company B revenue $99M"]],
+                           outputs=["gist: Company B revenue $99M"])]
+    for leaves, trace in ((["[section 1] Company A revenue $10M"], trace_a),
+                          (["[section 1] Company B revenue $99M"], trace_b)):
+        await persist_gist_tree(
+            store, question="summarize the financials", leaf_extracts=leaves, trace=trace,
+            final_answer="", session_id="same-sess", source_handles=["h"],
+        )
+    from localharness.memory.sqlite import FactQuery
+    schemas = [f for f in await store.query_facts(FactQuery(min_confidence=0.0, limit=50))
+               if f.node_kind == "schema"]
+    assert len(schemas) == 2  # distinct runs — nothing superseded
+    gists = [f for f in await store.query_facts(FactQuery(min_confidence=0.0, limit=50))
+             if f.node_kind == "gist" and f.status == "active"]
+    assert {("Company A" in g.value) for g in gists} == {True, False}  # both trees alive

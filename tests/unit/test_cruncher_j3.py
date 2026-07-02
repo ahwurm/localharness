@@ -424,3 +424,43 @@ def test_cruncher_chunk_chars_knee():
     assert f(2_000) == 2_000, "tiny window -> floor (tiny-window safety)"
     assert f(None) == subagent._CRUNCHER_DEFAULT_CHUNK_CHARS, "no window -> default"
     assert f(1_000_000) <= 32_000, "never exceed the 32k knee — the recall cliff above is sharp"
+
+
+@pytest.mark.asyncio
+async def test_cruncher_persists_gist_tree_via_real_dispatch(mock_llm_client, bus, tmp_path):
+    """Whole-milestone critic M2: exercise the ACTUAL wired path — dispatch_cruncher_subagent
+    (memory_store=...) → persist_gist_tree — not a hand-called persist. A green test on the
+    composed path, per the project's own 'prove it's wired' rule."""
+    from localharness.memory.sqlite import FactQuery, MemoryStore
+
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    head = "Filler sentence about federalism and checks. " * 110
+    tail = "More filler about ratification and republics. " * 110
+    body = head + f"\nThe hidden passphrase is {SECRET}.\n" + tail
+
+    parent = ContentStore()
+    granted_h = parent.put(body, origin="trusted")
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    ctx = ContextManager(
+        content_store=ContentStore(parent=parent, granted=frozenset({granted_h})),
+        max_context_tokens=8_000,
+    )
+    store = MemoryStore(agent_id="cruncher-mem", division_id="", org_id="", base_dir=str(tmp_path))
+    await store.open()
+    try:
+        result = await subagent.dispatch_cruncher_subagent(
+            "What is the hidden passphrase?",
+            grant_handles=[granted_h], llm=_reactive_cruncher_llm(Response, ToolCall), bus=bus,
+            base_registry=base, parent_session_id="run", permission_evaluator=PermissionEvaluator(),
+            context_manager=ctx, depth=0, max_subagent_depth=2,
+            memory_store=store,
+        )
+        assert SECRET in result  # the answer path is untouched by persistence
+        rows = await store.query_facts(FactQuery(min_confidence=0.0, limit=100))
+        kinds = {f.node_kind for f in rows}
+        assert "schema" in kinds and "gist" in kinds
+        finals = [f for f in rows if f.key.endswith("/final")]
+        assert finals and "session:run" in finals[0].provenance  # verbatim pointer intact
+    finally:
+        await store.close()

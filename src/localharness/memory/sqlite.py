@@ -474,14 +474,16 @@ class MemoryStore:
         existing = await self._get_fact_row(key)
         if existing is not None and existing.value == value:
             # Corroboration: same claim re-asserted — strengthen, don't duplicate.
-            # expires_at follows the NEW call (critic m2: re-asserting an expired fact
-            # must revive it, matching v1 upsert semantics; None clears expiry).
+            # expires_at/tags/node_kind follow the NEW call (critics 29-m2 + 32-m1:
+            # the branch must not silently ignore caller-supplied metadata — same
+            # contract as the supersede path, minus the new row).
             await self._db.execute(
                 "UPDATE facts SET updated_at = ?, confidence = MAX(confidence, ?), "
-                "expires_at = ?, "
+                "expires_at = ?, tags = ?, node_kind = ?, "
                 "source = CASE WHEN ? = '' THEN source ELSE ? END "
                 "WHERE agent_id = ? AND key = ? AND status = 'active'",
-                (now, confidence, expires_at, source, source, self._agent_id, key),
+                (now, confidence, expires_at, tags_json, node_kind,
+                 source, source, self._agent_id, key),
             )
             await self._db.commit()
         else:
@@ -565,14 +567,18 @@ class MemoryStore:
         return _row_to_fact(row)
 
     async def get_facts_by_ids(self, ids: list[int]) -> list[Fact]:
-        """Resolve graph-walk node ids back to facts (HIER-03), preserving input order."""
+        """Resolve graph-walk node ids back to ACTIVE facts (HIER-03), preserving input
+        order. Active-only (whole-milestone critic B2): the graph may traverse THROUGH
+        superseded nodes, but a hot path must never RENDER one — a stale gist presented
+        with a current gist's authority is the misattribution class this project's
+        number-net exists to catch. Explicit history stays on get_fact_history."""
         if not ids:
             return []
         assert self._db is not None
         qmarks = ",".join("?" * len(ids))
         async with self._db.execute(
             f"SELECT {self._FACT_COLS} FROM facts "
-            f"WHERE agent_id = ? AND id IN ({qmarks})",
+            f"WHERE agent_id = ? AND status = 'active' AND id IN ({qmarks})",
             [self._agent_id, *ids],
         ) as cur:
             rows = await cur.fetchall()

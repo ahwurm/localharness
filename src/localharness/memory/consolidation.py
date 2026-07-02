@@ -26,6 +26,11 @@ The deterministic core (fold, candidate promotion on cross-episode recurrence, d
 cap trim, proxies) runs with NO model at all. The LLM session-replay claim-extractor is
 a seam (`llm=` param): implemented + cancellable + guarded, wired OFF by default until
 its output quality is iterated live (owner: don't pause for slow items).
+
+Deliberate (whole-milestone critic m4): decay / cap-trim / untag write score columns
+via raw UPDATEs, bypassing store_fact's read-back-verify — these mutate derived ranking
+state, never claimed content; untag includes `tags` in its SET list so the narrowed
+facts_au trigger keeps FTS consistent, and the others don't touch indexed columns.
 """
 from __future__ import annotations
 
@@ -150,18 +155,24 @@ class ConsolidationPass:
             (self._store._agent_id, self._cfg.iteration_cap),
         ) as cur:
             candidates = [_row_to_fact(r) for r in await cur.fetchall()]
-        groups: dict[tuple[str, str], list] = {}
+        # Grouping (whole-milestone critic B1): recurrence = the SAME LESSON across
+        # episodes, keyed by the gate's content hash — grouping by (tier, tool) alone
+        # merged two unrelated one-off errors on one tool into a fabricated "recurring"
+        # record (false positive) while the genuinely-recurring case self-superseded to
+        # one provenance and never promoted (false negative).
+        groups: dict[tuple[str, str, str], list] = {}
         for c in candidates:
-            parts = c.key.split("/")  # gate/<tier>/<tool>[/<hash>]
+            parts = c.key.split("/")  # gate/<tier>/<tool>[/<lesson>[/<session>]]
             if len(parts) < 3 or parts[0] != "gate":
                 continue
-            groups.setdefault((parts[1], parts[2]), []).append(c)
+            lesson = parts[3] if len(parts) > 3 else ""
+            groups.setdefault((parts[1], parts[2], lesson), []).append(c)
 
-        for (tier, tool), members in groups.items():
+        for (tier, tool, lesson), members in groups.items():
             if self._cancel.is_set():
                 return
             provenances = {m.provenance for m in members if m.provenance}
-            key = f"learned/{tool}/{tier}"
+            key = f"learned/{tool}/{tier}" + (f"/{lesson}" if lesson else "")
             existing = await self._store.get_fact(key)
             # Promotion warrant: recurrence (≥2 distinct episodes), OR an existing
             # promoted record (a single fresh episode is schema-consistent evidence —

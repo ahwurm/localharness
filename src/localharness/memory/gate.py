@@ -111,11 +111,20 @@ class WriteGate:
                 prior_error = prior[0]
                 # Resolved mistake — the highest-warrant learning signal. Cross-turn by
                 # design (M3); provenance = the session that RESOLVED it.
+                # Key shape (whole-milestone critic B1): gate/<tier>/<tool>/<LESSON>/<SESSION>
+                # — the LESSON hash (tool+error) is what consolidation groups recurrence
+                # by (identical lessons only — two different errors on one tool are NOT
+                # recurrence), and the SESSION suffix lets the same lesson accumulate one
+                # co-active row per episode instead of superseding itself down to a
+                # single provenance (which made true recurrence structurally invisible).
                 await self._capture(
                     tier="resolved_error",
                     session_id=event.session_id,
                     tool_name=event.tool_name,
-                    fact_key=f"gate/resolved_error/{event.tool_name}/{_h8(event.tool_name, prior_error)}",
+                    fact_key=(
+                        f"gate/resolved_error/{event.tool_name}/"
+                        f"{_h8(event.tool_name, prior_error)}/{_h8(event.session_id)}"
+                    ),
                     value=(
                         f"Tool `{event.tool_name}` failed then later succeeded "
                         f"(a resolved mistake). Error was: {prior_error} "
