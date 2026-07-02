@@ -73,6 +73,23 @@ class MemorySearchTool(Tool):
             if len(snippet) > 160:
                 snippet = snippet[:159] + "…"
             lines.append(f"- {f.key}: {snippet}")
+        # Structure-aware retrieval (HIER-03): the FTS hit is the ENTRY POINT; the graph
+        # supplies the neighborhood — a leaf hit surfaces its gist/schema context, a
+        # schema hit surfaces its members. Gist routes; verbatim answers.
+        nbhd = getattr(self._mem, "neighborhood", None)
+        by_ids = getattr(self._mem, "get_facts_by_ids", None)
+        top_id = getattr(facts[0], "id", 0)
+        if nbhd is not None and by_ids is not None and top_id:
+            try:
+                walk = await nbhd(top_id, depth=1, limit=6)
+                rel = await by_ids([nid for nid, d in walk if d > 0])
+                if rel:
+                    lines.append(
+                        "Related (graph neighborhood of top hit): "
+                        + ", ".join(f"{f.key} [{f.node_kind}]" for f in rel)
+                    )
+            except Exception:
+                pass  # the neighborhood is enrichment; search must never fail on it
         return self.ok("\n".join(lines), match_count=len(facts))
 
 

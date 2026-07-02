@@ -483,6 +483,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         depth=0,
         max_subagent_depth=agent_config.max_subagent_depth,
         available_agents=available_agent_names,
+        # HIER-02: cruncher runs persist their gist tree into the agent's memory graph.
+        memory_store=memory_store,
         # Grant keystone: the root's ContentStore is the parent store children read through when the
         # model delegates with grant_handles (it IS `eviction_store` — start_cmd:315/406 — so an
         # evicted/handle id the model sees in a stub is exactly what it can grant to a cruncher).

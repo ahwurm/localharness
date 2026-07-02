@@ -414,6 +414,7 @@ class MemoryStore:
         source: str = "",
         expires_at: int | None = None,
         provenance: str | None = None,
+        node_kind: str = "fact",
     ) -> Fact:
         """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04).
 
@@ -459,11 +460,11 @@ class MemoryStore:
                 )
             cur = await self._db.execute(
                 "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
-                "source, created_at, updated_at, expires_at, status, provenance, importance) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                "source, created_at, updated_at, expires_at, status, provenance, importance, node_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
                 (self._agent_id, self._division_id, self._org_id, key, value,
                  tags_json, confidence, source, now, now, expires_at, prov,
-                 _importance_prior(tags or [], source)),
+                 _importance_prior(tags or [], source), node_kind),
             )
             new_id = cur.lastrowid
             if existing is not None:
@@ -512,6 +513,21 @@ class MemoryStore:
         if row is None:
             return None
         return _row_to_fact(row)
+
+    async def get_facts_by_ids(self, ids: list[int]) -> list[Fact]:
+        """Resolve graph-walk node ids back to facts (HIER-03), preserving input order."""
+        if not ids:
+            return []
+        assert self._db is not None
+        qmarks = ",".join("?" * len(ids))
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts "
+            f"WHERE agent_id = ? AND id IN ({qmarks})",
+            [self._agent_id, *ids],
+        ) as cur:
+            rows = await cur.fetchall()
+        by_id = {f.id: f for f in (_row_to_fact(r) for r in rows)}
+        return [by_id[i] for i in ids if i in by_id]
 
     async def get_fact_history(self, key: str) -> list[Fact]:
         """All versions of a fact, newest first — the explicit-request path to the past
