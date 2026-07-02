@@ -128,7 +128,10 @@ class WriteGate:
                 self._seen_tools.add(event.tool_name)
                 # Value is deliberately STABLE (no output preview — critic m5): the
                 # store-level corroboration touch makes restart re-fires a no-op
-                # instead of supersede churn.
+                # instead of supersede churn. Novelty is TELEMETRY + candidate only —
+                # by design it never promotes (single unhashed key ⇒ one provenance;
+                # Phase-31 critic M1 disposition): "the agent used a tool once" is not
+                # a durable lesson; salient/recurring signals are.
                 await self._capture(
                     tier="novelty",
                     session_id=event.session_id,
@@ -145,6 +148,10 @@ class WriteGate:
 
     async def _on_stuck_recovered(self, event: "StuckRecovered") -> None:
         try:
+            # `salient` = the APPROACH §C single-episode promotion flag (Phase-31 critic
+            # M1): a stuck-then-recovered loop is a rare, high-salience event — one
+            # occurrence is warrant enough for consolidation to promote it, unlike
+            # resolved errors (which must recur) and novelty (telemetry-only, below).
             await self._capture(
                 tier="stuck_recovered",
                 session_id=event.session_id,
@@ -156,6 +163,7 @@ class WriteGate:
                     "(auto-captured by the prediction-error gate; pending consolidation)"
                 ),
                 detail=_preview(event.stuck_signature),
+                extra_tags=["salient"],
             )
         except Exception:
             log.exception("write-gate stuck handler failed (non-fatal)")
@@ -169,11 +177,12 @@ class WriteGate:
         fact_key: str,
         value: str,
         detail: str,
+        extra_tags: Optional[list[str]] = None,
     ) -> None:
         await self._store.store_fact(
             key=fact_key,
             value=value,
-            tags=["gate", f"tier:{tier}", "pending_consolidation"],
+            tags=["gate", f"tier:{tier}", "pending_consolidation"] + (extra_tags or []),
             confidence=_TIER_CONFIDENCE[tier],
             source="write_gate",
             provenance=session_id,

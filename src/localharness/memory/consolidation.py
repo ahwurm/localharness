@@ -79,6 +79,10 @@ class ConsolidationPass:
         self._llm = llm
         self._on_promotion_sample = on_promotion_sample
         self._cancel = asyncio.Event()
+        # Same-run promotion grace (critic BLOCKER 2): cap-trim must never demote what
+        # this very pass just promoted (fresh records have zero access history — the
+        # lowest slow-score in any mature store, i.e. first trim victims).
+        self._promoted_ids_this_run: set[int] = set()
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -130,14 +134,22 @@ class ConsolidationPass:
         fast track, translated): the same lesson captured from ≥2 distinct sessions
         graduates from candidate (below the injection threshold) to durable fact
         (above it), linked `derived_from` its source candidates."""
-        from localharness.memory.sqlite import FactQuery
+        # Direct candidate query (Phase-31 critic M3): the relevance-ranked query_facts
+        # crowded backlog candidates out of the iteration_cap window as the store
+        # accumulated well-used facts — the guardrail silently became a starvation
+        # bound. Oldest-first over the pending set is what "bounded work on candidates"
+        # actually means.
+        from localharness.memory.sqlite import _row_to_fact
 
-        candidates = [
-            f for f in await self._store.query_facts(
-                FactQuery(min_confidence=0.0, limit=self._cfg.iteration_cap)
-            )
-            if "pending_consolidation" in f.tags
-        ]
+        assert self._store._db is not None
+        async with self._store._db.execute(
+            f"SELECT {self._store._FACT_COLS} FROM facts "
+            "WHERE agent_id = ? AND status = 'active' "
+            "AND tags LIKE '%\"pending_consolidation\"%' "
+            "ORDER BY created_at ASC, id ASC LIMIT ?",
+            (self._store._agent_id, self._cfg.iteration_cap),
+        ) as cur:
+            candidates = [_row_to_fact(r) for r in await cur.fetchall()]
         groups: dict[tuple[str, str], list] = {}
         for c in candidates:
             parts = c.key.split("/")  # gate/<tier>/<tool>[/<hash>]
@@ -151,29 +163,41 @@ class ConsolidationPass:
             provenances = {m.provenance for m in members if m.provenance}
             key = f"learned/{tool}/{tier}"
             existing = await self._store.get_fact(key)
-            # A one-off does NOT create a new promoted record — but if a promoted record
-            # already exists, a single fresh episode is SCHEMA-CONSISTENT evidence and
-            # merges in cheaply (Tse 2007 fast track; APPROACH §C): identical merge →
-            # corroboration touch; changed merge → supersede.
-            if existing is None and len(provenances) < 2:
+            # Promotion warrant: recurrence (≥2 distinct episodes), OR an existing
+            # promoted record (a single fresh episode is schema-consistent evidence —
+            # Tse 2007 fast track), OR a SALIENT flag (Phase-31 critic M1: the APPROACH
+            # §C "or carries a salience flag" route — the gate marks stuck-recoveries
+            # salient; one occurrence is warrant enough). Novelty candidates carry
+            # neither and by design never promote (telemetry tier).
+            salient = any("salient" in m.tags for m in members)
+            if existing is None and len(provenances) < 2 and not salient:
                 continue
             # verify-against-leaf (CONS-04): the merged record is composed ONLY of
             # verbatim candidate bodies (and the prior record's own bullets).
-            bodies = {m.value for m in members if m.value}
-            if not bodies:
+            new_bodies = sorted({m.value for m in members if m.value})
+            if not new_bodies:
                 continue
             prev_n = 0
+            prior_bullets: list[str] = []
             if existing is not None:
-                bodies |= {ln[2:] for ln in existing.value.splitlines() if ln.startswith("- ")}
+                prior_bullets = [ln[2:] for ln in existing.value.splitlines() if ln.startswith("- ")]
                 if existing.provenance.startswith("consolidated:"):
                     try:
                         prev_n = int(existing.provenance.split(":")[1].split("-")[0])
                     except (ValueError, IndexError):
                         prev_n = 0
             total_n = prev_n + len(provenances)
+            # Newest evidence first, cap 5, and say what was dropped (critic M2: the
+            # old alphabetical [:5] silently discarded episodes while the count climbed).
+            seen_b: set[str] = set()
+            bullets = [b for b in new_bodies + prior_bullets
+                       if not (b in seen_b or seen_b.add(b))]
+            shown = bullets[:5]
+            dropped = len(bullets) - len(shown)
             merged = (
                 f"Recurring ({total_n} episodes): {tier} on `{tool}`.\n"
-                + "\n".join(f"- {b}" for b in sorted(bodies)[:5])
+                + "\n".join(f"- {b}" for b in shown)
+                + (f"\n- … (+{dropped} earlier example(s) consolidated away)" if dropped else "")
             )
             promoted = await self._store.store_fact(
                 key=key,
@@ -183,6 +207,7 @@ class ConsolidationPass:
                 source="consolidation",
                 provenance=f"consolidated:{total_n}-episodes",
             )
+            self._promoted_ids_this_run.add(promoted.id)
             for m in members:
                 try:
                     await self._store.add_edge(promoted.id, m.id, "derived_from")
@@ -238,11 +263,14 @@ class ConsolidationPass:
             claim = line.strip(" -•\t")
             if not claim or len(stored) >= min(5, self._cfg.iteration_cap):
                 continue
-            # verify-against-leaf: some ≥6-char token of the claim must exist verbatim
-            # in the transcript it was extracted from (anti-confabulation floor).
+            # verify-against-leaf (critic M4: any-single-token was trivially passed by
+            # confabulations sharing one common word like "contains"): a MAJORITY of
+            # the claim's ≥6-char tokens must appear verbatim in the source transcript.
             tokens = [t for t in claim.split() if len(t) >= 6]
-            if tokens and not any(t in corpus for t in tokens):
-                continue
+            if tokens:
+                matched = sum(1 for t in tokens if t in corpus)
+                if matched * 2 < len(tokens):  # < 50% grounded → confabulation risk
+                    continue
             # dedup-before-generate: skip if an equivalent fact already exists.
             existing = await self._store.query_facts(FactQuery(text=claim[:60], limit=1))
             if existing and existing[0].value.strip() == claim:
@@ -334,12 +362,20 @@ class ConsolidationPass:
         report.active_over_cap = max(0, active - cap)
         if active <= cap:
             return
+        # Exclusion (critic BLOCKER 2): never demote a record promoted in THIS run —
+        # promote-then-self-demote under ordinary over-cap conditions pitted two
+        # success criteria against each other. Deterministic tiebreakers (critic minor)
+        # so victim selection is stable, not SQLite-implementation-defined.
+        grace = self._promoted_ids_this_run or {-1}
+        grace_marks = ",".join("?" * len(grace))
         async with self._store._db.execute(
             "SELECT id FROM facts WHERE agent_id = ? AND status = 'active' "
             "AND retrieval_strength >= 0.2 "
-            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) ASC "
+            f"AND id NOT IN ({grace_marks}) "
+            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) ASC, "
+            "updated_at ASC, id ASC "
             "LIMIT ?",
-            (self._store._agent_id, now, active - cap),
+            (self._store._agent_id, *grace, now, active - cap),
         ) as cur:
             victims = [r[0] for r in await cur.fetchall()]
         if victims:
@@ -431,9 +467,11 @@ class ConsolidationScheduler:
         self.cancel_running()
         if self._run_task is not None:
             try:
-                await self._run_task
-            except (asyncio.CancelledError, Exception):
-                pass
+                # Bounded (critic minor 3): a pathologically slow step must not stall
+                # process shutdown; the cancel above makes steps exit at their next check.
+                await asyncio.wait_for(self._run_task, timeout=15.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                self._run_task.cancel()
 
     async def _on_user_activity(self, event: Any) -> None:
         """A user turn arrived: the box is NOT idle. Cancel any in-flight pass (it will
@@ -500,19 +538,26 @@ class ConsolidationScheduler:
         return bool(staged or pending or active > self._cfg.max_active_facts)
 
     async def _idle_timer_loop(self) -> None:
-        """In-session idle trigger: no user activity for idle_minutes → launch a pass."""
+        """In-session idle trigger: no user activity for idle_minutes → launch a pass.
+        The body is exception-guarded (critic M5): one transient _has_work error must
+        not silently kill idle consolidation for the rest of the session."""
         interval = max(5.0, self._cfg.idle_minutes * 60 / 4)
         fired_for_this_idle = False
         while True:
             await asyncio.sleep(interval)
-            idle_s = time.monotonic() - self._last_activity
-            if idle_s >= self._cfg.idle_minutes * 60:
-                if not fired_for_this_idle:
-                    fired_for_this_idle = True
-                    if await self._has_work():
-                        self.launch()
-            else:
-                fired_for_this_idle = False
+            try:
+                idle_s = time.monotonic() - self._last_activity
+                if idle_s >= self._cfg.idle_minutes * 60:
+                    if not fired_for_this_idle:
+                        fired_for_this_idle = True
+                        if await self._has_work():
+                            self.launch()
+                else:
+                    fired_for_this_idle = False
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("idle-timer check failed (non-fatal; timer continues)")
 
 
 # ---------------------------------------------------------------------------

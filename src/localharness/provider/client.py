@@ -171,7 +171,24 @@ async def _inference_gate(config: LLMConfig):
                 yield
                 return
             t0 = time.monotonic()
-            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+            # Cancellation-safe acquire (v2.0 Phase-31 critic, BLOCKER 1). The old
+            # `await asyncio.to_thread(fcntl.flock, fd, LOCK_EX)` parked a REAL OS
+            # thread on the fd; cancelling the awaiting task (e.g. a consolidation
+            # pass yielding to a user turn) ran the finally-close while that thread's
+            # flock was still in-flight in the kernel — the lock was then granted to a
+            # struct-file no fd names anymore, so LOCK_UN could never be called and the
+            # shared lockfile wedged for every process on the box: the exact freeze
+            # this gate exists to prevent, caused by its own cancellation path.
+            # A LOCK_NB poll never blocks a thread: each attempt returns instantly on
+            # the event loop, cancellation can only land at the sleep, and the
+            # finally-close is always safe (either we hold the lock — close releases
+            # it — or we don't). 50ms polling is noise against minutes-long holds.
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    await asyncio.sleep(0.05)
             waited = time.monotonic() - t0
             if waited > 5:
                 log.info("inference gate: waited %.1fs for another process's generation", waited)
