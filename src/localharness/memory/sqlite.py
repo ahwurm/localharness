@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import aiosqlite
 
-from localharness.memory.errors import MemoryCorruptionError, SessionNotFoundError
+from localharness.memory.errors import (
+    MemoryCorruptionError,
+    MemoryVerifyError,
+    SessionNotFoundError,
+)
 from localharness.memory.history import HistoryWriter
 from localharness.memory.markdown import MarkdownMemory
 
@@ -36,6 +40,13 @@ class Fact:
     created_at: int = 0
     updated_at: int = 0
     expires_at: int | None = None
+    # v2 (supersede-not-overwrite): 'active' | 'superseded'; superseded rows stay queryable
+    # via get_fact_history / include_superseded but leave every hot path.
+    status: str = "active"
+    superseded_by: int | None = None
+    # Episodic source pointer (session_id or origin) — hippocampal indexing (WRITE-04).
+    provenance: str = ""
+    id: int = 0
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,7 @@ class FactQuery:
     min_confidence: float = 0.0
     include_scopes: list[str] = field(default_factory=lambda: ["agent"])
     limit: int = 50
+    include_superseded: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,8 +72,9 @@ class MemoryContext:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
+# v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
 CREATE TABLE IF NOT EXISTS facts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +134,114 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE INDEX IF NOT EXISTS idx_notes_agent_id ON notes(agent_id, section);
 """
 
+# ---------------------------------------------------------------------------
+# Schema v2 — supersede-not-overwrite (WRITE-02) + provenance (WRITE-04).
+# The v1 UNIQUE(agent_id, key) is replaced by a PARTIAL unique index on ACTIVE
+# rows only, so a superseded row can share its successor's key while the active
+# tier keeps one-truth-per-key. The partial indexes are also the RANK-05
+# hot-path guarantee: default retrieval never scans superseded rows.
+# ---------------------------------------------------------------------------
+
+_FACTS_TABLE_V2 = """
+CREATE TABLE IF NOT EXISTS facts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id      TEXT    NOT NULL,
+    division_id   TEXT    NOT NULL DEFAULT '',
+    org_id        TEXT    NOT NULL DEFAULT '',
+    key           TEXT    NOT NULL,
+    value         TEXT    NOT NULL,
+    tags          TEXT    NOT NULL DEFAULT '[]',
+    confidence    REAL    NOT NULL DEFAULT 1.0,
+    source        TEXT    NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    expires_at    INTEGER,
+    status        TEXT    NOT NULL DEFAULT 'active',
+    superseded_by INTEGER,
+    provenance    TEXT    NOT NULL DEFAULT ''
+);
+"""
+
+_FACTS_INDEXES_V2 = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_active_key ON facts(agent_id, key) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_facts_agent_id ON facts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_facts_active_recency ON facts(agent_id, updated_at DESC) WHERE status = 'active';
+"""
+
+_FACTS_FTS_AND_TRIGGERS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+    key, value, tags,
+    content=facts, content_rowid=id
+);
+CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
+    INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
+END;
+"""
+
+_SESSIONS_NOTES_SQL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id              TEXT    PRIMARY KEY,
+    agent_id        TEXT    NOT NULL,
+    division_id     TEXT    NOT NULL DEFAULT '',
+    org_id          TEXT    NOT NULL DEFAULT '',
+    started_at      INTEGER NOT NULL,
+    ended_at        INTEGER,
+    turn_count      INTEGER NOT NULL DEFAULT 0,
+    action_count    INTEGER NOT NULL DEFAULT 0,
+    tokens_in       INTEGER NOT NULL DEFAULT 0,
+    tokens_out      INTEGER NOT NULL DEFAULT 0,
+    exit_reason     TEXT,
+    summary         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE TABLE IF NOT EXISTS notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    TEXT    NOT NULL,
+    section     TEXT    NOT NULL DEFAULT 'general',
+    content     TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_agent_id ON notes(agent_id, section);
+"""
+
+SCHEMA_V2_SQL = _FACTS_TABLE_V2 + _FACTS_INDEXES_V2 + _FACTS_FTS_AND_TRIGGERS + _SESSIONS_NOTES_SQL
+
+# In-place v1→v2 rebuild: SQLite cannot drop a UNIQUE table constraint, so the table is
+# rebuilt (rename → recreate → copy → drop), triggers/indexes recreated, FTS re-synced.
+MIGRATION_V1_TO_V2_SQL = (
+    """
+DROP TRIGGER IF EXISTS facts_ai;
+DROP TRIGGER IF EXISTS facts_ad;
+DROP TRIGGER IF EXISTS facts_au;
+DROP INDEX IF EXISTS idx_facts_agent_id;
+DROP INDEX IF EXISTS idx_facts_key;
+ALTER TABLE facts RENAME TO facts_v1_old;
+"""
+    + _FACTS_TABLE_V2
+    + """
+INSERT INTO facts (id, agent_id, division_id, org_id, key, value, tags, confidence, source,
+                   created_at, updated_at, expires_at, status, superseded_by, provenance)
+    SELECT id, agent_id, division_id, org_id, key, value, tags, confidence, source,
+           created_at, updated_at, expires_at, 'active', NULL, ''
+    FROM facts_v1_old;
+DROP TABLE facts_v1_old;
+"""
+    + _FACTS_INDEXES_V2
+    + _FACTS_FTS_AND_TRIGGERS
+    + """
+INSERT INTO facts_fts(facts_fts) VALUES('rebuild');
+"""
+)
+
 
 # ---------------------------------------------------------------------------
 # MemoryStore
@@ -166,6 +287,8 @@ class MemoryStore:
         self._bus = bus
         self._db: Optional[aiosqlite.Connection] = None
         self._subscription_handles: list["SubscriptionHandle"] = []
+        # Live session id — the default provenance stamped on writes (WRITE-04).
+        self._current_session_id: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -199,8 +322,11 @@ class MemoryStore:
         async with self._db.execute("PRAGMA user_version") as cur:
             row = await cur.fetchone()
             current_version = row[0]
+        if current_version == 0:
+            await self._db.executescript(SCHEMA_V2_SQL)
+        elif current_version == 1:
+            await self._db.executescript(MIGRATION_V1_TO_V2_SQL)
         if current_version < CURRENT_SCHEMA_VERSION:
-            await self._db.executescript(SCHEMA_V1_SQL)
             await self._db.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             await self._db.commit()
 
@@ -218,6 +344,10 @@ class MemoryStore:
     # Facts CRUD
     # ------------------------------------------------------------------
 
+    def set_current_session(self, session_id: str | None) -> None:
+        """Record the live session id — the default provenance for writes (WRITE-04)."""
+        self._current_session_id = session_id
+
     async def store_fact(
         self,
         key: str,
@@ -226,37 +356,79 @@ class MemoryStore:
         confidence: float = 1.0,
         source: str = "",
         expires_at: int | None = None,
+        provenance: str | None = None,
     ) -> Fact:
-        """Upsert a fact. Preserves created_at on update."""
+        """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04).
+
+        - No active row for `key` → insert a new active row.
+        - Active row with the IDENTICAL value → corroboration touch (updated_at bumped,
+          confidence = max(old, new)); no duplicate row.
+        - Active row with a DIFFERENT value → the old row is marked superseded
+          (status='superseded', superseded_by=<new id>) and a fresh active row is
+          inserted. Nothing is overwritten or deleted; history stays queryable via
+          get_fact_history / FactQuery(include_superseded=True).
+
+        Every write is READ-BACK-VERIFIED: the active row is re-read and compared before
+        the write is claimed; a mismatch raises MemoryVerifyError (the Cline
+        "claims-to-write-but-didn't" class).
+        """
         if not (0.0 <= confidence <= 1.0):
             raise ValueError(f"confidence must be in [0.0, 1.0], got {confidence}")
         assert self._db is not None
         now = int(time.time())
         tags_json = json.dumps(tags or [])
-        await self._db.execute(
-            """
-            INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, source, created_at, updated_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(agent_id, key) DO UPDATE SET
-                value      = excluded.value,
-                tags       = excluded.tags,
-                confidence = excluded.confidence,
-                source     = excluded.source,
-                updated_at = excluded.updated_at,
-                expires_at = excluded.expires_at
-            """,
-            (self._agent_id, self._division_id, self._org_id, key, value,
-             tags_json, confidence, source, now, now, expires_at),
-        )
-        await self._db.commit()
-        return await self._get_fact_row(key)  # type: ignore[return-value]
+        prov = provenance if provenance is not None else (self._current_session_id or "")
+
+        existing = await self._get_fact_row(key)
+        if existing is not None and existing.value == value:
+            # Corroboration: same claim re-asserted — strengthen, don't duplicate.
+            await self._db.execute(
+                "UPDATE facts SET updated_at = ?, confidence = MAX(confidence, ?), "
+                "source = CASE WHEN ? = '' THEN source ELSE ? END "
+                "WHERE agent_id = ? AND key = ? AND status = 'active'",
+                (now, confidence, source, source, self._agent_id, key),
+            )
+            await self._db.commit()
+        else:
+            if existing is not None:
+                # Supersede: vacate the active-unique slot, insert successor, then link.
+                await self._db.execute(
+                    "UPDATE facts SET status = 'superseded', updated_at = ? "
+                    "WHERE agent_id = ? AND key = ? AND status = 'active'",
+                    (now, self._agent_id, key),
+                )
+            cur = await self._db.execute(
+                "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
+                "source, created_at, updated_at, expires_at, status, provenance) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+                (self._agent_id, self._division_id, self._org_id, key, value,
+                 tags_json, confidence, source, now, now, expires_at, prov),
+            )
+            new_id = cur.lastrowid
+            if existing is not None:
+                await self._db.execute(
+                    "UPDATE facts SET superseded_by = ? "
+                    "WHERE agent_id = ? AND key = ? AND status = 'superseded' AND superseded_by IS NULL",
+                    (new_id, self._agent_id, key),
+                )
+            await self._db.commit()
+
+        fact = await self._get_fact_row(key)
+        if fact is None or fact.value != value:
+            raise MemoryVerifyError(key)
+        return fact
+
+    _FACT_COLS = (
+        "key, value, agent_id, division_id, org_id, tags, confidence, source, "
+        "created_at, updated_at, expires_at, status, superseded_by, provenance, id"
+    )
 
     async def _get_fact_row(self, key: str) -> Fact | None:
-        """Read a fact row without expiry check (internal use)."""
+        """Read the ACTIVE fact row without expiry check (internal use)."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT key, value, agent_id, division_id, org_id, tags, confidence, source, created_at, updated_at, expires_at "
-            "FROM facts WHERE agent_id = ? AND key = ?",
+            f"SELECT {self._FACT_COLS} FROM facts "
+            "WHERE agent_id = ? AND key = ? AND status = 'active'",
             (self._agent_id, key),
         ) as cur:
             row = await cur.fetchone()
@@ -265,18 +437,31 @@ class MemoryStore:
         return _row_to_fact(row)
 
     async def get_fact(self, key: str) -> Fact | None:
-        """Get a single fact by exact key. Returns None if not found or expired."""
+        """Get the active fact by exact key. Returns None if not found, expired, or superseded."""
         assert self._db is not None
         now = int(time.time())
         async with self._db.execute(
-            "SELECT key, value, agent_id, division_id, org_id, tags, confidence, source, created_at, updated_at, expires_at "
-            "FROM facts WHERE agent_id = ? AND key = ? AND (expires_at IS NULL OR expires_at > ?)",
+            f"SELECT {self._FACT_COLS} FROM facts "
+            "WHERE agent_id = ? AND key = ? AND status = 'active' "
+            "AND (expires_at IS NULL OR expires_at > ?)",
             (self._agent_id, key, now),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
             return None
         return _row_to_fact(row)
+
+    async def get_fact_history(self, key: str) -> list[Fact]:
+        """All versions of a fact, newest first — the explicit-request path to the past
+        (WRITE-02: supersede keeps history retrievable; nothing is ever silently lost)."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts "
+            "WHERE agent_id = ? AND key = ? ORDER BY created_at DESC, id DESC",
+            (self._agent_id, key),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_fact(r) for r in rows]
 
     async def delete_fact(self, key: str) -> bool:
         """Delete a fact by key. Returns True if a row was deleted."""
@@ -294,29 +479,36 @@ class MemoryStore:
         assert self._db is not None
         now = int(time.time())
 
-        if query.text:
-            sql = """
+        status_filter = "" if query.include_superseded else "AND f.status = 'active'"
+        fts_text = _sanitize_fts_query(query.text) if query.text else ""
+
+        if fts_text:
+            sql = f"""
                 SELECT f.key, f.value, f.agent_id, f.division_id, f.org_id, f.tags,
-                       f.confidence, f.source, f.created_at, f.updated_at, f.expires_at
+                       f.confidence, f.source, f.created_at, f.updated_at, f.expires_at,
+                       f.status, f.superseded_by, f.provenance, f.id
                 FROM facts f
                 JOIN facts_fts ON facts_fts.rowid = f.id
                 WHERE facts_fts MATCH ?
                   AND f.agent_id = ?
                   AND f.confidence >= ?
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
+                  {status_filter}
                 ORDER BY rank
                 LIMIT ?
             """
-            params: list[Any] = [query.text, self._agent_id, query.min_confidence, now, query.limit]
+            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, query.limit]
         else:
-            sql = """
-                SELECT key, value, agent_id, division_id, org_id, tags, confidence, source,
-                       created_at, updated_at, expires_at
-                FROM facts
-                WHERE agent_id = ?
-                  AND confidence >= ?
-                  AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY updated_at DESC
+            sql = f"""
+                SELECT f.key, f.value, f.agent_id, f.division_id, f.org_id, f.tags,
+                       f.confidence, f.source, f.created_at, f.updated_at, f.expires_at,
+                       f.status, f.superseded_by, f.provenance, f.id
+                FROM facts f
+                WHERE f.agent_id = ?
+                  AND f.confidence >= ?
+                  AND (f.expires_at IS NULL OR f.expires_at > ?)
+                  {status_filter}
+                ORDER BY f.updated_at DESC
                 LIMIT ?
             """
             params = [self._agent_id, query.min_confidence, now, query.limit]
@@ -481,7 +673,7 @@ class MemoryStore:
         now = int(time.time())
         async with self._db.execute(
             "SELECT key, value FROM facts "
-            "WHERE agent_id = ? AND confidence >= 0.7 "
+            "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
             "AND (expires_at IS NULL OR expires_at > ?) "
             "ORDER BY updated_at DESC",
             (self._agent_id, now),
@@ -588,7 +780,7 @@ class MemoryStore:
         now = int(time.time())
         async with self._db.execute(
             "SELECT key, value, updated_at FROM facts "
-            "WHERE agent_id = ? AND confidence >= 0.7 "
+            "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
             "AND (expires_at IS NULL OR expires_at > ?) "
             "ORDER BY updated_at DESC",
             (self._agent_id, now),
@@ -743,10 +935,21 @@ def _last_n_entries(history: str, n: int) -> str:
     return "\n".join(lines[: max(0, n)]) if n > 0 else "(session history omitted)"
 
 
+def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
+    """Quote every whitespace token so FTS5 operator/syntax characters in real-corpus
+    tokens (`000660.KS`, `P/GP`, `-1.5σ`) are literal phrases, never syntax (WRITE-05).
+    Embedded double-quotes are doubled per FTS5 string rules. Returns "" when no usable
+    token remains (caller falls back to the non-FTS recency path)."""
+    tokens = (text or "").split()
+    quoted = ['"' + t.replace('"', '""') + '"' for t in tokens[:max_tokens] if t.strip('"')]
+    return " ".join(quoted)
+
+
 def _row_to_fact(row: aiosqlite.Row) -> Fact:
     tags_raw = row["tags"] if isinstance(row, aiosqlite.Row) else row[5]
     tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
     if isinstance(row, aiosqlite.Row):
+        keys = row.keys()
         return Fact(
             key=row["key"],
             value=row["value"],
@@ -759,10 +962,18 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             expires_at=row["expires_at"],
+            status=row["status"] if "status" in keys else "active",
+            superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
+            provenance=row["provenance"] if "provenance" in keys else "",
+            id=row["id"] if "id" in keys else 0,
         )
     # Positional (shouldn't happen with row_factory=aiosqlite.Row)
     return Fact(
         key=row[0], value=row[1], agent_id=row[2], division_id=row[3],
         org_id=row[4], tags=tags, confidence=row[6], source=row[7],
         created_at=row[8], updated_at=row[9], expires_at=row[10],
+        status=row[11] if len(row) > 11 else "active",
+        superseded_by=row[12] if len(row) > 12 else None,
+        provenance=row[13] if len(row) > 13 else "",
+        id=row[14] if len(row) > 14 else 0,
     )

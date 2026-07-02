@@ -302,6 +302,18 @@ class MemoryConfig(BaseModel):
         ),
     )
 
+    write_gate_enabled: bool = Field(
+        default=True,
+        description=(
+            "If True (default), the prediction-error write gate auto-captures memory fact "
+            "candidates from bus signals the loop already emits (a tool error that later "
+            "resolved, stuck-then-recovered, first-use novelty) — zero added LLM calls, "
+            "written BELOW the injection confidence threshold until consolidation promotes "
+            "them. Set False to disable all harness-initiated memory writes (the `remember` "
+            "tool is unaffected)."
+        ),
+    )
+
 
 class ContextConfig(BaseModel):
     """Context window management configuration."""

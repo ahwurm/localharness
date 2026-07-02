@@ -599,6 +599,10 @@ class AgentLoop:
             )
         if self._memory is not None:
             try:
+                # Default provenance for this session's writes (WRITE-04).
+                _set_sess = getattr(self._memory, "set_current_session", None)
+                if _set_sess is not None:
+                    _set_sess(session.session_id)
                 _mem_cfg = getattr(self._config, "memory", None)
                 ctx = await self._memory.load_context(
                     index_mode=getattr(_mem_cfg, "index_mode", True),
