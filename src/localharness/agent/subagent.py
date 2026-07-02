@@ -1052,6 +1052,7 @@ async def dispatch_cruncher_subagent(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     cruncher_config: Any = None,
+    memory_store: Any = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1136,30 +1137,26 @@ async def dispatch_cruncher_subagent(
     # those — looping until they fit. A TARGETED query (few relevant sections) does ONE final combine;
     # a BROAD query (many sections) reduces in levels. This keeps the reduce bounded for ANY query
     # (the single-pass combine could overflow on broad queries — seen in the live injection dogfood).
+    # HIER-01: the reduce loop is the factored, reusable core/reduce.hierarchical_reduce —
+    # byte-identical batching/combining/termination; the returned trace is what HIER-02
+    # persists as the durable gist tree (the intermediate gists stop being throwaway strings).
+    from localharness.core.reduce import hierarchical_reduce
+
     items = extracts or ["(no document section contained anything relevant to the question)"]
     budget = max(3_000, (max_ctx or 8_000) * 2)
-    level = 0
-    while len("\n\n".join(items)) > budget and len(items) > 1 and level < 4:
-        level += 1
-        batches: list[list[str]] = []
-        cur: list[str] = []
-        clen = 0
-        for e in items:
-            if cur and clen + len(e) > budget:
-                batches.append(cur)
-                cur, clen = [], 0
-            cur.append(e)
-            clen += len(e)
-        if cur:
-            batches.append(cur)
-        log.info("cruncher reduce L%d: %d items -> %d batches (budget %d chars)", level, len(items), len(batches), budget)
-        items = [
-            await _cruncher_combine_turn(
-                question, b, partial=True, llm=llm, child_bus=child_bus, base_registry=base_registry,
-                permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
-            )
-            for b in batches
-        ]
+
+    async def _combine_partial(batch: list[str]) -> str:
+        return await _cruncher_combine_turn(
+            question, batch, partial=True, llm=llm, child_bus=child_bus, base_registry=base_registry,
+            permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+        )
+
+    items, level, reduce_trace = await hierarchical_reduce(
+        items, budget=budget, combine_partial=_combine_partial,
+        on_level=lambda lvl, n_items, n_batches: log.info(
+            "cruncher reduce L%d: %d items -> %d batches (budget %d chars)",
+            lvl, n_items, n_batches, budget),
+    )
 
     answer = await _cruncher_combine_turn(
         question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
@@ -1178,6 +1175,20 @@ async def dispatch_cruncher_subagent(
                         "(possible lossy-summary-node leak): %s", len(unverified), shown)
             answer = (f"{answer}\n\n⚠️ unverified figures (absent from every section extract — may "
                       f"originate from a lossy summary node): {shown}")
+    # HIER-02: persist the gist tree (schema node + per-level gists + final, with
+    # derived_from/member_of edges and the HIER-04 figure net) — fire-and-forget for the
+    # answer path: persistence failure never degrades the cruncher's result.
+    if memory_store is not None:
+        try:
+            from localharness.memory.hierarchy import persist_gist_tree
+            await persist_gist_tree(
+                memory_store, question=question, leaf_extracts=extracts,
+                trace=reduce_trace, final_answer=answer or "",
+                session_id=parent_session_id or "", source_handles=handles,
+            )
+        except Exception:
+            log.exception("gist-tree persistence failed (non-fatal)")
+
     note = truncated_note.strip()
     header = f"[cruncher] sections: {n_sections}{(' | ' + note) if note else ''}"
     return f"{header}\n\n{answer or '(no answer)'}"
@@ -1198,6 +1209,7 @@ def make_explore_agent_runner(
     available_agents: list[str] | None = None,
     parent_store: Any = None,
     cruncher_config: Any = None,
+    memory_store: Any = None,
 ) -> Callable[..., Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1286,7 +1298,7 @@ def make_explore_agent_runner(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
-                cruncher_config=cruncher_config,
+                cruncher_config=cruncher_config, memory_store=memory_store,
             )
         if name == "explore":
             dispatch = dispatch_explore_subagent
