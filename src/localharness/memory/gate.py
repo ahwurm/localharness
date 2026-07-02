@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -64,10 +65,15 @@ class WriteGate:
         self._bus = bus
         self._agent_id = agent_id
         self._handles: list["SubscriptionHandle"] = []
-        # (session_id, tool_name) -> last error preview; resolved on next success.
-        self._pending_errors: dict[tuple[str, str], str] = {}
+        # tool_name -> (error preview, monotonic ts). Keyed by TOOL, not session (Phase-29
+        # critic M3): loop.py mints a fresh session_id per run_turn, so session-keying made
+        # the canonical interactive flow — fail in turn N, user says "try again", succeed
+        # in turn N+1 — structurally invisible. A TTL horizon bounds staleness instead.
+        self._pending_errors: dict[str, tuple[str, float]] = {}
         # First-use novelty (per process lifetime; store-level dedup makes repeats no-ops).
         self._seen_tools: set[str] = set()
+
+    _PENDING_TTL_S = 2 * 3600.0  # an error unresolved for 2h is stale, not "resolved"
 
     async def open(self) -> None:
         from localharness.core.events import Observation, StuckRecovered
@@ -91,20 +97,27 @@ class WriteGate:
         try:
             if event.observation_type != "tool_result" or not event.tool_name:
                 return
-            key = (event.session_id, event.tool_name)
+            now = time.monotonic()
+            if len(self._pending_errors) > 64:  # opportunistic TTL prune
+                self._pending_errors = {
+                    t: (p, ts) for t, (p, ts) in self._pending_errors.items()
+                    if now - ts < self._PENDING_TTL_S
+                }
             if event.error is not None:
-                self._pending_errors[key] = _preview(event.error)
+                self._pending_errors[event.tool_name] = (_preview(event.error), now)
                 return
-            prior_error = self._pending_errors.pop(key, None)
-            if prior_error is not None:
-                # Resolved mistake — the highest-warrant learning signal.
+            prior = self._pending_errors.pop(event.tool_name, None)
+            if prior is not None and now - prior[1] < self._PENDING_TTL_S:
+                prior_error = prior[0]
+                # Resolved mistake — the highest-warrant learning signal. Cross-turn by
+                # design (M3); provenance = the session that RESOLVED it.
                 await self._capture(
                     tier="resolved_error",
                     session_id=event.session_id,
                     tool_name=event.tool_name,
-                    fact_key=f"gate/resolved_error/{event.tool_name}/{_h8(event.session_id, event.tool_name, prior_error)}",
+                    fact_key=f"gate/resolved_error/{event.tool_name}/{_h8(event.tool_name, prior_error)}",
                     value=(
-                        f"Tool `{event.tool_name}` failed then later succeeded in the same session "
+                        f"Tool `{event.tool_name}` failed then later succeeded "
                         f"(a resolved mistake). Error was: {prior_error} "
                         f"Success followed: {_preview(event.output)} "
                         "(auto-captured by the prediction-error gate; pending consolidation)"
@@ -113,6 +126,9 @@ class WriteGate:
                 )
             elif event.tool_name not in self._seen_tools:
                 self._seen_tools.add(event.tool_name)
+                # Value is deliberately STABLE (no output preview — critic m5): the
+                # store-level corroboration touch makes restart re-fires a no-op
+                # instead of supersede churn.
                 await self._capture(
                     tier="novelty",
                     session_id=event.session_id,
@@ -120,7 +136,6 @@ class WriteGate:
                     fact_key=f"gate/novelty/{event.tool_name}",
                     value=(
                         f"First successful use of tool `{event.tool_name}` observed. "
-                        f"Result preview: {_preview(event.output)} "
                         "(auto-captured by the novelty gate; pending consolidation)"
                     ),
                     detail="first-of-its-kind tool use",

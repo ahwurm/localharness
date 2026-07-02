@@ -206,6 +206,28 @@ async def test_gate_stuck_recovered_and_novelty(store: MemoryStore):
 
 
 @pytest.mark.asyncio
+async def test_gate_resolves_across_turns(store: MemoryStore):
+    """Critic M3: loop.py mints a fresh session_id per run_turn — the canonical flow
+    (fail in turn N, user says 'try again', succeed in turn N+1) MUST fire."""
+    from localharness.core.events import Observation
+    from localharness.memory.gate import WriteGate
+
+    bus = _FakeBus()
+    gate = WriteGate(store, bus, "wp-agent")
+    await gate._on_observation(Observation(
+        agent_id="wp-agent", session_id="turn-1", observation_type="tool_result",
+        tool_name="edit", output="", error="old_string not found"))
+    await gate._on_observation(Observation(
+        agent_id="wp-agent", session_id="turn-2", observation_type="tool_result",
+        tool_name="edit", output="edited", error=None))
+
+    fired = [e for e in bus.published if e.event_type == "MemoryGateFired" and e.tier == "resolved_error"]
+    assert len(fired) == 1
+    fact = await store.get_fact(fired[0].fact_key)
+    assert fact.provenance == "turn-2"  # the session that RESOLVED it
+
+
+@pytest.mark.asyncio
 async def test_gate_never_raises_into_the_loop(store: MemoryStore, monkeypatch):
     from localharness.core.events import Observation
     from localharness.memory.gate import WriteGate

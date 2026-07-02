@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -223,8 +224,12 @@ SCHEMA_V2_SQL = _FACTS_TABLE_V2 + _FACTS_INDEXES_V2 + _FACTS_FTS_AND_TRIGGERS + 
 
 # In-place v1→v2 rebuild: SQLite cannot drop a UNIQUE table constraint, so the table is
 # rebuilt (rename → recreate → copy → drop), triggers/indexes recreated, FTS re-synced.
+# CRASH-SAFE (Phase-29 critic M1): the whole script is ONE transaction that stamps
+# user_version as its last statement — a crash anywhere rolls back to intact v1 and the
+# next open() retries cleanly; a crash after COMMIT never re-runs (version stamped).
 MIGRATION_V1_TO_V2_SQL = (
     """
+BEGIN IMMEDIATE;
 DROP TRIGGER IF EXISTS facts_ai;
 DROP TRIGGER IF EXISTS facts_ad;
 DROP TRIGGER IF EXISTS facts_au;
@@ -245,6 +250,8 @@ DROP TABLE facts_v1_old;
     + _FACTS_FTS_AND_TRIGGERS
     + """
 INSERT INTO facts_fts(facts_fts) VALUES('rebuild');
+PRAGMA user_version = 2;
+COMMIT;
 """
 )
 
@@ -263,6 +270,7 @@ INSERT INTO facts_fts(facts_fts) VALUES('rebuild');
 # ---------------------------------------------------------------------------
 
 MIGRATION_V2_TO_V3_SQL = """
+BEGIN IMMEDIATE;
 ALTER TABLE facts ADD COLUMN retrieval_strength REAL NOT NULL DEFAULT 0.5;
 ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 0.0;
 ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
@@ -284,6 +292,8 @@ CREATE TRIGGER facts_au AFTER UPDATE OF key, value, tags ON facts BEGIN
     INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
     INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
 END;
+PRAGMA user_version = 3;
+COMMIT;
 """
 
 
@@ -339,9 +349,25 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     async def open(self) -> None:
-        """Open SQLite connection, enable WAL mode, apply pending migrations."""
+        """Open SQLite connection, enable WAL mode, apply pending migrations.
+
+        Critic M2: any failure after connect closes the connection before re-raising —
+        aiosqlite's worker thread is non-daemon, and a leaked handle hangs process exit.
+        """
         self._agent_dir.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
+        try:
+            await self._open_inner()
+        except BaseException:
+            db, self._db = self._db, None
+            try:
+                await db.close()
+            except Exception:
+                pass
+            raise
+
+    async def _open_inner(self) -> None:
+        assert self._db is not None
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode = WAL")
         await self._db.execute("PRAGMA synchronous = NORMAL")
@@ -369,23 +395,30 @@ class MemoryStore:
             )
 
     async def _apply_migrations(self) -> None:
+        """Stepwise ladder; each rewrite script is a single transaction that stamps
+        user_version itself (critic M1: crash → rollback → clean retry; never a
+        half-migrated DB, never a double-run)."""
         assert self._db is not None
-        async with self._db.execute("PRAGMA user_version") as cur:
-            row = await cur.fetchone()
-            current_version = row[0]
-        original_version = current_version
-        if current_version == 0:
+
+        async def _version() -> int:
+            async with self._db.execute("PRAGMA user_version") as cur:
+                row = await cur.fetchone()
+            return row[0]
+
+        v = await _version()
+        if v == 0:
+            # Fresh DB: idempotent DDL, so stamping after is safe (a crash between
+            # script and stamp re-runs harmlessly thanks to IF NOT EXISTS).
             await self._db.executescript(SCHEMA_V2_SQL)
-            current_version = 2
-        elif current_version == 1:
-            await self._db.executescript(MIGRATION_V1_TO_V2_SQL)
-            current_version = 2
-        if current_version == 2:
-            await self._db.executescript(MIGRATION_V2_TO_V3_SQL)
-            current_version = 3
-        if original_version < CURRENT_SCHEMA_VERSION:
-            await self._db.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+            await self._db.execute("PRAGMA user_version = 2")
             await self._db.commit()
+            v = 2
+        if v == 1:
+            await self._db.executescript(MIGRATION_V1_TO_V2_SQL)
+            v = await _version()
+        if v == 2:
+            await self._db.executescript(MIGRATION_V2_TO_V3_SQL)
+            v = await _version()
 
     async def close(self) -> None:
         """Unsubscribe from bus, close SQLite connection."""
@@ -415,6 +448,7 @@ class MemoryStore:
         expires_at: int | None = None,
         provenance: str | None = None,
         node_kind: str = "fact",
+        _retried: bool = False,
     ) -> Fact:
         """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04).
 
@@ -440,11 +474,14 @@ class MemoryStore:
         existing = await self._get_fact_row(key)
         if existing is not None and existing.value == value:
             # Corroboration: same claim re-asserted — strengthen, don't duplicate.
+            # expires_at follows the NEW call (critic m2: re-asserting an expired fact
+            # must revive it, matching v1 upsert semantics; None clears expiry).
             await self._db.execute(
                 "UPDATE facts SET updated_at = ?, confidence = MAX(confidence, ?), "
+                "expires_at = ?, "
                 "source = CASE WHEN ? = '' THEN source ELSE ? END "
                 "WHERE agent_id = ? AND key = ? AND status = 'active'",
-                (now, confidence, source, source, self._agent_id, key),
+                (now, confidence, expires_at, source, source, self._agent_id, key),
             )
             await self._db.commit()
         else:
@@ -458,14 +495,27 @@ class MemoryStore:
                     "WHERE agent_id = ? AND key = ? AND status = 'active'",
                     (now, self._agent_id, key),
                 )
-            cur = await self._db.execute(
-                "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
-                "source, created_at, updated_at, expires_at, status, provenance, importance, node_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-                (self._agent_id, self._division_id, self._org_id, key, value,
-                 tags_json, confidence, source, now, now, expires_at, prov,
-                 _importance_prior(tags or [], source), node_kind),
-            )
+            try:
+                cur = await self._db.execute(
+                    "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
+                    "source, created_at, updated_at, expires_at, status, provenance, importance, node_kind) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                    (self._agent_id, self._division_id, self._org_id, key, value,
+                     tags_json, confidence, source, now, now, expires_at, prov,
+                     _importance_prior(tags or [], source), node_kind),
+                )
+            except sqlite3.IntegrityError:
+                # Critic m4: two concurrent writers raced past the existence check (the
+                # partial-unique index is the backstop). Retry once — the loser now sees
+                # the winner's row and corroborates/supersedes normally.
+                await self._db.rollback()
+                if _retried:
+                    raise
+                return await self.store_fact(
+                    key, value, tags=tags, confidence=confidence, source=source,
+                    expires_at=expires_at, provenance=provenance, node_kind=node_kind,
+                    _retried=True,
+                )
             new_id = cur.lastrowid
             if existing is not None:
                 await self._db.execute(
@@ -542,7 +592,11 @@ class MemoryStore:
         return [_row_to_fact(r) for r in rows]
 
     async def delete_fact(self, key: str) -> bool:
-        """Delete a fact by key. Returns True if a row was deleted."""
+        """Hard-DELETE a fact by key. Returns True if a row was deleted.
+
+        ⚠️ v2.0 (critic m7): this contradicts supersede-never-delete — it exists for
+        explicit user-initiated removal only. Harness code must use store_fact
+        (supersede) instead; no production path calls this."""
         assert self._db is not None
         async with self._db.execute(
             "DELETE FROM facts WHERE agent_id = ? AND key = ?",
@@ -559,6 +613,10 @@ class MemoryStore:
 
         status_filter = "" if query.include_superseded else "AND f.status = 'active'"
         fts_text = _sanitize_fts_query(query.text) if query.text else ""
+        if query.text and not fts_text:
+            # Critic m1: a query that sanitizes to nothing must NOT fall back to the
+            # recency listing — unrelated facts would render as "matches".
+            return []
         prefixed_cols = ", ".join(f"f.{c}" for c in self._FACT_COLS.split(", "))
 
         # Tool-path ranking is the FULL fused score — fresh, staged counters included,
