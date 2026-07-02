@@ -891,7 +891,12 @@ def build_chunk_summarizer_config(name: str = "chunk-summarizer", kill_file: str
 
 _CRUNCHER_DEFAULT_CHUNK_CHARS = 8_000
 _CRUNCHER_MAX_LEAVES = 64  # bound the fan-out; an over-long doc is NOTED, never silently truncated
-_CRUNCHER_MAP_CONCURRENCY = 8  # leaves are independent → run this many at once (vLLM batches them)
+# Serial by default (2026-07-02 DGX Spark freeze postmortem): N-way map = N concurrent prefills,
+# a memory spike that on unified-memory boxes competes with ALL host RAM — while decode is
+# engine-serialized, so the map's wall-clock gain on one GPU is ~nil. The provider inference gate
+# serializes requests anyway; keeping the map at 1 also avoids N live leaf loops' host RAM.
+# Raise only on boxes with genuine headroom.
+_CRUNCHER_MAP_CONCURRENCY = max(1, int(os.environ.get("LOCALHARNESS_CRUNCHER_MAP_CONCURRENCY", "1")))
 
 
 def _cruncher_chunk_chars(max_context_tokens: int | None) -> int:

@@ -33,14 +33,22 @@ def _fake_httpx(monkeypatch, *, text, content_type="text/html"):
             self.text = text
             self.headers = {"content-type": content_type}
             self.url = "https://news.test/article"
+            self.encoding = "utf-8"
         def raise_for_status(self): pass
         def json(self): return None
+        async def aiter_bytes(self):
+            yield text.encode("utf-8")
+
+    class _Stream:
+        async def __aenter__(self): return _Resp()
+        async def __aexit__(self, *a): return False
 
     class _Client:
         def __init__(self, *a, **k): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
         async def get(self, url, **k): return _Resp()
+        def stream(self, method, url, **k): return _Stream()
 
     monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
 

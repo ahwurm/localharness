@@ -1,14 +1,24 @@
 """OpenAI-compatible async LLM client with XML fallback and local timeout handling."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import re
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import openai
 from openai import AsyncOpenAI
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: no cross-process lock, in-process semaphore still applies
+    fcntl = None  # type: ignore[assignment]
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, ToolCall, ToolSchema
@@ -117,6 +127,60 @@ class MalformedResponseError(ProviderError):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Inference gate — serialize requests to the shared local GPU
+# ---------------------------------------------------------------------------
+# One local GPU serves every harness process on the box, and concurrency toward it
+# multiplies concurrent prefills. On unified-memory hosts (DGX Spark class) those
+# allocations compete with ALL host RAM, and the observed failure mode is not a slow
+# queue but a hard system freeze: NVRM cannot allocate → SoC wedge (2026-07-02, two
+# overlapping harness processes on a 119 GiB box). Decode is engine-serialized anyway,
+# so concurrency buys ~no wall-clock on a single GPU. Serial is therefore the default,
+# at two independent layers; remote endpoints are ungated (provider limits apply there):
+#   in-process  — asyncio.Semaphore; LOCALHARNESS_MAX_CONCURRENT_INFERENCE (default 1)
+#   cross-proc  — flock on a per-endpoint lockfile; LOCALHARNESS_INFERENCE_LOCK=0 disables
+_MAX_CONCURRENT_INFERENCE = max(1, int(os.environ.get("LOCALHARNESS_MAX_CONCURRENT_INFERENCE", "1")))
+_inference_sem = asyncio.Semaphore(_MAX_CONCURRENT_INFERENCE)
+_INFERENCE_LOCK_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_LOCK", "1") != "0"
+
+
+def _inference_lock_path(base_url: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9.]+", "-", base_url.split("://", 1)[-1]).strip("-")
+    return os.path.join(tempfile.gettempdir(), f"localharness-inference-{safe}.lock")
+
+
+@asynccontextmanager
+async def _inference_gate(config: LLMConfig):
+    """Hold for the FULL request including stream consumption — the GPU is occupied
+    until the last token, not until the HTTP call returns."""
+    if not config.is_local:
+        yield
+        return
+    async with _inference_sem:
+        if not _INFERENCE_LOCK_ENABLED or fcntl is None:
+            yield
+            return
+        fd = None
+        try:
+            try:
+                fd = os.open(_inference_lock_path(config.base_url), os.O_CREAT | os.O_RDWR, 0o666)
+            except OSError as exc:
+                # Unwritable tmp / foreign-owned lockfile: degrade to in-process gating —
+                # never let the safety layer itself block inference.
+                log.warning("inference lock unavailable (%s) — cross-process gating disabled", exc)
+                yield
+                return
+            t0 = time.monotonic()
+            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+            waited = time.monotonic() - t0
+            if waited > 5:
+                log.info("inference gate: waited %.1fs for another process's generation", waited)
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)  # releases the flock; kernel also releases on process death
+
+
 def _tools_to_api_format(tools: list[ToolSchema]) -> list[dict]:
     """Serialize ToolSchema list to OpenAI tools API format."""
     result = []
@@ -176,19 +240,20 @@ class LLMClient:
         ]
 
         try:
-            response = await self._client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "What files are in the current directory?"},
-                ],
-                tools=probe_tools,
-                # Generous cap: preamble-prone models spend 30+ tokens narrating before
-                # the call; at 64 the call got truncated and the probe misread a
-                # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
-                max_tokens=256,
-                temperature=0.0,
-            )
+            async with _inference_gate(self.config):
+                response = await self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "What files are in the current directory?"},
+                    ],
+                    tools=probe_tools,
+                    # Generous cap: preamble-prone models spend 30+ tokens narrating before
+                    # the call; at 64 the call got truncated and the probe misread a
+                    # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
+                    max_tokens=256,
+                    temperature=0.0,
+                )
             msg = response.choices[0].message
             if msg.tool_calls:
                 tool_call_mode = "native"
@@ -300,13 +365,14 @@ class LLMClient:
             # model-agnostic: it disables thinking where supported, is ignored elsewhere.
             if self.config.is_local:
                 kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-            if stream:
-                kwargs["stream"] = True
-                kwargs["stream_options"] = {"include_usage": True}
+            async with _inference_gate(self.config):
+                if stream:
+                    kwargs["stream"] = True
+                    kwargs["stream_options"] = {"include_usage": True}
+                    response = await self._client.chat.completions.create(**kwargs)
+                    return await self._consume_native_stream(response, on_token)
                 response = await self._client.chat.completions.create(**kwargs)
-                return await self._consume_native_stream(response, on_token)
-            response = await self._client.chat.completions.create(**kwargs)
-            return response.choices[0].message, response.usage
+                return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -390,7 +456,10 @@ class LLMClient:
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            # Gate scoped to the create alone: the except-path re-enters via
+            # _complete_xml_fallback, which takes its own turn at the gate.
+            async with _inference_gate(self.config):
+                response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except openai.BadRequestError:
             # Server rejected tools/extra_body — fall back to system prompt injection
@@ -427,7 +496,8 @@ class LLMClient:
         if self.config.is_local:
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            async with _inference_gate(self.config):
+                response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except Exception as exc:
             raise self._wrap_error(exc) from exc
