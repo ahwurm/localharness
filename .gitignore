@@ -20,14 +20,13 @@ bench/results/
 .planning/
 docs/competitive/
 
+# Live dogfood artifacts (search-verifier ledger writes here per UTC day)
+reports/
+
 # Local tool settings
 .claude/
 
-# Internal-only docs and scratch (not part of the public project)
+# Local steering docs + architect trail (local-only, not part of the public repo)
 /CLAUDE.md
 /INDEX.md
 /ARCHITECT-REVIEW.md
-/sessiontask.md
-/test-brief.md
-/gtm-plan-*.md
-/MACMINI-*.md
