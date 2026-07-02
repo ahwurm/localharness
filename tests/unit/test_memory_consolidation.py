@@ -211,6 +211,76 @@ async def test_over_cap_admission_never_blocks_and_pass_trims(store: MemoryStore
 
 
 # ---------------------------------------------------------------------------
+# Phase-31 critic dispositions (BLOCKER 2, M1, M4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_same_run_promotion_survives_cap_trim(store: MemoryStore):
+    """Critic BLOCKER 2: a freshly promoted record (zero access history = lowest slow
+    score) must not be demoted by the cap-trim of the very pass that promoted it."""
+    import time as _t
+    cfg = _cfg(max_active_facts=8)
+    now = int(_t.time())
+    for i in range(9):  # established facts with real access history, already at cap
+        await store.store_fact(f"veteran-{i}", f"old body {i}")
+    await store._db.execute(
+        "UPDATE facts SET access_count = 5, last_accessed_at = ? WHERE key LIKE 'veteran-%'",
+        (now,),
+    )
+    await store._db.commit()
+    await _seed_candidate(store, "bash_exec", "s1", "err one")
+    await _seed_candidate(store, "bash_exec", "s2", "err two")
+
+    report = await ConsolidationPass(store, cfg).run()
+    assert report.promoted == 1 and report.demoted > 0
+    promoted = await store.get_fact("learned/bash_exec/resolved_error")
+    assert promoted.retrieval_strength >= 0.2  # visible in the index, NOT self-demoted
+    assert "learned/bash_exec/resolved_error" in await store._render_memory_index(10)
+
+
+@pytest.mark.asyncio
+async def test_salient_single_episode_promotes(store: MemoryStore):
+    """Critic M1: the APPROACH §C salience-flag route — a stuck-recovery (tagged
+    salient by the gate) promotes on ONE episode; recurrence is not required."""
+    await store.store_fact(
+        key="gate/stuck_recovered/abc12345",
+        value="Agent got stuck (repeated `read:x`) and recovered at iteration 7.",
+        tags=["gate", "tier:stuck_recovered", "pending_consolidation", "salient"],
+        confidence=0.6, source="write_gate", provenance="s1",
+    )
+    report = await ConsolidationPass(store, _cfg()).run()
+    assert report.promoted == 1
+    promoted = await store.get_fact("learned/abc12345/stuck_recovered")
+    assert promoted is not None and promoted.confidence >= 0.7
+
+
+@pytest.mark.asyncio
+async def test_verify_against_leaf_rejects_shared_common_word(store: MemoryStore):
+    """Critic M4: a confabulated claim sharing ONE common ≥6-char word with the corpus
+    ('contains') must be rejected — majority-token grounding required."""
+    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "assistant_message",
+                                "id": "1", "session_id": "s", "ts": 1,
+                                "content": "The database contains customer records"})
+    llm = _FakeLLM("The production database contains unencrypted admin passwords for all customers")
+    report = await ConsolidationPass(store, _cfg(), llm=llm).run()
+    assert report.replayed_claims == 0  # confidently-alarming junk stays OUT
+
+
+@pytest.mark.asyncio
+async def test_demoted_fact_recovers_through_use(store: MemoryStore):
+    """Critic minor 2 / RANK-03 'bumped on confirmed recall': heavy use restores a
+    demoted fact's retrieval strength via the fold — demotion is not a one-way door."""
+    await store.store_fact("comeback", "demoted then heavily used")
+    await store._db.execute("UPDATE facts SET retrieval_strength = 0.15 WHERE key='comeback'")
+    await store._db.commit()
+    for _ in range(3):
+        await store.touch_staged(["comeback"])
+    await store.fold_staged_access()
+    fact = await store.get_fact("comeback")
+    assert fact.retrieval_strength >= 0.2  # 0.15 + 3*0.05 → back above the index gate
+
+
+# ---------------------------------------------------------------------------
 # CONS-06: quality proxies
 # ---------------------------------------------------------------------------
 

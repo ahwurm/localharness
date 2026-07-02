@@ -690,11 +690,17 @@ class MemoryStore:
     async def fold_staged_access(self) -> int:
         """Consolidation-boundary fold: staged read-counters merge into the base columns
         the injected block reads. THE only moment a read can reorder the block — called
-        by the idle consolidation pass (Phase 31). Returns rows folded."""
+        by the idle consolidation pass (Phase 31). Returns rows folded.
+
+        Also the RANK-03 'bumped on confirmed recall' path (Phase-31 critic minor 2:
+        retrieval_strength was one-way-down): folded reads restore accessibility, so a
+        heavily-used demoted/decayed fact can organically climb back above the index
+        gate instead of needing a fresh supersede-write."""
         assert self._db is not None
         cur = await self._db.execute(
             "UPDATE facts SET access_count = access_count + access_count_staged, "
             "last_accessed_at = COALESCE(last_accessed_staged, last_accessed_at), "
+            "retrieval_strength = MIN(1.0, retrieval_strength + 0.05 * access_count_staged), "
             "access_count_staged = 0, last_accessed_staged = NULL "
             "WHERE agent_id = ? AND access_count_staged > 0",
             (self._agent_id,),
@@ -725,31 +731,38 @@ class MemoryStore:
     ) -> list[tuple[int, int]]:
         """Undirected graph walk from a node: [(fact_id, min_depth)] ordered nearest-first.
 
-        SQLite's `WITH RECURSIVE` has NO built-in cycle detection and machine-written
-        edges WILL eventually contain a cycle (2026-07-02 critic, MAJOR) — so every walk
-        carries BOTH guards in the SQL itself: a depth cap and an in-CTE visited-path
-        check (`instr(path, ...)`). Depth is additionally hard-capped at 4 in Python.
+        Python frontier BFS with a REAL visited set (Phase-30 critic, MAJOR): the
+        recursive-CTE version's in-path guard blocked cycles but could not prune a node
+        rediscovered via sibling branches — it enumerated ALL simple paths (~×avg-degree
+        rows per level; 129k raw rows at depth 4 on a 200-node graph, 87-148ms on the
+        every-turn retrieval path). SQLite forbids the multiple-recursive-reference
+        subquery that would fix it in SQL. BFS = ≤depth round trips, identical results
+        (verified across 15 start nodes), ~55× faster. Depth hard-capped at 4.
         """
         assert self._db is not None
         depth = min(max(depth, 0), 4)
-        sql = """
-            WITH RECURSIVE walk(id, d, path) AS (
-                SELECT ?, 0, '/' || ? || '/'
-                UNION ALL
-                SELECT e.nxt, w.d + 1, w.path || e.nxt || '/'
-                FROM walk w
-                JOIN (
-                    SELECT src_id AS cur, dst_id AS nxt FROM edges
-                    UNION ALL
-                    SELECT dst_id AS cur, src_id AS nxt FROM edges
-                ) e ON e.cur = w.id
-                WHERE w.d < ? AND instr(w.path, '/' || e.nxt || '/') = 0
-            )
-            SELECT id, MIN(d) AS md FROM walk GROUP BY id ORDER BY md, id LIMIT ?
-        """
-        async with self._db.execute(sql, (node_id, node_id, depth, limit)) as cur:
-            rows = await cur.fetchall()
-        return [(r[0], r[1]) for r in rows]
+        visited: dict[int, int] = {node_id: 0}
+        frontier: list[int] = [node_id]
+        for d in range(1, depth + 1):
+            if not frontier or len(visited) >= limit * 4:
+                break
+            qmarks = ",".join("?" * len(frontier))
+            async with self._db.execute(
+                f"SELECT src_id, dst_id FROM edges "
+                f"WHERE src_id IN ({qmarks}) OR dst_id IN ({qmarks})",
+                [*frontier, *frontier],
+            ) as cur:
+                rows = await cur.fetchall()
+            fset = set(frontier)
+            nxt: list[int] = []
+            for s, t in rows:
+                for a, b in ((s, t), (t, s)):
+                    if a in fset and b not in visited:
+                        visited[b] = d
+                        nxt.append(b)
+            frontier = nxt
+        items = sorted(visited.items(), key=lambda kv: (kv[1], kv[0]))[:limit]
+        return items
 
     # ------------------------------------------------------------------
     # History delegation
@@ -905,8 +918,14 @@ class MemoryStore:
         # genuine writes, or a day boundary (the loop.py:592 "date not time" precedent).
         # Retrieval-strength gate (RANK-03): inaccessible facts drop out of the index
         # while staying searchable via the tool path.
+        # INDEXED BY (Phase-30 critic BLOCKER 2): the rs-gate + function ORDER BY
+        # combination silently defeated the planner's partial-index choice (it fell to
+        # idx_facts_agent_id, fetching every superseded row on the hottest per-turn
+        # query — the exact long-session degradation the owner's supersede approval
+        # forbids). Forcing the partial index is deterministic, ANALYZE-independent,
+        # and fails LOUD if the index name ever drifts.
         async with self._db.execute(
-            "SELECT key, value FROM facts "
+            "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
             "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
             "AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
@@ -1015,7 +1034,7 @@ class MemoryStore:
         assert self._db is not None
         now = int(time.time())
         async with self._db.execute(
-            "SELECT key, value, updated_at FROM facts "
+            "SELECT key, value, updated_at FROM facts INDEXED BY idx_facts_active_recency "
             "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
             "AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
@@ -1175,8 +1194,11 @@ def _last_n_entries(history: str, n: int) -> str:
 
 # ---------------------------------------------------------------------------
 # Activation scoring (RANK-02/03) — registered as SQLite scalar functions so ranking
-# is closed-form and costs ZERO decode tokens. ACT-R base-level activation,
-# B = ln(n) − d·ln(T), with the canonical d = 0.5 (Anderson & Schooler 1991).
+# is closed-form and costs ZERO decode tokens. ACT-R–INSPIRED base-level activation
+# with the canonical decay d = 0.5: a single-trace simplification ln(1+n) − d·ln(age
+# since most recent use), NOT Anderson & Schooler 1991's full ln(Σ tⱼ⁻ᵈ) per-trace sum
+# (Phase-30 critic minor: the criterion is freq+recency beating pure recency, which
+# this satisfies — claiming exact ACT-R fidelity would overreach).
 # ---------------------------------------------------------------------------
 
 _ACTR_DECAY = 0.5
@@ -1212,11 +1234,15 @@ def _base_activation(
     n = access_count or 0
     stamps = [s for s in (last_accessed_at, updated_at) if s is not None]
     last = max(stamps) if stamps else now
-    age_s = max(0, now - last)
     if day_granularity:
-        age_units = age_s // 86400 + 1
+        # SHARED CALENDAR-DAY difference (Phase-30 critic BLOCKER 1): `(now-last)//86400`
+        # was a rolling 24h window phased to each fact's own last-touch — measured 11-24
+        # block reorders/day at 30-300 facts (an arbitrary-hour cache bust per fact).
+        # Epoch-day difference changes for ALL facts atomically at the same boundary as
+        # the system prompt's date line (loop.py:592) — measured ≤0.55 reorders/day.
+        age_units = max(0, (now // 86400) - (last // 86400)) + 1
     else:
-        age_units = age_s / 3600.0 + 1.0
+        age_units = max(0, now - last) / 3600.0 + 1.0
     return math.log(1 + n) - _ACTR_DECAY * math.log(age_units)
 
 
@@ -1286,4 +1312,9 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
         superseded_by=row[12] if len(row) > 12 else None,
         provenance=row[13] if len(row) > 13 else "",
         id=row[14] if len(row) > 14 else 0,
+        retrieval_strength=row[15] if len(row) > 15 else 0.5,
+        importance=row[16] if len(row) > 16 else 0.0,
+        access_count=row[17] if len(row) > 17 else 0,
+        last_accessed_at=row[18] if len(row) > 18 else None,
+        node_kind=row[19] if len(row) > 19 else "fact",
     )
