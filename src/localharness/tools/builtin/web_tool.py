@@ -18,6 +18,11 @@ from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 _FETCH_DEFAULT_CHARS = 5000   # ~1.2k tokens — page through with start_index instead of raising
 _FETCH_MAX_CHARS = 20000      # hard ceiling regardless of caller request
+# Byte cap on the DOWNLOAD itself. Lossless retention made the full body load-bearing, and an
+# unbounded resp.text materializes whatever the server sends (~3-4x transiently after decode +
+# strip) — one pathological URL was a whole-box OOM vector on unified-memory hosts. 4 MB of
+# HTML/text exceeds any article; the cap is surfaced in the retained page, never silent.
+_FETCH_MAX_BODY_BYTES = max(100_000, int(os.environ.get("LOCALHARNESS_FETCH_MAX_BODY_BYTES", "4000000")))
 _UA = "Mozilla/5.0 (compatible; LocalHarness/0.1; +https://localharness.dev)"
 
 # Opt-in self-hosted metasearch: set LOCALHARNESS_SEARXNG_URL to a SearXNG /search endpoint to
@@ -185,17 +190,29 @@ class WebFetchTool(Tool):
             return self.err("internal addresses are not fetchable", error_type="validation_error")
         cap = max(500, min(int(max_chars), _FETCH_MAX_CHARS))
         start = max(0, int(start_index))
+        capped = False
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=20.0,
                                          headers={"User-Agent": _UA}) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.aiter_bytes():
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= _FETCH_MAX_BODY_BYTES:
+                            capped = True
+                            break
         except httpx.HTTPError as exc:
             return self.err(f"fetch failed: {exc}")
         ctype = resp.headers.get("content-type", "")
-        body = resp.text
+        body = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
         is_html = not ("text/plain" in ctype or "json" in ctype)
         text = body if not is_html else _html_to_text(body)
+        if capped:
+            text += (f"\n[download capped at {_FETCH_MAX_BODY_BYTES} bytes — the rest of this page "
+                     f"was not retrieved; the retained text is a PREFIX, not the full page]")
         # JS-salvage (HTML only): stdlib extraction yields ~nothing on JS-rendered / blocking pages.
         # Say so explicitly (don't invite a wasted re-fetch) and rescue the <title> (often the
         # headline figure) so the call is not a total loss.

@@ -510,13 +510,21 @@ def _fake_httpx_client(monkeypatch, page_text: str):
         text = page_text
         headers = {"content-type": "text/plain"}
         url = "https://example.test/page"
+        encoding = "utf-8"
         def raise_for_status(self): pass
+        async def aiter_bytes(self):
+            yield page_text.encode("utf-8")
+
+    class _Stream:
+        async def __aenter__(self): return _Resp()
+        async def __aexit__(self, *a): return False
 
     class _Client:
         def __init__(self, *a, **k): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
         async def get(self, url): return _Resp()
+        def stream(self, method, url, **k): return _Stream()
 
     monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
 

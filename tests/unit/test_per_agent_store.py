@@ -75,12 +75,32 @@ def _fake_httpx_by_url(monkeypatch, mapping):
             self.text = text
             self.headers = {"content-type": "text/plain"}
             self.url = "https://x.test/"
+            self.encoding = "utf-8"
 
         def raise_for_status(self):
             pass
 
         def json(self):
             return None
+
+        async def aiter_bytes(self):
+            yield self.text.encode("utf-8")
+
+    def _resp_for(url):
+        for key, text in mapping.items():
+            if key in url:
+                return _Resp(text)
+        return _Resp("unmapped")
+
+    class _Stream:
+        def __init__(self, url):
+            self._url = url
+
+        async def __aenter__(self):
+            return _resp_for(self._url)
+
+        async def __aexit__(self, *a):
+            return False
 
     class _Client:
         def __init__(self, *a, **k):
@@ -93,10 +113,10 @@ def _fake_httpx_by_url(monkeypatch, mapping):
             return False
 
         async def get(self, url, **k):
-            for key, text in mapping.items():
-                if key in url:
-                    return _Resp(text)
-            return _Resp("unmapped")
+            return _resp_for(url)
+
+        def stream(self, method, url, **k):
+            return _Stream(url)
 
     monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
 
