@@ -59,6 +59,14 @@ class MemorySearchTool(Tool):
             return self.err(f"Memory search failed: {exc}")
         if not facts:
             return self.ok(f"No facts matched '{query}'.")
+        # Reads bump STAGED counters only (RANK-04): ranking learns from use without
+        # ever reordering the injected block mid-conversation.
+        touch = getattr(self._mem, "touch_staged", None)
+        if touch is not None:
+            try:
+                await touch([f.key for f in facts])
+            except Exception:
+                pass  # staging is best-effort; retrieval must never fail on it
         lines = []
         for f in facts:
             snippet = (f.value or "").strip().replace("\n", " ")
@@ -169,4 +177,10 @@ class MemoryGetTool(Tool):
             return self.err(f"Memory get failed: {exc}")
         if fact is None:
             return self.err(f"No fact named '{name}'.", error_type="not_found")
+        touch = getattr(self._mem, "touch_staged", None)
+        if touch is not None:
+            try:
+                await touch([fact.key])
+            except Exception:
+                pass
         return self.ok(fact.value)

@@ -47,6 +47,12 @@ class Fact:
     # Episodic source pointer (session_id or origin) — hippocampal indexing (WRITE-04).
     provenance: str = ""
     id: int = 0
+    # v3 (RANK): trust/accessibility split + ACT-R use-counters + graph node kind.
+    retrieval_strength: float = 0.5
+    importance: float = 0.0
+    access_count: int = 0
+    last_accessed_at: int | None = None
+    node_kind: str = "fact"
 
 
 @dataclass(frozen=True)
@@ -72,7 +78,7 @@ class MemoryContext:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -242,6 +248,44 @@ INSERT INTO facts_fts(facts_fts) VALUES('rebuild');
 """
 )
 
+# ---------------------------------------------------------------------------
+# Schema v3 — activation scoring (RANK-01..05). Additive:
+# - ACT-R columns: access_count/last_accessed_at (BASE — the injected block's ordering
+#   reads ONLY these) + *_staged twins (reads bump staging ONLY; folded at consolidation
+#   boundaries so the injected block is byte-stable between consolidations, RANK-04).
+# - confidence split (RANK-03): confidence stays trust (stable); retrieval_strength is
+#   accessibility (decays with disuse — decay itself lands with consolidation, Phase 31;
+#   supersede drops it immediately); importance is the write-time tag-heuristic prior.
+# - typed graph (RANK-01): facts rows ARE the nodes (node_kind: fact|gist|schema);
+#   edges(src,dst,kind) carries derived_from/member_of/supports/contradicts.
+#   `supersedes` stays a facts column — it is the hot-path mechanism, not an edge.
+# - facts_au trigger narrowed to indexed columns so activation bumps never churn FTS.
+# ---------------------------------------------------------------------------
+
+MIGRATION_V2_TO_V3_SQL = """
+ALTER TABLE facts ADD COLUMN retrieval_strength REAL NOT NULL DEFAULT 0.5;
+ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE facts ADD COLUMN last_accessed_at INTEGER;
+ALTER TABLE facts ADD COLUMN access_count_staged INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE facts ADD COLUMN last_accessed_staged INTEGER;
+ALTER TABLE facts ADD COLUMN node_kind TEXT NOT NULL DEFAULT 'fact';
+CREATE TABLE IF NOT EXISTS edges (
+    src_id     INTEGER NOT NULL,
+    dst_id     INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (src_id, dst_id, kind)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id);
+DROP TRIGGER IF EXISTS facts_au;
+CREATE TRIGGER facts_au AFTER UPDATE OF key, value, tags ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
+    INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
+END;
+"""
+
 
 # ---------------------------------------------------------------------------
 # MemoryStore
@@ -303,6 +347,13 @@ class MemoryStore:
         await self._db.execute("PRAGMA synchronous = NORMAL")
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.execute("PRAGMA temp_store = MEMORY")
+        # Overlapping writers (agent loop vs idle consolidation) wait instead of throwing
+        # "database is locked" (critic CONS-02 groundwork).
+        await self._db.execute("PRAGMA busy_timeout = 5000")
+        # Activation scoring as registered scalar functions: zero-token ranking (RANK-02)
+        # without depending on SQLite being compiled with math functions.
+        await self._db.create_function("lh_slow_score", 5, _slow_score, deterministic=True)
+        await self._db.create_function("lh_fused_score", 7, _fused_score, deterministic=True)
         await self._apply_migrations()
 
         if self._bus is not None:
@@ -322,11 +373,17 @@ class MemoryStore:
         async with self._db.execute("PRAGMA user_version") as cur:
             row = await cur.fetchone()
             current_version = row[0]
+        original_version = current_version
         if current_version == 0:
             await self._db.executescript(SCHEMA_V2_SQL)
+            current_version = 2
         elif current_version == 1:
             await self._db.executescript(MIGRATION_V1_TO_V2_SQL)
-        if current_version < CURRENT_SCHEMA_VERSION:
+            current_version = 2
+        if current_version == 2:
+            await self._db.executescript(MIGRATION_V2_TO_V3_SQL)
+            current_version = 3
+        if original_version < CURRENT_SCHEMA_VERSION:
             await self._db.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             await self._db.commit()
 
@@ -392,17 +449,21 @@ class MemoryStore:
         else:
             if existing is not None:
                 # Supersede: vacate the active-unique slot, insert successor, then link.
+                # The loser's retrieval_strength drops immediately — interference: the old
+                # memory loses the retrieval competition, it is not erased (RANK-03).
                 await self._db.execute(
-                    "UPDATE facts SET status = 'superseded', updated_at = ? "
+                    "UPDATE facts SET status = 'superseded', updated_at = ?, "
+                    "retrieval_strength = MIN(retrieval_strength, 0.1) "
                     "WHERE agent_id = ? AND key = ? AND status = 'active'",
                     (now, self._agent_id, key),
                 )
             cur = await self._db.execute(
                 "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
-                "source, created_at, updated_at, expires_at, status, provenance) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+                "source, created_at, updated_at, expires_at, status, provenance, importance) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
                 (self._agent_id, self._division_id, self._org_id, key, value,
-                 tags_json, confidence, source, now, now, expires_at, prov),
+                 tags_json, confidence, source, now, now, expires_at, prov,
+                 _importance_prior(tags or [], source)),
             )
             new_id = cur.lastrowid
             if existing is not None:
@@ -420,7 +481,8 @@ class MemoryStore:
 
     _FACT_COLS = (
         "key, value, agent_id, division_id, org_id, tags, confidence, source, "
-        "created_at, updated_at, expires_at, status, superseded_by, provenance, id"
+        "created_at, updated_at, expires_at, status, superseded_by, provenance, id, "
+        "retrieval_strength, importance, access_count, last_accessed_at, node_kind"
     )
 
     async def _get_fact_row(self, key: str) -> Fact | None:
@@ -481,12 +543,14 @@ class MemoryStore:
 
         status_filter = "" if query.include_superseded else "AND f.status = 'active'"
         fts_text = _sanitize_fts_query(query.text) if query.text else ""
+        prefixed_cols = ", ".join(f"f.{c}" for c in self._FACT_COLS.split(", "))
 
+        # Tool-path ranking is the FULL fused score — fresh, staged counters included,
+        # BM25 relevance + ln(confidence) precision term (RANK-04: only the tool result,
+        # appended after the prefix cache, may re-rank freely on every call).
         if fts_text:
             sql = f"""
-                SELECT f.key, f.value, f.agent_id, f.division_id, f.org_id, f.tags,
-                       f.confidence, f.source, f.created_at, f.updated_at, f.expires_at,
-                       f.status, f.superseded_by, f.provenance, f.id
+                SELECT {prefixed_cols}
                 FROM facts f
                 JOIN facts_fts ON facts_fts.rowid = f.id
                 WHERE facts_fts MATCH ?
@@ -494,24 +558,30 @@ class MemoryStore:
                   AND f.confidence >= ?
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
-                ORDER BY rank
+                ORDER BY lh_fused_score(
+                    f.importance,
+                    f.access_count + f.access_count_staged,
+                    COALESCE(f.last_accessed_staged, f.last_accessed_at),
+                    f.updated_at, ?, f.confidence, rank) DESC
                 LIMIT ?
             """
-            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, query.limit]
+            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, now, query.limit]
         else:
             sql = f"""
-                SELECT f.key, f.value, f.agent_id, f.division_id, f.org_id, f.tags,
-                       f.confidence, f.source, f.created_at, f.updated_at, f.expires_at,
-                       f.status, f.superseded_by, f.provenance, f.id
+                SELECT {prefixed_cols}
                 FROM facts f
                 WHERE f.agent_id = ?
                   AND f.confidence >= ?
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
-                ORDER BY f.updated_at DESC
+                ORDER BY lh_fused_score(
+                    f.importance,
+                    f.access_count + f.access_count_staged,
+                    COALESCE(f.last_accessed_staged, f.last_accessed_at),
+                    f.updated_at, ?, f.confidence, 0.0) DESC
                 LIMIT ?
             """
-            params = [self._agent_id, query.min_confidence, now, query.limit]
+            params = [self._agent_id, query.min_confidence, now, now, query.limit]
 
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
@@ -522,6 +592,90 @@ class MemoryStore:
             facts = [f for f in facts if any(t in f.tags for t in query.tags)]
 
         return facts
+
+    # ------------------------------------------------------------------
+    # Activation staging + fold (RANK-02/04)
+    # ------------------------------------------------------------------
+
+    async def touch_staged(self, keys: list[str]) -> None:
+        """Record reads into the STAGING columns only — never anything the injected
+        block's ordering consumes, so a plain read can never void the prefix cache
+        (RANK-04, the 2026-07-02 critic's staging discipline)."""
+        if not keys:
+            return
+        assert self._db is not None
+        now = int(time.time())
+        await self._db.executemany(
+            "UPDATE facts SET access_count_staged = access_count_staged + 1, "
+            "last_accessed_staged = ? "
+            "WHERE agent_id = ? AND key = ? AND status = 'active'",
+            [(now, self._agent_id, k) for k in keys],
+        )
+        await self._db.commit()
+
+    async def fold_staged_access(self) -> int:
+        """Consolidation-boundary fold: staged read-counters merge into the base columns
+        the injected block reads. THE only moment a read can reorder the block — called
+        by the idle consolidation pass (Phase 31). Returns rows folded."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE facts SET access_count = access_count + access_count_staged, "
+            "last_accessed_at = COALESCE(last_accessed_staged, last_accessed_at), "
+            "access_count_staged = 0, last_accessed_staged = NULL "
+            "WHERE agent_id = ? AND access_count_staged > 0",
+            (self._agent_id,),
+        )
+        await self._db.commit()
+        return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # Typed graph (RANK-01): facts rows are the nodes; edges carry structure
+    # ------------------------------------------------------------------
+
+    EDGE_KINDS = frozenset({"derived_from", "member_of", "supports", "contradicts"})
+
+    async def add_edge(self, src_id: int, dst_id: int, kind: str) -> None:
+        """Insert a typed edge (idempotent). `supersedes` is NOT an edge kind — it stays
+        a facts column because it is the hot-path exclusion mechanism (RANK-05)."""
+        if kind not in self.EDGE_KINDS:
+            raise ValueError(f"unknown edge kind {kind!r}; allowed: {sorted(self.EDGE_KINDS)}")
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT OR IGNORE INTO edges (src_id, dst_id, kind, created_at) VALUES (?, ?, ?, ?)",
+            (src_id, dst_id, kind, int(time.time())),
+        )
+        await self._db.commit()
+
+    async def neighborhood(
+        self, node_id: int, *, depth: int = 2, limit: int = 50
+    ) -> list[tuple[int, int]]:
+        """Undirected graph walk from a node: [(fact_id, min_depth)] ordered nearest-first.
+
+        SQLite's `WITH RECURSIVE` has NO built-in cycle detection and machine-written
+        edges WILL eventually contain a cycle (2026-07-02 critic, MAJOR) — so every walk
+        carries BOTH guards in the SQL itself: a depth cap and an in-CTE visited-path
+        check (`instr(path, ...)`). Depth is additionally hard-capped at 4 in Python.
+        """
+        assert self._db is not None
+        depth = min(max(depth, 0), 4)
+        sql = """
+            WITH RECURSIVE walk(id, d, path) AS (
+                SELECT ?, 0, '/' || ? || '/'
+                UNION ALL
+                SELECT e.nxt, w.d + 1, w.path || e.nxt || '/'
+                FROM walk w
+                JOIN (
+                    SELECT src_id AS cur, dst_id AS nxt FROM edges
+                    UNION ALL
+                    SELECT dst_id AS cur, src_id AS nxt FROM edges
+                ) e ON e.cur = w.id
+                WHERE w.d < ? AND instr(w.path, '/' || e.nxt || '/') = 0
+            )
+            SELECT id, MIN(d) AS md FROM walk GROUP BY id ORDER BY md, id LIMIT ?
+        """
+        async with self._db.execute(sql, (node_id, node_id, depth, limit)) as cur:
+            rows = await cur.fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     # ------------------------------------------------------------------
     # History delegation
@@ -671,12 +825,20 @@ class MemoryStore:
         told it can call memory_get(name) / memory_search(query) for the full detail."""
         assert self._db is not None
         now = int(time.time())
+        # Injected-block ordering (RANK-02/04): importance + ACT-R base-level activation
+        # over the FOLDED columns only (staged read-counters are invisible here), with age
+        # quantized to DAYS — so the block's bytes change only at consolidation folds,
+        # genuine writes, or a day boundary (the loop.py:592 "date not time" precedent).
+        # Retrieval-strength gate (RANK-03): inaccessible facts drop out of the index
+        # while staying searchable via the tool path.
         async with self._db.execute(
             "SELECT key, value FROM facts "
             "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
+            "AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
-            "ORDER BY updated_at DESC",
-            (self._agent_id, now),
+            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
+            "updated_at DESC, key ASC",
+            (self._agent_id, now, now),
         ) as cur:
             rows = await cur.fetchall()
 
@@ -781,9 +943,11 @@ class MemoryStore:
         async with self._db.execute(
             "SELECT key, value, updated_at FROM facts "
             "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
+            "AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
-            "ORDER BY updated_at DESC",
-            (self._agent_id, now),
+            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
+            "updated_at DESC, key ASC",
+            (self._agent_id, now, now),
         ) as cur:
             rows = await cur.fetchall()
 
@@ -935,6 +1099,73 @@ def _last_n_entries(history: str, n: int) -> str:
     return "\n".join(lines[: max(0, n)]) if n > 0 else "(session history omitted)"
 
 
+# ---------------------------------------------------------------------------
+# Activation scoring (RANK-02/03) — registered as SQLite scalar functions so ranking
+# is closed-form and costs ZERO decode tokens. ACT-R base-level activation,
+# B = ln(n) − d·ln(T), with the canonical d = 0.5 (Anderson & Schooler 1991).
+# ---------------------------------------------------------------------------
+
+_ACTR_DECAY = 0.5
+
+# Write-time importance prior (RANK-03): a TAG HEURISTIC, never an LLM rater (VETO #1).
+_IMPORTANCE_PRIORS: dict[str, float] = {
+    "tier:resolved_error": 0.3,
+    "tier:stuck_recovered": 0.2,
+    "remember": 0.4,
+}
+
+
+def _importance_prior(tags: list[str], source: str) -> float:
+    candidates = [0.0] + [_IMPORTANCE_PRIORS[t] for t in tags if t in _IMPORTANCE_PRIORS]
+    if source == "remember":
+        candidates.append(_IMPORTANCE_PRIORS["remember"])
+    return max(candidates)
+
+
+def _base_activation(
+    access_count: int | None,
+    last_accessed_at: int | None,
+    updated_at: int | None,
+    now: int,
+    *,
+    day_granularity: bool,
+) -> float:
+    """ln(1 + n) − d·ln(age): n = folded access count; age measured from the most recent
+    of last-read/last-write. Day-granular for the injected block (byte-stable within a
+    day), continuous (hours) for the tool path."""
+    import math
+
+    n = access_count or 0
+    stamps = [s for s in (last_accessed_at, updated_at) if s is not None]
+    last = max(stamps) if stamps else now
+    age_s = max(0, now - last)
+    if day_granularity:
+        age_units = age_s // 86400 + 1
+    else:
+        age_units = age_s / 3600.0 + 1.0
+    return math.log(1 + n) - _ACTR_DECAY * math.log(age_units)
+
+
+def _slow_score(importance, access_count, last_accessed_at, updated_at, now) -> float:
+    """Injected-block score: importance + base-level over FOLDED columns, day-quantized.
+    Every input moves only at consolidation folds, genuine writes, or a day boundary —
+    the byte-stability discipline (RANK-04)."""
+    return (importance or 0.0) + _base_activation(
+        access_count, last_accessed_at, updated_at, now, day_granularity=True
+    )
+
+
+def _fused_score(importance, access_total, last_access, updated_at, now, confidence, bm25_rank) -> float:
+    """Tool-path score (SYNTHESIS §2, additive in log-odds): importance + base-level
+    (fresh, staged included, hour-granular) + ln(precision) − BM25 (SQLite bm25 is
+    smaller-is-better, typically negative — negate into a goodness term)."""
+    import math
+
+    base = _base_activation(access_total, last_access, updated_at, now, day_granularity=False)
+    conf = min(max(confidence if confidence is not None else 0.5, 1e-3), 1.0)
+    return (importance or 0.0) + base + math.log(conf) - (bm25_rank or 0.0)
+
+
 def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
     """Quote every whitespace token so FTS5 operator/syntax characters in real-corpus
     tokens (`000660.KS`, `P/GP`, `-1.5σ`) are literal phrases, never syntax (WRITE-05).
@@ -966,6 +1197,11 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             provenance=row["provenance"] if "provenance" in keys else "",
             id=row["id"] if "id" in keys else 0,
+            retrieval_strength=row["retrieval_strength"] if "retrieval_strength" in keys else 0.5,
+            importance=row["importance"] if "importance" in keys else 0.0,
+            access_count=row["access_count"] if "access_count" in keys else 0,
+            last_accessed_at=row["last_accessed_at"] if "last_accessed_at" in keys else None,
+            node_kind=row["node_kind"] if "node_kind" in keys else "fact",
         )
     # Positional (shouldn't happen with row_factory=aiosqlite.Row)
     return Fact(
