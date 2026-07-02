@@ -219,9 +219,9 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.context.tool_result_evict_threshold_chars" in entries
     assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
     assert "agent.cruncher.exec_enabled" in entries  # P-CRUNCH B: cruncher exec is addressable
-    assert len(entries) == 97, (
-        f"catalogue should be 97 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1, the sealed P-A capability-floor flag), got {len(entries)}"
+    assert len(entries) == 98, (
+        f"catalogue should be 98 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03]), got {len(entries)}"
     )
 
 
@@ -285,9 +285,9 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 97, (
-        f"catalogue should be 97 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1, the sealed P-A capability-floor flag), got {len(entries)}"
+    assert len(entries) == 98, (
+        f"catalogue should be 98 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03]), got {len(entries)}"
     )
 
 

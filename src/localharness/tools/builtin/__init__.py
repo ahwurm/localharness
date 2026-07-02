@@ -31,9 +31,14 @@ async def register_builtin_tools(
         await registry.register(tool, scope="global")
 
     if memory_store is not None:
-        from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
+        from localharness.tools.builtin.memory_tools import (
+            MemoryGetTool,
+            MemoryRememberTool,
+            MemorySearchTool,
+        )
         await registry.register(MemorySearchTool(memory_store), scope="global")
         await registry.register(MemoryGetTool(memory_store), scope="global")
+        await registry.register(MemoryRememberTool(memory_store), scope="global")
 
     if eviction_store is not None:
         from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool

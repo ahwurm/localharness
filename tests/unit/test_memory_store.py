@@ -62,7 +62,8 @@ async def test_open_applies_migration(tmp_path: Path):
     try:
         async with store._db.execute("PRAGMA user_version") as cur:
             row = await cur.fetchone()
-        assert row[0] == 1
+        from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION
+        assert row[0] == CURRENT_SCHEMA_VERSION
     finally:
         await store.close()
 
@@ -85,12 +86,19 @@ async def test_store_fact_insert(memory_store: MemoryStore):
 
 @pytest.mark.asyncio
 async def test_store_fact_upsert(memory_store: MemoryStore):
-    fact1 = await memory_store.store_fact("key1", "v1")
-    created_at = fact1.created_at
+    """v2 semantics (WRITE-02): a different value SUPERSEDES — new active row, old row
+    kept as history. The v1 destructive in-place upsert is gone by design."""
+    await memory_store.store_fact("key1", "v1")
 
     fact2 = await memory_store.store_fact("key1", "v2")
     assert fact2.value == "v2"
-    assert fact2.created_at == created_at  # created_at preserved
+    assert fact2.status == "active"
+
+    history = await memory_store.get_fact_history("key1")
+    assert [f.value for f in history[:2]] == ["v2", "v1"] or {f.value for f in history} == {"v1", "v2"}
+    old = next(f for f in history if f.value == "v1")
+    assert old.status == "superseded"
+    assert old.superseded_by == fact2.id
 
 
 @pytest.mark.asyncio

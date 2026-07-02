@@ -1,4 +1,4 @@
-"""All 19 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 23 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -353,6 +353,21 @@ class SentinelAlert(BaseEvent):
     fixtures: list[str] = Field(default_factory=list)  # saturated fixtures (kind="saturation")
 
 
+class MemoryGateFired(BaseEvent):
+    """Prediction-error write-gate decision (WRITE-03/06). Emitted by memory.gate.WriteGate
+    on every gated auto-capture — the fork-(b) live observability surface for gate density
+    and precision (fire counts per tier, watched instead of pre-measured). Fire-and-forget;
+    the gate never blocks or fails the agent loop."""
+
+    event_type: str = "MemoryGateFired"
+    agent_id: AgentID
+    session_id: SessionID
+    tier: Literal["resolved_error", "stuck_recovered", "novelty"]
+    fact_key: str
+    tool_name: Optional[str] = None
+    detail: str = ""  # human-readable one-liner (error preview etc.)
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -376,6 +391,7 @@ AnyEvent = Union[
     ComponentMutated,
     MutationArchived,
     SentinelAlert,
+    MemoryGateFired,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -401,6 +417,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ComponentMutated": ComponentMutated,
     "MutationArchived": MutationArchived,
     "SentinelAlert": SentinelAlert,
+    "MemoryGateFired": MemoryGateFired,
 }
 
 

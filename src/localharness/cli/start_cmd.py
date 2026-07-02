@@ -308,6 +308,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"memory: {exc} (in-memory mode)")
         memory_store = None
 
+    # Prediction-error write gate (WRITE-03/06): harness-initiated memory writes from bus
+    # signals. Default-on, config-off (agent.memory.write_gate_enabled) — cruncher-style.
+    write_gate = None
+    if memory_store is not None and getattr(agent_config.memory, "write_gate_enabled", True):
+        try:
+            from localharness.memory.gate import WriteGate
+            write_gate = WriteGate(memory_store, bus, agent_name_str)
+            await write_gate.open()
+        except Exception as exc:
+            warnings.append(f"memory write-gate: {exc}")
+            write_gate = None
+
     # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
     # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
     # the ContextManager below so eviction-writes and restore-reads hit the same map.
@@ -318,6 +330,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
             await tool_registry.register(MemorySearchTool(memory_store), scope="global")
             await tool_registry.register(MemoryGetTool(memory_store), scope="global")
+        if memory_store is not None:
+            # The write path is registered whenever a store exists — remember must work
+            # even when index injection is off (memory available via tools only).
+            from localharness.tools.builtin.memory_tools import MemoryRememberTool
+            await tool_registry.register(MemoryRememberTool(memory_store), scope="global")
         if agent_config.context.tool_result_eviction:
             from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
             await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
@@ -535,11 +552,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
     finally:
-        # --- Ordered shutdown: MCP -> MemoryStore ---
+        # --- Ordered shutdown: MCP -> WriteGate -> MemoryStore ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
+            except Exception:
+                pass
+        if write_gate:
+            try:
+                await write_gate.close()
             except Exception:
                 pass
         if memory_store:

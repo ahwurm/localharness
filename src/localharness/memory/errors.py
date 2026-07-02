@@ -24,6 +24,15 @@ class MemoryReadError(MemoryError):
         super().__init__(f"Memory read failed: {path}: {underlying}")
 
 
+class MemoryVerifyError(MemoryError):
+    """A fact write failed read-back verification — the store did not persist what was
+    claimed (the 'claims-to-write-but-didn't' class). Raised by MemoryStore.store_fact."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"Fact write failed read-back verification: {key!r}")
+
+
 class MemoryCorruptionError(MemoryError):
     """Detected corruption: PRAGMA integrity_check failed, or JSONL line fails JSON parsing."""
 
