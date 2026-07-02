@@ -72,7 +72,10 @@ class MemorySearchTool(Tool):
             snippet = (f.value or "").strip().replace("\n", " ")
             if len(snippet) > 160:
                 snippet = snippet[:159] + "…"
-            lines.append(f"- {f.key}: {snippet}")
+            # Critic M4: unvetted candidates must never read with the same authority as
+            # confirmed facts — mark them until consolidation promotes them.
+            marker = " [pending]" if "pending_consolidation" in getattr(f, "tags", []) else ""
+            lines.append(f"- {f.key}{marker}: {snippet}")
         # Structure-aware retrieval (HIER-03): the FTS hit is the ENTRY POINT; the graph
         # supplies the neighborhood — a leaf hit surfaces its gist/schema context, a
         # schema hit surfaces its members. Gist routes; verbatim answers.
@@ -169,7 +172,8 @@ class MemoryGetTool(Tool):
             name="memory_get",
             description=(
                 "Return the full body of one persistent fact by its exact name (the name shown "
-                "in the memory index or returned by memory_search)."
+                "in the memory index or returned by memory_search). Pass history=true to see "
+                "the fact's full version history (superseded values are kept, never deleted)."
             ),
             parameters={
                 "type": "object",
@@ -178,6 +182,11 @@ class MemoryGetTool(Tool):
                         "type": "string",
                         "description": "The exact fact name/key to fetch.",
                     },
+                    "history": {
+                        "type": "boolean",
+                        "description": "If true, return all versions newest-first (default: current only).",
+                        "default": False,
+                    },
                 },
                 "required": ["name"],
             },
@@ -185,9 +194,22 @@ class MemoryGetTool(Tool):
             estimated_tokens=400,
         )
 
-    async def _execute(self, name: str) -> ToolResult:
+    async def _execute(self, name: str, history: bool = False) -> ToolResult:
         if self._mem is None:
             return self.err("No memory store available.", error_type="execution_error")
+        # The explicit-request path to the past (WRITE-02's door — critic m8).
+        if history and hasattr(self._mem, "get_fact_history"):
+            try:
+                versions = await self._mem.get_fact_history(name)
+            except Exception as exc:
+                return self.err(f"Memory get failed: {exc}")
+            if not versions:
+                return self.err(f"No fact named '{name}'.", error_type="not_found")
+            lines = [
+                f"[{v.status}{'' if v.status == 'active' else ''}] {v.value}"
+                for v in versions
+            ]
+            return self.ok("\n---\n".join(lines), version_count=len(versions))
         try:
             fact = await self._mem.get_fact(name)
         except Exception as exc:

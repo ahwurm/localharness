@@ -343,14 +343,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.agent.context import ContentStore
     eviction_store = ContentStore()
     try:
-        if memory_store is not None and agent_config.memory.inject_into_context:
-            from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
+        if memory_store is not None:
+            # ALL memory tools register whenever a store exists (critic M5): the
+            # inject_into_context flag gates INJECTION, not tool availability —
+            # otherwise injection-off produces write-only memory (remember succeeds,
+            # nothing can ever read it back).
+            from localharness.tools.builtin.memory_tools import (
+                MemoryGetTool,
+                MemoryRememberTool,
+                MemorySearchTool,
+            )
             await tool_registry.register(MemorySearchTool(memory_store), scope="global")
             await tool_registry.register(MemoryGetTool(memory_store), scope="global")
-        if memory_store is not None:
-            # The write path is registered whenever a store exists — remember must work
-            # even when index injection is off (memory available via tools only).
-            from localharness.tools.builtin.memory_tools import MemoryRememberTool
             await tool_registry.register(MemoryRememberTool(memory_store), scope="global")
         if agent_config.context.tool_result_eviction:
             from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
