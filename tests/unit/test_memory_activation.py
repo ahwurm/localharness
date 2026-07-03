@@ -4,7 +4,7 @@ Covers: typed graph with cycle-guarded traversal (RANK-01), ACT-R activation in 
 staging discipline (RANK-02/04), the confidence split + importance prior (RANK-03),
 partial-index hot-path guarantee (RANK-05), and the v3 schema ladder.
 RANK-06 (GB10 micro-bench) is a committed script (scripts/microbench_prefix_cache.py);
-its live run is deferred by owner ruling.
+live-run 2026-07-03: one-byte bust costs ~16.1s TTFT at 32k ctx (see the script header).
 """
 import time
 from pathlib import Path
