@@ -102,3 +102,63 @@ async def test_self_check_review_turn_is_user_role_bounded_text(faithful_fake_ll
     assert len(reviews) == 1
     assert reviews[0]["role"] == "user"
     assert "Review your answer" in reviews[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# CONFIRMED sentinel — the review reply must never become the user-facing answer
+# (observed live 2026-07-02: Qwen answers review/nudge turns with "I already
+# provided the answer" meta text, which then shipped as the TaskComplete summary).
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedNoToolLLM:
+    """Content-only script, one entry per LLM round-trip; never emits tool calls."""
+
+    def __init__(self, contents: list[str]):
+        self._contents = list(contents)
+        self.calls = 0
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.calls += 1
+        idx = min(self.calls, len(self._contents)) - 1
+        return NS(content=self._contents[idx], tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_self_check_confirmed_returns_reviewed_answer(bus):
+    """Sentinel reply → summary is the answer that was confirmed, not 'CONFIRMED'."""
+    llm = _ScriptedNoToolLLM(["The capital of France is Paris.", "CONFIRMED"])
+    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    session = Session(agent_id="selfcheck-agent", session_id="s-conf", messages=[])
+
+    summary = await loop._execute_loop(session, "capital of France?", None)
+
+    assert summary == "The capital of France is Paris."
+    assert session.terminated_reason == "complete"
+
+
+@pytest.mark.asyncio
+async def test_self_check_confirmed_case_and_punct(bus):
+    """'Confirmed.' variants count as the sentinel; walk-back still finds the answer."""
+    llm = _ScriptedNoToolLLM(["Answer: 42.", "Confirmed."])
+    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    session = Session(agent_id="selfcheck-agent", session_id="s-conf2", messages=[])
+
+    summary = await loop._execute_loop(session, "meaning of life?", None)
+
+    assert summary == "Answer: 42."
+
+
+@pytest.mark.asyncio
+async def test_self_check_correction_replaces_answer(bus):
+    """A substantive (non-sentinel) review reply stands as the corrected final answer."""
+    llm = _ScriptedNoToolLLM(["Paris is in Germany.", "Paris is in France."])
+    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    session = Session(agent_id="selfcheck-agent", session_id="s-corr", messages=[])
+
+    summary = await loop._execute_loop(session, "where is Paris?", None)
+
+    assert summary == "Paris is in France."
