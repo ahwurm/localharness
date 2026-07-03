@@ -295,6 +295,16 @@ class MemoryStore:
         now = int(time.time())
 
         if query.text:
+            # FTS5 parses raw hyphens/colons/parens as query syntax ("built-in" reads as a
+            # column filter → 'no such column: in'). Quote each token (implicit AND, quotes
+            # doubled); punctuation-only tokens are unsearchable — drop them.
+            match_expr = " ".join(
+                '"{}"'.format(t.replace('"', '""'))
+                for t in query.text.split()
+                if any(c.isalnum() for c in t)
+            )
+            if not match_expr:
+                return []
             sql = """
                 SELECT f.key, f.value, f.agent_id, f.division_id, f.org_id, f.tags,
                        f.confidence, f.source, f.created_at, f.updated_at, f.expires_at
@@ -307,7 +317,7 @@ class MemoryStore:
                 ORDER BY rank
                 LIMIT ?
             """
-            params: list[Any] = [query.text, self._agent_id, query.min_confidence, now, query.limit]
+            params: list[Any] = [match_expr, self._agent_id, query.min_confidence, now, query.limit]
         else:
             sql = """
                 SELECT key, value, agent_id, division_id, org_id, tags, confidence, source,
