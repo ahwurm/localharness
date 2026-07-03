@@ -113,19 +113,22 @@ async def test_no_grant_means_no_parent_store(monkeypatch):
 async def test_grant_to_host_dangerous_target_is_refused(monkeypatch):
     """The structural invariant: a granted handle is readable via tool_result_get/chunk (NOT
     untrusted-ingest), so granting to a host-dangerous target would put attacker-controllable bytes
-    one call from a host action. Refuse it — FAIL CLOSED before dispatch. data-analyst holds
-    bash_exec; the grant must raise GrantTargetError and the dispatch must NEVER run."""
+    one call from a host action. Refuse it — FAIL CLOSED before dispatch. The fixture is a config
+    child holding bash_exec (since v0.5.3 no default builtin is host-dangerous); the grant must
+    raise GrantTargetError and the dispatch must NEVER run."""
     async def _must_not_run(task, **kwargs):  # pragma: no cover - asserted never reached
         raise AssertionError("dispatch must not run when the grant target is host-dangerous")
 
-    monkeypatch.setattr(subagent, "dispatch_data_subagent", _must_not_run)
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", _must_not_run)
+    bash_child = AgentConfig(name="bash-child", role="r", tools=ToolConfig(add=["bash_exec", "read"]))
     runner = subagent.make_explore_agent_runner(
         llm=object(), bus=object(), base_registry=object(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=lambda n: bash_child,
         parent_store=ContentStore(),
     )
     with pytest.raises(GrantTargetError):
-        await runner("data-analyst", "here is a big doc", grant_handles=["H"])
+        await runner("bash-child", "here is a big doc", grant_handles=["H"])
 
 
 @pytest.mark.asyncio
@@ -149,13 +152,10 @@ async def test_grant_to_no_danger_target_passes_the_gate(monkeypatch):
 
 
 def test_resolve_target_toolset_flags_builtin_danger():
-    """The grant-safety resolver sees host-dangerous builtins (data-analyst/frontend hold bash/
-    write/edit) and clean ones (explore), so the gate can decide. Config children resolve via
-    their yaml allowlist."""
+    """The grant-safety resolver sees clean builtins (explore) and host-dangerous config
+    children (yaml allowlist), so the gate can decide."""
     from localharness.tools.capabilities import HOST_DANGEROUS
 
-    danger = set(subagent._resolve_target_toolset("data-analyst", None))
-    assert danger & HOST_DANGEROUS, "data-analyst must surface its host-dangerous tools to the gate"
     assert not (set(subagent._resolve_target_toolset("explore", None)) & HOST_DANGEROUS)
 
     cfg = AgentConfig(name="danger-cfg", role="r", tools=ToolConfig(add=["bash_exec", "read"]))

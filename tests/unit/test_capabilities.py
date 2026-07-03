@@ -132,12 +132,9 @@ async def test_root_without_strip_is_caught_by_chokepoint_fail_closed():
 # --- Sanity: every built-in subagent toolset stays clean ------------------
 
 def test_builtin_subagent_toolsets_clean():
-    from localharness.agent.subagent import (
-        DATA_TOOLS,
-        EXPLORE_TOOLS,
-        FRONTEND_TOOLS,
-        SEARCH_VERIFIER_TOOLS,
-        WEB_TOOLS,
-    )
-    for toolset in (EXPLORE_TOOLS, WEB_TOOLS, DATA_TOOLS, FRONTEND_TOOLS, SEARCH_VERIFIER_TOOLS):
+    # Iterate the dispatch table itself so every default builtin — current and future —
+    # is checked; v0.5.3 demoted the bash-holding specialists to examples/agents/.
+    from localharness.agent.subagent import _BUILTIN_TOOLSETS
+
+    for name, toolset in _BUILTIN_TOOLSETS.items():
         assert_no_coresidence(toolset)  # must not raise

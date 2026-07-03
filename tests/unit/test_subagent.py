@@ -296,60 +296,6 @@ async def test_web_dispatch_at_depth_one_refuses(mock_llm_client, bus):
 
 
 # ---------------------------------------------------------------------------
-# data-analyst subagent (mirror of web-researcher wiring)
-# ---------------------------------------------------------------------------
-
-import pytest
-
-
-def test_data_analyst_config_budget_and_role():
-    from localharness.agent.subagent import (
-        DATA_MAX_ACTIONS, DATA_MAX_DURATION_MINUTES, build_data_analyst_config,
-    )
-    cfg = build_data_analyst_config()
-    assert cfg.name == "data-analyst"
-    assert cfg.permissions.budget.max_actions == DATA_MAX_ACTIONS
-    assert cfg.permissions.budget.max_duration_minutes == DATA_MAX_DURATION_MINUTES
-    assert "source of truth" in cfg.role
-    assert "never paste raw file dumps" in cfg.role.lower()
-
-
-@pytest.mark.asyncio
-async def test_data_analyst_registry_is_local_tools_only():
-    from localharness.agent.subagent import DATA_TOOLS
-    from localharness.tools.registry import ToolRegistry
-    from localharness.tools.builtin import register_builtin_tools
-
-    base = ToolRegistry()
-    await register_builtin_tools(base)
-    child = ToolRegistry.from_allowed(DATA_TOOLS, base_registry=base)
-    assert set(child._tools["global"].keys()) == {"bash_exec", "read", "glob", "grep"}
-
-
-@pytest.mark.asyncio
-async def test_runner_dispatches_data_analyst(monkeypatch):
-    import localharness.agent.subagent as subagent
-
-    captured = {}
-    async def _fake_dispatch(task, **kwargs):
-        captured["task"] = task
-        captured["depth"] = kwargs.get("depth")
-        captured["cap"] = kwargs.get("max_subagent_depth")
-        return "[data analysis] ok"
-    monkeypatch.setattr(subagent, "dispatch_data_subagent", _fake_dispatch)
-
-    runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
-        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
-        max_subagent_depth=2,
-    )
-    out = await runner("data_analyst", "compute the thing")   # `_`->`-` sanitization
-    assert out == "[data analysis] ok"
-    assert captured["task"] == "compute the thing"
-    assert captured["depth"] == 0          # runner serves depth 0 (the orchestrator)
-    assert captured["cap"] == 2            # config cap threads to the dispatch
-
-
 @pytest.mark.asyncio
 async def test_runner_threads_token_counter_and_window_into_child(monkeypatch):
     """Children must inherit the parent's model-aware counter + resolved window, not bare
@@ -373,13 +319,6 @@ async def test_runner_threads_token_counter_and_window_into_child(monkeypatch):
     assert ctx is not None
     assert ctx.max_context_tokens == 126_976          # resolved window, not the 131072 default
     assert ctx._token_counter is sentinel_counter      # exact /tokenize counter, not bare tiktoken
-
-
-def test_format_data_findings_header():
-    from localharness.agent.subagent import format_data_findings
-    out = format_data_findings("task x", "answer 42", 7)
-    assert out.startswith("[data analysis] task: task x | tool calls: 7")
-    assert "answer 42" in out
 
 
 # ---------------------------------------------------------------------------
@@ -473,37 +412,16 @@ def test_prepend_toolset_states_capabilities():
 
 
 # ---------------------------------------------------------------------------
-# frontend-designer subagent (built-in, mirror of data-analyst wiring)
+# default-roster security invariant (v0.5.3)
 # ---------------------------------------------------------------------------
 
-def test_frontend_designer_builtin_config_shape():
-    from localharness.agent.subagent import (
-        FRONTEND_MAX_ACTIONS,
-        FRONTEND_MAX_DURATION_MINUTES,
-        FRONTEND_TOOLS,
-        build_frontend_designer_config,
-    )
-    cfg = build_frontend_designer_config()
-    assert cfg.name == "frontend-designer"
-    assert cfg.permissions.budget.max_actions == FRONTEND_MAX_ACTIONS
-    assert cfg.permissions.budget.max_duration_minutes == FRONTEND_MAX_DURATION_MINUTES
-    # The role must teach the visual-verification loop and the packaged helper.
-    assert "design-screenshot.js" in cfg.role
-    assert "agent" not in FRONTEND_TOOLS  # child cannot delegate
-
-
-@pytest.mark.asyncio
-async def test_runner_routes_frontend_designer_to_builtin_dispatch():
-    """'frontend-designer' is a built-in: the runner must route it to its dispatcher
-    (depth guard fires) rather than fall through to the yaml-loader 'not wired' path."""
+def test_builtin_roster_has_no_host_dangerous_agents():
+    """v0.5.3 invariant: every default-roster builtin is quarantined or read-only.
+    bash/write/edit-holding specialist roles (data-analyst, frontend-designer) were demoted
+    to opt-in examples/agents/ configs (quality investigation 2026-07-03) — a default agent
+    must never put granted or ingested bytes one call from a host action."""
     import localharness.agent.subagent as subagent
+    from localharness.tools.capabilities import HOST_DANGEROUS
 
-    # A runner already serving at the cap: any dispatch it attempts hits the belt-and-suspenders
-    # depth>=cap guard (depth now rides in via the factory, not a per-call arg).
-    runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
-        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
-        depth=subagent.MAX_DEPTH, max_subagent_depth=subagent.MAX_DEPTH,
-    )
-    with pytest.raises(ValueError, match="depth"):
-        await runner("frontend-designer", "build a landing page")
+    for name, tools in subagent._BUILTIN_TOOLSETS.items():
+        assert not (set(tools) & HOST_DANGEROUS), f"default builtin '{name}' holds host-dangerous tools"
