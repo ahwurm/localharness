@@ -4,6 +4,36 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.5.3] — 2026-07-03
+
+(0.5.2 is intentionally skipped — that number is already publicly attached to the
+in-progress hierarchical-memory milestone on the devnotes page.)
+
+### Changed
+- **The default subagent roster is now quarantined-or-read-only.** `data-analyst` and
+  `frontend-designer` no longer ship in the default roster: both hold `bash_exec`
+  (host-dangerous), which sat uneasily next to the harness's fenced-by-construction
+  security story, and neither had bench coverage. A live quality battery (2026-07-03,
+  receipts in the repo history of this entry) found `frontend-designer`'s first-run
+  build task hangs against an undeclared Playwright dependency; `data-analyst` passed
+  its battery cleanly and was demoted on security posture alone. Both are preserved as
+  fully documented opt-in configs under `examples/agents/` — drop one into
+  `~/.localharness/agents/` to restore it. The remaining defaults: `explore`
+  (read-only), `web-researcher` (web-quarantined), `search-verifier` (blind verifier),
+  `cruncher` (grant-fed reducer), plus your own YAML agents.
+- The grant-target safety gate and its tests now exercise host-dangerous CONFIG
+  children (yaml allowlists) rather than host-dangerous builtins — there are none left.
+
+### Fixed
+- `memory_search` no longer fails on hyphenated queries ("no such column: in") —
+  FTS5 MATCH input is tokenized and quoted, so operator characters in real-world
+  queries (`built-in`, `000660.KS`, `P/GP`) are literal terms, never syntax.
+- No-tool instant answers no longer terminate with a meta "I already provided the
+  answer" summary. The act-guard and self-check prompts now state that only the
+  latest reply is user-visible, and the self-check confirm path is a deterministic
+  sentinel (`CONFIRMED`) whose summary selection walks back to the answer it
+  confirmed — cheaper and loss-free versus asking the model to repeat itself.
+
 ## [0.5.1] — 2026-06-26
 
 ### Added

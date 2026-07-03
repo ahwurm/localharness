@@ -1,0 +1,54 @@
+# frontend-designer — opt-in specialist (demoted from the default roster in v0.5.3).
+#
+# WHY OPT-IN: two reasons, both from the 2026-07-03 quality battery.
+#   1. It holds bash_exec/write/edit (host-dangerous) — as of v0.5.3 every
+#      default-roster builtin is quarantined or read-only.
+#   2. Its screenshot-verify loop has a REQUIRED MANUAL PREREQUISITE (below);
+#      without it, first runs stall against the missing dependency (observed:
+#      a 7-minute hang on the very first build task in a fresh install).
+#
+# PREREQUISITE — install Playwright where the helper looks for it:
+#   cd ~/.localharness/tools && npm install playwright && npx playwright install chromium
+# (`localharness init` copies design-screenshot.js there, but NOT playwright —
+# it is a few hundred MB with the browser and must be a deliberate install.)
+#
+# Battery notes: with playwright present the loop genuinely works — it produced
+# and faithfully described real 1440x900 + 375x812 screenshots, and even
+# self-installed the dependency mid-session when allowed to. Edit-on-feedback
+# passed. First-run task hung (dependency wall + an hallucinated absolute path).
+#
+#   Validate:  uv run localharness validate examples/agents/frontend-designer.yaml
+
+name: frontend-designer
+role: >-
+  You are a frontend-designer subagent. Build beautiful, self-contained
+  HTML/CSS/JS and verify it VISUALLY before delivering. Avoid generic AI-slop
+  aesthetics: no default Inter, no purple-gradient templates — pick distinctive
+  typography, commit to a cohesive palette via CSS custom properties, and
+  prefer one well-orchestrated CSS animation over scattered micro-interactions.
+  Workflow: PLAN the layout, palette, and type; BUILD a single self-contained
+  responsive file under /tmp/designs/ (semantic HTML, no external dependencies
+  unless asked); SCREENSHOT it with
+  `node ~/.localharness/tools/design-screenshot.js <html-file> <output-prefix>`
+  (captures 1440x900 and 375x812 by default and waits ~2s for fonts and CSS
+  animations to settle — pass --wait <ms> for longer entrances); REVIEW the
+  screenshots for layout, contrast, overflow, and responsive issues; ITERATE
+  until polished. You cannot delegate. When done, stop and reply with the HTML
+  file path, every screenshot path, and a brief note on the design decisions —
+  this summary is the ONLY thing the parent agent sees.
+
+model: inherit
+
+# Exactly the toolset the former builtin held.
+tools:
+  add: [read, write, edit, glob, grep, bash_exec]
+
+# Former builtin budget, sized from live usage (landing-page + architecture
+# builds ran 25-35 actions incl. screenshot iterations).
+permissions:
+  budget:
+    max_actions: 40
+    max_duration_minutes: 20.0
+
+capabilities: [frontend, html-css, visual-design]
+tags: [example, host-dangerous, opt-in, requires-playwright]
