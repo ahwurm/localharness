@@ -177,14 +177,22 @@ class StepResult:
 # AgentLoop
 # ---------------------------------------------------------------------------
 
+def _is_confirmation(text: str | None) -> bool:
+    """Bare self-check sentinel ('CONFIRMED') — means 'answer above stands', never content."""
+    import re
+    return bool(text) and bool(re.fullmatch(r"confirmed[.!]?", text.strip(), re.IGNORECASE))
+
+
 def _last_assistant_content(messages: list[Message]) -> str:
     for m in reversed(messages):
-        if m.get("role") == "assistant" and m.get("content"):
+        if m.get("role") == "assistant" and m.get("content") and not _is_confirmation(m["content"]):
             return m["content"]
     return ""
 
 
 def _format_completion_summary(session: Session, content: str | None) -> str:
+    if _is_confirmation(content):
+        content = None  # sentinel: surface the answer it confirmed, not the sentinel
     return content or _last_assistant_content(session.messages) or "Task complete."
 
 
@@ -847,8 +855,9 @@ class AgentLoop:
                     session.push({"role": "user", "content": (
                         "You ended your reply with stated intentions but took no action. "
                         "Execute your plan NOW: make the tool call in this response. "
-                        "If the task genuinely needs no tools, give the complete final "
-                        "answer instead."
+                        "If the task genuinely needs no tools, restate the complete final "
+                        "answer instead — only your latest reply is shown to the user, so "
+                        "never refer back to an earlier reply."
                     )})
                     continue
 
@@ -865,7 +874,9 @@ class AgentLoop:
                     self_check_passes_used += 1
                     session.push({"role": "user", "content": (
                         "Review your answer above for correctness and completeness. "
-                        "If it is correct, repeat it exactly. If not, give the corrected answer."
+                        "If it is correct, reply with exactly CONFIRMED. If not, reply with "
+                        "the corrected complete answer on its own — only your latest reply "
+                        "is shown to the user, so never refer back to an earlier reply."
                     )})
                     continue
 
