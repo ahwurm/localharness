@@ -951,14 +951,26 @@ class MemoryStore:
         facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
 
         history_full = self._markdown_memory.get_section("session_history")
-        history_block = _last_n_entries(history_full, max_session_history)
+        # No dead promises in the injected block (v2.0 audit FINDING-A): session_history
+        # has no live writer yet (create_session/end_session have zero production callers
+        # — v2.1 Phase 33 wires them), so advertising the shelf over a permanent
+        # "(no sessions recorded)" placeholder misleads the model and spends tokens on
+        # nothing. Render the section ONLY when at least one entry exists; it
+        # self-restores the day a writer lands. Byte-stability holds: absence is
+        # constant, and future entries change only at session boundaries.
+        history_section = (
+            f"\n\n### Recent Session History (last {max_session_history})\n"
+            f"{_last_n_entries(history_full, max_session_history)}"
+            if history_full.strip()
+            else ""
+        )
 
         return (
             "This is an INDEX, not the full memory. Each line below is one persistent fact "
             "(name: short description). Call `memory_get(name)` for a fact's full body, or "
             "`memory_search(query)` to search fact contents.\n\n"
-            f"### Persistent Facts ({len(fact_lines)})\n{facts_block}\n\n"
-            f"### Recent Session History (last {max_session_history})\n{history_block}"
+            f"### Persistent Facts ({len(fact_lines)})\n{facts_block}"
+            f"{history_section}"
         )
 
     # ------------------------------------------------------------------

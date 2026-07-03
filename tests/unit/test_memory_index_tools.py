@@ -73,6 +73,25 @@ async def test_session_history_cap(tmp_path: Path):
         assert "session number 4" in md
         assert "session number 3" in md
         assert "session number 0" not in md
+        # The populated path renders the section header (the twin of the empty test below).
+        assert "Recent Session History" in md
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_history_section_absent_when_empty(tmp_path: Path):
+    """v2.0 audit FINDING-A: no dead promises in the injected block — with zero recorded
+    sessions the index omits the 'Recent Session History' section entirely (no header,
+    no '(no sessions recorded)' placeholder). It self-restores once any history entry
+    exists (see test_session_history_cap's header assert)."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("k", "v")
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert "Recent Session History" not in md
+        assert "(no sessions recorded)" not in md
     finally:
         await store.close()
 
