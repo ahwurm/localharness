@@ -622,6 +622,8 @@ class MemoryStore:
         if query.text and not fts_text:
             # Critic m1: a query that sanitizes to nothing must NOT fall back to the
             # recency listing — unrelated facts would render as "matches".
+            # (Same contract as origin/main's 2c7e712 inline quoting, which this
+            # sanitizer supersedes — main's hyphen/colon regression tests apply.)
             return []
         prefixed_cols = ", ".join(f"f.{c}" for c in self._FACT_COLS.split(", "))
 

@@ -205,6 +205,30 @@ async def test_query_facts_min_confidence(memory_store: MemoryStore):
     assert "low" not in keys
 
 
+@pytest.mark.asyncio
+async def test_query_facts_hyphenated_text(memory_store: MemoryStore):
+    """Regression: raw hyphens leaked FTS5 column syntax — 'built-in subagents' raised
+    'no such column: in' (memory_search exit 1, observed live 2026-07-02)."""
+    await memory_store.store_fact("subagents", "the built-in subagents ship with the harness")
+    results = await memory_store.query_facts(FactQuery(text="built-in subagents"))
+    assert [f.key for f in results] == ["subagents"]
+
+
+@pytest.mark.asyncio
+async def test_query_facts_fts_operator_chars(memory_store: MemoryStore):
+    """FTS5 operator/quote characters in user text must never raise."""
+    await memory_store.store_fact("k1", "plain value")
+    for text in ('col:filter', 'a AND (b', 'quo"te', 'NEAR(x, y)', 'trailing-'):
+        await memory_store.query_facts(FactQuery(text=text))  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_query_facts_punctuation_only_text(memory_store: MemoryStore):
+    """Nothing searchable in the query → empty result, not an FTS error or a full scan."""
+    await memory_store.store_fact("k1", "plain value")
+    assert await memory_store.query_facts(FactQuery(text="--- ::: !!")) == []
+
+
 # ---------------------------------------------------------------------------
 # persistence across close/reopen
 # ---------------------------------------------------------------------------
