@@ -617,7 +617,10 @@ class AgentLoop:
                     parts.append("## Agent Memory\n" + ctx.agent_memory_md)
                 system_prompt = "\n\n".join(parts)
             except Exception:
-                pass  # memory load failure is non-fatal
+                # Non-fatal by design, but never silent (live test 2026-07-03: a
+                # swallowed failure here means the agent runs amnesiac all session
+                # and nothing anywhere says so).
+                log.warning("memory context load failed — no memory injected this turn", exc_info=True)
 
         # Get tool schemas
         tool_schemas: list = []

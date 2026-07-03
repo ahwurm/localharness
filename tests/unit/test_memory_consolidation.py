@@ -403,3 +403,40 @@ async def test_composed_gate_consolidation_recurrence_semantics(store: MemorySto
     promoted = await store.get_fact(report.promoted_keys[0])
     assert "2 episodes" in promoted.value
     assert not [k for k in report.promoted_keys if "/edit/" in k]
+
+
+@pytest.mark.asyncio
+async def test_promoted_lesson_payload_survives_injected_block(store: MemoryStore):
+    """Live-test regression (2026-07-03): chat #3 fumbled WITH the lesson nominally
+    in context, because the promoted value led with bookkeeping ("Recurring (2
+    episodes): tier — …") and the index line's char budget guillotined the payload
+    before the filename. The full seam — real WriteGate observations (loop-shaped
+    "[tool error] " prefix included), real ConsolidationPass, real load_context()
+    injection — must deliver the DISCRIMINATING content: what failed, what worked."""
+    from localharness.core.events import Observation
+    from localharness.memory.gate import WriteGate
+
+    gate = WriteGate(store, _NullBus(), "cons-agent")
+    err = "[tool error] File not found: /home/openclaw-user/localharness/docs/VISION.md"
+    fix = "1 # Spec 00: Architecture Overview for LocalHarness — layers, event bus"
+    for sess in ("sitting-1", "sitting-2"):
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name="read", output="", error=err))
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name="read", output=fix, error=None))
+
+    report = await ConsolidationPass(store, _cfg()).run()
+    assert report.promoted == 1
+
+    block = (await store.load_context(index_mode=True)).agent_memory_md
+    line = next(ln for ln in block.splitlines() if "learned/read/resolved_error/" in ln)
+    # The two facts that make the lesson actionable — the failure's subject and
+    # the resolution's head — must survive every render layer.
+    assert "docs/VISION.md" in line
+    assert "Spec 00" in line
+    # Payload-first at every layer: lesson before recurrence bookkeeping, and the
+    # loop's presentation prefix stripped at capture.
+    assert line.find("File not found") < line.find("[recurring: 2 episodes")
+    assert "[tool error]" not in line

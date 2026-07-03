@@ -941,7 +941,11 @@ class MemoryStore:
         ) as cur:
             rows = await cur.fetchall()
 
-        fact_lines = [f"- {r[0]}: {_one_line(r[1])}" for r in rows]
+        # 180-char budget (live test 2026-07-03): at the default 100, one absolute
+        # path (~50 chars) plus any prefix guillotined the payload — the injected
+        # line carried an error with no filename and no resolution. Lessons must
+        # survive the line render with their discriminating content intact.
+        fact_lines = [f"- {r[0]}: {_one_line(r[1], 180)}" for r in rows]
         facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
 
         history_full = self._markdown_memory.get_section("session_history")

@@ -104,7 +104,11 @@ class WriteGate:
                     if now - ts < self._PENDING_TTL_S
                 }
             if event.error is not None:
-                self._pending_errors[event.tool_name] = (_preview(event.error), now)
+                # The loop's "[tool error] " prefix is presentation, not lesson —
+                # 13 dead chars in every budgeted render downstream (live test
+                # 2026-07-03). Strip before preview AND lesson hash.
+                err = event.error.removeprefix("[tool error] ")
+                self._pending_errors[event.tool_name] = (_preview(err), now)
                 return
             prior = self._pending_errors.pop(event.tool_name, None)
             if prior is not None and now - prior[1] < self._PENDING_TTL_S:

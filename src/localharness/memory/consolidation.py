@@ -205,16 +205,20 @@ class ConsolidationPass:
                        if not (b in seen_b or seen_b.add(b))]
             shown = bullets[:5]
             dropped = len(bullets) - len(shown)
-            # The FIRST LINE carries the lesson essence (dogfood 2026-07-02: the
-            # injected index renders one line per fact — a bare "Recurring (2
-            # episodes)" header told the model nothing; the actual lesson was buried
-            # in bullet 2 behind a memory_get).
-            lesson_preview = " ".join(shown[0].split())[:110] if shown else ""
+            # PAYLOAD-FIRST, nothing before it (live test 2026-07-03: the
+            # "Recurring (N episodes): tier — " prefix pushed the payload past the
+            # index-line truncation — chat #3 saw bookkeeping ending in "File not
+            # found: /home/…", no filename, no resolution, and fumbled with the
+            # lesson nominally in context). Recurrence bookkeeping rides as a
+            # SUFFIX; the same rule the dogfood forced on gate captures one layer
+            # down. Every layer that touches lesson text repeats this rule.
+            # 135 = the discriminating payload budget: an absolute path (~50) plus
+            # error head plus resolution head must ALL fit, and 135 + the ~41-char
+            # recurrence suffix stays inside the index render's 180-char line.
+            lesson_preview = " ".join(shown[0].split())[:135] if shown else ""
             plural = "s" if total_n != 1 else ""
-            # No tool in the header — the payload-first bullet already names it, and
-            # every header char steals lesson chars from the 100-char index line.
             merged = (
-                f"Recurring ({total_n} episode{plural}): {tier} — {lesson_preview}\n"
+                f"{lesson_preview} [recurring: {total_n} episode{plural}, {tier}]\n"
                 + "\n".join(f"- {b}" for b in shown)
                 + (f"\n- … (+{dropped} earlier example(s) consolidated away)" if dropped else "")
             )
