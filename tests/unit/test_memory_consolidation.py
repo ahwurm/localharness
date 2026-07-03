@@ -417,7 +417,7 @@ async def test_promoted_lesson_payload_survives_injected_block(store: MemoryStor
     from localharness.memory.gate import WriteGate
 
     gate = WriteGate(store, _NullBus(), "cons-agent")
-    err = "[tool error] File not found: /home/openclaw-user/localharness/docs/VISION.md"
+    err = "[tool error] File not found: /home/user/localharness/docs/VISION.md"
     fix = "1 # Spec 00: Architecture Overview for LocalHarness — layers, event bus"
     for sess in ("sitting-1", "sitting-2"):
         await gate._on_observation(Observation(

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """GB10 prefix-cache micro-bench (RANK-06) — prices the byte-stability discipline.
 
-STATUS: script + method committed; the LIVE RUN IS DEFERRED (owner 2026-07-02:
-"don't pause for slow items"). Run it against the local vLLM before freezing any
-relaxation of the injected-block byte-stability rules.
+STATUS: live run DONE 2026-07-03 (qwen3.6-27b nvfp4 on vLLM, GB10, 5 trials/arm):
+L=8k  hit 0.362s / bust 0.366s (delta ~0 — single-chunk prefill, overhead-dominated);
+L=32k hit 0.543s / bust 16.692s (**delta 16.1s per one-byte bust**) — the
+byte-stability discipline is confirmed load-bearing. L=96k intentionally not run:
+repeated cache-bust prefills at that length are a hard-hang risk on unified-memory
+boxes — run attended, with a free-memory watchdog, or not at all.
 
 METHOD
 ------
@@ -34,8 +37,8 @@ USAGE
       --context-tokens 8000 32000 96000 --trials 5
 
 Requires only the `openai` client already in the project deps. Writes a JSON report
-next to this script (microbench_prefix_cache.results.json) — commit the numbers to
-.planning/research/2026-07-01-hierarchical-memory/ when run.
+next to this script (microbench_prefix_cache.results.json); record headline numbers
+in the STATUS block above when you re-run on new hardware.
 """
 from __future__ import annotations
 

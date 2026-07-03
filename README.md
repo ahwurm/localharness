@@ -10,10 +10,11 @@ It's model-agnostic. Point it at any OpenAI-compatible endpoint and the same age
 
 The bet: the harness, not the model, is where most of the capability lives. The same model can swing tens of benchmark points depending on the harness around it.
 
-Two things it does that are hard to find anywhere else:
+Three things it does that are hard to find anywhere else:
 
 - **Read documents bigger than the context window — losslessly.** Every section is actually read, never truncated, and every number in the answer traces back to the source text it came from. Built for long filings, contracts, and reports, on hardware you control.
 - **Structural defense against prompt injection.** Untrusted web content can never share an agent with host-mutating tools like bash, write, or edit. The boundary is enforced in the agent topology and fails closed — not left to the model to refuse.
+- **Memory that consolidates while idle.** Lessons auto-capture from real failure→recovery moments at zero extra model calls; recurring ones are promoted into the prompt during idle "sleep" passes; superseded facts are never deleted, and search routes through a gist/schema hierarchy — gists route the search, leaf records anchor the answer. All SQLite: no vector DB, no second resident model.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
@@ -36,7 +37,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
-- **Isolated memory per agent** — SQLite-backed, scoped per agent
+- **Memory that learns from use** — per-agent SQLite memory with an automatic write gate (lessons captured from failure→recovery signals, zero extra model calls), activation-ranked recall in pure SQL, cancellable idle consolidation, and a persisted gist/schema hierarchy over document analyses; conflicting facts supersede, never overwrite
 - **Deny-first permissions** — policies inherit down the hierarchy and can only narrow
 - **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
 - **MCP support** — connect Model Context Protocol servers and expose their tools to agents
@@ -136,7 +137,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.5.2, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.6.0, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
