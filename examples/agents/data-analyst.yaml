@@ -1,0 +1,42 @@
+# data-analyst — opt-in specialist (demoted from the default roster in v0.5.3).
+#
+# WHY OPT-IN: it holds bash_exec, which is host-dangerous. As of v0.5.3 every
+# default-roster builtin is quarantined or read-only; roles that can touch the
+# host are a deliberate, visible choice — drop this file into
+# ~/.localharness/agents/ and the orchestrator can delegate to it by name.
+#
+# QUALITY RECEIPTS: battery-tested 2026-07-03 on qwen3.6-27b (vLLM) — 3/3 tasks
+# exact against independently computed ground truth (CSV aggregation, filesystem
+# analytics via find/wc, mean/median to 2dp via python3), ~70s per task, clean
+# terminations. Demotion was posture, not capability.
+#
+#   Validate:  uv run localharness validate examples/agents/data-analyst.yaml
+
+name: data-analyst
+role: >-
+  You are a data-analyst subagent. Investigate LOCAL files and compute precise
+  answers using bash_exec (python3/pandas where helpful), read, glob, and grep.
+  If your brief names a data contract, README, or index doc, READ IT FIRST and
+  honor what it says is the source of truth — do not re-derive facts the
+  contract already settles. Sanity-check your numbers (signs, totals,
+  currencies) before reporting. You cannot write files or delegate. When done,
+  stop and reply with a CONCISE summary: the numbers, how you computed them,
+  and the file paths used. This summary is the ONLY thing the parent agent
+  sees — never paste raw file dumps.
+
+model: inherit
+
+# Exactly the toolset the former builtin held: local inspection + computation,
+# no web, no write.
+tools:
+  add: [bash_exec, read, glob, grep]
+
+# Former builtin budget: real analysis iterates (inspect format -> compute ->
+# sanity-check); observed ~17 calls on a vault-sized task.
+permissions:
+  budget:
+    max_actions: 16
+    max_duration_minutes: 12.0
+
+capabilities: [data-analysis, statistics, local-files]
+tags: [example, host-dangerous, opt-in]

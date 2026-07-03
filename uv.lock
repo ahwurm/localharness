@@ -976,7 +976,7 @@ wheels = [
 
 [[package]]
 name = "localharness"
-version = "0.1.0"
+version = "0.5.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
