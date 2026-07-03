@@ -29,6 +29,7 @@ SC9 (sealed holdout): every scenario here is slice='train'. The holdout slice is
 """
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -155,24 +156,15 @@ async def test_spine_single_read_live_vllm(tool_scenario_corpus, tmp_path):
     LLMClient instead of the faithful-fake. Skipped by default — the 21-01 autouse `_skip_live_vllm`
     guard skips it unless LOCALHARNESS_LIVE_VLLM=1 (no real endpoint is hit in CI).
 
-    Model-agnostic (LOCKED guardrail): the provider/model/base_url are resolved from the loaded cfg
-    — NEVER a baked model id. Mirrors orchestrator._build_bench_client + the _run_one_model probe.
+    Model-agnostic (LOCKED guardrail): provider/model/base_url resolve from the
+    LOCALHARNESS_LIVE_* env channel (_live_provider) — NEVER baked into src/. The conftest
+    isolation fixture seeds a placeholder default_model, so the loaded cfg is NOT the live truth.
     Guardrail: runs ONLY the train-slice single_read scenario — the holdout slice is SEALED and
     is never executed, read, or passed anywhere in this file.
     """
-    # 1. Resolve the real provider/model from cfg (never bake an id) and build a probed client.
-    from localharness.bench.config import MatrixEntry
-    from localharness.bench.orchestrator import _build_bench_client
-    from localharness.cli.components_cmd import _build_loader
-
-    cfg = _build_loader().load_harness()
-    entry = MatrixEntry(
-        name=cfg.provider.default_model,
-        provider=cfg.provider.provider_type,
-        model_id=cfg.provider.default_model,
-        base_url=cfg.provider.base_url,
-    )
-    client = _build_bench_client(entry)
+    # 1. Resolve the real provider/model from the live env channel and build a probed client.
+    model_id, _ = _live_provider()
+    client = _live_bench_client()
     # The PROBE — sets the real tool_call_mode (native vs xml). The gate path skips this (AUDIT-03a);
     # the honest end-to-end variant resolves the mode the same way production _run_one_model does.
     await client.detect_capabilities()
@@ -182,7 +174,7 @@ async def test_spine_single_read_live_vllm(tool_scenario_corpus, tmp_path):
     results_root = tmp_path / "results"
     samples, _stop = await accumulate_runs(
         scen,
-        cfg.provider.default_model,
+        model_id,
         results_root,
         llm_client_factory=lambda _s: client,
         min_runs_override=1,
@@ -283,7 +275,7 @@ async def test_live_full_loop_holdout_unreached(live_endpoint, tmp_path):
     from localharness.cli.components_cmd import _build_loader
     from localharness.config.overlay import atomic_write_overlay
 
-    cfg = _build_loader().load_harness()  # provider/model/base_url resolved from config
+    cfg = _live_cfg(_build_loader().load_harness())  # provider swapped to the live env channel
 
     # 1. A real train-only worktree-source repo (holdout fixtures do not exist on disk).
     repo = _make_train_corpus_repo(tmp_path / "repo")
@@ -366,21 +358,40 @@ async def test_live_full_loop_holdout_unreached(live_endpoint, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _live_bench_client(cfg):
-    """Build + probe a real bench LLMClient from cfg.provider (model-agnostic, never a baked id).
+def _live_provider() -> tuple[str, str]:
+    """(model_id, base_url) for opted-in live runs — the LOCALHARNESS_LIVE_* env channel.
 
-    Mirrors orchestrator._build_bench_client + the _run_one_model capability probe. The probe
-    sets the real native/xml tool_call_mode the production bench path uses.
+    The autouse _isolate_localharness_home fixture (conftest.py) seeds EVERY test's config
+    with default_model 'test-model', which 404s vLLM's capability probe AND /tokenize — and
+    TokenCounter is server-or-fail by design, so every bench run dies inside
+    _build_agent_loop before a single generation. The env channel (established by
+    test_injection_redteam.py) is the live-run source of truth; the defaults mirror the
+    box reference architecture. Nothing is baked into src/, and env overrides both.
+    """
+    return (
+        os.environ.get("LOCALHARNESS_LIVE_MODEL", "qwen3.6-27b"),
+        os.environ.get("LOCALHARNESS_LIVE_BASE_URL", "http://localhost:8000/v1"),
+    )
+
+
+def _live_cfg(cfg):
+    """cfg with provider.default_model/base_url swapped to the live env channel — for the
+    _build_default_run_slice/run_experiment paths that resolve the bench client from cfg."""
+    model_id, base_url = _live_provider()
+    provider = cfg.provider.model_copy(update={"default_model": model_id, "base_url": base_url})
+    return cfg.model_copy(update={"provider": provider})
+
+
+def _live_bench_client():
+    """Build + probe a real bench LLMClient from the live env channel (NEVER the isolation
+    fixture's placeholder cfg — see _live_provider). Mirrors orchestrator._build_bench_client
+    + the _run_one_model capability probe (sets the real native/xml tool_call_mode).
     """
     from localharness.bench.config import MatrixEntry
     from localharness.bench.orchestrator import _build_bench_client
 
-    entry = MatrixEntry(
-        name=cfg.provider.default_model,
-        provider=cfg.provider.provider_type,
-        model_id=cfg.provider.default_model,
-        base_url=cfg.provider.base_url,
-    )
+    model_id, base_url = _live_provider()
+    entry = MatrixEntry(name=model_id, provider="vllm", model_id=model_id, base_url=base_url)
     return _build_bench_client(entry)
 
 
@@ -391,12 +402,10 @@ async def test_live_write_execute_real_file(live_endpoint, tool_scenario_corpus,
     Drives the write_execute scenario against live vLLM via the bench-arm-direct spine and asserts
     the on-disk write target EXISTS — proof of real tool dispatch + file I/O that a model merely
     echoing the token in prose cannot fake. NEVER asserts tool_call_count (the green-check trap).
-    Model-agnostic: model/base_url resolved from cfg.provider.
+    Model-agnostic: model/base_url resolved from the live env channel (_live_provider).
     """
-    from localharness.cli.components_cmd import _build_loader
-
-    cfg = _build_loader().load_harness()
-    client = _live_bench_client(cfg)
+    model_id, _ = _live_provider()
+    client = _live_bench_client()
     await client.detect_capabilities()
 
     # Pre-clean so a stale file can't mask a non-dispatching spine.
@@ -413,7 +422,7 @@ async def test_live_write_execute_real_file(live_endpoint, tool_scenario_corpus,
         results_root = tmp_path / "results"
         await accumulate_runs(
             scen,
-            cfg.provider.default_model,
+            model_id,
             results_root,
             llm_client_factory=lambda _s: client,
             min_runs_override=1,
@@ -442,11 +451,11 @@ async def test_live_explore_subagent_delegation(live_endpoint, tmp_path):
       - the child's read Action carries parent_id == the run/parent session_id (Phase 27 stamping);
       - the final result contains MAGIC_VALUE_777 (success is True under the answer-anchor rubric).
     Skipped by default (autouse _skip_live_vllm); live_endpoint hard-fails if opted-in but down.
-    Model-agnostic (LOCKED): provider/model/base_url resolved from cfg.provider, never a baked id.
-    Train-slice only (06_agent_creation is slice='train') — the holdout seal is untouched.
+    Model-agnostic (LOCKED): provider/model/base_url resolved from the LOCALHARNESS_LIVE_* env
+    channel (_live_provider), never baked into src/. Train-slice only (06_agent_creation is
+    slice='train') — the holdout seal is untouched.
     """
     from localharness.bench.runner import execute_one_run
-    from localharness.cli.components_cmd import _build_loader
     from localharness.core.events import Action, deserialize_event
 
     corpus_dir = pathlib.Path(__file__).resolve().parents[2] / "bench" / "scenarios"
@@ -454,8 +463,8 @@ async def test_live_explore_subagent_delegation(live_endpoint, tmp_path):
     fixture_values = pathlib.Path("/tmp/bench_fixtures/exploration_root/data/values.txt")
     assert fixture_values.is_file(), f"fixture not staged: {fixture_values}"
 
-    cfg = _build_loader().load_harness()
-    client = _live_bench_client(cfg)
+    model_id, _ = _live_provider()
+    client = _live_bench_client()
     await client.detect_capabilities()
 
     # A real generation may exceed the corpus default max_latency_s; widen the latency limit ONLY
@@ -465,7 +474,7 @@ async def test_live_explore_subagent_delegation(live_endpoint, tmp_path):
     )
 
     run_path = tmp_path / "live_delegation.jsonl"
-    completed = await execute_one_run(scen, cfg.provider.default_model, run_path, client)
+    completed = await execute_one_run(scen, model_id, run_path, client)
 
     # 1. Genuine delegation: 1 parent `agent` Action + >=1 child `read` Action on the SAME bus.
     assert completed.tool_call_count >= 2, (
@@ -503,12 +512,10 @@ async def test_live_budget_cap_halts(live_endpoint, tool_scenario_corpus, tmp_pa
     side-effect (a successful run, which requires the bash step's HELLO_BENCH_OK output to satisfy
     the rubric) is therefore ABSENT. We assert the absent second-step effect (run did NOT succeed),
     NEVER tool_call_count (the green-check trap, which increments pre-dispatch).
-    Model-agnostic: model/base_url resolved from cfg.provider.
+    Model-agnostic: model/base_url resolved from the live env channel (_live_provider).
     """
-    from localharness.cli.components_cmd import _build_loader
-
-    cfg = _build_loader().load_harness()
-    client = _live_bench_client(cfg)
+    model_id, _ = _live_provider()
+    client = _live_bench_client()
     await client.detect_capabilities()
 
     target = pathlib.Path(tool_scenario_corpus["write_target"])
@@ -528,7 +535,7 @@ async def test_live_budget_cap_halts(live_endpoint, tool_scenario_corpus, tmp_pa
         results_root = tmp_path / "results"
         samples, _stop = await accumulate_runs(
             capped,
-            cfg.provider.default_model,
+            model_id,
             results_root,
             llm_client_factory=lambda _s: client,
             min_runs_override=1,
@@ -560,7 +567,7 @@ async def test_live_non_agent_divergence_and_train(live_endpoint, tmp_git_repo, 
     =True) sets it to 55.0; the baseline arm (=False) keeps the default 80.0 -> the resolved
     AgentConfigs differ. Then the REAL train slice runs against live vLLM and must score > 0
     (Pitfall 5: a 0 train under live is the v1.2 regression this milestone kills — ESCALATE, do
-    not relax). Model-agnostic: model/base_url resolved from cfg.provider.
+    not relax). Model-agnostic: model/base_url resolved from the live env channel (_live_provider).
     """
     from localharness.autoresearch.experiment import (
         _build_default_run_slice,
@@ -569,7 +576,7 @@ async def test_live_non_agent_divergence_and_train(live_endpoint, tmp_git_repo, 
     from localharness.cli.components_cmd import _build_loader
     from localharness.config.overlay import atomic_write_overlay
 
-    cfg = _build_loader().load_harness()
+    cfg = _live_cfg(_build_loader().load_harness())  # provider swapped to the live env channel
 
     # Materialize the non-agent.* experiment overlay (the PROPOSAL arm) into the worktree.
     atomic_write_overlay(

@@ -795,7 +795,10 @@ def live_endpoint():
     if not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
 
-    base = _build_loader().load_harness().provider.base_url  # model-agnostic; NEVER bake the URL
+    # Live env channel first (matches test_injection_redteam + _live_provider), else the loaded
+    # config. Module-scoped: runs BEFORE the function-scoped isolation fixture, so load_harness()
+    # here reads the REAL home config — but the env var keeps preflight + tests on one target.
+    base = os.environ.get("LOCALHARNESS_LIVE_BASE_URL") or _build_loader().load_harness().provider.base_url
     try:
         httpx.get(base.rstrip("/") + "/models", timeout=3.0).raise_for_status()
     except Exception as e:  # noqa: BLE001 — any failure to reach the opted-in endpoint is a hard fail
