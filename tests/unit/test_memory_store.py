@@ -805,3 +805,69 @@ async def test_orchestrator_migration_noop_for_other_agents(tmp_path: Path):
         assert fact is not None and fact.agent_id == "default"
     finally:
         await legacy.close()
+
+
+# --- Collision refusal (ORCH-03): a user's OWN "orchestrator" is never merged/clobbered ---
+
+async def _build_collision_stores(tmp_path: Path) -> None:
+    """A user's OWN pre-existing "orchestrator" agent AND a legacy "default" root — both
+    real, both closed. The migration must REFUSE to touch either (destination exists)."""
+    theirs = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await theirs.open()
+    await theirs.store_fact("user/own/fact", "THEIRS-marker", confidence=0.9)
+    await theirs.close()
+
+    legacy = MemoryStore(agent_id="default", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    await legacy.store_fact("learned/legacy/fact", "LEGACY-marker", confidence=0.9)
+    await legacy.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_migration_refuses_collision_never_clobbers(tmp_path: Path):
+    """Collision = refusal: when a real "orchestrator" agent already exists, opening it
+    NEVER merges the legacy "default" data in and NEVER deletes the legacy dir. Their own
+    fact stays intact, the legacy fact does not leak, nothing is clobbered, and no false
+    rename breadcrumb is written on the refused migration."""
+    await _build_collision_stores(tmp_path)
+
+    theirs = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await theirs.open()  # destination exists -> migration REFUSES
+    try:
+        assert await theirs.get_fact("user/own/fact") is not None      # their data intact
+        assert await theirs.get_fact("learned/legacy/fact") is None    # NO merge/leak
+        assert (tmp_path / "agents" / "default" / "memory.db").exists()  # nothing deleted
+        # No false breadcrumb on a refused migration. store_fact writes no history, so the
+        # orchestrator's history.jsonl may not exist at all — guard the read.
+        hist = tmp_path / "agents" / "orchestrator" / "history.jsonl"
+        assert (not hist.exists()) or ("agent_renamed" not in hist.read_text())
+    finally:
+        await theirs.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_migration_collision_legacy_still_opens_as_default(tmp_path: Path):
+    """After a refused collision, the un-migrated legacy root keeps working under its OLD
+    "default" name — its fact is still reachable and still renders (ORCH-03: keep working
+    under the old name when the new name is already taken)."""
+    await _build_collision_stores(tmp_path)
+
+    # Refuse once (open+close the colliding orchestrator), then prove the legacy still opens.
+    theirs = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await theirs.open()
+    await theirs.close()
+
+    legacy = MemoryStore(agent_id="default", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    try:
+        fact = await legacy.get_fact("learned/legacy/fact")
+        assert fact is not None and fact.agent_id == "default"
+        agent_md = (await legacy.load_context(index_mode=True)).agent_memory_md
+        assert "LEGACY-marker" in agent_md
+    finally:
+        await legacy.close()
