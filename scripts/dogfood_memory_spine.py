@@ -13,6 +13,8 @@ consolidation pass:
   3. The one-off web_fetch error is NOT promoted (stays a [pending] candidate).
   4. A stuck-recovery (salient) promotes from ONE episode.
   5. memory_search("uv") finds the lesson; the superseded/history door still works.
+  6. A fresh sitting's injected block answers "what did we do last sitting?" — the
+     session-history shelf self-restores with the uv payload, zero tool calls.
 
 Everything below drives the REAL EventBus → WriteGate subscription → MemoryStore →
 ConsolidationPass → _render_memory_index → MemorySearchTool. The deterministic spine
@@ -24,6 +26,7 @@ import tempfile
 
 sys.path.insert(0, "src")
 
+from localharness.cli.session_accumulator import SessionAccumulator, derive_session_summary
 from localharness.config.models import MemoryConsolidationConfig
 from localharness.core.bus import EventBus
 from localharness.core.events import Observation, StuckRecovered
@@ -49,12 +52,14 @@ async def tool_event(bus, session, tool, *, error=None, output="ok"):
 
 
 async def main() -> None:
-    store = MemoryStore(agent_id=AGENT, division_id="", org_id="",
-                        base_dir=tempfile.mkdtemp(prefix="dogfood-mem-"))
+    mem_dir = tempfile.mkdtemp(prefix="dogfood-mem-")
+    store = MemoryStore(agent_id=AGENT, division_id="", org_id="", base_dir=mem_dir)
     await store.open()
     bus = EventBus()
     gate = WriteGate(store, bus, AGENT)
     await gate.open()  # the REAL subscription path, agent-id filtered
+    acc = SessionAccumulator(bus, AGENT)
+    await acc.open()  # accumulates the SAME events sections A/B publish (no synthetic extras)
 
     gate_events = []
     from localharness.core.events import MemoryGateFired
@@ -98,6 +103,26 @@ async def main() -> None:
     result = await MemorySearchTool(store)._execute(query="uv command")
     print(result.output)
 
+    section("SITTING CLOSES — end_session flushes a payload-first history line")
+    # The dogfood's sittings are simulated ids (not process lifetimes), so mint the row here
+    # for end_session's UPDATE to land. The summary is DERIVED from the real accumulator —
+    # the string is NOT hand-written (driving the derive path is the point of this check).
+    await store.create_session("session-B", budget={}, model="dogfood",
+                               context_tokens_available=8192)
+    summary = derive_session_summary(acc)
+    print(f"derived summary: {summary!r}")
+    await acc.close()
+    await store.end_session("session-B", exit_reason="complete", summary=summary,
+                            turn_count=2, action_count=acc.action_count,
+                            tokens_in=0, tokens_out=0)
+
+    section("FRESH SITTING — a NEW store instance renders the injected block")
+    store2 = MemoryStore(agent_id=AGENT, division_id="", org_id="", base_dir=mem_dir)
+    await store2.open()  # new process lifetime over the same base_dir = the next sitting
+    fresh_index = (await store2.load_context(index_mode=True)).agent_memory_md
+    print(fresh_index)
+    await store2.close()
+
     section("VERDICT vs prediction")
     checks = {
         "1. candidates invisible pre-consolidation": "gate/" not in index_before,
@@ -107,6 +132,14 @@ async def main() -> None:
         "3. one-off web_fetch NOT promoted": not any("/web_fetch/" in k for k in report.promoted_keys),
         "4. salient stuck-recovery promoted from 1 episode": any("stuck_recovered" in k for k in report.promoted_keys),
         "5. search finds the lesson": result.success and "uv" in result.output.lower(),
+        # SESS-04 end-to-end proxy + SESS-05 KILL tooth: `summary is not None` is a hard
+        # AND-term — a vacuous derivation fails RED here (no silent pass on a suppressed
+        # shelf); "uv" IN the history block is the discriminating-content bar a generic
+        # "worked on stuff" line could never clear.
+        "6. fresh sitting answers 'what did we do last sitting' zero-tool":
+            summary is not None
+            and "Recent Session History" in fresh_index
+            and "uv" in fresh_index.split("Recent Session History")[1],
     }
     ok = True
     for name, passed in checks.items():
