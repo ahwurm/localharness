@@ -7,7 +7,6 @@ from .errors import (
     MemoryWriteError,
     MemoryReadError,
     MemoryCorruptionError,
-    SessionNotFoundError,
     DiskFullError,
 )
 
@@ -23,6 +22,5 @@ __all__ = [
     "MemoryWriteError",
     "MemoryReadError",
     "MemoryCorruptionError",
-    "SessionNotFoundError",
     "DiskFullError",
 ]

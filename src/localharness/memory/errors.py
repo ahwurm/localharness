@@ -42,14 +42,6 @@ class MemoryCorruptionError(MemoryError):
         super().__init__(f"Memory corruption detected: {path}: {detail}")
 
 
-class SessionNotFoundError(MemoryError):
-    """session_id has no records in history.jsonl."""
-
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        super().__init__(f"Session not found: {session_id}")
-
-
 class DiskFullError(MemoryWriteError):
     """Write failed due to ENOSPC. Subclass of MemoryWriteError."""
     pass

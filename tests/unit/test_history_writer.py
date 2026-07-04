@@ -7,7 +7,6 @@ from localharness.memory.errors import (
     MemoryWriteError,
     MemoryReadError,
     MemoryCorruptionError,
-    SessionNotFoundError,
     DiskFullError,
 )
 from localharness.memory.history import HistoryWriter
@@ -35,7 +34,6 @@ def test_memory_error_hierarchy():
     assert issubclass(MemoryWriteError, MemoryError)
     assert issubclass(MemoryReadError, MemoryError)
     assert issubclass(MemoryCorruptionError, MemoryError)
-    assert issubclass(SessionNotFoundError, MemoryError)
     assert issubclass(DiskFullError, MemoryWriteError)
 
 
@@ -51,12 +49,6 @@ def test_memory_corruption_error_attributes():
     assert exc.path == "/tmp/foo.jsonl"
     assert exc.detail == "Line 3: bad json"
     assert "/tmp/foo.jsonl" in str(exc)
-
-
-def test_session_not_found_error():
-    exc = SessionNotFoundError("sess_xyz")
-    assert exc.session_id == "sess_xyz"
-    assert "sess_xyz" in str(exc)
 
 
 # --- HistoryWriter tests ---

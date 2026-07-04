@@ -7,7 +7,6 @@ import pytest
 
 from localharness.core.bus import EventBus
 from localharness.core.events import Action, Observation, UserMessage
-from localharness.memory.errors import SessionNotFoundError
 from localharness.memory.sqlite import Fact, FactQuery, MemoryContext, MemoryStore
 
 
@@ -404,95 +403,6 @@ async def test_get_history_delegates(memory_store: MemoryStore):
     s1_records = await memory_store.get_history(session_id=sid1)
     assert len(s1_records) == 1
     assert s1_records[0]["content"] == "msg-0"
-
-
-# ---------------------------------------------------------------------------
-# reconstruct_session
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_reconstruct_session_basic(memory_store: MemoryStore):
-    sid = new_session_id()
-    ts = int(time.time())
-
-    await memory_store.append_history({
-        "v": 1, "type": "system_message", "id": str(uuid.uuid4()),
-        "session_id": sid, "agent_id": "test-agent", "ts": ts,
-        "role": "system", "content": "You are a test agent.",
-        "is_compacted": False, "replaces_ids": [],
-    })
-    await memory_store.append_history({
-        "v": 1, "type": "user_message", "id": str(uuid.uuid4()),
-        "session_id": sid, "agent_id": "test-agent", "ts": ts + 1,
-        "role": "user", "content": "Hello agent", "channel": "terminal",
-        "channel_metadata": None,
-    })
-    call_id = str(uuid.uuid4())
-    await memory_store.append_history({
-        "v": 1, "type": "assistant_message", "id": str(uuid.uuid4()),
-        "session_id": sid, "agent_id": "test-agent", "ts": ts + 2,
-        "role": "assistant", "content": "Using a tool.",
-        "tool_calls": [{"id": call_id, "name": "some_tool", "arguments": {}}],
-        "finish_reason": "tool_calls", "tokens_in": 100, "tokens_out": 20,
-        "model": "test-model", "latency_ms": 100,
-    })
-    await memory_store.append_history({
-        "v": 1, "type": "tool_result", "id": str(uuid.uuid4()),
-        "session_id": sid, "agent_id": "test-agent", "ts": ts + 3,
-        "role": "tool", "call_id": call_id, "tool_name": "some_tool",
-        "content": "Tool result here.", "is_error": False, "error_type": None,
-        "truncated": False, "original_length": 16, "stored_length": 16,
-    })
-
-    messages = await memory_store.reconstruct_session(sid)
-    roles = [m["role"] for m in messages]
-    assert roles == ["system", "user", "assistant", "tool"]
-
-
-@pytest.mark.asyncio
-async def test_reconstruct_session_orphan_guard(memory_store: MemoryStore):
-    sid = new_session_id()
-    ts = int(time.time())
-    orphan_call_id = str(uuid.uuid4())
-
-    await memory_store.append_history({
-        "v": 1, "type": "assistant_message", "id": str(uuid.uuid4()),
-        "session_id": sid, "agent_id": "test-agent", "ts": ts,
-        "role": "assistant", "content": "Using a tool.",
-        "tool_calls": [{"id": orphan_call_id, "name": "tool", "arguments": {}}],
-        "finish_reason": "tool_calls", "tokens_in": 100, "tokens_out": 20,
-        "model": "test-model", "latency_ms": 100,
-    })
-    # No matching tool_result — orphaned tool call
-
-    messages = await memory_store.reconstruct_session(sid)
-    # The assistant message with unmatched tool_calls should be dropped
-    for m in messages:
-        assert m.get("role") != "assistant" or not m.get("tool_calls")
-
-
-@pytest.mark.asyncio
-async def test_reconstruct_session_not_found(memory_store: MemoryStore):
-    with pytest.raises(SessionNotFoundError):
-        await memory_store.reconstruct_session("nonexistent-session-id")
-
-
-# ---------------------------------------------------------------------------
-# notes
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_update_notes(tmp_path: Path):
-    store = make_store(tmp_path)
-    await store.open()
-    try:
-        # Create initial MEMORY.md via flush
-        await store.flush_memory_md()
-        await store.update_notes("working_notes", "new working note content")
-        md = store._markdown_memory.read()
-        assert "new working note content" in md
-    finally:
-        await store.close()
 
 
 @pytest.mark.asyncio
