@@ -697,3 +697,182 @@ def test_deploy_config_default_path(tmp_path, monkeypatch):
     result_path = wf.deploy_config("default-bot")
     assert result_path == tmp_path / ".localharness" / "agents" / "default-bot.yaml"
     assert result_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Plan 33-03 Task 2: session lifecycle wired into the REAL _start_async
+#
+# FINDING-A: the sessions table had ZERO rows across every sitting ever — the
+# create_session/end_session primitives had no production caller. These drives run
+# the real _start_async with only the EXTERNAL boundaries stubbed (LLM probe,
+# tokenizer, REPL loop, plugin discovery); everything memory-side runs for real,
+# which is the wiring under test. repl.run is a no-op, so the sitting has zero turns.
+# ---------------------------------------------------------------------------
+
+def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, repl_run=None):
+    """Write a minimal (known-good) config and stub every external boundary so the
+    real _start_async runs offline. `repl_run` overrides the no-op REPL loop to drive
+    live bus traffic through the running harness."""
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: ollama\n"
+        "  base_url: http://localhost:11434/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+    )
+
+    async def fake_probe(llm, max_retries=3, delay=2.0):
+        # served window comfortably above the default 131072 cfg + 4096 reserve so
+        # the fit-check (start_cmd:248) does not abort the drive
+        return (True, "native", 262_144)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", fake_probe)
+
+    class _StubTokenCounter:
+        # the real TokenCounter FAILS LOUD without a /tokenize server
+        def __init__(self, base_url=None, model=None):
+            pass
+
+        def count(self, text=""):
+            return max(1, len(str(text)) // 4)
+
+        def count_messages(self, messages):
+            return sum(self.count(m.get("content", "")) for m in messages)
+    monkeypatch.setattr("localharness.agent.context.TokenCounter", _StubTokenCounter)
+
+    async def default_repl_run(self):
+        return None  # clean, immediate return -> zero turns -> exit_reason "complete"
+    monkeypatch.setattr(
+        "localharness.cli.repl.OrchestratorREPL.run", repl_run or default_repl_run
+    )
+
+    async def fake_discover(self):
+        return []  # keep the test off the real home plugin dir
+    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.discover_all", fake_discover)
+
+    if capture_session_id is not None:
+        import localharness.agent.loop as _loop_mod
+        real_init = _loop_mod.AgentLoop.__init__
+
+        def wrapped_init(self, *args, **kwargs):
+            capture_session_id.append(kwargs.get("session_id"))
+            return real_init(self, *args, **kwargs)
+        monkeypatch.setattr("localharness.agent.loop.AgentLoop.__init__", wrapped_init)
+
+
+def _read_sessions(tmp_path):
+    """Read the sessions table from the real memory.db the drive wrote."""
+    import sqlite3
+    db_path = tmp_path / "agents" / "default" / "memory.db"
+    assert db_path.exists(), f"memory.db not created at {db_path}"
+    con = sqlite3.connect(str(db_path))
+    try:
+        return con.execute(
+            "SELECT id, started_at, ended_at, exit_reason, summary, "
+            "turn_count, action_count FROM sessions"
+        ).fetchall()
+    finally:
+        con.close()
+
+
+async def test_session_lifecycle_create_and_end_once(tmp_path, monkeypatch):
+    """A full _start_async lifecycle inserts exactly ONE sessions row, opened at
+    start and closed at shutdown with a real exit_reason."""
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1
+    _id, started_at, ended_at, exit_reason, _summary, _tc, _ac = rows[0]
+    assert started_at is not None
+    assert ended_at is not None
+    assert exit_reason == "complete"
+
+
+async def test_session_id_threaded_to_agent_loop(tmp_path, monkeypatch):
+    """The sitting id minted in start_cmd is the SAME id AgentLoop carries and the
+    SAME id the sessions row is keyed by (create == loop == end)."""
+    from localharness.cli.start_cmd import _start_async
+    captured: list = []
+    _stub_start_boundaries(tmp_path, monkeypatch, capture_session_id=captured)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert len(captured) == 1, "exactly one AgentLoop is constructed in a zero-turn drive"
+    loop_session_id = captured[0]
+    assert loop_session_id is not None, "start_cmd must pass session_id=sitting_id"
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1
+    assert rows[0][0] == loop_session_id  # sessions row id == AgentLoop session_id
+
+
+async def test_vacuous_sitting_leaves_shelf_suppressed(tmp_path, monkeypatch):
+    """SESS-05 KILL guardrail, end-to-end: a zero-turn sitting writes a NULL summary
+    and the injected index does NOT advertise an empty 'Recent Session History'."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.memory.sqlite import MemoryStore
+    _stub_start_boundaries(tmp_path, monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1
+    assert rows[0][4] is None  # summary NULL (vacuous -> suppressed, not "worked on stuff")
+    assert rows[0][5] == 0     # turn_count 0
+
+    # A fresh store rendering the injected index must not promise an empty shelf.
+    store = MemoryStore(
+        agent_id="default", division_id="default", org_id="default",
+        base_dir=str(tmp_path),
+    )
+    await store.open()
+    try:
+        ctx = await store.load_context()
+    finally:
+        await store.close()
+    assert "Recent Session History" not in ctx.agent_memory_md
+
+
+async def test_gate_capture_produces_payload_first_summary_row(tmp_path, monkeypatch):
+    """Positive control for the KILL guardrail: a sitting with a real gate capture +
+    tool use — published on the LIVE bus the accumulator is subscribed to, during the
+    running drive — closes with counts AND a payload-first summary that leads with the
+    capture detail, not bookkeeping. This exercises the composed spine end-to-end
+    (bus -> SessionAccumulator -> derive_session_summary -> end_session -> sessions row)."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.core.events import MemoryGateFired, Observation, TurnCompleted
+
+    async def driving_repl_run(self):
+        # agent_id must be the running agent ("default") for the accumulator filter to
+        # pass; session_id is the sitting id the loop carries. publish() awaits handlers
+        # inline, so the accumulator has counted these before the finally derives the summary.
+        sid = self._agent.current_session_id
+        await self._bus.publish(TurnCompleted(
+            agent_id="default", session_id=sid, iterations=1, duration_seconds=1.0,
+            elapsed_tokens=150, input_tokens=100, output_tokens=50, summary="done",
+        ))
+        await self._bus.publish(Observation(
+            agent_id="default", session_id=sid, observation_type="tool_result",
+            tool_name="bash_exec", output="ok",
+        ))
+        await self._bus.publish(MemoryGateFired(
+            agent_id="default", session_id=sid, tier="resolved_error",
+            fact_key="gate/resolved_error/bash_exec/k", tool_name="bash_exec",
+            detail="uv: command not found",
+        ))
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=driving_repl_run)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1
+    _id, _s, _e, exit_reason, summary, turn_count, action_count = rows[0]
+    assert exit_reason == "complete"
+    assert turn_count == 1
+    assert action_count == 1
+    assert summary is not None
+    assert summary.startswith("resolved: uv: command not found")
+    assert "bash_exec" in summary

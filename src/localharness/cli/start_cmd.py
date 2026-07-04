@@ -116,6 +116,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        channel_mode: str = "terminal", subagents: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
+    import uuid
 
     from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
     from localharness.agent.loop import AgentLoop
@@ -278,6 +279,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     agent_dir = cfg_path / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
+    sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     # LLMClient built above with probe-derived tool_call_mode.
 
     # --- 2. Core infrastructure ---
@@ -308,6 +310,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"memory: {exc} (in-memory mode)")
         memory_store = None
 
+    # SESS-02: open the sessions row for this sitting (soft — a session-row failure must
+    # not cost the whole memory subsystem). All three args are already-resolved locals.
+    _session_started = False
+    if memory_store is not None:
+        try:
+            await memory_store.create_session(
+                sitting_id,
+                budget=agent_config.permissions.budget.model_dump(),
+                model=resolved_model,
+                context_tokens_available=_cfg_window,
+            )
+            _session_started = True
+        except Exception as exc:
+            warnings.append(f"session-start: {exc}")
+
     # Prediction-error write gate (WRITE-03/06): harness-initiated memory writes from bus
     # signals. Default-on, config-off (agent.memory.write_gate_enabled) — cruncher-style.
     write_gate = None
@@ -320,10 +337,26 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             warnings.append(f"memory write-gate: {exc}")
             write_gate = None
 
+    # SESS-02/05: sitting-scoped counters feeding the payload-first close-out summary
+    # (zero model calls — derived from bus signals the gate already composes payload-first).
+    # Same agent_id-filtered bus seam as the write gate; closed before the summary reads.
+    session_acc = None
+    if memory_store is not None:
+        try:
+            from localharness.cli.session_accumulator import SessionAccumulator
+            session_acc = SessionAccumulator(bus, agent_name_str)
+            await session_acc.open()
+        except Exception as exc:
+            warnings.append(f"session-accumulator: {exc}")
+
     # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
     # idle timer, cooperatively cancelled by any user turn. llm=None on purpose — the
     # deterministic pass (fold/promote/decay/cap-trim/proxies) needs no model; the LLM
     # replay seam stays off until its output quality is iterated live.
+    # on_promotion_sample=None on purpose too (CONS-06): the Discord-post callback path
+    # exists and is unit-verified (test_churn_metric_and_sample_hook), but DiscordChannel is
+    # constructed later in the channel block (§10) — wiring it here means reordering channel
+    # construction for a hook with no live consumer yet. Named seam, same contract as llm.
     consolidation_scheduler = None
     _cons_cfg = getattr(agent_config.memory, "consolidation", None)
     if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
@@ -515,6 +548,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         permission_evaluator=perm_eval,
         memory_loader=memory_store,
         compact_md_path=compact_md_path,
+        session_id=sitting_id,  # SESS-01: the whole sitting shares this id
     )
     if channel_mode == "discord":
         from localharness.channels.discord import DiscordChannel, discord_config_from_env
@@ -572,12 +606,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         config_dir=cfg_path,
     )
 
+    _exit_reason = "complete"
     try:
         await repl.run()
     except KeyboardInterrupt:
+        _exit_reason = "interrupt"
         console.print("\nGoodbye.")
+    except Exception:
+        _exit_reason = "error"
+        raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> MemoryStore ---
+        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> end_session -> MemoryStore ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
@@ -594,6 +633,31 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 await write_gate.close()
             except Exception:
                 pass
+        # end_session needs the store OPEN (it writes) but the gate CLOSED (no racing
+        # capture mid-summary) and consolidation STOPPED (no in-flight promotion mutating
+        # facts mid-read) — hence here, after write_gate.close(), before the store closes
+        # (research Pitfall 4).
+        if session_acc is not None:
+            try:
+                await session_acc.close()  # stop counting before the summary reads
+            except Exception:
+                pass
+        if memory_store is not None and _session_started:
+            try:
+                from localharness.cli.session_accumulator import derive_session_summary
+                await memory_store.end_session(
+                    sitting_id,
+                    exit_reason=_exit_reason,
+                    summary=derive_session_summary(session_acc),
+                    turn_count=session_acc.turn_count if session_acc else 0,
+                    action_count=session_acc.action_count if session_acc else 0,
+                    tokens_in=session_acc.tokens_in if session_acc else 0,
+                    tokens_out=session_acc.tokens_out if session_acc else 0,
+                )
+            except Exception as exc:
+                # Never silent (2026-07-03 live-test rule): a skipped close-out is the
+                # amnesia class. Match the surrounding swallow but leave a one-line trace.
+                err_console.print(f"[yellow]⚠ session close-out skipped: {exc}[/yellow]")
         if memory_store:
             try:
                 await memory_store.close()
