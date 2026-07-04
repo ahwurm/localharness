@@ -887,6 +887,50 @@ async def test_gate_capture_produces_payload_first_summary_row(tmp_path, monkeyp
     assert "bash_exec" in summary
 
 
+async def test_user_message_produces_topical_summary_row(tmp_path, monkeypatch):
+    """TIME-01 composed spine: a repl-shaped UserMessage published on the LIVE bus during
+    a real _start_async drive flows SessionAccumulator (UserMessage subscription) ->
+    derive_session_summary -> end_session -> sessions row. A pure-chat delegation sitting
+    (NO gate capture) closes with a zero-model topical slice leading the line — the exact
+    owner UAT-2 anchor, pinned by string EQUALITY (a substring assert would miss the
+    em-dash separator and the fixed pluralization)."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.core.events import Observation, TurnCompleted, UserMessage
+
+    async def driving_repl_run(self):
+        # agent_id must be the running agent ("orchestrator") for the accumulator filter to
+        # pass; session_id is the sitting id the loop carries. publish() awaits handlers
+        # inline, so the accumulator has counted these before the finally derives the summary.
+        sid = self._agent.current_session_id
+        await self._bus.publish(UserMessage(
+            agent_id="orchestrator", session_id=sid,
+            content="any fun 4th of July events in Miami Beach?", channel="terminal",
+        ))
+        for _ in range(3):
+            await self._bus.publish(TurnCompleted(
+                agent_id="orchestrator", session_id=sid, iterations=1, duration_seconds=1.0,
+                elapsed_tokens=150, input_tokens=100, output_tokens=50, summary="done",
+            ))
+        await self._bus.publish(Observation(
+            agent_id="orchestrator", session_id=sid, observation_type="tool_result",
+            tool_name="agent", output="ok",
+        ))
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=driving_repl_run)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1
+    _id, _s, _e, exit_reason, summary, turn_count, action_count = rows[0]
+    assert exit_reason == "complete"
+    assert turn_count == 3
+    assert action_count == 1
+    assert summary == (
+        'asked: "any fun 4th of July events in Miami Beach?" — 3 turns, 1 delegation'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 33.1 (ORCH-01/02/03): upgrade drives — the rename must not cost a single memory.
 # Composed proof that plan 01's store migration + Task 1's YAML migration + selection +
