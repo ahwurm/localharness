@@ -15,7 +15,6 @@ import aiosqlite
 from localharness.memory.errors import (
     MemoryCorruptionError,
     MemoryVerifyError,
-    SessionNotFoundError,
 )
 from localharness.memory.history import HistoryWriter
 from localharness.memory.markdown import MarkdownMemory
@@ -130,15 +129,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE TABLE IF NOT EXISTS notes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id    TEXT    NOT NULL,
-    section     TEXT    NOT NULL DEFAULT 'general',
-    content     TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_notes_agent_id ON notes(agent_id, section);
 """
 
 # ---------------------------------------------------------------------------
@@ -192,7 +182,7 @@ CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
 END;
 """
 
-_SESSIONS_NOTES_SQL = """
+_SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
     id              TEXT    PRIMARY KEY,
     agent_id        TEXT    NOT NULL,
@@ -209,18 +199,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE TABLE IF NOT EXISTS notes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id    TEXT    NOT NULL,
-    section     TEXT    NOT NULL DEFAULT 'general',
-    content     TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_notes_agent_id ON notes(agent_id, section);
 """
 
-SCHEMA_V2_SQL = _FACTS_TABLE_V2 + _FACTS_INDEXES_V2 + _FACTS_FTS_AND_TRIGGERS + _SESSIONS_NOTES_SQL
+SCHEMA_V2_SQL = _FACTS_TABLE_V2 + _FACTS_INDEXES_V2 + _FACTS_FTS_AND_TRIGGERS + _SESSIONS_SQL
 
 # In-place v1→v2 rebuild: SQLite cannot drop a UNIQUE table constraint, so the table is
 # rebuilt (rename → recreate → copy → drop), triggers/indexes recreated, FTS re-synced.
@@ -793,82 +774,8 @@ class MemoryStore:
         return records[-limit:]
 
     # ------------------------------------------------------------------
-    # Session reconstruction
+    # Context loading
     # ------------------------------------------------------------------
-
-    async def reconstruct_session(self, session_id: str) -> list[dict[str, Any]]:
-        """Reconstruct LLM message format from history JSONL with compaction + orphan guard."""
-        all_records = await self._history_writer.read_all()
-        session_records = [r for r in all_records if r.get("session_id") == session_id]
-        if not session_records:
-            raise SessionNotFoundError(session_id)
-
-        # Collect compacted IDs
-        compacted_ids: set[str] = set()
-        for r in session_records:
-            if r.get("type") == "system_message" and r.get("is_compacted"):
-                compacted_ids.update(r.get("replaces_ids", []))
-
-        active = [r for r in session_records if r.get("id") not in compacted_ids]
-
-        messages: list[dict[str, Any]] = []
-        pending_tool_calls: dict[str, dict] = {}
-
-        for r in active:
-            rtype = r.get("type")
-            if rtype == "system_message":
-                messages.append({"role": "system", "content": r.get("content", "")})
-            elif rtype == "user_message":
-                messages.append({"role": "user", "content": r.get("content", "")})
-            elif rtype == "assistant_message":
-                tool_calls = r.get("tool_calls") or []
-                msg: dict[str, Any] = {"role": "assistant", "content": r.get("content")}
-                if tool_calls:
-                    msg["tool_calls"] = [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc.get("arguments", {})),
-                            },
-                        }
-                        for tc in tool_calls
-                    ]
-                    for tc in tool_calls:
-                        pending_tool_calls[tc["id"]] = tc
-                messages.append(msg)
-            elif rtype == "tool_result":
-                call_id = r.get("call_id")
-                if call_id in pending_tool_calls:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": r.get("content", ""),
-                    })
-                    del pending_tool_calls[call_id]
-                # orphaned tool_result — drop silently
-
-        # Drop orphaned assistant messages (pending_tool_calls non-empty = crash mid-turn)
-        if pending_tool_calls:
-            orphan_ids = set(pending_tool_calls.keys())
-            messages = [
-                m for m in messages
-                if not (
-                    m.get("role") == "assistant"
-                    and any(tc["id"] in orphan_ids for tc in m.get("tool_calls", []))
-                )
-            ]
-
-        return messages
-
-    # ------------------------------------------------------------------
-    # Notes / context
-    # ------------------------------------------------------------------
-
-    async def update_notes(self, section: str, content: str) -> None:
-        """Replace a named MEMORY.md section. Delegates to MarkdownMemory."""
-        self._markdown_memory.update_section(section, content)
 
     async def load_context(
         self,
