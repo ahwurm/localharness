@@ -6,7 +6,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -1194,6 +1194,35 @@ def _one_line(value: str, max_chars: int = 100) -> str:
     """First line of a fact value, truncated — the index carries a description, not the body."""
     first = (value or "").strip().splitlines()[0] if (value or "").strip() else ""
     return first if len(first) <= max_chars else first[: max_chars - 1].rstrip() + "…"
+
+
+# TIME-03: the injected shelf's hard line budget — a system invariant, not a
+# tunable default (config can go lower, never higher).
+_SESSION_SHELF_HARD_CAP = 8
+
+
+def _relative_day_label(sitting_local_date: date, today_local_date: date) -> str:
+    """Relative day word for the injected shelf (TIME-02). PURE — no clock reads:
+    `today_local_date` is computed ONCE per render by the caller, so the label is
+    byte-stable within a day and flips only at the LOCAL day boundary, phasing
+    with the loop.py:606 daily date bust (TIME-04 — no new cache-bust class).
+    Negative deltas (clock skew) and >6-day deltas fall back to the absolute ISO
+    date — the KILL bar's revert shape, applied per-line."""
+    delta = (today_local_date - sitting_local_date).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "yesterday"
+    if 2 <= delta <= 6:
+        return sitting_local_date.strftime("%a")  # e.g. "Tue" (older-in-week)
+    return sitting_local_date.strftime("%Y-%m-%d")
+
+
+def _clock_label(sitting_local_dt: datetime) -> str:
+    """12-hour clock, no leading zero, portable (no %-I/%#I platform split):
+    %I is 01-12, so lstrip('0') strips at most the hour's leading zero and can
+    never touch the zero-padded minutes."""
+    return sitting_local_dt.strftime("%I:%M%p").lstrip("0").lower()
 
 
 def _last_n_entries(history: str, n: int) -> str:
