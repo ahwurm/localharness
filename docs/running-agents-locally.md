@@ -23,7 +23,7 @@ That's the substance behind "zero cost." A local model holds up here because the
 
 | | Runs on a model you own | Zero marginal cost | Built *for* local's pains | Time to a working agent | Agents as config, not code |
 |---|---|---|---|---|---|
-| **LocalHarness** | Yes — the design center | Yes, on your hardware | Yes — endpoint/model detection + context management | Fast: `init` then `start`, default agent, no wiring | Yes — YAML |
+| **LocalHarness** | Yes — the design center | Yes, on your hardware | Yes — endpoint/model detection + context management | Fast: `init` then `start`, the orchestrator is ready, no wiring | Yes — YAML |
 | **Claude Code** | No (Claude models only) | No (subscription / API) | n/a | Fast, but cloud | Settings + markdown |
 | **OpenCode** | Can point at a local endpoint | Yes, if you run local | Partial — local is a config option, not the design center | Fast | JSON |
 | **Goose** | Can point at a local endpoint | Yes, if you run local | Partial — general agent that supports local | Fast | YAML recipes |
