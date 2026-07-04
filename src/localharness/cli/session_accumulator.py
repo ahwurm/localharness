@@ -37,6 +37,7 @@ class SessionAccumulator:
         self.tokens_out = 0
         self.tools_used: Counter[str] = Counter()
         self.captures: list[tuple[str, str]] = []  # (tier, detail)
+        self.first_ask: str | None = None  # TIME-01: sitting's opening user ask (zero-model topic)
 
     async def open(self) -> None:
         from localharness.core.events import (
@@ -44,6 +45,7 @@ class SessionAccumulator:
             Observation,
             TurnCompleted,
             TurnFailed,
+            UserMessage,
         )
         sub = self._bus.subscribe
         self._handles += [
@@ -51,6 +53,7 @@ class SessionAccumulator:
             sub(TurnFailed, self.on_turn_failed, agent_id=self._agent_id),
             sub(Observation, self.on_observation, agent_id=self._agent_id),
             sub(MemoryGateFired, self.on_gate_fired, agent_id=self._agent_id),
+            sub(UserMessage, self.on_user_message, agent_id=self._agent_id),
         ]
 
     async def close(self) -> None:
@@ -74,24 +77,54 @@ class SessionAccumulator:
     async def on_gate_fired(self, event) -> None:
         self.captures.append((event.tier, event.detail))
 
+    async def on_user_message(self, event) -> None:
+        # Capture-FIRST: the sitting's opening ask is the topic a human recognizes.
+        if self.first_ask is None and (event.content or "").strip():
+            self.first_ask = event.content
+
+
+def _clean_ask(text: str) -> str:
+    # Collapse whitespace (gate.py _preview precedent) + neutralize double quotes that
+    # would break the single-line `asked: "..."` markdown/quoting contract (Pitfall 3).
+    return " ".join((text or "").split()).replace('"', "'")
+
 
 def derive_session_summary(acc: Optional[SessionAccumulator]) -> str | None:
-    """Payload-first or nothing. Lead with the highest-warrant capture's detail
-    (resolved_error > stuck_recovered; novelty never leads — telemetry tier),
-    then the counts tail. No capture and no tool use -> None (suppressed)."""
+    """Payload-first or nothing. Lead priority: resolved_error > stuck_recovered
+    > asked-slice (TIME-01 — a pure-chat sitting is no longer invisible); novelty
+    never leads. No lead and no tool use -> None (SESS-05 suppressed)."""
     if acc is None:
         return None
-    lead = ""
+    lead, sep = "", "; "
     for tier in ("resolved_error", "stuck_recovered"):
         detail = next((d for t, d in acc.captures if t == tier and d), None)
         if detail:
             lead = _TIER_LEAD[tier] + detail[:_DETAIL_BUDGET]
             break
-    top = ", ".join(name for name, _ in acc.tools_used.most_common(3))
-    tail = (f"{acc.turn_count} turns, {acc.action_count} tool calls"
-            + (f" ({top})" if top else ""))
+    if not lead and acc.first_ask:
+        ask = _clean_ask(acc.first_ask)
+        if len(ask) > _DETAIL_BUDGET:
+            ask = ask[: _DETAIL_BUDGET - 1].rstrip() + "…"
+        lead = f'asked: "{ask}"'
+        sep = " — "  # owner specimen: ask lead uses em dash; capture tiers keep "; "
+    delegations = acc.tools_used.get("agent", 0)
+    tool_calls = acc.action_count - delegations
+    top = ", ".join(
+        n for n, _ in Counter(
+            {k: v for k, v in acc.tools_used.items() if k != "agent"}
+        ).most_common(3)
+    )
+    parts = [f"{acc.turn_count} turn{'s' if acc.turn_count != 1 else ''}"]
+    if tool_calls:
+        parts.append(
+            f"{tool_calls} tool call{'s' if tool_calls != 1 else ''}"
+            + (f" ({top})" if top else "")
+        )
+    if delegations:
+        parts.append(f"{delegations} delegation{'s' if delegations != 1 else ''}")
+    tail = ", ".join(parts)
     if lead:
-        return f"{lead}; {tail}"[:_LINE_BUDGET]
+        return f"{lead}{sep}{tail}"[:_LINE_BUDGET]
     if acc.tools_used:
         return tail[:_LINE_BUDGET]
     return None
