@@ -18,8 +18,11 @@ The `self_check`-changed signal was CUT from v1 by the 2026-07-02 critic pass: n
 answer-comparison logic exists and none can be computed cheaply inline.
 
 The gate must NEVER break the loop: every handler swallows its own exceptions (logged),
-and every decision is published as a MemoryGateFired event — the fork-(b) live
-observability for gate density/precision.
+and every CAPTURE is published as a MemoryGateFired event. Observability is PER FIRE,
+not per decision: suppressed/pending moments (an error recorded awaiting resolution, a
+novelty dedup no-op) deliberately emit nothing — no consumer exists for non-fire
+decisions, and adding event types nobody reads grows the surface for zero benefit
+(WRITE-06 scope decision, Phase 33).
 """
 from __future__ import annotations
 
@@ -65,10 +68,11 @@ class WriteGate:
         self._bus = bus
         self._agent_id = agent_id
         self._handles: list["SubscriptionHandle"] = []
-        # tool_name -> (error preview, monotonic ts). Keyed by TOOL, not session (Phase-29
-        # critic M3): loop.py mints a fresh session_id per run_turn, so session-keying made
-        # the canonical interactive flow — fail in turn N, user says "try again", succeed
-        # in turn N+1 — structurally invisible. A TTL horizon bounds staleness instead.
+        # tool_name -> (error preview, monotonic ts). Keyed by TOOL, not session: two
+        # DIFFERENT tools can hold simultaneously-pending errors within one sitting — a
+        # session-keyed dict could track only one at a time, conflating unrelated tools.
+        # (Historically also required because sessions were per-turn pre-Phase-33; the
+        # tool-keying + TTL horizon remain correct now that a session = one sitting.)
         self._pending_errors: dict[str, tuple[str, float]] = {}
         # First-use novelty (per process lifetime; store-level dedup makes repeats no-ops).
         self._seen_tools: set[str] = set()
