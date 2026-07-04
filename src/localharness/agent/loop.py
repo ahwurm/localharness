@@ -701,6 +701,25 @@ class AgentLoop:
             # 3. Build request messages first (runs compaction if needed)
             request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
 
+            # SESS-03: a compaction summary must outlive the window. CompactionTriggered
+            # cannot fire live (production ContextManager has no bus — start_cmd gap, noted
+            # for the owner, NOT fixed here); the summary is only observable in the returned
+            # request_messages. Rolling per-sitting node: supersede absorbs re-fires.
+            if self._memory is not None:
+                _marker = "[Context Summary]\n"
+                for _m in request_messages:
+                    _c = _m.get("content") or ""
+                    if _m.get("role") == "assistant" and _c.startswith(_marker):
+                        try:
+                            from localharness.memory.hierarchy import persist_compaction_gist
+                            await persist_compaction_gist(
+                                self._memory, summary=_c[len(_marker):],
+                                session_id=session.session_id,
+                            )
+                        except Exception:
+                            log.warning("compaction-gist persistence failed (non-fatal)", exc_info=True)
+                        break  # one summary message per build; stop at the first
+
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
             raw_pct = ctx_budget.usage_fraction * 100.0
             util_pct = min(100.0, raw_pct)

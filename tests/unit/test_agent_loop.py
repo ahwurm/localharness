@@ -226,12 +226,13 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Action, Observation
 
 
-def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None, session_id=None):
+def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None,
+                     session_id=None, memory_loader=None, context_manager=None):
     """Helper to construct an AgentLoop with mock dependencies."""
     from localharness.config.models import AgentConfig
     cfg = config or AgentConfig(name="test-agent", role="Test agent.")
     llm = mock_llm_client_factory(responses)
-    ctx = ContextManager()
+    ctx = context_manager or ContextManager()
     perm = PermissionEvaluator()
     # session_id is additive: most callers (bench/subagent) construct without it and
     # keep per-turn uuid semantics, so only pass it through when the test supplies one.
@@ -243,6 +244,7 @@ def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_
         context_manager=ctx,
         tool_registry=tool_registry,
         permission_evaluator=perm,
+        memory_loader=memory_loader,
         **extra,
     )
 
@@ -1337,3 +1339,101 @@ async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
               and "took no action" in (m.get("content") or "")]
     assert len(nudges) == 1                    # exactly one nudge, persisted in history
     assert session.terminated_reason == "complete"
+
+
+# ---------------------------------------------------------------------------
+# SESS-03: the loop.py caller — compaction summaries persist as a per-sitting gist
+# ---------------------------------------------------------------------------
+
+def _compacting_ctx(summary_text: str = "compacted: A then B"):
+    """A real ContextManager whose pipeline fires SummaryCompactionStage on any over-window
+    build. NO bus is wired — EXACTLY production's shape (start_cmd passes the ContextManager
+    no bus), so CompactionTriggered structurally cannot fire and the '[Context Summary]'
+    marker scan is the only observation hook (research Pitfall 2)."""
+    from localharness.agent.context import CompactionPipeline, TokenCounter
+
+    tc = TokenCounter()  # tiktoken, offline — no server needed
+
+    async def _fake_summarize(middle):
+        return summary_text
+
+    pipeline = CompactionPipeline(
+        token_counter=tc, llm_summarize_fn=_fake_summarize,
+        preserve_first_n=1, preserve_last_n=1,
+    )
+    return ContextManager(max_context_tokens=2_000, pipeline=pipeline, token_counter=tc)
+
+
+def _big_msgs(rounds: int = 6):
+    """A conversation far over a 2k window: alternating user/assistant, each ~1k tokens."""
+    return [
+        m for i in range(rounds)
+        for m in (
+            {"role": "user", "content": f"u{i} " + "X" * 4000},
+            {"role": "assistant", "content": f"a{i} " + "Y" * 4000},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compaction_gist_persisted_once_per_sitting(mock_llm_client, bus, tmp_path):
+    """Composed: run_turn → _execute_loop → build_messages compaction → the marker scan →
+    persist_compaction_gist. Two compacting turns in one sitting leave EXACTLY ONE active
+    gist row at gist/compaction/sit-1 (supersede/corroborate — never duplicate keys)."""
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="test-agent", division_id="", org_id="", base_dir=str(tmp_path))
+    await store.open()
+    try:
+        Response = mock_llm_client.Response
+        loop = _make_agent_loop(
+            mock_llm_client, [Response(content="done 1"), Response(content="done 2")], bus,
+            session_id="sit-1", memory_loader=store, context_manager=_compacting_ctx(),
+        )
+        await loop.run_turn("first", initial_messages=_big_msgs())  # compaction #1
+        await loop.run_turn("second")                               # #2 (messages never shrink)
+
+        history = await store.get_fact_history("gist/compaction/sit-1")
+        active = [f for f in history if f.status == "active"]
+        assert len(active) == 1                       # exactly one active after >= 2 compactions
+        assert "compacted: A then B" in active[0].value
+        assert active[0].node_kind == "gist" and active[0].provenance == "sit-1"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_gist_staging_discipline(mock_llm_client, bus, tmp_path):
+    """The 0.6 gist write must NOT reorder the injected block: _render_memory_index is
+    byte-identical before and after a compacting turn (below the 0.7 injection gate). The
+    get_fact assert keeps it non-vacuous — proves a gist was actually written."""
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="test-agent", division_id="", org_id="", base_dir=str(tmp_path))
+    await store.open()
+    try:
+        Response = mock_llm_client.Response
+        loop = _make_agent_loop(
+            mock_llm_client, [Response(content="done")], bus,
+            session_id="sit-1", memory_loader=store, context_manager=_compacting_ctx(),
+        )
+        index_before = await store._render_memory_index(10)
+        await loop.run_turn("first", initial_messages=_big_msgs())
+
+        assert await store.get_fact("gist/compaction/sit-1") is not None  # the write happened
+        assert await store._render_memory_index(10) == index_before       # byte-identical
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_memory_no_crash(mock_llm_client, bus):
+    """The scan is guarded by `self._memory is not None`: a compacting turn on a loop with
+    no memory_loader completes normally, writing no gist and raising nothing."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(
+        mock_llm_client, [Response(content="all done")], bus,
+        session_id="sit-1", context_manager=_compacting_ctx(),  # memory_loader stays None
+    )
+    summary = await loop.run_turn("first", initial_messages=_big_msgs())
+    assert "all done" in summary  # reached natural completion, no exception path
