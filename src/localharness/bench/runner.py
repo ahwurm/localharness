@@ -59,9 +59,12 @@ async def _seed_memory_store(agent_id: str, seeds: list[tuple[str, str]]) -> Any
     agent_id mismatch AND the flat-file vs agents/{id}/memory.db layout
     mismatch in one stroke).
 
-    flush_memory_md() is REQUIRED: AgentLoop injects load_context().agent_memory_md
-    (the MEMORY.md "## Persistent Facts" text), NOT the raw facts table — so
-    store_fact() without the flush would inject nothing.
+    flush_memory_md() covers the LEGACY index_mode=False path only: with index_mode=True
+    (the default) load_context() renders the injected index directly from the facts table
+    (_render_memory_index), so store_fact() alone already injects. The flush is kept so
+    legacy-mode scenarios read the same truth (v2.0 audit: the previous version of this
+    comment claimed MEMORY.md was the injection source — false, and it misdirected a live
+    debugging session 2026-07-03).
     """
     import tempfile
     from localharness.memory.sqlite import MemoryStore
@@ -73,7 +76,7 @@ async def _seed_memory_store(agent_id: str, seeds: list[tuple[str, str]]) -> Any
     await store.open()
     for key, value in seeds:
         await store.store_fact(key, value, confidence=1.0)  # >=0.7 so flush includes it
-    await store.flush_memory_md()  # load_context reads MEMORY.md, not the facts table
+    await store.flush_memory_md()  # legacy index_mode=False only; index_mode=True renders from facts
     return store
 
 
@@ -479,6 +482,19 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     seeds = _MEMORY_SEEDS.get(scenario.name)
     if seeds is not None:
         memory_loader = await _seed_memory_store(agent_config.name, seeds)
+
+    if memory_loader is not None:
+        # SESS-06 parity (v2.0 audit): production registers all three memory tools
+        # whenever a store exists (start_cmd critic M5); bench agents previously got
+        # memory INJECTION but no memory tools — write-only memory in scored runs.
+        # Registration rides with the store (AFTER from_allowed), NOT with
+        # scenario.tools_allowed (which whitelists capabilities under test).
+        from localharness.tools.builtin.memory_tools import (
+            MemoryGetTool, MemoryRememberTool, MemorySearchTool,
+        )
+        await tool_registry.register(MemorySearchTool(memory_loader), scope="global")
+        await tool_registry.register(MemoryGetTool(memory_loader), scope="global")
+        await tool_registry.register(MemoryRememberTool(memory_loader), scope="global")
 
     try:
         return AgentLoop(
