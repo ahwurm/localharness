@@ -25,12 +25,11 @@ _CREATION_TRIGGERS = ("create an agent", "create agent", "make an agent",
 
 
 class OrchestratorREPL:
-    """Interactive REPL routing through Orchestrator.
+    """Interactive REPL for the orchestrator layer.
 
-    Slash commands are deterministic (no LLM). All other input
-    routes through the Orchestrator for LLM-driven handling.
-    When agent creation intent is detected, drives the
-    AgentCreationWorkflow state machine through conversation.
+    Slash commands are deterministic (no LLM). When agent-creation intent is
+    detected, drives the AgentCreationWorkflow state machine through conversation.
+    All other input is dispatched to the agent loop.
     """
 
     def __init__(
@@ -48,7 +47,7 @@ class OrchestratorREPL:
         self._config_dir = config_dir
 
     async def run(self) -> None:
-        """Main REPL loop. Slash commands first, then Orchestrator routing."""
+        """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
         await self._channel.start()
         try:
             while True:
@@ -96,10 +95,9 @@ class OrchestratorREPL:
                             channel=ch_id if isinstance(ch_id, str) else "terminal",
                         )
                     )
-                    # Route through orchestrator
-                    decision = self._orchestrator.route_task(user_input)
-                    # v1: single agent loop — use it regardless of routing decision.
-                    # Routing decision is logged for observability; multi-agent dispatch is MULTI-02 (v2).
+                    # v1: the single agent loop handles every turn directly. Multi-agent
+                    # routing (AgentCardRegistry.route) will be wired in for dispatch in
+                    # MULTI-02 (v2).
                     await self._agent.run_turn(
                         task=user_input,
                         on_token=None,

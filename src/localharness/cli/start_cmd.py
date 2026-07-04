@@ -139,8 +139,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # No config → welcome message + exit
     if not config_file.exists():
-        from localharness.orchestrator.router import Orchestrator
-        console.print(Orchestrator.no_config_message())
+        from localharness.orchestrator.router import AgentCreationFlow
+        console.print(AgentCreationFlow.no_config_message())
         raise typer.Exit(0)
 
     # Load harness config
@@ -434,8 +434,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         token_counter=token_counter,
     )
 
-    # --- 9. Orchestrator ---
-    from localharness.orchestrator.router import Orchestrator, OrchestratorContextGuard
+    # --- 9. Orchestrator layer ---
+    from localharness.orchestrator.router import AgentCreationFlow
     from localharness.orchestrator.cards import AgentCardRegistry
     card_registry = AgentCardRegistry()
     for agent_data in agents:
@@ -445,10 +445,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             card_registry.register_from_config(a_cfg)
         except Exception:
             pass  # skip agents that fail to load — non-fatal
-    orchestrator = Orchestrator(
-        card_registry=card_registry,
-        context_guard=OrchestratorContextGuard(token_counter=token_counter),
-    )
+    orchestrator = AgentCreationFlow(card_registry=card_registry)
 
     # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
     # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
