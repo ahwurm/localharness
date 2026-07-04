@@ -1,7 +1,7 @@
 """Bug#1 regression guard + T1 closure-extraction coverage for the `agent` delegation tool.
 
 Production `localharness start` delegation was DEAD: start_cmd registered the AgentTool at
-scope="agent", agent_id="orchestrator", but the running parent agent is the `default` agent, and
+agent scope keyed to the id 'orchestrator', but the running parent agent was the `default` root, and
 ToolRegistry.get_tools_for_agent resolves agent-scoped tools by the loop's own name
 (loop.py: agent_id=self._config.name). So `default` was never offered `agent` and could not delegate.
 The bench hid this by registering `agent` at GLOBAL scope. The fix registers at global scope in
@@ -10,6 +10,11 @@ start_cmd too, and extracts the runner into the module-level make_explore_agent_
 These tests are fully deterministic — NO live model. The dispatch path uses a spy runner (Bug#1
 regression guard), and the extracted-runner routing/threading is verified by spying
 dispatch_explore_subagent.
+
+Phase 33.1 renamed the root agent 'default' -> 'orchestrator'. The mismatched registration id
+in these tests is now the placeholder 'some-other-agent' so the mismatch semantics survive the
+rename (the old literal 'orchestrator' would coincidentally match the new root name, silently
+turning the mismatch-invisibility regression guard into a same-name visibility test).
 """
 from __future__ import annotations
 
@@ -27,10 +32,11 @@ from localharness.tools.registry import ToolRegistry
 
 
 @pytest.mark.asyncio
-async def test_global_agent_tool_visible_and_dispatchable_as_default():
-    """After registering the AgentTool at GLOBAL scope, the `default` parent SEES `agent` and a
-    dispatch as agent_id='default' SUCCEEDS. With the old scope='agent'/agent_id='orchestrator'
-    registration this is exactly what failed (default never resolved the tool)."""
+async def test_global_agent_tool_visible_and_dispatchable_as_orchestrator():
+    """After registering the AgentTool at GLOBAL scope, the `orchestrator` root parent SEES
+    `agent` and a dispatch as agent_id='orchestrator' SUCCEEDS. With the old
+    scope='agent'/agent_id='orchestrator' registration this is exactly what failed (the root —
+    then named `default` — never resolved the tool)."""
     registry = ToolRegistry()
     await register_builtin_tools(registry)  # read/glob/grep/write/bash_exec — no `agent` collision
 
@@ -41,34 +47,38 @@ async def test_global_agent_tool_visible_and_dispatchable_as_default():
         return "delegated-ok"
 
     agent_tool = AgentTool(agent_runner=_spy_runner, available_agents=["explore"])
-    # THE FIX under test: global scope (drop agent_id="orchestrator").
+    # THE FIX under test: global scope (drop the agent-scoped registration).
     await registry.register(agent_tool, scope="global")
 
-    # Visibility: the `default` agent's resolved toolset INCLUDES `agent` (ToolConfig inherits
+    # Visibility: the `orchestrator` root's resolved toolset INCLUDES `agent` (ToolConfig inherits
     # global). Web ingestion denied so the host-tool agent resolves clean under the P-A floor.
-    # Old agent/orchestrator scope would NOT appear here for `default`.
+    # An agent-scoped registration under a non-root name would NOT appear here for the root.
     _clean = ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])
-    tools = registry.get_tools_for_agent("default", "default", _clean)
-    assert "agent" in tools, "global-scope `agent` tool must be visible to the `default` parent"
+    tools = registry.get_tools_for_agent("orchestrator", "default", _clean)
+    assert "agent" in tools, "global-scope `agent` tool must be visible to the `orchestrator` parent"
 
-    # Dispatchability: dispatch as the `default` agent resolves the tool and runs the runner.
+    # Dispatchability: dispatch as the `orchestrator` root resolves the tool and runs the runner.
     result = await registry.dispatch(
         "agent",
         {"agent_id": "explore", "task": "go look"},
-        agent_id="default",
+        agent_id="orchestrator",
         division_id="default",
         tool_config=_clean,
     )
-    assert result.success is True, f"dispatch as `default` must succeed, got {result.error!r}"
+    assert result.success is True, f"dispatch as `orchestrator` must succeed, got {result.error!r}"
     assert result.output == "delegated-ok"
     assert calls == [("explore", "go look")]
 
 
 @pytest.mark.asyncio
-async def test_agent_scoped_orchestrator_registration_is_invisible_to_default():
-    """The OLD (buggy) wiring characterized: registering `agent` at scope='agent',
-    agent_id='orchestrator' leaves it INVISIBLE to the `default` parent — the root cause of Bug#1.
-    This pins the contract so a regression back to agent-scope is caught."""
+async def test_agent_scoped_mismatched_registration_is_invisible_to_orchestrator():
+    """Bug#1's negative-space contract, rename-proofed: an `agent` tool registered at
+    scope='agent' under a name that is NOT the running root (the placeholder
+    'some-other-agent') is INVISIBLE to the `orchestrator` root — exactly Bug#1's shape (a
+    mismatched agent-scope registration the root's own-name query never resolves). The
+    placeholder MUST differ from the real root name; the pre-rename literal 'orchestrator'
+    would now coincidentally equal the root and silently flip this into a same-name
+    visibility test, killing the regression guard (Phase 33.1 landmine)."""
     registry = ToolRegistry()
     await register_builtin_tools(registry)
 
@@ -76,16 +86,16 @@ async def test_agent_scoped_orchestrator_registration_is_invisible_to_default():
         return "x"
 
     agent_tool = AgentTool(agent_runner=_spy_runner, available_agents=["explore"])
-    await registry.register(agent_tool, scope="agent", agent_id="orchestrator")
+    await registry.register(agent_tool, scope="agent", agent_id="some-other-agent")
 
     # Web denied so the host-tool agent resolves clean under the P-A floor (irrelevant to the
     # invisibility contract under test, but required to pass the co-residence check).
     tools = registry.get_tools_for_agent(
-        "default", "default", ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])
+        "orchestrator", "default", ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])
     )
     assert "agent" not in tools, (
-        "agent-scoped/orchestrator `agent` tool must NOT resolve for `default` "
-        "(this invisibility is exactly Bug#1)"
+        "agent-scoped `agent` tool registered under a non-root name must NOT resolve for the "
+        "`orchestrator` root (this invisibility is exactly Bug#1)"
     )
 
 
