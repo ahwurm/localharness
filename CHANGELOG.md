@@ -4,6 +4,30 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Added
+- **Sessions are real now, and the next sitting remembers the last one.** Each run of
+  `localharness start` is a "sitting" with its own session record. When it ends, the
+  harness derives a one-line, payload-first summary of what actually happened — the error
+  you resolved, the stuck loop it recovered from — and saves it to the agent's memory
+  (a sitting with nothing of substance is suppressed, never padded with filler). A fresh
+  sitting can then answer "what did we do last time?" straight from its injected memory
+  block, with zero tool calls. Summaries the harness writes when it compacts context now
+  persist too, so what got compacted away isn't lost to the next sitting. This closes the
+  0.6.0 known-limit "session-history recording is not wired yet."
+
+### Changed
+- **The root agent is now the orchestrator, by name.** `localharness start` creates and
+  selects the root agent as `orchestrator` (was `default`), matching the architecture's
+  own vocabulary. Existing installations migrate automatically on first start and keep
+  every memory: `agents/default.yaml` becomes `agents/orchestrator.yaml`, and the memory
+  store (facts, sessions, MEMORY.md, history) is adopted under the new name — one-time,
+  idempotent, crash-safe. If you already have your own agent named `orchestrator`, the
+  migration refuses (nothing is merged or overwritten) and the root keeps its old name;
+  a console warning explains how to resolve. `--agent default` redirects to
+  `orchestrator` with a note. Direct subagent addressing is unchanged.
+
 ## [0.6.0] — 2026-07-03
 
 ### Added
