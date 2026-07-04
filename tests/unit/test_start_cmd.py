@@ -888,6 +888,174 @@ async def test_gate_capture_produces_payload_first_summary_row(tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# Phase 33.1 (ORCH-01/02/03): upgrade drives — the rename must not cost a single memory.
+# Composed proof that plan 01's store migration + Task 1's YAML migration + selection +
+# gate wiring cooperate through the REAL production entry point (_start_async), memory
+# side fully real (no new stubbing seams beyond _stub_start_boundaries).
+# ---------------------------------------------------------------------------
+
+async def test_upgrade_drive_migrates_legacy_root_and_gate_captures(tmp_path, monkeypatch):
+    """THE end-to-end upgrade proof: a real pre-rename install — legacy default.yaml (the
+    exact bytes an old mint wrote) + a default-keyed store holding a fact and an ended
+    sitting — driven through the REAL _start_async comes out MIGRATED: orchestrator.yaml
+    with name rewritten, default.yaml gone, the OLD fact + OLD session reachable under
+    'orchestrator', AND a live gate capture during the SAME sitting lands in the new
+    sitting's payload-first summary row. The (2)+(4) split is Pitfall 1's exact test —
+    old memory renders AND live capture lands under the new name = no split-brain."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+    from localharness.core.events import MemoryGateFired, Observation, TurnCompleted
+    from localharness.memory.sqlite import MemoryStore
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "default.yaml").write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    legacy = MemoryStore(agent_id="default", division_id="default", org_id="default",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    await legacy.store_fact(
+        "learned/bash_exec/resolved_error", "uv fix: use .venv/bin/python", confidence=0.9,
+    )
+    await legacy.create_session("old-sit", {}, "dogfood", 8192)
+    await legacy.end_session(
+        "old-sit", exit_reason="complete",
+        summary="resolved: old-sitting marker; 3 turns, 4 tool calls (bash_exec)",
+        turn_count=3, action_count=4, tokens_in=100, tokens_out=50,
+    )
+    await legacy.close()
+
+    async def driving_repl_run(self):
+        # live capture during the migrated sitting — agent_id is the NEW root name; a stale
+        # 'default' here would make the accumulator filter drop it (Pitfall 1 signature).
+        sid = self._agent.current_session_id
+        await self._bus.publish(TurnCompleted(
+            agent_id="orchestrator", session_id=sid, iterations=1, duration_seconds=1.0,
+            elapsed_tokens=150, input_tokens=100, output_tokens=50, summary="done",
+        ))
+        await self._bus.publish(Observation(
+            agent_id="orchestrator", session_id=sid, observation_type="tool_result",
+            tool_name="bash_exec", output="ok",
+        ))
+        await self._bus.publish(MemoryGateFired(
+            agent_id="orchestrator", session_id=sid, tier="resolved_error",
+            fact_key="gate/resolved_error/bash_exec/k", tool_name="bash_exec",
+            detail="uv: command not found",
+        ))
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=driving_repl_run)
+    await _start_async(None, False, False, str(tmp_path))
+
+    # (1) YAML migrated: name rewritten, legacy file gone
+    orch_yaml = agents_dir / "orchestrator.yaml"
+    assert orch_yaml.exists()
+    assert yaml.safe_load(orch_yaml.read_text(encoding="utf-8"))["name"] == "orchestrator"
+    assert not (agents_dir / "default.yaml").exists()
+
+    # (2) two rows in the orchestrator db: the migrated OLD sitting AND the new LIVE one
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 2
+    summaries = [r[4] for r in rows]
+    assert any(s and "old-sitting marker" in s for s in summaries), \
+        "the migrated old sitting must be reachable under the new name"
+    assert any(s and s.startswith("resolved: uv: command not found") for s in summaries), \
+        "the live capture must land under the NEW name (no split-brain — Pitfall 1)"
+
+    # (3) directory adopted: legacy data dir gone
+    assert not (tmp_path / "agents" / "default").exists()
+
+    # (4) the old fact renders under the new root (re-keyed, not just dir-aliased)
+    store = MemoryStore(agent_id="orchestrator", division_id="default", org_id="default",
+                        base_dir=str(tmp_path))
+    await store.open()
+    try:
+        agent_md = (await store.load_context(index_mode=True)).agent_memory_md
+    finally:
+        await store.close()
+    assert "uv fix: use .venv/bin/python" in agent_md
+
+
+async def test_upgrade_drive_collision_keeps_legacy_root_working(tmp_path, monkeypatch):
+    """ORCH-03 collision: a user's OWN pre-existing orchestrator.yaml (different content)
+    blocks the rename — the migration refuses, BOTH yaml files stay byte-untouched, and the
+    sitting runs under the un-migrated legacy root 'default' (selection prefers it), so the
+    user keeps full memory continuity under the old name (nothing merged, nothing clobbered)."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+    from localharness.memory.sqlite import MemoryStore
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "default.yaml").write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(_build_agent_yaml("orchestrator", "My custom orchestrator", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    legacy = MemoryStore(agent_id="default", division_id="default", org_id="default",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    await legacy.store_fact(
+        "learned/bash_exec/resolved_error", "uv fix: use .venv/bin/python", confidence=0.9,
+    )
+    await legacy.close()
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+
+    # both yaml files untouched — never merged, never clobbered
+    assert yaml.safe_load(
+        (agents_dir / "default.yaml").read_text(encoding="utf-8"))["name"] == "default"
+    assert yaml.safe_load(
+        (agents_dir / "orchestrator.yaml").read_text(encoding="utf-8"))["role"] == \
+        "My custom orchestrator"
+
+    # the sitting ran under the LEGACY root: exactly one new row in the default db
+    rows = _read_sessions(tmp_path, agent="default")
+    assert len(rows) == 1
+
+    # the fact stays reachable under the un-migrated 'default' (never re-keyed)
+    store = MemoryStore(agent_id="default", division_id="default", org_id="default",
+                        base_dir=str(tmp_path))
+    await store.open()
+    try:
+        fact = await store.get_fact("learned/bash_exec/resolved_error")
+    finally:
+        await store.close()
+    assert fact is not None and fact.agent_id == "default"
+
+
+async def test_agent_flag_default_redirects_to_orchestrator(tmp_path, monkeypatch):
+    """ORCH-03 never a hard break: on a migrated/fresh install (only orchestrator.yaml),
+    `--agent default` does NOT typer.Exit — it redirects to 'orchestrator' with a note and
+    the sitting runs, landing one row in the orchestrator db."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(_build_agent_yaml("orchestrator", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    # must NOT raise typer.Exit — the redirect keeps old muscle memory / scripts working
+    await _start_async("default", False, False, str(tmp_path))
+
+    rows = _read_sessions(tmp_path)  # orchestrator db
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
 # Phase 33.1 (ORCH-01/03): the one-time root-agent YAML migration helper.
 # agents/default.yaml -> agents/orchestrator.yaml with name: rewritten (a bare rename
 # is not enough — discovery reads the name: key). Idempotent + crash-safe + collision-safe.
