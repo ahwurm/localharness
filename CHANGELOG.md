@@ -4,7 +4,7 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.7.0] — 2026-07-04
 
 ### Added
 - **Sessions are real now, and the next sitting remembers the last one.** Each run of
@@ -16,6 +16,20 @@ All notable changes to LocalHarness are documented here. The format follows
   block, with zero tool calls. Summaries the harness writes when it compacts context now
   persist too, so what got compacted away isn't lost to the next sitting. This closes the
   0.6.0 known-limit "session-history recording is not wired yet."
+- **Session summaries carry the topic, and the shelf carries the timeline.** The
+  end-of-sitting summary now leads with a trimmed slice of what you asked
+  (`asked: "any fun events this weekend…" — 3 turns, 1 delegation`) whenever there is no
+  error-lesson to lead with — a pure conversation is no longer invisible to memory. The
+  injected "Recent Session History" renders each sitting with a relative day and clock
+  time (`- today 11:47am: …`), newest first, hard-capped at 8 lines; older sittings stay
+  in the store and remain searchable. Rendering reads the sessions table directly — the
+  on-disk format is unchanged, and the block stays byte-stable within a day (the labels
+  flip with the existing daily date change, preserving the prefix cache). Still zero
+  model calls end to end; empty sittings still write nothing.
+- **A live "thinking…" indicator in the REPL.** While the model is generating, the
+  terminal shows an animated spinner that clears the instant real output arrives — a
+  tool-call line, the answer panel, or the input prompt. Replaces the occasional static
+  "Working…" line, so long generations no longer look like a hang.
 
 ### Changed
 - **The root agent is now the orchestrator, by name.** `localharness start` creates and
@@ -27,6 +41,15 @@ All notable changes to LocalHarness are documented here. The format follows
   migration refuses (nothing is merged or overwritten) and the root keeps its old name;
   a console warning explains how to resolve. `--agent default` redirects to
   `orchestrator` with a note. Direct subagent addressing is unchanged.
+
+### Fixed
+- **Conversational turns no longer surface meta-narration or duplicated answers** (#6).
+  The act-guard — the nudge that turns "I'll go look that up" into an actual tool call —
+  used to ask the model to restate its final answer when no tools were needed, which
+  could produce a narrated duplicate ("You're right, my previous reply was just a
+  conversational response…") in the output panel. The nudge now requests a sentinel the
+  harness swallows, and the original reply is delivered unchanged. The leak had been
+  live since v0.5.0.
 
 ## [0.6.0] — 2026-07-03
 
