@@ -369,6 +369,67 @@ async def test_build_agent_loop_routes_cruncher_and_resolves_grant(monkeypatch, 
     assert calls["cruncher"].get("grant_handles") == [handle]
 
 
+@pytest.mark.asyncio
+async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
+    """SESS-06 parity: a seeded bench scenario registers the SAME three memory tools
+    production registers whenever a store exists (start_cmd critic M5). Bench agents
+    previously got memory INJECTION but no memory tools — write-only memory in scored runs.
+    """
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    # "memory_recall" is a _MEMORY_SEEDS key -> _seed_memory_store runs -> memory_loader set.
+    scen = ScenarioSpec(
+        name="memory_recall", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert captured["memory_loader"] is not None, "seeded scenario must hydrate a MemoryStore"
+    tools = captured["tool_registry"]._tools["global"]
+    for name in ("memory_search", "memory_get", "memory_remember"):
+        assert name in tools, f"seeded bench agent missing {name} (production registers all three)"
+
+
+@pytest.mark.asyncio
+async def test_bench_no_memory_tools_without_seeds(monkeypatch):
+    """No phantom store: a non-seeded scenario has memory_loader=None and registers NONE of the
+    three memory tools — the tools ride with the store, exactly like production."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    scen = ScenarioSpec(
+        name="unseeded_scenario", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert captured["memory_loader"] is None, "unseeded scenario must NOT hydrate a store"
+    tools = captured["tool_registry"]._tools["global"]
+    for name in ("memory_search", "memory_get", "memory_remember"):
+        assert name not in tools, f"unseeded bench agent wrongly has {name} (phantom store)"
+
+
 def test_render_prompt_substitutes_fixtures_token():
     """_render_prompt swaps {FIXTURES} for an absolute bench/fixtures path (so load_document, which
     requires an absolute path, gets one) and leaves token-free prompts untouched."""
