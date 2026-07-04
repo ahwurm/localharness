@@ -844,7 +844,7 @@ async def test_user_message_produces_topical_summary_row(tmp_path, monkeypatch):
         sid = self._agent.current_session_id
         await self._bus.publish(UserMessage(
             agent_id="orchestrator", session_id=sid,
-            content="any fun 4th of July events in Miami Beach?", channel="terminal",
+            content="any fun 4th of July events near the boardwalk?", channel="terminal",
         ))
         for _ in range(3):
             await self._bus.publish(TurnCompleted(
@@ -867,7 +867,7 @@ async def test_user_message_produces_topical_summary_row(tmp_path, monkeypatch):
     assert turn_count == 3
     assert action_count == 1
     assert summary == (
-        'asked: "any fun 4th of July events in Miami Beach?" — 3 turns, 1 delegation'
+        'asked: "any fun 4th of July events near the boardwalk?" — 3 turns, 1 delegation'
     )
 
 

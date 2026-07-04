@@ -138,6 +138,8 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
         data = yaml.safe_load(legacy.read_text(encoding="utf-8")) or {}
     except Exception:
         return  # unreadable legacy yaml: leave it to discovery's tolerant path
+    if not isinstance(data, dict):
+        return  # a list/scalar default.yaml is not an agent config — don't crash startup
     if data.get("name", "default") != "default":
         return
     data["name"] = "orchestrator"
@@ -148,7 +150,7 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
         except Exception:
             existing = None
         if existing == data:
-            legacy.unlink()  # crash remnant — the migrated copy is already in place
+            legacy.unlink(missing_ok=True)  # crash remnant — the migrated copy is already in place
         else:
             console.print(
                 "[yellow]Warning:[/yellow] cannot rename the root agent 'default' -> "
@@ -159,7 +161,7 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
             )
         return
     target.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
-    legacy.unlink()
+    legacy.unlink(missing_ok=True)  # two-process first-start race: the other may have unlinked
 
 
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,

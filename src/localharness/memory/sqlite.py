@@ -1033,7 +1033,7 @@ class MemoryStore:
         self,
         session_id: str,
         exit_reason: str,
-        summary: str,
+        summary: str | None,
         turn_count: int,
         action_count: int,
         tokens_in: int,

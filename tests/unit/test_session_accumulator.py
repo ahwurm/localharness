@@ -190,13 +190,13 @@ async def test_ask_capture_leads_when_no_payload():
     """The owner UAT-2 anchor: a pure-chat delegation sitting reads
     `asked: "..." — 3 turns, 1 delegation` — no "(agent)", no "tool calls" phrase."""
     acc = _acc()
-    await acc.on_user_message(_user_msg("any fun 4th of July events in Miami Beach, FL?"))
+    await acc.on_user_message(_user_msg("any fun 4th of July events near the boardwalk, FL?"))
     for _ in range(3):
         await acc.on_turn_completed(_turn(10, 5))
     await acc.on_observation(_obs("agent"))
     line = derive_session_summary(acc)
     assert line == (
-        'asked: "any fun 4th of July events in Miami Beach, FL?" — 3 turns, 1 delegation'
+        'asked: "any fun 4th of July events near the boardwalk, FL?" — 3 turns, 1 delegation'
     )
 
 

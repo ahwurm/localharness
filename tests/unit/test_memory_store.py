@@ -623,7 +623,7 @@ async def test_shelf_owner_anchor_line_verbatim(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        line = '- today 11:47am: asked: "any fun 4th of July events in Miami Beach…" — 3 turns, 1 delegation'
+        line = '- today 11:47am: asked: "any fun 4th of July events near the boardwalk…" — 3 turns, 1 delegation'
         summary = line[len("- today 11:47am: "):]
         await _seed_sitting(store, "s-anchor", _today_at(11, 47), summary)
         md = (await store.load_context(index_mode=True)).agent_memory_md
