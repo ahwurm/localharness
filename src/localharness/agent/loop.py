@@ -880,6 +880,10 @@ class AgentLoop:
                 # (observed live: fail/succeed/fail across identical prompts). Give
                 # it exactly one deterministic push before accepting a tool-less
                 # completion; a genuine no-tool answer just gets repeated.
+                # The no-tool fallback asks for the bare CONFIRMED sentinel —
+                # _format_completion_summary surfaces the prior reply untouched
+                # (issue #6: 'restate' invited meta-narrated duplicates on
+                # conversational turns).
                 if (session.actions_taken == 0 and not session.act_nudge_used
                         and tool_schemas):
                     session.act_nudge_used = True
@@ -887,9 +891,8 @@ class AgentLoop:
                     session.push({"role": "user", "content": (
                         "You ended your reply with stated intentions but took no action. "
                         "Execute your plan NOW: make the tool call in this response. "
-                        "If the task genuinely needs no tools, restate the complete final "
-                        "answer instead — only your latest reply is shown to the user, so "
-                        "never refer back to an earlier reply."
+                        "If the task genuinely needs no tools, reply with exactly CONFIRMED — "
+                        "your previous reply will be delivered to the user unchanged."
                     )})
                     continue
 

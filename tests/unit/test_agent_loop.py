@@ -1341,6 +1341,92 @@ async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
     assert session.terminated_reason == "complete"
 
 
+class _ConfirmOnNudgeLLM:
+    """Conversational sign-off, no tool calls; after the act-guard nudge replies with the
+    bare CONFIRMED sentinel. Mirrors _AnnounceThenActLLM's NS/call-counting shape (issue #6:
+    the prior reply must surface untouched — no restate, no meta-narration)."""
+
+    def __init__(self):
+        self.calls = 0
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.calls += 1
+        if self.calls == 1:
+            return NS(content="Sounds like a great plan — enjoy the food!", tool_calls=None), None
+        return NS(content="CONFIRMED", tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_act_guard_confirmed_surfaces_prior_reply(bus, tmp_path):
+    """Issue #6: a nudged no-tool turn that replies CONFIRMED surfaces the model's ORIGINAL
+    reply as TaskComplete.summary — the sentinel machinery (_format_completion_summary) does
+    the job: no duplicate, no leaked 'CONFIRMED', no meta-narration."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "act-guard-agent", "role": "Test.",
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    llm = _ConfirmOnNudgeLLM()
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="act-guard-agent", session_id="s-ag-confirmed", messages=[])
+    await loop._execute_loop(session, "thanks!", None)
+
+    completions = bus.history(event_types=[TaskComplete])
+    assert session.act_nudge_used is True                       # (a) the nudge fired
+    assert len(completions) == 1                                # (b) exactly one completion
+    assert completions[0].summary == "Sounds like a great plan — enjoy the food!"
+    assert "CONFIRMED" not in completions[0].summary            # (c) sentinel never leaks
+    assert session.terminated_reason == "complete"             # (d) clean finish
+
+
+@pytest.mark.asyncio
+async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
+    """The single act-guard nudge asks for the bare CONFIRMED sentinel and never invites a
+    'restate' (issue #6: 'restate the complete final answer' drew meta-narrated duplicates)."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "act-guard-agent", "role": "Test.",
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    llm = _ConfirmOnNudgeLLM()
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="act-guard-agent", session_id="s-ag-nudgetext", messages=[])
+    await loop._execute_loop(session, "thanks!", None)
+
+    nudges = [m for m in session.messages if m.get("role") == "user"
+              and "took no action" in (m.get("content") or "")]
+    assert len(nudges) == 1
+    assert "reply with exactly CONFIRMED" in nudges[0]["content"]
+    assert "restate" not in nudges[0]["content"]
+
+
 # ---------------------------------------------------------------------------
 # SESS-03: the loop.py caller — compaction summaries persist as a per-sitting gist
 # ---------------------------------------------------------------------------
