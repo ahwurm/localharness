@@ -103,7 +103,9 @@ class MarkdownMemory:
             else:
                 session_body = session_entry
         else:
-            session_body = existing_session_lines or "(No sessions recorded yet.)"
+            # No placeholder: an empty machine-regenerated section is honest — the injected
+            # index suppresses the shelf when no real entry exists (1fbdf6b). empty=empty.
+            session_body = existing_session_lines
 
         new_content = (
             f"# Memory: {agent_name}\n\n"
