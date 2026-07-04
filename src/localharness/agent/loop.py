@@ -413,6 +413,7 @@ class AgentLoop:
         memory_loader: Any = None,
         kill_file_path: Path | None = None,
         compact_md_path: Path | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -434,7 +435,12 @@ class AgentLoop:
         else:
             kf = Path.cwd() / "KILL"
         self._kill = KillWatcher(kill_file_path=kf)
-        self._current_session_id: str | None = None
+        # SESS-01: one session_id per SITTING when supplied at construction. None keeps
+        # the legacy per-turn uuid fallback (bench/subagent callers). Set current_session_id
+        # eagerly so it is valid BEFORE the first run_turn (repl reads it to stamp the
+        # turn-1 UserMessage, previously None).
+        self._sitting_session_id = session_id
+        self._current_session_id: str | None = session_id
         self._conversation: list[Message] = []
 
     @property
@@ -461,7 +467,7 @@ class AgentLoop:
 
         session = Session(
             agent_id=self._config.name,
-            session_id=str(uuid.uuid4()),
+            session_id=self._sitting_session_id or str(uuid.uuid4()),
             messages=prior,
         )
         self._current_session_id = session.session_id

@@ -226,13 +226,16 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Action, Observation
 
 
-def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None):
+def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None, session_id=None):
     """Helper to construct an AgentLoop with mock dependencies."""
     from localharness.config.models import AgentConfig
     cfg = config or AgentConfig(name="test-agent", role="Test agent.")
     llm = mock_llm_client_factory(responses)
     ctx = ContextManager()
     perm = PermissionEvaluator()
+    # session_id is additive: most callers (bench/subagent) construct without it and
+    # keep per-turn uuid semantics, so only pass it through when the test supplies one.
+    extra = {"session_id": session_id} if session_id is not None else {}
     return AgentLoop(
         config=cfg,
         llm=llm,
@@ -240,6 +243,7 @@ def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_
         context_manager=ctx,
         tool_registry=tool_registry,
         permission_evaluator=perm,
+        **extra,
     )
 
 
@@ -268,6 +272,40 @@ async def test_run_turn_publishes_turn_completed(mock_llm_client, bus):
     await loop.run_turn("task")
     events = bus.history(event_types=[TurnCompleted])
     assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_sitting_session_id_stable_across_turns(mock_llm_client, bus):
+    """SESS-01: a loop built with session_id keeps ONE sitting id across every turn, and
+    current_session_id is valid BEFORE the first run_turn (kills the repl.py:94 off-by-one
+    where turn 1's UserMessage carried a None session)."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(
+        mock_llm_client, [Response(content="a"), Response(content="b")], bus,
+        session_id="sit-1",
+    )
+    assert loop.current_session_id == "sit-1"  # valid at construction, pre-first-turn
+    await loop.run_turn("first")
+    await loop.run_turn("second")
+    started = bus.history(event_types=[TurnStarted])
+    assert [e.session_id for e in started] == ["sit-1", "sit-1"]
+    assert loop.current_session_id == "sit-1"
+
+
+@pytest.mark.asyncio
+async def test_no_kwarg_keeps_per_turn_uuid(mock_llm_client, bus):
+    """Legacy fallback intact: without session_id, each run_turn mints a fresh uuid so
+    bench/subagent callers (which never pass the kwarg) keep per-run session semantics."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(
+        mock_llm_client, [Response(content="a"), Response(content="b")], bus,
+    )
+    await loop.run_turn("first")
+    sid1 = loop.current_session_id
+    await loop.run_turn("second")
+    sid2 = loop.current_session_id
+    assert sid1 and sid2 and sid1 != sid2
+    assert [e.session_id for e in bus.history(event_types=[TurnStarted])] == [sid1, sid2]
 
 
 @pytest.mark.asyncio
