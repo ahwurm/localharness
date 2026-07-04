@@ -132,3 +132,30 @@ async def persist_gist_tree(
 
     log.info("gist tree persisted: run=%s nodes=%d levels=%d", run, written, len(trace))
     return written
+
+
+async def persist_compaction_gist(
+    store: "MemoryStore", *, summary: str, session_id: str,
+) -> int:
+    """SESS-03: persist a compaction summary as ONE gist node per sitting.
+
+    Not persist_gist_tree (shape mismatch — no leaf_extracts/trace/batches for a
+    flat compaction summary). Keyed by session_id ALONE (not content-hash): the
+    compaction pipeline re-decides to compact every iteration once the threshold
+    is crossed (session.messages never shrinks — pre-existing, context.py:751
+    copy-not-mutate), so this is a ROLLING summary — each re-fire supersedes the
+    prior via store_fact's supersede-not-overwrite path; full history stays
+    queryable via get_fact_history. Confidence stays at _GIST_CONFIDENCE (0.6),
+    below the 0.7 injection gate — staging discipline holds BY CONSTRUCTION: a
+    gist can never appear in _render_memory_index's confidence >= 0.7 clause, so
+    writing one mid-session cannot reorder the injected block (RANK-04)."""
+    await store.store_fact(
+        key=f"gist/compaction/{session_id}",
+        value=summary,
+        tags=["gist", "compaction"],
+        confidence=_GIST_CONFIDENCE,
+        source="compaction",
+        provenance=session_id,   # bare id — the gate's convention, not persist_gist_tree's "session:X;handles:Y"
+        node_kind="gist",
+    )
+    return 1

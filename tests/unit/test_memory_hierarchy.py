@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from localharness.core.reduce import ReduceLevel, batch_by_budget, hierarchical_reduce
-from localharness.memory.hierarchy import flag_unverified_figures, persist_gist_tree
+from localharness.memory.hierarchy import (
+    flag_unverified_figures,
+    persist_compaction_gist,
+    persist_gist_tree,
+)
 from localharness.memory.sqlite import MemoryStore
 
 
@@ -207,3 +211,51 @@ async def test_two_documents_same_question_get_distinct_runs(store: MemoryStore)
     gists = [f for f in await store.query_facts(FactQuery(min_confidence=0.0, limit=50))
              if f.node_kind == "gist" and f.status == "active"]
     assert {("Company A" in g.value) for g in gists} == {True, False}  # both trees alive
+
+
+# ---------------------------------------------------------------------------
+# SESS-03: compaction summaries persist as ONE rolling gist per sitting
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_compaction_gist_written(store: MemoryStore):
+    await persist_compaction_gist(store, summary="did X then Y", session_id="sit-1")
+
+    fact = await store.get_fact("gist/compaction/sit-1")
+    assert fact is not None
+    assert fact.value == "did X then Y"
+    assert fact.node_kind == "gist"
+    assert fact.confidence == 0.6  # below the 0.7 injection gate
+    assert fact.provenance == "sit-1"  # bare sitting id, not "session:X;handles:Y"
+    assert fact.source == "compaction"
+    assert "gist" in fact.tags and "compaction" in fact.tags
+
+
+@pytest.mark.asyncio
+async def test_compaction_gist_refire_supersedes_not_duplicates(store: MemoryStore):
+    # DIFFERENT summaries re-fired in one sitting → supersede: one active row, history 2.
+    await persist_compaction_gist(store, summary="worked on A", session_id="sit-diff")
+    await persist_compaction_gist(store, summary="then also B", session_id="sit-diff")
+    active = await store.get_fact("gist/compaction/sit-diff")
+    assert active is not None and active.value == "then also B"  # newest wins
+    history = await store.get_fact_history("gist/compaction/sit-diff")
+    assert len(history) == 2  # both versions queryable — nothing lost
+    assert sum(1 for f in history if f.status == "active") == 1  # exactly one active
+
+    # IDENTICAL summaries re-fired → corroboration touch: no new row, history stays 1.
+    await persist_compaction_gist(store, summary="same summary", session_id="sit-same")
+    await persist_compaction_gist(store, summary="same summary", session_id="sit-same")
+    same_history = await store.get_fact_history("gist/compaction/sit-same")
+    assert len(same_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_gist_never_reaches_index(store: MemoryStore):
+    index_before = await store._render_memory_index(10)
+    await persist_compaction_gist(store, summary="invisible to the block", session_id="sit-1")
+    index_after = await store._render_memory_index(10)
+
+    # 0.6 < the 0.7 gate: the gist can never enter the injected block, so writing one
+    # mid-sitting cannot reorder it — staging discipline holds BY CONSTRUCTION.
+    assert "gist/compaction" not in index_after
+    assert index_after == index_before  # byte-identical pre/post
