@@ -858,17 +858,17 @@ class MemoryStore:
         facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
 
         history_full = self._markdown_memory.get_section("session_history")
-        # No dead promises in the injected block (v2.0 audit FINDING-A): session_history
-        # has no live writer yet (create_session/end_session have zero production callers
-        # — v2.1 Phase 33 wires them), so advertising the shelf over a permanent
-        # "(no sessions recorded)" placeholder misleads the model and spends tokens on
-        # nothing. Render the section ONLY when at least one entry exists; it
-        # self-restores the day a writer lands. Byte-stability holds: absence is
-        # constant, and future entries change only at session boundaries.
+        # No dead promises in the injected block (v2.0 audit FINDING-A): render the shelf
+        # ONLY when at least one REAL entry line exists (SESS-05 wires the writer in Phase
+        # 33). Suppression now keys on real entry lines — NOT raw section truthiness — so a
+        # placeholder (fresh or legacy on-disk) can never un-suppress the shelf with a dead
+        # promise. It self-restores the moment a real entry lands. Byte-stability holds:
+        # absence is constant, and entries change only at session boundaries.
+        _history_entries = _last_n_entries(history_full, max_session_history)
         history_section = (
             f"\n\n### Recent Session History (last {max_session_history})\n"
-            f"{_last_n_entries(history_full, max_session_history)}"
-            if history_full.strip()
+            f"{_history_entries}"
+            if _history_entries
             else ""
         )
 
@@ -984,7 +984,9 @@ class MemoryStore:
         session_entry: str | None = None
         if session_summary:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            session_entry = f"- {today}: {session_summary[:120]}"
+            # 180-char budget — same as the index fact-line budget (5192f27): the payload
+            # must survive every render layer; 120 guillotined derived summaries mid-payload.
+            session_entry = f"- {today}: {session_summary[:180]}"
 
         self._markdown_memory.regenerate(
             agent_id=self._agent_id,
@@ -1115,12 +1117,12 @@ def _one_line(value: str, max_chars: int = 100) -> str:
 
 
 def _last_n_entries(history: str, n: int) -> str:
-    """Keep the last `n` non-empty session-history lines. Entries are prepended newest-first
-    in MEMORY.md (markdown.py), so the most-recent n are the FIRST n lines."""
-    if not history.strip():
-        return "(no sessions recorded)"
-    lines = [ln for ln in history.splitlines() if ln.strip()]
-    return "\n".join(lines[: max(0, n)]) if n > 0 else "(session history omitted)"
+    """Last n REAL entry lines ('- ' prefix). Placeholder/prose lines are filtered:
+    the injected shelf renders entries or renders nothing (1fbdf6b + SESS-05 KILL).
+    Entries are prepended newest-first in MEMORY.md (markdown.py), so the most-recent n
+    are the FIRST n entry lines."""
+    lines = [ln for ln in history.splitlines() if ln.lstrip().startswith("- ")]
+    return "\n".join(lines[: max(0, n)]) if lines and n > 0 else ""
 
 
 # ---------------------------------------------------------------------------
