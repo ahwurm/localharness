@@ -760,10 +760,13 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
         monkeypatch.setattr("localharness.agent.loop.AgentLoop.__init__", wrapped_init)
 
 
-def _read_sessions(tmp_path):
-    """Read the sessions table from the real memory.db the drive wrote."""
+def _read_sessions(tmp_path, agent="orchestrator"):
+    """Read the sessions table from the real memory.db the drive wrote.
+
+    Phase 33.1: fresh/migrated installs write under 'orchestrator'; the collision
+    drive reads the un-migrated legacy store by passing agent="default"."""
     import sqlite3
-    db_path = tmp_path / "agents" / "default" / "memory.db"
+    db_path = tmp_path / "agents" / agent / "memory.db"
     assert db_path.exists(), f"memory.db not created at {db_path}"
     con = sqlite3.connect(str(db_path))
     try:
@@ -789,6 +792,12 @@ async def test_session_lifecycle_create_and_end_once(tmp_path, monkeypatch):
     assert started_at is not None
     assert ended_at is not None
     assert exit_reason == "complete"
+
+    # ORCH-01: a fresh mint lands the root as 'orchestrator' — the sibling yaml exists
+    # with the rewritten name (not the legacy 'default'), and discovery read it back.
+    root_yaml = tmp_path / "agents" / "orchestrator.yaml"
+    assert root_yaml.exists()
+    assert yaml.safe_load(root_yaml.read_text(encoding="utf-8"))["name"] == "orchestrator"
 
 
 async def test_session_id_threaded_to_agent_loop(tmp_path, monkeypatch):
@@ -824,7 +833,7 @@ async def test_vacuous_sitting_leaves_shelf_suppressed(tmp_path, monkeypatch):
 
     # A fresh store rendering the injected index must not promise an empty shelf.
     store = MemoryStore(
-        agent_id="default", division_id="default", org_id="default",
+        agent_id="orchestrator", division_id="default", org_id="default",
         base_dir=str(tmp_path),
     )
     await store.open()
@@ -845,20 +854,20 @@ async def test_gate_capture_produces_payload_first_summary_row(tmp_path, monkeyp
     from localharness.core.events import MemoryGateFired, Observation, TurnCompleted
 
     async def driving_repl_run(self):
-        # agent_id must be the running agent ("default") for the accumulator filter to
-        # pass; session_id is the sitting id the loop carries. publish() awaits handlers
+        # agent_id must be the running agent ("orchestrator") for the accumulator filter
+        # to pass; session_id is the sitting id the loop carries. publish() awaits handlers
         # inline, so the accumulator has counted these before the finally derives the summary.
         sid = self._agent.current_session_id
         await self._bus.publish(TurnCompleted(
-            agent_id="default", session_id=sid, iterations=1, duration_seconds=1.0,
+            agent_id="orchestrator", session_id=sid, iterations=1, duration_seconds=1.0,
             elapsed_tokens=150, input_tokens=100, output_tokens=50, summary="done",
         ))
         await self._bus.publish(Observation(
-            agent_id="default", session_id=sid, observation_type="tool_result",
+            agent_id="orchestrator", session_id=sid, observation_type="tool_result",
             tool_name="bash_exec", output="ok",
         ))
         await self._bus.publish(MemoryGateFired(
-            agent_id="default", session_id=sid, tier="resolved_error",
+            agent_id="orchestrator", session_id=sid, tier="resolved_error",
             fact_key="gate/resolved_error/bash_exec/k", tool_name="bash_exec",
             detail="uv: command not found",
         ))
@@ -876,3 +885,105 @@ async def test_gate_capture_produces_payload_first_summary_row(tmp_path, monkeyp
     assert summary is not None
     assert summary.startswith("resolved: uv: command not found")
     assert "bash_exec" in summary
+
+
+# ---------------------------------------------------------------------------
+# Phase 33.1 (ORCH-01/03): the one-time root-agent YAML migration helper.
+# agents/default.yaml -> agents/orchestrator.yaml with name: rewritten (a bare rename
+# is not enough — discovery reads the name: key). Idempotent + crash-safe + collision-safe.
+# ---------------------------------------------------------------------------
+
+def test_migrate_legacy_root_yaml_renames_and_rewrites_name(tmp_path):
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _migrate_legacy_root_agent_yaml
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "default.yaml").write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+
+    _migrate_legacy_root_agent_yaml(agents_dir)
+
+    assert not (agents_dir / "default.yaml").exists()
+    orch = agents_dir / "orchestrator.yaml"
+    assert orch.exists()
+    assert yaml.safe_load(orch.read_text(encoding="utf-8"))["name"] == "orchestrator"
+
+
+def test_migrate_legacy_root_yaml_collision_refuses_untouched(tmp_path):
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _migrate_legacy_root_agent_yaml
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    legacy = agents_dir / "default.yaml"
+    theirs = agents_dir / "orchestrator.yaml"
+    legacy.write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    # A genuinely different, pre-existing user 'orchestrator' agent.
+    theirs.write_text(
+        yaml.dump(_build_agent_yaml("orchestrator", "My custom orchestrator", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    legacy_before = legacy.read_bytes()
+    theirs_before = theirs.read_bytes()
+
+    _migrate_legacy_root_agent_yaml(agents_dir)  # must not raise
+
+    # Both files still exist, byte-identical — never merged, never clobbered.
+    assert legacy.read_bytes() == legacy_before
+    assert theirs.read_bytes() == theirs_before
+
+
+def test_migrate_legacy_root_yaml_completes_crash_remnant(tmp_path):
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _migrate_legacy_root_agent_yaml
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "default.yaml").write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    # Simulate a crash between write and unlink: orchestrator.yaml already holds the
+    # parsed-equal migrated copy the helper would have written.
+    migrated = _build_agent_yaml("orchestrator", "General-purpose assistant", None)
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(migrated, default_flow_style=False), encoding="utf-8"
+    )
+
+    _migrate_legacy_root_agent_yaml(agents_dir)
+
+    # The remnant path finishes the job: unlink the legacy file, keep the migrated copy.
+    assert not (agents_dir / "default.yaml").exists()
+    orch = agents_dir / "orchestrator.yaml"
+    assert yaml.safe_load(orch.read_text(encoding="utf-8"))["name"] == "orchestrator"
+
+
+def test_migrate_legacy_root_yaml_ignores_non_root_default_file(tmp_path):
+    from localharness.cli.start_cmd import _migrate_legacy_root_agent_yaml
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    # A file literally named default.yaml whose name: field is NOT 'default' — not the
+    # minted root; the helper must leave it entirely alone.
+    default_file = agents_dir / "default.yaml"
+    default_file.write_text(
+        yaml.dump({"name": "something-else", "role": "x", "model": "inherit"},
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    before = default_file.read_bytes()
+
+    _migrate_legacy_root_agent_yaml(agents_dir)
+
+    assert default_file.read_bytes() == before
+    assert not (agents_dir / "orchestrator.yaml").exists()

@@ -306,7 +306,8 @@ def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None) 
     REFUSES on a positive host-dangerous match, and an unknown name can't be granted to anyway."""
     if name in _BUILTIN_TOOLSETS:
         return list(_BUILTIN_TOOLSETS[name])
-    if load_agent is not None and name != "default":
+    # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
+    if load_agent is not None and name != "orchestrator":
         try:
             return _config_child_allowed(load_agent(name))
         except Exception:
@@ -1133,7 +1134,8 @@ def make_explore_agent_runner(
             dispatch = dispatch_search_verifier_subagent
         else:
             cfg = None
-            if load_agent is not None and name != "default":
+            # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
+            if load_agent is not None and name != "orchestrator":
                 try:
                     cfg = load_agent(name)
                 except Exception:

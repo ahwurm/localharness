@@ -112,6 +112,56 @@ def _discover_agents_for_start(config_dir: Path) -> list[dict]:
     return list(agents.values())
 
 
+def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
+    """Phase 33.1 (ORCH-01/03): one-time root-agent rename on the global agents dir —
+    agents/default.yaml -> agents/orchestrator.yaml with the name: field REWRITTEN
+    (a bare file rename is not enough: discovery reads the name: key, and the legacy
+    file carries name: default). The MemoryStore data directory migrates separately
+    inside MemoryStore.open() (Phase 33.1 plan 01).
+
+    Idempotent + crash-safe by construction:
+    - no default.yaml -> no-op (fresh install, or already migrated);
+    - default.yaml whose name: is not 'default' -> no-op (not the minted root);
+    - orchestrator.yaml already exists:
+        * parsed-equal to the would-be migration -> crash remnant of a previous run
+          that died between write and unlink -> finish the job (unlink default.yaml);
+        * different content -> GENUINE collision (the user has their own
+          'orchestrator' agent): refuse loudly, keep the legacy root under its old
+          name — never merge, never clobber;
+    - normal path: write orchestrator.yaml FIRST, then unlink default.yaml (a crash
+      between the two leaves both files; the remnant branch completes it next start).
+    """
+    legacy = agents_dir / "default.yaml"
+    if not legacy.exists():
+        return
+    try:
+        data = yaml.safe_load(legacy.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return  # unreadable legacy yaml: leave it to discovery's tolerant path
+    if data.get("name", "default") != "default":
+        return
+    data["name"] = "orchestrator"
+    target = agents_dir / "orchestrator.yaml"
+    if target.exists():
+        try:
+            existing = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+        except Exception:
+            existing = None
+        if existing == data:
+            legacy.unlink()  # crash remnant — the migrated copy is already in place
+        else:
+            console.print(
+                "[yellow]Warning:[/yellow] cannot rename the root agent 'default' -> "
+                "'orchestrator': agents/orchestrator.yaml already exists (an "
+                "unrelated agent). Keeping the root under its old name 'default'. "
+                "To resolve, rename your 'orchestrator' agent — note it can no "
+                "longer be delegated to (the root's name is guarded)."
+            )
+        return
+    target.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+    legacy.unlink()
+
+
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
                        channel_mode: str = "terminal", subagents: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
@@ -154,32 +204,51 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     _ensure_packaged_tools(cfg_path)
 
-    # Discover agents
+    # Discover agents (migrate the legacy root-agent YAML first so discovery reads the
+    # rewritten name: field, not the stale name: default — Phase 33.1 ORCH-01/03)
+    _migrate_legacy_root_agent_yaml(cfg_path / "agents")
     agents = _discover_agents_for_start(cfg_path)
 
     if agent_name:
         # --agent flag: find by name
         match = [a for a in agents if a.get("name") == agent_name]
+        if not match and agent_name == "default":
+            # Phase 33.1: the root agent was renamed default -> orchestrator; keep old
+            # muscle memory / scripts working instead of hard-erroring (ORCH-03).
+            match = [a for a in agents if a.get("name") == "orchestrator"]
+            if match:
+                console.print(
+                    "[yellow]Note:[/yellow] the root agent was renamed 'default' -> "
+                    "'orchestrator'; starting 'orchestrator'."
+                )
         if not match:
             err_console.print(f"[bold red]Error:[/bold red] Agent '{agent_name}' not found.")
             raise typer.Exit(1)
         selected_data = match[0]
     elif not agents:
-        # No agents: create default
-        console.print("[yellow]No agents configured. Creating default agent...[/yellow]")
+        # No agents: mint the root agent as 'orchestrator' (ORCH-01)
+        console.print("[yellow]No agents configured. Creating the orchestrator (root agent)...[/yellow]")
         agents_dir = cfg_path / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        default_data = _build_agent_yaml("default", "General-purpose assistant", None)
+        root_data = _build_agent_yaml("orchestrator", "General-purpose assistant", None)
         import yaml as _yaml
-        (agents_dir / "default.yaml").write_text(
-            _yaml.dump(default_data, default_flow_style=False), encoding="utf-8"
+        (agents_dir / "orchestrator.yaml").write_text(
+            _yaml.dump(root_data, default_flow_style=False), encoding="utf-8"
         )
-        agents = [default_data]
-        selected_data = default_data
+        agents = [root_data]
+        selected_data = root_data
     elif len(agents) == 1 or not subagents:
-        # Default: open straight to the banner. Prefer the "default" agent, else the
-        # first discovered. Pass --subagents to pick from the multi-agent table instead.
-        selected_data = next((a for a in agents if a.get("name") == "default"), agents[0])
+        # Default: open straight to the banner. Pass --subagents to pick from the
+        # multi-agent table instead.
+        # Prefer 'default' if it still exists: post-migration that only happens when the
+        # YAML migration REFUSED (a name collision with a user's own 'orchestrator'
+        # agent), and the un-migrated legacy root must keep winning selection or the
+        # user lands in a different agent and loses their memory continuity. Normal
+        # installs have no default.yaml after migration, so 'orchestrator' wins.
+        selected_data = next(
+            (a for a in agents if a.get("name") == "default"),
+            next((a for a in agents if a.get("name") == "orchestrator"), agents[0]),
+        )
     else:
         # --subagents + multiple agents: show picker
         table = Table(title="Available Agents")
@@ -194,7 +263,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         selected_data = agents[idx]
 
     # Load full AgentConfig (uses ConfigLoader for inheritance)
-    agent_name_str: str = selected_data.get("name", "default")
+    agent_name_str: str = selected_data.get("name", "orchestrator")
     try:
         agent_config = loader.load_agent(agent_name_str)
     except Exception:
