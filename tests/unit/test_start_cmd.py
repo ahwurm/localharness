@@ -1016,6 +1016,74 @@ async def test_upgrade_drive_collision_keeps_legacy_root_working(tmp_path, monke
     assert fact is not None and fact.agent_id == "default"
 
 
+async def test_upgrade_drive_collision_never_grafts_legacy_dir_into_user_orchestrator(
+    tmp_path, monkeypatch
+):
+    """BLOCKER 2 data-loss guard: when the YAML rename REFUSED because the user has their
+    own 'orchestrator' agent, the legacy root's DATA DIR must never be adopted into that
+    unrelated agent. Pre-rename install — default.yaml + a default-keyed store holding a
+    fact — PLUS the user's own orchestrator.yaml and NO orchestrator data dir yet. Driving
+    the real _start_async with --agent orchestrator must leave agents/default/ intact (the
+    fact still under 'default'), must NOT graft it into the orchestrator store, and must
+    NOT delete default.yaml — the released "nothing is merged or overwritten" guarantee."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+    from localharness.memory.sqlite import MemoryStore
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "default.yaml").write_text(
+        yaml.dump(_build_agent_yaml("default", "General-purpose assistant", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    # the user's OWN orchestrator agent (different content) — genuine ORCH-03 collision,
+    # and it has NO data dir yet (never run), so the destination is free for a bad rename.
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(_build_agent_yaml("orchestrator", "My custom orchestrator", None),
+                  default_flow_style=False),
+        encoding="utf-8",
+    )
+    legacy = MemoryStore(agent_id="default", division_id="default", org_id="default",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    await legacy.store_fact(
+        "learned/bash_exec/resolved_error", "uv fix: use .venv/bin/python", confidence=0.9,
+    )
+    await legacy.close()
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    await _start_async("orchestrator", False, False, str(tmp_path))
+
+    # (1) the legacy data dir is UNTOUCHED — never adopted into the unrelated orchestrator
+    assert (agents_dir / "default").is_dir(), \
+        "legacy 'default' data dir was adopted into the user's orchestrator — guarantee broken"
+
+    # (2) the old fact stays reachable under 'default', never re-keyed away
+    dstore = MemoryStore(agent_id="default", division_id="default", org_id="default",
+                         base_dir=str(tmp_path))
+    await dstore.open()
+    try:
+        fact = await dstore.get_fact("learned/bash_exec/resolved_error")
+    finally:
+        await dstore.close()
+    assert fact is not None and fact.agent_id == "default"
+
+    # (3) the user's orchestrator store never received the legacy fact (nothing merged)
+    ostore = MemoryStore(agent_id="orchestrator", division_id="default", org_id="default",
+                         base_dir=str(tmp_path))
+    await ostore.open()
+    try:
+        grafted = await ostore.get_fact("learned/bash_exec/resolved_error")
+    finally:
+        await ostore.close()
+    assert grafted is None, \
+        "legacy fact was grafted into the user's orchestrator store — nothing should be merged"
+
+    # (4) collision-refusal state preserved: default.yaml never deleted
+    assert (agents_dir / "default.yaml").exists()
+
+
 async def test_agent_flag_default_redirects_to_orchestrator(tmp_path, monkeypatch):
     """ORCH-03 never a hard break: on a migrated/fresh install (only orchestrator.yaml),
     `--agent default` does NOT typer.Exit — it redirects to 'orchestrator' with a note and

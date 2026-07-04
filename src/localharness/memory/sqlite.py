@@ -98,6 +98,14 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
     real 'orchestrator' agent's data — the legacy store then simply keeps opening
     under its old name (ORCH-03 collision rule). No-op for every non-root agent_id.
     """
+    if (base_dir / "agents" / f"{_LEGACY_ROOT_AGENT_ID}.yaml").exists():
+        # The YAML rename deletes default.yaml BEFORE any store opens; its lingering
+        # presence means that rename REFUSED (the user owns an 'orchestrator' agent —
+        # ORCH-03 collision) and the legacy root still lives under its old 'default'
+        # name. Adopting its dir would graft the legacy root's memories into that
+        # unrelated agent, falsifying the released "nothing is merged or overwritten"
+        # guarantee. Never adopt while the collision-refusal marker is on disk.
+        return
     if agent_id != _ROOT_AGENT_ID:
         return
     legacy_dir = base_dir / "agents" / _LEGACY_ROOT_AGENT_ID
