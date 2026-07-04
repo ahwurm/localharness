@@ -40,7 +40,8 @@ All notable changes to LocalHarness are documented here. The format follows
   idempotent, crash-safe. If you already have your own agent named `orchestrator`, the
   migration refuses (nothing is merged or overwritten) and the root keeps its old name;
   a console warning explains how to resolve. `--agent default` redirects to
-  `orchestrator` with a note. Direct subagent addressing is unchanged.
+  `orchestrator` with a note. Direct subagent addressing is unchanged, except the
+  name `orchestrator` is now reserved for the root (mirroring the old `default` guard).
 
 ### Fixed
 - **Conversational turns no longer surface meta-narration or duplicated answers** (#6).
