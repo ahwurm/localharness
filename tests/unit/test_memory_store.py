@@ -679,3 +679,129 @@ async def test_close_unsubscribes(tmp_path: Path):
     await store.close()
     # After close, subscriber_count should be 0 (all handles unsubscribed)
     assert bus.subscriber_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 33.1 (ORCH-02): one-time root rename default -> orchestrator
+#
+# The agent's name IS its storage identity (directory name + the agent_id column
+# in facts/sessions). Renaming the root without migrating would orphan every
+# memory an existing install has ("amnesia the same week it learned to
+# remember"). These composed tests build a PRE-rename store under "default", then
+# open the SAME base_dir as "orchestrator" (the migration trigger) and prove the
+# old facts + session history are fully reachable, rows are RE-KEYED (not
+# directory-aliased), re-opens are a clean no-op, non-root opens never touch the
+# legacy dir, and a real user "orchestrator" is never merged or clobbered.
+# ---------------------------------------------------------------------------
+
+async def _build_legacy_default_store(tmp_path: Path) -> None:
+    """A pre-rename root store: one high-confidence fact + one ended sitting, closed."""
+    store = MemoryStore(agent_id="default", division_id="", org_id="",
+                        base_dir=str(tmp_path))
+    await store.open()
+    await store.store_fact(
+        "learned/bash_exec/resolved_error", "uv fix: use .venv/bin/python",
+        confidence=0.9,
+    )
+    await store.create_session("sit-1", {}, "dogfood", 8192)
+    await store.end_session(
+        "sit-1", exit_reason="complete",
+        summary="resolved: uv: command not found; 5 turns, 12 tool calls (bash_exec, read)",
+        turn_count=5, action_count=12, tokens_in=1000, tokens_out=200,
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_migration_pre_rename_store_fully_reachable(tmp_path: Path):
+    """THE quality-gate composed test: a store built + closed under the OLD root name
+    "default" is fully reachable after opening the SAME base_dir as "orchestrator" —
+    facts AND session history render, rows are RE-KEYED (not just directory-aliased),
+    the legacy dir is gone, the new dir holds memory.db, integrity stays clean, and an
+    honest rename breadcrumb lands in history.jsonl."""
+    await _build_legacy_default_store(tmp_path)
+
+    # Simulated upgrade: open under the NEW root name over the SAME base_dir.
+    store_b = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                          base_dir=str(tmp_path))
+    await store_b.open()  # <- triggers the migration (dir adoption + SQL row fixup)
+    try:
+        # (a) facts + session history render under the new root name
+        agent_md = (await store_b.load_context(index_mode=True)).agent_memory_md
+        assert "uv fix: use .venv/bin/python" in agent_md      # old fact reachable
+        assert "### Recent Session History" in agent_md
+        assert "uv: command not found" in agent_md             # old session line reachable
+        # (b) the row was RE-KEYED, not directory-aliased
+        fact = await store_b.get_fact("learned/bash_exec/resolved_error")
+        assert fact is not None and fact.agent_id == "orchestrator"
+        # (c) directory adoption: legacy gone, new dir holds the db
+        assert not (tmp_path / "agents" / "default").exists()
+        assert (tmp_path / "agents" / "orchestrator" / "memory.db").exists()
+        # (d) breadcrumb is schema-conformant — integrity stays clean
+        assert await store_b.integrity_check() == []
+        # (e) honest paper trail: the rename is recorded in history.jsonl
+        assert "agent_renamed" in (
+            tmp_path / "agents" / "orchestrator" / "history.jsonl"
+        ).read_text()
+    finally:
+        await store_b.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_migration_idempotent_across_reopens(tmp_path: Path):
+    """Second and later opens as "orchestrator" are a clean no-op: the dir-rename branch
+    no-ops (legacy gone), the row UPDATE matches 0 rows, and EXACTLY ONE breadcrumb ever
+    exists — the facts + session history still render."""
+    await _build_legacy_default_store(tmp_path)
+
+    store_b = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                          base_dir=str(tmp_path))
+    await store_b.open()
+    await store_b.close()
+
+    store_c = MemoryStore(agent_id="orchestrator", division_id="", org_id="",
+                          base_dir=str(tmp_path))
+    await store_c.open()  # second open — must not raise, must not re-migrate
+    try:
+        agent_md = (await store_c.load_context(index_mode=True)).agent_memory_md
+        assert "uv fix: use .venv/bin/python" in agent_md
+        assert "uv: command not found" in agent_md
+        fact = await store_c.get_fact("learned/bash_exec/resolved_error")
+        assert fact is not None and fact.agent_id == "orchestrator"
+        # exactly one rename breadcrumb — no re-append on the idempotent second open
+        breadcrumbs = [
+            ln for ln in (tmp_path / "agents" / "orchestrator" / "history.jsonl")
+            .read_text().splitlines()
+            if "agent_renamed" in ln
+        ]
+        assert len(breadcrumbs) == 1
+    finally:
+        await store_c.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_migration_noop_for_other_agents(tmp_path: Path):
+    """The migration is scoped to the root: opening any OTHER agent_id never touches the
+    legacy "default" directory, and the legacy store stays fully reachable under its old
+    name (nothing moves for non-root opens)."""
+    await _build_legacy_default_store(tmp_path)
+
+    # A non-root agent opens over the same base_dir — legacy dir must be untouched.
+    cruncher = MemoryStore(agent_id="cruncher", division_id="", org_id="",
+                           base_dir=str(tmp_path))
+    await cruncher.open()
+    try:
+        assert (tmp_path / "agents" / "default" / "memory.db").exists()  # untouched
+        assert await cruncher.get_fact("learned/bash_exec/resolved_error") is None
+    finally:
+        await cruncher.close()
+
+    # The legacy root still opens — and still holds its fact — under the OLD name.
+    legacy = MemoryStore(agent_id="default", division_id="", org_id="",
+                         base_dir=str(tmp_path))
+    await legacy.open()
+    try:
+        fact = await legacy.get_fact("learned/bash_exec/resolved_error")
+        assert fact is not None and fact.agent_id == "default"
+    finally:
+        await legacy.close()

@@ -75,6 +75,57 @@ class MemoryContext:
 
 
 # ---------------------------------------------------------------------------
+# Phase 33.1 (ORCH-02): one-time root-agent rename (default -> orchestrator)
+# ---------------------------------------------------------------------------
+# The agent's name IS its storage identity (directory name + the agent_id column
+# in facts/sessions + the bus filter), so the default->orchestrator rename must
+# reconcile pre-existing 'default'-keyed data the first time the store opens under
+# the new root name — otherwise every memory an existing install has is orphaned.
+_LEGACY_ROOT_AGENT_ID = "default"
+_ROOT_AGENT_ID = "orchestrator"
+
+
+def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
+    """One-time, idempotent adoption of a pre-rename root store (Phase 33.1, ORCH-02).
+
+    If this store is opening as the NEW root name and a legacy 'default' directory
+    exists with no 'orchestrator' directory yet, adopt it wholesale: memory.db,
+    MEMORY.md, history.jsonl, bus-events.jsonl, compact.md are all siblings in the
+    same directory, so ONE atomic rename carries everything (WAL/SHM sidecars ride
+    along too).
+
+    Refuses (no-op) whenever the destination exists: never merge, never clobber a
+    real 'orchestrator' agent's data — the legacy store then simply keeps opening
+    under its old name (ORCH-03 collision rule). No-op for every non-root agent_id.
+    """
+    if agent_id != _ROOT_AGENT_ID:
+        return
+    legacy_dir = base_dir / "agents" / _LEGACY_ROOT_AGENT_ID
+    new_dir = base_dir / "agents" / _ROOT_AGENT_ID
+    if not legacy_dir.is_dir() or new_dir.exists():
+        return
+    legacy_dir.rename(new_dir)
+    # Honest paper trail for whoever debugs this store later (CLAUDE.md: docs for the
+    # adversary): one schema-conformant session_event breadcrumb in the adopted
+    # history.jsonl — carries all six HistoryWriter REQUIRED_FIELDS with a VALID_TYPES
+    # type, and mirrors the existing session_event convention (v=1, integer ts) so a
+    # later integrity_check()/read_all() never flags it as corruption.
+    record = {
+        "v": 1,
+        "type": "session_event",
+        "id": str(uuid.uuid4()),
+        "session_id": "phase-33.1-migration",
+        "agent_id": _ROOT_AGENT_ID,
+        "ts": int(time.time()),
+        "event": "agent_renamed",
+        "from_agent_id": _LEGACY_ROOT_AGENT_ID,
+        "to_agent_id": _ROOT_AGENT_ID,
+    }
+    with (new_dir / "history.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
@@ -332,9 +383,17 @@ class MemoryStore:
     async def open(self) -> None:
         """Open SQLite connection, enable WAL mode, apply pending migrations.
 
+        Phase 33.1 (ORCH-02): performs a one-time, idempotent root-rename migration
+        first — a pre-rename 'default' store is adopted (directory + facts/sessions
+        rows re-keyed) the first time it opens as 'orchestrator'.
+
         Critic M2: any failure after connect closes the connection before re-raising —
         aiosqlite's worker thread is non-daemon, and a leaked handle hangs process exit.
         """
+        # Phase 33.1: must run before mkdir — mkdir would create an empty
+        # agents/orchestrator/ first and the adoption rename would then refuse
+        # (destination exists), silently orphaning the legacy store.
+        _migrate_legacy_root_agent_dir(self._base_dir, self._agent_id)
         self._agent_dir.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
         try:
@@ -400,6 +459,24 @@ class MemoryStore:
         if v == 2:
             await self._db.executescript(MIGRATION_V2_TO_V3_SQL)
             v = await _version()
+
+        # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
+        # is NOT enough — every read filters WHERE agent_id = ?, so rows stamped 'default'
+        # are invisible to a store opened as 'orchestrator'. Idempotent (matches 0 rows
+        # once migrated), scoped to the root store only, and both tables commit in ONE
+        # transaction (critic M1: crash -> rollback -> clean retry, never a half-migrated
+        # identity). No unique-index conflict is possible: a store directory only ever
+        # contains its own agent's rows, so 'default' and 'orchestrator' rows never coexist.
+        if self._agent_id == _ROOT_AGENT_ID:
+            await self._db.execute(
+                "UPDATE facts SET agent_id = ? WHERE agent_id = ?",
+                (_ROOT_AGENT_ID, _LEGACY_ROOT_AGENT_ID),
+            )
+            await self._db.execute(
+                "UPDATE sessions SET agent_id = ? WHERE agent_id = ?",
+                (_ROOT_AGENT_ID, _LEGACY_ROOT_AGENT_ID),
+            )
+            await self._db.commit()
 
     async def close(self) -> None:
         """Unsubscribe from bus, close SQLite connection."""
