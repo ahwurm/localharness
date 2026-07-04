@@ -386,9 +386,9 @@ async def test_runner_dispatches_yaml_defined_agent(monkeypatch):
     with pytest.raises(ValueError, match="CREATE one"):
         await runner("nonexistent-agent", "do thing")
 
-    # "default" is never loadable as a child (self-delegation guard)
+    # "orchestrator" (the root) is never loadable as a child (self-delegation guard)
     with pytest.raises(ValueError, match="not wired"):
-        await runner("default", "do thing")
+        await runner("orchestrator", "do thing")
 
 
 @pytest.mark.asyncio
@@ -401,6 +401,22 @@ async def test_runner_without_loader_keeps_old_refusal():
     )
     with pytest.raises(ValueError, match="not wired"):
         await runner("youtube-summarizer", "x")
+
+
+def test_resolve_target_toolset_never_loads_root():
+    """Phase 33.1: the grant-target-safety toolset resolver (subagent.py:309) must never
+    call load_agent for the root name 'orchestrator' — the root is not a delegation child.
+    Returns [] (unknown-to-the-gate) AND the loader is provably never invoked."""
+    from localharness.agent.subagent import _resolve_target_toolset
+
+    loaded: list[str] = []
+
+    def _spy_load(name: str):  # pragma: no cover - asserted never called
+        loaded.append(name)
+        raise AssertionError("load_agent must not be called for the root name")
+
+    assert _resolve_target_toolset("orchestrator", load_agent=_spy_load) == []
+    assert loaded == []
 
 
 def test_prepend_toolset_states_capabilities():
