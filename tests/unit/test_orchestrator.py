@@ -1,9 +1,9 @@
-"""Tests for orchestrator routing, Agent Cards, and context guard."""
+"""Tests for orchestrator routing, Agent Cards, and the agent-creation flow."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from localharness.orchestrator.cards import AgentCard, AgentCardRegistry, score_card, RoutingDecision
+from localharness.orchestrator.cards import AgentCard, AgentCardRegistry, score_card
 from localharness.config.models import AgentConfig
 
 
@@ -117,52 +117,14 @@ def test_registry_route_tiebreak_fn_exception_falls_through():
     assert decision.matched is True  # Should still route, just without tiebreak
 
 
-# --- OrchestratorContextGuard ---
+# --- AgentCreationFlow.begin_agent_creation ---
 
-def test_context_guard_trims_to_cap():
-    from localharness.orchestrator.router import OrchestratorContextGuard
-    guard = OrchestratorContextGuard(max_tokens=16_000)
-    # Simulate messages that exceed cap
-    messages = [{"role": "system", "content": "sys"}]
-    for i in range(50):
-        messages.append({"role": "user", "content": f"message {i} " * 100})
-        messages.append({"role": "assistant", "content": f"response {i} " * 100})
-    trimmed = guard.trim(messages)
-    # Should keep system + last N turns, not all 100 messages
-    assert len(trimmed) < len(messages)
-    assert trimmed[0]["role"] == "system"  # system always preserved
-
-
-# --- Greeting behavior ---
-
-def test_greeting_new_session():
-    """New session greeting: 2-3 sentences + /help pointer."""
-    from localharness.orchestrator.router import Orchestrator
-    greeting = Orchestrator.compose_greeting(is_returning=False)
-    assert "/help" in greeting
-    assert len(greeting) > 20  # not empty
-
-def test_greeting_returning_session():
-    """Returning session: minimal 'Ready.' banner."""
-    from localharness.orchestrator.router import Orchestrator
-    greeting = Orchestrator.compose_greeting(is_returning=True)
-    assert greeting == "Ready."  # minimal banner for returning users
-
-def test_greeting_returning_session_with_model():
-    """Returning session with model name: 'model -- Ready.'"""
-    from localharness.orchestrator.router import Orchestrator
-    greeting = Orchestrator.compose_greeting(is_returning=True, model_name="gpt-oss-120b")
-    assert greeting == "gpt-oss-120b -- Ready."
-
-
-# --- Orchestrator.begin_agent_creation ---
-
-def test_orchestrator_begin_agent_creation():
-    """Orchestrator.begin_agent_creation() instantiates and returns an AgentCreationWorkflow."""
-    from localharness.orchestrator.router import Orchestrator
+def test_begin_agent_creation():
+    """AgentCreationFlow.begin_agent_creation() instantiates and returns an AgentCreationWorkflow."""
+    from localharness.orchestrator.router import AgentCreationFlow
     from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
     registry = AgentCardRegistry()
-    orch = Orchestrator(card_registry=registry)
+    orch = AgentCreationFlow(card_registry=registry)
     wf = orch.begin_agent_creation()
     assert isinstance(wf, AgentCreationWorkflow)
     assert wf.state == WorkflowState.DISCUSS
@@ -196,10 +158,9 @@ async def test_user_message_includes_session_id():
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(side_effect=["hello", EOFError()])
 
-    # Mock orchestrator with no active workflow and route_task returning a decision
+    # Mock orchestrator with no active workflow
     mock_orchestrator = MagicMock()
     mock_orchestrator.active_workflow = None
-    mock_orchestrator.route_task = MagicMock(return_value=RoutingDecision(matched=True, agent_id="test-agent", agent_card=None, confidence=1.0, reason="test"))
 
     repl = OrchestratorREPL(
         orchestrator=mock_orchestrator,
