@@ -8,7 +8,9 @@
 
 ## Purpose
 
-The orchestrator is the user-facing entry point to LocalHarness. It is intentionally thin: it routes, synthesizes, escalates, and manages agent creation workflows. It does not do domain work. It does not load file contents. It does not run multi-step reasoning on domain data.
+The orchestrator layer is the user-facing entry point to LocalHarness. It is intentionally thin: it routes, synthesizes, escalates, and manages agent creation workflows. It does not do domain work. It does not load file contents. It does not run multi-step reasoning on domain data.
+
+> **Naming.** "Orchestrator" here refers to the architectural *layer* (`src/localharness/orchestrator/`). The layer's conversational entry-point class in `router.py` is `AgentCreationFlow` — it holds the agent-card registry and drives agent-creation workflows. The broader `Orchestrator` class sketched below is the original design and predates that split.
 
 The single most important invariant: **the orchestrator's context window stays at 10-15% utilization at all times**. This is enforced structurally — the orchestrator receives only summaries and Agent Cards, never file contents or full agent histories.
 
