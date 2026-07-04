@@ -117,10 +117,12 @@ def doctor(
                 served = None
 
             cfg_ctx = None
-            try:
-                cfg_ctx = loader.load_agent("default").context.max_context_tokens
-            except Exception:
-                cfg_ctx = None
+            for _root_name in ("orchestrator", "default"):  # Phase 33.1: new root name, then pre-migration fallback
+                try:
+                    cfg_ctx = loader.load_agent(_root_name).context.max_context_tokens
+                    break
+                except Exception:
+                    continue
 
             if served and cfg_ctx:
                 reserve = 4_096
