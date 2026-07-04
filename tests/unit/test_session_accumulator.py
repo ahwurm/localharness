@@ -20,6 +20,7 @@ from localharness.core.events import (
     Observation,
     TurnCompleted,
     TurnFailed,
+    UserMessage,
 )
 
 AGENT = "sess-agent"
@@ -48,6 +49,12 @@ def _gate(tier: str, detail: str) -> MemoryGateFired:
     return MemoryGateFired(
         agent_id=AGENT, session_id="sit-1", tier=tier, fact_key=f"gate/{tier}/k",
         tool_name="bash_exec", detail=detail,
+    )
+
+
+def _user_msg(content: str, agent: str = AGENT) -> UserMessage:
+    return UserMessage(
+        agent_id=agent, session_id="sit-1", content=content, channel="terminal",
     )
 
 
@@ -94,7 +101,7 @@ async def test_summary_leads_with_capture_detail():
     assert line.startswith("resolved: uv: command not found")
     assert "bash_exec" in line
     # payload leads bookkeeping
-    assert line.index("uv: command not found") < line.index("turns")
+    assert line.index("uv: command not found") < line.index("turn")
 
 
 async def test_stuck_capture_leads_when_no_resolved():
@@ -125,7 +132,7 @@ async def test_novelty_never_leads():
     line = derive_session_summary(acc)
     assert line is not None
     assert "novelty" not in line
-    assert line.startswith("1 turns, 1 tool calls")
+    assert line.startswith("1 turn, 1 tool call")
     assert "bash_exec" in line
 
 
@@ -172,3 +179,101 @@ async def test_agent_id_filter_via_real_bus():
     assert acc.tokens_in == 100
     assert acc.tokens_out == 50
     assert acc._handles == []  # close() unsubscribed everything
+
+
+# ---------------------------------------------------------------------------
+# TIME-01: zero-model topical slice (the user's FIRST ask) leads a pure-chat
+# sitting; delegation-aware tail; "1 turns" pluralization bug dies.
+# ---------------------------------------------------------------------------
+
+async def test_ask_capture_leads_when_no_payload():
+    """The owner UAT-2 anchor: a pure-chat delegation sitting reads
+    `asked: "..." — 3 turns, 1 delegation` — no "(agent)", no "tool calls" phrase."""
+    acc = _acc()
+    await acc.on_user_message(_user_msg("any fun 4th of July events in Miami Beach, FL?"))
+    for _ in range(3):
+        await acc.on_turn_completed(_turn(10, 5))
+    await acc.on_observation(_obs("agent"))
+    line = derive_session_summary(acc)
+    assert line == (
+        'asked: "any fun 4th of July events in Miami Beach, FL?" — 3 turns, 1 delegation'
+    )
+
+
+async def test_resolved_error_still_leads_over_ask():
+    """Payload-first order stands: an ask is captured but the resolved_error tier
+    still leads, with the `; ` separator, and `asked:` never appears."""
+    acc = _acc()
+    await acc.on_user_message(_user_msg("please make my build work"))
+    await acc.on_gate_fired(_gate("resolved_error", "uv: command not found"))
+    await acc.on_observation(_obs("bash_exec"))
+    await acc.on_turn_completed(_turn(10, 5))
+    line = derive_session_summary(acc)
+    assert line is not None
+    assert line.startswith("resolved: uv: command not found; ")
+    assert "asked:" not in line
+
+
+async def test_first_ask_only_first_kept():
+    """The sitting's OPENING ask is the topic; later asks do not overwrite it."""
+    acc = _acc()
+    await acc.on_user_message(_user_msg("first ask"))
+    await acc.on_user_message(_user_msg("second ask"))
+    assert acc.first_ask == "first ask"
+    line = derive_session_summary(acc)
+    assert line is not None
+    assert '"first ask"' in line
+    assert "second ask" not in line
+
+
+async def test_ask_sanitized_single_line():
+    """Newlines/tabs collapse to single spaces and double quotes become single —
+    the raw ask can never break the single-line `asked: "..."` markdown contract."""
+    acc = _acc()
+    await acc.on_user_message(_user_msg('line one\nline "two"\t  spaced'))
+    await acc.on_turn_completed(_turn(10, 5))
+    line = derive_session_summary(acc)
+    assert line is not None
+    assert 'asked: "line one line \'two\' spaced"' in line
+    assert "\n" not in line and "\t" not in line
+
+
+async def test_ask_truncated_with_ellipsis():
+    """A long ask is trimmed to a 120-char quoted slice (119 kept + ellipsis); the
+    counts tail survives and the whole line stays within the 180-char budget."""
+    acc = _acc()
+    await acc.on_user_message(_user_msg("Q" * 200))
+    await acc.on_turn_completed(_turn(10, 5))
+    line = derive_session_summary(acc)
+    assert line is not None
+    quoted = line[line.index('"') + 1 : line.rindex('"')]
+    assert len(quoted) == 120
+    assert quoted.endswith("…")
+    assert line.endswith(" — 1 turn")
+    assert len(line) <= 180
+
+
+async def test_mixed_tools_and_delegations_tail():
+    """OQ1 ruling pinned: tool calls (delegations excluded) and delegations render as
+    separate comma parts; "agent" is kept out of the top-tools parenthetical."""
+    acc = _acc()
+    await acc.on_turn_completed(_turn(10, 5))
+    await acc.on_observation(_obs("bash_exec"))
+    await acc.on_observation(_obs("bash_exec"))
+    await acc.on_observation(_obs("agent"))
+    line = derive_session_summary(acc)
+    assert line == "1 turn, 2 tool calls (bash_exec), 1 delegation"
+
+
+async def test_user_message_agent_filter_via_real_bus():
+    """Only this agent's ask is captured when driven through a real EventBus — the
+    UserMessage subscription is agent_id-filtered like the other four."""
+    bus = EventBus()
+    acc = SessionAccumulator(bus=bus, agent_id=AGENT)
+    await acc.open()
+    try:
+        await bus.publish(_user_msg("not mine", agent="other-agent"))
+        await bus.publish(_user_msg("mine"))
+    finally:
+        await acc.close()
+    assert acc.first_ask == "mine"
