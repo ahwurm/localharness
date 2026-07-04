@@ -397,7 +397,8 @@ async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
     await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     assert captured["memory_loader"] is not None, "seeded scenario must hydrate a MemoryStore"
     tools = captured["tool_registry"]._tools["global"]
-    for name in ("memory_search", "memory_get", "memory_remember"):
+    # the write verb registers as "remember" (not "memory_remember"), same as production
+    for name in ("memory_search", "memory_get", "remember"):
         assert name in tools, f"seeded bench agent missing {name} (production registers all three)"
 
 
@@ -426,7 +427,7 @@ async def test_bench_no_memory_tools_without_seeds(monkeypatch):
     await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     assert captured["memory_loader"] is None, "unseeded scenario must NOT hydrate a store"
     tools = captured["tool_registry"]._tools["global"]
-    for name in ("memory_search", "memory_get", "memory_remember"):
+    for name in ("memory_search", "memory_get", "remember"):
         assert name not in tools, f"unseeded bench agent wrongly has {name} (phantom store)"
 
 
