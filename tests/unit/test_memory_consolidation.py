@@ -440,3 +440,87 @@ async def test_promoted_lesson_payload_survives_injected_block(store: MemoryStor
     # loop's presentation prefix stripped at capture.
     assert line.find("File not found") < line.find("[recurring: 2 episodes")
     assert "[tool error]" not in line
+
+
+# ---------------------------------------------------------------------------
+# SESS-01 + FLOW2-BUS-HOP: the session-unit ruling made executable, and the real
+# bus→filtered-subscription→gate delivery seam proven with live EventBus objects.
+# ---------------------------------------------------------------------------
+
+async def _facts_like(store: MemoryStore, pattern: str) -> list[tuple[str, str]]:
+    """(key, provenance) rows matching a LIKE pattern — the raw-SQL lookup consolidation.py
+    itself uses (150-156) to find candidates without knowing the lesson hash."""
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT key, provenance FROM facts WHERE agent_id = ? AND key LIKE ? ORDER BY key",
+        (store._agent_id, pattern),
+    ) as cur:
+        return list(await cur.fetchall())
+
+
+@pytest.mark.asyncio
+async def test_same_sitting_double_stumble_does_not_promote(store: MemoryStore):
+    """The owner's session-unit ruling (SESS-01) made executable: a double-stumble WITHIN
+    one sitting is ONE provenance, so it does NOT promote by recurrence — 'recurring ≥2
+    episodes' now honestly means '≥2 sittings'. The SAME lesson in a second sitting (2
+    distinct provenances) DOES promote (the positive control)."""
+    from localharness.core.events import Observation
+    from localharness.memory.gate import WriteGate
+
+    gate = WriteGate(store, _NullBus(), "cons-agent")
+
+    async def cycle(sess: str):
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name="bash_exec", output="", error="permission denied: /etc/shadow"))
+        await gate._on_observation(Observation(
+            agent_id="cons-agent", session_id=sess, observation_type="tool_result",
+            tool_name="bash_exec", output="ok", error=None))
+
+    # Same sitting stumbling twice on the same lesson: one provenance → no recurrence.
+    await cycle("sit-1")
+    await cycle("sit-1")
+    report = await ConsolidationPass(store, _cfg()).run()
+    assert report.promoted == 0
+    assert await _facts_like(store, "learned/bash_exec/%") == []
+
+    # A SECOND sitting hits the same lesson → 2 distinct provenances → now it promotes.
+    await cycle("sit-2")
+    report2 = await ConsolidationPass(store, _cfg()).run()
+    assert report2.promoted == 1
+    assert report2.promoted_keys[0].startswith("learned/bash_exec/resolved_error/")
+    assert "2 episodes" in (await store.get_fact(report2.promoted_keys[0])).value
+
+
+@pytest.mark.asyncio
+async def test_bus_publish_reaches_gate_composed(store: MemoryStore):
+    """FLOW2-BUS-HOP closed: the whole delivery seam with REAL objects — bus.publish → the
+    EventBus agent_id-filtered subscription → the gate handler → store — NOT a direct
+    handler call. Also proves the filter hop itself: another agent's identical event is
+    dropped at the subscription and never produces a fact."""
+    from localharness.core.bus import EventBus
+    from localharness.core.events import Observation
+    from localharness.memory.gate import WriteGate
+
+    bus = EventBus()
+    gate = WriteGate(store, bus, "cons-agent")
+    await gate.open()
+    try:
+        # A DIFFERENT agent's full error→success cycle must be filtered out at the
+        # subscription (agent_id mismatch); if it leaked a fact under "other-sess" appears.
+        for out, err in (("", "boom"), ("ok", None)):
+            await bus.publish(Observation(
+                agent_id="other-agent", session_id="other-sess", observation_type="tool_result",
+                tool_name="bash_exec", output=out, error=err))
+        assert await _facts_like(store, "gate/resolved_error/bash_exec/%") == []
+
+        # The real hop for THIS agent: publish → filtered handler → gate writes the fact.
+        for out, err in (("", "boom"), ("ok", None)):
+            await bus.publish(Observation(
+                agent_id="cons-agent", session_id="s1", observation_type="tool_result",
+                tool_name="bash_exec", output=out, error=err))
+        rows = await _facts_like(store, "gate/resolved_error/bash_exec/%")
+        assert len(rows) == 1
+        assert rows[0][1] == "s1"  # provenance == the resolving session
+    finally:
+        await gate.close()
