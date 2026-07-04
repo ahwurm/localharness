@@ -420,6 +420,44 @@ async def test_flush_memory_md(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# TIME-02/04: pure relative-time label helpers. The day-flip seam is dependency
+# injection (a plain `today` argument) — zero clock mocking, freezegun is NOT a dep.
+# ---------------------------------------------------------------------------
+
+def test_relative_day_label_boundaries():
+    """Day-delta boundaries for the injected shelf's relative day word. `today` is a plain
+    argument (no clock read), so the flip is provable without any mocking library."""
+    from datetime import date
+
+    from localharness.memory.sqlite import _relative_day_label
+
+    today = date(2026, 7, 4)
+    assert _relative_day_label(date(2026, 7, 4), today) == "today"      # delta 0
+    assert _relative_day_label(date(2026, 7, 3), today) == "yesterday"  # delta 1
+    # delta 2 and 6 → the sitting's own weekday abbrev (locale-immune: compare to strftime)
+    assert _relative_day_label(date(2026, 7, 2), today) == date(2026, 7, 2).strftime("%a")
+    assert _relative_day_label(date(2026, 6, 28), today) == date(2026, 6, 28).strftime("%a")
+    # delta 7 → absolute ISO fallback
+    assert _relative_day_label(date(2026, 6, 27), today) == "2026-06-27"
+    # delta -1 (clock skew: sitting "tomorrow") → ISO fallback, NEVER "today"
+    skewed = _relative_day_label(date(2026, 7, 5), today)
+    assert skewed == "2026-07-05" and skewed != "today"
+
+
+def test_clock_label_edges():
+    """12-hour clock, no leading zero, portable — %I is 01-12 so lstrip('0') only ever
+    strips the hour's leading zero, never the zero-padded minutes."""
+    from datetime import datetime
+
+    from localharness.memory.sqlite import _clock_label
+
+    assert _clock_label(datetime(2026, 7, 4, 9, 5)) == "9:05am"
+    assert _clock_label(datetime(2026, 7, 4, 0, 5)) == "12:05am"   # midnight
+    assert _clock_label(datetime(2026, 7, 4, 12, 5)) == "12:05pm"  # noon
+    assert _clock_label(datetime(2026, 7, 4, 23, 59)) == "11:59pm"
+
+
+# ---------------------------------------------------------------------------
 # session-history render contract (SESS-05): payload-first, 180-char, placeholder-proof
 # ---------------------------------------------------------------------------
 
