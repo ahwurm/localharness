@@ -1,6 +1,7 @@
 """Tests for MemoryStore: SQLite facts, sessions, FTS5, bus integration."""
 import time
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -583,6 +584,152 @@ async def test_legacy_index_mode_renders_truth_after_end_session(tmp_path: Path)
         ctx = await store.load_context(index_mode=False)
         assert "uv fix: use .venv/bin/python" in ctx.agent_memory_md  # facts survived
         assert "uv: command not found" in ctx.agent_memory_md  # fresh session line
+    finally:
+        await store.close()
+
+
+# ---------------------------------------------------------------------------
+# TIME-02/03/04 invariant proofs: relative day + clock, newest-first; ≤8 hard
+# budget with store retention; same-day byte-stability; day-flip labels-only.
+# Deterministic same-day seeds (create/end_session + explicit started_at) — zero
+# clock mocking; the only flake window is a test spanning local midnight (the
+# accepted date-bust class, same as the loop.py date-bust tests).
+# ---------------------------------------------------------------------------
+
+def _today_at(hour: int, minute: int, *, day_offset: int = 0) -> int:
+    """Epoch for today (+ day_offset days) at H:M LOCAL — the shelf-render seed."""
+    base = datetime.now().astimezone().replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    return int((base + timedelta(days=day_offset)).timestamp())
+
+
+async def _seed_sitting(store: MemoryStore, sid: str, started_at: int, summary: str) -> None:
+    """One real closed sitting with an explicit started_at — reach into store._db to set
+    the timestamp (the established seed pattern for deterministic shelf render tests)."""
+    await store.create_session(sid, {}, "m", 0)
+    await store.end_session(sid, "complete", summary, 1, 1, 0, 0)
+    await store._db.execute(
+        "UPDATE sessions SET started_at = ? WHERE id = ?", (started_at, sid)
+    )
+    await store._db.commit()
+
+
+@pytest.mark.asyncio
+async def test_shelf_owner_anchor_line_verbatim(tmp_path: Path):
+    """The UAT-2 acceptance anchor (CONTEXT.md <specifics>) reproduced BYTE-FOR-BYTE: a
+    today-11:47 sitting renders the owner-approved line exactly. The seeded summary is
+    derived from the literal, so seed and expectation cannot drift."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        line = '- today 11:47am: asked: "any fun 4th of July events in Miami Beach…" — 3 turns, 1 delegation'
+        summary = line[len("- today 11:47am: "):]
+        await _seed_sitting(store, "s-anchor", _today_at(11, 47), summary)
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert line in md
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shelf_error_anchor_line_verbatim(tmp_path: Path):
+    """The error-resolving acceptance anchor (CONTEXT.md <specifics>, anchor 2): the
+    payload lead is preserved and rendered byte-for-byte from a today-9:02 sitting —
+    a render-side pin that sidesteps the OQ2 parenthetical ruling by storing the summary
+    literally."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        line = "- today 9:02am: resolved: uv: command not found; 5 turns, 12 tool calls"
+        summary = line[len("- today 9:02am: "):]
+        await _seed_sitting(store, "s-err", _today_at(9, 2), summary)
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert line in md
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shelf_relative_time_newest_first(tmp_path: Path):
+    """TIME-02: relative day + clock time, newest-first — a today sitting renders ABOVE a
+    yesterday sitting, each carrying its own relative label."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await _seed_sitting(store, "s-today", _today_at(11, 47), "AAA today-sitting")
+        await _seed_sitting(
+            store, "s-yest", _today_at(16, 20, day_offset=-1), "BBB yesterday-sitting"
+        )
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert "- today 11:47am: AAA today-sitting" in md
+        assert "- yesterday 4:20pm: BBB yesterday-sitting" in md
+        assert md.index("AAA today-sitting") < md.index("BBB yesterday-sitting")  # newest first
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shelf_hard_budget_drops_oldest_whole(tmp_path: Path):
+    """TIME-03: the shelf caps at 8 lines regardless of config (50 requested), dropping the
+    OLDEST rows WHOLE — and the store keeps all 12 rows (absence from the prompt is not
+    forgetting: the dropped sittings stay search-reachable in the table)."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        base = _today_at(8, 0)
+        for i in range(12):
+            await _seed_sitting(store, f"s-{i}", base + i * 60, f"sitting {i}")
+        md = (await store.load_context(index_mode=True, max_session_history=50)).agent_memory_md
+        section = md.split("### Recent Session History (last 8)\n", 1)[1]
+        entry_lines = [ln for ln in section.splitlines() if ln.startswith("- ")]
+        assert len(entry_lines) == 8  # hard cap holds; config 50 ignored
+        summaries = [ln.split(": ", 1)[1] for ln in entry_lines]  # exact, not substring
+        assert "sitting 11" in summaries  # newest present, whole line intact
+        assert "sitting 4" in summaries   # 8th-newest still inside the budget
+        for dropped in ("sitting 0", "sitting 1", "sitting 2", "sitting 3"):
+            assert dropped not in summaries  # oldest four dropped whole
+        async with store._db.execute("SELECT COUNT(*) FROM sessions") as cur:
+            assert (await cur.fetchone())[0] == 12  # the store forgets nothing
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shelf_byte_stable_same_day(tmp_path: Path):
+    """TIME-04: two same-day renders are BYTE-IDENTICAL (the RANK-04 discipline extended to
+    the shelf) — `today` is computed once per render, so there is no per-call drift."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("a-fact", "alpha body")
+        await _seed_sitting(store, "s-1", _today_at(9, 15), "first sitting")
+        await _seed_sitting(store, "s-2", _today_at(10, 30), "second sitting")
+        first = await store._render_memory_index(8)
+        second = await store._render_memory_index(8)
+        assert first == second
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shelf_day_flip_changes_only_labels(tmp_path: Path):
+    """TIME-04 KILL tripwire: shifting a sitting one day back (delta-equivalent to the clock
+    advancing a day — the pure-function seam makes them symmetric) changes ONLY the day
+    word; the clock and the summary are byte-identical across the flip."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await _seed_sitting(store, "s-flip", _today_at(11, 47), "FLIP-PROBE sitting")
+        before = await store._render_memory_index(8)
+        before_line = next(ln for ln in before.splitlines() if "FLIP-PROBE" in ln)
+        assert before_line.startswith("- today 11:47am: ")
+        await store._db.execute("UPDATE sessions SET started_at = started_at - 86400")
+        await store._db.commit()
+        after = await store._render_memory_index(8)
+        after_line = next(ln for ln in after.splitlines() if "FLIP-PROBE" in ln)
+        assert after_line.startswith("- yesterday 11:47am: ")  # clock unchanged, day word flipped
+        assert before_line.split(": ", 1)[1] == after_line.split(": ", 1)[1]  # summary untouched
     finally:
         await store.close()
 
