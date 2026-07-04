@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.status import Status
 from rich.text import Text
 from rich.theme import Theme
 
@@ -219,7 +220,7 @@ class TerminalChannel(ChannelAdapter):
         self._state: str = "IDLE"
         self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
         self._output_lock: asyncio.Lock = asyncio.Lock()
-        self._heartbeat_counter: int = 0
+        self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
         self._observation_handle = None
@@ -255,6 +256,8 @@ class TerminalChannel(ChannelAdapter):
             if handle is not None:
                 self.bus.unsubscribe(handle)
 
+        self._stop_thinking()
+
         if self._live is not None:
             self._live.stop()
             self._live = None
@@ -269,6 +272,7 @@ class TerminalChannel(ChannelAdapter):
     ) -> None:
         """Print a message to the terminal. Wraps in Panel if agent_id provided."""
         async with self._output_lock:
+            self._stop_thinking()
             self._ensure_idle()
             if agent_id:
                 self._console.print(Panel(
@@ -287,6 +291,7 @@ class TerminalChannel(ChannelAdapter):
         """Stream tokens to terminal using Rich Live. Returns full assembled text."""
         full_text = ""
         async with self._output_lock:
+            self._stop_thinking()
             self._state = "STREAMING"
             panel_title = f"[agent.name]{agent_id or 'agent'}[/agent.name] [muted]streaming...[/muted]"
             live_panel = Panel("", title=panel_title, border_style="cyan")
@@ -323,6 +328,7 @@ class TerminalChannel(ChannelAdapter):
         key_arg = _get_key_arg(arguments)
         display = f"{_DIAMOND} {tool_name} {key_arg}".rstrip()
         async with self._output_lock:
+            self._stop_thinking()
             self._console.print(f"  [tool.call]{display}[/tool.call]")
 
     async def send_tool_result(
@@ -335,6 +341,7 @@ class TerminalChannel(ChannelAdapter):
         """Display tool result inline. Uses checkmark for success, cross for error."""
         lines = result.strip().split("\n") if result else [""]
         async with self._output_lock:
+            self._stop_thinking()
             if is_error:
                 first = lines[0][:120] if lines else ""
                 self._console.print(f"  [tool.error]{_CROSS} {tool_name} (exit 1): {first}[/tool.error]")
@@ -349,6 +356,7 @@ class TerminalChannel(ChannelAdapter):
         agent_id: str | None = None,
     ) -> None:
         """Write error to stderr console."""
+        self._stop_thinking()
         self._err_console.print(f"[system.error]Error:[/system.error] {error}")
         if detail:
             for line in detail.split("\n"):
@@ -358,6 +366,7 @@ class TerminalChannel(ChannelAdapter):
         """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
         if self._history is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
+        self._stop_thinking()
         self._state = "WAITING_INPUT"
         app = _build_input_app(
             self._history, prompt, hint="", context_pct=self._context_pct,
@@ -380,15 +389,29 @@ class TerminalChannel(ChannelAdapter):
         if self._state == "STREAMING":
             self._err_console.print("[warning]Warning: output during streaming state[/warning]")
 
-    async def on_heartbeat(self, event: Heartbeat) -> None:
-        """Track context utilization (shown in the next input bubble) + spin every 3rd beat."""
-        self._context_pct = event.context_utilization_pct
-        self._heartbeat_counter += 1
-        if self._heartbeat_counter % 3 == 0:
-            spinner_chars = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
-            char = spinner_chars[self._heartbeat_counter % len(spinner_chars)]
-            async with self._output_lock:
-                self._console.print(
-                    f"  [muted]{char} Working...[/muted]",
-                    end="\r",
+    def _start_thinking(self) -> None:
+        """Animated indicator while an LLM round-trip is in flight (REPL-02).
+        IDLE-only: never over the input bubble or a streaming panel."""
+        if self._thinking is None and self._state == "IDLE":
+            try:
+                self._thinking = self._console.status(
+                    "[muted]thinking\u2026[/muted]", spinner="dots"
                 )
+                self._thinking.start()
+            except Exception:
+                self._thinking = None  # a broken spinner must never break output
+
+    def _stop_thinking(self) -> None:
+        if self._thinking is not None:
+            try:
+                self._thinking.stop()
+            finally:
+                self._thinking = None
+
+    async def on_heartbeat(self, event: Heartbeat) -> None:
+        """Track context utilization (shown in the next input bubble) and start the
+        thinking indicator \u2014 the Heartbeat fires right before each LLM call, so this
+        is the 'model is now generating' signal (REPL-02)."""
+        self._context_pct = event.context_utilization_pct
+        async with self._output_lock:
+            self._start_thinking()

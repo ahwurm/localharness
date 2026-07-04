@@ -227,6 +227,68 @@ class TestTerminalChannelBasics:
         assert ch._context_pct == 42.0
 
 
+class TestThinkingIndicator:
+    """REPL-02: a rich console.status spinner runs while the model generates and is torn
+    down the instant any real output lands — never over the input bubble or a stream."""
+
+    @staticmethod
+    def _channel():
+        # force_terminal (via make_terminal_channel) so rich Status renders headlessly
+        return make_terminal_channel(out=StringIO())
+
+    @staticmethod
+    def _heartbeat():
+        from localharness.core.events import Heartbeat
+        return Heartbeat(
+            agent_id="a", session_id="s", iteration=1,
+            context_utilization_pct=10.0, last_tool=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_starts_thinking_indicator(self):
+        ch = self._channel()
+        assert ch._state == "IDLE"
+        await ch.on_heartbeat(self._heartbeat())
+        assert ch._thinking is not None      # spinner live the moment generation begins
+        assert ch._context_pct == 10.0       # existing utilization tracking preserved
+        ch._stop_thinking()                  # tidy the daemon refresh thread
+
+    @pytest.mark.asyncio
+    async def test_send_message_stops_thinking_indicator(self):
+        ch = self._channel()
+        await ch.on_heartbeat(self._heartbeat())
+        assert ch._thinking is not None
+        await ch.send_message("hello")
+        assert ch._thinking is None
+
+    @pytest.mark.asyncio
+    async def test_tool_output_stops_thinking_indicator(self):
+        ch = self._channel()
+        await ch.on_heartbeat(self._heartbeat())
+        await ch.send_tool_call("glob", {"pattern": "*.py"})
+        assert ch._thinking is None
+        await ch.on_heartbeat(self._heartbeat())   # per-iteration rhythm: restarts
+        assert ch._thinking is not None
+        await ch.send_tool_result("glob", "ok", is_error=False)
+        assert ch._thinking is None
+
+    @pytest.mark.asyncio
+    async def test_thinking_never_starts_outside_idle(self):
+        for state in ("WAITING_INPUT", "STREAMING"):
+            ch = self._channel()
+            ch._state = state
+            await ch.on_heartbeat(self._heartbeat())
+            assert ch._thinking is None, f"indicator must not start while {state}"
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_thinking(self):
+        ch = self._channel()
+        await ch.on_heartbeat(self._heartbeat())
+        assert ch._thinking is not None
+        await ch.stop()
+        assert ch._thinking is None          # stop() must not leak a running Status thread
+
+
 class TestContextMeter:
     def test_levels_step_with_usage(self):
         from localharness.channels.terminal import _ctx_segments
