@@ -522,6 +522,33 @@ async def test_summary_survives_to_180_chars(tmp_path: Path):
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_legacy_index_mode_renders_truth_after_end_session(tmp_path: Path):
+    """LEGACY-INJECT rider (SESS-06): index_mode=False reads the WHOLE MEMORY.md — and
+    since Phase 33's flush restored a live writer (end_session -> flush_memory_md ->
+    regenerate), that whole-file read now reflects real data. A real fact AND a fresh
+    session line both survive the legacy path — rider closed by proof, zero new code on
+    the legacy branch."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact(
+            "learned/bash_exec/resolved_error",
+            "uv fix: use .venv/bin/python",
+            confidence=0.9,  # >= 0.7 so the flush includes it
+        )
+        sid = new_session_id()
+        await store.create_session(sid, {}, "m", 8192)
+        await store.end_session(
+            sid, "complete", "resolved: uv: command not found; 3 turns", 3, 4, 500, 100
+        )
+        ctx = await store.load_context(index_mode=False)
+        assert "uv fix: use .venv/bin/python" in ctx.agent_memory_md  # facts survived
+        assert "uv: command not found" in ctx.agent_memory_md  # fresh session line
+    finally:
+        await store.close()
+
+
 # ---------------------------------------------------------------------------
 # integrity_check
 # ---------------------------------------------------------------------------

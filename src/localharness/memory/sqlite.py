@@ -789,7 +789,10 @@ class MemoryStore:
         recent `max_session_history` session-history entries — instead of the entire
         MEMORY.md file. The full body of any fact is served on demand via the memory_get /
         memory_search tools. When False, the legacy behaviour (whole MEMORY.md inlined)
-        is used.
+        is used — which became LIVE-WRITTEN in Phase 33 (SESS-02 restored the MEMORY.md
+        writer: end_session -> flush_memory_md -> MarkdownMemory.regenerate writes the exact
+        file this branch reads), so it now renders real facts + the latest session line
+        rather than a stale/empty file no live code updated.
         """
         assert self._db is not None
 
