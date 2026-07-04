@@ -5,6 +5,7 @@
 - session-history cap inlines only the last N entries.
 - memory_get returns a fact's full body; memory_search finds a seeded fact (FTS5).
 """
+import time
 from pathlib import Path
 
 import pytest
@@ -64,9 +65,19 @@ async def test_session_history_cap(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        # 5 sessions => 5 prepended history entries (newest first).
+        # 5 REAL closed sittings with distinct explicit starts (i=4 newest, all today/
+        # yesterday). The injected shelf now renders from the sessions TABLE, so seed real
+        # rows and reach into store._db to set started_at — the established seed pattern
+        # (cf. test_memory_store.py's session-history tests).
+        base = int(time.time()) - 5 * 3600
         for i in range(5):
-            await store.flush_memory_md(f"session number {i}")
+            sid = f"sit-{i}"
+            await store.create_session(sid, {}, "m", 0)
+            await store.end_session(sid, "complete", f"session number {i}", 1, 1, 0, 0)
+            await store._db.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?", (base + i * 3600, sid)
+            )
+        await store._db.commit()
         ctx = await store.load_context(index_mode=True, max_session_history=2)
         md = ctx.agent_memory_md
         # Only the 2 most-recent entries inline (4 and 3); 0 must be excluded.

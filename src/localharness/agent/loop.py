@@ -620,7 +620,7 @@ class AgentLoop:
                 _mem_cfg = getattr(self._config, "memory", None)
                 ctx = await self._memory.load_context(
                     index_mode=getattr(_mem_cfg, "index_mode", True),
-                    max_session_history=getattr(_mem_cfg, "max_session_history_entries", 10),
+                    max_session_history=getattr(_mem_cfg, "max_session_history_entries", 8),
                 )
                 parts = [system_prompt]
                 if ctx.guardrails_md:

@@ -554,7 +554,7 @@ async def test_summary_survives_to_180_chars(tmp_path: Path):
         md = (await store.load_context(index_mode=True)).agent_memory_md
         assert "MARKER-BEYOND-120" in md  # the old [:120] cap would have cut it
         entry = next(ln for ln in md.splitlines() if "MARKER-BEYOND-120" in ln)
-        payload = entry.split(": ", 1)[1]  # strip "- YYYY-MM-DD: "
+        payload = entry.split(": ", 1)[1]  # strip "- today 3:22pm: " (clock colon has no trailing space)
         assert len(payload) <= 180
     finally:
         await store.close()
@@ -596,10 +596,11 @@ async def test_legacy_index_mode_renders_truth_after_end_session(tmp_path: Path)
 async def test_fresh_sitting_answers_last_sitting_zero_tool(tmp_path: Path):
     """SESS-04 phase provable: a FRESH sitting (new MemoryStore instance = new process
     lifetime over one base_dir) answers 'what did we do last sitting?' from the injected
-    block ALONE — zero tool calls. The disk-persisted MEMORY.md session_history is the
-    cross-process seam: end_session flushes it (sitting N) -> a brand-new instance's
-    load_context renders it (sitting N+1), which loop.py injects verbatim into the next
-    system prompt. Two instances, sequential (first CLOSED before second opens)."""
+    block ALONE — zero tool calls. The cross-process seam is now the sessions TABLE in the
+    disk-persisted memory.db: end_session writes the row (sitting N) -> a brand-new
+    instance's load_context renders it via the sessions query (sitting N+1), which loop.py
+    injects verbatim into the next system prompt. Two instances, sequential (first CLOSED
+    before second opens)."""
     # Sitting N: a real close-out flushes a payload-first history line to MEMORY.md, then
     # the process ends (store_a.close()).
     store_a = MemoryStore(agent_id="test-agent", division_id="", org_id="",

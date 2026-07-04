@@ -341,12 +341,14 @@ class MemoryConfig(BaseModel):
     )
 
     max_session_history_entries: int = Field(
-        default=10,
+        default=8,
         ge=0,
         le=200,
         description=(
             "When index_mode is True, how many of the most recent Session History entries to "
-            "inline. Older entries stay in MEMORY.md / history.jsonl and are not injected."
+            "inline. Older entries stay in MEMORY.md / history.jsonl and are not injected. "
+            "The injected index hard-caps this at 8 lines (TIME-03) — values above 8 render "
+            "8; lower values render fewer."
         ),
     )
 

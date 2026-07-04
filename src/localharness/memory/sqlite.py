@@ -857,15 +857,17 @@ class MemoryStore:
     async def load_context(
         self,
         index_mode: bool = True,
-        max_session_history: int = 10,
+        max_session_history: int = 8,
     ) -> MemoryContext:
         """Load three-tier context for system prompt injection.
 
         When `index_mode` is True (default), the agent-memory block is an INDEX — one line
         per persistent fact (name + one-line description, NOT the full body) plus the most
-        recent `max_session_history` session-history entries — instead of the entire
-        MEMORY.md file. The full body of any fact is served on demand via the memory_get /
-        memory_search tools. When False, the legacy behaviour (whole MEMORY.md inlined)
+        recent session-history entries rendered from the sessions TABLE with relative day +
+        clock-time labels (`- today 11:47am: …`), hard-capped at `_SESSION_SHELF_HARD_CAP`
+        (TIME-03) — instead of the entire MEMORY.md file. The full body of any fact is
+        served on demand via the memory_get / memory_search tools. When False, the legacy
+        behaviour (whole MEMORY.md inlined)
         is used — which became LIVE-WRITTEN in Phase 33 (SESS-02 restored the MEMORY.md
         writer: end_session -> flush_memory_md -> MarkdownMemory.regenerate writes the exact
         file this branch reads), so it now renders real facts + the latest session line
@@ -903,8 +905,9 @@ class MemoryStore:
 
     async def _render_memory_index(self, max_session_history: int) -> str:
         """Render the agent-memory INDEX: fact names + one-line descriptions (not full
-        bodies) and the last `max_session_history` session-history entries. The model is
-        told it can call memory_get(name) / memory_search(query) for the full detail."""
+        bodies) and the most recent session-history entries — the latter from the sessions
+        TABLE with relative-time labels, hard-capped at `_SESSION_SHELF_HARD_CAP` (TIME-03).
+        The model is told it can call memory_get(name) / memory_search(query) for detail."""
         assert self._db is not None
         now = int(time.time())
         # Injected-block ordering (RANK-02/04): importance + ACT-R base-level activation
@@ -937,18 +940,42 @@ class MemoryStore:
         fact_lines = [f"- {r[0]}: {_one_line(r[1], 180)}" for r in rows]
         facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
 
-        history_full = self._markdown_memory.get_section("session_history")
-        # No dead promises in the injected block (v2.0 audit FINDING-A): render the shelf
-        # ONLY when at least one REAL entry line exists (SESS-05 wires the writer in Phase
-        # 33). Suppression now keys on real entry lines — NOT raw section truthiness — so a
-        # placeholder (fresh or legacy on-disk) can never un-suppress the shelf with a dead
-        # promise. It self-restores the moment a real entry lands. Byte-stability holds:
-        # absence is constant, and entries change only at session boundaries.
-        _history_entries = _last_n_entries(history_full, max_session_history)
+        # TIME-02/03: the injected shelf renders from the sessions TABLE — started_at
+        # is full-precision epoch; MEMORY.md's date-only line cannot carry clock time.
+        # `summary IS NOT NULL` is one schema predicate doing two structural jobs:
+        # excludes the still-open current sitting (create_session leaves summary NULL
+        # until end_session) AND vacuous sittings (SESS-05: derive -> None -> NULL) —
+        # "renders entries or renders nothing" (1fbdf6b), now enforced by the schema
+        # instead of text filtering. Hard budget (TIME-03): min(config, cap); LIMIT
+        # drops the oldest rows WHOLE (5192f27 — never mid-line). Rows for dropped
+        # sittings stay in the table: absence from the prompt is not forgetting.
+        shelf_n = min(max_session_history, _SESSION_SHELF_HARD_CAP)
+        sess_rows: list = []
+        if shelf_n > 0:
+            async with self._db.execute(
+                "SELECT started_at, summary FROM sessions "
+                "WHERE agent_id = ? AND summary IS NOT NULL "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                (self._agent_id, shelf_n),
+            ) as cur:
+                sess_rows = list(await cur.fetchall())
+        # Relative labels: LOCAL time (the loop.py:606 convention — this block and the
+        # system prompt's date line must agree), `today` computed ONCE per render —
+        # byte-stable within a day; flips only at the local day boundary, phasing with
+        # the existing daily date bust (TIME-04: no new cache-bust class).
+        today_local = datetime.now().astimezone().date()
+        entry_lines = []
+        for started_at, summary in sess_rows:
+            dt_local = datetime.fromtimestamp(started_at).astimezone()
+            label = _relative_day_label(dt_local.date(), today_local)
+            # _one_line: newline-proof + the 180-char payload budget (5192f27) —
+            # end_session stores summaries uncapped; the render must cap.
+            entry_lines.append(
+                f"- {label} {_clock_label(dt_local)}: {_one_line(summary, 180)}"
+            )
         history_section = (
-            f"\n\n### Recent Session History (last {max_session_history})\n"
-            f"{_history_entries}"
-            if _history_entries
+            f"\n\n### Recent Session History (last {shelf_n})\n" + "\n".join(entry_lines)
+            if entry_lines
             else ""
         )
 
@@ -1223,15 +1250,6 @@ def _clock_label(sitting_local_dt: datetime) -> str:
     %I is 01-12, so lstrip('0') strips at most the hour's leading zero and can
     never touch the zero-padded minutes."""
     return sitting_local_dt.strftime("%I:%M%p").lstrip("0").lower()
-
-
-def _last_n_entries(history: str, n: int) -> str:
-    """Last n REAL entry lines ('- ' prefix). Placeholder/prose lines are filtered:
-    the injected shelf renders entries or renders nothing (1fbdf6b + SESS-05 KILL).
-    Entries are prepended newest-first in MEMORY.md (markdown.py), so the most-recent n
-    are the FIRST n entry lines."""
-    lines = [ln for ln in history.splitlines() if ln.lstrip().startswith("- ")]
-    return "\n".join(lines[: max(0, n)]) if lines and n > 0 else ""
 
 
 # ---------------------------------------------------------------------------
