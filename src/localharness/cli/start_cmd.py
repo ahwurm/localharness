@@ -177,7 +177,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
     from localharness.core.bus import EventBus
-    from localharness.memory.sqlite import MemoryStore
+    from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
     from localharness.plugins.loader import PluginLoader
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
@@ -345,6 +345,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     mcp_failed = 0
 
     # --- 1. HARD requirements (abort on failure) ---
+    # Phase 33.1: adopt the legacy root data dir (agents/default -> agents/orchestrator)
+    # BEFORE the EventBus below materializes agents/<root>/bus-events.jsonl. The store's
+    # own open()-time adoption (plan 01) refuses once agents/orchestrator/ exists, and the
+    # bus's persist_path.parent.mkdir would create it first — stranding the old memories in
+    # agents/default/. Doing it here preserves the single-adoption contract (open()'s call
+    # then no-ops on the existing dir, while its SQL row re-key still runs).
+    _migrate_legacy_root_agent_dir(cfg_path, agent_name_str)
     agent_dir = cfg_path / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
