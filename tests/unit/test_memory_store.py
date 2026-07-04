@@ -550,6 +550,44 @@ async def test_legacy_index_mode_renders_truth_after_end_session(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
+# SESS-04: the zero-tool "what did we do last sitting?" answer survives a
+# process boundary (a fresh MemoryStore instance over the same base_dir)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fresh_sitting_answers_last_sitting_zero_tool(tmp_path: Path):
+    """SESS-04 phase provable: a FRESH sitting (new MemoryStore instance = new process
+    lifetime over one base_dir) answers 'what did we do last sitting?' from the injected
+    block ALONE — zero tool calls. The disk-persisted MEMORY.md session_history is the
+    cross-process seam: end_session flushes it (sitting N) -> a brand-new instance's
+    load_context renders it (sitting N+1), which loop.py injects verbatim into the next
+    system prompt. Two instances, sequential (first CLOSED before second opens)."""
+    # Sitting N: a real close-out flushes a payload-first history line to MEMORY.md, then
+    # the process ends (store_a.close()).
+    store_a = MemoryStore(agent_id="test-agent", division_id="", org_id="",
+                          base_dir=str(tmp_path))
+    await store_a.open()
+    await store_a.create_session("sit-1", {}, "dogfood", 8192)
+    await store_a.end_session(
+        "sit-1", exit_reason="complete",
+        summary="resolved: uv: command not found; 5 turns, 12 tool calls (bash_exec, read)",
+        turn_count=5, action_count=12, tokens_in=1000, tokens_out=200,
+    )
+    await store_a.close()
+
+    # Sitting N+1: a NEW instance opens the SAME base_dir and renders the injected block.
+    store_b = MemoryStore(agent_id="test-agent", division_id="", org_id="",
+                          base_dir=str(tmp_path))
+    await store_b.open()
+    try:
+        agent_md = (await store_b.load_context(index_mode=True)).agent_memory_md
+        assert "### Recent Session History" in agent_md
+        assert "uv: command not found" in agent_md  # the previous sitting's payload
+    finally:
+        await store_b.close()
+
+
+# ---------------------------------------------------------------------------
 # integrity_check
 # ---------------------------------------------------------------------------
 
