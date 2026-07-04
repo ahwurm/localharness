@@ -95,6 +95,15 @@ def test_regenerate_prepends_session_entry(tmp_path):
     assert idx_second < idx_first  # newer entry comes first
 
 
+def test_regenerate_no_session_placeholder(tmp_path):
+    """No session entry writes an EMPTY Session History body — no '(No sessions recorded
+    yet.)' placeholder (the 1fbdf6b suppression needs empty-means-empty)."""
+    mm = MarkdownMemory(tmp_path / "MEMORY.md")
+    mm.regenerate("agent_01", "Test Agent", "role", "", None)
+    assert "(No sessions recorded yet.)" not in mm.read()
+    assert mm.get_section("session_history") == ""
+
+
 # --- get_section tests ---
 
 def test_get_section_returns_content(tmp_path):

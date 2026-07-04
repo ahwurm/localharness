@@ -420,6 +420,109 @@ async def test_flush_memory_md(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# session-history render contract (SESS-05): payload-first, 180-char, placeholder-proof
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_session_history_renders_after_real_end_session(tmp_path: Path):
+    """A real end_session summary renders in the injected index's history shelf — the
+    1fbdf6b suppression self-restores once one real entry exists."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        sid = new_session_id()
+        await store.create_session(sid, {}, "m", 8192)
+        await store.end_session(
+            sid, "complete",
+            "resolved: uv: command not found; 5 turns, 12 tool calls (bash_exec, read)",
+            5, 12, 1000, 200,
+        )
+        md = (await store.load_context(index_mode=True, max_session_history=10)).agent_memory_md
+        assert "### Recent Session History" in md
+        assert "uv: command not found" in md
+        async with store._db.execute(
+            "SELECT ended_at FROM sessions WHERE id = ?", (sid,)
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None and row[0] is not None  # ended_at NOT NULL
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_vacuous_summary_keeps_shelf_suppressed(tmp_path: Path):
+    """summary=None must not un-suppress the shelf, and must never write a placeholder the
+    render could pick up — empty-means-empty (the 1fbdf6b contract)."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        sid = new_session_id()
+        await store.create_session(sid, {}, "m", 0)
+        await store.end_session(sid, "complete", None, 0, 0, 0, 0)
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert "Recent Session History" not in md
+        # MEMORY.md exists but its Session History section carries no entry line.
+        assert store._markdown_memory.exists()
+        history = store._markdown_memory.get_section("session_history")
+        assert not [ln for ln in history.splitlines() if ln.lstrip().startswith("- ")]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_never_leaks_into_index(tmp_path: Path):
+    """Render-time filter defeats a legacy on-disk placeholder: seed a pre-fix MEMORY.md
+    whose Session History body is the literal placeholder, then a real end_session renders
+    exactly ONE entry line and never surfaces the placeholder."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        # Simulate pre-fix on-disk state (a MEMORY.md written before this plan landed).
+        store._markdown_memory._path.write_text(
+            "# Memory: test-agent\n\n"
+            "## Persistent Facts\n\n(No facts recorded yet.)\n\n"
+            "## Working Notes\n\n(No working notes yet.)\n\n"
+            "## Learned Behaviors\n\n(No learned behaviors yet.)\n\n"
+            "## Session History\n\n(No sessions recorded yet.)\n",
+            encoding="utf-8",
+        )
+        sid = new_session_id()
+        await store.create_session(sid, {}, "m", 0)
+        await store.end_session(sid, "complete", "resolved: real work this sitting", 1, 1, 10, 5)
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert "resolved: real work this sitting" in md
+        # Exactly one entry line in the whole index (no facts stored → the entry is the
+        # only '- ' line) and the legacy placeholder is filtered out at render time.
+        dash_lines = [ln for ln in md.splitlines() if ln.lstrip().startswith("- ")]
+        assert len(dash_lines) == 1
+        assert "resolved: real work this sitting" in dash_lines[0]
+        assert "(No sessions recorded" not in md
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_survives_to_180_chars(tmp_path: Path):
+    """The history line budget is 180 (5192f27), not the old [:120] guillotine: a marker
+    past char 120 but within 180 survives into the rendered entry."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        summary = "X" * 140 + "MARKER-BEYOND-120" + "Y" * 63  # 220 chars; marker at 140..156
+        assert len(summary) == 220
+        sid = new_session_id()
+        await store.create_session(sid, {}, "m", 0)
+        await store.end_session(sid, "complete", summary, 1, 1, 0, 0)
+        md = (await store.load_context(index_mode=True)).agent_memory_md
+        assert "MARKER-BEYOND-120" in md  # the old [:120] cap would have cut it
+        entry = next(ln for ln in md.splitlines() if "MARKER-BEYOND-120" in ln)
+        payload = entry.split(": ", 1)[1]  # strip "- YYYY-MM-DD: "
+        assert len(payload) <= 180
+    finally:
+        await store.close()
+
+
+# ---------------------------------------------------------------------------
 # integrity_check
 # ---------------------------------------------------------------------------
 
