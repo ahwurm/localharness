@@ -61,6 +61,9 @@ class ConsolidationReport:
     decayed: int = 0
     demoted: int = 0
     replayed_claims: int = 0
+    schemas_written: int = 0   # Phase 36 SEMA-02/03: chapters written this pass
+    reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
+    mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
     active_over_cap: int = 0
     churn_rate: float = 0.0
     cancelled: bool = False
@@ -107,6 +110,9 @@ class ConsolidationPass:
             self._step_fold,
             self._step_promote_recurring,
             self._step_replay_llm,
+            self._step_write_schemas,   # Phase 36: chapter-writer (llm+config-gated)
+            self._step_reconcile,       # Phase 36: correction-queue reconciliation
+            self._step_mine,            # Phase 36: transcript mining
             self._step_decay,
             self._step_cap_trim,
             self._step_proxies,
@@ -343,6 +349,48 @@ class ConsolidationPass:
             return await result
         return result
 
+    # -- 3b. Phase-36 idle LLM passes (chapter-writer / reconcile / mine) --
+    # Each mirrors _step_replay_llm's gating (return immediately when self._llm is None) AND
+    # its own config axis, delegating to a Wave-2 sibling (all never-raise + cancellable via
+    # the shared idle_llm path) and threading self._cancel so a user turn stops them mid-look.
+    # Because they early-return with no LLM, every existing llm=None test sees identical
+    # behavior — the deterministic core is byte-unchanged.
+
+    async def _step_write_schemas(self, report: ConsolidationReport) -> None:
+        if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):
+            return
+        from localharness.memory.chapter_writer import write_cluster_schemas
+        written = await write_cluster_schemas(
+            self._store, self._llm, self._cancel,
+            min_sessions=self._cfg.cluster_min_sessions,
+            write_budget=self._cfg.schema_write_budget,
+            depth_cap=self._cfg.schema_depth_cap,
+        )
+        report.schemas_written = len(written)
+
+    async def _step_reconcile(self, report: ConsolidationReport) -> None:
+        if self._llm is None or not getattr(self._cfg, "reconcile_enabled", False):
+            return
+        from localharness.memory.reconciliation import reconcile_corrections
+        r = await reconcile_corrections(
+            self._store, self._llm, self._cancel, ttl_looks=self._cfg.reconcile_ttl_looks
+        )
+        # Every disposition is a resolved queue row (36-05's 7-field, shape-aware counters):
+        # confirm (shape b) + confirm-corrected/retire (shape a) + revert-restore/clear + undecided.
+        report.reconciled = (
+            r.confirmed + r.confirmed_corrected + r.retired
+            + r.reverted_restored + r.reverted_cleared + r.undecided
+        )
+
+    async def _step_mine(self, report: ConsolidationReport) -> None:
+        if self._llm is None or not getattr(self._cfg, "mining_enabled", False):
+            return
+        from localharness.memory.mining import mine_transcript
+        m = await mine_transcript(
+            self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget
+        )
+        report.mined = m.written
+
     # -- 4. retrieval-strength decay (RANK-03's time axis) ----------------
 
     async def _step_decay(self, report: ConsolidationReport) -> None:
@@ -564,17 +612,27 @@ class ConsolidationScheduler:
         # supersede on a staged gate/ candidate keeps the gate/ key but carries
         # tier:correction_pending, which promotion skips — so it can never be untagged and
         # must not count as work either. Mirrors _step_promote_recurring's exclusion.
+        # Phase-36 DELIBERATE premise change (the 4th clause): reconciliation is the ONLY
+        # consumer that CLEARS tier:correction_pending (promote-recurring excludes it), so when
+        # reconcile is enabled an active quarantined correction IS work — the idle scheduler
+        # must fire the consumer instead of optimizing the pass away. When reconcile is disabled
+        # the old behavior holds EXACTLY (Pitfall 3's staleness optimization intact for non-36
+        # configs). surprising_failure rows stay EXCLUDED here on purpose: the chapter-writer
+        # drains them piggybacking on real-work passes (36-04), never re-pinning this probe.
         q = (
             "SELECT EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND access_count_staged > 0), "
             "EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND status = 'active' "
             "       AND tags LIKE '%\"pending_consolidation\"%' AND key LIKE 'gate/%' "
             "       AND tags NOT LIKE '%\"tier:correction_pending\"%'), "
             "(SELECT COUNT(*) FROM facts WHERE agent_id = :a AND status = 'active' "
-            "       AND retrieval_strength >= 0.2)"
+            "       AND retrieval_strength >= 0.2), "
+            "EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND status = 'active' "
+            "       AND tags LIKE '%\"tier:correction_pending\"%')"
         )
         async with self._store._db.execute(q, {"a": self._agent_id}) as cur:
-            staged, pending, active = await cur.fetchone()
-        return bool(staged or pending or active > self._cfg.max_active_facts)
+            staged, pending, active, corrections = await cur.fetchone()
+        reconcile_work = corrections and getattr(self._cfg, "reconcile_enabled", False)
+        return bool(staged or pending or reconcile_work or active > self._cfg.max_active_facts)
 
     async def _idle_timer_loop(self) -> None:
         """In-session idle trigger: no user activity for idle_minutes → launch a pass.
