@@ -109,6 +109,11 @@ async def mine_transcript(
             line = raw_line.strip(" -•\t")
             if not line:
                 continue
+            # PER-CYCLE WRITE BUDGET: cap successful writes at write_budget (default 5 — a
+            # bounded colleague-memory intake per idle cycle; owner-tunable via the 36-07
+            # config axis). Ungrounded rejections do not consume the budget.
+            if report.written >= write_budget:
+                break
             # GROUNDING GATE — the kill discipline extended to mined facts: no line whose
             # tokens aren't a majority-match in the cited span is ever written.
             if not grounded(line, corpus):
