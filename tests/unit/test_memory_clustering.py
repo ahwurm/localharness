@@ -12,6 +12,7 @@ from localharness.memory.clustering import (
     _connected_components,
     _load_pool,
     _relatedness_edges,
+    find_stable_clusters,
 )
 from localharness.memory.sqlite import MemoryStore
 
@@ -20,7 +21,11 @@ from localharness.memory.sqlite import MemoryStore
 # only the SEMA-05 provable forbids fabricated lesson text — see 36-CONTEXT.md).
 _READ_A = "The read tool returned FileNotFound on a relative path; retrying with the absolute path resolved the failure."
 _READ_B = "The read tool raised a permission problem on a protected path; the absolute path form resolved it cleanly."
+_READ_C = "The read tool timed out once then, using the absolute path directly, resolved on the second attempt."
 _GREP_C = "The grep command required the fixed-string flag for literal square brackets during matching."
+# A second domain sharing "docker"/"registry"/"container" but NO token with the read lessons.
+_DOCK_A = "The docker build failed pulling from the registry; a container cache prune cleared the broken layer."
+_DOCK_B = "The docker container refused to start until the registry credentials were refreshed before the pull."
 
 
 @pytest.fixture
@@ -109,3 +114,82 @@ async def test_cluster_contract_has_aux_hook():
     assert c.aux_members == []
     with pytest.raises(Exception):
         c.depth = 1  # frozen
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — cross-sitting stability filter + find_stable_clusters entrypoint
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cross_sitting_related_pair_is_stable(store):
+    """Two related lessons whose sources span 2 distinct sittings → one stable cluster."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+
+    clusters = await find_stable_clusters(store)
+    assert len(clusters) == 1
+    assert len(clusters[0].members) == 2
+    assert clusters[0].sessions == frozenset({"s1", "s2"})
+    assert clusters[0].aux_members == []  # Task 3 populates; empty here
+
+
+@pytest.mark.asyncio
+async def test_single_sitting_no_cluster(store):
+    """Two related lessons captured in ONE sitting are a double-stumble, not a chapter:
+    the component exists but min_sessions filters it out (SEMA-01 'not one hot evening')."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s1"], lesson="b2")
+
+    # the pair IS one component...
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [2]
+    # ...but not a STABLE cluster (single session).
+    assert await find_stable_clusters(store) == []
+
+
+@pytest.mark.asyncio
+async def test_three_lesson_three_sitting_cluster(store):
+    """A 3-lesson component spanning 3 sittings → one cluster, sessions of size 3."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+
+    clusters = await find_stable_clusters(store)
+    assert len(clusters) == 1
+    assert len(clusters[0].members) == 3
+    assert clusters[0].sessions == frozenset({"s1", "s2", "s3"})
+
+
+@pytest.mark.asyncio
+async def test_clusters_sorted_biggest_first(store):
+    """Deterministic order: the biggest chapter leads (writer's per-cycle budget)."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+    await _seed_learned(store, "docker", "build_fail", _DOCK_A, ["s4"], lesson="d1")
+    await _seed_learned(store, "docker", "start_fail", _DOCK_B, ["s5"], lesson="d2")
+
+    clusters = await find_stable_clusters(store)
+    assert [len(c.members) for c in clusters] == [3, 2]  # read (3) before docker (2)
+    # deterministic across calls
+    again = await find_stable_clusters(store)
+    assert [c.sessions for c in again] == [c.sessions for c in clusters]
+
+
+@pytest.mark.asyncio
+async def test_find_stable_clusters_issues_no_writes(store, monkeypatch):
+    """The whole entrypoint is pure read: any write attempt must raise."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    before = await _fact_count(store)
+
+    async def _boom(*a, **k):
+        raise AssertionError("clustering must not write")
+
+    monkeypatch.setattr(store, "store_fact", _boom)
+    monkeypatch.setattr(store, "add_edge", _boom)
+
+    clusters = await find_stable_clusters(store)
+    assert len(clusters) == 1  # still produced the cluster
+    assert await _fact_count(store) == before
