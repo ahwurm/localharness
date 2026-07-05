@@ -63,6 +63,24 @@ class FactQuery:
     include_scopes: list[str] = field(default_factory=lambda: ["agent"])
     limit: int = 50
     include_superseded: bool = False
+    since: int | None = None   # epoch seconds, inclusive lower bound on facts.updated_at
+    until: int | None = None   # epoch seconds, inclusive upper bound on facts.updated_at
+
+
+@dataclass(frozen=True)
+class ToolPrior:
+    """A per-tool statistical prior from event history (COLL-01) — the context a
+    surprise score is graded against. Computed in ONE indexed SQL aggregate; the
+    None fields carry cold start honestly (no history -> no prediction)."""
+    tool_name: str
+    n: int                          # prior observation count (strictly earlier rows)
+    error_rate: float | None        # AVG(is_error); None when n == 0
+    lat_mean_ms: float | None
+    lat_var_ms: float | None        # population variance
+    lat_n: int
+    size_mean: float | None
+    size_var: float | None
+    size_n: int
 
 
 @dataclass(frozen=True)
@@ -137,7 +155,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -336,6 +354,86 @@ PRAGMA user_version = 3;
 COMMIT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v4 — the collect-only predictive-gate substrate (Phase 34, COLL-01..04).
+# ADDITIVE ONLY: four new tables, zero touches to facts/sessions/edges — so the
+# ambient injected block (_render_memory_index reads ONLY facts/sessions) is
+# byte-stable by construction, not by discipline. One BEGIN IMMEDIATE ...
+# PRAGMA user_version = 4; COMMIT transaction (critic M1: crash -> rollback to
+# intact v3 -> clean retry), matching the v2->v3 additive precedent above.
+#
+# Column semantics (the schema contract plans 34-03/04/07 build against):
+# - tool_observations: one row per scored Observation — the substrate for the
+#   pure-SQL per-tool priors. `is_error` derives from `Observation.error IS NOT
+#   NULL` (exit_code is a dead field — 100% null in production, Pitfall 1);
+#   `output_len` is len of the ALREADY-CAPPED output (200 == ">=200", Pitfall 6);
+#   `duration_ms` is the Action->Observation timestamp delta (zero loop
+#   instrumentation); `event_id` is the source bus event's id for idempotent
+#   re-ingestion (INSERT OR IGNORE); `source` in ('live','backfill').
+# - surprise_scores: COLL-04's persisted SurpriseScored. `expectation_json`
+#   snapshots the exact prior that produced the score (Phase 35 re-derives
+#   thresholds offline under any windowing); `quadrant` in ('routine',
+#   'surprising_failure','unsurprising_failure','quiet_surprise','cold_start').
+# - user_signals: COLL-02's zero-NLU labels. `signal_type` in ('correction',
+#   'confirmation','interruption'); `trigger_family` in ('negation',
+#   'correction_phrase','frustration','reask','confirmation','interruption');
+#   `user_message` stored in FULL (owner steer: look-ready records).
+# - staged_snapshots: COLL-03's credit-assignment candidates. `candidate_type`
+#   in ('bump','suspect').
+# ---------------------------------------------------------------------------
+
+MIGRATION_V3_TO_V4_SQL = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS tool_observations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id      TEXT    NOT NULL,
+    session_id    TEXT    NOT NULL,
+    tool_call_id  TEXT,
+    tool_name     TEXT    NOT NULL,
+    ts            INTEGER NOT NULL,
+    is_error      INTEGER NOT NULL,
+    output_len    INTEGER,
+    duration_ms   INTEGER,
+    event_id      TEXT    UNIQUE,
+    source        TEXT    NOT NULL DEFAULT 'live'
+);
+CREATE INDEX IF NOT EXISTS idx_tool_obs_tool ON tool_observations(agent_id, tool_name, ts);
+CREATE TABLE IF NOT EXISTS surprise_scores (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id         TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    observation_id   INTEGER REFERENCES tool_observations(id),
+    expectation_json TEXT,
+    score            REAL    NOT NULL,
+    quadrant         TEXT,
+    scored_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_surprise_scores_agent ON surprise_scores(agent_id, scored_at);
+CREATE TABLE IF NOT EXISTS user_signals (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id               TEXT    NOT NULL,
+    session_id             TEXT    NOT NULL,
+    ts                     INTEGER NOT NULL,
+    signal_type            TEXT    NOT NULL,
+    trigger_family         TEXT,
+    matched_text           TEXT,
+    user_message           TEXT    NOT NULL,
+    corrected_turn_summary TEXT,
+    event_id               TEXT    UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_user_signals_agent ON user_signals(agent_id, ts);
+CREATE TABLE IF NOT EXISTS staged_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_signal_id  INTEGER NOT NULL REFERENCES user_signals(id),
+    fact_key        TEXT    NOT NULL,
+    fact_id         INTEGER,
+    candidate_type  TEXT    NOT NULL,
+    captured_at     INTEGER NOT NULL
+);
+PRAGMA user_version = 4;
+COMMIT;
+"""
+
 
 # ---------------------------------------------------------------------------
 # MemoryStore
@@ -466,6 +564,9 @@ class MemoryStore:
             v = await _version()
         if v == 2:
             await self._db.executescript(MIGRATION_V2_TO_V3_SQL)
+            v = await _version()
+        if v == 3:
+            await self._db.executescript(MIGRATION_V3_TO_V4_SQL)
             v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
@@ -684,6 +785,17 @@ class MemoryStore:
         now = int(time.time())
 
         status_filter = "" if query.include_superseded else "AND f.status = 'active'"
+        # Temporal window on updated_at (34-05): built once, interpolated into BOTH branches
+        # after {status_filter}; a fact touched by supersede/consolidation in the window is
+        # temporally relevant. Tool-output concern only — the ambient render never reads it.
+        temporal_filter = ""
+        temporal_params: list[Any] = []
+        if query.since is not None:
+            temporal_filter += " AND f.updated_at >= ?"
+            temporal_params.append(query.since)
+        if query.until is not None:
+            temporal_filter += " AND f.updated_at <= ?"
+            temporal_params.append(query.until)
         fts_text = _sanitize_fts_query(query.text) if query.text else ""
         if query.text and not fts_text:
             # Critic m1: a query that sanitizes to nothing must NOT fall back to the
@@ -706,6 +818,7 @@ class MemoryStore:
                   AND f.confidence >= ?
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
+                  {temporal_filter}
                 ORDER BY lh_fused_score(
                     f.importance,
                     f.access_count + f.access_count_staged,
@@ -713,7 +826,7 @@ class MemoryStore:
                     f.updated_at, ?, f.confidence, rank) DESC
                 LIMIT ?
             """
-            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, now, query.limit]
+            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, *temporal_params, now, query.limit]
         else:
             sql = f"""
                 SELECT {prefixed_cols}
@@ -722,6 +835,7 @@ class MemoryStore:
                   AND f.confidence >= ?
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
+                  {temporal_filter}
                 ORDER BY lh_fused_score(
                     f.importance,
                     f.access_count + f.access_count_staged,
@@ -729,7 +843,7 @@ class MemoryStore:
                     f.updated_at, ?, f.confidence, 0.0) DESC
                 LIMIT ?
             """
-            params = [self._agent_id, query.min_confidence, now, now, query.limit]
+            params = [self._agent_id, query.min_confidence, now, *temporal_params, now, query.limit]
 
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
@@ -837,6 +951,176 @@ class MemoryStore:
             frontier = nxt
         items = sorted(visited.items(), key=lambda kv: (kv[1], kv[0]))[:limit]
         return items
+
+    # ------------------------------------------------------------------
+    # Predictive gate substrate (COLL-01) — pure-SQL per-tool priors
+    # ------------------------------------------------------------------
+
+    async def get_tool_prior(
+        self, tool_name: str, *, before_ts: int | None = None
+    ) -> ToolPrior:
+        """Per-tool statistical prior from event history (COLL-01). ONE indexed
+        aggregate over tool_observations, zero tokens — the two-step shape query_facts
+        already uses (SQL computes the context, a pure function scores it).
+
+        before_ts (walk-forward): only rows STRICTLY earlier count, so the scored
+        observation never contaminates its own prior. Variance is the population form
+        AVG(x*x) - AVG(x)*AVG(x); tiny negative results (float cancellation on a
+        near-constant history) are clamped to 0.0. NULL aggregates (empty history)
+        map to None — cold start carried honestly, never a fabricated 0."""
+        assert self._db is not None
+        async with self._db.execute(
+            """
+            SELECT COUNT(*),
+                   AVG(is_error),
+                   AVG(duration_ms),
+                   AVG(duration_ms * duration_ms) - AVG(duration_ms) * AVG(duration_ms),
+                   COUNT(duration_ms),
+                   AVG(output_len),
+                   AVG(output_len * output_len) - AVG(output_len) * AVG(output_len),
+                   COUNT(output_len)
+            FROM tool_observations
+            WHERE agent_id = ? AND tool_name = ? AND (? IS NULL OR ts < ?)
+            """,
+            (self._agent_id, tool_name, before_ts, before_ts),
+        ) as cur:
+            row = await cur.fetchone()
+
+        lat_var = row[3]
+        if lat_var is not None and lat_var < 0.0:
+            lat_var = 0.0
+        size_var = row[6]
+        if size_var is not None and size_var < 0.0:
+            size_var = 0.0
+        return ToolPrior(
+            tool_name=tool_name,
+            n=row[0] or 0,
+            error_rate=row[1],
+            lat_mean_ms=row[2],
+            lat_var_ms=lat_var,
+            lat_n=row[4] or 0,
+            size_mean=row[5],
+            size_var=size_var,
+            size_n=row[7] or 0,
+        )
+
+    # ------------------------------------------------------------------
+    # Recording APIs (COLL-03/04) — idempotent, collect-only. These write ONLY the
+    # v4 tables; facts/sessions/edges are never touched (the byte-stability test is
+    # the enforcement). Signatures are the store contract plans 34-03/34-04 call.
+    # ------------------------------------------------------------------
+
+    async def record_tool_observation(
+        self, *, session_id: str, tool_call_id: str | None, tool_name: str, ts: int,
+        is_error: int, output_len: int | None, duration_ms: int | None,
+        event_id: str | None, source: str = "live",
+    ) -> int:
+        """INSERT OR IGNORE keyed on event_id (idempotent re-ingestion — a live row and a
+        later backfill of the same bus event collapse to one). Returns the rowid (the
+        existing row's id on ignore). One INSERT, no reads — the WriteGate cheapness class."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO tool_observations "
+            "(agent_id, session_id, tool_call_id, tool_name, ts, is_error, output_len, "
+            "duration_ms, event_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._agent_id, session_id, tool_call_id, tool_name, ts, is_error,
+             output_len, duration_ms, event_id, source),
+        )
+        await self._db.commit()
+        if cur.rowcount == 0 and event_id is not None:
+            async with self._db.execute(
+                "SELECT id FROM tool_observations WHERE event_id = ?", (event_id,)
+            ) as c2:
+                row = await c2.fetchone()
+            return row[0] if row else 0
+        return cur.lastrowid
+
+    async def record_surprise_score(
+        self, *, session_id: str, observation_id: int | None,
+        expectation_json: str | None, score: float, quadrant: str | None, scored_at: int,
+    ) -> int:
+        """One INSERT into surprise_scores. agent_id from self._agent_id."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "INSERT INTO surprise_scores "
+            "(agent_id, session_id, observation_id, expectation_json, score, quadrant, scored_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (self._agent_id, session_id, observation_id, expectation_json, score,
+             quadrant, scored_at),
+        )
+        await self._db.commit()
+        return cur.lastrowid
+
+    async def record_user_signal(
+        self, *, session_id: str, ts: int, signal_type: str, trigger_family: str | None,
+        matched_text: str | None, user_message: str, corrected_turn_summary: str | None,
+        event_id: str | None,
+    ) -> int:
+        """INSERT OR IGNORE keyed on event_id. Returns rowid (existing on ignore).
+        user_message stored in FULL (owner steer: look-ready records — the future model
+        look needs the verbatim text, not a preview)."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO user_signals "
+            "(agent_id, session_id, ts, signal_type, trigger_family, matched_text, "
+            "user_message, corrected_turn_summary, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._agent_id, session_id, ts, signal_type, trigger_family, matched_text,
+             user_message, corrected_turn_summary, event_id),
+        )
+        await self._db.commit()
+        if cur.rowcount == 0 and event_id is not None:
+            async with self._db.execute(
+                "SELECT id FROM user_signals WHERE event_id = ?", (event_id,)
+            ) as c2:
+                row = await c2.fetchone()
+            return row[0] if row else 0
+        return cur.lastrowid
+
+    async def snapshot_staged_candidates(
+        self, user_signal_id: int, candidate_type: str
+    ) -> int:
+        """COLL-03 collect-only credit assignment: snapshot the facts currently staged into
+        context (access_count_staged > 0 — exactly touch_staged's explicitly-retrieved
+        semantics; ambient always-injected facts are NOT staged and NOT snapshotted, a
+        deliberate v1 scope per 34-RESEARCH Open Q2). One SELECT + executemany INSERT.
+        candidate_type: 'bump' (confirmation) | 'suspect' (correction). Returns count."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT id, key FROM facts WHERE agent_id = ? AND access_count_staged > 0",
+            (self._agent_id,),
+        ) as cur:
+            staged = await cur.fetchall()
+        if not staged:
+            return 0
+        now = int(time.time())
+        await self._db.executemany(
+            "INSERT INTO staged_snapshots "
+            "(user_signal_id, fact_key, fact_id, candidate_type, captured_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(user_signal_id, r[1], r[0], candidate_type, now) for r in staged],
+        )
+        await self._db.commit()
+        return len(staged)
+
+    async def staged_suspect_facts(self) -> list[tuple[int, str, str]]:
+        """PGATE-03 read side: the facts explicitly staged into the current sitting's
+        context (access_count_staged > 0 — the same actually-retrieved set
+        snapshot_staged_candidates records as 'suspect'). Returns (id, key, value)
+        MOST-RECENTLY-STAGED FIRST (max last_accessed_staged, tie-break highest id) so a
+        scoped correction supersede (BLOCKER 1(b)) can target the single most-recent
+        suspect deterministically instead of the whole staged sitting. Read-only: never
+        resets the staged counter (that is fold_staged_access's job at the consolidation
+        boundary), so it is stable within a sitting and order-independent vs
+        UserSignalDetector."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT id, key, value FROM facts "
+            "WHERE agent_id = ? AND access_count_staged > 0 AND status = 'active' "
+            "ORDER BY last_accessed_staged DESC, id DESC",
+            (self._agent_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
 
     # ------------------------------------------------------------------
     # History delegation
@@ -1275,6 +1559,14 @@ _ACTR_DECAY = 0.5
 _IMPORTANCE_PRIORS: dict[str, float] = {
     "tier:resolved_error": 0.3,
     "tier:stuck_recovered": 0.2,
+    # Phase 35 (PGATE-01/03) stat + correction tiers. Pitfall 4: this dict is closed and
+    # hand-maintained — a new tier tag with no entry here silently ranks at the 0.0
+    # fallback, so the graded-surprise/correction writes must have explicit priors or
+    # "graded surprise feeds importance/activation" degrades to no-op. surprising_failure
+    # shares resolved_error's warrant (both an error signal worth learning);
+    # correction_pending shares stuck_recovered's tier (a single-episode salient dispute).
+    "tier:surprising_failure": 0.3,
+    "tier:correction_pending": 0.2,
     "remember": 0.4,
 }
 
@@ -1332,6 +1624,89 @@ def _fused_score(importance, access_total, last_access, updated_at, now, confide
     base = _base_activation(access_total, last_access, updated_at, now, day_granularity=False)
     conf = min(max(confidence if confidence is not None else 0.5, 1e-3), 1.0)
     return (importance or 0.0) + base + math.log(conf) - (bm25_rank or 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Surprise scoring (COLL-01) — deterministic pure functions beside the activation
+# scalars, same aesthetic (cold-start-graceful, never NULL/raise). NOT registered
+# via create_function this phase: a 12-arg SQL scalar with no SQL-side caller is
+# surface without a consumer — Phase 35 registers it when ORDER BY needs it. Module-
+# level so the report script (34-07) can import and score offline.
+# ---------------------------------------------------------------------------
+
+_SURPRISE_MIN_N = 5  # default cold-start floor; callers thread the config value through
+
+
+def _tool_error_surprisal(
+    is_error: int, prior_error_rate: float | None, n: int, min_n: int = _SURPRISE_MIN_N
+) -> float:
+    """Information-theoretic surprise of one boolean outcome against this tool's own
+    history: observed surprisal minus the prior's own entropy (~0 when routine, positive
+    when it deviates). Cold start (n < min_n) or no prior -> 0.0 neutral (mirrors
+    _base_activation's graceful n=0 — never NULL, never raises)."""
+    import math
+
+    if prior_error_rate is None or n < min_n:
+        return 0.0
+    p = min(max(prior_error_rate, 1e-3), 1 - 1e-3)  # guard degenerate 0%/100% rates
+    observed = -math.log(p if is_error else (1 - p))
+    expected = -(p * math.log(p) + (1 - p) * math.log(1 - p))  # the prior's own entropy
+    return observed - expected
+
+
+def _band_z(
+    value: float | None,
+    mean: float | None,
+    variance: float | None,
+    n: int,
+    min_n: int = _SURPRISE_MIN_N,
+) -> float:
+    """Plain z-score for a continuous feature (latency, output size). None inputs,
+    n < min_n, or degenerate (near-constant) variance all degrade to 0.0 rather than
+    raising or dividing by ~zero."""
+    import math
+
+    if value is None or mean is None or variance is None or n < min_n or variance < 1e-6:
+        return 0.0
+    return (value - mean) / math.sqrt(variance)
+
+
+def compute_surprise_score(
+    is_error: int,
+    output_len: int | None,
+    duration_ms: int | None,
+    prior: ToolPrior,
+    *,
+    min_n: int = _SURPRISE_MIN_N,
+    latency_weight: float = 0.5,
+    size_weight: float = 0.25,
+) -> float:
+    """Composite graded surprise: error-outcome surprisal + weighted ABSOLUTE latency/size
+    deviations. abs(): a deviation in EITHER direction is "succeeded-but-differently" (the
+    reframe doc's quiet-surprise quadrant) — a 10x-faster call is as anomalous as a
+    10x-slower one. Cold-start-neutral by delegation (every term is 0.0 below min_n), so an
+    empty prior yields exactly 0.0."""
+    return (
+        _tool_error_surprisal(is_error, prior.error_rate, prior.n, min_n)
+        + latency_weight
+        * abs(_band_z(duration_ms, prior.lat_mean_ms, prior.lat_var_ms, prior.lat_n, min_n))
+        + size_weight
+        * abs(_band_z(output_len, prior.size_mean, prior.size_var, prior.size_n, min_n))
+    )
+
+
+def compute_quadrant(
+    is_error: int, prior_error_rate: float | None, n: int, min_n: int = _SURPRISE_MIN_N
+) -> str:
+    """Map an outcome onto the reframe taxonomy (the quadrants the binary gate structurally
+    cannot express). Below min_n or with no prior -> 'cold_start'. predicted_fail is the
+    tool's own history saying error is the base case (error_rate >= 0.5)."""
+    if prior_error_rate is None or n < min_n:
+        return "cold_start"
+    predicted_fail = prior_error_rate >= 0.5
+    if not predicted_fail:
+        return "surprising_failure" if is_error else "routine"
+    return "unsurprising_failure" if is_error else "quiet_surprise"
 
 
 def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:

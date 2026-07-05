@@ -272,6 +272,113 @@ class MemoryConsolidationConfig(BaseModel):
     )
 
 
+class TriggerLexiconConfig(BaseModel):
+    """COLL-02 zero-NLU trigger word lists (owner steer 2026-07-04: TRIGGERS, NOT
+    CLASSIFIERS — a tripwire for a later model look, recall-first by design; a false
+    trigger costs one logged record, a miss costs another missed correction). Matching rules
+    live in memory/user_signals.py: single-word triggers match on token boundaries,
+    multi-word triggers as substrings, all lowercased. Tunable per-family via the
+    component registry with zero code edits."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    negation: list[str] = Field(
+        default_factory=lambda: [
+            "no", "nope", "nah", "not that", "not what i", "that's not", "thats not",
+            "that's wrong", "thats wrong", "wrong",
+        ],
+        description="Correction-class triggers: negations ('no' is deliberately broad — owner-endorsed).",
+    )
+    correction_phrase: list[str] = Field(
+        default_factory=lambda: [
+            "i meant", "i said", "actually", "instead", "rather", "incorrect",
+            "i didn't ask", "i didnt ask", "you misunderstood", "that isn't", "that isnt",
+        ],
+        description="Correction-class triggers: explicit correction phrasing.",
+    )
+    frustration: list[str] = Field(
+        default_factory=lambda: [
+            "ugh", "ffs", "wtf", "damn", "dammit", "fuck", "fucking", "shit",
+            "come on", "seriously", "annoying", "frustrated", "frustrating",
+            "still wrong", "still broken", "broken again",
+        ],
+        description="Correction-class triggers: frustration/profanity markers (owner-endorsed).",
+    )
+    confirmation: list[str] = Field(
+        default_factory=lambda: [
+            "exactly", "correct", "perfect", "right", "yes", "yep", "yeah",
+            "that's right", "thats right", "that's it", "thats it", "spot on",
+            "nice", "great", "awesome", "thanks", "thank you",
+        ],
+        description="Positive-label triggers ('exactly / right' are the owner's own examples).",
+    )
+    interruption: list[str] = Field(
+        default_factory=lambda: [
+            "stop", "wait", "hold on", "hang on", "never mind", "nevermind",
+            "forget it", "cancel", "cancel that", "one sec", "pause",
+        ],
+        description=(
+            "Interruption triggers — a WEAKER, separate label class, never conflated "
+            "with corrections (owner ruling 2026-07-04 22:44). LEXICAL by design: the "
+            "REPL has no mid-turn cancel seam (34-RESEARCH Pitfall 5)."
+        ),
+    )
+
+
+class PredictiveGateConfig(BaseModel):
+    """Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
+    score every outcome; user-signal triggers log labeled prediction errors. Score
+    everything, gate nothing — no store write and no behavior change keys off any of it
+    until Phase 35 sets thresholds from the observed distribution."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "If True (default), the collect-only scorer + user-signal detector subscribe "
+            "to the bus and persist surprise scores / signal labels (schema v4 tables). "
+            "Zero model calls, zero gating — pure measurement feeding Phase 35."
+        ),
+    )
+    min_prior_n: int = Field(
+        default=5, ge=1, le=1000,
+        description="Cold-start floor: below this many prior observations of a tool, its surprise score is neutral 0.0.",
+    )
+    latency_weight: float = Field(
+        default=0.5, ge=0.0, le=10.0,
+        description="Weight of |latency z-score| in the composite surprise score.",
+    )
+    size_weight: float = Field(
+        default=0.25, ge=0.0, le=10.0,
+        description="Weight of |output-size z-score| in the composite surprise score.",
+    )
+    pending_cap: int = Field(
+        default=256, ge=8, le=10000,
+        description="Max in-flight Action→Observation correlations held; overflow drops oldest (skip-under-load, collect-only can afford drops).",
+    )
+    reask_threshold: float = Field(
+        default=0.8, ge=0.5, le=1.0,
+        description="difflib.SequenceMatcher ratio above which a user message counts as a re-ask of an earlier message in the same sitting.",
+    )
+    reask_window: int = Field(
+        default=50, ge=1, le=500,
+        description="How many prior user messages per sitting the re-ask check compares against.",
+    )
+    write_live: bool = Field(
+        default=True,
+        description=(
+            "Phase 35 (PGATE): if True (default), PredictiveWriteGate turns surprise scores "
+            "and scoped corrections into real sub-0.7 fact writes. The pre-committed KILL "
+            "lever — set False to revert to motif-only capture while the collect-only scorer "
+            "keeps persisting scores as telemetry. "
+            "Mutable via `localharness components set agent.memory.predictive_gate.write_live <true|false>`."
+        ),
+    )
+    lexicon: TriggerLexiconConfig = Field(
+        default_factory=TriggerLexiconConfig,
+        description="COLL-02 trigger word lists — see TriggerLexiconConfig.",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory backend configuration for an agent."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -367,6 +474,11 @@ class MemoryConfig(BaseModel):
     consolidation: MemoryConsolidationConfig = Field(
         default_factory=MemoryConsolidationConfig,
         description="Idle-time consolidation pass (v2.0 CONS) — see MemoryConsolidationConfig.",
+    )
+
+    predictive_gate: PredictiveGateConfig = Field(
+        default_factory=PredictiveGateConfig,
+        description="Collect-only predictive gate (Phase 34 COLL) — see PredictiveGateConfig.",
     )
 
 

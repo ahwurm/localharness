@@ -1,4 +1,4 @@
-"""All 23 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 26 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -368,6 +368,60 @@ class MemoryGateFired(BaseEvent):
     detail: str = ""  # human-readable one-liner (error preview etc.)
 
 
+class ExpectationAttached(BaseEvent):
+    """Harness-computed (L1 statistical-prior) expectation attached to a pending tool
+    call (COLL-04, collect-only). Published by memory.predictive_gate between the loop's
+    Action publish and dispatch; nothing reads it inline — it is the audit trail of what
+    the harness expected at dispatch time. source='l1_priors' now; 'l3_expect_slot' is
+    Phase-37 territory."""
+
+    event_type: str = "ExpectationAttached"
+    agent_id: AgentID
+    session_id: SessionID
+    tool_call_id: ToolCallID
+    tool_name: str
+    source: str = "l1_priors"
+    prior_n: int = 0
+    prior_error_rate: Optional[float] = None
+    lat_mean_ms: Optional[float] = None
+    lat_var_ms: Optional[float] = None
+    size_mean: Optional[float] = None
+    size_var: Optional[float] = None
+
+
+class OutcomeObserved(BaseEvent):
+    """The observed outcome for a previously-expected tool call (COLL-04). is_error
+    derives from Observation.error IS NOT NULL (exit_code is a dead field);
+    duration_ms is the Action→Observation timestamp delta (zero loop instrumentation)."""
+
+    event_type: str = "OutcomeObserved"
+    agent_id: AgentID
+    session_id: SessionID
+    tool_call_id: ToolCallID
+    tool_name: str
+    is_error: bool
+    output_len: int = 0
+    duration_ms: Optional[int] = None
+
+
+class SurpriseScored(BaseEvent):
+    """Graded surprise for one tool outcome (COLL-01 × COLL-04). Score everything,
+    gate nothing: no subscriber acts on this in Phase 34; Phase 35 sets thresholds
+    from the persisted distribution. quadrant per the reframe taxonomy:
+    routine|surprising_failure|unsurprising_failure|quiet_surprise|cold_start."""
+
+    event_type: str = "SurpriseScored"
+    agent_id: AgentID
+    session_id: SessionID
+    tool_call_id: ToolCallID
+    tool_name: str
+    score: float
+    quadrant: str
+    error_surprisal: float = 0.0
+    z_latency: float = 0.0
+    z_size: float = 0.0
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -392,6 +446,9 @@ AnyEvent = Union[
     MutationArchived,
     SentinelAlert,
     MemoryGateFired,
+    ExpectationAttached,
+    OutcomeObserved,
+    SurpriseScored,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -418,6 +475,9 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "MutationArchived": MutationArchived,
     "SentinelAlert": SentinelAlert,
     "MemoryGateFired": MemoryGateFired,
+    "ExpectationAttached": ExpectationAttached,
+    "OutcomeObserved": OutcomeObserved,
+    "SurpriseScored": SurpriseScored,
 }
 
 

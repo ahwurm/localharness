@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 23 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 26 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -14,14 +14,17 @@ from localharness.core.events import (
     DelegationResult,
     Escalation,
     EVENT_TYPE_MAP,
+    ExpectationAttached,
     Heartbeat,
     MemoryGateFired,
     MutationArchived,
     Observation,
+    OutcomeObserved,
     ParseFailed,
     ScenarioCompleted,
     SentinelAlert,
     StuckRecovered,
+    SurpriseScored,
     SystemReady,
     TaskComplete,
     TaskRequest,
@@ -31,7 +34,7 @@ from localharness.core.events import (
     UserMessage,
     deserialize_event,
 )
-from localharness.core.types import AgentID, DivisionID, OrgID, SessionID
+from localharness.core.types import AgentID, DivisionID, OrgID, SessionID, ToolCallID
 
 
 def test_required_event_types():
@@ -134,14 +137,15 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 23 event types."""
-    assert len(EVENT_TYPE_MAP) == 23
+    """EVENT_TYPE_MAP has entries for all 26 event types."""
+    assert len(EVENT_TYPE_MAP) == 26
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
         "Observation", "DelegationRequest", "DelegationResult", "Escalation", "Heartbeat",
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
         "ComponentMutated", "MutationArchived", "SentinelAlert", "MemoryGateFired",
+        "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -171,17 +175,18 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 23 event classes."""
+    """AnyEvent type contains all 26 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     args = typing.get_args(AnyEvent)
-    assert len(args) == 23
+    assert len(args) == 26
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
         DelegationRequest, DelegationResult, Escalation, Heartbeat,
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
         ComponentMutated, MutationArchived, SentinelAlert, MemoryGateFired,
+        ExpectationAttached, OutcomeObserved, SurpriseScored,
     }
     assert set(args) == expected
 
@@ -460,3 +465,78 @@ async def test_sentinel_alert_delivered_to_subscriber(bus):
     await bus.publish(SentinelAlert(kind="near_duplicate", detail="3 dupes"))
     assert len(received) == 1
     assert received[0].kind == "near_duplicate"
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 / COLL-04: ExpectationAttached, OutcomeObserved, SurpriseScored
+# The predictive-gate collect-only bus contract. These MUST round-trip through
+# deserialize_event AND replay from JSONL — a forgotten EVENT_TYPE_MAP entry
+# makes the live system work but leaves a backfill silently empty (Pitfall 2).
+# ---------------------------------------------------------------------------
+
+
+def test_predictive_events_roundtrip():
+    """Each COLL-04 event constructs, serializes, and deserialize_event restores the
+    exact class with field equality (tool_call_id, score, quadrant, prior fields)."""
+    exp = ExpectationAttached(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_call_id=ToolCallID("tc-1"), tool_name="bash",
+        prior_n=7, prior_error_rate=0.1, lat_mean_ms=12.5, lat_var_ms=3.0,
+        size_mean=100.0, size_var=9.0,
+    )
+    r = deserialize_event(exp.model_dump_json())
+    assert isinstance(r, ExpectationAttached)
+    assert r.tool_call_id == "tc-1"
+    assert r.tool_name == "bash"
+    assert r.source == "l1_priors"  # default
+    assert r.prior_n == 7
+    assert r.prior_error_rate == 0.1
+    assert r.lat_mean_ms == 12.5
+
+    out = OutcomeObserved(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_call_id=ToolCallID("tc-1"), tool_name="bash",
+        is_error=True, output_len=42, duration_ms=15,
+    )
+    ro = deserialize_event(out.model_dump_json())
+    assert isinstance(ro, OutcomeObserved)
+    assert ro.tool_call_id == "tc-1"
+    assert ro.is_error is True
+    assert ro.output_len == 42
+    assert ro.duration_ms == 15
+
+    sur = SurpriseScored(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_call_id=ToolCallID("tc-1"), tool_name="bash",
+        score=0.87, quadrant="surprising_failure",
+        error_surprisal=1.2, z_latency=2.0, z_size=0.5,
+    )
+    rs = deserialize_event(sur.model_dump_json())
+    assert isinstance(rs, SurpriseScored)
+    assert rs.tool_call_id == "tc-1"
+    assert rs.score == 0.87
+    assert rs.quadrant == "surprising_failure"
+    assert rs.error_surprisal == 1.2
+    assert rs.z_latency == 2.0
+    assert rs.z_size == 0.5
+
+
+async def test_predictive_events_replayable(tmp_path):
+    """A serialized SurpriseScored line replays through EventBus.replay() — the Pitfall-2
+    regression guard at the REPLAY layer (a forgotten EVENT_TYPE_MAP entry = empty backfill)."""
+    from localharness.core.bus import EventBus
+
+    jsonl = tmp_path / "events.jsonl"
+    ev = SurpriseScored(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_call_id=ToolCallID("tc-1"), tool_name="bash",
+        score=0.5, quadrant="routine",
+    )
+    jsonl.write_text(ev.model_dump_json() + "\n", encoding="utf-8")
+
+    bus = EventBus(persist_path=jsonl)
+    replayed = [e async for e in bus.replay()]
+    assert len(replayed) == 1
+    assert isinstance(replayed[0], SurpriseScored)
+    assert replayed[0].score == 0.5
+    assert replayed[0].quadrant == "routine"

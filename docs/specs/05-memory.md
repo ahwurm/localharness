@@ -1,984 +1,454 @@
 # Spec 05: Memory System
 
-**Component:** `src/localharness/memory/`
-**Requirements:** MEM-01, MEM-02, MEM-03, MEM-04
-**Status:** v1
+**Component:** `src/localharness/memory/` (+ `cli/session_accumulator.py`)
+**Requirements:** MEM-01..04, WRITE-01..06, RANK-01..05, HIER-02..04, CONS-01..06, COLL-01..04, PGATE-01..04, SESS-02..05, TIME-01..04
+**Status:** v2 (predictive) — supersedes the v1 three-tier-scope spec
+
+> **Ground-truth note.** This document is structural: it names modules, tables, and
+> concepts. Where a number or a decision is load-bearing (the injection gate, the quadrant
+> definitions, the confidence tiers), the **source docstrings are canonical** and win over
+> this prose. Specs describe intent; the code is the contract.
 
 ---
 
-## Purpose
+## 1. Purpose
 
-The memory system provides persistent, scoped storage for agent state across sessions. It implements a three-tier hierarchy (agent → division → org) where agents read up through all tiers but write only to their own scope. The system has three storage layers per scope:
+The memory system gives one agent durable state across sittings, and decides — with **zero
+extra model calls** — what is worth keeping and what earns space in the prompt. It is built
+on one cognitive frame, **Complementary Learning Systems (CLS)**: a fast path captures
+sparse episodes as they happen (the event bus writing sessions; the write gates capturing
+lessons), and a slow path integrates them into durable, prompt-visible knowledge during
+idle "sleep" (the consolidation pass). The two halves are deliberately split because
+integration is expensive and must never block the user's turn.
 
-1. **SQLite facts store** — structured key/value facts and FTS5-queryable entries (`memory.db`)
-2. **JSONL chat history** — append-only ordered event log, the source of truth for session reconstruction (`history.jsonl`)
-3. **MEMORY.md** — human-readable markdown notes, injected into context at session start
+Four properties hold across every write path, old and new:
 
-This design is directly derived from the Mem0 multi-scope pattern and the OpenHands V1 event-sourced state model. JSONL is not auxiliary — it IS the session state. Context reconstruction means replaying the JSONL log, not querying a separate state store.
+- **Nothing is overwritten.** A conflicting fact *supersedes* the old one; the old row
+  stays queryable. Every fact carries **provenance** to its source episode (WRITE-02/04).
+- **One visibility line governs the prompt.** A fact enters the injected memory block only
+  at **confidence ≥ 0.7 AND retrieval_strength ≥ 0.2**. Everything the harness auto-captures
+  lands *below* that line until the slow path confirms it (§5).
+- **The injected block is byte-stable between consolidations.** Reads never reorder it, so
+  the inference server's prefix cache survives (RANK-04, §6).
+- **Ranking costs zero decode tokens.** Activation scoring runs as SQL scalar functions
+  (RANK-02, §6).
 
----
-
-## File Layout
-
-```
-~/.localharness/
-  orgs/{org_id}/
-    GUARDRAILS.md          # persistent failure memory (org-wide)
-    config.yaml            # org-level defaults
-    org.db                 # SQLite: org-scoped facts (v2: FTS5 cross-agent index)
-
-  divisions/{division_id}/
-    DIVISION.md            # division narrative notes
-    shared.db              # SQLite: division-scoped facts
-
-  agents/{agent_id}/
-    MEMORY.md              # agent narrative notes (read into context on every turn)
-    memory.db              # SQLite: agent-scoped facts
-    history.jsonl          # append-only JSONL: full session event log
-    session_state.json     # current session metadata (turn count, budget used, etc.)
-```
-
-Path resolution uses `agent_id`, `division_id`, and `org_id` from `AgentConfig`. All paths are configurable per agent via `memory.base_dir` in YAML; the layout above is the default.
+The v1 spec described scoped agent→division→org storage. Those columns still exist
+(`division_id` / `org_id` default `''`) and division/org markdown is still read into
+context, but the live subject of this system — and of this rewrite — is the **single-agent
+prediction-error write path** and the **activation-ranked, byte-stable injection** built on
+top of it. The scope machinery is legacy substrate; the predictive gate is the work.
 
 ---
 
-## SQLite Schema
+## 2. Module map & honest status
 
-All three scope databases use the same schema. Apply at DB creation via `PRAGMA user_version` migration guard.
+Every module below is a bus subscriber wired beside `MemoryStore` at startup
+(`cli/start_cmd.py`). Each swallows its own exceptions and is logged, never re-raised — a
+memory fault can never break the agent loop or the user's turn.
 
-### WAL Mode
+| Module | Role | Status |
+|--------|------|--------|
+| `memory/sqlite.py` `MemoryStore` | The store: facts/edges/FTS5/sessions + v4 telemetry; supersede-not-overwrite; the injected index render; activation scalars; the pure-SQL priors + quadrant functions | **live, default-on** |
+| `memory/gate.py` `WriteGate` | Motif capture floor: `resolved_error` / `stuck_recovered` / `novelty` candidates, sub-0.7 (`write_gate_enabled`, default on) | **live, default-on** |
+| `memory/predictive_gate.py` `PredictiveGate` | Scores every tool outcome against that tool's own history; emits the surprise event contract; **writes no facts** (`predictive_gate.enabled`, default on) | **collect-only** |
+| `memory/user_signals.py` `UserSignalDetector` | Zero-NLU correction/confirmation/interruption tripwire; logs look-ready records + staged snapshots; **writes no facts** | **collect-only** |
+| `memory/predictive_write_gate.py` `PredictiveWriteGate` | The live write decision: turns surprise scores + scoped corrections into real, reversible, sub-0.7 writes (`predictive_gate.write_live`, default on — the pre-committed KILL lever) | **live, default-on (capture-only)** |
+| `memory/consolidation.py` `ConsolidationScheduler` / `ConsolidationPass` | Idle CLS slow-integrate: fold / promote / decay / trim; its LLM session-replay claim-extractor is a built, guarded, cancellable seam | **deterministic core live; LLM replay built, wired off** |
+| `memory/hierarchy.py` | Persists the cruncher's gist/schema tree into the memory graph; routes structure-aware search | **live, default-on** |
+| `memory/markdown.py` `MarkdownMemory` | `MEMORY.md` regeneration (facts + session shelf), preserving hand-written sections | **live, default-on** |
+| `cli/session_accumulator.py` `SessionAccumulator` | Bus-subscribed sitting counters → the payload-first one-line session summary | **live, default-on** |
+| L3 model-stated `expect:` slot; L2 logprob surprisal; idle deep correction/surprise reconciliation | The next rungs of the mechanisms ladder | **future phase (36/37)** |
 
-Enable immediately on every connection open, before any reads or writes:
+"Collect-only" is a hard contract: those modules write **only** the v4 telemetry tables
+and never touch `facts` / `sessions` / `edges`. "Capture-only" means a module *does* write
+facts, but every write is below the visibility line (§5), so it changes what is *captured*,
+not what the agent *does*.
+
+---
+
+## 3. The store
+
+One SQLite database per agent (`agents/{agent_id}/memory.db`), async via `aiosqlite`, WAL
+mode, `busy_timeout` so the agent loop and the idle consolidation pass wait instead of
+throwing "database is locked". Schema evolves through a stepwise migration ladder; each
+rewrite script is a single `BEGIN IMMEDIATE … PRAGMA user_version = N; COMMIT` transaction,
+so a crash rolls back to the prior intact version and the next open retries cleanly.
+`CURRENT_SCHEMA_VERSION = 4`.
+
+### 3.1 Facts — supersede-not-overwrite, with a trust/accessibility split
+
+`facts` rows are the graph nodes. The load-bearing columns beyond the v1 key/value/tags/
+confidence/source/timestamps:
 
 ```sql
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA temp_store = MEMORY;
+status        TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'superseded'
+superseded_by INTEGER,                          -- successor row id
+provenance    TEXT NOT NULL DEFAULT '',         -- source session id / origin (WRITE-04)
+retrieval_strength REAL NOT NULL DEFAULT 0.5,   -- accessibility; decays with disuse (RANK-03)
+importance    REAL NOT NULL DEFAULT 0.0,        -- write-time tag-heuristic prior
+access_count  INTEGER NOT NULL DEFAULT 0,       -- folded ACT-R use counter
+last_accessed_at INTEGER,                        -- folded ACT-R recency
+access_count_staged  INTEGER NOT NULL DEFAULT 0, -- staged read counters (RANK-04)
+last_accessed_staged INTEGER,
+node_kind     TEXT NOT NULL DEFAULT 'fact'      -- fact | gist | schema (RANK-01)
+
+-- The active-tier invariant: one truth per key, superseded rows keep the key.
+CREATE UNIQUE INDEX ux_facts_active_key ON facts(agent_id, key) WHERE status = 'active';
+CREATE INDEX idx_facts_active_recency  ON facts(agent_id, updated_at DESC) WHERE status = 'active';
 ```
 
-`synchronous = NORMAL` is safe with WAL mode and gives ~3x write throughput over FULL. `temp_store = MEMORY` avoids temp file creation on every query.
+`store_fact` is the single write seam and enforces WRITE-01/02/04:
 
-### Tables
+- **No active row for the key** → insert a new active row.
+- **Active row, identical value** → *corroboration touch*: bump `updated_at`,
+  `confidence = MAX(old, new)`; no duplicate row (so restart re-fires and repeat captures
+  are no-ops, not churn).
+- **Active row, different value** → *supersede*: mark the old row `status='superseded'`,
+  drop its `retrieval_strength` immediately (it loses the retrieval competition — RANK-03
+  interference, not erasure), insert a fresh active row, link `superseded_by`. History stays
+  reachable via `get_fact_history` / `FactQuery(include_superseded=True)`.
+
+Every write is **read-back-verified**: the active row is re-read and compared before the
+write is claimed; a mismatch raises `MemoryVerifyError`. This closes the
+"claims-to-write-but-didn't" failure class at the store boundary. A `delete_fact` exists for
+explicit user-initiated removal only; no harness path calls it (supersede, never delete).
+
+`importance` is set at write time by a **closed tag heuristic** (`_IMPORTANCE_PRIORS`),
+never an LLM rater. A tier tag with no entry there ranks at the 0.0 floor — so every
+candidate-producing tier (`tier:resolved_error`, `tier:stuck_recovered`,
+`tier:surprising_failure`, `tier:correction_pending`, `remember`) must have an explicit
+prior or its graded salience silently degrades to a no-op.
+
+### 3.2 Edges — the typed graph
+
+`edges(src_id, dst_id, kind)` carries `derived_from` / `member_of` / `supports` /
+`contradicts`. `supersedes` is deliberately **not** an edge kind — it stays a `facts` column
+because it is the hot-path exclusion mechanism, not a relationship to walk. `neighborhood()`
+is a Python frontier BFS with a real visited set (depth hard-capped at 4), chosen over a
+recursive CTE that enumerated all simple paths and degraded the every-turn retrieval path.
+
+### 3.3 Sessions
+
+One `sessions` row per sitting: `started_at` / `ended_at`, turn/action/token counts,
+`exit_reason`, and a `summary` that stays `NULL` until the sitting ends. That single
+`summary IS NOT NULL` predicate does two structural jobs for the injected shelf (§9): it
+excludes both the still-open current sitting and vacuous sittings that derived no summary.
+
+### 3.4 The v4 telemetry tables (COLL substrate)
+
+Additive-only — four tables, zero touches to `facts`/`sessions`/`edges`, so the injected
+block is byte-stable **by construction**. They are the substrate the predictive layer
+measures against and the record Phase 36 will re-derive thresholds from.
+
+- **`tool_observations`** — one row per scored tool result. `is_error` derives from
+  `Observation.error IS NOT NULL` (`exit_code` is a dead field). `duration_ms` is the
+  Action→Observation timestamp delta (zero loop instrumentation). `event_id` is UNIQUE for
+  idempotent re-ingestion (`INSERT OR IGNORE`). `source ∈ {live, backfill}`.
+- **`surprise_scores`** — the persisted `SurpriseScored`. `expectation_json` snapshots the
+  exact prior that produced the score (so thresholds can be re-derived offline under any
+  windowing). `quadrant ∈ {routine, surprising_failure, unsurprising_failure, quiet_surprise,
+  cold_start}`.
+- **`user_signals`** — the zero-NLU labels. `signal_type ∈ {correction, confirmation,
+  interruption}`; `trigger_family ∈ {negation, correction_phrase, frustration, reask,
+  confirmation, interruption}`; the **full** user message is stored (look-ready records for
+  the future model look).
+- **`staged_snapshots`** — credit-assignment candidates. `candidate_type ∈ {bump, suspect}`.
+
+### 3.5 FTS5 & JSONL history
+
+`facts_fts` is an FTS5 index over `key`/`value`/`tags`, kept in sync by triggers; the update
+trigger is narrowed to `key`/`value`/`tags` so activation bumps never churn the index.
+`memory_search` queries route FTS5 MATCH through a sanitizer that quotes every whitespace
+token, so operator characters in real corpora (`000660.KS`, `built-in`, `-1.5σ`) are literal
+terms, never syntax (WRITE-05). `history.jsonl` remains the append-only, event-sourced
+session log — the source of truth for replay and reconstruction; it is never rewritten, only
+appended, and compaction is logical (`replaces_ids`), not physical.
+
+---
+
+## 4. The write path
+
+Two harness-initiated write paths run side by side. Both emit candidates **below** the
+visibility line; neither ever calls a model inline.
+
+### 4.1 Motif WriteGate — the capture floor
+
+`WriteGate` subscribes to `Observation` / `StuckRecovered` and turns discrete,
+already-on-the-bus signals that the agent's world-model was *wrong then corrected* into
+fact candidates, at zero added latency (dict ops + one SQLite write on fire). Three tiers,
+each a distinct confidence below 0.7:
+
+- **`resolved_error` (0.65)** — a tool that errored and later succeeded. The highest-warrant
+  learning signal; cross-turn by design. Keyed `gate/resolved_error/<tool>/<lesson>/<session>`
+  so identical lessons accumulate one row per episode and true recurrence stays visible to
+  consolidation.
+- **`stuck_recovered` (0.60)** — a repeated-action loop that broke free. Tagged `salient`: one
+  occurrence is warrant enough for promotion (a rare, high-salience event).
+- **`novelty` (0.50)** — first successful use of a tool. Telemetry + candidate only; by design
+  it never promotes ("used a tool once" is not a durable lesson).
+
+Every fire publishes a `MemoryGateFired` event (the live observability surface — fire counts
+per tier, watched rather than pre-measured). Suppressed/pending moments deliberately emit
+nothing. This gate is the **floor**: it works from turn one, before any tool has enough
+history for a statistical prior to exist.
+
+### 4.2 The predictive layer
+
+The floor is motif-shaped and binary. The predictive layer adds *graded* surprise measured
+against each tool's own history — the north star's "prediction-error-gated writes" with
+actual predictions.
+
+**Per-tool statistical priors, in pure SQL (COLL-01).** `get_tool_prior(tool)` computes a
+`ToolPrior` in one indexed aggregate over `tool_observations`: observation count, error
+rate, latency mean/variance, output-size mean/variance. It is **walk-forward** — only rows
+strictly earlier than the scored observation count, so an outcome never contaminates its own
+prior. Empty history maps to `None`, never a fabricated zero: cold start is carried honestly.
+
+**The three-event contract (COLL-04).** For each tool call the predictive layer publishes:
+
+1. `ExpectationAttached` at dispatch — the L1 prior the harness held (`source='l1_priors'`;
+   the model-stated `l3_expect_slot` is a future phase).
+2. `OutcomeObserved` on completion — is_error, output_len, duration_ms.
+3. `SurpriseScored` — the graded composite plus its quadrant.
+
+The composite score is `error_surprisal + w_lat·|z_latency| + w_size·|z_size|`: the
+information-theoretic surprise of the boolean outcome against the tool's own error rate,
+plus weighted absolute deviations of latency and output size. Every term degrades to `0.0`
+below the cold-start floor (default `min_prior_n = 5`), so an empty prior scores exactly
+zero.
+
+**The quadrant taxonomy (canonical).** `compute_quadrant` maps an outcome onto the
+expectation × outcome grid the binary motif gate structurally cannot express. `predicted_fail`
+means the tool's own history says error is the base case (`error_rate ≥ 0.5`). Below the
+floor or with no prior → `cold_start`.
+
+| | **outcome succeeded** | **outcome errored** |
+|---|---|---|
+| **predicted success** (error_rate < 0.5) | `routine` — no write; the junk the motif gate can't suppress | `surprising_failure` — a normally-reliable tool errored; **the write quadrant** |
+| **predicted failure** (error_rate ≥ 0.5) | `quiet_surprise` — predicted to fail, **succeeded** | `unsurprising_failure` — no write; the quadrant the motif gate can't even name |
+
+**`quiet_surprise` is canonically defined as predicted-fail-but-SUCCEEDED.** (Distinct from a
+"succeeded-but-differently" latency/size anomaly — that magnitude rides in the graded *score*,
+is currently unnamed, and is future work; the quadrant name belongs to the error-flip case.)
+
+**Graded confidence anchored to measured percentiles (PGATE-01).**
+`graded_confidence(score) = clamp(0.5 + 0.07·score, 0.5, 0.69)`. The anchors come from the
+collect-only distribution (routine's P90 score sits at the floor; the surprising median
+grades to ~0.65). Two facts matter: the number is **strictly < 0.7** so a stat write can
+never enter the injected index, and it only *grades importance within* the tier — the
+**categorical quadrant gate**, not the score, makes the write/no-write call.
+
+**Quadrant-gated writes (PGATE-01/02).** `PredictiveWriteGate` reads the already-published
+`SurpriseScored` (zero recompute) and writes **only** on `surprising_failure`, keyed by
+`(tool, day)` so a same-day retry burst corroborates into one row. `unsurprising_failure`,
+`routine`, `cold_start`, and `quiet_surprise` write nothing — PGATE-02's suppression is the
+*absence of a branch*, not a branch. This is the exact junk the motif floor could not
+suppress.
+
+**Correction handling (PGATE-03).** User messages are themselves an expectation signal.
+`UserSignalDetector` (collect-only) classifies each turn from a zero-NLU trigger lexicon —
+correction-class families (`negation` / `correction_phrase` / `frustration`) checked before
+`confirmation` before `interruption`, first match wins — and, for corrections, snapshots the
+explicitly-staged facts as `suspect` (confirmations snapshot as `bump`). `PredictiveWriteGate`
+then writes, reversibly and coarsely:
+
+- An **explicit `correction_phrase`** ("i meant / actually / instead / you misunderstood")
+  supersedes the **single most-recently-staged suspect** fact — a marker prefixes the *full*
+  original value (never truncated; a plain `get_fact` still returns the real content), at
+  confidence 0.6. Scoped to one suspect, never the whole staged sitting; reversible via
+  history.
+- **Every other in-scope correction, and the no-suspect case**, writes a standalone
+  **quarantine** fact keyed to the correction, at confidence 0.65 — the user's own words,
+  additive, never touching the staged rows. A bare `negation` ("no") is deliberately
+  quarantine-only: it is far too broad to rewrite an already-retrieved fact on.
+
+**The `write_live` lever.** `PredictiveWriteGate` fires only when
+`predictive_gate.write_live` is set (default on, **fail-closed** if unreadable). It is the
+pre-committed KILL: flip it off and the harness reverts to motif-only capture while the
+collect-only scorer keeps persisting scores as pure telemetry — the strongest form of "the
+motif floor stays provably unchanged" (the gate is a separate sibling subscriber; the diff
+on `gate.py` is empty by construction).
+
+---
+
+## 5. The visibility line
+
+There is exactly one gate between the store and the prompt, in `_render_memory_index` (and
+mirrored in `flush_memory_md`):
 
 ```sql
--- User version for migration tracking
-PRAGMA user_version = 1;
-
--- Structured key/value facts
-CREATE TABLE IF NOT EXISTS facts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id    TEXT    NOT NULL,
-    division_id TEXT    NOT NULL DEFAULT '',
-    org_id      TEXT    NOT NULL DEFAULT '',
-    key         TEXT    NOT NULL,
-    value       TEXT    NOT NULL,
-    tags        TEXT    NOT NULL DEFAULT '[]',   -- JSON array of strings
-    confidence  REAL    NOT NULL DEFAULT 1.0,    -- 0.0–1.0
-    source      TEXT    NOT NULL DEFAULT '',     -- tool name or "user" or "inference"
-    created_at  INTEGER NOT NULL,               -- Unix timestamp (seconds)
-    updated_at  INTEGER NOT NULL,               -- Unix timestamp (seconds)
-    expires_at  INTEGER,                        -- NULL = never expires
-    UNIQUE(agent_id, key)
-);
-
-CREATE INDEX IF NOT EXISTS idx_facts_agent_id    ON facts(agent_id);
-CREATE INDEX IF NOT EXISTS idx_facts_key         ON facts(agent_id, key);
-CREATE INDEX IF NOT EXISTS idx_facts_tags        ON facts(tags);         -- JSON index, partial
-
--- FTS5 full-text search over fact values (v1: per-agent only; v2: cross-agent in org.db)
-CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
-    key,
-    value,
-    tags,
-    content     = facts,
-    content_rowid = id
-);
-
--- Triggers to keep FTS5 in sync with facts table
-CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
-    INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, key, value, tags) VALUES ('delete', old.id, old.key, old.value, old.tags);
-    INSERT INTO facts_fts(rowid, key, value, tags) VALUES (new.id, new.key, new.value, new.tags);
-END;
-
--- Session metadata
-CREATE TABLE IF NOT EXISTS sessions (
-    id              TEXT    PRIMARY KEY,         -- UUID4
-    agent_id        TEXT    NOT NULL,
-    division_id     TEXT    NOT NULL DEFAULT '',
-    org_id          TEXT    NOT NULL DEFAULT '',
-    started_at      INTEGER NOT NULL,
-    ended_at        INTEGER,                    -- NULL = still active
-    turn_count      INTEGER NOT NULL DEFAULT 0,
-    action_count    INTEGER NOT NULL DEFAULT 0,
-    tokens_in       INTEGER NOT NULL DEFAULT 0,
-    tokens_out      INTEGER NOT NULL DEFAULT 0,
-    exit_reason     TEXT,                       -- 'complete' | 'budget' | 'stuck' | 'error' | 'kill'
-    summary         TEXT                        -- final summary text from agent
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started  ON sessions(started_at DESC);
-
--- Notes: arbitrary free-text blocks for MEMORY.md sync
--- MEMORY.md is the canonical source; this table mirrors its sections for queryability
-CREATE TABLE IF NOT EXISTS notes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id    TEXT    NOT NULL,
-    section     TEXT    NOT NULL DEFAULT 'general',
-    content     TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_notes_agent_id ON notes(agent_id, section);
+WHERE status = 'active' AND confidence >= 0.7 AND retrieval_strength >= 0.2
 ```
 
-### Migration Protocol
+Confidence ≥ 0.7 is *trust*; retrieval_strength ≥ 0.2 is *accessibility*. A fact must clear
+**both** to occupy prompt space. **Every fact any write gate in §4 produces is below 0.7** —
+motif tiers (0.50–0.65), stat writes (`graded_confidence` ≤ 0.69), corrections/quarantine
+(0.60/0.65), and gists (0.60). They live in the store, are searchable via the tool path, and
+route retrieval through the graph — but they **do not enter the injected block** until the
+slow path promotes them (§7).
 
-```sql
--- Check current version before applying migrations
--- This pattern runs on every DB open (cheap PRAGMA read)
--- Version 0 → 1: initial schema (above)
--- Version 1 → 2 (future): add expires_at column, cross-agent index table
-```
-
-Implementation: `MemoryStore._apply_migrations(conn)` reads `PRAGMA user_version`, compares to `CURRENT_SCHEMA_VERSION = 1`, and applies ordered migration scripts from `memory/migrations/*.sql`. Never modify existing migrations — only append new ones.
+State this plainly, because it is the whole honest posture of the tranche: **the new write
+paths change what the harness captures, not how the agent behaves.** Turning the predictive
+gate on adds rows below the line; it does not, on its own, alter a single injected byte.
 
 ---
 
-## JSONL Chat History Format
+## 6. Activation & ranking
 
-File: `~/.localharness/agents/{agent_id}/history.jsonl`
+**ACT-R base-level activation, in SQL (RANK-02).** Ordering is a registered scalar function,
+so it costs zero decode tokens and does not depend on SQLite's optional math build. The
+single-trace simplification is `ln(1 + n) − d·ln(age)` with canonical decay `d = 0.5`, where
+`n` is the folded access count and age is measured from the most recent read-or-write. Two
+score variants:
 
-One JSON object per line. Each line is a complete, self-describing record. All timestamps are Unix epoch seconds (integer). All fields are always present — use `null` for absent optional values rather than omitting the field. This ensures reliable replay without field-presence checks.
+- `lh_slow_score` — the **injected-block** score: `importance + base_activation` over the
+  **folded** columns only, with age quantized to **days**. Every input moves only at a
+  consolidation fold, a genuine write, or a day boundary.
+- `lh_fused_score` — the **tool-path** score: adds fresh staged counters, hour-granular age,
+  `ln(confidence)`, and the BM25 relevance term. Only the tool result — appended *after* the
+  prefix cache — may re-rank freely on every call.
 
-### Message Types
-
-#### user_message
-```json
-{
-  "v": 1,
-  "type": "user_message",
-  "id": "msg_01abc",
-  "session_id": "sess_uuid4",
-  "agent_id": "morning-briefing",
-  "division_id": "financial",
-  "org_id": "default",
-  "ts": 1748042400,
-  "role": "user",
-  "content": "Generate today's market briefing",
-  "channel": "terminal",
-  "channel_metadata": null
-}
-```
-
-#### assistant_message
-```json
-{
-  "v": 1,
-  "type": "assistant_message",
-  "id": "msg_02def",
-  "session_id": "sess_uuid4",
-  "agent_id": "morning-briefing",
-  "division_id": "financial",
-  "org_id": "default",
-  "ts": 1748042405,
-  "role": "assistant",
-  "content": "I'll gather market data now.",
-  "tool_calls": [
-    {
-      "id": "call_01",
-      "name": "exa_search",
-      "arguments": {"query": "market open May 23 2026", "num_results": 5}
-    }
-  ],
-  "finish_reason": "tool_calls",
-  "tokens_in": 1024,
-  "tokens_out": 87,
-  "model": "qwen3.5-122b-a10b",
-  "latency_ms": 1230
-}
-```
-
-`tool_calls` is an empty list `[]` when there are no tool calls, never `null`. `finish_reason` is one of: `"tool_calls"`, `"stop"`, `"length"`, `"content_filter"`.
-
-#### tool_result
-```json
-{
-  "v": 1,
-  "type": "tool_result",
-  "id": "msg_03ghi",
-  "session_id": "sess_uuid4",
-  "agent_id": "morning-briefing",
-  "division_id": "financial",
-  "org_id": "default",
-  "ts": 1748042407,
-  "role": "tool",
-  "call_id": "call_01",
-  "tool_name": "exa_search",
-  "content": "SPX opened at 5,412.3...",
-  "is_error": false,
-  "error_type": null,
-  "truncated": false,
-  "original_length": 842,
-  "stored_length": 842
-}
-```
-
-`is_error: true` records use `error_type` to classify: `"tool_not_found"`, `"validation_error"`, `"execution_error"`, `"timeout"`, `"permission_denied"`. `truncated: true` means `content` was capped by the tool result budget; `original_length` records the pre-cap size.
-
-#### system_message
-```json
-{
-  "v": 1,
-  "type": "system_message",
-  "id": "msg_00sys",
-  "session_id": "sess_uuid4",
-  "agent_id": "morning-briefing",
-  "division_id": "financial",
-  "org_id": "default",
-  "ts": 1748042400,
-  "role": "system",
-  "content": "You are morning-briefing...",
-  "is_compacted": false,
-  "replaces_ids": []
-}
-```
-
-`is_compacted: true` means this system message is a summary that replaces the messages listed in `replaces_ids`. This is the SummaryMessageID compaction marker. The original messages are still in the JSONL file (never deleted); only in-memory replay skips them.
-
-#### session_event
-```json
-{
-  "v": 1,
-  "type": "session_event",
-  "id": "evt_01",
-  "session_id": "sess_uuid4",
-  "agent_id": "morning-briefing",
-  "division_id": "financial",
-  "org_id": "default",
-  "ts": 1748042400,
-  "event": "session_start",
-  "data": {
-    "budget": {"max_actions": 100, "max_duration_minutes": 30},
-    "model": "qwen3.5-122b-a10b",
-    "context_tokens_available": 131072
-  }
-}
-```
-
-`event` values: `"session_start"`, `"session_end"`, `"compaction"`, `"budget_warning"`, `"stuck_detected"`, `"kill_signal"`.
+**Staging discipline + byte-stable injection (RANK-04).** This is prefix-cache economics, not
+cosmetics: on reference architecture A, one changed byte near the top of a 32k-token prompt
+costs ~16 s of time-to-first-token. So a plain read never touches anything the injected block
+orders. Reads accumulate in the `*_staged` twin columns; the block reads only the base
+columns. The single moment a read can reorder the block is `fold_staged_access`, called at the
+consolidation boundary — which also restores accessibility (a heavily-used, decayed fact can
+climb organically back above the line instead of needing a fresh supersede-write). The render
+also forces the partial recency index and quantizes age to days so the block's bytes flip only
+with genuine change or the daily date boundary.
 
 ---
 
-## MEMORY.md Format
+## 7. Idle consolidation — the CLS slow-integrate pass
 
-File: `~/.localharness/agents/{agent_id}/MEMORY.md`
+`ConsolidationScheduler` lives inside the harness process (no daemon, no cron): a
+session-start staleness check plus an in-session idle timer fire a pass, and **any user turn
+cancels an in-flight pass instantly** (the serial inference gate is non-preemptive, so a pass
+must yield rather than make the user wait behind its generation). Default-on, config-off
+(`memory.consolidation.*`). A `ConsolidationPass` runs six steps, the deterministic core with
+no model at all:
 
-Human-readable, git-committable, read in full at session start. Format is strict to enable automated append:
-
-```markdown
-# Memory: {agent_name}
-
-Last updated: {ISO 8601 datetime}
-Agent ID: {agent_id}
-Division: {division_id}
-
-## Identity
-
-{agent_role_description}
-
-## Persistent Facts
-
-- {fact_key}: {fact_value} *(updated {date})*
-- {fact_key}: {fact_value} *(updated {date})*
-
-## Working Notes
-
-{free-form narrative notes added by the agent}
-
-## Learned Behaviors
-
-{patterns, preferences, and corrections accumulated over sessions}
-
-## Session History
-
-- {YYYY-MM-DD}: {one-line summary of what was accomplished}
-- {YYYY-MM-DD}: {one-line summary}
-```
-
-### Auto-Update Rules
-
-MEMORY.md is updated by `MemoryStore.flush_memory_md()` after each session completes. Rules:
-
-1. **Facts section**: regenerated from the `facts` table (agent scope only). All facts with `confidence >= 0.7` are included, sorted by `updated_at DESC`.
-2. **Session History**: one line appended per completed session. Line format: `- {date}: {session.summary[:120]}`. Never truncate existing history lines; prepend new entries at the top of the list.
-3. **Working Notes and Learned Behaviors**: never overwritten programmatically. Only the agent's LLM may append to these sections via `update_notes()`. The agent receives the current content of these sections as context and returns updated text.
-4. **Last updated**: always refreshed to current UTC datetime.
-5. **Identity**: written once at agent creation from `agent_config.role`. Never modified after.
-
-The file is the canonical human-readable view. If the file is manually edited by the user, the next `flush_memory_md()` call preserves the edited Working Notes and Learned Behaviors sections verbatim.
-
-### Read-Into-Context Protocol
-
-At session start, `MemoryStore.load_context()` returns a `MemoryContext` object with the full contents of:
-
-1. Agent's `MEMORY.md` (always)
-2. Division's `DIVISION.md` (always, if it exists)
-3. Org's `GUARDRAILS.md` (always, if it exists and non-empty)
-
-These are injected into the system prompt in that order, separated by `---` markers. The agent loop injects them before the user's task message, not as part of the conversation history. This means they consume system prompt tokens, not message tokens.
+1. **Fold** staged read-counters into the base columns (§6).
+2. **Promote recurring candidates.** The promotion warrant is **cross-episode recurrence** —
+   the same lesson captured from ≥2 distinct sessions (grouped by the gate's content hash, not
+   by tool alone) — **or** an existing promoted record (schema-consistent fast track) **or** a
+   `salient` flag (one stuck-recovery is enough). A promoted record crosses to confidence 0.8
+   (above the line), composed only of verbatim candidate bodies, linked `derived_from` its
+   sources. Novelty carries none of these warrants and never promotes.
+   **`tier:correction_pending` rows are excluded from promotion** — a disputed supersede or a
+   quarantine fact must not graduate into the injected block until the Phase-36 model look
+   reconciles it. This exclusion is a live predicate, not a convention.
+3. **Replay (LLM seam).** The rationalization engine: extract durable claims from recent
+   history via a cancellable, guarded LLM call (iteration cap, dedup-before-generate,
+   verify-against-leaf: a majority of a claim's long tokens must appear verbatim in the
+   source). **Built, guarded, and wired OFF by default** (`llm=None`) until its output quality
+   is iterated live.
+4. **Decay** — retrieval_strength halves per idle half-life (default 30 days), floored at 0.05;
+   trust (confidence) never decays. Facts fade from the *index*, never from the *store*.
+5. **Cap-trim** — a **soft** capacity cap (default 256 active facts), enforced *here*, never at
+   admission. Trim = demote the lowest-activation actives below the line; nothing is deleted,
+   and a record promoted in this same pass is never demoted in it.
+6. **Proxies** — promote-then-superseded churn rate + a promotion-sample hook (the dispatch
+   layer can pipe samples out for passive owner spot-check); fire counters alone can't see
+   silent corruption.
 
 ---
 
-## Public Interfaces
+## 8. Gist / schema hierarchy
 
-### MemoryStore
-
-```python
-# src/localharness/memory/sqlite.py
-
-import aiosqlite
-from dataclasses import dataclass, field
-from typing import Any
-
-@dataclass(frozen=True)
-class Fact:
-    key: str
-    value: str
-    agent_id: str
-    division_id: str
-    org_id: str
-    tags: list[str] = field(default_factory=list)
-    confidence: float = 1.0
-    source: str = ""
-    created_at: int = 0      # Unix seconds
-    updated_at: int = 0      # Unix seconds
-    expires_at: int | None = None
-
-@dataclass(frozen=True)
-class FactQuery:
-    """Parameters for querying facts."""
-    text: str | None = None          # FTS5 search query
-    tags: list[str] = field(default_factory=list)
-    min_confidence: float = 0.0
-    include_scopes: list[str] = field(default_factory=lambda: ["agent"])
-    # include_scopes: ["agent"], ["agent", "division"], ["agent", "division", "org"]
-    limit: int = 50
-
-@dataclass(frozen=True)
-class MemoryContext:
-    """Loaded context for injection into system prompt."""
-    agent_memory_md: str          # full MEMORY.md content, empty string if not exists
-    division_md: str              # full DIVISION.md content, empty string if not exists
-    guardrails_md: str            # full GUARDRAILS.md content, empty string if not exists
-    fact_count: int               # number of facts loaded
-    token_estimate: int           # rough token count (len(joined) // 4)
-
-class MemoryStore:
-    """
-    Three-tier persistent memory for a single agent.
-    
-    Owns the agent's memory.db, history.jsonl, and MEMORY.md.
-    Reads (but never writes) division and org memory for context injection.
-    
-    Thread safety: aiosqlite connections are not thread-safe. One MemoryStore
-    instance per agent loop coroutine. Do not share across asyncio tasks.
-    """
-
-    def __init__(
-        self,
-        agent_id: str,
-        division_id: str,
-        org_id: str,
-        base_dir: str,           # e.g. "~/.localharness"
-    ) -> None: ...
-
-    async def open(self) -> None:
-        """
-        Open SQLite connection, enable WAL mode, apply pending migrations.
-        Must be called before any other method.
-        Raises MemoryCorruptionError if integrity check fails.
-        """
-        ...
-
-    async def close(self) -> None:
-        """
-        Flush pending writes, close SQLite connection.
-        Safe to call multiple times.
-        """
-        ...
-
-    async def store_fact(
-        self,
-        key: str,
-        value: str,
-        tags: list[str] | None = None,
-        confidence: float = 1.0,
-        source: str = "",
-        expires_at: int | None = None,
-    ) -> Fact:
-        """
-        Upsert a fact into the agent's fact store.
-        
-        If a fact with the same key already exists, updates value, confidence,
-        source, updated_at, and tags. Does not reset created_at.
-        
-        Args:
-            key: Fact identifier. Use dot notation for namespacing: "portfolio.last_rebalance".
-            value: Fact value. Always stored as text; caller serializes complex values to JSON.
-            tags: Optional list of string labels for filtering.
-            confidence: 0.0–1.0. Facts below 0.5 are excluded from MEMORY.md output.
-            source: Origin of the fact: tool name, "user", "inference", "system".
-            expires_at: Unix timestamp after which the fact is excluded from queries. None = never.
-        
-        Returns:
-            The stored Fact with populated id and timestamps.
-        
-        Raises:
-            MemoryWriteError: On SQLite write failure.
-            ValueError: If confidence not in [0.0, 1.0].
-        """
-        ...
-
-    async def query_facts(
-        self,
-        query: FactQuery,
-    ) -> list[Fact]:
-        """
-        Query facts across one or more scopes.
-        
-        Scope order: agent facts first, then division, then org.
-        Within each scope, results are ordered by relevance (FTS5 rank) when
-        text is provided, otherwise by updated_at DESC.
-        
-        Expired facts (expires_at <= now()) are never returned.
-        
-        Args:
-            query: FactQuery specifying search criteria.
-        
-        Returns:
-            List of matching Facts, deduplicated by key (agent scope wins over
-            division wins over org for same key).
-        
-        Raises:
-            MemoryReadError: On SQLite read failure.
-        """
-        ...
-
-    async def get_fact(self, key: str) -> Fact | None:
-        """
-        Get a single fact by exact key from agent scope.
-        Returns None if not found or expired.
-        """
-        ...
-
-    async def delete_fact(self, key: str) -> bool:
-        """
-        Delete a fact by key from agent scope.
-        Returns True if a row was deleted, False if key not found.
-        """
-        ...
-
-    async def get_history(
-        self,
-        session_id: str | None = None,
-        limit: int = 200,
-        message_types: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Load message history from JSONL, optionally filtered by session_id.
-        
-        Reads history.jsonl sequentially (it is ordered by append time).
-        When session_id is provided, returns only records with that session_id.
-        When session_id is None, returns the last `limit` records across all sessions.
-        
-        This is the primary method for context reconstruction (session replay).
-        Compaction markers (system_message with is_compacted=True) are honored:
-        messages listed in replaces_ids are excluded from the returned list, and
-        the compacted summary message is included in their place.
-        
-        Args:
-            session_id: Filter to a specific session. None = recent history.
-            limit: Maximum number of records to return.
-            message_types: Filter by type. None = all types returned.
-        
-        Returns:
-            List of message dicts in chronological order (oldest first).
-            Each dict matches the JSONL record schema exactly.
-        
-        Raises:
-            MemoryReadError: On file I/O failure.
-            MemoryCorruptionError: If any JSONL line fails JSON parsing.
-        """
-        ...
-
-    async def reconstruct_session(
-        self,
-        session_id: str,
-    ) -> list[dict[str, Any]]:
-        """
-        Reconstruct the full message list for an LLM request from a session.
-        
-        Returns messages in the format expected by the LLM provider:
-        [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]
-        
-        Handles:
-        - Compaction markers: replaces sequences with summary messages
-        - tool_calls reconstruction: assembles OpenAI-format tool_calls arrays
-        - tool_result attachment: pairs each tool_result with its tool_call
-        - Orphan guard: removes any tool_result without a preceding tool_call
-        
-        Raises:
-            MemoryReadError: On I/O failure.
-            SessionNotFoundError: If session_id has no records in history.jsonl.
-        """
-        ...
-
-    async def update_notes(
-        self,
-        section: str,
-        content: str,
-    ) -> None:
-        """
-        Replace the content of a named section in MEMORY.md.
-        
-        Valid sections: "working_notes", "learned_behaviors".
-        The "identity", "persistent_facts", and "session_history" sections
-        are managed automatically and cannot be updated via this method.
-        
-        Args:
-            section: Section name (snake_case, matches MEMORY.md heading).
-            content: Full replacement text for the section. Overwrites entirely.
-        
-        Raises:
-            ValueError: If section is not "working_notes" or "learned_behaviors".
-            MemoryWriteError: On file I/O failure.
-        """
-        ...
-
-    async def load_context(self) -> MemoryContext:
-        """
-        Load all memory context for system prompt injection.
-        
-        Reads MEMORY.md (agent), DIVISION.md (division), GUARDRAILS.md (org).
-        Missing files return empty strings — not an error.
-        
-        Returns a MemoryContext with pre-formatted text ready for system prompt injection.
-        """
-        ...
-
-    async def append_history(
-        self,
-        record: dict[str, Any],
-    ) -> None:
-        """
-        Append a single record to history.jsonl.
-        
-        The record must match one of the defined JSONL schemas (user_message,
-        assistant_message, tool_result, system_message, session_event).
-        
-        Validates the record has required fields: v, type, id, session_id,
-        agent_id, ts. Raises ValueError for missing fields.
-        
-        O_APPEND write — atomic on POSIX for records under 4KB (PIPE_BUF safe).
-        
-        Raises:
-            MemoryWriteError: On file I/O failure.
-            ValueError: If record is missing required fields or type is unknown.
-        """
-        ...
-
-    async def flush_memory_md(
-        self,
-        session_summary: str | None = None,
-    ) -> None:
-        """
-        Regenerate MEMORY.md from current fact store state.
-        
-        Preserves "working_notes" and "learned_behaviors" sections verbatim.
-        Regenerates "persistent_facts" from SQLite.
-        Appends session_summary to "session_history" if provided.
-        
-        Idempotent: safe to call multiple times. Does not acquire exclusive lock
-        (race condition on concurrent flush_memory_md calls is acceptable — the
-        last writer wins, which is fine since only one agent loop runs at a time).
-        
-        Raises:
-            MemoryWriteError: On file I/O failure.
-        """
-        ...
-
-    async def create_session(
-        self,
-        session_id: str,
-        budget: dict[str, Any],
-        model: str,
-        context_tokens_available: int,
-    ) -> None:
-        """
-        Record session start in SQLite sessions table and append session_start
-        event to history.jsonl.
-        """
-        ...
-
-    async def end_session(
-        self,
-        session_id: str,
-        exit_reason: str,
-        summary: str,
-        turn_count: int,
-        action_count: int,
-        tokens_in: int,
-        tokens_out: int,
-    ) -> None:
-        """
-        Record session end in SQLite sessions table and append session_end
-        event to history.jsonl. Calls flush_memory_md(summary).
-        """
-        ...
-
-    async def integrity_check(self) -> list[str]:
-        """
-        Run SQLite PRAGMA integrity_check and PRAGMA foreign_key_check.
-        Validate history.jsonl is parseable (scan all lines).
-        
-        Returns list of error strings. Empty list = healthy.
-        Does not raise — returns errors for caller to handle.
-        """
-        ...
-```
-
-### HistoryWriter
-
-```python
-# src/localharness/memory/history.py
-
-import asyncio
-from pathlib import Path
-from typing import Any
-
-class HistoryWriter:
-    """
-    Low-level append-only JSONL writer for chat history.
-    
-    Used internally by MemoryStore. Callers should use MemoryStore.append_history().
-    Exposed separately for the audit logger to reuse the same append pattern.
-    
-    Uses asyncio file I/O with O_APPEND flag. On POSIX, O_APPEND writes are
-    atomic up to PIPE_BUF (4096 bytes) — sufficient for all message records.
-    Records exceeding 4096 bytes are still written correctly but not atomically
-    (a concurrent writer could interleave). Agent loops are single-coroutine,
-    so this is not a practical concern for v1.
-    """
-
-    def __init__(self, path: Path) -> None: ...
-
-    async def append(self, record: dict[str, Any]) -> None:
-        """
-        Serialize record to JSON and append to file with newline.
-        Creates file if it does not exist.
-        
-        Raises:
-            MemoryWriteError: On file I/O failure.
-        """
-        ...
-
-    async def read_all(self) -> list[dict[str, Any]]:
-        """
-        Read and parse all records from the file.
-        Returns empty list if file does not exist.
-        
-        Raises:
-            MemoryCorruptionError: If any line fails JSON parsing.
-                Includes line number and raw line content in error message.
-        """
-        ...
-
-    async def read_last_n(self, n: int) -> list[dict[str, Any]]:
-        """
-        Efficiently read the last n records without loading entire file.
-        Uses seek-from-end strategy for files larger than 1MB.
-        Falls back to read_all() + tail for smaller files.
-        """
-        ...
-```
-
-### MarkdownMemory
-
-```python
-# src/localharness/memory/markdown.py
-
-from pathlib import Path
-
-VALID_WRITABLE_SECTIONS = frozenset({"working_notes", "learned_behaviors"})
-
-class MarkdownMemory:
-    """
-    MEMORY.md and DIVISION.md file manager.
-    
-    Parses the markdown file into named sections for selective update.
-    Section boundaries are defined by ## headings.
-    """
-
-    def __init__(self, path: Path) -> None: ...
-
-    def exists(self) -> bool: ...
-
-    def read(self) -> str:
-        """Read full file content. Returns empty string if file does not exist."""
-        ...
-
-    def get_section(self, section_slug: str) -> str:
-        """
-        Extract content of a named section by its slug (heading text in snake_case).
-        Returns empty string if section not found.
-        
-        Example: section_slug="working_notes" matches "## Working Notes"
-        """
-        ...
-
-    def update_section(self, section_slug: str, content: str) -> None:
-        """
-        Replace content of a named section in place.
-        
-        Raises:
-            ValueError: If section_slug not in VALID_WRITABLE_SECTIONS.
-            FileNotFoundError: If the markdown file does not exist.
-        """
-        ...
-
-    def regenerate(
-        self,
-        agent_id: str,
-        agent_name: str,
-        role: str,
-        facts_text: str,
-        session_entry: str | None,
-    ) -> None:
-        """
-        Rewrite the file, preserving working_notes and learned_behaviors verbatim.
-        Creates the file if it does not exist.
-        
-        Args:
-            facts_text: Pre-formatted text for the Persistent Facts section.
-            session_entry: One-line entry to prepend to Session History, or None.
-        """
-        ...
-```
+When the cruncher reads an over-window document, it builds a lossy gist-over-verbatim tree and
+normally discards it. `hierarchy.persist_gist_tree` gives that tree rows in the memory graph:
+one **schema node** per run, one **gist node** per reduce output (`member_of` the schema,
+`derived_from` the previous level's gists), and a final-answer node. Gists sit at confidence
+0.60 — **below the line** by construction, so writing one mid-session can never reorder the
+injected block. They *route* retrieval (the graph neighborhood in `memory_search`) rather than
+occupy the prompt: gists route the search, leaf records anchor the answer. The 0.5.1
+number-provenance net extends here (HIER-04): a figure in a gist absent from all of its inputs
+is tagged `unverified-figures` — flagged, never rejected — the same DRM-lure guard the
+cruncher ships. A rolling compaction summary persists the same way (one gist per sitting,
+superseding itself each re-fire).
 
 ---
 
-## Scope Resolution
+## 9. Session shelf
 
-### Read Scope
+`SessionAccumulator` subscribes to the bus and keeps sitting-scoped counters (turns, tool
+calls, delegations, gate captures, the opening ask) with zero model calls. On close,
+`derive_session_summary` composes one **payload-first** line — leading with the resolved-error
+or unstuck lesson, else the trimmed opening ask (`asked: "…"`), never with novelty — or
+returns `None` for a sitting with nothing discriminating (suppressed, never padded with
+filler). `end_session` writes it to the `sessions` row.
 
-When an agent calls `query_facts(FactQuery(include_scopes=["agent", "division", "org"]))`:
-
-1. Query agent's `memory.db` — returns agent-scoped facts.
-2. Open division's `shared.db` (read-only) — returns division-scoped facts.
-3. Open org's `org.db` (read-only) — returns org-scoped facts.
-4. Merge results, deduplicating by key: agent scope wins over division, division wins over org.
-
-The MemoryStore holds the path to its own DB and resolves sibling paths from `base_dir`, `division_id`, and `org_id`. It opens division and org DBs with `aiosqlite.connect(..., uri=True)` using `?mode=ro` URI parameter — read-only mode prevents accidental writes even if a code path tries to write.
-
-### Write Scope
-
-Agents write only to their own `memory.db`. Division and org DBs are opened read-only. An agent that attempts to write to a parent scope (which should never happen through the public API) receives `PermissionError`. The MemoryStore API provides no method to write to division or org scope.
-
-Division-level shared facts are written by the orchestrator only, via a separate `DivisionMemoryStore` that wraps the shared division DB with write access. `DivisionMemoryStore` exposes the same `store_fact` / `query_facts` interface but targets `shared.db` instead of `memory.db`.
+The injected "Recent Session History" shelf renders **from the sessions table**, not from
+`MEMORY.md`: each entry gets a relative-day + clock label (`- today 11:47am: …`), newest
+first, hard-capped at 8 lines (`_SESSION_SHELF_HARD_CAP`, a system invariant — config can go
+lower, never higher). Labels are computed once per render against the local day, so the block
+stays byte-stable within a day and flips only at the local day boundary, phasing with the
+system prompt's own date line (TIME-04, no new cache-bust class). Dropped sittings stay in the
+table: absence from the prompt is not forgetting.
 
 ---
 
-## Session Reconstruction
+## 10. Honest limits (named, not hidden)
 
-Reconstruction from JSONL is the recovery path used when an agent loop restarts after a crash, or when the orchestrator needs to review a past session.
-
-### Algorithm
-
-```python
-async def reconstruct_session(session_id: str) -> list[dict]:
-    records = await history_writer.read_all()
-    session_records = [r for r in records if r["session_id"] == session_id]
-
-    # Identify compaction ranges: system_messages with is_compacted=True
-    compacted_ids: set[str] = set()
-    for r in session_records:
-        if r["type"] == "system_message" and r.get("is_compacted"):
-            compacted_ids.update(r.get("replaces_ids", []))
-
-    # Exclude compacted messages; keep summary system_messages
-    active = [r for r in session_records if r["id"] not in compacted_ids]
-
-    # Convert to LLM message format
-    messages = []
-    pending_tool_calls: dict[str, dict] = {}  # call_id -> tool_call dict
-
-    for r in active:
-        if r["type"] == "system_message":
-            messages.append({"role": "system", "content": r["content"]})
-        elif r["type"] == "user_message":
-            messages.append({"role": "user", "content": r["content"]})
-        elif r["type"] == "assistant_message":
-            msg = {"role": "assistant", "content": r["content"]}
-            if r["tool_calls"]:
-                msg["tool_calls"] = [
-                    {"id": tc["id"], "type": "function",
-                     "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
-                    for tc in r["tool_calls"]
-                ]
-                for tc in r["tool_calls"]:
-                    pending_tool_calls[tc["id"]] = tc
-            messages.append(msg)
-        elif r["type"] == "tool_result":
-            call_id = r["call_id"]
-            if call_id in pending_tool_calls:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": r["content"],
-                })
-                del pending_tool_calls[call_id]
-            # Orphaned tool_results (no matching tool_call) are silently dropped
-            # This is the boundary guard during reconstruction
-
-    # Drop trailing orphaned tool_calls from pending_tool_calls
-    # (crash occurred mid-turn before results arrived)
-    if pending_tool_calls:
-        # Remove the assistant message that contains these orphaned calls
-        messages = [
-            m for m in messages
-            if not (m.get("role") == "assistant" and
-                    any(tc["id"] in pending_tool_calls for tc in m.get("tool_calls", [])))
-        ]
-
-    return messages
-```
-
-### Crash Recovery
-
-If a crash occurs mid-turn (after tool calls dispatched but before results received), `pending_tool_calls` will be non-empty at reconstruction time. The algorithm removes the orphaned assistant message containing those tool calls. The reconstructed session ends at the last clean turn, allowing the agent loop to re-issue the last message safely.
+- **Correction detection is lexical.** The trigger lexicon is a recall-first tripwire, not a
+  classifier — measured recall is **~23%** on a real hand-labeled census, so most corrections
+  that don't use a trigger word are missed. Precision comes from a later model look, which is
+  future work; today a false trigger costs one logged record and a miss costs a missed
+  correction.
+- **Expected-failure suppression and stuck-recovery are synthetic-tested only.** The real
+  bus-events trace to date carries **zero** `unsurprising_failure` events and **zero**
+  `StuckRecovered` events. PGATE-02's live suppression and the `stuck_recovered` tier are
+  proven by unit tests, not by a real occurrence — disclosed, never silently declared victory.
+- **Statistical priors are per-tool and silent until a tool has ≥5 observations.** Below the
+  cold-start floor a tool's surprise is neutral `0.0` and its quadrant is `cold_start`; the
+  predictive layer contributes nothing for a fresh tool. The **motif floor (§4.1) covers from
+  turn one**, which is why it stays as the floor.
+- **The injected block does not yet change the agent's FIRST move.** Injected memory improves
+  *recovery* — the agent consults what it knows once context makes it relevant. Steering the
+  opening move is explicitly future work. Every new write in this tranche lands below the
+  visibility line, so it changes capture, not the next action.
 
 ---
 
-## Error Handling
+## 11. Configuration
 
-### Error Types
-
-```python
-# src/localharness/memory/errors.py
-
-class MemoryError(Exception):
-    """Base class for all memory errors."""
-    pass
-
-class MemoryWriteError(MemoryError):
-    """
-    SQLite write or file I/O write failure.
-    Attributes: path (str), underlying (Exception)
-    """
-    def __init__(self, path: str, underlying: Exception) -> None: ...
-
-class MemoryReadError(MemoryError):
-    """
-    SQLite read or file I/O read failure.
-    """
-    def __init__(self, path: str, underlying: Exception) -> None: ...
-
-class MemoryCorruptionError(MemoryError):
-    """
-    Detected corruption: PRAGMA integrity_check failed, or JSONL line
-    fails JSON parsing.
-    Attributes: path (str), detail (str)
-    """
-    def __init__(self, path: str, detail: str) -> None: ...
-
-class SessionNotFoundError(MemoryError):
-    """
-    session_id has no records in history.jsonl.
-    """
-    def __init__(self, session_id: str) -> None: ...
-
-class DiskFullError(MemoryWriteError):
-    """
-    Write failed due to ENOSPC. Subclass of MemoryWriteError.
-    The agent loop catches this specifically to trigger emergency shutdown
-    and log the event to stderr (disk-full means JSONL write also failed).
-    """
-    pass
-```
-
-### Concurrent Access (WAL Mode)
-
-SQLite WAL mode allows multiple simultaneous readers with one writer. The agent loop is the sole writer to `memory.db`. The orchestrator may read concurrently for indexing. With WAL mode:
-
-- Multiple readers never block each other.
-- One writer at a time; writer does not block readers.
-- Readers see a consistent snapshot from when their transaction began.
-
-`aiosqlite` uses `asyncio.to_thread` to run SQLite operations on a thread pool, avoiding blocking the event loop. The MemoryStore does not implement additional locking; SQLite's WAL handles isolation.
-
-### Disk Full
-
-When `append_history` or any write method raises an `OSError` with `errno.ENOSPC`, the MemoryStore raises `DiskFullError`. The agent loop catches `DiskFullError`, logs to stderr (since JSONL writes also fail), invokes the kill switch, and terminates the session. The orchestrator is notified via an `Escalation` event published before the kill.
-
-### Corruption Detection
-
-On `open()`, `MemoryStore` runs:
-```sql
-PRAGMA integrity_check;
-PRAGMA foreign_key_check;
-```
-
-If either returns anything other than `"ok"`, `open()` raises `MemoryCorruptionError`. The agent loop catches this, logs the error, and refuses to start the session (safe: won't make corrupt state worse). A CLI message directs the user to `localharness doctor` for recovery options.
-
-Recovery options (exposed by `localharness doctor`):
-1. Delete `memory.db` and reconstruct facts from MEMORY.md (lossy — facts in DB but not in MEMORY.md are lost).
-2. Copy a WAL checkpoint backup (SQLite WAL files can be used for point-in-time recovery if the `-wal` and `-shm` files are intact).
-
----
-
-## Configuration
+All under an agent's `memory:` key (see `config/models.py`; every field auto-enumerates as a
+`agent.memory.*` component-registry axis, tunable with no code edit):
 
 ```yaml
-# In agent YAML config, under the memory: key
 memory:
-  base_dir: "~/.localharness"     # root for all memory files
-  max_facts: 10000                # hard cap on fact count per agent scope
-  fact_expiry_days: null          # null = facts never auto-expire
-  history_retention_sessions: 50  # keep last N session IDs in history.jsonl
-                                  # older sessions are archived to history.YYYY-MM.jsonl
-  max_history_file_mb: 100        # rotate history.jsonl when it exceeds this size
-  memory_md_max_tokens: 4096      # truncate MEMORY.md injection if over this estimate
-  include_division_context: true  # read DIVISION.md into system prompt
-  include_org_context: true       # read GUARDRAILS.md into system prompt
+  inject_into_context: true          # inject the memory block into the system prompt
+  index_mode: true                   # inline the INDEX (names + one-liners), bodies on demand
+  max_session_history_entries: 8     # session-shelf lines (hard-capped at 8)
+  write_gate_enabled: true           # the motif capture floor (§4.1)
+  consolidation:                     # the CLS slow pass (§7)
+    enabled: true
+    idle_minutes: 10.0
+    staleness_hours: 6.0
+    max_active_facts: 256            # SOFT cap, trimmed by demotion
+    decay_half_life_days: 30.0
+  predictive_gate:                   # the predictive layer (§4.2)
+    enabled: true                    # collect-only scorer + user-signal detector
+    write_live: true                 # PredictiveWriteGate live writes — the KILL lever
+    min_prior_n: 5                   # cold-start floor
+    latency_weight: 0.5
+    size_weight: 0.25
+    lexicon: { … }                   # zero-NLU trigger families (TriggerLexiconConfig)
 ```
-
-All memory paths computed from `base_dir`:
-- Agent DB: `{base_dir}/agents/{agent_id}/memory.db`
-- Agent history: `{base_dir}/agents/{agent_id}/history.jsonl`
-- Agent MEMORY.md: `{base_dir}/agents/{agent_id}/MEMORY.md`
-- Division DB: `{base_dir}/divisions/{division_id}/shared.db`
-- Division MD: `{base_dir}/divisions/{division_id}/DIVISION.md`
-- Org DB: `{base_dir}/orgs/{org_id}/org.db`
-- Org GUARDRAILS: `{base_dir}/orgs/{org_id}/GUARDRAILS.md`
 
 ---
 
-## Implementation Notes
+## 12. Cross-references
 
-- Use `aiosqlite` exclusively — never `sqlite3` directly, as synchronous DB calls block the asyncio event loop for 10-50ms per query.
-- Use parameterized queries everywhere. No string interpolation in SQL. `aiosqlite` supports `:named` parameters.
-- The `tags` column stores a JSON array as text. Index lookups use `json_each()`: `WHERE EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`. This is SQLite's built-in JSON function, available in Python's bundled sqlite3 since Python 3.9.
-- JSONL files are never rewritten — only appended. Compaction is a logical operation (tracking `replaces_ids`) not a physical one. Physical cleanup (archiving old sessions) happens via a maintenance task on session close when `history_retention_sessions` is exceeded.
-- The `MemoryStore.open()` call creates the directory tree (`base_dir/agents/{agent_id}/`) if it does not exist, using `Path.mkdir(parents=True, exist_ok=True)`.
-- MEMORY.md regeneration uses `MEMORY.md.tmp` write + atomic rename (`os.replace`) to prevent partial-write corruption.
+| Topic | Spec |
+|-------|------|
+| Event types (`Observation`, `Action`, `MemoryGateFired`, `ExpectationAttached`, `OutcomeObserved`, `SurpriseScored`, `StuckRecovered`), EventBus | `01-event-bus.md` |
+| Config models, component registry | `06-config.md` |
+| Context window, compaction, the cruncher | `08-context-management.md` |
+| Threat model, architecture principles | `SECURITY.md`, `00-architecture-overview.md` |
+
+> Specs 05 (this doc) and 08 predate parts of the ContentStore/eviction subsystem; where
+> they and a source docstring disagree, **the docstring is ground truth**.

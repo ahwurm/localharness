@@ -6,12 +6,17 @@
 - memory_get returns a fact's full body; memory_search finds a seeded fact (FTS5).
 """
 import time
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
 import pytest
 
 from localharness.memory.sqlite import MemoryStore
-from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
+from localharness.tools.builtin.memory_tools import (
+    MemoryGetTool,
+    MemorySearchTool,
+    resolve_time_expr,
+)
 
 
 def make_store(tmp_path: Path) -> MemoryStore:
@@ -137,6 +142,116 @@ async def test_memory_get_missing(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_memory_search_finds_seeded_fact(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
+        await store.store_fact("car_key", "car maintenance schedule")
+        tool = MemorySearchTool(store)
+        res = await tool.run(query="smoothie")
+        assert res.success
+        assert "recipe_key" in res.output
+        assert "car_key" not in res.output
+    finally:
+        await store.close()
+
+
+# ---------------------------------------------------------------------------
+# 34-05: resolve_time_expr grammar (closed enum + ISO) → LOCAL epoch seconds
+# ---------------------------------------------------------------------------
+
+def _local_day_epoch(day: date, *, end: bool) -> int:
+    """Independent reference: LOCAL start/end-of-day epoch (no call to the unit under test)."""
+    boundary = dtime(23, 59, 59) if end else dtime.min
+    return int(datetime.combine(day, boundary).astimezone().timestamp())
+
+
+def test_resolve_today():
+    today = datetime.now().astimezone().date()
+    assert resolve_time_expr("today", end=False) == _local_day_epoch(today, end=False)
+    assert resolve_time_expr("today", end=True) == _local_day_epoch(today, end=True)
+
+
+def test_resolve_yesterday_window():
+    yday = datetime.now().astimezone().date() - timedelta(days=1)
+    start = resolve_time_expr("yesterday", end=False)
+    finish = resolve_time_expr("yesterday", end=True)
+    assert start == _local_day_epoch(yday, end=False)
+    assert finish == _local_day_epoch(yday, end=True)
+    assert finish - start == 86399  # brackets the whole local day 00:00:00..23:59:59
+
+
+def test_resolve_this_week():
+    today = datetime.now().astimezone().date()
+    monday = today - timedelta(days=today.weekday())  # Monday itself → today 00:00
+    assert resolve_time_expr("this_week", end=False) == _local_day_epoch(monday, end=False)
+
+
+def test_resolve_iso_date_and_datetime():
+    # bare date → local start-of-day (end=False) / end-of-day (end=True)
+    assert resolve_time_expr("2026-07-01", end=False) == _local_day_epoch(date(2026, 7, 1), end=False)
+    assert resolve_time_expr("2026-07-01", end=True) == _local_day_epoch(date(2026, 7, 1), end=True)
+    # datetime precision → exact local time, end flag ignored (both ends identical)
+    exact = int(datetime(2026, 7, 1, 9, 30).astimezone().timestamp())
+    assert resolve_time_expr("2026-07-01T09:30", end=False) == exact
+    assert resolve_time_expr("2026-07-01T09:30", end=True) == exact
+
+
+def test_resolve_garbage():
+    with pytest.raises(ValueError) as exc:
+        resolve_time_expr("banana")
+    msg = str(exc.value)
+    assert "today|yesterday|this_week" in msg
+    assert "ISO" in msg
+
+
+@pytest.mark.asyncio
+async def test_search_temporal_since_filters(tmp_path: Path):
+    """memory_search(query, since='today') returns only facts touched today — 'what happened
+    this morning?' is answerable by construction."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        now = int(time.time())
+        await store.store_fact("fresh_note", "temporal search marker fresh")
+        await store.store_fact("stale_note", "temporal search marker stale")
+        await store._db.execute(
+            "UPDATE facts SET updated_at = ? WHERE key = ?", (now - 2 * 86400, "stale_note")
+        )
+        await store._db.commit()
+        tool = MemorySearchTool(store)
+        res = await tool.run(query="marker", since="today")
+        assert res.success
+        assert "fresh_note" in res.output
+        assert "stale_note" not in res.output
+        res_all = await tool.run(query="marker")  # no filter → both
+        assert "fresh_note" in res_all.output and "stale_note" in res_all.output
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_temporal_bad_expr_readable_error(tmp_path: Path):
+    """must_have #4: an unparseable time expression is a readable tool error naming the
+    accepted grammar — NEVER an exception into the loop."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("k", "some searchable value")
+        tool = MemorySearchTool(store)
+        res = await tool.run(query="value", since="banana")
+        assert res.success is False
+        blob = (res.error or "") + (res.output or "")
+        assert "today|yesterday|this_week" in blob
+        assert "ISO" in blob
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_temporal_params_optional(tmp_path: Path):
+    """Plain memory_search (no since/until) is byte-unchanged — FactQuery gets since=None,
+    until=None and behaves exactly as before the rider."""
     store = make_store(tmp_path)
     await store.open()
     try:

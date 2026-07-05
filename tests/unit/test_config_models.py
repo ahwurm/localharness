@@ -248,3 +248,50 @@ def test_proposer_config_optional():
 
     cfg = HarnessConfig.model_validate(_harness_dict())
     assert getattr(cfg, "proposer", None) is None
+
+
+# -----------------------------------------------------------------------------
+# Phase 34 COLL — PredictiveGateConfig + TriggerLexiconConfig under MemoryConfig
+# Collect-only default-on (write_gate_enabled precedent); lexicon is registry-tunable
+# data, not code (COLL-02); extra keys rejected; axes auto-enumerate with zero
+# catalogue edits (the walk_model_fields list[str]-as-leaf precedent).
+# -----------------------------------------------------------------------------
+
+
+def test_predictive_gate_defaults():
+    """COLL default-on with the owner-steered scoring weights."""
+    from localharness.config.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.predictive_gate.enabled is True
+    assert cfg.predictive_gate.min_prior_n == 5
+    assert cfg.predictive_gate.latency_weight == 0.5
+    assert cfg.predictive_gate.size_weight == 0.25
+    assert cfg.predictive_gate.reask_threshold == 0.8
+
+
+def test_predictive_gate_lexicon_defaults():
+    """COLL-02 recall-first trigger lists — the owner's own specimens land per family."""
+    from localharness.config.models import MemoryConfig
+    lex = MemoryConfig().predictive_gate.lexicon
+    assert "nah" in lex.negation
+    assert "i meant" in lex.correction_phrase
+    assert "exactly" in lex.confirmation
+    assert "hold on" in lex.interruption
+    assert "frustrating" in lex.frustration
+
+
+def test_predictive_gate_extra_forbid():
+    """extra='forbid' — an unknown predictive_gate key is rejected, not silently kept."""
+    from localharness.config.models import MemoryConfig
+    with pytest.raises(ValidationError):
+        MemoryConfig(predictive_gate={"nope": 1})
+
+
+def test_predictive_gate_registry_discovery():
+    """The new axes auto-enumerate via walk_model_fields (zero catalogue edits) — both a
+    scalar leaf and a lexicon list[str] leaf appear on AgentConfig's walked paths."""
+    from localharness.config.models import AgentConfig
+    from localharness.registry.paths import walk_model_fields
+    paths = {p for p, _ann in walk_model_fields(AgentConfig)}
+    assert "memory.predictive_gate.enabled" in paths
+    assert "memory.predictive_gate.lexicon.negation" in paths
