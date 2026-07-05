@@ -203,15 +203,18 @@ async def test_guard_refuses_shared_bench_results_dir(tmp_path: Path):
 def _write_month_history(path: Path, *, days: int = 2) -> None:
     """A tiny synthetic 'owner month' history.jsonl (fixture — tests may fabricate): the SAME
     two queries repeated on `days` distinct calendar days (3 days apart), plus one assistant
-    row and one foreign-agent row that extraction must ignore. The queries make the bundled
-    offline loop-LLM read a missing path (real ReadTool error) then recover — so the shipped
-    WriteGate captures a real resolved_error lesson per query per sitting, and recurrence
-    across sittings promotes them (the honest ≥2-sittings stability warrant)."""
+    row and one foreign-agent row that extraction must ignore. Day 0 carries the LEGACY root
+    alias agent_id='default' (the real month's shape — the 33.1 rename migrated the DB, not
+    old history lines); day 1 carries 'orchestrator' — extraction must unify them (B1). The
+    queries make the bundled offline loop-LLM read a missing path (real ReadTool error) then
+    recover — so the shipped WriteGate captures a real resolved_error lesson per query per
+    sitting, and recurrence across sittings promotes them (the ≥2-sittings warrant)."""
     base = 1_750_000_000
     rows = []
     for d in range(days):
+        alias = "default" if d % 2 == 0 else AGENT  # mixed root aliases across days (B1)
         for i, tag in enumerate(("alpha", "beta")):
-            rows.append({"v": 1, "agent_id": AGENT, "type": "user_message", "id": f"m{d}{i}",
+            rows.append({"v": 1, "agent_id": alias, "type": "user_message", "id": f"m{d}{i}",
                          "session_id": f"orig-{d}", "ts": base + d * 3 * 86400 + i * 60,
                          "content": f"please read the {tag} file"})
     rows.append({"v": 1, "agent_id": AGENT, "type": "assistant_message", "id": "a0",
@@ -220,6 +223,52 @@ def _write_month_history(path: Path, *, days: int = 2) -> None:
                  "session_id": "orig-0", "ts": base + 6, "content": "not our agent's query"})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_extract_day_queries_unifies_root_aliases(tmp_path: Path):
+    """BLOCKER 1: the real month is agent_id='default' (135 msgs/14 days — the 33.1 rename
+    migrated the DB, not old history lines). Requesting either root alias must capture
+    {None, 'default', 'orchestrator'} as ONE identity; a non-root agent keeps the narrow filter."""
+    hist = tmp_path / "history.jsonl"
+    rows = [
+        {"type": "user_message", "agent_id": "default", "ts": 1_750_000_000, "content": "q-default"},
+        {"type": "user_message", "agent_id": "orchestrator", "ts": 1_750_000_060, "content": "q-orch"},
+        {"type": "user_message", "ts": 1_750_000_120, "content": "q-none"},  # no agent_id field
+        {"type": "user_message", "agent_id": "someone-else", "ts": 1_750_000_180, "content": "q-foreign"},
+    ]
+    hist.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    for root in ("orchestrator", "default"):
+        got = sema._extract_day_queries(hist, root)
+        queries = [q for _, day_q in got for q in day_q]
+        assert queries == ["q-default", "q-orch", "q-none"], f"alias unification failed for {root}"
+    got = sema._extract_day_queries(hist, "someone-else")
+    assert [q for _, day_q in got for q in day_q] == ["q-none", "q-foreign"]
+
+
+def test_live_store_paths_denied_by_permissions():
+    """BLOCKER 3: the composed agent config must deny write/edit/bash_exec on the live agent
+    stores (~/.localharness/agents/*) — belt and braces over the isolated-store guarantee."""
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.core.types import ToolCall
+
+    cfg = sema._root_agent_config("orchestrator")
+    home = str(Path.home() / ".localharness" / "agents")
+    ev = PermissionEvaluator()
+    assert ev.evaluate(ToolCall(name="bash_exec",
+                                arguments={"command": f"rm -rf {home}/orchestrator"}, id="t"),
+                       cfg.permissions).denied
+    assert ev.evaluate(ToolCall(name="write",
+                                arguments={"path": f"{home}/orchestrator/memory.db", "content": "x"},
+                                id="t"), cfg.permissions).denied
+    assert ev.evaluate(ToolCall(name="edit",
+                                arguments={"path": f"{home}/x/history.jsonl", "old": "a", "new": "b"},
+                                id="t"), cfg.permissions).denied
+    # The P-A capability floor is applied too (web_* denied for the bash-holding root).
+    assert "web_fetch" in cfg.tools.deny
+    # Innocuous calls stay allowed.
+    assert not ev.evaluate(ToolCall(name="bash_exec", arguments={"command": "echo hi"}, id="t"),
+                           cfg.permissions).denied
 
 
 @pytest.mark.asyncio
@@ -245,15 +294,26 @@ async def test_live_mode_groups_days_into_sittings_and_drives_real_loop(tmp_path
     assert len({s["session_id"] for s in v["sittings"]}) == 2
     assert [s["turns"] for s in v["sittings"]] == [2, 2]
 
-    # REAL-loop invocation: real sessions rows (create/end_session per sitting) and real
-    # tool_observations (the loop dispatched REAL read tools: 2 days x 2 queries x 2 reads).
+    # REAL-loop invocation: real sessions rows (2 sittings + the probe turn's session) and
+    # real tool_observations (the loop dispatched REAL read tools: 2 days x 2 queries x 2 reads).
     db = next(storedir.rglob("memory.db"))
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     n_sessions = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     n_obs = con.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0]
     con.close()
-    assert n_sessions == 2
+    assert n_sessions == 3  # 2 sittings + sema05-probe
     assert n_obs >= 8
+
+    # BLOCKER 2: the zero-tool metric comes from a REAL probe turn (not a substring match):
+    # the domain question was actually asked through the loop against the consolidated store,
+    # and tool_calls is the count of real Action(tool_call) events that turn emitted.
+    assert v["probe"]["session_id"] == "sema05-probe"
+    assert v["probe"]["question"] == v["domain_question"]
+    assert isinstance(v["probe"]["answer"], str) and v["probe"]["answer"]
+    assert v["probe"]["tool_calls"] == 0
+    assert v["tool_calls"] == v["probe"]["tool_calls"]
+    assert isinstance(v["probe"]["chapter_content_in_answer"], bool)
+    assert v["probe"]["chapter_content_in_answer"] is True  # the fake echoes the injected chapter line
 
     # Verdict shape intact (same LOCKED bars as trace mode) + non-vacuous: the repeated real
     # tool-error lessons cluster across the two sittings into one grounded zero-tool chapter.
@@ -263,7 +323,12 @@ async def test_live_mode_groups_days_into_sittings_and_drives_real_loop(tmp_path
     for bucket in ("confirmed", "confirmed_corrected", "retired",
                    "reverted_restored", "reverted_cleared", "undecided"):
         assert isinstance(v["reconcile"][bucket], int)
-    assert "sensitivity" in v and "live_store" in v
+    assert "live_store" in v
+
+    # MAJOR 5 boundary: a 2-session cluster with its schema already written must NOT pass the
+    # stricter cluster_min_sessions+1 (=3) re-grade — the schema's own "cluster:..." provenance
+    # previously counted as a fake third session (sensitivity pollution).
+    assert v["sensitivity"]["cluster_min_sessions_plus1_holds"] is False
 
     # The method amendment is disclosed in the report, quoting the LOCKED grading timestamp.
     rep = (resultsdir / "report.md").read_text(encoding="utf-8")
@@ -300,3 +365,70 @@ async def test_live_mode_max_turns_per_day_cap_and_mode_exclusivity(tmp_path: Pa
         "--results", str(tmp_path / "r3"), "--agent", AGENT,
     ])
     assert await sema.run(neither) == 2
+
+
+@pytest.mark.asyncio
+async def test_kill_file_stops_sittings_before_any_turn(tmp_path: Path):
+    """MAJOR 6b: a KILL file present at the top of the day loop stops accumulation — killed
+    runs must not keep iterating and inflating turns_driven."""
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    storedir = tmp_path / "store"
+    storedir.mkdir()
+    (storedir / "KILL").write_text("")
+
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(storedir),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+    ])
+    code = await sema.run(args)
+    assert code == 1  # zero turns driven -> honest processing failure, no fabricated verdict
+    assert not (tmp_path / "results" / "verdict.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_kill_file_aborts_grading_with_honest_verdict(tmp_path: Path):
+    """MAJOR 6a: a KILL file present before the grading-phase LLM work (consolidation +
+    reconcile looks) aborts with an honest ABORTED verdict + exit 1 — never a silent skip."""
+    tracedir = tmp_path / "trace"
+    await _build_trace(tracedir)
+    storedir = tmp_path / "store"
+    storedir.mkdir()
+    (storedir / "KILL").write_text("")
+
+    args = sema._parse_args([
+        "--offline", "--trace", str(tracedir), "--store", str(storedir),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+    ])
+    code = await sema.run(args)
+    assert code == 1
+    v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
+    assert v["verdict"] == "ABORTED"
+
+
+@pytest.mark.asyncio
+async def test_guards_refuse_live_store_shaped_paths(tmp_path: Path):
+    """minor 9: --results refuses /.localharness/agents/ paths (like --store); --history and
+    --trace refuse pointing AT a live-store path directly — a copy is required."""
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    fake_live = tmp_path / ".localharness" / "agents" / "orchestrator"
+
+    # --results under a live agents dir -> refused.
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(tmp_path / "s"),
+        "--results", str(fake_live / "reports"), "--agent", AGENT,
+    ])
+    assert await sema.run(args) == 2
+    # --history pointing at a live-store path -> refused (copy required).
+    args = sema._parse_args([
+        "--offline", "--history", str(fake_live / "history.jsonl"),
+        "--store", str(tmp_path / "s"), "--results", str(tmp_path / "r"), "--agent", AGENT,
+    ])
+    assert await sema.run(args) == 2
+    # --trace pointing at a live-store path -> refused (copy required).
+    args = sema._parse_args([
+        "--offline", "--trace", str(fake_live / "bus-events.jsonl"),
+        "--store", str(tmp_path / "s"), "--results", str(tmp_path / "r"), "--agent", AGENT,
+    ])
+    assert await sema.run(args) == 2
