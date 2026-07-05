@@ -271,6 +271,52 @@ class MemoryConsolidationConfig(BaseModel):
         description="Hard per-pass work cap (letta #957 infinite-loop class guardrail).",
     )
 
+    # --- Phase 36 (the chapter-writer) axes: the idle LLM passes, each independently
+    # gated. All require an LLM wired into the scheduler (start_cmd); with no LLM the
+    # deterministic core above is byte-unchanged (each step early-returns). ---
+    schema_writer_enabled: bool = Field(
+        default=True,
+        description=(
+            "Phase 36 SEMA-02/03: the idle chapter-writer clusters promoted lessons and "
+            "writes one grounded schema per stable cluster (requires an LLM wired)."
+        ),
+    )
+    reconcile_enabled: bool = Field(
+        default=True,
+        description=(
+            "Phase 36 PGATE-03: an idle model-look reconciles the correction_pending "
+            "quarantine (confirm / revert / undecidable). Also broadens the idle-work probe "
+            "to fire on a pending correction queue."
+        ),
+    )
+    mining_enabled: bool = Field(
+        default=True,
+        description=(
+            "Phase 36 PGATE-03: an idle model-look mines transcripts for missed corrections "
+            "and plain personal facts (grounded, budgeted, injectable)."
+        ),
+    )
+    cluster_min_sessions: int = Field(
+        default=2, ge=1, le=100,
+        description="A cluster is chapter-worthy only if its members span at least this many distinct sittings.",
+    )
+    schema_write_budget: int = Field(
+        default=3, ge=1, le=50,
+        description="Max schema chapters written per idle cycle.",
+    )
+    schema_depth_cap: int = Field(
+        default=2, ge=1, le=5,
+        description="Max schema depth above lessons: lesson->chapter(1)->chapter-of-chapters(2)->stop.",
+    )
+    reconcile_ttl_looks: int = Field(
+        default=3, ge=1, le=20,
+        description="An undecidable correction fact leaves the reconciliation queue after this many looks.",
+    )
+    mining_write_budget: int = Field(
+        default=5, ge=1, le=50,
+        description="Max mined facts written per idle cycle.",
+    )
+
 
 class TriggerLexiconConfig(BaseModel):
     """COLL-02 zero-NLU trigger word lists (owner steer 2026-07-04: TRIGGERS, NOT

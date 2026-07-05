@@ -428,20 +428,24 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             warnings.append(f"session-accumulator: {exc}")
 
     # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
-    # idle timer, cooperatively cancelled by any user turn. llm=None on purpose — the
-    # deterministic pass (fold/promote/decay/cap-trim/proxies) needs no model; the LLM
-    # replay seam stays off until its output quality is iterated live.
-    # on_promotion_sample=None on purpose too (CONS-06): the Discord-post callback path
-    # exists and is unit-verified (test_churn_metric_and_sample_hook), but DiscordChannel is
-    # constructed later in the channel block (§10) — wiring it here means reordering channel
-    # construction for a hook with no live consumer yet. Named seam, same contract as llm.
+    # idle timer, cooperatively cancelled by any user turn. Phase 36: the LLM replay seam is
+    # now ON in production — the real LLMClient is bridged through LLMTextAdapter (36-03, the
+    # SINGLE cancellable + char-bounded idle path) and passed as llm=, so the pass can write
+    # chapters, reconcile the correction queue, and mine transcripts. Each of those is gated
+    # per-step by an agent.memory.consolidation.* axis (schema_writer/reconcile/mining_enabled)
+    # AND early-returns when llm is None, so the deterministic core stays byte-unchanged. The
+    # try/except soft-degrades a wiring fault back to the deterministic pass (warnings.append).
+    # on_promotion_sample=None DEFERRED (CONS-06): the SEMA-05 report already surfaces generated
+    # chapters to the owner; wiring the Discord sample hook needs channel-construction reordering
+    # (§10), out of scope here. Named seam, same contract as llm.
     consolidation_scheduler = None
     _cons_cfg = getattr(agent_config.memory, "consolidation", None)
     if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
         try:
             from localharness.memory.consolidation import ConsolidationScheduler
+            from localharness.memory.idle_llm import LLMTextAdapter
             consolidation_scheduler = ConsolidationScheduler(
-                memory_store, bus, agent_name_str, _cons_cfg
+                memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm)
             )
             await consolidation_scheduler.start()
         except Exception as exc:
