@@ -161,17 +161,23 @@ async def test_offline_run_isolated_to_store_and_results(tmp_path: Path):
     resultsdir = tmp_path / "results"
     await _build_trace(tracedir)
 
+    # Snapshot the trace dir (bytes + listing) so we can prove the replay was READ-ONLY.
+    before = {p.name: p.read_bytes() for p in tracedir.rglob("*") if p.is_file()}
+
     args = sema._parse_args([
         "--offline", "--trace", str(tracedir), "--store", str(storedir),
         "--results", str(resultsdir), "--agent", AGENT,
     ])
     await sema.run(args)
 
-    # The isolated store got a real DB; the trace dir was NOT mutated (read-only replay source).
+    # The isolated store got a real DB; the outputs landed only under --results.
     assert storedir.exists()
     assert list(storedir.rglob("memory.db")), "the replay must build a fresh DB under --store"
-    trace_files = {p.name for p in tracedir.iterdir()}
-    assert trace_files == {"bus-events.jsonl", "history.jsonl"}, "the trace dir must stay untouched"
+    assert {p.name for p in resultsdir.iterdir()} == {"verdict.json", "report.md"}
+
+    # The trace dir is byte-for-byte unchanged — the real trace is only ever read, never mutated.
+    after = {p.name: p.read_bytes() for p in tracedir.rglob("*") if p.is_file()}
+    assert after == before, "the trace dir must stay byte-identical (read-only replay source)"
 
 
 @pytest.mark.asyncio
