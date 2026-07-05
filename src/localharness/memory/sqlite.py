@@ -1238,9 +1238,40 @@ class MemoryStore:
         # query — the exact long-session degradation the owner's supersede approval
         # forbids). Forcing the partial index is deterministic, ANALYZE-independent,
         # and fails LOUD if the index name ever drifts.
+        # SEMA-04 (Phase 36): schemas render FIRST as their own "### Knowledge" section —
+        # "gist routes, verbatim answers" made true for EXPERIENCE (a chapter leads; its
+        # member lessons are demoted OUT of the facts list by 36-04's retrieval_strength
+        # drop, NOT edge-joined here — the hottest per-turn query stays flat so the forced
+        # partial index keeps holding). SCOPE (RESEARCH Pitfall 4, "decide and state"): this
+        # schemas-first change is the index_mode=True render path ONLY (the config default,
+        # per load_context above). The legacy flush_memory_md -> MarkdownMemory.regenerate
+        # end-of-session dump is DELIBERATELY out of scope — the injected ambient block is the
+        # byte-stability-critical surface; the legacy dump is not on the hot path. Same gates
+        # + INDEXED BY + day-quantized lh_slow_score ORDER BY as the facts query below
+        # (byte-stability: folded columns only).
         async with self._db.execute(
             "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
-            "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
+            "WHERE agent_id = ? AND status = 'active' AND node_kind = 'schema' "
+            "AND confidence >= 0.7 AND retrieval_strength >= 0.2 "
+            "AND (expires_at IS NULL OR expires_at > ?) "
+            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
+            "updated_at DESC, key ASC",
+            (self._agent_id, now, now),
+        ) as cur:
+            schema_rows = await cur.fetchall()
+        schema_lines = [f"- {r[0]}: {_one_line(r[1], 180)}" for r in schema_rows]
+        # Zero bytes when absent (mirrors history_section below): an empty schemas set must
+        # not change the injected block's bytes for chapter-less stores (RANK-04 byte-stability).
+        schema_section = (
+            f"### Knowledge ({len(schema_lines)} chapters)\n" + "\n".join(schema_lines) + "\n\n"
+            if schema_lines
+            else ""
+        )
+
+        async with self._db.execute(
+            "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
+            "WHERE agent_id = ? AND status = 'active' AND node_kind != 'schema' "
+            "AND confidence >= 0.7 "
             "AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
             "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
@@ -1299,7 +1330,7 @@ class MemoryStore:
             "This is an INDEX, not the full memory. Each line below is one persistent fact "
             "(name: short description). Call `memory_get(name)` for a fact's full body, or "
             "`memory_search(query)` to search fact contents.\n\n"
-            f"### Persistent Facts ({len(fact_lines)})\n{facts_block}"
+            f"{schema_section}### Persistent Facts ({len(fact_lines)})\n{facts_block}"
             f"{history_section}"
         )
 
