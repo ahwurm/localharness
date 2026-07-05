@@ -134,3 +134,47 @@ async def test_set_cancel_event_reports_cancelled_without_hanging(store: MemoryS
     assert report.written == 0
     assert await store.query_facts(FactQuery(tags=["mined"])) == []
     assert await _get_meta(store, _MINING_WATERMARK_KEY) is None  # watermark untouched
+
+
+# ---------------------------------------------------------------------------
+# Task 2: per-cycle write budget + supersede-on-repeat
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_budget_caps_writes_per_cycle(store: MemoryStore):
+    """10 grounded candidate lines with write_budget=5 writes at MOST 5 facts this cycle —
+    a bounded colleague-memory intake per idle cycle (owner-tunable)."""
+    await store.append_history(
+        _rec(5, "the user reported several preference items worth remembering today")
+    )
+    # Each line grounds on 'reported'(8) + 'preference'(10), both present in the span;
+    # the trailing index makes the 10 lines distinct keys (so, uncapped, 10 facts).
+    llm = _FakeLLM("\n".join(f"user reported a preference item {i}" for i in range(10)))
+    report = await mine_transcript(store, llm, asyncio.Event(), write_budget=5)
+
+    assert report.written == 5
+    assert len(await store.query_facts(FactQuery(tags=["mined"]))) == 5
+
+
+@pytest.mark.asyncio
+async def test_repeated_line_supersedes_not_duplicates(store: MemoryStore):
+    """A re-mined identical line hits the SAME key (mined/{_h8(line)}) -> store_fact's
+    corroboration branch -> no duplicate row. The active history for the key stays at 1."""
+    from localharness.memory.mining import _h8
+
+    line = "user reported a preference for dark mode"
+    await store.append_history(_rec(5, "the user reported a preference for dark mode theme"))
+    llm = _FakeLLM(line)
+
+    r1 = await mine_transcript(store, llm, asyncio.Event())
+    assert r1.written == 1
+
+    # A NEWER record with identical content -> re-mined past the advanced watermark -> the
+    # same line -> the same key -> corroboration (no new row).
+    await store.append_history(_rec(50, "the user reported a preference for dark mode theme"))
+    r2 = await mine_transcript(store, llm, asyncio.Event())
+    assert r2.written == 1
+
+    history = await store.get_fact_history(f"mined/{_h8(line)}")
+    assert len(history) == 1  # supersede-on-repeat: identical value == no duplicate row
