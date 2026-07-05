@@ -78,3 +78,27 @@ async def complete_cancellable(llm: Any, prompt: str, cancel_event: asyncio.Even
     (`LLMTextAdapter` in prod, the fake doubles in tests)."""
     prompt = prompt[:char_cap]
     return await run_cancellable(llm.complete(prompt), cancel_event)
+
+
+def grounded(claim: str, corpus: str, *, min_token_len: int = 6) -> bool:
+    """A generated claim is grounded iff a MAJORITY of its >=min_token_len tokens appear
+    verbatim in the corpus (extracted from consolidation.py:295-301; critic M4: an
+    any-single-token check was trivially passed by confabulations sharing one common word
+    like "contains"). An empty-token claim (all short words) -> True (nothing to verify).
+    This is the BROAD kill gate; `ground_numbers` layers the narrower numeric net on top
+    for figures specifically."""
+    tokens = [t for t in claim.split() if len(t) >= min_token_len]
+    if not tokens:
+        return True
+    matched = sum(1 for t in tokens if t in corpus)
+    return matched * 2 >= len(tokens)
+
+
+def ground_numbers(text: str, sources: list[str]) -> list[str]:
+    """Numeric tokens in `text` absent from every source (hierarchy.flag_unverified_figures,
+    which reuses the shipped cruncher number-net). A non-empty return == unverified figures;
+    the caller must NOT write those tokens (the SEMA-05 kill is stricter than hierarchy.py's
+    flag-don't-reject: for chapters/mined facts, reject)."""
+    from localharness.memory.hierarchy import flag_unverified_figures
+
+    return flag_unverified_figures(text, sources)

@@ -15,6 +15,8 @@ import pytest
 from localharness.memory.idle_llm import (
     LLMTextAdapter,
     complete_cancellable,
+    ground_numbers,
+    grounded,
 )
 
 
@@ -108,3 +110,34 @@ async def test_char_cap_truncates_before_call():
     llm = _RecordingLLM("ok")
     await complete_cancellable(llm, "x" * 10000, asyncio.Event(), char_cap=100)
     assert llm.seen is not None and len(llm.seen) <= 100
+
+
+# ---------------------------------------------------------------------------
+# Task 2: grounding — the pre-committed KILL (no token not derivable from members)
+# ---------------------------------------------------------------------------
+
+def test_grounded_true_when_majority_tokens_present():
+    """A majority of the claim's >=6-char tokens appearing verbatim in the corpus is
+    grounded — the broad kill gate passes real, derivable claims."""
+    claim = "The read tool retries on transient errors"
+    corpus = "the read tool retries on transient errors when the network drops"
+    assert grounded(claim, corpus) is True
+
+
+def test_grounded_false_on_shared_common_word():
+    """The critic-M4 false negative: a confabulation sharing ONE common >=6-char word
+    ('contains') with the corpus must be rejected — any-single-token was too weak."""
+    claim = "The database contains unencrypted passwords"
+    corpus = "the file contains a value"
+    assert grounded(claim, corpus) is False
+
+
+def test_ground_numbers_flags_absent_figure():
+    """A figure absent from every source is flagged unverified (the number-provenance
+    net — a mined/schema fact must NOT assert it)."""
+    assert ground_numbers("failed 5 times", ["failed twice"]) == ["5"]
+
+
+def test_ground_numbers_passes_present_figure():
+    """A figure present in a source is grounded — no false alarm."""
+    assert ground_numbers("failed 5 times", ["it failed 5 times yesterday"]) == []
