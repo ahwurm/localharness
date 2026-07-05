@@ -65,6 +65,26 @@ async def _load_pool(store) -> list[Fact]:
         return [_row_to_fact(r) for r in await cur.fetchall()]
 
 
+async def _load_failure_queue(store) -> list[Fact]:
+    """The LIVE tier:surprising_failure queue: active, pending_consolidation, not-yet-faded
+    (retrieval_strength >= 0.2). Faded rows are 36-04's drain concern — offering them as aux
+    would blur the fold-vs-drain split — so they are withheld here. These sub-0.7 rows are
+    attached to clusters as aux, NEVER promoted (raw observations never enter the index).
+    Mirrors _load_pool's SELECT idiom + consolidation.py's `tags LIKE '%\"...\"%'` predicate."""
+    assert store._db is not None
+    now = int(time.time())
+    async with store._db.execute(
+        f"SELECT {store._FACT_COLS} FROM facts "
+        "WHERE agent_id = ? AND status = 'active' "
+        "AND tags LIKE '%\"tier:surprising_failure\"%' "
+        "AND tags LIKE '%\"pending_consolidation\"%' "
+        "AND retrieval_strength >= 0.2 "
+        "AND (expires_at IS NULL OR expires_at > ?)",
+        (store._agent_id, now),
+    ) as cur:
+        return [_row_to_fact(r) for r in await cur.fetchall()]
+
+
 def _salient_tokens(value: str, *, max_tokens: int = 8) -> list[str]:
     """A bounded, deduped set of >=5-char content tokens — the FTS similarity probe.
     >=5 chars drops stopwords/punctuation and matches the grounding-check token floor
@@ -168,21 +188,75 @@ def _cluster_key(cluster: Cluster) -> str:
     return "|".join(sorted(m.key for m in cluster.members))
 
 
+def _member_tool(key: str) -> str | None:
+    """learned/{tool}/... -> tool. Schema/other keys have no tool axis -> None."""
+    parts = key.split("/")
+    return parts[1] if len(parts) >= 2 and parts[0] == "learned" else None
+
+
+def _failure_tool(key: str) -> str | None:
+    """predgate/surprising_failure/{tool}/{day} -> tool (predictive_write_gate.py:182)."""
+    parts = key.split("/")
+    return parts[2] if len(parts) >= 3 and parts[0] == "predgate" else None
+
+
+async def _attach_aux_failures(
+    store, cluster_members, failure_queue, *, fts_top_k, graph_depth, aux_cap: int = 8,
+) -> list[Fact]:
+    """PGATE-03 rider, pure READ. A surprising_failure queue row Q is auxiliary to a cluster
+    iff EITHER (a) DOMAIN: Q's tool matches any member's tool, OR (b) GRAPH/FTS: Q is within a
+    member's graph neighborhood OR surfaces on a member's salient FTS token. Deduped, capped
+    at aux_cap (bounded corpus). The rows' sub-0.7 confidence is left untouched — 36-04 folds
+    them under the schema (member_of + a consumed tag) and drains them; they are never promoted."""
+    if not failure_queue:
+        return []
+    q_ids = {q.id for q in failure_queue}
+    member_tools = {t for t in (_member_tool(m.key) for m in cluster_members) if t}
+
+    graph_adjacent: set[int] = set()
+    fts_adjacent: set[int] = set()
+    for m in cluster_members:
+        for nid, _depth in await store.neighborhood(m.id, depth=graph_depth):
+            if nid in q_ids:
+                graph_adjacent.add(nid)
+        for tok in _salient_tokens(m.value):
+            # No min_confidence here: the queue rows ARE sub-0.7 and must surface.
+            for hit in await store.query_facts(FactQuery(text=tok, limit=fts_top_k)):
+                if hit.id in q_ids:
+                    fts_adjacent.add(hit.id)
+
+    matched: list[Fact] = []
+    seen: set[int] = set()
+    for q in failure_queue:
+        if q.id in seen:
+            continue
+        tool = _failure_tool(q.key)
+        if (tool is not None and tool in member_tools) or q.id in graph_adjacent or q.id in fts_adjacent:
+            matched.append(q)
+            seen.add(q.id)
+            if len(matched) >= aux_cap:
+                break
+    return matched
+
+
 async def find_stable_clusters(
     store, *, min_cluster_size: int = 2, min_sessions: int = 2,
-    fts_top_k: int = 5, graph_depth: int = 2,
+    fts_top_k: int = 5, graph_depth: int = 2, aux_cap: int = 8,
 ) -> list[Cluster]:
     """Discover STABLE lesson clusters over the promoted population. A cluster is returned
     iff it has >= min_cluster_size (2) related members spanning >= min_sessions (2) distinct
     sittings — recurrence across evenings, not one hot evening (SEMA-01), enforced explicitly
     on real Phase-33 session units rather than merely inherited from each lesson's own
-    promotion warrant. Returned biggest-first (deterministic tiebreak) so the writer's
-    per-cycle budget takes the largest chapters first. Pure read: zero LLM, zero writes.
-    (aux_members is left empty here; Task 3 attaches the surprising_failure rider.)"""
+    promotion warrant. Each stable cluster is then enriched with adjacent
+    tier:surprising_failure aux_members (PGATE-03 rider) — a pure READ that attaches the
+    sub-0.7 stat rows for 36-04 to fold + drain; they are NEVER promoted into membership.
+    Returned biggest-first (deterministic tiebreak) so the writer's per-cycle budget takes
+    the largest chapters first. Pure read+compute: zero LLM, zero writes."""
     pool = await _load_pool(store)
     if len(pool) < min_cluster_size:
         return []
     adj = await _relatedness_edges(store, pool, fts_top_k=fts_top_k, graph_depth=graph_depth)
+    failure_queue = await _load_failure_queue(store)  # loaded ONCE for the whole pass
 
     clusters: list[Cluster] = []
     for members in _connected_components(pool, adj):
@@ -193,5 +267,12 @@ async def find_stable_clusters(
             continue  # single-sitting grouping — not yet a stable chapter
         depth = max(_depth_from_tags(m.tags) for m in members)
         ordered = sorted(members, key=lambda m: m.key)
-        clusters.append(Cluster(members=ordered, sessions=sessions, depth=depth))
+        aux = (
+            await _attach_aux_failures(
+                store, ordered, failure_queue,
+                fts_top_k=fts_top_k, graph_depth=graph_depth, aux_cap=aux_cap,
+            )
+            if failure_queue else []
+        )
+        clusters.append(Cluster(members=ordered, sessions=sessions, depth=depth, aux_members=aux))
     return sorted(clusters, key=lambda c: (-len(c.members), _cluster_key(c)))
