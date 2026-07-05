@@ -20,7 +20,10 @@ TWO ACCUMULATION MODES (exactly one):
       real WriteGate/PredictiveGate/UserSignalDetector/PredictiveWriteGate, real builtin
       tools, real memory store — against the ISOLATED agent home. One fresh sitting (distinct
       session id; fresh loop/gates/store instances, emulating one process per sitting) per
-      original day, with real create_session/end_session close-outs.
+      original day, with real create_session/end_session close-outs. Root aliases are ONE
+      identity ({None, 'default', 'orchestrator'} — the 33.1 rename migrated the DB, not old
+      history lines): the real month measures 148 user messages across 15 original days
+      (135 legacy-'default' + 13 'orchestrator'; offline dry-run 2026-07-05).
   --trace <dir|bus-events>    LEGACY TRACE REPLAY (retained as an offline cross-check: it
       rehearses the gate shapes — incl. both correction_pending shapes — at zero loop cost).
       Feeds the copied real bus-events through the shipped gates into the isolated store.
@@ -58,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sqlite3
 import sys
@@ -82,14 +86,18 @@ from localharness.core.events import (  # noqa: E402
     StuckRecovered,
     UserMessage,
 )
-from localharness.memory.clustering import find_stable_clusters  # noqa: E402
 from localharness.memory.consolidation import ConsolidationPass  # noqa: E402
 from localharness.memory.gate import WriteGate  # noqa: E402
 from localharness.memory.idle_llm import LLMTextAdapter, ground_numbers, grounded  # noqa: E402
 from localharness.memory.predictive_gate import PredictiveGate  # noqa: E402
 from localharness.memory.predictive_write_gate import PredictiveWriteGate  # noqa: E402
 from localharness.memory.reconciliation import reconcile_corrections  # noqa: E402
-from localharness.memory.sqlite import MemoryStore, _row_to_fact  # noqa: E402
+from localharness.memory.sqlite import (  # noqa: E402
+    _LEGACY_ROOT_AGENT_ID,
+    _ROOT_AGENT_ID,
+    MemoryStore,
+    _row_to_fact,
+)
 
 _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this MemAvailable.
 _LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
@@ -178,12 +186,14 @@ class _ToolCall:
 
 
 class _OfflineLoopLLM:
-    """Loop-client double for --offline --history: drives the REAL AgentLoop + REAL builtin
-    tools deterministically. For a 'please read the {tag} file' task it reads a missing {tag}
-    path (a REAL ReadTool error), then a real existing path (recovery), then answers — so the
-    shipped WriteGate captures a real resolved_error lesson from real tool events, recurring
-    across sittings. Neither fake authors lesson text; the offline chapter prose comes from
-    the seam fake's verbatim corpus echo (the honest generator/lesson split)."""
+    """Loop-client double for --offline: drives the REAL AgentLoop + REAL builtin tools
+    deterministically. For an ordinary task it reads a missing per-task path (a REAL ReadTool
+    error), then a real existing path (recovery), then answers — so the shipped WriteGate
+    captures a real resolved_error lesson from real tool events; the SAME task text repeated
+    on another day recurs naturally (the tag hashes the task). For the PROBE question it
+    answers zero-tool, echoing the injected '### Knowledge' chapter line if present — so the
+    probe turn exercises real tool-call counting. Neither fake authors lesson text; offline
+    chapter prose comes from the seam fake's verbatim corpus echo."""
 
     def __init__(self, existing_path: str, missing_dir: str) -> None:
         self._existing = existing_path
@@ -196,6 +206,20 @@ class _OfflineLoopLLM:
 
         self.config = _Cfg()
 
+    async def complete(self, messages=None, tools=None):
+        """The compaction summarize seam (make_compaction_summarize_fn unpacks a tuple)."""
+        return _Msg(content="compact summary of the earlier turns"), None
+
+    @staticmethod
+    def _knowledge_line(msgs: list) -> str | None:
+        for m in msgs:
+            if m.get("role") == "system" and "### Knowledge" in str(m.get("content", "")):
+                section = str(m["content"]).split("### Knowledge", 1)[1]
+                for ln in section.splitlines():
+                    if ln.strip().startswith("- "):
+                        return ln.strip()[2:]
+        return None
+
     async def stream_complete(self, messages=None, tools=None, on_token=None):
         self._n += 1
         msgs = messages or []
@@ -203,13 +227,27 @@ class _OfflineLoopLLM:
         task = str(last_user.get("content", ""))
         if task.startswith("Review your answer"):  # MECH-01 self-check pass (if enabled)
             return _Msg(content="CONFIRMED"), None
+        if task.startswith("You ended your reply"):
+            # The loop's act-guard nudge after a tool-less completion: the genuine-no-tool
+            # contract is the bare CONFIRMED sentinel (the prior reply is delivered unchanged).
+            return _Msg(content="CONFIRMED"), None
+        if task.startswith("What has the harness learned") or task.startswith(
+            "What durable domain knowledge"
+        ):
+            # The PROBE turn: answer zero-tool from the injected index (BLOCKER 2 rehearsal).
+            chapter = self._knowledge_line(msgs)
+            if chapter:
+                return _Msg(content=f"From memory: {chapter}"), None
+            return _Msg(content="I have no durable knowledge chapter yet."), None
         n_tool = 0
         for m in reversed(msgs):  # tool results since the last user turn = the stage
             if m.get("role") == "user":
                 break
             if m.get("role") == "tool":
                 n_tool += 1
-        tag = next((w for w in ("alpha", "beta", "gamma") if w in task), "alpha")
+        # Per-task stable tag: the SAME query text re-run on another day produces the SAME
+        # missing path -> the same real error -> honest cross-sitting recurrence.
+        tag = hashlib.sha1(" ".join(task.lower().split()).encode("utf-8")).hexdigest()[:6]
         if n_tool == 0:  # stage 1: read a missing path -> a REAL deterministic tool error
             return _Msg(tool_calls=[_ToolCall(
                 id=f"tc{self._n}", name="read",
@@ -219,7 +257,7 @@ class _OfflineLoopLLM:
             return _Msg(tool_calls=[_ToolCall(
                 id=f"tc{self._n}", name="read", arguments={"path": self._existing},
             )]), None
-        return _Msg(content=f"Read the {tag} file after recovering from the missing path."), None
+        return _Msg(content="Handled the request after recovering from the missing path."), None
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +319,24 @@ async def _load_transcript(store: MemoryStore, history_path: Path) -> int:
 # re-run the owner's REAL month queries through the REAL agent loop, one fresh
 # sitting per original day, against the ISOLATED agent home.
 # ---------------------------------------------------------------------------
+def _accepted_agent_ids(agent_id: str) -> set[str | None]:
+    """BLOCKER 1 (mirrors the ORCH-01/03 root-alias handling): the Phase-33.1 default->
+    orchestrator rename migrated the DB but NOT old history.jsonl lines, so the real month's
+    user messages carry agent_id='default'. Requesting EITHER root alias treats
+    {None, 'default', 'orchestrator'} as one root identity; non-root agents keep the narrow
+    filter (their own id + agent-less lines)."""
+    if agent_id in (_ROOT_AGENT_ID, _LEGACY_ROOT_AGENT_ID):
+        return {None, _ROOT_AGENT_ID, _LEGACY_ROOT_AGENT_ID}
+    return {None, agent_id}
+
+
 def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, list[str]]]:
     """READ-ONLY extraction of the owner's real user messages from a copied history.jsonl,
     grouped by ORIGINAL calendar day (local box time — the days the owner actually lived,
     which is what the ≥2-sittings stability gate should honestly measure). Within a day,
-    original ts order. Non-user records and other agents' records are ignored."""
+    original ts order. Non-user records and other agents' records are ignored; root aliases
+    are unified (the real month ≈ 135 user messages / 14 days under agent_id='default')."""
+    accepted = _accepted_agent_ids(agent_id)
     by_day: dict[str, list[tuple[int, str]]] = {}
     for raw in history_path.read_text(encoding="utf-8").splitlines():
         raw = raw.strip()
@@ -297,7 +348,7 @@ def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, l
             continue
         if rec.get("type") != "user_message":
             continue
-        if rec.get("agent_id") not in (None, agent_id):
+        if rec.get("agent_id") not in accepted:
             continue
         content = str(rec.get("content", "")).strip()
         if not content:
@@ -306,6 +357,84 @@ def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, l
         day = time.strftime("%Y%m%d", time.localtime(ts))
         by_day.setdefault(day, []).append((ts, content))
     return [(day, [c for _, c in sorted(rows)]) for day, rows in sorted(by_day.items())]
+
+
+def _root_agent_config(agent: str):
+    """The composed AgentConfig, EXACTLY as start_cmd shapes the root agent's plus the
+    live-store belt-and-braces (BLOCKER 3):
+    - 32k context bound (machine-safety: far below the 96k hard-hang class);
+    - P-A capability floor: web_* (untrusted-ingest) DENIED for a bash/write/edit-holding
+      agent (prompt-injection->host hole; the real root delegates ingestion to a subagent,
+      which this bounded run omits);
+    - deny_patterns for write/edit/bash_exec touching ~/.localharness/agents/* — the live
+      stores are never writable from a replayed turn even though the run is isolated."""
+    from localharness.config.models import AgentConfig
+    from localharness.tools.capabilities import apply_root_capability_floor
+
+    a_cfg = AgentConfig(name=agent, role=_ROLE)
+    a_cfg.context.max_context_tokens = _LOOP_CONTEXT_TOKENS
+    apply_root_capability_floor(a_cfg.tools)
+    home_agents = str(Path.home() / ".localharness" / "agents")
+    a_cfg.permissions.deny_patterns += [
+        f"write({home_agents}/*)",
+        f"edit({home_agents}/*)",
+        f"bash_exec(*{home_agents}*)",
+    ]
+    return a_cfg
+
+
+async def _build_loop(args, store_dir: Path, store: MemoryStore, bus: EventBus,
+                      sid: str, loop_llm: object, token_counter: object | None):
+    """The REAL loop composition shared by accumulation sittings and the probe turn (mirrors
+    start_cmd): builtin tools + memory tools + eviction ContentStore bound, the root config
+    (_root_agent_config), and — MAJOR 8 — the production CompactionPipeline wired with the
+    same LLM, so context pressure compacts exactly as the live CLI does instead of warning."""
+    from localharness.agent.context import (
+        CompactionPipeline,
+        ContentStore,
+        ContextManager,
+        TokenCounter,
+        make_compaction_summarize_fn,
+    )
+    from localharness.agent.loop import AgentLoop
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.tools.builtin import bind_agent_store_tools, register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    content_store = ContentStore()
+    await register_builtin_tools(registry, memory_store=store, eviction_store=content_store)
+    bind_agent_store_tools(registry, content_store)
+
+    a_cfg = _root_agent_config(args.agent)
+    compact_md = store_dir / "agents" / args.agent / "compact.md"  # isolated (never ~/. path)
+    tc = token_counter or TokenCounter()  # offline: the same estimator ContextManager defaults to
+    pipeline = CompactionPipeline(
+        token_counter=tc,
+        tool_result_cap=a_cfg.context.max_tool_output_chars,
+        preserve_first_n=a_cfg.context.preserve_first_n_messages,
+        preserve_last_n=a_cfg.context.preserve_last_n_messages,
+        llm_summarize_fn=make_compaction_summarize_fn(loop_llm),
+        compact_md_path=compact_md,
+    )
+    ctx = ContextManager(
+        max_context_tokens=_LOOP_CONTEXT_TOKENS,
+        preserve_first_n=a_cfg.context.preserve_first_n_messages,
+        preserve_last_n=a_cfg.context.preserve_last_n_messages,
+        pipeline=pipeline,
+        eviction_store=content_store,
+        tool_evict_threshold_chars=a_cfg.context.tool_result_evict_threshold_chars,
+        tool_evict_enabled=a_cfg.context.tool_result_eviction,
+        token_counter=tc,
+    )
+    return AgentLoop(
+        config=a_cfg, llm=loop_llm, bus=bus, context_manager=ctx,
+        tool_registry=registry, permission_evaluator=PermissionEvaluator(),
+        memory_loader=store,
+        compact_md_path=compact_md,
+        kill_file_path=store_dir / "KILL",  # attended stop: `touch <store>/KILL`
+        session_id=sid,
+    )
 
 
 async def _run_sittings(
@@ -321,21 +450,18 @@ async def _run_sittings(
     create_session/end_session close-outs, the bus persisted into the isolated agent home.
     This is the same hot path the CLI runs (start_cmd composition, repl.py drive): the loop
     publishes real Action/Observation events, executes REAL tools, and the shipped gates
-    capture real lessons/corrections. Watchdog-checked before every live turn; raises
-    _WatchdogAbort on a trip. Returns [{day, session_id, turns}] in run order."""
-    # Real-composition imports (lazy: only the --history mode pays them).
-    from localharness.agent.context import ContentStore, ContextManager
-    from localharness.agent.loop import AgentLoop
-    from localharness.agent.permissions import PermissionEvaluator
+    capture real lessons/corrections. Watchdog-checked before every live turn; a KILL file
+    stops accumulation at the next boundary (MAJOR 6b) so killed runs never keep iterating.
+    Returns [{day, session_id, turns}] in run order."""
     from localharness.cli.session_accumulator import SessionAccumulator, derive_session_summary
-    from localharness.config.models import AgentConfig
     from localharness.memory.user_signals import UserSignalDetector
-    from localharness.tools.builtin import bind_agent_store_tools, register_builtin_tools
-    from localharness.tools.registry import ToolRegistry
 
     events_path = store_dir / "agents" / args.agent / "bus-events.jsonl"
     sittings: list[dict] = []
     for day, queries in day_queries:
+        if (store_dir / "KILL").exists():  # MAJOR 6b: stop BEFORE starting another sitting
+            print(f"KILL file present — stopping accumulation before sitting {day}.")
+            break
         if not args.offline and not _watchdog_ok():
             raise _WatchdogAbort(f"MemAvailable below {_MIN_MEM_GIB} GiB before sitting {day}")
         capped = queries[: args.max_turns_per_day] if args.max_turns_per_day else queries
@@ -360,38 +486,16 @@ async def _run_sittings(
         await pw.open()
         acc = SessionAccumulator(bus, args.agent)
         await acc.open()
-
-        registry = ToolRegistry()
-        content_store = ContentStore()
-        await register_builtin_tools(registry, memory_store=store, eviction_store=content_store)
-        bind_agent_store_tools(registry, content_store)
-
-        a_cfg = AgentConfig(name=args.agent, role=_ROLE)
-        a_cfg.context.max_context_tokens = _LOOP_CONTEXT_TOKENS  # machine-safety context bound
-        # P-A capability floor, EXACTLY as start_cmd applies it to the root agent: web_*
-        # (untrusted-ingest) is DENIED for a bash/write/edit-holding agent (prompt-injection->
-        # host hole). Queries needing web ingestion run without web tools — production behavior
-        # (the real root delegates ingestion to a subagent, which this bounded run omits).
-        from localharness.tools.capabilities import apply_root_capability_floor
-        apply_root_capability_floor(a_cfg.tools)
-        ctx = ContextManager(
-            max_context_tokens=_LOOP_CONTEXT_TOKENS,
-            eviction_store=content_store,
-            token_counter=token_counter,
-        )
-        loop = AgentLoop(
-            config=a_cfg, llm=loop_llm, bus=bus, context_manager=ctx,
-            tool_registry=registry, permission_evaluator=PermissionEvaluator(),
-            memory_loader=store,
-            compact_md_path=store_dir / "agents" / args.agent / "compact.md",  # isolated
-            kill_file_path=store_dir / "KILL",  # attended stop: `touch <store>/KILL`
-            session_id=sid,
-        )
+        loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter)
 
         turns = 0
         exit_reason = "complete"
         try:
             for q in capped:
+                if (store_dir / "KILL").exists():  # MAJOR 6b: stop at the next turn boundary
+                    exit_reason = "kill_file"
+                    print(f"KILL file present — stopping sitting {day} after {turns} turns.")
+                    break
                 if not args.offline and not _watchdog_ok():
                     exit_reason = "watchdog_abort"
                     raise _WatchdogAbort(
@@ -424,6 +528,57 @@ async def _run_sittings(
         sittings.append({"day": day, "session_id": sid, "turns": turns})
         print(f"sitting {day}: {turns}/{len(queries)} real queries re-run (session {sid})")
     return sittings
+
+
+async def _probe_turn(args, store_dir: Path, question: str, loop_llm: object,
+                      token_counter: object | None, schema_values: list[str],
+                      model_label: str) -> dict:
+    """BLOCKER 2: the zero-tool metric comes from a REAL turn, not a substring heuristic.
+    After consolidation, ASK the domain question through the same AgentLoop machinery the
+    sittings used — a fresh probe session against the consolidated isolated store, the
+    chapter-bearing index injected via memory_loader, tools REGISTERED — and derive:
+      tool_calls              = the count of real Action(tool_call) events the turn emitted;
+      zero_tool (caller-side) = tool_calls == 0 AND the answer is non-empty;
+      chapter_content_in_answer = any written chapter's tokens majority-appear in the answer
+                                  (recorded for the report, NOT a gate).
+    The write gates are deliberately NOT subscribed — a measurement turn must not write new
+    candidates into the store it is grading."""
+    bus = EventBus(persist_path=store_dir / "agents" / args.agent / "bus-events.jsonl")
+    tool_calls: list = []
+
+    async def _count(e) -> None:
+        if getattr(e, "action_type", None) == "tool_call":
+            tool_calls.append(e)
+
+    bus.subscribe(Action, _count, agent_id=args.agent)
+    store = MemoryStore(agent_id=args.agent, division_id="", org_id="",
+                        base_dir=str(store_dir), bus=bus)
+    await store.open()
+    sid = "sema05-probe"
+    try:
+        await store.create_session(sid, budget={}, model=model_label,
+                                   context_tokens_available=_LOOP_CONTEXT_TOKENS)
+        loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter)
+        await bus.publish(UserMessage(agent_id=args.agent, session_id=sid,
+                                      content=question, channel="terminal"))
+        answer = (await loop.run_turn(task=question) or "").strip()
+        try:
+            await store.end_session(sid, exit_reason="complete", summary=None,
+                                    turn_count=1, action_count=len(tool_calls),
+                                    tokens_in=0, tokens_out=0)
+        except Exception:  # noqa: BLE001 — close-out is best-effort for the probe
+            pass
+    finally:
+        await store.close()
+    return {
+        "session_id": sid,
+        "question": question,
+        "answer": answer,
+        "tool_calls": len(tool_calls),
+        "chapter_content_in_answer": bool(
+            answer and any(grounded(sv, answer) for sv in schema_values)
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -501,38 +656,48 @@ async def _correction_shape_split(store: MemoryStore) -> tuple[int, int]:
     return len(rows) - shape_b, shape_b
 
 
-async def _probe(store: MemoryStore) -> dict:
-    """Proxy-independent FIRST: zero-tool BINARY + tool-call integer, then the mechanical KILL
-    re-check (majority-token grounding + numeric net) per schema, then byte-stability."""
+async def _schema_corpus(store: MemoryStore, schema) -> tuple[list[str], str]:
+    """MAJOR 4: the grading corpus must equal the WRITER'S corpus (chapter_writer._write_one):
+    member+aux bodies PLUS the event-log dereference of payload-thin stat rows (CONTEXT
+    ruling 1), char-capped identically — otherwise a validly-grounded chapter can spuriously
+    KILL because the checker sees less than the writer did. Returns (bodies, capped_corpus);
+    the numeric net grades against bodies only, exactly as the writer does."""
+    from localharness.memory.chapter_writer import _dereference
+
+    members = await _schema_members(store, schema.id)
+    bodies = [m.value for m in members]
+    derefs = await _dereference(store, members)
+    return bodies, "\n".join(bodies + derefs)[:6000]  # == chapter_writer corpus_char_cap default
+
+
+async def _static_checks(store: MemoryStore) -> dict:
+    """The store-side halves of the grade: the mechanical KILL re-check (majority-token
+    grounding + numeric net, per schema, against the WRITER'S corpus), byte-stability
+    (double-render ==), N, and the domain question. The zero-tool metric itself comes from
+    the REAL probe turn (_probe_turn) — never a substring heuristic (BLOCKER 2)."""
     index = (await store.load_context(index_mode=True)).agent_memory_md
     index2 = (await store.load_context(index_mode=True)).agent_memory_md
     byte_stable = index == index2  # SEMA-04 double-render ==
-    knowledge_present = "### Knowledge" in index
-    knowledge_section = (
-        index.split("### Knowledge", 1)[1].split("\n\n", 1)[0].lower()
-        if knowledge_present else ""
-    )
 
     schemas = await _active(store, "node_kind='schema'")
     per_schema: list[dict] = []
     member_tools: list[str] = []
     for s in schemas:
-        members = await _schema_members(store, s.id)
-        bodies = [m.value for m in members]
-        corpus = "\n".join(bodies)
+        bodies, corpus = await _schema_corpus(store, s)
         g_majority = grounded(s.value, corpus)            # the shipped >=50% majority-token net
         unverified = ground_numbers(s.value, bodies)      # the numeric net (empty == clean)
         per_schema.append({
             "key": s.key,
+            "value": s.value[:300],  # the actual chapter text, for the human read
             "grounded": bool(g_majority and not unverified),  # KILL trip: either failing -> kill
             "grounded_majority": bool(g_majority),
             "unverified_numbers": unverified,
         })
+        members = await _schema_members(store, s.id)
         member_tools += [t for t in (_member_tool(m.key) for m in members) if t]
 
     kill_triggered = any(not p["grounded"] for p in per_schema)
     domain_token = Counter(member_tools).most_common(1)[0][0] if member_tools else None
-    zero_tool = bool(knowledge_present and domain_token and domain_token in knowledge_section)
     domain_question = (
         f"What has the harness learned about the `{domain_token}` tool?"
         if domain_token else "What durable domain knowledge has the harness formed?"
@@ -540,37 +705,60 @@ async def _probe(store: MemoryStore) -> dict:
     n_lessons = len(await _active(store, "key LIKE 'learned/%'"))
     return {
         "schemas_written": len(schemas),
+        "schema_values": [s.value for s in schemas],
         "per_schema_grounding": per_schema,
         "kill_triggered": kill_triggered,
         "domain_token": domain_token,
         "domain_question": domain_question,
-        "zero_tool_answered": zero_tool,
-        "tool_calls": 0 if zero_tool else 1,
         "byte_stable": byte_stable,
         "n_lessons": n_lessons,
-        "knowledge_present": knowledge_present,
     }
+
+
+async def _stricter_clusters(store: MemoryStore, min_sessions: int) -> int:
+    """MAJOR 5: re-derive stable clusters under the stricter bar over a pool that EXCLUDES
+    schema nodes — a just-written chapter otherwise joins _load_pool and its own
+    'cluster:sessA|sessB' provenance counts as a FAKE extra session, so the stricter bar
+    falsely holds. Composes clustering.py's own primitives (same defaults as
+    find_stable_clusters) rather than forking its logic; 'cluster:' provenances are filtered
+    out of session sets as a second belt."""
+    from localharness.memory import clustering as _clustering
+
+    pool = [f for f in await _clustering._load_pool(store) if f.node_kind != "schema"]
+    if len(pool) < 2:
+        return 0
+    adj = await _clustering._relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    n = 0
+    for members in _clustering._connected_components(pool, adj):
+        if len(members) < 2:
+            continue
+        sessions = await _clustering._component_sessions(store, members)
+        sessions = {s for s in sessions if not s.startswith("cluster:")}
+        if len(sessions) >= min_sessions:
+            n += 1
+    return n
 
 
 async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> dict:
     """§6 mandatory re-grade under >=1 alternate assumption: (1) a stricter super-majority
-    grounding bar; (2) a stricter cluster-stability bar (cluster_min_sessions + 1)."""
+    grounding bar (against the WRITER'S corpus, MAJOR 4); (2) a stricter cluster-stability
+    bar (cluster_min_sessions + 1) over a schema-free pool (MAJOR 5)."""
     schemas = await _active(store, "node_kind='schema'")
     holds_super = True
     for s in schemas:
-        members = await _schema_members(store, s.id)
-        corpus = "\n".join(m.value for m in members)
+        _bodies, corpus = await _schema_corpus(store, s)
         if not _supermajority_grounded(s.value, corpus):
             holds_super = False
-    stricter = await find_stable_clusters(store, min_sessions=cfg.cluster_min_sessions + 1)
+    n_strict = await _stricter_clusters(store, cfg.cluster_min_sessions + 1)
     return {
         "grounding_supermajority_holds": bool(holds_super),
-        "cluster_min_sessions_plus1_holds": len(stricter) >= 1,
-        "stable_clusters_at_min_sessions_plus1": len(stricter),
+        "cluster_min_sessions_plus1_holds": n_strict >= 1,
+        "stable_clusters_at_min_sessions_plus1": n_strict,
         "notes": (
             "Auto re-grade, post-hoc over the promoted population (members folded but still "
-            "confidence>=0.7). If the headline zero-tool verdict flips under either assumption it "
-            "is disclosed here, never smoothed (the M1 methodology-sensitivity failure mode)."
+            "confidence>=0.7; schema nodes excluded so a written chapter cannot vouch for its "
+            "own stability). If the headline zero-tool verdict flips under either assumption "
+            "it is disclosed here, never smoothed (the M1 methodology-sensitivity failure mode)."
         ),
     }
 
@@ -627,7 +815,15 @@ def _report(v: dict) -> str:
 
     add("## Proxy-independent metrics (lead)\n")
     add(f"- Zero-tool answer (BINARY): **{v['zero_tool_answered']}** — tool calls: **{v['tool_calls']}**")
-    add(f"- Domain question: {v['domain_question']}")
+    p = v["probe"]
+    add(
+        f"- Measured by a REAL probe turn (session `{p['session_id']}`, same loop machinery, "
+        f"tools registered, chapter-bearing index injected): the question was actually asked; "
+        f"tool_calls = the turn's emitted Action(tool_call) events."
+    )
+    add(f"- Domain question: {p['question']}")
+    add(f"- Probe answer: \"{p['answer'][:300]}\"")
+    add(f"- Chapter content substantively in the answer (report-only, not a gate): **{p['chapter_content_in_answer']}**")
     add(f"- N real accumulated lessons (isolated store): **{v['n_lessons']}**  |  chapters written: **{v['schemas_written']}**")
     if live_mode:
         add(f"- Turns driven: {v['turns_driven']}  |  isolated-home transcript records: {v['transcript_records']}\n")
@@ -701,6 +897,14 @@ async def run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # GUARD (minor 9): outputs must never land inside a live agent store either.
+    if "/.localharness/agents/" in str(results):
+        print(
+            "REFUSED: --results points inside ~/.localharness/agents/ (a live agent store). "
+            "Use an isolated dir (e.g. ~/.localharness/sema05-reports/...).",
+            file=sys.stderr,
+        )
+        return 2
     store_dir = Path(args.store).expanduser().resolve()
     # GUARD: the provable MUST use an isolated store — never the live agent store.
     if "/.localharness/agents/" in str(store_dir):
@@ -722,14 +926,30 @@ async def run(args: argparse.Namespace) -> int:
     live_mode = bool(args.history)
 
     if live_mode:
-        history_path = Path(args.history).expanduser()
+        history_path = Path(args.history).expanduser().resolve()
+        # GUARD (minor 9): never point the runner AT the live store's own files — a COPY is
+        # required (read-only intent is not enough protection against future edits).
+        if "/.localharness/agents/" in str(history_path):
+            print(
+                "REFUSED: --history points at a live agent store file. Copy it to a scratch dir "
+                "first (cp ~/.localharness/agents/<agent>/history.jsonl <scratch>/).",
+                file=sys.stderr,
+            )
+            return 2
         bus_events = None
         live_db = history_path.parent / "memory.db"  # sibling of the copied history (read-only)
         if not history_path.exists():
             print(f"PROCESSING FAILURE: history file not found: {history_path}", file=sys.stderr)
             return 1
     else:
-        tp = Path(args.trace).expanduser()
+        tp = Path(args.trace).expanduser().resolve()
+        if "/.localharness/agents/" in str(tp):  # minor 9: same copy-required rule for traces
+            print(
+                "REFUSED: --trace points at a live agent store path. Copy the trace to a scratch "
+                "dir first.",
+                file=sys.stderr,
+            )
+            return 2
         if tp.is_dir():
             bus_events, history_path, live_db = (
                 tp / "bus-events.jsonl", tp / "history.jsonl", tp / "memory.db",
@@ -798,7 +1018,10 @@ async def run(args: argparse.Namespace) -> int:
             print("PROCESSING FAILURE: zero turns driven.", file=sys.stderr)
             return 1
 
-    # GRADE (both modes — the LOCKED bars, unchanged). Fresh store handle over the isolated home.
+    # GRADE (both modes — the LOCKED bars, unchanged). Store handle #1 for accumulation-side
+    # loading + the idle LLM passes + static checks; it CLOSES before the probe turn opens
+    # its own fresh composition (one clean handle per phase, like one process per sitting).
+    method = "live_session_accumulation" if live_mode else "trace_replay"
     store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
     await store.open()
     try:
@@ -816,6 +1039,24 @@ async def run(args: argparse.Namespace) -> int:
         # Snapshot the correction-queue shape split BEFORE reconcile drains it.
         shape_a, shape_b = await _correction_shape_split(store)
 
+        # MAJOR 6a: a KILL file must also stop the GRADING-phase LLM work (consolidation
+        # generations + reconcile looks) — honest ABORTED verdict, never a silent skip.
+        if (store_dir / "KILL").exists():
+            aborted = {
+                "verdict": "ABORTED",
+                "reason": "KILL file present before grading-phase LLM work",
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "method": method,
+                "grading_doc": _GRADING_DOC,
+                "grading_committed": _GRADING_COMMITTED,
+                "sittings": sittings,
+            }
+            (results / "verdict.json").write_text(json.dumps(aborted, indent=2) + "\n",
+                                                  encoding="utf-8")
+            print("ABORTED: KILL file present — no grading-phase LLM work performed.",
+                  file=sys.stderr)
+            return 1
+
         # Seam-ON pass (chapter-writer + mining). reconcile_enabled=False so reconcile runs as an
         # owned direct call below that returns the six shape-aware buckets the grading doc requires.
         cfg = MemoryConsolidationConfig(reconcile_enabled=False)
@@ -827,81 +1068,95 @@ async def run(args: argparse.Namespace) -> int:
         cancel = asyncio.Event()
         rec = await reconcile_corrections(store, llm, cancel, ttl_looks=cfg.reconcile_ttl_looks)
 
-        probe = await _probe(store)
+        static = await _static_checks(store)
         sens = await _sensitivity(store, cfg)
         live = _live_store_counts(live_db, args.agent)
-
-        drained = rec.reverted_restored + rec.reverted_cleared
-        reconcile_total = (rec.confirmed + rec.confirmed_corrected + rec.retired
-                           + drained + rec.undecided)
-        drain_ok = (reconcile_total == 0) or (drained >= 1)
-
-        # Mechanical verdict (36-SEMA05-GRADING.md): KILL leads, then HOLDS, else INCONCLUSIVE.
-        if probe["kill_triggered"]:
-            verdict = "KILL"
-        elif (probe["schemas_written"] >= 1 and probe["zero_tool_answered"]
-              and probe["byte_stable"] and drain_ok):
-            verdict = "HOLDS"
-        else:
-            verdict = "INCONCLUSIVE"
-
-        v = {
-            "verdict": verdict,
-            "offline": bool(args.offline),
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "grading_doc": _GRADING_DOC,
-            "grading_committed": _GRADING_COMMITTED,
-            "method": "live_session_accumulation" if live_mode else "trace_replay",
-            "sittings": sittings,
-            "days": len(sittings) if sittings else None,
-            "queries_total": queries_total if live_mode else None,
-            "turns_driven": sum(s["turns"] for s in sittings) if sittings else None,
-            "max_turns_per_day": args.max_turns_per_day,
-            "n_lessons": probe["n_lessons"],
-            "domain_token": probe["domain_token"],
-            "domain_question": probe["domain_question"],
-            "zero_tool_answered": probe["zero_tool_answered"],
-            "tool_calls": probe["tool_calls"],
-            "schemas_written": probe["schemas_written"],
-            "pass_schemas_written": report.schemas_written,
-            "per_schema_grounding": probe["per_schema_grounding"],
-            "kill_triggered": probe["kill_triggered"],
-            "churn_rate": report.churn_rate,
-            "byte_stable": probe["byte_stable"],
-            "mined": report.mined,
-            "reconcile": {
-                "confirmed": rec.confirmed,
-                "confirmed_corrected": rec.confirmed_corrected,
-                "retired": rec.retired,
-                "reverted_restored": rec.reverted_restored,
-                "reverted_cleared": rec.reverted_cleared,
-                "undecided": rec.undecided,
-                "drained": drained,
-            },
-            "shape_a": shape_a,
-            "shape_b": shape_b,
-            "drain_ok": drain_ok,
-            "sensitivity": sens,
-            "live_store": live,
-            "events_replayed": events_replayed,
-            "transcript_records": transcript_records,
-            "duration_s": round(time.monotonic() - t0, 2),
-        }
-        (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
-        (results / "report.md").write_text(_report(v), encoding="utf-8")
-
-        print(
-            f"SEMA-05 {verdict} [{v['method']}] | N={probe['n_lessons']} "
-            f"chapters={probe['schemas_written']} "
-            f"zero_tool={probe['zero_tool_answered']} tool_calls={probe['tool_calls']} "
-            f"kill={probe['kill_triggered']} byte_stable={probe['byte_stable']} "
-            f"churn={report.churn_rate:.3f} | reconcile drained={drained} "
-            f"(shape_a={shape_a} shape_b={shape_b}) | live_store_chapters={live['schemas']}"
-        )
-        print(f"report: {results / 'report.md'}")
-        return 0  # HOLDS / KILL / INCONCLUSIVE are ALL a successful measurement.
     finally:
         await store.close()
+
+    # BLOCKER 2: the REAL probe turn — ASK the domain question through the same loop machinery
+    # against the consolidated store (chapter-bearing index injected, tools registered) and
+    # count the turn's real tool-call events. Never a substring heuristic.
+    if not args.offline and not _watchdog_ok():
+        print("ABORT (machine-safety): MemAvailable dropped below threshold pre-probe.",
+              file=sys.stderr)
+        return 1
+    probe = await _probe_turn(
+        args, store_dir, static["domain_question"], loop_llm, token_counter,
+        schema_values=static["schema_values"], model_label=args.model or "offline-fake",
+    )
+    zero_tool_answered = probe["tool_calls"] == 0 and bool(probe["answer"])
+
+    drained = rec.reverted_restored + rec.reverted_cleared
+    reconcile_total = (rec.confirmed + rec.confirmed_corrected + rec.retired
+                       + drained + rec.undecided)
+    drain_ok = (reconcile_total == 0) or (drained >= 1)
+
+    # Mechanical verdict (36-SEMA05-GRADING.md): KILL leads, then HOLDS, else INCONCLUSIVE.
+    if static["kill_triggered"]:
+        verdict = "KILL"
+    elif (static["schemas_written"] >= 1 and zero_tool_answered
+          and static["byte_stable"] and drain_ok):
+        verdict = "HOLDS"
+    else:
+        verdict = "INCONCLUSIVE"
+
+    v = {
+        "verdict": verdict,
+        "offline": bool(args.offline),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "grading_doc": _GRADING_DOC,
+        "grading_committed": _GRADING_COMMITTED,
+        "method": method,
+        "sittings": sittings,
+        "days": len(sittings) if sittings else None,
+        "queries_total": queries_total if live_mode else None,
+        "turns_driven": sum(s["turns"] for s in sittings) if sittings else None,
+        "max_turns_per_day": args.max_turns_per_day,
+        "n_lessons": static["n_lessons"],
+        "domain_token": static["domain_token"],
+        "domain_question": static["domain_question"],
+        "zero_tool_answered": zero_tool_answered,
+        "tool_calls": probe["tool_calls"],
+        "probe": probe,
+        "schemas_written": static["schemas_written"],
+        "pass_schemas_written": report.schemas_written,
+        "per_schema_grounding": static["per_schema_grounding"],
+        "kill_triggered": static["kill_triggered"],
+        "churn_rate": report.churn_rate,
+        "byte_stable": static["byte_stable"],
+        "mined": report.mined,
+        "reconcile": {
+            "confirmed": rec.confirmed,
+            "confirmed_corrected": rec.confirmed_corrected,
+            "retired": rec.retired,
+            "reverted_restored": rec.reverted_restored,
+            "reverted_cleared": rec.reverted_cleared,
+            "undecided": rec.undecided,
+            "drained": drained,
+        },
+        "shape_a": shape_a,
+        "shape_b": shape_b,
+        "drain_ok": drain_ok,
+        "sensitivity": sens,
+        "live_store": live,
+        "events_replayed": events_replayed,
+        "transcript_records": transcript_records,
+        "duration_s": round(time.monotonic() - t0, 2),
+    }
+    (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
+    (results / "report.md").write_text(_report(v), encoding="utf-8")
+
+    print(
+        f"SEMA-05 {verdict} [{method}] | N={static['n_lessons']} "
+        f"chapters={static['schemas_written']} "
+        f"zero_tool={zero_tool_answered} tool_calls={probe['tool_calls']} "
+        f"kill={static['kill_triggered']} byte_stable={static['byte_stable']} "
+        f"churn={report.churn_rate:.3f} | reconcile drained={drained} "
+        f"(shape_a={shape_a} shape_b={shape_b}) | live_store_chapters={live['schemas']}"
+    )
+    print(f"report: {results / 'report.md'}")
+    return 0  # HOLDS / KILL / INCONCLUSIVE are ALL a successful measurement.
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -910,10 +1165,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "(or legacy trace replay) into an isolated store + seam-ON pass + verdict"
     )
     p.add_argument("--history", default=None,
-                   help="COPIED real history.jsonl (READ-ONLY). LIVE-SESSION ACCUMULATION — the "
-                        "provable's method: each original day's real queries re-run through the "
-                        "REAL agent loop as one fresh sitting. Sibling memory.db (if present) is "
-                        "read for the live-store watch item.")
+                   help="COPIED real history.jsonl (READ-ONLY; a copy is REQUIRED — live-store "
+                        "paths are refused). LIVE-SESSION ACCUMULATION — the provable's method: "
+                        "each original day's real queries re-run through the REAL agent loop as "
+                        "one fresh sitting (root aliases unified; the real month = 148 queries / "
+                        "15 days). Sibling memory.db (if present) is read for the live-store "
+                        "watch item.")
     p.add_argument("--trace", default=None,
                    help="LEGACY cross-check: dir (or bus-events file) with the COPIED real trace "
                         "to replay through the shipped gates. READ-ONLY. Mutually exclusive with "
