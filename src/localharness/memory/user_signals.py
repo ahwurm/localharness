@@ -4,7 +4,7 @@
 The lexicon is a TRIPWIRE for a later model look (Phase 35 inline coarse / Phase 36 idle
 deep), never a classifier: precision comes from the look + pruning, never from the
 trigger. Recall-first by design — a false trigger costs one logged record, a miss costs
-another bandshell. Zero tokens, zero model calls, deterministic, auditable.
+another missed correction. Zero tokens, zero model calls, deterministic, auditable.
 
 The detector subscribes to UserMessage / TurnCompleted, classifies each user turn from the
 trigger lexicon, and writes a look-ready labeled record (the FULL user message + the
