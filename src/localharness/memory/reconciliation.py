@@ -85,9 +85,10 @@ async def _retag_out(store: "MemoryStore", fact: "Fact", *, new_tier: str, prove
 
 
 async def _revert(store: "MemoryStore", disputed: "Fact") -> str:
-    """Reverse a false-positive correction. Returns "restored" — shape (a): a pre-dispute
-    antecedent was restored active (a clean third row in the chain; no delete, no new
-    primitive). NEVER a no-op.
+    """Reverse a false-positive correction. Returns "restored" (shape a: a pre-dispute
+    antecedent was restored active — a clean third row in the chain, no delete, no new
+    primitive) or "cleared" (shape b / all-disputed: nothing to restore — retagged OUT of the
+    queue with a breadcrumb). NEVER a no-op: every REVERT resolves so no row re-surfaces forever.
 
     Pitfall 5: after stacked disputes the pre-dispute value is NOT history[1]; search history
     newest-first for the first version that is neither `_DISPUTE_MARKER`-prefixed NOR still
@@ -105,9 +106,12 @@ async def _revert(store: "MemoryStore", disputed: "Fact") -> str:
             provenance=f"revert-of:{disputed.provenance or disputed.key}",
         )
         return "restored"
-    # SHAPE (b) quarantine-only / all-disputed chain: no antecedent to restore. The CLEAR path
-    # (BLOCKER 1 — raw retag out of the queue) lands in Task 2.
-    raise NotImplementedError("shape-(b) clear lands in Task 2 (BLOCKER 1)")
+    # SHAPE (b) quarantine-only key (or an all-disputed chain): nothing clean to restore. Retag
+    # OUT so the queue DRAINS (BLOCKER 1) — a raw UPDATE via _retag_out, NOT store_fact (an
+    # identical-value store_fact corroborate-no-ops and would leave it quarantined forever).
+    await _retag_out(store, disputed, new_tier="tier:reconcile_cleared",
+                     provenance=f"revert-cleared:{disputed.provenance or disputed.key}")
+    return "cleared"
 
 
 async def _correction_context(store: "MemoryStore", fact: "Fact", cap: int) -> str:
