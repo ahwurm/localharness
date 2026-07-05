@@ -43,15 +43,21 @@ THEN (both modes — the LOCKED grading, unchanged):
 MACHINE-SAFETY (binding — this box hard-hung twice in 24h under vLLM prefill): the live path is
 attended-only, context-bounded (32k loop window; idle passes char-capped), and gated by a
 MemAvailable watchdog checked before EVERY live turn (aborts below ~30 GiB). `touch <store>/KILL`
-stops the current turn via the loop's own KillWatcher. Offline never touches vLLM. Tools run
-FOR REAL during live sittings (bash/web/write included) — attended-only is the containment.
+stops accumulation at the next turn/day boundary and aborts grading-phase LLM work with an
+honest ABORTED verdict. Offline never touches vLLM. Tools run FOR REAL during live sittings
+(bash/write/edit included; web_* structurally denied) — attended-only is the containment.
+RUNBOOK (attended): before the run, `chmod -R a-w ~/.localharness/agents` (the PHYSICAL
+write-protection layer for the live stores — the deny-pattern globs are path-form-limited);
+restore with `chmod -R u+w ~/.localharness/agents` after. The orchestrator applies/restores
+this at run time. RECOMMENDED: --max-turns-per-day 5 (owner token/GPU discipline — ~75 turns
+instead of the full 148; the uncapped full month remains available).
 
 usage (live, ATTENDED only):
   .venv/bin/python scripts/sema05_month_in_a_day.py \
       --history <scratch>/history.jsonl \
       --store <scratch>/isolated-store \
       --results ~/.localharness/sema05-reports/phase36-$(date +%Y%m%dT%H%M%SZ) \
-      --model <subject> --base-url <url> [--max-turns-per-day N]
+      --model <subject> --base-url <url> --max-turns-per-day 5
 
 Exit codes: 0 = a measurement was produced (HOLDS / KILL / INCONCLUSIVE all succeed);
             1 = processing failure / watchdog abort; 2 = guard refusal (bench/results, live
@@ -84,6 +90,7 @@ from localharness.core.events import (  # noqa: E402
     Action,
     Observation,
     StuckRecovered,
+    TurnFailed,
     UserMessage,
 )
 from localharness.memory.consolidation import ConsolidationPass  # noqa: E402
@@ -366,8 +373,15 @@ def _root_agent_config(agent: str):
     - P-A capability floor: web_* (untrusted-ingest) DENIED for a bash/write/edit-holding
       agent (prompt-injection->host hole; the real root delegates ingestion to a subagent,
       which this bounded run omits);
-    - deny_patterns for write/edit/bash_exec touching ~/.localharness/agents/* — the live
-      stores are never writable from a replayed turn even though the run is isolated."""
+    - deny_patterns for write/edit/bash_exec touching the live agent stores.
+
+    HONEST COVERAGE NOTE (safety-critic residual): these are fnmatch globs over the RAW,
+    PRE-EXPANSION argument strings (write/edit expanduser AFTER the permission check), so
+    coverage is path-form-limited — absolute and ~-prefixed forms are caught; shell-split /
+    cd-relative bash forms are NOT (no shell parsing is attempted here). The PHYSICAL layer
+    for attended runs is `chmod -R a-w ~/.localharness/agents` applied/restored by the
+    orchestrator at run time; these patterns are belt-and-braces above that and above the
+    isolated-store guarantee."""
     from localharness.config.models import AgentConfig
     from localharness.tools.capabilities import apply_root_capability_floor
 
@@ -375,20 +389,24 @@ def _root_agent_config(agent: str):
     a_cfg.context.max_context_tokens = _LOOP_CONTEXT_TOKENS
     apply_root_capability_floor(a_cfg.tools)
     home_agents = str(Path.home() / ".localharness" / "agents")
-    a_cfg.permissions.deny_patterns += [
-        f"write({home_agents}/*)",
-        f"edit({home_agents}/*)",
-        f"bash_exec(*{home_agents}*)",
-    ]
+    for form in (home_agents, "~/.localharness/agents"):
+        a_cfg.permissions.deny_patterns += [
+            f"write({form}/*)",
+            f"edit({form}/*)",
+            f"bash_exec(*{form}*)",
+        ]
     return a_cfg
 
 
 async def _build_loop(args, store_dir: Path, store: MemoryStore, bus: EventBus,
-                      sid: str, loop_llm: object, token_counter: object | None):
+                      sid: str, loop_llm: object, token_counter: object | None,
+                      compact_md: Path | None = None):
     """The REAL loop composition shared by accumulation sittings and the probe turn (mirrors
     start_cmd): builtin tools + memory tools + eviction ContentStore bound, the root config
     (_root_agent_config), and — MAJOR 8 — the production CompactionPipeline wired with the
-    same LLM, so context pressure compacts exactly as the live CLI does instead of warning."""
+    same LLM, so context pressure compacts exactly as the live CLI does instead of warning.
+    `compact_md` overrides the compact.md path — the probe turn passes a FRESH one so a
+    carried accumulation summary can never be a second answer source faking attribution."""
     from localharness.agent.context import (
         CompactionPipeline,
         ContentStore,
@@ -407,7 +425,8 @@ async def _build_loop(args, store_dir: Path, store: MemoryStore, bus: EventBus,
     bind_agent_store_tools(registry, content_store)
 
     a_cfg = _root_agent_config(args.agent)
-    compact_md = store_dir / "agents" / args.agent / "compact.md"  # isolated (never ~/. path)
+    if compact_md is None:
+        compact_md = store_dir / "agents" / args.agent / "compact.md"  # isolated (never ~/. path)
     tc = token_counter or TokenCounter()  # offline: the same estimator ContextManager defaults to
     pipeline = CompactionPipeline(
         token_counter=tc,
@@ -537,20 +556,31 @@ async def _probe_turn(args, store_dir: Path, question: str, loop_llm: object,
     After consolidation, ASK the domain question through the same AgentLoop machinery the
     sittings used — a fresh probe session against the consolidated isolated store, the
     chapter-bearing index injected via memory_loader, tools REGISTERED — and derive:
-      tool_calls              = the count of real Action(tool_call) events the turn emitted;
-      zero_tool (caller-side) = tool_calls == 0 AND the answer is non-empty;
+      tool_calls   = the count of real Action(tool_call) events the turn emitted;
+      turn_failed  = whether the turn published TurnFailed (run_turn NEVER returns an empty
+                     string — error/kill summaries are non-empty prose — so the failure
+                     signal must come from the event, not the answer text);
       chapter_content_in_answer = any written chapter's tokens majority-appear in the answer
-                                  (recorded for the report, NOT a gate).
-    The write gates are deliberately NOT subscribed — a measurement turn must not write new
-    candidates into the store it is grading."""
+                     (substring/paraphrase-tolerant via the majority-token net).
+    The caller gates zero_tool on ALL THREE (locked bar: 'answered BY the Knowledge line');
+    a failed or off-chapter probe demotes to INCONCLUSIVE — false-negative is the only
+    permitted error direction. The probe gets a FRESH compact-probe.md so a carried
+    accumulation summary can never be a second answer source faking attribution. The write
+    gates are deliberately NOT subscribed — a measurement turn must not write new candidates
+    into the store it is grading."""
     bus = EventBus(persist_path=store_dir / "agents" / args.agent / "bus-events.jsonl")
     tool_calls: list = []
+    failures: list = []
 
     async def _count(e) -> None:
         if getattr(e, "action_type", None) == "tool_call":
             tool_calls.append(e)
 
+    async def _failed(e) -> None:
+        failures.append(e)
+
     bus.subscribe(Action, _count, agent_id=args.agent)
+    bus.subscribe(TurnFailed, _failed, agent_id=args.agent)
     store = MemoryStore(agent_id=args.agent, division_id="", org_id="",
                         base_dir=str(store_dir), bus=bus)
     await store.open()
@@ -558,7 +588,8 @@ async def _probe_turn(args, store_dir: Path, question: str, loop_llm: object,
     try:
         await store.create_session(sid, budget={}, model=model_label,
                                    context_tokens_available=_LOOP_CONTEXT_TOKENS)
-        loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter)
+        loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter,
+                                 compact_md=store_dir / "compact-probe.md")
         await bus.publish(UserMessage(agent_id=args.agent, session_id=sid,
                                       content=question, channel="terminal"))
         answer = (await loop.run_turn(task=question) or "").strip()
@@ -575,6 +606,7 @@ async def _probe_turn(args, store_dir: Path, question: str, loop_llm: object,
         "question": question,
         "answer": answer,
         "tool_calls": len(tool_calls),
+        "turn_failed": bool(failures),
         "chapter_content_in_answer": bool(
             answer and any(grounded(sv, answer) for sv in schema_values)
         ),
@@ -715,28 +747,32 @@ async def _static_checks(store: MemoryStore) -> dict:
     }
 
 
-async def _stricter_clusters(store: MemoryStore, min_sessions: int) -> int:
+async def _stricter_clusters(store: MemoryStore, min_sessions: int) -> tuple[int, list[list[str]]]:
     """MAJOR 5: re-derive stable clusters under the stricter bar over a pool that EXCLUDES
     schema nodes — a just-written chapter otherwise joins _load_pool and its own
     'cluster:sessA|sessB' provenance counts as a FAKE extra session, so the stricter bar
     falsely holds. Composes clustering.py's own primitives (same defaults as
     find_stable_clusters) rather than forking its logic; 'cluster:' provenances are filtered
-    out of session sets as a second belt."""
+    out of session sets as a second belt. Returns (n_meeting_bar, per-candidate-cluster
+    sorted session-id lists) — the lists go into the verdict so plus1 legitimacy is
+    hostile-read-verifiable from the artifact alone."""
     from localharness.memory import clustering as _clustering
 
     pool = [f for f in await _clustering._load_pool(store) if f.node_kind != "schema"]
     if len(pool) < 2:
-        return 0
+        return 0, []
     adj = await _clustering._relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
     n = 0
+    per_cluster: list[list[str]] = []
     for members in _clustering._connected_components(pool, adj):
         if len(members) < 2:
             continue
         sessions = await _clustering._component_sessions(store, members)
         sessions = {s for s in sessions if not s.startswith("cluster:")}
+        per_cluster.append(sorted(sessions))
         if len(sessions) >= min_sessions:
             n += 1
-    return n
+    return n, per_cluster
 
 
 async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> dict:
@@ -749,11 +785,14 @@ async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> di
         _bodies, corpus = await _schema_corpus(store, s)
         if not _supermajority_grounded(s.value, corpus):
             holds_super = False
-    n_strict = await _stricter_clusters(store, cfg.cluster_min_sessions + 1)
+    n_strict, cluster_sessions = await _stricter_clusters(store, cfg.cluster_min_sessions + 1)
     return {
         "grounding_supermajority_holds": bool(holds_super),
         "cluster_min_sessions_plus1_holds": n_strict >= 1,
         "stable_clusters_at_min_sessions_plus1": n_strict,
+        # Per-candidate-cluster sorted session ids (schema-free pool, 'cluster:' filtered) —
+        # a hostile reader can verify the plus1 verdict from the artifact alone.
+        "stricter_cluster_sessions": cluster_sessions,
         "notes": (
             "Auto re-grade, post-hoc over the promoted population (members folded but still "
             "confidence>=0.7; schema nodes excluded so a written chapter cannot vouch for its "
@@ -1085,7 +1124,17 @@ async def run(args: argparse.Namespace) -> int:
         args, store_dir, static["domain_question"], loop_llm, token_counter,
         schema_values=static["schema_values"], model_label=args.model or "offline-fake",
     )
-    zero_tool_answered = probe["tool_calls"] == 0 and bool(probe["answer"])
+    # The zero-tool gate (locked bar: 'answered BY the Knowledge line'): the turn must have
+    # SUCCEEDED (run_turn never returns empty — error/kill summaries are prose, so the
+    # failure signal is the TurnFailed event), used ZERO tools, and the answer must carry
+    # the chapter's content (attribution; substring/paraphrase-tolerant majority-token net).
+    # A failed or off-chapter probe demotes to INCONCLUSIVE — false-negative is the only
+    # permitted error direction.
+    zero_tool_answered = (
+        probe["tool_calls"] == 0
+        and not probe["turn_failed"]
+        and probe["chapter_content_in_answer"]
+    )
 
     drained = rec.reverted_restored + rec.reverted_cleared
     reconcile_total = (rec.confirmed + rec.confirmed_corrected + rec.retired
