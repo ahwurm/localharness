@@ -1,22 +1,25 @@
 """Offline unit test for scripts/sema05_month_in_a_day.py (SEMA-05 month-in-a-day runner).
 
-Drives the runner in --offline mode (bundled FakeLLM) against a TINY real-shaped bus-events
-trace (test fixture — fabricated fixtures are allowed offline per 36-CONTEXT; the PROVABLE path
-in Task 3 uses only real events). Asserts:
-  - the full pipeline runs: replay real-shaped events through the SHIPPED gates into an ISOLATED
-    store -> seam-ON consolidation (FakeLLM) -> verdict.json + report.md emitted into --results;
-  - verdict.json carries the proxy-independent metrics (zero-tool BINARY + tool-call integer),
-    per-schema grounding (the KILL re-check), the six shape-aware reconcile buckets, and the
-    honest live-store block;
-  - the runner writes ONLY under --store / --results and never touches ~/.localharness.
+Covers BOTH accumulation modes offline (fabricated fixtures are allowed in tests per
+36-CONTEXT; the PROVABLE in Task 3 uses only real data):
 
-The fixture is engineered so the replay yields two related `read` lessons across four sittings
-(one grounded chapter) plus the dogfood correction sequence — so schemas_written >= 1 and a
-zero-tool answer are asserted, not merely the verdict shape.
+1. LIVE-SESSION ACCUMULATION (--history; THE provable method, owner steer 2026-07-05 17:53):
+   a tiny synthetic history.jsonl of "owner month queries" is re-run through the REAL
+   AgentLoop (real bus, real gates, real builtin tools, real memory store; fake LLM at the
+   client seam only) — one fresh sitting per original day — then the seam-ON pass + the
+   LOCKED grading. Asserts day->sitting grouping, real-loop/real-tool invocation (sessions +
+   tool_observations rows), the --max-turns-per-day cap, and the verdict shape + the
+   method-amendment disclosure.
+
+2. TRACE REPLAY (--trace; legacy cross-check): a real-shaped bus-events trace replayed
+   through the shipped gates. Asserts the verdict shape (proxy-independent metrics,
+   per-schema KILL re-check, six shape-aware reconcile buckets incl. the shape-(b) DRAIN,
+   live-store honesty) and that the runner writes ONLY under --store / --results.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -191,3 +194,109 @@ async def test_guard_refuses_shared_bench_results_dir(tmp_path: Path):
     ])
     code = await sema.run(args)
     assert code == 2, "a --results path inside bench/results must be refused (exit 2)"
+
+
+# ---------------------------------------------------------------------------
+# Live-session accumulation mode (--history) — the provable's method (owner steer)
+# ---------------------------------------------------------------------------
+
+def _write_month_history(path: Path, *, days: int = 2) -> None:
+    """A tiny synthetic 'owner month' history.jsonl (fixture — tests may fabricate): the SAME
+    two queries repeated on `days` distinct calendar days (3 days apart), plus one assistant
+    row and one foreign-agent row that extraction must ignore. The queries make the bundled
+    offline loop-LLM read a missing path (real ReadTool error) then recover — so the shipped
+    WriteGate captures a real resolved_error lesson per query per sitting, and recurrence
+    across sittings promotes them (the honest ≥2-sittings stability warrant)."""
+    base = 1_750_000_000
+    rows = []
+    for d in range(days):
+        for i, tag in enumerate(("alpha", "beta")):
+            rows.append({"v": 1, "agent_id": AGENT, "type": "user_message", "id": f"m{d}{i}",
+                         "session_id": f"orig-{d}", "ts": base + d * 3 * 86400 + i * 60,
+                         "content": f"please read the {tag} file"})
+    rows.append({"v": 1, "agent_id": AGENT, "type": "assistant_message", "id": "a0",
+                 "session_id": "orig-0", "ts": base + 5, "content": "sure thing"})
+    rows.append({"v": 1, "agent_id": "someone-else", "type": "user_message", "id": "f0",
+                 "session_id": "orig-0", "ts": base + 6, "content": "not our agent's query"})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_live_mode_groups_days_into_sittings_and_drives_real_loop(tmp_path: Path):
+    """--history mode: each original day becomes one fresh sitting driven through the REAL
+    AgentLoop; real tools execute; the seam-ON pass then grades with the LOCKED bars."""
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    storedir, resultsdir = tmp_path / "store", tmp_path / "results"
+
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(storedir),
+        "--results", str(resultsdir), "--agent", AGENT,
+    ])
+    code = await sema.run(args)
+    assert code == 0
+
+    v = json.loads((resultsdir / "verdict.json").read_text(encoding="utf-8"))
+    # Day -> sitting grouping: 2 original days -> 2 fresh sittings, distinct session ids,
+    # 2 turns each (the assistant + foreign-agent rows were ignored).
+    assert v["method"] == "live_session_accumulation"
+    assert len(v["sittings"]) == 2
+    assert len({s["session_id"] for s in v["sittings"]}) == 2
+    assert [s["turns"] for s in v["sittings"]] == [2, 2]
+
+    # REAL-loop invocation: real sessions rows (create/end_session per sitting) and real
+    # tool_observations (the loop dispatched REAL read tools: 2 days x 2 queries x 2 reads).
+    db = next(storedir.rglob("memory.db"))
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    n_sessions = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    n_obs = con.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0]
+    con.close()
+    assert n_sessions == 2
+    assert n_obs >= 8
+
+    # Verdict shape intact (same LOCKED bars as trace mode) + non-vacuous: the repeated real
+    # tool-error lessons cluster across the two sittings into one grounded zero-tool chapter.
+    assert v["schemas_written"] >= 1
+    assert v["zero_tool_answered"] is True and v["tool_calls"] == 0
+    assert v["kill_triggered"] is False and v["byte_stable"] is True
+    for bucket in ("confirmed", "confirmed_corrected", "retired",
+                   "reverted_restored", "reverted_cleared", "undecided"):
+        assert isinstance(v["reconcile"][bucket], int)
+    assert "sensitivity" in v and "live_store" in v
+
+    # The method amendment is disclosed in the report, quoting the LOCKED grading timestamp.
+    rep = (resultsdir / "report.md").read_text(encoding="utf-8")
+    assert "Method amendment" in rep
+    assert "2026-07-05T17:43:47Z" in rep
+
+
+@pytest.mark.asyncio
+async def test_live_mode_max_turns_per_day_cap_and_mode_exclusivity(tmp_path: Path):
+    """--max-turns-per-day bounds each sitting; --history/--trace are mutually exclusive."""
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+        "--max-turns-per-day", "1",
+    ])
+    code = await sema.run(args)
+    assert code == 0  # INCONCLUSIVE (1 lesson -> no 2-member cluster) is still a measurement
+    v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
+    assert [s["turns"] for s in v["sittings"]] == [1, 1]
+    assert v["max_turns_per_day"] == 1
+
+    # Exactly one accumulation mode: both --history and --trace -> guard refusal (exit 2).
+    both = sema._parse_args([
+        "--offline", "--history", str(hist), "--trace", str(tmp_path / "scratch"),
+        "--store", str(tmp_path / "s2"), "--results", str(tmp_path / "r2"), "--agent", AGENT,
+    ])
+    assert await sema.run(both) == 2
+    # Neither mode -> same refusal.
+    neither = sema._parse_args([
+        "--offline", "--store", str(tmp_path / "s3"),
+        "--results", str(tmp_path / "r3"), "--agent", AGENT,
+    ])
+    assert await sema.run(neither) == 2
