@@ -10,6 +10,7 @@ NOTHING. Seed content is fixture-fake (allowed in tests; only the SEMA-05 provab
 fabricated lesson text — see 36-CONTEXT.md).
 """
 import asyncio
+import time
 
 import pytest
 
@@ -24,6 +25,12 @@ _READ_A = "The read tool returned FileNotFound on a relative path; retrying with
 _READ_B = "The read tool raised a permission problem on a protected path; the absolute path form resolved it cleanly."
 _READ_C = "The read tool timed out once then, using the absolute path directly, resolved on the second attempt."
 _GROUNDED = "read tool returned FileNotFound retrying with the absolute path resolved"
+# A second domain (docker) sharing NO salient token with the read lessons — a distinct cluster.
+_DOCK_A = "The docker build failed pulling from the registry; a container cache prune cleared the broken layer."
+_DOCK_B = "The docker container refused to start until the registry credentials were refreshed before the pull."
+# Two depth-N chapter bodies sharing "absolute"/"resolves"/"recovers" — they cluster one level up.
+_CHAP_A = "Chapter: the read tool reliably recovers when the absolute path resolves the lookup failure."
+_CHAP_B = "Chapter: the read tool recovers on protected paths once the absolute path resolves cleanly."
 
 
 @pytest.fixture
@@ -72,6 +79,16 @@ async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None, pro
         await store._db.execute("UPDATE facts SET retrieval_strength = ? WHERE id = ?", (rs, f.id))
         await store._db.commit()
     return f
+
+
+async def _seed_schema(store, suffix, body, depth, prov):
+    """A chapter node exactly as the writer emits it (node_kind='schema', depth:N, 0.8) — used
+    to build a chapter-of-chapters cluster and to probe the depth cap."""
+    return await store.store_fact(
+        key=f"schema/cluster/{suffix}", value=body,
+        tags=["schema", "tier:schema", f"depth:{depth}"],
+        confidence=0.8, source="chapter_writer", provenance=prov, node_kind="schema",
+    )
 
 
 async def _member_of_dst(store, src_id) -> set[int]:
@@ -215,3 +232,74 @@ async def test_write_budget_caps_schema_count(store):
 
     assert len(result) == 3
     assert await _schema_cluster_count(store) == 3
+
+
+# ---------------------------------------------------------------------------------------
+# Task 2 — depth cap + member fold-out + cancellation/serial-gate proof
+# ---------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_depth_cap_refuses_deep_cluster(store):
+    """A cluster of depth:2 chapters would yield a depth:3 chapter (> cap 2) — REFUSED, no write.
+    lesson(0) -> chapter(depth:1) -> chapter-of-chapters(depth:2) -> stop."""
+    await _seed_schema(store, "deepA", _CHAP_A, 2, "cluster:xa")
+    await _seed_schema(store, "deepB", _CHAP_B, 2, "cluster:xb")
+
+    result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
+
+    assert result == []
+    assert await _schema_cluster_count(store) == 2  # only the two seeds; no depth:3 chapter
+
+
+@pytest.mark.asyncio
+async def test_depth1_cluster_yields_depth2_chapter(store):
+    """Chapter-of-chapters is allowed exactly once: a cluster of depth:1 chapters -> depth:2."""
+    await _seed_schema(store, "d1A", _CHAP_A, 1, "cluster:xa")
+    await _seed_schema(store, "d1B", _CHAP_B, 1, "cluster:xb")
+
+    result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
+
+    assert len(result) == 1
+    assert "depth:2" in result[0].tags
+
+
+@pytest.mark.asyncio
+async def test_member_foldout_demotes_but_searchable(store):
+    """After a chapter is written, each member's retrieval_strength drops to 0.15 (out of the
+    ambient index) yet the member stays query_facts-searchable — the pile folds into the chapter."""
+    m1 = await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    m2 = await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    m3 = await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+
+    result = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
+    assert len(result) == 1
+
+    for m in (m1, m2, m3):
+        got = await store.get_fact(m.key)
+        assert got.retrieval_strength == 0.15   # below the 0.2 index gate
+        assert got.confidence == 0.8            # trust untouched — only accessibility demoted
+    hits = {f.key for f in await store.query_facts(FactQuery(text="resolved"))}
+    assert m1.key in hits                        # still searchable (rs is a non-indexed column)
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_further_clusters(store):
+    """A cancel_event set mid-generation stops the pass without hanging (partial result) and the
+    generation task is truly cancelled — the serial inference gate is released promptly."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_learned(store, "docker", "build_fail", _DOCK_A, ["s3"], lesson="d1")
+    await _seed_learned(store, "docker", "start_fail", _DOCK_B, ["s4"], lesson="d2")
+
+    llm = _SlowLLM(delay=10.0)
+    cancel = asyncio.Event()
+    t0 = time.monotonic()
+    task = asyncio.create_task(write_cluster_schemas(store, llm, cancel))
+    await asyncio.sleep(0.1)
+    cancel.set()  # what a user turn does via the scheduler
+    result = await asyncio.wait_for(task, timeout=3.0)
+
+    assert result == []                    # cancelled before the first chapter completed
+    assert time.monotonic() - t0 < 3.0     # nobody waited 10s behind the generation
+    assert llm.cancelled                   # generation cancelled -> inference gate released
+    assert await _schema_cluster_count(store) == 0
