@@ -220,3 +220,84 @@ async def test_set_cancel_event_stops_loop_without_hang(tmp_path: Path):
         assert active is not None and "tier:correction_pending" in active.tags  # untouched
     finally:
         await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — REVERT: restore (shape a, dispute-stack-safe) / clear (shape b, BLOCKER 1)
+# ---------------------------------------------------------------------------
+
+
+async def test_revert_restores_pre_dispute_value(tmp_path: Path):
+    # Shape (a) false positive: _revert restores the pre-dispute value active (via history,
+    # not string-strip) — a wrong correction is recoverable.
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = await _seed_shape_a(store, pre_value="the capital is Sydney", provenance="evt-syd")
+        report = await reconcile_corrections(store, _FakeLLM("REVERT"), asyncio.Event())
+        active = await store.get_fact(key)
+        assert active is not None
+        assert active.value == "the capital is Sydney"          # original restored
+        assert _DISPUTE_MARKER not in active.value
+        assert "tier:correction_pending" not in active.tags
+        assert report.reverted_restored == 1
+        assert report.reverted_cleared == 0
+    finally:
+        await store.close()
+
+
+async def test_revert_after_two_stacked_disputes_restores_original(tmp_path: Path):
+    # Pitfall 5: after TWO stacked disputes on one key, _revert must restore the ORIGINAL, not
+    # the first wrap (newest-first search for the first non-marker, non-correction_pending row).
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = "profile/city"
+        await store.store_fact(key=key, value="Berlin", confidence=0.8)  # original
+        await store.store_fact(key=key, value=f"{_DISPUTE_MARKER} Berlin",
+                               tags=list(_PENDING_TAGS), confidence=0.6, provenance="evt1")
+        await store.store_fact(key=key, value=f"{_DISPUTE_MARKER} {_DISPUTE_MARKER} Berlin",
+                               tags=list(_PENDING_TAGS), confidence=0.6, provenance="evt2")
+        report = await reconcile_corrections(store, _FakeLLM("REVERT"), asyncio.Event())
+        active = await store.get_fact(key)
+        assert active is not None
+        assert active.value == "Berlin"                         # the ORIGINAL, not the first wrap
+        assert _DISPUTE_MARKER not in active.value
+        assert report.reverted_restored == 1
+    finally:
+        await store.close()
+
+
+async def test_revert_restore_row_carries_provenance_breadcrumb(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = await _seed_shape_a(store, pre_value="the capital is Sydney", provenance="evt-syd2")
+        await reconcile_corrections(store, _FakeLLM("REVERT"), asyncio.Event())
+        active = await store.get_fact(key)
+        assert active is not None
+        assert active.provenance.startswith("revert-of:")
+    finally:
+        await store.close()
+
+
+async def test_revert_shape_b_clears_queue_no_antecedent(tmp_path: Path):
+    # BLOCKER 1: a fresh quarantine-only fact has NO clean antecedent -> REVERT CLEARS it out of
+    # tier:correction_pending (raw retag, breadcrumb), never restores, never re-surfaces, and is
+    # NOT deleted (still searchable). Counted as reverted_cleared, not reverted_restored.
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = await _seed_shape_b(store)
+        report = await reconcile_corrections(store, _FakeLLM("REVERT"), asyncio.Event())
+        active = await store.get_fact(key)
+        assert active is not None                               # still present (not deleted)
+        assert "tier:correction_pending" not in active.tags     # cleared out of the queue
+        assert "tier:reconcile_cleared" in active.tags
+        assert active.provenance.startswith("revert-cleared:")
+        keys = [f.key for f in await store.query_facts(FactQuery(limit=200))]
+        assert key in keys                                      # still searchable
+        assert report.reverted_cleared == 1
+        assert report.reverted_restored == 0
+    finally:
+        await store.close()
