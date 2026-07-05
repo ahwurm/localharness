@@ -4,6 +4,54 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.8.0] — 2026-07-05
+
+### Added
+- **The write gate now predicts.** Alongside the motif capture floor (a tool error that
+  later resolved, a stuck loop that recovered), the harness now scores *every* tool outcome
+  against that tool's own history — per-tool statistical priors computed in pure SQL, zero
+  model calls, zero decode tokens. Each outcome falls into one of four quadrants — *routine*,
+  *surprising failure*, *unsurprising failure*, *quiet surprise* — plus an honest *cold start*
+  when a tool has too little history to predict from. A **surprising failure** (a
+  normally-reliable tool erroring) becomes a captured memory; an **expected** failure stops
+  being news — the junk the old motif gate had no way to suppress. The whole
+  expectation→outcome→surprise reconciliation rides the event bus the harness already carries,
+  as a sibling subscriber that changes no existing gate.
+- **User corrections write quarantined, reversible facts.** A zero-NLU tripwire flags
+  correction-class turns ("no", "i meant…", "actually…"). An explicit correction *phrase*
+  scoped-supersedes the single most-recently-staged fact it was most likely about — the full
+  original text is preserved behind a dispute marker, never truncated or erased — while every
+  other in-scope correction writes a standalone quarantine fact from the user's own words.
+  All reversible through fact history; all keyed so a repeat corroborates instead of
+  duplicating.
+- **Everything new is capture, not behavior.** Every write in this tranche lands *below* the
+  injected-memory visibility line (confidence ≥ 0.7 **and** retrieval-strength ≥ 0.2): the new
+  facts live in the store and are searchable, but they do not enter the prompt — and so do not
+  change what the agent *does* — until an idle consolidation pass confirms them. Correction and
+  disputed rows are held back from promotion pending a deeper reconciliation pass. One config
+  lever (`predictive_gate.write_live`) reverts the entire live-write path to motif-only capture
+  while the scorer keeps logging telemetry — a pre-committed KILL.
+- **Proven by offline replay.** Replaying one real bus-events trace through both gates, the
+  predictive gate's capture recall on the surprising-failure population is **73/73** versus the
+  motif gate's **68/73** — measured directly against the population, independent of any
+  hand-label proxy. The junk-write-rate comparison is methodology-sensitive (it depends on the
+  grading applied — under the strictest re-grade the precision comparison inverts, while the
+  recall result is grading-independent), so both gradings ship in the repo's report tooling
+  (`scripts/gate_replay_comparison.py`) rather than as one headline number.
+
+### Known limits (named, not hidden)
+- **Correction detection is lexical.** The trigger lexicon is a recall-first tripwire, not a
+  classifier — measured recall ~23% on a real hand-labeled census, so corrections that don't
+  use a trigger word are missed. A model look is future work; a false trigger costs one logged
+  record, a miss costs a missed correction.
+- **Expected-failure suppression and stuck-recovery are synthetic-proven.** The real trace
+  carries zero unsurprising-failure and zero stuck-recovered events; both are covered by unit
+  tests, not a real occurrence — disclosed, not declared won.
+- **Statistical priors are per-tool and silent below 5 observations** of a tool (neutral
+  score, cold-start quadrant); the motif capture floor covers from turn one.
+- **The injected block still does not steer the first move.** New writes sit below the
+  visibility line, so they capture — they do not yet change the agent's opening action.
+
 ## [0.7.0] — 2026-07-04
 
 ### Added

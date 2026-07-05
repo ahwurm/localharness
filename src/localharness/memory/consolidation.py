@@ -146,11 +146,17 @@ class ConsolidationPass:
         # actually means.
         from localharness.memory.sqlite import _row_to_fact
 
+        # EXCLUDE disputed/correction facts (critic MAJOR 2): a correction_phrase supersede
+        # writes the disputed row back onto the ORIGINAL gate/ key with tier:correction_pending,
+        # which would otherwise group + promote to 0.8 (into the injected block) here — the
+        # exact "<0.7 until Phase 36" violation. The tier tag catches BOTH the gate/-keyed
+        # disputed supersede rows and the correction/quarantine/ facts in one predicate.
         assert self._store._db is not None
         async with self._store._db.execute(
             f"SELECT {self._store._FACT_COLS} FROM facts "
             "WHERE agent_id = ? AND status = 'active' "
             "AND tags LIKE '%\"pending_consolidation\"%' "
+            "AND tags NOT LIKE '%\"tier:correction_pending\"%' "
             "ORDER BY created_at ASC, id ASC LIMIT ?",
             (self._store._agent_id, self._cfg.iteration_cap),
         ) as cur:
@@ -549,10 +555,20 @@ class ConsolidationScheduler:
 
     async def _has_work(self) -> bool:
         assert self._store._db is not None
+        # Scope the pending probe to gate/-keyed candidates (critic minor 1): predgate/ +
+        # correction/quarantine/ telemetry carry pending_consolidation forever (they never
+        # match the gate/ promotion prefix, so _untag_candidate never clears them), which
+        # otherwise pins _has_work True every sitting and defeats the staleness optimization.
+        # gate/ is exactly the set _step_promote_recurring promotes — WriteGate's convention.
+        # Disputed rows are likewise excluded (critic re-verdict residual): a correction
+        # supersede on a staged gate/ candidate keeps the gate/ key but carries
+        # tier:correction_pending, which promotion skips — so it can never be untagged and
+        # must not count as work either. Mirrors _step_promote_recurring's exclusion.
         q = (
             "SELECT EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND access_count_staged > 0), "
             "EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND status = 'active' "
-            "       AND tags LIKE '%\"pending_consolidation\"%'), "
+            "       AND tags LIKE '%\"pending_consolidation\"%' AND key LIKE 'gate/%' "
+            "       AND tags NOT LIKE '%\"tier:correction_pending\"%'), "
             "(SELECT COUNT(*) FROM facts WHERE agent_id = :a AND status = 'active' "
             "       AND retrieval_strength >= 0.2)"
         )

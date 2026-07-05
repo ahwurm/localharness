@@ -68,6 +68,91 @@ async def test_open_applies_migration(tmp_path: Path):
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_migration_v3_to_v4(tmp_path: Path):
+    """A hand-built v3 store opens at v4 with all four additive COLL tables present and the
+    pre-existing fact + session rows byte-unchanged (Phase 34: additive-only migration)."""
+    import aiosqlite
+
+    from localharness.memory.sqlite import MIGRATION_V2_TO_V3_SQL, SCHEMA_V2_SQL
+
+    # Build a real v3 DB by hand — from the module's OWN constants so the fixture can
+    # never drift from the real v2->v3 shape — at the exact path MemoryStore will open.
+    agent_dir = tmp_path / "agents" / "test-agent"
+    agent_dir.mkdir(parents=True)
+    db_path = agent_dir / "memory.db"
+    conn = await aiosqlite.connect(str(db_path))
+    try:
+        await conn.executescript(SCHEMA_V2_SQL)
+        await conn.executescript(MIGRATION_V2_TO_V3_SQL)  # stamps user_version = 3
+        await conn.execute(
+            "INSERT INTO facts (agent_id, key, value, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("test-agent", "pre-v4-fact", "survives migration", 111, 222),
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, started_at, summary) VALUES (?, ?, ?, ?)",
+            ("pre-v4-sess", "test-agent", 333, "an old sitting"),
+        )
+        await conn.commit()
+        async with conn.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == 3  # the fixture really is a v3 DB
+        async with conn.execute(
+            "SELECT id, agent_id, key, value, confidence, created_at, updated_at, status FROM facts"
+        ) as cur:
+            fact_before = tuple(await cur.fetchone())
+        async with conn.execute(
+            "SELECT id, agent_id, started_at, summary FROM sessions"
+        ) as cur:
+            sess_before = tuple(await cur.fetchone())
+    finally:
+        await conn.close()
+
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        async with store._db.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == 4  # ladder carried v3 -> v4
+        async with store._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('tool_observations', 'surprise_scores', 'user_signals', 'staged_snapshots')"
+        ) as cur:
+            tables = {r[0] for r in await cur.fetchall()}
+        assert tables == {
+            "tool_observations", "surprise_scores", "user_signals", "staged_snapshots"
+        }
+        # facts / sessions rows are byte-unchanged through the additive migration.
+        async with store._db.execute(
+            "SELECT id, agent_id, key, value, confidence, created_at, updated_at, status FROM facts"
+        ) as cur:
+            assert tuple(await cur.fetchone()) == fact_before
+        async with store._db.execute(
+            "SELECT id, agent_id, started_at, summary FROM sessions"
+        ) as cur:
+            assert tuple(await cur.fetchone()) == sess_before
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_v4_idempotent_reopen(tmp_path: Path):
+    """Open + close + reopen leaves the store at v4 — no duplicate tables, no error."""
+    store = make_store(tmp_path)
+    await store.open()
+    await store.close()
+
+    store2 = make_store(tmp_path)
+    await store2.open()
+    try:
+        async with store2._db.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == 4
+        async with store2._db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'tool_observations'"
+        ) as cur:
+            assert (await cur.fetchone())[0] == 1  # exactly one — reopen did not re-create
+    finally:
+        await store2.close()
+
+
 # ---------------------------------------------------------------------------
 # store_fact / get_fact
 # ---------------------------------------------------------------------------
@@ -227,6 +312,87 @@ async def test_query_facts_punctuation_only_text(memory_store: MemoryStore):
     """Nothing searchable in the query → empty result, not an FTS error or a full scan."""
     await memory_store.store_fact("k1", "plain value")
     assert await memory_store.query_facts(FactQuery(text="--- ::: !!")) == []
+
+
+# ---------------------------------------------------------------------------
+# COLL-01 temporal filter (34-05): FactQuery.since/until on facts.updated_at
+# ---------------------------------------------------------------------------
+
+async def _seed_temporal_trio(store: MemoryStore, now: int) -> None:
+    """Three facts sharing an FTS marker word, updated_at forced to T-2d / T-1d / T.
+    The test controls time via a direct UPDATE (the write path sets updated_at, so we
+    overwrite it deterministically — no sleeps)."""
+    day = 86400
+    await store.store_fact("fact_old", "temporal marker old body")
+    await store.store_fact("fact_mid", "temporal marker mid body")
+    await store.store_fact("fact_new", "temporal marker new body")
+    for key, ts in (("fact_old", now - 2 * day), ("fact_mid", now - day), ("fact_new", now)):
+        await store._db.execute("UPDATE facts SET updated_at = ? WHERE key = ?", (ts, key))
+    await store._db.commit()
+
+
+@pytest.mark.asyncio
+async def test_query_facts_since(memory_store: MemoryStore):
+    """since= is an INCLUSIVE lower bound on updated_at — the two facts touched at/after
+    T-1d return; the T-2d fact is filtered out."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    results = await memory_store.query_facts(FactQuery(since=now - 86400))
+    assert {f.key for f in results} == {"fact_mid", "fact_new"}
+
+
+@pytest.mark.asyncio
+async def test_query_facts_until(memory_store: MemoryStore):
+    """until= is an INCLUSIVE upper bound — the two older facts return; the freshest is out."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    results = await memory_store.query_facts(FactQuery(until=now - 86400))
+    assert {f.key for f in results} == {"fact_old", "fact_mid"}
+
+
+@pytest.mark.asyncio
+async def test_query_facts_window(memory_store: MemoryStore):
+    """since+until brackets a window — exactly the middle fact (T-1d) survives [T-1d, T-1d+1]."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    results = await memory_store.query_facts(
+        FactQuery(since=now - 86400, until=now - 86400 + 1)
+    )
+    assert {f.key for f in results} == {"fact_mid"}
+
+
+@pytest.mark.asyncio
+async def test_temporal_with_fts(memory_store: MemoryStore):
+    """The FTS branch (text=) must carry the same temporal WHERE — the marker word matches
+    all three, the window narrows to the middle fact (proves BOTH branches filter)."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    results = await memory_store.query_facts(
+        FactQuery(text="marker", since=now - 86400, until=now - 86400 + 1)
+    )
+    assert {f.key for f in results} == {"fact_mid"}
+
+
+@pytest.mark.asyncio
+async def test_temporal_default_off(memory_store: MemoryStore):
+    """Back-compat: no since/until → every existing caller sees all rows, unfiltered."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    results = await memory_store.query_facts(FactQuery())
+    assert {f.key for f in results} == {"fact_old", "fact_mid", "fact_new"}
+
+
+@pytest.mark.asyncio
+async def test_render_index_ignores_temporal(memory_store: MemoryStore):
+    """must_have #3: the ambient injected block never reads FactQuery.since/until — exercising
+    the temporal path leaves _render_memory_index BYTE-IDENTICAL (temporal filtering is a
+    tool-output concern, never an ambient one)."""
+    now = int(time.time())
+    await _seed_temporal_trio(memory_store, now)
+    before = await memory_store._render_memory_index(8)
+    await memory_store.query_facts(FactQuery(since=now - 86400, until=now))
+    after = await memory_store._render_memory_index(8)
+    assert before == after
 
 
 # ---------------------------------------------------------------------------

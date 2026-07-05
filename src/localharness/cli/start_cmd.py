@@ -448,6 +448,44 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             warnings.append(f"memory consolidation: {exc}")
             consolidation_scheduler = None
 
+    # Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
+    # score every outcome; user-signal triggers log labeled prediction errors. Score
+    # everything, gate nothing — pure measurement feeding Phase 35's thresholds. Additive
+    # bus subscribers only (WriteGate shape); zero loop changes, zero model calls.
+    predictive_gate = None
+    user_signal_detector = None
+    _pg_cfg = getattr(agent_config.memory, "predictive_gate", None)
+    if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled:
+        try:
+            from localharness.memory.predictive_gate import PredictiveGate
+            predictive_gate = PredictiveGate(memory_store, bus, agent_name_str, _pg_cfg)
+            await predictive_gate.open()
+        except Exception as exc:
+            warnings.append(f"predictive-gate: {exc}")
+            predictive_gate = None
+        try:
+            from localharness.memory.user_signals import UserSignalDetector
+            user_signal_detector = UserSignalDetector(memory_store, bus, agent_name_str, _pg_cfg)
+            await user_signal_detector.open()
+        except Exception as exc:
+            warnings.append(f"user-signals: {exc}")
+            user_signal_detector = None
+
+    # PredictiveWriteGate (Phase 35, PGATE-01/02/03): the LIVE write decision — turns 34's
+    # already-published SurpriseScored + correction-worded UserMessage into gated sub-0.7 fact
+    # writes. Sibling subscriber (WriteGate shape), reusing the same _pg_cfg; gated on write_live
+    # (the pre-committed KILL-revert lever) AND enabled. Its OWN try/except so a wiring fault
+    # soft-degrades to motif-only capture and never crashes start.
+    predictive_write_gate = None
+    if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled and getattr(_pg_cfg, "write_live", True):
+        try:
+            from localharness.memory.predictive_write_gate import PredictiveWriteGate
+            predictive_write_gate = PredictiveWriteGate(memory_store, bus, agent_name_str, _pg_cfg)
+            await predictive_write_gate.open()
+        except Exception as exc:
+            warnings.append(f"predictive-write-gate: {exc}")
+            predictive_write_gate = None
+
     # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
     # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
     # the ContextManager below so eviction-writes and restore-reads hit the same map.
@@ -691,7 +729,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> end_session -> MemoryStore ---
+        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> PredictiveGate/UserSignals/PredictiveWriteGate -> end_session -> MemoryStore ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
@@ -706,6 +744,28 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if write_gate:
             try:
                 await write_gate.close()
+            except Exception:
+                pass
+        # PredictiveGate / UserSignalDetector (Phase 34): additive bus subscribers that call
+        # store methods on fire — close them AFTER write_gate, while the store is still open,
+        # and BEFORE the close-out summary reads (same discipline as session_acc below).
+        if predictive_gate:
+            try:
+                await predictive_gate.close()
+            except Exception:
+                pass
+        if user_signal_detector:
+            try:
+                await user_signal_detector.close()
+            except Exception:
+                pass
+        # PredictiveWriteGate (Phase 35): writes facts via store_fact on fire, so close it
+        # AFTER user_signal_detector (no racing capture) while the store is still OPEN and
+        # BEFORE end_session reads the close-out summary (research Pitfall 4 — same discipline
+        # as write_gate/predictive_gate above).
+        if predictive_write_gate:
+            try:
+                await predictive_write_gate.close()
             except Exception:
                 pass
         # end_session needs the store OPEN (it writes) but the gate CLOSED (no racing

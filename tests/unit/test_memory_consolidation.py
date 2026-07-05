@@ -524,3 +524,40 @@ async def test_bus_publish_reaches_gate_composed(store: MemoryStore):
         assert rows[0][1] == "s1"  # provenance == the resolving session
     finally:
         await gate.close()
+
+
+@pytest.mark.asyncio
+async def test_has_work_ignores_non_gate_pending_facts(store: MemoryStore):
+    # minor 1: predgate/ + correction/quarantine/ telemetry carry pending_consolidation
+    # forever — they never match the gate/ promotion prefix, so _untag_candidate never runs
+    # on them. They must NOT perpetually trip the session-start staleness gate; only
+    # gate/-keyed candidates (the set _step_promote_recurring actually promotes) count as
+    # "work", matching WriteGate's gate/ convention. (Key filter, not tag filter: the stat
+    # fact carries a "gate" TAG but a predgate/ KEY.)
+    from localharness.core.bus import EventBus
+
+    sched = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg())
+    await store.store_fact(
+        key="predgate/surprising_failure/web_fetch/20260705", value="stat telemetry",
+        tags=["gate", "tier:surprising_failure", "pending_consolidation"], confidence=0.646,
+    )
+    await store.store_fact(
+        key="correction/quarantine/abc123", value="quarantined user words",
+        tags=["correction", "tier:correction_pending", "pending_consolidation"], confidence=0.65,
+    )
+    # non-gate/ pending telemetry alone is NOT work — the staleness optimization holds.
+    assert await sched._has_work() is False
+    # a DISPUTED gate/-keyed row (correction supersede keeps the gate/ key but carries
+    # tier:correction_pending, which promotion skips) is un-untaggable — it must not pin
+    # _has_work True forever either (critic re-verdict residual).
+    await store.store_fact(
+        key="gate/resolved_error/mytool/lesson0/sess0", value="[disputed] old lesson text",
+        tags=["gate", "tier:correction_pending", "pending_consolidation"], confidence=0.6,
+    )
+    assert await sched._has_work() is False
+    # a real gate/-keyed promotion candidate IS work.
+    await store.store_fact(
+        key="gate/resolved_error/mytool/lesson1/sess1", value="a real recurring lesson",
+        tags=["gate", "tier:resolved_error", "pending_consolidation"], confidence=0.65,
+    )
+    assert await sched._has_work() is True

@@ -16,6 +16,7 @@ Three things it does that are hard to find anywhere else:
 - **Structural defense against prompt injection.** Untrusted web content can never share an agent with host-mutating tools like bash, write, or edit. The boundary is enforced in the agent topology and fails closed — not left to the model to refuse.
 - **Memory that consolidates while idle.** Lessons auto-capture from real failure→recovery moments at zero extra model calls; recurring ones are promoted into the prompt during idle "sleep" passes; superseded facts are never deleted, and search routes through a gist/schema hierarchy — gists route the search, leaf records anchor the answer. All SQLite: no vector DB, no second resident model.
 - **Sittings that remember each other.** Every run records a session; on close it gets one topical summary line (what you asked, or the error it resolved) — derived from events, zero model calls. The next sitting opens with the recent timeline already in its prompt (relative times, newest first, hard-capped at 8 lines) and can answer "what did we do last time?" without a single lookup.
+- **A write gate that predicts.** Per-tool statistical priors — computed in pure SQL, zero model calls — score every tool outcome against that tool's own history. A normally-reliable tool that suddenly errors becomes a captured memory, and a user correction ("no, I meant…") writes a quarantined, reversible one; a failure the tool's history already expected stops being news. Each of these lands *below* the prompt's visibility line — captured and searchable, but not steering the agent until an idle consolidation pass confirms it, with one config lever to revert to motif-only capture.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
@@ -138,7 +139,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.7.0, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.8.0, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 

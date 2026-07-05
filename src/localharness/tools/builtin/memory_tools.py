@@ -3,9 +3,45 @@
 These serve the full persistent-fact bodies on demand so the system prompt can inline only a
 small INDEX (fact names + one-line descriptions) instead of the entire MEMORY.md every turn.
 """
+from datetime import datetime, time as _dtime, timedelta
 from typing import Any
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+
+
+def resolve_time_expr(expr: str, *, end: bool = False) -> int:
+    """Resolve a memory_search time expression to LOCAL epoch seconds.
+
+    Accepts: 'today' | 'yesterday' | 'this_week' | an ISO-8601 date or datetime.
+    Date-precision values resolve to start-of-day (end=False) or end-of-day 23:59:59
+    (end=True) so ``until='yesterday'`` includes all of yesterday; datetime-precision values
+    are used exactly. Local timezone BY DESIGN — mirrors the injected shelf's relative-day
+    labels (sqlite._relative_day_label), so "today" in search means what "today" means on the
+    shelf. Raises ValueError naming the accepted grammar on anything else."""
+    word = expr.strip().lower()
+    today_local = datetime.now().astimezone().date()  # read the clock ONCE per call
+    if word == "today":
+        day = today_local
+    elif word == "yesterday":
+        day = today_local - timedelta(days=1)
+    elif word == "this_week":
+        day = today_local - timedelta(days=today_local.weekday())  # most recent Monday
+    else:
+        try:
+            parsed = datetime.fromisoformat(expr.strip())
+        except ValueError:
+            raise ValueError(
+                f"Unrecognized time expression {expr!r}: use today|yesterday|this_week "
+                "or an ISO date/datetime like 2026-07-01 or 2026-07-01T09:30"
+            ) from None
+        # A bare date parses to midnight — distinguish a REAL midnight datetime from a date
+        # by the presence of a time separator in the raw string (the subtle part).
+        if parsed.time() != _dtime.min or "T" in expr or " " in expr.strip():
+            dt = parsed if parsed.tzinfo else parsed.astimezone()  # naive → local
+            return int(dt.timestamp())
+        day = parsed.date()
+    boundary = _dtime(23, 59, 59) if end else _dtime.min
+    return int(datetime.combine(day, boundary).astimezone().timestamp())
 
 
 class MemorySearchTool(Tool):
@@ -23,7 +59,8 @@ class MemorySearchTool(Tool):
                 "Search your persistent memory (fact names, values, tags) for a query string. "
                 "Returns matching fact names with a short snippet. Use memory_get(name) for a "
                 "match's full body. The system prompt shows only an index, so search when you "
-                "need detail that isn't already inlined."
+                "need detail that isn't already inlined. Supports time filters — e.g. "
+                "since='yesterday' answers 'what did we learn yesterday?'."
             ),
             parameters={
                 "type": "object",
@@ -39,6 +76,21 @@ class MemorySearchTool(Tool):
                         "minimum": 1,
                         "maximum": 50,
                     },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "Only facts updated at/after this time. Accepts 'today', "
+                            "'yesterday', 'this_week', or an ISO date/datetime "
+                            "(e.g. '2026-07-01', '2026-07-01T09:30')."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
+                            "Only facts updated at/before this time. Same formats as 'since'; "
+                            "a bare date includes the whole day."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -46,14 +98,30 @@ class MemorySearchTool(Tool):
             estimated_tokens=400,
         )
 
-    async def _execute(self, query: str, limit: int = 10) -> ToolResult:
+    async def _execute(
+        self, query: str, limit: int = 10, since: str | None = None, until: str | None = None
+    ) -> ToolResult:
         from localharness.memory.sqlite import FactQuery
 
         if self._mem is None:
             return self.err("No memory store available.", error_type="execution_error")
+        since_epoch = until_epoch = None
+        try:
+            if since:
+                since_epoch = resolve_time_expr(since, end=False)
+            if until:
+                until_epoch = resolve_time_expr(until, end=True)
+        except ValueError as exc:
+            # Readable teach-back, never an exception into the loop (must_have #4). Note:
+            # error_type must be a valid ToolResult Literal — 'invalid_params' is NOT one
+            # (it raises a pydantic ValidationError); 'validation_error' is the correct fit.
+            return self.err(str(exc), error_type="validation_error")
         try:
             facts = await self._mem.query_facts(
-                FactQuery(text=query, min_confidence=0.0, limit=limit)
+                FactQuery(
+                    text=query, min_confidence=0.0, limit=limit,
+                    since=since_epoch, until=until_epoch,
+                )
             )
         except Exception as exc:
             return self.err(f"Memory search failed: {exc}")

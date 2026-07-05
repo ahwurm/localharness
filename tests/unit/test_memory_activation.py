@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from localharness.memory.sqlite import FactQuery, MemoryStore
+from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION, FactQuery, MemoryStore
 
 
 @pytest.fixture
@@ -27,10 +27,12 @@ async def store(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_fresh_db_lands_on_v3_with_graph(store: MemoryStore):
+async def test_fresh_db_lands_on_current_schema_with_graph(store: MemoryStore):
+    # A fresh DB runs the whole ladder to the CURRENT version (Phase 34: v4). The
+    # graph substrate + activation columns below prove the v3 step ran on the way.
     async with store._db.execute("PRAGMA user_version") as cur:
         row = await cur.fetchone()
-    assert row[0] == 3
+    assert row[0] == CURRENT_SCHEMA_VERSION
     async with store._db.execute("PRAGMA table_info(facts)") as cur:
         cols = {r[1] for r in await cur.fetchall()}
     assert {"retrieval_strength", "importance", "access_count", "last_accessed_at",

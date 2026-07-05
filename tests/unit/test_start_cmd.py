@@ -1207,3 +1207,249 @@ def test_migrate_legacy_root_yaml_ignores_non_root_default_file(tmp_path):
 
     assert default_file.read_bytes() == before
     assert not (agents_dir / "orchestrator.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34-06 (COLL-01/02/04): the collect-only predictive gate wired into the REAL
+# _start_async. PredictiveGate + UserSignalDetector open beside WriteGate at startup
+# (config-gated on agent.memory.predictive_gate.enabled, soft-degrading independently)
+# and close in ordered shutdown. These drives prove the composed spine end-to-end — a
+# live tool-call pair lands surprise rows and a correction-worded user turn lands a
+# labeled signal — the production wiring, not the unit islands 34-03/34-04 already proved.
+# ---------------------------------------------------------------------------
+
+def _read_predictive_counts(tmp_path, agent="orchestrator"):
+    """(tool_observations, surprise_scores, correction-labeled user_signals) counts from
+    the real memory.db the drive wrote — the three Phase-34 collect-only tables."""
+    import sqlite3
+    db_path = tmp_path / "agents" / agent / "memory.db"
+    assert db_path.exists(), f"memory.db not created at {db_path}"
+    con = sqlite3.connect(str(db_path))
+    try:
+        obs = con.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0]
+        scores = con.execute("SELECT COUNT(*) FROM surprise_scores").fetchone()[0]
+        corrections = con.execute(
+            "SELECT COUNT(*) FROM user_signals WHERE signal_type = 'correction'"
+        ).fetchone()[0]
+        return obs, scores, corrections
+    finally:
+        con.close()
+
+
+def _capture_start_console(monkeypatch):
+    """Capture start_cmd's console output — the summary line carries the warnings list
+    (`... [predictive-gate: ...]`). Returns the growing list of printed strings."""
+    import localharness.cli.start_cmd as _sc
+    printed: list[str] = []
+    monkeypatch.setattr(
+        _sc.console, "print", lambda *a, **k: printed.append(" ".join(str(x) for x in a))
+    )
+    return printed
+
+
+async def _drive_one_tool_call_and_correction(self):
+    """A scripted turn on the LIVE bus: one tool call (Action + matching tool_result
+    Observation) then the correction-worded user message. agent_id is the running root so
+    the collectors' agent filter passes; publish() awaits handlers inline, so every row is
+    written before the drive returns and shutdown closes the store."""
+    from localharness.core.events import Action, Observation, UserMessage
+    sid = self._agent.current_session_id
+    await self._bus.publish(Action(
+        agent_id="orchestrator", session_id=sid, action_type="tool_call",
+        tool_call_id="tc-1", tool_name="bash_exec",
+    ))
+    await self._bus.publish(Observation(
+        agent_id="orchestrator", session_id=sid, observation_type="tool_result",
+        tool_call_id="tc-1", tool_name="bash_exec", output="ok",
+    ))
+    await self._bus.publish(UserMessage(
+        agent_id="orchestrator", session_id=sid,
+        content="no, i meant the other file", channel="terminal",
+    ))
+
+
+async def test_predictive_collectors_wired(tmp_path, monkeypatch):
+    """The composed spine, default-on: a live tool-call turn lands >=1 tool_observations
+    row AND >=1 surprise_scores row (PredictiveGate), and the correction-worded user message
+    lands >=1 user_signals row labeled 'correction' (UserSignalDetector) — proven through the
+    REAL _start_async production entry point, not the unit islands."""
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(
+        tmp_path, monkeypatch, repl_run=_drive_one_tool_call_and_correction
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    obs, scores, corrections = _read_predictive_counts(tmp_path)
+    assert obs >= 1, "PredictiveGate must persist a tool_observations row for the live tool call"
+    assert scores >= 1, "PredictiveGate must persist a surprise_scores row for the live tool call"
+    assert corrections >= 1, "UserSignalDetector must label 'no, i meant...' as a correction"
+
+
+async def test_predictive_gate_config_off(tmp_path, monkeypatch):
+    """The off-switch silences everything: with agent.memory.predictive_gate.enabled=False,
+    the same drive lands ZERO rows in all three tables, startup emits no predictive-gate /
+    user-signals warning (the block is skipped, never caught), and the sitting still closes
+    one clean sessions row — REPL behavior identical."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    data = _build_agent_yaml("orchestrator", "General-purpose assistant", None)
+    data["memory"] = {"predictive_gate": {"enabled": False}}
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(data, default_flow_style=False), encoding="utf-8"
+    )
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(
+        tmp_path, monkeypatch, repl_run=_drive_one_tool_call_and_correction
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    obs, scores, corrections = _read_predictive_counts(tmp_path)
+    assert (obs, scores, corrections) == (0, 0, 0), "the off-switch must silence all collection"
+
+    out = "\n".join(printed)
+    assert "predictive-gate" not in out and "user-signals" not in out, \
+        "a disabled gate must emit no soft-degrade warning (the block is skipped, not caught)"
+
+    # REPL behavior identical: the sitting still opens + closes one clean sessions row.
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
+
+
+async def test_predictive_gate_soft_degrade(tmp_path, monkeypatch):
+    """Independent soft-degrade (WriteGate discipline): if PredictiveGate.open() raises at
+    startup, the sitting still runs — a 'predictive-gate' warning is recorded, the scorer
+    subscribes nothing (zero surprise rows), but the UserSignalDetector still opens on its
+    OWN try/except so the correction still lands, and shutdown is clean."""
+    from localharness.cli.start_cmd import _start_async
+
+    async def boom(self):
+        raise RuntimeError("scorer wiring blew up")
+    monkeypatch.setattr("localharness.memory.predictive_gate.PredictiveGate.open", boom)
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(
+        tmp_path, monkeypatch, repl_run=_drive_one_tool_call_and_correction
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    out = "\n".join(printed)
+    assert "predictive-gate" in out, "a scorer open() failure must soft-degrade with a warning"
+
+    # the loop survives measurement failure: clean completion, one sessions row.
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
+
+    # the two try/excepts are independent — the failed scorer subscribed nothing (zero
+    # surprise rows) yet the signal channel opened and labeled the correction.
+    obs, scores, corrections = _read_predictive_counts(tmp_path)
+    assert (obs, scores) == (0, 0), "the failed scorer must subscribe nothing — no surprise rows"
+    assert corrections >= 1, "user-signal detection must survive a predictive-gate open() failure"
+
+
+# ---------------------------------------------------------------------------
+# Phase 35-02 (PGATE-01/02/03): PredictiveWriteGate wired LIVE into the REAL
+# _start_async. The gate is constructed + opened beside PredictiveGate/UserSignals
+# (config-gated on predictive_gate.enabled AND write_live), soft-degrades on its own
+# try/except, and closes in ordered shutdown after user_signal_detector. These drives
+# prove the LIVE write path end-to-end: a reliable tool failing surprisingly on the live
+# bus produces a persisted sub-0.7 fact — reachability, not object existence.
+# ---------------------------------------------------------------------------
+
+
+async def _drive_reliable_tool_then_surprising_failure(self):
+    """Six clean bash_exec calls build a reliable prior (error_rate 0, n=6 >= min_prior_n 5),
+    then ONE failure of the SAME tool. PredictiveGate scores that as quadrant
+    'surprising_failure' and publishes SurpriseScored onto the live bus; the wired
+    PredictiveWriteGate consumes it and writes a gated fact. publish() awaits handlers inline,
+    so every write lands before shutdown closes the store."""
+    from localharness.core.events import Action, Observation
+    sid = self._agent.current_session_id
+    for i in range(6):
+        await self._bus.publish(Action(
+            agent_id="orchestrator", session_id=sid, action_type="tool_call",
+            tool_call_id=f"ok-{i}", tool_name="bash_exec",
+        ))
+        await self._bus.publish(Observation(
+            agent_id="orchestrator", session_id=sid, observation_type="tool_result",
+            tool_call_id=f"ok-{i}", tool_name="bash_exec", output="ok",
+        ))
+    # the surprising failure: a normally-reliable tool errors (is_error=1 on a ~0 prior rate)
+    await self._bus.publish(Action(
+        agent_id="orchestrator", session_id=sid, action_type="tool_call",
+        tool_call_id="boom", tool_name="bash_exec",
+    ))
+    await self._bus.publish(Observation(
+        agent_id="orchestrator", session_id=sid, observation_type="tool_result",
+        tool_call_id="boom", tool_name="bash_exec", error="unexpected failure", exit_code=1,
+    ))
+
+
+def _read_predgate_facts(tmp_path, agent="orchestrator"):
+    """(key, confidence, source) of the facts the PredictiveWriteGate stat channel wrote
+    (key predgate/surprising_failure/...) — read straight from the real memory.db."""
+    import sqlite3
+    db_path = tmp_path / "agents" / agent / "memory.db"
+    assert db_path.exists(), f"memory.db not created at {db_path}"
+    con = sqlite3.connect(str(db_path))
+    try:
+        return con.execute(
+            "SELECT key, confidence, source FROM facts "
+            "WHERE key LIKE 'predgate/surprising_failure/%'"
+        ).fetchall()
+    finally:
+        con.close()
+
+
+async def test_predictive_write_gate_wired_and_fires(tmp_path, monkeypatch):
+    """PGATE-01 end-to-end through the REAL start path: raw tool events -> PredictiveGate ->
+    SurpriseScored(surprising_failure) -> the WIRED PredictiveWriteGate -> a persisted sub-0.7
+    fact. Proves the gate is CONSTRUCTED, OPENED and REACHABLE on the live bus with write_live
+    defaulting True — a green unit on an unwired gate would be a checkmark on a lie."""
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(
+        tmp_path, monkeypatch, repl_run=_drive_reliable_tool_then_surprising_failure
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    facts = _read_predgate_facts(tmp_path)
+    assert len(facts) >= 1, "the wired PredictiveWriteGate must write a surprising_failure fact"
+    _key, confidence, source = facts[0]
+    assert source == "predictive_write_gate"
+    assert confidence < 0.7, "stat facts stay below the 0.7 injection gate (CLS fast-capture)"
+
+
+async def test_predictive_write_gate_kill_lever_reverts_writes_keeps_telemetry(tmp_path, monkeypatch):
+    """The pre-committed KILL-revert lever, end-to-end: with agent.memory.predictive_gate.
+    write_live=False the SAME surprising-failure drive writes ZERO predgate facts (reverted to
+    motif-only) while the collect-only scorer STILL persists surprise_scores (scores stay as
+    telemetry) — the exact 'revert to motifs, keep the scores' shape the ROADMAP pre-committed."""
+    from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.start_cmd import _start_async
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    data = _build_agent_yaml("orchestrator", "General-purpose assistant", None)
+    data["memory"] = {"predictive_gate": {"write_live": False}}
+    (agents_dir / "orchestrator.yaml").write_text(
+        yaml.dump(data, default_flow_style=False), encoding="utf-8"
+    )
+
+    _stub_start_boundaries(
+        tmp_path, monkeypatch, repl_run=_drive_reliable_tool_then_surprising_failure
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    # writes OFF: the gate is not even constructed (guard: enabled AND write_live)
+    assert _read_predgate_facts(tmp_path) == [], "write_live=False must write zero gated facts"
+    # telemetry ON: the collect-only scorer still persisted surprise scores
+    _obs, scores, _corr = _read_predictive_counts(tmp_path)
+    assert scores >= 1, "the collect-only scorer keeps persisting scores as telemetry (KILL-revert shape)"
