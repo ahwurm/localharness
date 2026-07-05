@@ -220,9 +220,18 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
     assert "agent.cruncher.exec_enabled" in entries  # P-CRUNCH B: cruncher exec is addressable
     assert "agent.memory.predictive_gate.write_live" in entries  # Phase 35 PGATE: the KILL-revert lever is addressable
-    assert len(entries) == 117, (
-        f"catalogue should be 117 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x6 [v2.0 CONS-01] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
+    # Phase 36 (the chapter-writer): the eight agent.memory.consolidation.* idle-LLM axes.
+    assert "agent.memory.consolidation.schema_writer_enabled" in entries
+    assert "agent.memory.consolidation.reconcile_enabled" in entries
+    assert "agent.memory.consolidation.mining_enabled" in entries
+    assert "agent.memory.consolidation.cluster_min_sessions" in entries
+    assert "agent.memory.consolidation.schema_write_budget" in entries
+    assert "agent.memory.consolidation.schema_depth_cap" in entries
+    assert "agent.memory.consolidation.reconcile_ttl_looks" in entries
+    assert "agent.memory.consolidation.mining_write_budget" in entries
+    assert len(entries) == 125, (
+        f"catalogue should be 125 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x14 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
     )
 
 
@@ -286,9 +295,9 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 117, (
-        f"catalogue should be 117 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x6 [v2.0 CONS-01] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
+    assert len(entries) == 125, (
+        f"catalogue should be 125 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x14 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
     )
 
 
