@@ -9,7 +9,9 @@ import pytest
 
 from localharness.memory.clustering import (
     Cluster,
+    _attach_aux_failures,
     _connected_components,
+    _load_failure_queue,
     _load_pool,
     _relatedness_edges,
     find_stable_clusters,
@@ -19,7 +21,7 @@ from localharness.memory.sqlite import MemoryStore
 # Two `read` lessons that share the salient tokens "absolute"/"resolved" (FTS-related);
 # a `grep` lesson that shares none (isolated). Content is fixture-fake (allowed in tests;
 # only the SEMA-05 provable forbids fabricated lesson text — see 36-CONTEXT.md).
-_READ_A = "The read tool returned FileNotFound on a relative path; retrying with the absolute path resolved the failure."
+_READ_A = "The read tool returned FileNotFound on a relative path; retrying with the absolute path resolved it."
 _READ_B = "The read tool raised a permission problem on a protected path; the absolute path form resolved it cleanly."
 _READ_C = "The read tool timed out once then, using the absolute path directly, resolved on the second attempt."
 _GREP_C = "The grep command required the fixed-string flag for literal square brackets during matching."
@@ -62,6 +64,23 @@ async def _seed_learned(store, tool, tier, body, sessions, *, lesson="", node_ki
 async def _fact_count(store) -> int:
     async with store._db.execute("SELECT COUNT(*) FROM facts") as cur:
         return (await cur.fetchone())[0]
+
+
+async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None):
+    """A tier:surprising_failure queue row exactly as predictive_write_gate.py:181-192 writes
+    it (key predgate/surprising_failure/{tool}/{day}, sub-0.7 confidence). Optionally fade its
+    retrieval_strength (direct SQL — tests may write; the harness never fades via clustering)."""
+    f = await store.store_fact(
+        key=f"predgate/surprising_failure/{tool}/{day}",
+        value=value or (f"`{tool}` had a surprising failure — a normally-reliable tool "
+                        "errored (quadrant surprising_failure). Pending consolidation."),
+        tags=["gate", "tier:surprising_failure", "pending_consolidation"],
+        confidence=0.6, source="predictive_write_gate", provenance="sess-fail",
+    )
+    if rs is not None:
+        await store._db.execute("UPDATE facts SET retrieval_strength = ? WHERE id = ?", (rs, f.id))
+        await store._db.commit()
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +212,101 @@ async def test_find_stable_clusters_issues_no_writes(store, monkeypatch):
     clusters = await find_stable_clusters(store)
     assert len(clusters) == 1  # still produced the cluster
     assert await _fact_count(store) == before
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — adjacent tier:surprising_failure aux_members (PGATE-03 rider, pure read)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_load_failure_queue_excludes_faded(store):
+    """The queue = active, pending, not-yet-faded (retrieval_strength >= 0.2). Faded rows
+    are 36-04's drain concern, never offered as aux."""
+    live = await _seed_failure(store, "read", "20260701")            # rs default 0.5
+    faded = await _seed_failure(store, "read", "20260702", rs=0.1)   # below the 0.2 gate
+    ids = {f.id for f in await _load_failure_queue(store)}
+    assert live.id in ids
+    assert faded.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_same_tool_failure_attaches_as_aux(store):
+    """A surprising_failure row on a cluster member's tool attaches (domain match); the
+    sub-0.7 row is attached, NEVER promoted."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    fail = await _seed_failure(store, "read")
+
+    clusters = await find_stable_clusters(store)
+    assert len(clusters) == 1
+    assert fail.key in {f.key for f in clusters[0].aux_members}
+    assert all(f.confidence < 0.7 for f in clusters[0].aux_members)  # untouched, sub-line
+
+
+@pytest.mark.asyncio
+async def test_unrelated_tool_failure_not_attached(store):
+    """A generic surprising_failure row on an unrelated tool with no graph/FTS link does
+    not attach to the read cluster."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    fail = await _seed_failure(store, "bash_exec")  # different tool, generic content
+
+    clusters = await find_stable_clusters(store)
+    attached = {f.key for c in clusters for f in c.aux_members}
+    assert fail.key not in attached
+
+
+@pytest.mark.asyncio
+async def test_fts_adjacent_failure_attaches_despite_tool(store):
+    """Graph/FTS adjacency REINFORCES the tool match, it doesn't gate it: a queue row on a
+    different tool but sharing content tokens with a member attaches via the FTS branch."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    fail = await _seed_failure(
+        store, "write_file",
+        value="A recorded failure where the absolute path resolved differently than usual.",
+    )
+
+    clusters = await find_stable_clusters(store)
+    assert fail.key in {f.key for f in clusters[0].aux_members}  # tool mismatch, shared tokens
+
+
+@pytest.mark.asyncio
+async def test_aux_members_capped(store):
+    """aux_cap bounds the folded corpus even when many same-tool rows match."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    for i in range(10):
+        await _seed_failure(store, "read", f"2026070{i}")
+    clusters = await find_stable_clusters(store, aux_cap=8)
+    assert len(clusters[0].aux_members) == 8
+
+
+@pytest.mark.asyncio
+async def test_attach_aux_issues_no_writes(store, monkeypatch):
+    """Aux attachment is a pure READ — any write attempt must raise; queue rows untouched."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_failure(store, "read")
+    before = await _fact_count(store)
+
+    async def _boom(*a, **k):
+        raise AssertionError("aux attachment must not write")
+
+    monkeypatch.setattr(store, "store_fact", _boom)
+    monkeypatch.setattr(store, "add_edge", _boom)
+
+    clusters = await find_stable_clusters(store)
+    assert clusters[0].aux_members  # aux was attached
+    assert await _fact_count(store) == before
+
+
+@pytest.mark.asyncio
+async def test_attach_aux_failures_direct(store):
+    """Unit-level: _attach_aux_failures matches same-tool, dedups, and returns the row."""
+    m1 = await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    m2 = await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    fail = await _seed_failure(store, "read")
+    queue = await _load_failure_queue(store)
+    aux = await _attach_aux_failures(store, [m1, m2], queue, fts_top_k=5, graph_depth=2, aux_cap=8)
+    assert [f.key for f in aux] == [fail.key]
