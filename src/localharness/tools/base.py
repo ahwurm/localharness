@@ -78,7 +78,20 @@ class Tool(ABC):
     async def _execute(self, **kwargs: Any) -> ToolResult: ...
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        timeout = self.timeout_s or 30.0
+        # The outer bound must EXCEED any per-call inner timeout (e.g. bash_exec's
+        # `timeout_s` kwarg, whose _execute has its own wait_for + proc.kill path):
+        # if the outer wait_for fires first it cancels _execute mid-await, the inner
+        # kill/cleanup path never runs, and the subprocess is orphaned (timeout
+        # inversion). Size the outer bound off the call's own timeout_s plus slack so
+        # the inner cleanup always wins the race; without a call-level timeout, add
+        # bounded slack over the instance default (covers _execute-signature defaults
+        # equal to the instance value, e.g. bash's 60/60 tie).
+        base = self.timeout_s or 30.0
+        try:
+            call_timeout = float(kwargs.get("timeout_s") or 0.0)
+        except (TypeError, ValueError):
+            call_timeout = 0.0
+        timeout = max(base, call_timeout + 5.0) if call_timeout else base + min(5.0, base)
         try:
             return await asyncio.wait_for(self._execute(**kwargs), timeout=timeout)
         except asyncio.TimeoutError:
