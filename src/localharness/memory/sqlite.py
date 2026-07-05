@@ -93,6 +93,30 @@ class MemoryContext:
 
 
 # ---------------------------------------------------------------------------
+# Phase 36 (SEMA-03/04): lesson-cluster "chapter" schema contract
+# ---------------------------------------------------------------------------
+# The store-side half of the chapter node: key prefix, tier tag, confidence tier, depth tag.
+# DISTINCT from hierarchy.py's doc-analysis schema/doc/* gists (those are _GIST_CONFIDENCE=0.6,
+# below the 0.7 line, a different feature that routes but never injects). A chapter is a
+# PROMOTION over its member lessons: it must clear the 0.7 injection gate to render.
+SCHEMA_KEY_PREFIX = "schema/cluster/"          # chapter nodes; never collides with schema/doc/*
+SCHEMA_TIER_TAG = "tier:schema"
+SCHEMA_CONFIDENCE = 0.8                          # == consolidation._PROMOTED_CONFIDENCE; >= 0.7 gate
+SCHEMA_DEPTH_TAG_PREFIX = "depth:"              # depth:1 chapter-of-lessons, depth:2 chapter-of-chapters
+
+
+def _schema_depth(tags: list[str]) -> int:
+    """Read the depth:N tag (SEMA-03 depth cap). 0 = a plain lesson (no tag)."""
+    for t in tags:
+        if t.startswith(SCHEMA_DEPTH_TAG_PREFIX):
+            try:
+                return int(t[len(SCHEMA_DEPTH_TAG_PREFIX):])
+            except ValueError:
+                return 0
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Phase 33.1 (ORCH-02): one-time root-agent rename (default -> orchestrator)
 # ---------------------------------------------------------------------------
 # The agent's name IS its storage identity (directory name + the agent_id column
@@ -1568,6 +1592,10 @@ _IMPORTANCE_PRIORS: dict[str, float] = {
     "tier:surprising_failure": 0.3,
     "tier:correction_pending": 0.2,
     "remember": 0.4,
+    # Phase 36 (SEMA-03/04): a lesson-cluster chapter LEADS its "### Knowledge" section —
+    # 0.5 sits above resolved_error's 0.3 so the schema (a promotion over its members) sorts
+    # first; with no prior it would sink to the 0.0 floor (Pitfall 2) despite being the lead.
+    "tier:schema": 0.5,
 }
 
 
