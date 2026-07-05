@@ -528,36 +528,45 @@ async def test_bus_publish_reaches_gate_composed(store: MemoryStore):
 
 @pytest.mark.asyncio
 async def test_has_work_ignores_non_gate_pending_facts(store: MemoryStore):
-    # minor 1: predgate/ + correction/quarantine/ telemetry carry pending_consolidation
-    # forever — they never match the gate/ promotion prefix, so _untag_candidate never runs
-    # on them. They must NOT perpetually trip the session-start staleness gate; only
-    # gate/-keyed candidates (the set _step_promote_recurring actually promotes) count as
-    # "work", matching WriteGate's gate/ convention. (Key filter, not tag filter: the stat
-    # fact carries a "gate" TAG but a predgate/ KEY.)
+    # minor 1: predgate/ surprising_failure telemetry carries pending_consolidation forever —
+    # it never matches the gate/ promotion prefix and 36-04 drains it piggybacking on
+    # real-work passes, so it must NEVER trip the staleness gate (Phase 36 DELIBERATELY does
+    # not add surprising_failure to _has_work). correction_pending is the deliberate premise
+    # change: 36's reconciliation consumer clears it, so it counts as work WHEN reconcile is
+    # enabled (the new default) but not when disabled (old optimization preserved for non-36).
     from localharness.core.bus import EventBus
 
-    sched = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg())
+    off = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg(reconcile_enabled=False))
+    on = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg(reconcile_enabled=True))
+
     await store.store_fact(
         key="predgate/surprising_failure/web_fetch/20260705", value="stat telemetry",
         tags=["gate", "tier:surprising_failure", "pending_consolidation"], confidence=0.646,
     )
+    # surprising_failure alone is NEVER work — neither reconcile mode counts it (36-04 drains it).
+    assert await off._has_work() is False
+    assert await on._has_work() is False
+
+    # A correction_pending quarantine row: work ONLY when reconcile is enabled (the consumer
+    # must fire); with reconcile off the pre-36 staleness optimization holds exactly.
     await store.store_fact(
         key="correction/quarantine/abc123", value="quarantined user words",
         tags=["correction", "tier:correction_pending", "pending_consolidation"], confidence=0.65,
     )
-    # non-gate/ pending telemetry alone is NOT work — the staleness optimization holds.
-    assert await sched._has_work() is False
-    # a DISPUTED gate/-keyed row (correction supersede keeps the gate/ key but carries
-    # tier:correction_pending, which promotion skips) is un-untaggable — it must not pin
-    # _has_work True forever either (critic re-verdict residual).
+    assert await off._has_work() is False   # reconcile disabled -> old behavior preserved
+    assert await on._has_work() is True     # reconcile enabled -> the consumer fires (new premise)
+
+    # A DISPUTED gate/-keyed row (correction supersede keeps the gate/ key but carries
+    # tier:correction_pending, which promotion skips) is likewise the reconciler's job: NOT
+    # work when disabled — never the un-untaggable "pins _has_work forever" anti-pattern.
     await store.store_fact(
         key="gate/resolved_error/mytool/lesson0/sess0", value="[disputed] old lesson text",
         tags=["gate", "tier:correction_pending", "pending_consolidation"], confidence=0.6,
     )
-    assert await sched._has_work() is False
-    # a real gate/-keyed promotion candidate IS work.
+    assert await off._has_work() is False
+    # a real gate/-keyed promotion candidate IS work regardless of reconcile mode.
     await store.store_fact(
         key="gate/resolved_error/mytool/lesson1/sess1", value="a real recurring lesson",
         tags=["gate", "tier:resolved_error", "pending_consolidation"], confidence=0.65,
     )
-    assert await sched._has_work() is True
+    assert await off._has_work() is True
