@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from localharness.memory.sqlite import (
+    SCHEMA_KEY_PREFIX,
     MemoryStore,
     _importance_prior,
     _schema_depth,
@@ -39,3 +40,55 @@ def test_schema_depth_parses_tag():
 
 def test_schema_depth_defaults_zero_for_plain_lesson():
     assert _schema_depth(["schema"]) == 0
+
+
+# --- Task 2: schemas-first render (index_mode=True path) -------------------------
+
+async def _seed_schema(store, key_suffix: str, value: str):
+    """A chapter fact exactly as 36-04 will write one: schema key prefix, node_kind='schema',
+    tier:schema + depth:1 tags, promoted confidence (>= the 0.7 injection gate)."""
+    await store.store_fact(
+        key=SCHEMA_KEY_PREFIX + key_suffix,
+        value=value,
+        tags=["schema", "tier:schema", "depth:1"],
+        confidence=0.8,
+        node_kind="schema",
+    )
+
+
+@pytest.mark.asyncio
+async def test_schema_renders_above_facts_and_not_inside_them(store: MemoryStore):
+    """A chapter renders under '### Knowledge' ABOVE '### Persistent Facts', and its key
+    never double-renders into the facts list (SEMA-04: gist routes, verbatim answers)."""
+    await store.store_fact("fact/one", "first persistent fact body", confidence=0.8)
+    await store.store_fact("fact/two", "second persistent fact body", confidence=0.8)
+    await _seed_schema(store, "abc", "How vLLM behaves on this box: prefill wedges past 96k.")
+
+    rendered = await store._render_memory_index(8)
+
+    assert "### Knowledge" in rendered
+    assert rendered.index("### Knowledge") < rendered.index("### Persistent Facts")  # schemas first
+    facts_block = rendered[rendered.index("### Persistent Facts"):]
+    assert (SCHEMA_KEY_PREFIX + "abc") not in facts_block  # not double-rendered as a fact
+    assert "fact/one" in facts_block and "fact/two" in facts_block  # plain facts still render
+
+
+@pytest.mark.asyncio
+async def test_index_byte_stable_across_renders(store: MemoryStore):
+    """RANK-04 / TIME-04: two renders with NO intervening write are byte-identical (the
+    16.1s TTFT re-prefill @32k is real — the injected block must not churn within a sitting)."""
+    await store.store_fact("fact/one", "a persistent fact body", confidence=0.8)
+    await _seed_schema(store, "xyz", "A chapter that must render identically twice.")
+
+    first = await store._render_memory_index(8)
+    second = await store._render_memory_index(8)
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_empty_schema_set_adds_zero_bytes(store: MemoryStore):
+    """No chapters -> the '### Knowledge' section is entirely absent (zero added bytes),
+    preserving byte-identity for chapter-less stores."""
+    await store.store_fact("fact/only", "just a plain fact", confidence=0.8)
+    rendered = await store._render_memory_index(8)
+    assert "### Knowledge" not in rendered
