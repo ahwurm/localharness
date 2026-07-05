@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_DEMOTED_RS = 0.15   # mirrors consolidation._DEMOTED_RS: below the 0.2 index gate, still searchable
+
 
 def _h8(*parts: str) -> str:
     """Stable cluster identity over sorted member keys (mirrors predictive_write_gate._h8 /
@@ -112,7 +114,22 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
             await store.add_edge(schema.id, m.id, "member_of")
         except Exception:
             log.exception("chapter-writer: member_of edge failed (non-fatal)")
+    await _fold_out_members(store, members)
     return schema
+
+
+async def _fold_out_members(store, members) -> None:
+    """Demote each folded member below the 0.2 index gate (retrieval_strength -> _DEMOTED_RS) so
+    the chapter REPLACES the pile in the ambient block — the member stays active + FTS-searchable
+    (a raw UPDATE of a non-indexed column only). Mirrors consolidation._untag_candidate /
+    consolidation._DEMOTED_RS=0.15. Confidence (trust) is never touched — only accessibility."""
+    assert store._db is not None
+    for m in members:
+        await store._db.execute(
+            "UPDATE facts SET retrieval_strength = MIN(retrieval_strength, ?) WHERE id = ?",
+            (_DEMOTED_RS, m.id),
+        )
+    await store._db.commit()
 
 
 async def write_cluster_schemas(
@@ -135,7 +152,11 @@ async def write_cluster_schemas(
     for cluster in clusters[:write_budget]:
         if cancel_event.is_set():
             break
+        # SEMA-03 depth cap: lesson(0) -> chapter(depth:1) -> chapter-of-chapters(depth:2) -> stop.
         new_depth = cluster.depth + 1
+        if new_depth > depth_cap:
+            log.debug("chapter-writer: depth cap reached (%d > %d) — cluster refused", new_depth, depth_cap)
+            continue
         try:
             schema = await _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap)
         except Exception:
