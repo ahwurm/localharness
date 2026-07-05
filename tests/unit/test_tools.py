@@ -476,6 +476,41 @@ async def test_bash_exec_tool_timeout():
     assert result.error_type == "timeout_error"
 
 
+class _InnerTimeoutTool(Tool):
+    """Mirrors bash_exec's shape: a per-call timeout_s with the tool's OWN inner
+    wait_for + cleanup path. The instance timeout_s is SMALLER than the call's."""
+    timeout_s = 0.2
+
+    def __init__(self) -> None:
+        self.inner_cleanup_ran = False
+
+    def info(self) -> ToolSchema:
+        return ToolSchema(name="inner_timeout", description="x",
+                          parameters={"type": "object", "properties": {}, "required": []})
+
+    async def _execute(self, timeout_s: float = 0.5) -> ToolResult:
+        try:
+            await asyncio.wait_for(asyncio.sleep(30), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            self.inner_cleanup_ran = True  # the proc.kill-equivalent cleanup path
+            return self.err(f"inner timeout after {timeout_s}s", error_type="timeout_error")
+        return self.ok("done")
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_never_beats_inner_cleanup_path():
+    """Timeout-inversion regression (36-08 pre-flight MAJOR 7): when a call passes its own
+    timeout_s, the base-class outer wait_for must be sized ABOVE it — otherwise the outer
+    cancel fires first, the inner kill/cleanup path never runs, and (for bash_exec) the
+    subprocess is orphaned. The inner cleanup must always win the race."""
+    tool = _InnerTimeoutTool()
+    result = await tool.run(timeout_s=0.5)  # call timeout > instance timeout_s=0.2
+    assert tool.inner_cleanup_ran is True, "outer wait_for cancelled _execute before inner cleanup"
+    assert result.success is False
+    assert result.error_type == "timeout_error"
+    assert "inner timeout" in (result.error or "")  # the INNER path produced the result
+
+
 @pytest.mark.asyncio
 async def test_bash_exec_tool_captures_stderr():
     from localharness.tools.builtin.bash_tool import BashExecTool
