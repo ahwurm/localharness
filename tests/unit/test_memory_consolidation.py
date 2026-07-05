@@ -570,3 +570,137 @@ async def test_has_work_ignores_non_gate_pending_facts(store: MemoryStore):
         tags=["gate", "tier:resolved_error", "pending_consolidation"], confidence=0.65,
     )
     assert await off._has_work() is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 36 (the chapter-writer): the LOAD-BEARING composed proof — a single
+# ConsolidationPass.run() with an LLM wired must write a chapter, reconcile a
+# disputed fact (revert RESTORES the original), AND mine a personal fact, all
+# three inside run() (must-have #4 / plan-check WARNING 1). The no-LLM path is
+# provably inert (the deterministic core is byte-unchanged).
+# ---------------------------------------------------------------------------
+
+# Two `read` lessons sharing the salient tokens "absolute"/"resolved"/"path" — they cluster
+# via the FTS relatedness signal (fixture-fake seed text; allowed in tests per 36-CONTEXT).
+_READ_A = "The read tool returned FileNotFound on a relative path; retrying with the absolute path resolved it."
+_READ_B = "The read tool raised a permission problem on a protected path; the absolute path form resolved it cleanly."
+_ORIG_FACT = "user's preferred editor is neovim"          # the wrongly-disputed remembered fact
+_SUNBURN = "i got super duper sunburnt today at the beach"  # the live personal-fact specimen (36-CONTEXT)
+
+
+class _DispatchLLM:
+    """One fake that dispatches on prompt content so a SINGLE pass drives all three new steps:
+    REVERT for the reconcile look (shape (a) prompt says "disputed"), a grounded personal fact
+    for the miner ("colleague would remember"), a grounded corpus slice for the chapter-writer
+    ("Write ONE"), and "" for the replay seam (inert — no stray replay/ facts)."""
+    async def complete(self, prompt: str) -> str:
+        if "disputed" in prompt:                      # reconciliation shape (a)
+            return "REVERT"
+        if "colleague would remember" in prompt:      # transcript mining
+            return "user got sunburnt today"          # grounded on "sunburnt" (>=6-char token)
+        if "Write ONE" in prompt:                     # chapter-writer — echo a verbatim corpus slice
+            corpus = prompt.split("\n\n")[-1]
+            lines = [ln for ln in corpus.splitlines() if ln.strip()]
+            return " ".join(lines[0].split()[:12]) if lines else "chapter"
+        return ""                                     # replay seam + anything else: inert
+
+
+async def _seed_cluster_lesson(store, tool, tier, body, sess, lesson):
+    """A promoted lesson (learned/{tool}/{tier}/{lesson}, 0.8) PLUS its derived_from gate/ source
+    carrying provenance=session — mirrors 36-01/36-04 seeding so the cluster's session spread is
+    derivable from neighborhood() like the real graph. The gate lesson-part ("{lesson}src") differs
+    from the learned suffix so _step_promote_recurring never re-promotes the seed (no collision)."""
+    promoted = await store.store_fact(
+        key=f"learned/{tool}/{tier}/{lesson}", value=body,
+        tags=["consolidated", f"tier:{tier}"], confidence=0.8,
+        source="consolidation", provenance="consolidated:1-episodes",
+    )
+    cand = await store.store_fact(
+        key=f"gate/{tier}/{tool}/{lesson}src/{sess}",
+        value=f"Tool `{tool}` episode in {sess}: {body}",
+        tags=["gate", f"tier:{tier}", "pending_consolidation"],
+        confidence=0.65, source="write_gate", provenance=sess,
+    )
+    await store.add_edge(promoted.id, cand.id, "derived_from")
+    return promoted
+
+
+async def _seed_phase36(store) -> str:
+    """Seed the three specimens the composed pass must consume; returns the disputed key K."""
+    from localharness.memory.predictive_write_gate import _DISPUTE_MARKER
+
+    # (i) a stable 2-lesson cluster spanning 2 sittings (s1, s2).
+    await _seed_cluster_lesson(store, "read", "resolved_error", _READ_A, "s1", "a1")
+    await _seed_cluster_lesson(store, "read", "permission", _READ_B, "s2", "b2")
+    # (ii) a SHAPE (a) disputed fact: a clean antecedent THEN the exact gate supersede-wrap on the
+    # SAME key, so get_fact_history holds a pre-dispute row and REVERT RESTORES (marker disappears).
+    k = "recall/editor_pref"
+    await store.store_fact(key=k, value=_ORIG_FACT, tags=["remember"], confidence=0.8)
+    await store.store_fact(
+        key=k, value=f"{_DISPUTE_MARKER} {_ORIG_FACT}",
+        tags=["correction", "tier:correction_pending", "pending_consolidation"], confidence=0.6,
+    )
+    # (iii) a mineable transcript span past the (zero) mining watermark.
+    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "user_message",
+                                "id": "h1000", "session_id": "mine-sess", "ts": 1_000_000,
+                                "content": _SUNBURN})
+    return k
+
+
+async def _schema_rows(store) -> list[tuple[str, str]]:
+    async with store._db.execute(
+        "SELECT key, value FROM facts WHERE agent_id = ? AND status = 'active' AND node_kind = 'schema'",
+        (store._agent_id,),
+    ) as cur:
+        return list(await cur.fetchall())
+
+
+@pytest.mark.asyncio
+async def test_phase36_pass_writes_schema_reconciles_and_mines(store: MemoryStore):
+    """ONE ConsolidationPass.run() with an LLM wired writes a chapter (rendered schemas-first),
+    reverts+RESTORES a disputed fact, AND mines a personal fact — every new step proven wired
+    inside run() (must-have #4; mining_enabled=True is the plan-check WARNING 1 assertion)."""
+    from localharness.memory.predictive_write_gate import _DISPUTE_MARKER
+
+    k = await _seed_phase36(store)
+    cfg = _cfg(schema_writer_enabled=True, reconcile_enabled=True, mining_enabled=True)
+    report = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+
+    # (1) SCHEMA — one chapter written and it renders in the "### Knowledge" section.
+    assert report.schemas_written >= 1
+    schemas = await _schema_rows(store)
+    assert len(schemas) >= 1
+    index = await store._render_memory_index(10)
+    assert "### Knowledge" in index
+    assert schemas[0][0] in index                       # the schema key routes in the index
+
+    # (2) RECONCILE — the dispute is reverted and the ORIGINAL value is RESTORED (not cleared).
+    assert report.reconciled >= 1
+    restored = await store.get_fact(k)
+    assert restored is not None
+    assert restored.value == _ORIG_FACT                 # pre-dispute value back, verbatim
+    assert _DISPUTE_MARKER not in restored.value        # the marker is gone
+
+    # (3) MINE — a personal fact is mined and written INJECTABLE (>=0.7); this is what proves
+    # _step_mine is wired inside run() rather than skipped (WARNING 1).
+    assert report.mined >= 1
+    mined = await store.query_facts(FactQuery(tags=["mined"]))
+    assert mined and mined[0].key.startswith("mined/")
+    assert mined[0].confidence >= 0.7
+
+
+@pytest.mark.asyncio
+async def test_phase36_deterministic_pass_unchanged_without_llm(store: MemoryStore):
+    """The same seed with llm=None: the three new steps are INERT (report fields 0, no schema
+    written, the dispute stays quarantined, nothing mined) — the deterministic core is unchanged."""
+    from localharness.memory.predictive_write_gate import _DISPUTE_MARKER
+
+    k = await _seed_phase36(store)
+    report = await ConsolidationPass(store, _cfg(), llm=None).run()
+
+    assert report.schemas_written == 0
+    assert report.reconciled == 0
+    assert report.mined == 0
+    assert await _schema_rows(store) == []                       # no chapter without an LLM
+    assert (await store.get_fact(k)).value.startswith(_DISPUTE_MARKER)  # dispute untouched
+    assert await store.query_facts(FactQuery(tags=["mined"])) == []     # nothing mined
