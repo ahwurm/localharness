@@ -264,6 +264,17 @@ def test_live_store_paths_denied_by_permissions():
     assert ev.evaluate(ToolCall(name="edit",
                                 arguments={"path": f"{home}/x/history.jsonl", "old": "a", "new": "b"},
                                 id="t"), cfg.permissions).denied
+    # SAFETY B1 residual: ~-prefixed forms must ALSO be caught — fnmatch runs on the RAW
+    # pre-expansion argument strings (write/edit expanduser AFTER the permission check).
+    assert ev.evaluate(ToolCall(name="bash_exec",
+                                arguments={"command": "cat ~/.localharness/agents/orchestrator/memory.db"},
+                                id="t"), cfg.permissions).denied
+    assert ev.evaluate(ToolCall(name="write",
+                                arguments={"path": "~/.localharness/agents/orchestrator/MEMORY.md",
+                                           "content": "x"}, id="t"), cfg.permissions).denied
+    assert ev.evaluate(ToolCall(name="edit",
+                                arguments={"path": "~/.localharness/agents/x/history.jsonl",
+                                           "old": "a", "new": "b"}, id="t"), cfg.permissions).denied
     # The P-A capability floor is applied too (web_* denied for the bash-holding root).
     assert "web_fetch" in cfg.tools.deny
     # Innocuous calls stay allowed.
@@ -312,8 +323,13 @@ async def test_live_mode_groups_days_into_sittings_and_drives_real_loop(tmp_path
     assert isinstance(v["probe"]["answer"], str) and v["probe"]["answer"]
     assert v["probe"]["tool_calls"] == 0
     assert v["tool_calls"] == v["probe"]["tool_calls"]
+    assert v["probe"]["turn_failed"] is False  # a TurnFailed probe can never mint HOLDS
     assert isinstance(v["probe"]["chapter_content_in_answer"], bool)
     assert v["probe"]["chapter_content_in_answer"] is True  # the fake echoes the injected chapter line
+
+    # Sensitivity disclosure: per-cluster sorted session lists make plus1 legitimacy
+    # hostile-read-verifiable from the artifact alone.
+    assert isinstance(v["sensitivity"]["stricter_cluster_sessions"], list)
 
     # Verdict shape intact (same LOCKED bars as trace mode) + non-vacuous: the repeated real
     # tool-error lessons cluster across the two sittings into one grounded zero-tool chapter.
@@ -404,6 +420,86 @@ async def test_kill_file_aborts_grading_with_honest_verdict(tmp_path: Path):
     assert code == 1
     v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
     assert v["verdict"] == "ABORTED"
+
+
+@pytest.mark.asyncio
+async def test_failed_probe_turn_cannot_mint_holds(tmp_path: Path, monkeypatch):
+    """Probe-gate BLOCKER: run_turn NEVER returns an empty string (error/kill summaries are
+    non-empty prose), so bool(answer) was dead code — a failed probe turn minted HOLDS. The
+    gate must consume the turn's TurnFailed event: a probe whose LLM dies -> INCONCLUSIVE."""
+    orig = sema._OfflineLoopLLM.stream_complete
+
+    async def failing(self, messages=None, tools=None, on_token=None):
+        last_user = next((m for m in reversed(messages or []) if m.get("role") == "user"), {})
+        task = str(last_user.get("content", ""))
+        if task.startswith(("What has the harness learned", "What durable domain knowledge")):
+            raise ConnectionError("vLLM died mid-probe")
+        return await orig(self, messages, tools, on_token)
+
+    monkeypatch.setattr(sema._OfflineLoopLLM, "stream_complete", failing)
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+    ])
+    assert await sema.run(args) == 0  # still a measurement — an honest INCONCLUSIVE
+    v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
+    assert v["schemas_written"] >= 1          # the chapter exists...
+    assert v["probe"]["turn_failed"] is True  # ...but the probe turn FAILED
+    assert v["zero_tool_answered"] is False
+    assert v["verdict"] == "INCONCLUSIVE"     # never HOLDS on a failed probe
+
+
+@pytest.mark.asyncio
+async def test_off_chapter_answer_demotes_to_inconclusive(tmp_path: Path, monkeypatch):
+    """Attribution joins the HOLDS conjunction (orchestrator ruling): the locked bar is
+    'answered BY the Knowledge line' — a zero-tool answer that ignores the chapter is an
+    honest not-proven (false-negative is the only permitted error direction)."""
+    orig = sema._OfflineLoopLLM.stream_complete
+
+    async def off_chapter(self, messages=None, tools=None, on_token=None):
+        last_user = next((m for m in reversed(messages or []) if m.get("role") == "user"), {})
+        task = str(last_user.get("content", ""))
+        if task.startswith(("What has the harness learned", "What durable domain knowledge")):
+            return sema._Msg(content="The weather is lovely."), None  # zero-tool, OFF-chapter
+        return await orig(self, messages, tools, on_token)
+
+    monkeypatch.setattr(sema._OfflineLoopLLM, "stream_complete", off_chapter)
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+    ])
+    assert await sema.run(args) == 0
+    v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
+    assert v["schemas_written"] >= 1
+    assert v["probe"]["tool_calls"] == 0
+    assert v["probe"]["turn_failed"] is False
+    assert v["probe"]["chapter_content_in_answer"] is False
+    assert v["zero_tool_answered"] is False
+    assert v["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_aborts_before_any_sitting(tmp_path: Path, monkeypatch):
+    """Machine-safety: MemAvailable below threshold -> honest abort (exit 1) BEFORE any
+    sitting fires a live prefill. (The KILL mid-sitting per-turn break is inspection-covered:
+    the same predicate runs at the top of every turn iteration in _run_sittings.)"""
+    monkeypatch.setattr(sema, "_mem_available_gib", lambda: 5.0)  # far below the 30 GiB bar
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    # NOT --offline: the watchdog only guards the live path. The abort fires before any
+    # client construction, so the fake endpoint is never contacted.
+    args = sema._parse_args([
+        "--history", str(hist), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+        "--model", "fake-model", "--base-url", "http://localhost:1/v1",
+    ])
+    assert await sema.run(args) == 1
+    assert not (tmp_path / "results" / "verdict.json").exists()
+    assert not (tmp_path / "store").exists()  # no sitting ever composed
 
 
 @pytest.mark.asyncio
