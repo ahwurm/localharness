@@ -6,36 +6,53 @@ This is the phase gate for the chapter-writer: "100 lessons -> one honest chapte
 routes through." An honest KILL is a successful outcome. The grading method is committed BEFORE
 this ever runs so results cannot move the goalposts (the M1 methodology lesson).
 
-WHAT IT DOES (mirrors scripts/gate_replay_comparison.py's isolated-store + verdict shape):
-  1. REPLAY (real events only, nothing invented): read the copied real bus-events trace READ-ONLY and
-     feed its primary events through the SHIPPED gates (WriteGate + PredictiveGate +
-     PredictiveWriteGate) into a FRESH isolated store — producing real learned/* lessons + real
-     tier:correction_pending rows. The live transcript (history.jsonl) is loaded for mining/deref.
-  2. CONSOLIDATE: run the seam-ON ConsolidationPass (chapter-writer + mining) with the subject
-     model (live) or a bundled FakeLLM (--offline), then reconcile_corrections directly so the
-     verdict can record the six shape-aware disposition buckets (the pass's summed reconcile step
-     is regression-proven wired in 36-07; the direct call is only to surface the breakdown).
-  3. PROBE (proxy-independent FIRST): render the injected index; is the domain question answered
-     by the "### Knowledge" schema line with ZERO tool calls (BINARY)? tool-call count (integer)?
-     Re-apply the KILL to every schema (majority-token grounding + numeric net) mechanically.
-  4. PROXIES + SENSITIVITY: churn_rate + byte-stability (double-render ==); re-grade under a
+METHOD AMENDMENT (pre-run, owner-directed — Discord 2026-07-05 17:53): the provable does NOT
+replay old stored trace/DB shapes. It re-runs the REAL queries the owner ran over the month
+LIVE through the harness — the same run_turn hot path the CLI uses — in fresh sittings (one
+per original calendar day), so the ≥2-sittings stability gate is satisfied by real temporal
+structure and the proof exercises the live end-to-end pipeline. The GRADING DOC IS UNTOUCHED
+(committed 2026-07-05T17:43:47Z, before any run); only the accumulation method changed.
+
+TWO ACCUMULATION MODES (exactly one):
+  --history <history.jsonl>   LIVE-SESSION ACCUMULATION (the provable's method). Extract the
+      owner's real user messages READ-ONLY, group by original day (local box time — the days
+      the owner actually lived), and drive each query through the REAL AgentLoop: real bus,
+      real WriteGate/PredictiveGate/UserSignalDetector/PredictiveWriteGate, real builtin
+      tools, real memory store — against the ISOLATED agent home. One fresh sitting (distinct
+      session id; fresh loop/gates/store instances, emulating one process per sitting) per
+      original day, with real create_session/end_session close-outs.
+  --trace <dir|bus-events>    LEGACY TRACE REPLAY (retained as an offline cross-check: it
+      rehearses the gate shapes — incl. both correction_pending shapes — at zero loop cost).
+      Feeds the copied real bus-events through the shipped gates into the isolated store.
+
+THEN (both modes — the LOCKED grading, unchanged):
+  1. CONSOLIDATE: seam-ON ConsolidationPass (chapter-writer + mining) with the subject model
+     (live) or bundled fakes (--offline), then reconcile_corrections directly so the verdict
+     records the six shape-aware disposition buckets.
+  2. PROBE (proxy-independent FIRST): is the domain question answered by the "### Knowledge"
+     schema line with ZERO tool calls (BINARY)? tool-call count (integer)? Re-apply the KILL
+     per schema (majority-token grounding + numeric net) mechanically.
+  3. PROXIES + SENSITIVITY: churn_rate + byte-stability (double-render ==); re-grade under a
      stricter grounding bar and a stricter cluster-stability bar.
-  5. EMIT verdict.json + report.md into the ISOLATED --results dir; report the live store's real
-     organic counts (read-only) as a WATCH ITEM.
+  4. EMIT verdict.json + report.md into the ISOLATED --results dir (with a Method-amendment
+     section + per-sitting turn counts); live-store organic counts read-only as a WATCH ITEM.
 
 MACHINE-SAFETY (binding — this box hard-hung twice in 24h under vLLM prefill): the live path is
-attended-only, char-bounded (idle_llm), and gated by a MemAvailable watchdog that aborts below
-~30 GiB. Offline uses a fake LLM and never touches vLLM.
+attended-only, context-bounded (32k loop window; idle passes char-capped), and gated by a
+MemAvailable watchdog checked before EVERY live turn (aborts below ~30 GiB). `touch <store>/KILL`
+stops the current turn via the loop's own KillWatcher. Offline never touches vLLM. Tools run
+FOR REAL during live sittings (bash/web/write included) — attended-only is the containment.
 
 usage (live, ATTENDED only):
   .venv/bin/python scripts/sema05_month_in_a_day.py \
-      --trace <scratch-with-copied-bus-events+history+memory.db> \
+      --history <scratch>/history.jsonl \
       --store <scratch>/isolated-store \
       --results ~/.localharness/sema05-reports/phase36-$(date +%Y%m%dT%H%M%SZ) \
-      --model <subject> --base-url <url>
+      --model <subject> --base-url <url> [--max-turns-per-day N]
 
 Exit codes: 0 = a measurement was produced (HOLDS / KILL / INCONCLUSIVE all succeed);
-            1 = processing failure / watchdog abort; 2 = guard refusal (bench/results or live store).
+            1 = processing failure / watchdog abort; 2 = guard refusal (bench/results, live
+            store, or not-exactly-one accumulation mode).
 """
 from __future__ import annotations
 
@@ -75,6 +92,17 @@ from localharness.memory.reconciliation import reconcile_corrections  # noqa: E4
 from localharness.memory.sqlite import MemoryStore, _row_to_fact  # noqa: E402
 
 _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this MemAvailable.
+_LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
+_GRADING_DOC = ".planning/phases/36-chapter-writer/36-SEMA05-GRADING.md"
+_GRADING_COMMITTED = "2026-07-05T17:43:47Z"  # the LOCKED pre-commitment timestamp (quoted in report)
+_ROLE = (
+    "Personal assistant on the owner's box. Answer directly and use tools only when the "
+    "request actually needs them."
+)
+
+
+class _WatchdogAbort(RuntimeError):
+    """Raised when MemAvailable drops below the safety threshold mid-run (live mode)."""
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +147,79 @@ class _OfflineFakeLLM:
         if "colleague would remember" in prompt:  # transcript mining
             return "user got sunburnt today"       # grounded on 'sunburnt' in the span
         return ""  # replay seam + anything else: inert
+
+
+class _Msg:
+    """Loop-contract response message (mirrors conftest FakeLLMResponse: .content/.tool_calls)."""
+
+    def __init__(self, content: str | None = None, tool_calls: list | None = None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _ToolCall:
+    """Loop-contract tool call (mirrors conftest FakeToolCall): .id/.name/.arguments dict plus
+    the openai-shape .function view (name + JSON arguments) the native extractor consumes."""
+
+    def __init__(self, id: str, name: str, arguments: dict) -> None:  # noqa: A002
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+
+    @property
+    def function(self):
+        class _Fn:
+            pass
+
+        fn = _Fn()
+        fn.name = self.name
+        fn.arguments = json.dumps(self.arguments)
+        return fn
+
+
+class _OfflineLoopLLM:
+    """Loop-client double for --offline --history: drives the REAL AgentLoop + REAL builtin
+    tools deterministically. For a 'please read the {tag} file' task it reads a missing {tag}
+    path (a REAL ReadTool error), then a real existing path (recovery), then answers — so the
+    shipped WriteGate captures a real resolved_error lesson from real tool events, recurring
+    across sittings. Neither fake authors lesson text; the offline chapter prose comes from
+    the seam fake's verbatim corpus echo (the honest generator/lesson split)."""
+
+    def __init__(self, existing_path: str, missing_dir: str) -> None:
+        self._existing = existing_path
+        self._missing_dir = missing_dir
+        self._n = 0
+
+        class _Cfg:
+            tool_call_mode = "native"
+            context_window = _LOOP_CONTEXT_TOKENS
+
+        self.config = _Cfg()
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        self._n += 1
+        msgs = messages or []
+        last_user = next((m for m in reversed(msgs) if m.get("role") == "user"), {})
+        task = str(last_user.get("content", ""))
+        if task.startswith("Review your answer"):  # MECH-01 self-check pass (if enabled)
+            return _Msg(content="CONFIRMED"), None
+        n_tool = 0
+        for m in reversed(msgs):  # tool results since the last user turn = the stage
+            if m.get("role") == "user":
+                break
+            if m.get("role") == "tool":
+                n_tool += 1
+        tag = next((w for w in ("alpha", "beta", "gamma") if w in task), "alpha")
+        if n_tool == 0:  # stage 1: read a missing path -> a REAL deterministic tool error
+            return _Msg(tool_calls=[_ToolCall(
+                id=f"tc{self._n}", name="read",
+                arguments={"path": f"{self._missing_dir}/absent-{tag}.md"},
+            )]), None
+        if n_tool == 1:  # stage 2: recover by reading a real existing path
+            return _Msg(tool_calls=[_ToolCall(
+                id=f"tc{self._n}", name="read", arguments={"path": self._existing},
+            )]), None
+        return _Msg(content=f"Read the {tag} file after recovering from the missing path."), None
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +274,156 @@ async def _load_transcript(store: MemoryStore, history_path: Path) -> int:
         await store.append_history(rec)
         n += 1
     return n
+
+
+# ---------------------------------------------------------------------------
+# LIVE-SESSION ACCUMULATION — the provable's method (owner steer 2026-07-05 17:53):
+# re-run the owner's REAL month queries through the REAL agent loop, one fresh
+# sitting per original day, against the ISOLATED agent home.
+# ---------------------------------------------------------------------------
+def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, list[str]]]:
+    """READ-ONLY extraction of the owner's real user messages from a copied history.jsonl,
+    grouped by ORIGINAL calendar day (local box time — the days the owner actually lived,
+    which is what the ≥2-sittings stability gate should honestly measure). Within a day,
+    original ts order. Non-user records and other agents' records are ignored."""
+    by_day: dict[str, list[tuple[int, str]]] = {}
+    for raw in history_path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") != "user_message":
+            continue
+        if rec.get("agent_id") not in (None, agent_id):
+            continue
+        content = str(rec.get("content", "")).strip()
+        if not content:
+            continue
+        ts = int(rec.get("ts", 0) or 0)
+        day = time.strftime("%Y%m%d", time.localtime(ts))
+        by_day.setdefault(day, []).append((ts, content))
+    return [(day, [c for _, c in sorted(rows)]) for day, rows in sorted(by_day.items())]
+
+
+async def _run_sittings(
+    args: argparse.Namespace,
+    store_dir: Path,
+    day_queries: list[tuple[str, list[str]]],
+    loop_llm: object,
+    token_counter: object | None,
+    model_label: str,
+) -> list[dict]:
+    """Drive each original day's real queries through the REAL AgentLoop as ONE fresh sitting:
+    fresh store/bus/gates/loop instances per day (emulating one process per sitting), real
+    create_session/end_session close-outs, the bus persisted into the isolated agent home.
+    This is the same hot path the CLI runs (start_cmd composition, repl.py drive): the loop
+    publishes real Action/Observation events, executes REAL tools, and the shipped gates
+    capture real lessons/corrections. Watchdog-checked before every live turn; raises
+    _WatchdogAbort on a trip. Returns [{day, session_id, turns}] in run order."""
+    # Real-composition imports (lazy: only the --history mode pays them).
+    from localharness.agent.context import ContentStore, ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.cli.session_accumulator import SessionAccumulator, derive_session_summary
+    from localharness.config.models import AgentConfig
+    from localharness.memory.user_signals import UserSignalDetector
+    from localharness.tools.builtin import bind_agent_store_tools, register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    events_path = store_dir / "agents" / args.agent / "bus-events.jsonl"
+    sittings: list[dict] = []
+    for day, queries in day_queries:
+        if not args.offline and not _watchdog_ok():
+            raise _WatchdogAbort(f"MemAvailable below {_MIN_MEM_GIB} GiB before sitting {day}")
+        capped = queries[: args.max_turns_per_day] if args.max_turns_per_day else queries
+
+        # Fresh per-sitting composition (mirrors start_cmd; one continuous bus-events log).
+        bus = EventBus(persist_path=events_path)
+        store = MemoryStore(agent_id=args.agent, division_id="", org_id="",
+                            base_dir=str(store_dir), bus=bus)
+        await store.open()
+        sid = f"sema05-{day}"
+        await store.create_session(sid, budget={}, model=model_label,
+                                   context_tokens_available=_LOOP_CONTEXT_TOKENS)
+        wg = WriteGate(store, bus, args.agent)
+        await wg.open()
+        pg_cfg = PredictiveGateConfig()
+        pg_cfg.write_live = True
+        pg = PredictiveGate(store, bus, args.agent, pg_cfg)
+        await pg.open()
+        usig = UserSignalDetector(store, bus, args.agent, pg_cfg)
+        await usig.open()
+        pw = PredictiveWriteGate(store, bus, args.agent, pg_cfg)
+        await pw.open()
+        acc = SessionAccumulator(bus, args.agent)
+        await acc.open()
+
+        registry = ToolRegistry()
+        content_store = ContentStore()
+        await register_builtin_tools(registry, memory_store=store, eviction_store=content_store)
+        bind_agent_store_tools(registry, content_store)
+
+        a_cfg = AgentConfig(name=args.agent, role=_ROLE)
+        a_cfg.context.max_context_tokens = _LOOP_CONTEXT_TOKENS  # machine-safety context bound
+        # P-A capability floor, EXACTLY as start_cmd applies it to the root agent: web_*
+        # (untrusted-ingest) is DENIED for a bash/write/edit-holding agent (prompt-injection->
+        # host hole). Queries needing web ingestion run without web tools — production behavior
+        # (the real root delegates ingestion to a subagent, which this bounded run omits).
+        from localharness.tools.capabilities import apply_root_capability_floor
+        apply_root_capability_floor(a_cfg.tools)
+        ctx = ContextManager(
+            max_context_tokens=_LOOP_CONTEXT_TOKENS,
+            eviction_store=content_store,
+            token_counter=token_counter,
+        )
+        loop = AgentLoop(
+            config=a_cfg, llm=loop_llm, bus=bus, context_manager=ctx,
+            tool_registry=registry, permission_evaluator=PermissionEvaluator(),
+            memory_loader=store,
+            compact_md_path=store_dir / "agents" / args.agent / "compact.md",  # isolated
+            kill_file_path=store_dir / "KILL",  # attended stop: `touch <store>/KILL`
+            session_id=sid,
+        )
+
+        turns = 0
+        exit_reason = "complete"
+        try:
+            for q in capped:
+                if not args.offline and not _watchdog_ok():
+                    exit_reason = "watchdog_abort"
+                    raise _WatchdogAbort(
+                        f"MemAvailable below {_MIN_MEM_GIB} GiB mid-sitting {day} (turn {turns + 1})"
+                    )
+                # Exactly the repl.py drive: publish the UserMessage for the memory pipeline,
+                # then run the turn through the real loop.
+                await bus.publish(UserMessage(agent_id=args.agent, session_id=sid,
+                                              content=q, channel="terminal"))
+                await loop.run_turn(task=q)
+                turns += 1
+        finally:
+            # Mirror start_cmd's ordered shutdown: accumulator stops counting, end_session
+            # writes the real close-out, gates close, store closes.
+            await acc.close()
+            try:
+                await store.end_session(
+                    sid, exit_reason=exit_reason, summary=derive_session_summary(acc),
+                    turn_count=acc.turn_count, action_count=acc.action_count,
+                    tokens_in=acc.tokens_in, tokens_out=acc.tokens_out,
+                )
+            except Exception:  # noqa: BLE001 — a close-out fault must not mask the turn error
+                pass
+            for g in (pw, usig, pg, wg):
+                try:
+                    await g.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            await store.close()
+        sittings.append({"day": day, "session_id": sid, "turns": turns})
+        print(f"sitting {day}: {turns}/{len(queries)} real queries re-run (session {sid})")
+    return sittings
 
 
 # ---------------------------------------------------------------------------
@@ -328,21 +579,60 @@ async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> di
 # Report (owner-facing, plain language first, hostile-read-proof)
 # ---------------------------------------------------------------------------
 def _report(v: dict) -> str:
+    live_mode = v["method"] == "live_session_accumulation"
     L: list[str] = []
     add = L.append
     add("# SEMA-05 month-in-a-day — verdict\n")
-    add(
-        "Real accumulated events were replayed through the shipped gates into an ISOLATED store, "
-        "the seam-ON idle pass wrote chapter(s), and the result is graded against the "
-        "pre-committed method (36-SEMA05-GRADING.md). An honest KILL is a successful outcome.\n"
-    )
+    if live_mode:
+        add(
+            "The owner's REAL month of queries was re-run LIVE through the harness — the same "
+            "run_turn hot path the CLI uses — one fresh sitting per original day, against an "
+            "ISOLATED agent home. The seam-ON idle pass then wrote chapter(s), graded against the "
+            "pre-committed method (36-SEMA05-GRADING.md). An honest KILL is a successful outcome.\n"
+        )
+    else:
+        add(
+            "Real accumulated events were replayed through the shipped gates into an ISOLATED store, "
+            "the seam-ON idle pass wrote chapter(s), and the result is graded against the "
+            "pre-committed method (36-SEMA05-GRADING.md). An honest KILL is a successful outcome.\n"
+        )
     add(f"**VERDICT: {v['verdict']}**  ({'offline rehearsal' if v['offline'] else 'live subject model'})\n")
+
+    if live_mode:
+        add("## Method amendment (pre-run, owner-directed)\n")
+        add(
+            "- The accumulation method was changed BEFORE the run at owner direction (Discord "
+            "2026-07-05 17:53): the owner's real month queries are re-run live through the harness "
+            "in fresh per-day sittings, instead of replaying old stored trace/DB shapes — so the "
+            "proof exercises the live end-to-end pipeline and the ≥2-sittings stability gate is "
+            "satisfied by real temporal structure."
+        )
+        add(
+            f"- The grading doc is UNTOUCHED: committed {v['grading_committed']} "
+            f"(`{v['grading_doc']}`), before any run. Bars applied verbatim below."
+        )
+        cap = v["max_turns_per_day"]
+        add(
+            f"- Sittings driven: **{v['days']}** (one per original day) | turns driven: "
+            f"**{v['turns_driven']}** of {v['queries_total']} extracted queries"
+            + (f" (capped at {cap}/day)" if cap else " (uncapped)") + "."
+        )
+        add("- Per-sitting turn counts (disclosure):")
+        add("")
+        add("| day | session id | turns |")
+        add("|-----|------------|-------|")
+        for s in v["sittings"] or []:
+            add(f"| {s['day']} | {s['session_id']} | {s['turns']} |")
+        add("")
 
     add("## Proxy-independent metrics (lead)\n")
     add(f"- Zero-tool answer (BINARY): **{v['zero_tool_answered']}** — tool calls: **{v['tool_calls']}**")
     add(f"- Domain question: {v['domain_question']}")
     add(f"- N real accumulated lessons (isolated store): **{v['n_lessons']}**  |  chapters written: **{v['schemas_written']}**")
-    add(f"- Events replayed: {v['events_replayed']}  |  transcript records loaded: {v['transcript_records']}\n")
+    if live_mode:
+        add(f"- Turns driven: {v['turns_driven']}  |  isolated-home transcript records: {v['transcript_records']}\n")
+    else:
+        add(f"- Events replayed: {v['events_replayed']}  |  transcript records loaded: {v['transcript_records']}\n")
 
     add("## KILL re-check (mechanical — any schema token not derivable from its members)\n")
     add(f"- kill_triggered: **{v['kill_triggered']}**")
@@ -385,7 +675,7 @@ def _report(v: dict) -> str:
         f"correction_pending: {ls['correction_pending']}  |  promoted lessons: {ls['learned']}"
     )
     add(
-        "- The live store is NEVER mutated (only a read-only copy was replayed). Its first organic "
+        "- The live store is NEVER mutated (only read-only copies are consumed). Its first organic "
         "chapter is a post-phase watch item, not this phase's gate.\n"
     )
 
@@ -421,23 +711,48 @@ async def run(args: argparse.Namespace) -> int:
         )
         return 2
 
-    tp = Path(args.trace).expanduser()
-    if tp.is_dir():
-        bus_events, history_path, live_db = (
-            tp / "bus-events.jsonl", tp / "history.jsonl", tp / "memory.db",
+    # GUARD: exactly ONE accumulation mode (the owner-directed live mode, or the legacy trace).
+    if bool(args.history) == bool(args.trace):
+        print(
+            "REFUSED: pass exactly one of --history (live-session accumulation — the provable's "
+            "method) or --trace (legacy trace replay cross-check).",
+            file=sys.stderr,
         )
-    else:  # a bus-events file was passed directly — resolve siblings from its parent
-        bus_events, history_path, live_db = (
-            tp, tp.parent / "history.jsonl", tp.parent / "memory.db",
-        )
-    if not bus_events.exists():
-        print(f"PROCESSING FAILURE: bus-events trace not found: {bus_events}", file=sys.stderr)
-        return 1
+        return 2
+    live_mode = bool(args.history)
 
-    # LLM selection + machine-safety.
-    if args.offline:
-        llm: object = _OfflineFakeLLM()
+    if live_mode:
+        history_path = Path(args.history).expanduser()
+        bus_events = None
+        live_db = history_path.parent / "memory.db"  # sibling of the copied history (read-only)
+        if not history_path.exists():
+            print(f"PROCESSING FAILURE: history file not found: {history_path}", file=sys.stderr)
+            return 1
     else:
+        tp = Path(args.trace).expanduser()
+        if tp.is_dir():
+            bus_events, history_path, live_db = (
+                tp / "bus-events.jsonl", tp / "history.jsonl", tp / "memory.db",
+            )
+        else:  # a bus-events file was passed directly — resolve siblings from its parent
+            bus_events, history_path, live_db = (
+                tp, tp.parent / "history.jsonl", tp.parent / "memory.db",
+            )
+        if not bus_events.exists():
+            print(f"PROCESSING FAILURE: bus-events trace not found: {bus_events}", file=sys.stderr)
+            return 1
+
+    # LLM selection + machine-safety. ONE client serves both seams in live mode: the loop uses
+    # it directly (stream_complete) and the idle passes go through LLMTextAdapter — one serial
+    # inference gate for everything.
+    token_counter = None
+    if args.offline:
+        llm: object = _OfflineFakeLLM()  # the idle-pass (seam-contract) fake
+        loop_llm: object = _OfflineLoopLLM(str(history_path), str(store_dir))
+    else:
+        if not args.model or not args.base_url:
+            print("REFUSED: live mode requires --model and --base-url.", file=sys.stderr)
+            return 2
         if not _watchdog_ok():
             g = _mem_available_gib()
             print(
@@ -446,23 +761,57 @@ async def run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from localharness.agent.context import TokenCounter
         from localharness.provider.client import LLMClient, LLMConfig
-        llm = LLMTextAdapter(
-            LLMClient(LLMConfig(base_url=args.base_url, model=args.model,
-                                max_tokens=512, temperature=0.2))
-        )
+        client = LLMClient(LLMConfig(base_url=args.base_url, model=args.model))
+        # FIDEL-04: probe the real tool_call_mode + served window (never raises) — the same
+        # capability detection start_cmd runs before its loop.
+        await client.detect_capabilities()
+        loop_llm = client
+        llm = LLMTextAdapter(client)
+        token_counter = TokenCounter(base_url=args.base_url, model=args.model)
 
     results.mkdir(parents=True, exist_ok=True)
-    store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
-    await store.open()
     t0 = time.monotonic()
-    try:
-        events_replayed = await _replay(store, bus_events, args.agent)
-        transcript_records = await _load_transcript(store, history_path)
-        if events_replayed == 0:
-            print("PROCESSING FAILURE: zero primary events replayed (empty/wrong trace or agent).",
+
+    # ACCUMULATE (live mode): re-run the owner's real month queries, one sitting per day.
+    sittings: list[dict] | None = None
+    queries_total = 0
+    if live_mode:
+        day_queries = _extract_day_queries(history_path, args.agent)
+        queries_total = sum(len(q) for _, q in day_queries)
+        if not day_queries:
+            print("PROCESSING FAILURE: no user messages extracted from --history for this agent.",
                   file=sys.stderr)
             return 1
+        print(f"extracted {queries_total} real queries across {len(day_queries)} original days")
+        try:
+            sittings = await _run_sittings(
+                args, store_dir, day_queries, loop_llm, token_counter,
+                model_label=args.model or "offline-fake",
+            )
+        except _WatchdogAbort as exc:
+            print(f"ABORT (machine-safety): {exc}. Partial isolated store left for inspection.",
+                  file=sys.stderr)
+            return 1
+        if sum(s["turns"] for s in sittings) == 0:
+            print("PROCESSING FAILURE: zero turns driven.", file=sys.stderr)
+            return 1
+
+    # GRADE (both modes — the LOCKED bars, unchanged). Fresh store handle over the isolated home.
+    store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
+    await store.open()
+    try:
+        if live_mode:
+            events_replayed = None  # not a trace replay — turns_driven carries the volume
+            transcript_records = len(await store.get_history(limit=1_000_000))
+        else:
+            events_replayed = await _replay(store, bus_events, args.agent)
+            transcript_records = await _load_transcript(store, history_path)
+            if events_replayed == 0:
+                print("PROCESSING FAILURE: zero primary events replayed (empty/wrong trace or agent).",
+                      file=sys.stderr)
+                return 1
 
         # Snapshot the correction-queue shape split BEFORE reconcile drains it.
         shape_a, shape_b = await _correction_shape_split(store)
@@ -500,7 +849,14 @@ async def run(args: argparse.Namespace) -> int:
             "verdict": verdict,
             "offline": bool(args.offline),
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "grading_doc": ".planning/phases/36-chapter-writer/36-SEMA05-GRADING.md",
+            "grading_doc": _GRADING_DOC,
+            "grading_committed": _GRADING_COMMITTED,
+            "method": "live_session_accumulation" if live_mode else "trace_replay",
+            "sittings": sittings,
+            "days": len(sittings) if sittings else None,
+            "queries_total": queries_total if live_mode else None,
+            "turns_driven": sum(s["turns"] for s in sittings) if sittings else None,
+            "max_turns_per_day": args.max_turns_per_day,
             "n_lessons": probe["n_lessons"],
             "domain_token": probe["domain_token"],
             "domain_question": probe["domain_question"],
@@ -535,7 +891,8 @@ async def run(args: argparse.Namespace) -> int:
         (results / "report.md").write_text(_report(v), encoding="utf-8")
 
         print(
-            f"SEMA-05 {verdict} | N={probe['n_lessons']} chapters={probe['schemas_written']} "
+            f"SEMA-05 {verdict} [{v['method']}] | N={probe['n_lessons']} "
+            f"chapters={probe['schemas_written']} "
             f"zero_tool={probe['zero_tool_answered']} tool_calls={probe['tool_calls']} "
             f"kill={probe['kill_triggered']} byte_stable={probe['byte_stable']} "
             f"churn={report.churn_rate:.3f} | reconcile drained={drained} "
@@ -549,21 +906,30 @@ async def run(args: argparse.Namespace) -> int:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="SEMA-05 month-in-a-day: isolated-store replay + seam-ON pass + verdict"
+        description="SEMA-05 month-in-a-day: live re-run of the owner's real month queries "
+                    "(or legacy trace replay) into an isolated store + seam-ON pass + verdict"
     )
-    p.add_argument("--trace", required=True,
-                   help="Dir (or bus-events file) with the COPIED real trace: bus-events.jsonl "
-                        "[+ history.jsonl + memory.db]. READ-ONLY.")
+    p.add_argument("--history", default=None,
+                   help="COPIED real history.jsonl (READ-ONLY). LIVE-SESSION ACCUMULATION — the "
+                        "provable's method: each original day's real queries re-run through the "
+                        "REAL agent loop as one fresh sitting. Sibling memory.db (if present) is "
+                        "read for the live-store watch item.")
+    p.add_argument("--trace", default=None,
+                   help="LEGACY cross-check: dir (or bus-events file) with the COPIED real trace "
+                        "to replay through the shipped gates. READ-ONLY. Mutually exclusive with "
+                        "--history.")
     p.add_argument("--store", required=True,
                    help="ISOLATED fresh store dir (base_dir). NEVER a live agent store.")
     p.add_argument("--results", required=True,
                    help="ISOLATED output dir (verdict.json + report.md). Refuses bench/results.")
     p.add_argument("--agent", default="orchestrator",
-                   help="Agent id to replay under (must match the trace's events; default orchestrator).")
+                   help="Agent id to run under (must match the history/trace records; default orchestrator).")
     p.add_argument("--model", default=None, help="Subject model (live path only).")
     p.add_argument("--base-url", default=None, help="vLLM base URL (live path only).")
+    p.add_argument("--max-turns-per-day", type=int, default=None,
+                   help="Optional cap on re-run queries per sitting (default: uncapped).")
     p.add_argument("--offline", action="store_true",
-                   help="Use the bundled FakeLLM + skip the live vLLM/watchdog (CI).")
+                   help="Use the bundled fakes + skip the live vLLM/watchdog (CI).")
     return p.parse_args(argv)
 
 
