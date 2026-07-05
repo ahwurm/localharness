@@ -15,7 +15,8 @@ import time
 import pytest
 
 from localharness.memory.chapter_writer import write_cluster_schemas
-from localharness.memory.clustering import find_stable_clusters
+from localharness.memory.clustering import _load_failure_queue, find_stable_clusters
+from localharness.memory.consolidation import _get_meta, _set_meta
 from localharness.memory.idle_llm import grounded
 from localharness.memory.sqlite import SCHEMA_KEY_PREFIX, FactQuery, MemoryStore
 
@@ -96,6 +97,12 @@ async def _member_of_dst(store, src_id) -> set[int]:
         "SELECT dst_id FROM edges WHERE src_id = ? AND kind = 'member_of'", (src_id,)
     ) as cur:
         return {r[0] for r in await cur.fetchall()}
+
+
+async def _row(store, fact_id):
+    """Re-read a single ACTIVE fact by id (tags/confidence/retrieval_strength after a raw retag)."""
+    facts = await store.get_facts_by_ids([fact_id])
+    return facts[0] if facts else None
 
 
 async def _schema_cluster_count(store) -> int:
@@ -303,3 +310,61 @@ async def test_cancel_stops_further_clusters(store):
     assert time.monotonic() - t0 < 3.0     # nobody waited 10s behind the generation
     assert llm.cancelled                   # generation cancelled -> inference gate released
     assert await _schema_cluster_count(store) == 0
+
+
+# ---------------------------------------------------------------------------------------
+# Task 3 — consume + drain the tier:surprising_failure queue (PGATE-03's only consumer)
+# ---------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_claimed_aux_consumed_and_drained(store):
+    """A CLAIMED aux row (folded under a chapter) gets a member_of edge + is retagged consumed
+    (pending_consolidation dropped, tier:consumed added, rs demoted) — confidence UNCHANGED. It
+    leaves the pending surprising_failure probe (drains) but stays query_facts-searchable."""
+    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
+    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    aux = await _seed_failure(store, "read")  # same-tool -> attaches as aux (36-01)
+
+    result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
+    assert len(result) == 1
+    schema = result[0]
+
+    row = await _row(store, aux.id)
+    assert "pending_consolidation" not in row.tags       # drained from the queue
+    assert "tier:consumed" in row.tags                   # folded under the chapter
+    assert row.confidence == 0.6                          # NEVER promoted above the <0.7 clamp
+    assert aux.id in await _member_of_dst(store, schema.id)   # member_of schema -> aux
+    assert aux.id not in {f.id for f in await _load_failure_queue(store)}  # off the pending probe
+    assert aux.key in {f.key for f in await store.query_facts(FactQuery(text="surprising"))}
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_failure_drains_at_stale_looks(store):
+    """An UNCLAIMED row (adjacent to no stable cluster) drains after stale_looks idle cycles so
+    the queue cannot grow unboundedly: counter pre-seeded to stale_looks-1 -> one pass drains it."""
+    aux = await _seed_failure(store, "read", prov="lonely")   # no lessons -> no cluster claims it
+    await _set_meta(store, f"failure/looks/{aux.key}", "4")     # one look short of stale_looks=5
+
+    result = await write_cluster_schemas(store, _EchoLLM("unused"), asyncio.Event())
+    assert result == []                                         # no clusters, only the drain sweep
+
+    row = await _row(store, aux.id)
+    assert "pending_consolidation" not in row.tags             # drained at the 5th look
+    assert "tier:consumed" in row.tags
+    assert "stale" in row.tags                                 # aged-out breadcrumb
+    assert row.confidence == 0.6                               # confidence never touched
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_not_drained_before_stale_looks(store):
+    """The same row one cycle earlier (counter < stale_looks) is NOT drained — only the look
+    counter is bumped; it stays in the pending queue."""
+    aux = await _seed_failure(store, "read", prov="lonely")
+    await _set_meta(store, f"failure/looks/{aux.key}", "3")     # two looks short
+
+    await write_cluster_schemas(store, _EchoLLM("unused"), asyncio.Event())
+
+    row = await _row(store, aux.id)
+    assert "pending_consolidation" in row.tags                 # still queued (4 < 5)
+    assert "tier:consumed" not in row.tags
+    assert await _get_meta(store, f"failure/looks/{aux.key}") == "4"   # counter bumped, not drained
