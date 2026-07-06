@@ -66,6 +66,15 @@ async def _seed_learned(store, tool, tier, body, sessions, *, lesson="", node_ki
     return promoted
 
 
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+    import hashlib
+    h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
+    return await store.store_fact(
+        key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
+        confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
+    )
+
+
 async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None, prov="sess-fail"):
     """A tier:surprising_failure queue row exactly as predictive_write_gate.py writes it
     (key predgate/surprising_failure/{tool}/{day}, sub-0.7 confidence, provenance=session)."""
@@ -155,9 +164,9 @@ class _SlowLLM:
 async def test_writes_one_schema_with_member_edges(store):
     """A stable 3-lesson cluster + a grounded generation -> exactly ONE schema node (0.8,
     node_kind schema, key schema/cluster/*, depth:1) with a member_of edge to each member."""
-    m1 = await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    m2 = await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    m3 = await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+    m1 = await _seed_sem(store, _READ_A, "s1")
+    m2 = await _seed_sem(store, _READ_B, "s2")
+    m3 = await _seed_sem(store, _READ_C, "s3")
 
     result = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
 
@@ -177,9 +186,9 @@ async def test_writes_one_from_dereferenced_event(store):
     """The corpus DEREFERENCES payload-thin aux stat rows via provenance=session_id: a chapter
     grounds on the event-log text, not the boilerplate stat value. Load-bearing proof: the same
     claim is NOT grounded against the member bodies alone — only the deref makes it write."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_failure(store, "read", prov="sess-k")  # attaches as aux (same tool)
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_failure(store, "read", value="absolute path resolved via sess-k", prov="sess-k")  # attaches as aux (same tool)
     event_text = "authentication failed because the kerberos ticket expired"
     await store.append_history({"v": 1, "type": "tool_result", "id": "e1",
                                 "session_id": "sess-k", "agent_id": "chap-agent",
@@ -230,8 +239,8 @@ async def test_write_budget_caps_schema_count(store):
     for stem in "abcde":
         a = f"{stem}zzzalpha {stem}zzzbravo {stem}zzzcharlie"
         b = f"{stem}zzzalpha {stem}zzzbravo {stem}zzzdelta"
-        await _seed_learned(store, f"t{stem}", "err", a, [f"{stem}s1"], lesson="l1")
-        await _seed_learned(store, f"t{stem}", "err", b, [f"{stem}s2"], lesson="l2")
+        await _seed_sem(store, a, f"{stem}s1")
+        await _seed_sem(store, b, f"{stem}s2")
 
     assert len(await find_stable_clusters(store)) == 5  # five independent clusters
 
@@ -274,9 +283,9 @@ async def test_depth1_cluster_yields_depth2_chapter(store):
 async def test_member_foldout_demotes_but_searchable(store):
     """After a chapter is written, each member's retrieval_strength drops to 0.15 (out of the
     ambient index) yet the member stays query_facts-searchable — the pile folds into the chapter."""
-    m1 = await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    m2 = await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    m3 = await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+    m1 = await _seed_sem(store, _READ_A, "s1")
+    m2 = await _seed_sem(store, _READ_B, "s2")
+    m3 = await _seed_sem(store, _READ_C, "s3")
 
     result = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
     assert len(result) == 1
@@ -284,7 +293,7 @@ async def test_member_foldout_demotes_but_searchable(store):
     for m in (m1, m2, m3):
         got = await store.get_fact(m.key)
         assert got.retrieval_strength == 0.15   # below the 0.2 index gate
-        assert got.confidence == 0.8            # trust untouched — only accessibility demoted
+        assert got.confidence == 0.65           # trust untouched at the atom's 0.65 — only accessibility demoted
     hits = {f.key for f in await store.query_facts(FactQuery(text="resolved"))}
     assert m1.key in hits                        # still searchable (rs is a non-indexed column)
 
@@ -293,10 +302,10 @@ async def test_member_foldout_demotes_but_searchable(store):
 async def test_cancel_stops_further_clusters(store):
     """A cancel_event set mid-generation stops the pass without hanging (partial result) and the
     generation task is truly cancelled — the serial inference gate is released promptly."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_learned(store, "docker", "build_fail", _DOCK_A, ["s3"], lesson="d1")
-    await _seed_learned(store, "docker", "start_fail", _DOCK_B, ["s4"], lesson="d2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_sem(store, _DOCK_A, "s3")
+    await _seed_sem(store, _DOCK_B, "s4")
 
     llm = _SlowLLM(delay=10.0)
     cancel = asyncio.Event()
@@ -321,9 +330,9 @@ async def test_claimed_aux_consumed_and_drained(store):
     """A CLAIMED aux row (folded under a chapter) gets a member_of edge + is retagged consumed
     (pending_consolidation dropped, tier:consumed added, rs demoted) — confidence UNCHANGED. It
     leaves the pending surprising_failure probe (drains) but stays query_facts-searchable."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    aux = await _seed_failure(store, "read")  # same-tool -> attaches as aux (36-01)
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    aux = await _seed_failure(store, "read", value="absolute path resolved for claim")  # same-tool -> attaches as aux (36-01)
 
     result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
     assert len(result) == 1

@@ -7,11 +7,12 @@ cluster into one schema node — "100 lessons -> one chapter" starts here, by de
 WHICH lessons are one chapter.
 
 Design (Claude's-discretion knobs are the signature defaults, real numbers):
-  - Population = the PROMOTED lessons: active `learned/*` facts + `schema` nodes at/above
-    the 0.7 injection line (_load_pool). The raw sub-0.7 `gate/*` candidates are NEVER the
-    population — Phase 31 already clustered episodes->lesson; 36 clusters lesson->chapter
-    one level up. The sub-0.7 `predgate/surprising_failure/*` stat rows are likewise
-    excluded here by construction (conf<0.7); they arrive as aux_members (Task 3).
+  - Population = the SEMANTIC pool (MOVE 1): active `sem/*`/`mined/*` atoms + `schema` nodes +
+    settled corrections (`tier:reconcile_confirmed`) at/above pool-entry 0.6 (_load_pool). This
+    describes the USER'S WORLD, not tool lessons: operational memory (`gate/*`, `predgate/*`,
+    `learned/*`) is a SEPARATE track and is excluded (owner ruling c). Grouping runs over the
+    episodic population and the chapter IS the promotion (>=0.7) — un-inverting CLS. The sub-0.7
+    `predgate/surprising_failure/*` stat rows arrive only as aux_members (Task 3).
   - Relatedness (undirected): two pool lessons are RELATED if graph-adjacent within
     `graph_depth` hops (store.neighborhood) OR FTS-similar (they share a salient content
     token, probed via store.query_facts). Connected components >= min_cluster_size are
@@ -50,15 +51,23 @@ class Cluster:
 # ---------------------------------------------------------------------------
 
 async def _load_pool(store) -> list[Fact]:
-    """The PROMOTED population: active lessons/schemas at/above the 0.7 injection line.
-    Sub-0.7 gate/* + predgate/surprising_failure/* rows never clear the filter — the
-    schema is the visibility artifact — so they cannot enter primary membership."""
+    """The SEMANTIC population (MOVE 1): active facts at/above pool-entry 0.6 that describe the
+    USER'S WORLD — mined atoms (`sem/`, `mined/`), discovered schemas (chapters), and settled
+    user corrections (`tier:reconcile_confirmed`). This filter is INCLUDE-ONLY by design:
+    operational memory (`gate/`, `predgate/`, `learned/`) matches no arm and is thereby EXCLUDED
+    — a separate track, never in the ontology (owner ruling c). A settled correction that happens
+    to sit on a `gate/` key (shape-b confirm keeps its key) is a user-confirmed fact and MUST stay
+    in, so it enters via the reconcile_confirmed arm — NOT despite a blanket prefix ban that would
+    wrongly drop it. Pool entry (0.6) is BELOW the 0.7 injection line: grouping runs over the
+    episodic population and admission stops doing the consolidator's job (un-inverts CLS); the
+    chapter written from a stable cluster is the promotion, at >=0.7 as before."""
     assert store._db is not None
     now = int(time.time())
     async with store._db.execute(
         f"SELECT {store._FACT_COLS} FROM facts "
-        "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
-        "AND (key LIKE 'learned/%' OR node_kind = 'schema') "
+        "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.6 "
+        "AND (key LIKE 'sem/%' OR key LIKE 'mined/%' OR node_kind = 'schema' "
+        "     OR tags LIKE '%\"tier:reconcile_confirmed\"%') "
         "AND (expires_at IS NULL OR expires_at > ?)",
         (store._agent_id, now),
     ) as cur:
@@ -118,10 +127,13 @@ async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int
         for nid, _depth in await store.neighborhood(f.id, depth=graph_depth):
             if nid in pool_ids and nid != f.id:
                 _link(f.id, nid)
-        # (b) FTS signal: per salient token (implicit-AND store -> per-token union), scoped
-        # to the >=0.7 promoted population so candidates never dilute the top-k.
+        # (b) FTS signal: per salient token (implicit-AND store -> per-token union), floored at the
+        # sem-atom entry 0.65 (MOVE 1) so mined atoms link while sub-0.65 operational rows (gate
+        # novelty 0.5, predgate 0.6) can't crowd the top-k out from under real pool members. The
+        # `hit.id in pool_ids` intersection is the correctness filter (operational rows never link);
+        # this floor is the STARVATION guard. Aux attachment is a separate, floorless probe.
         for tok in _salient_tokens(f.value):
-            for hit in await store.query_facts(FactQuery(text=tok, limit=fts_top_k, min_confidence=0.7)):
+            for hit in await store.query_facts(FactQuery(text=tok, limit=fts_top_k, min_confidence=0.65)):
                 if hit.id in pool_ids and hit.id != f.id:
                     _link(f.id, hit.id)
     return adj
