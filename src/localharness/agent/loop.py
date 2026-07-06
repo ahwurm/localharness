@@ -423,6 +423,11 @@ class AgentLoop:
         self._permissions = permission_evaluator
         self._memory = memory_loader
         self._compact_md_path = compact_md_path
+        # Prior-session context (compact.md) is FOLDED into the single leading system message,
+        # never appended as a second system message — strict chat templates reject a non-leading
+        # system role (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0).
+        # Loaded once on the first turn of a sitting, reused across that sitting's turns.
+        self._prior_session_context = ""
         # Determine kill file path
         if kill_file_path is not None:
             kf = kill_file_path
@@ -472,14 +477,16 @@ class AgentLoop:
         )
         self._current_session_id = session.session_id
 
-        # Load prior session context from compact.md if no conversation history
+        # Load prior-session context from compact.md if no conversation history. It is STASHED
+        # (not inserted as a message) and folded into the single leading system message by
+        # _execute_loop — a second system message is rejected by strict chat templates
+        # (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0, 59/59 dead turns).
         if not prior:
             from localharness.agent.context import load_compact_md
             compact_path = self._compact_md_path or (Path.home() / ".localharness" / "agents" / self._config.name / "compact.md")
             compact_msg = load_compact_md(compact_path)
             if compact_msg is not None:
-                insert_idx = 1 if session.messages and session.messages[0].get("role") == "system" else 0
-                session.messages.insert(insert_idx, compact_msg)
+                self._prior_session_context = compact_msg["content"]
                 log.info("Loaded compact.md for agent %s", self._config.name)
 
         budget_cfg = self._config.permissions.budget
@@ -650,13 +657,18 @@ class AgentLoop:
             except Exception:
                 tool_schemas = []
 
-        # Initialize or continue session messages
+        # Initialize or continue session messages. Prior-session context (compact.md) is FOLDED
+        # into this ONE system message's content — never a second system message (strict chat
+        # templates reject a non-leading system role; the SEMA-05 P0). Folded every turn so it
+        # survives the continuing-conversation refresh below.
+        if self._prior_session_context:
+            system_prompt = f"{system_prompt}\n\n{self._prior_session_context}"
         has_prior_turns = any(m.get("role") == "user" for m in session.messages)
         if has_prior_turns and session.messages and session.messages[0].get("role") == "system":
             # Continuing conversation — refresh system prompt, append new user message
             session.messages[0] = {"role": "system", "content": system_prompt}
         else:
-            # First turn (may have compact.md already) — insert system prompt at front
+            # First turn — insert the single leading system message at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
         session.push({"role": "user", "content": task})
 
