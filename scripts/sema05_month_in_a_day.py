@@ -1002,8 +1002,14 @@ async def _grade_designed_month(
         if not grounded(a.value, day_corpus.get(day, "")):
             a2_kill = True                  # A2: ungrounded atom -> KILL (zero tolerance)
 
-    # --- Stage A1 recall over topic-sittings ((topic, day) with >= 1 manifest query) ---
-    topic_sittings = sorted({(q["topic"], q["day"]) for q in manifest["queries"] if q["topic"] in expected})
+    # --- Stage A1 recall over topic-sittings ((topic, day) with >= 1 EXTRACTION-EXPECTING
+    # manifest query). Ruling 4a: queries flagged expects_extraction: false (decisions/
+    # bookkeeping) are not extraction targets — counting them inflated the denominator and
+    # starved A1 (run 2: INCONCLUSIVE @A1). ---
+    topic_sittings = sorted({
+        (q["topic"], q["day"]) for q in manifest["queries"]
+        if q["topic"] in expected and q.get("expects_extraction", True)
+    })
     covered = sum(
         1 for (t, d) in topic_sittings
         if any(gt.get(a.id) == t and _day_of(a.provenance) == d for a in sem_atoms)
@@ -1423,12 +1429,19 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
     store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
     await store.open()
     try:
-        await ConsolidationPass(store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm).run()
+        pass_report = await ConsolidationPass(
+            store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm
+        ).run()
         grade = await _grade_designed_month(store, manifest, tqm)
         schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
         sens = await _sensitivity(store, MemoryConsolidationConfig())
     finally:
         await store.close()
+    # Ruling 4b: per_schema_grounding carries EVERY chapter-writer attempt — the static KILL
+    # re-check entries for written schemas, PLUS the rejected attempts (reason + grounding) that
+    # were previously invisible ('no chapter written' left an empty list and no forensic trail).
+    per_schema = [dict(p, written=True) for p in grade["per_schema_grounding"]]
+    per_schema += [a for a in pass_report.schema_attempts if not a.get("written")]
 
     # Stage C (secondary): one domain probe per formed chapter; keyword-hit count only.
     stage_c: list[dict] = []
@@ -1453,7 +1466,7 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         "grading_doc": _GRADING_DOC_36_1, "manifest": str(Path(args.manifest).resolve()),
         "sittings": sittings, "days": len(sittings), "max_turns_per_day": args.max_turns_per_day,
         "stage_a": grade["stage_a"], "stage_b": grade["stage_b"], "stage_c": stage_c,
-        "byte_stable": grade["byte_stable"], "per_schema_grounding": grade["per_schema_grounding"],
+        "byte_stable": grade["byte_stable"], "per_schema_grounding": per_schema,
         "sensitivity": sens, "duration_s": round(time.monotonic() - t0, 2),
     }
     (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
@@ -1738,7 +1751,12 @@ async def run(args: argparse.Namespace) -> int:
         "probe": probe,
         "schemas_written": static["schemas_written"],
         "pass_schemas_written": report.schemas_written,
-        "per_schema_grounding": static["per_schema_grounding"],
+        # Ruling 4b: written schemas (the static KILL re-check) + the pass's rejected
+        # chapter-writer attempts — a failed write is observable, never an empty list.
+        "per_schema_grounding": (
+            [dict(p, written=True) for p in static["per_schema_grounding"]]
+            + [a for a in report.schema_attempts if not a.get("written")]
+        ),
         "kill_triggered": static["kill_triggered"],
         "churn_rate": report.churn_rate,
         "byte_stable": static["byte_stable"],

@@ -4,7 +4,10 @@ Domain knowledge about the USER'S WORLD (what they work on, prefer, plan, decide
 semantic hierarchy HERE: an idle model-look walks the un-mined transcript and extracts TYPED
 atoms — `(topic, claim, evidence-span)` — writing one `sem/{topic-slug}/{h8(claim)}` fact per
 atom. Same-topic atoms share a key namespace, giving clustering natural handles (shared prefix +
-FTS token + graph edge to the session). This is the feeder that was previously missing: mining
+FTS token + graph edge to the session). An atom that CORRECTS an existing active atom carries an
+optional `replaces=<id>` marker (the miner is shown the active atoms in-prompt, capped) and lands
+on the OLD key — supersede chain, history preserved — so a stale value never stays active beside
+its correction (claim-hash keys alone can never collide; run-2 ruling 3). This is the feeder that was previously missing: mining
 shipped as a budgeted rider and the orphaned replay seam wrote unreachable `replay/*` keys — the
 two near-duplicate idle extractors are now ONE (the replay seam is retired into this walk).
 
@@ -46,16 +49,19 @@ from localharness.memory.idle_llm import complete_cancellable, grounded
 log = logging.getLogger(__name__)
 
 _MINING_WATERMARK_KEY = "mining/last_ts"  # DISTINCT from consolidation/last_run
-_PER_RECORD_CHARS = 400  # per-record slice fed to the model (and grounded against)
+_PER_RECORD_CHARS = 400   # per-record slice fed to the model (and grounded against)
+_KNOWN_ATOMS_CAP = 30     # existing active atoms shown to the miner (ruling 3), value-trimmed
 
 _PROMPT = (
     "Extract durable facts about the USER'S WORLD from this transcript — what the user works "
-    "on, prefers, plans, or decides. One fact per line, formatted EXACTLY as three "
-    "pipe-separated fields:\n"
+    "on, prefers, plans, or decides. One fact per line, formatted EXACTLY as pipe-separated "
+    "fields:\n"
     "topic | claim | evidence\n"
     "where `topic` is a 1-3 word subject (e.g. subagents, kyoto trip, gpu ops), `claim` is one "
     "self-contained fact, and `evidence` is a short VERBATIM quote from the transcript that "
-    "supports it. ONLY facts explicitly stated below — no inference, no new numbers:\n\n"
+    "supports it. If a fact CORRECTS or CONTRADICTS one of the known facts listed below on the "
+    "same topic, append a fourth field to that line: | replaces=<the known fact's id>. ONLY "
+    "facts explicitly stated in the transcript — no inference, no new numbers:\n\n"
 )
 
 
@@ -77,10 +83,11 @@ def _tokens(text: str, *, min_len: int = 5) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= min_len]
 
 
-def _parse_atoms(raw: str) -> list[tuple[str, str, str]]:
-    """Parse `topic | claim | evidence` lines into typed atoms; evidence falls back to the claim
-    when omitted. Malformed lines (no pipe, empty topic/claim) are skipped."""
-    atoms: list[tuple[str, str, str]] = []
+def _parse_atoms(raw: str) -> list[tuple[str, str, str, str | None]]:
+    """Parse `topic | claim | evidence [| replaces=<id>]` lines into typed atoms; evidence falls
+    back to the claim when omitted; `replaces` (ruling 3) is optional and None when absent.
+    Malformed lines (no pipe, empty topic/claim) are skipped."""
+    atoms: list[tuple[str, str, str, str | None]] = []
     for raw_line in raw.splitlines():
         line = raw_line.strip(" -•\t")
         if "|" not in line:
@@ -88,9 +95,24 @@ def _parse_atoms(raw: str) -> list[tuple[str, str, str]]:
         parts = [p.strip() for p in line.split("|")]
         topic, claim = parts[0], parts[1] if len(parts) > 1 else ""
         evidence = parts[2] if len(parts) > 2 and parts[2] else claim
+        replaces = next(
+            (p[len("replaces="):].strip() for p in parts[3:] if p.startswith("replaces=")), None,
+        )
         if topic and claim:
-            atoms.append((topic, claim, evidence))
+            atoms.append((topic, claim, evidence, replaces))
     return atoms
+
+
+async def _active_sem_atoms(store: Any, cap: int = _KNOWN_ATOMS_CAP) -> list[tuple[str, str]]:
+    """The newest active sem/ atoms as (key, value) — shown to the miner (ruling 3) so it can
+    mark `replaces=<id>` when a span corrects one. Capped; value trimmed at render time."""
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT key, value FROM facts WHERE agent_id = ? AND status = 'active' "
+        "AND key LIKE 'sem/%' ORDER BY updated_at DESC, id DESC LIMIT ?",
+        (store._agent_id, cap),
+    ) as cur:
+        return [(r[0], r[1]) for r in await cur.fetchall()]
 
 
 def _source_record(claim: str, evidence: str, records: list[dict]) -> dict | None:
@@ -161,27 +183,47 @@ async def mine_transcript(
                 str(r.get("content", ""))[:_PER_RECORD_CHARS] for r in chunk
             )[:corpus_char_cap]
 
+            # Ruling 3: show the miner the EXISTING active atoms (capped) so a correcting span
+            # can mark `replaces=<id>` instead of minting a colliding-proof new claim-hash key
+            # that leaves the stale value active forever. Reloaded PER CHUNK so an atom minted
+            # by an earlier chunk of this same pass is already replaceable by a later chunk.
+            known = await _active_sem_atoms(store)
+            known_keys = {k for k, _v in known}
+            known_block = (
+                "Known facts already on file (id: claim):\n"
+                + "\n".join(f"{k}: {v[:120]}" for k, v in known) + "\n\n"
+            ) if known else ""
+
+            prompt = _PROMPT + known_block + corpus
             raw = await complete_cancellable(
-                llm, _PROMPT + corpus, cancel_event, char_cap=corpus_char_cap + len(_PROMPT) + 64
+                llm, prompt, cancel_event,
+                char_cap=corpus_char_cap + len(_PROMPT) + len(known_block) + 64,
             )
             if raw is None:
                 # Cancelled mid-look — watermark NOT advanced past this chunk (next pass re-mines).
                 report.cancelled = True
                 break
 
-            for topic, claim, evidence in _parse_atoms(raw):
+            for topic, claim, evidence, replaces in _parse_atoms(raw):
                 if report.written >= write_budget:
                     budget_hit = True
                     break
                 src = _source_record(claim, evidence, chunk)
                 # GROUNDING KILL-NET: reject an atom with no source or whose claim is not a
-                # majority-token match in the cited record's text.
+                # majority-token match in the cited record's text (applies to replacements too).
                 if src is None or not grounded(claim, str(src.get("content", ""))[:_PER_RECORD_CHARS]):
                     report.rejected_ungrounded += 1
                     continue
                 provenance = src.get("session_id") or str(src.get("ts", ""))
+                key = f"sem/{_slug(topic)}/{_h8(claim)}"
+                # Ruling 3 supersede path: a VALID replaces marker (an active atom the miner was
+                # shown, same topic slug) writes the corrected value onto the OLD key — store_fact
+                # supersedes (history preserved), the stale value leaves the active set. An invalid
+                # marker (hallucinated id / cross-topic) falls back to a normal mint.
+                if replaces and replaces in known_keys and replaces.startswith(f"sem/{_slug(topic)}/"):
+                    key = replaces
                 await store.store_fact(
-                    key=f"sem/{_slug(topic)}/{_h8(claim)}",
+                    key=key,
                     value=claim,
                     tags=["sem", "pending_consolidation"],
                     confidence=0.65,  # searchable, sub-injection — ambient status is EARNED

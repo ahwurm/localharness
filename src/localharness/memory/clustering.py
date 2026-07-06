@@ -13,10 +13,12 @@ Design (Claude's-discretion knobs are the signature defaults, real numbers):
     `learned/*`) is a SEPARATE track and is excluded (owner ruling c). Grouping runs over the
     episodic population and the chapter IS the promotion (>=0.7) — un-inverting CLS. The sub-0.7
     `predgate/surprising_failure/*` stat rows arrive only as aux_members (Task 3).
-  - Relatedness (undirected): two pool lessons are RELATED if graph-adjacent within
-    `graph_depth` hops (store.neighborhood) OR FTS-similar (they share a salient content
-    token, probed via store.query_facts). Connected components >= min_cluster_size are
-    candidate clusters.
+  - Relatedness (undirected, precision-tiered — run-2 ruling 1): two pool atoms are RELATED if
+    graph-adjacent within `graph_depth` hops (store.neighborhood), OR same `sem/{topic}/` slug
+    with >=1 shared salient token, OR different slugs with >=2 distinct shared salient tokens
+    after dropping tokens above 30% pool document-frequency (generic-verb guard — one shared
+    'requested' must not weld the pool into a mega-component). Connected components
+    >= min_cluster_size are candidate clusters.
   - Stability (find_stable_clusters): a component is a STABLE cluster only if its members'
     source sittings span >= min_sessions distinct sessions — recurring experience across
     evenings, not one hot evening (SEMA-01, enforced on real Phase-33 session units).
@@ -25,14 +27,14 @@ Design (Claude's-discretion knobs are the signature defaults, real numbers):
     drain, and are NEVER promoted into primary membership.
 
 FTS note: this store's FTS5 combines query terms with implicit AND, so a full-value query
-would collapse to near-exact-duplicate detection — useless for grouping related-but-distinct
-lessons. The similarity signal here is therefore a per-salient-token union (each token an
-independent probe), filtered to the >=0.7 promoted population so sub-0.7 candidates can
-never dilute the top-k.
+would collapse to near-exact-duplicate detection. Member relatedness therefore intersects
+_salient_tokens in memory (FTS can neither count distinct shared tokens nor see pool-level
+document frequency); FTS probes remain only in aux-failure attachment (_attach_aux_failures).
 """
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 
 from localharness.memory.sqlite import Fact, FactQuery, _row_to_fact
@@ -110,11 +112,27 @@ def _salient_tokens(value: str, *, max_tokens: int = 8) -> list[str]:
     return out
 
 
+def _topic_slug(key: str) -> str | None:
+    """sem/{slug}/{h8} -> slug; anything else (schemas, mined/ legacy, settled gate/ keys) has
+    no topic axis -> None (such pairs take the strict cross-topic rule)."""
+    parts = key.split("/")
+    return parts[1] if len(parts) >= 3 and parts[0] == "sem" else None
+
+
 async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int, set[int]]:
-    """Undirected relatedness adjacency over the pool. F~G iff G is within F's graph
-    neighborhood (depth<=graph_depth) OR G shares a salient FTS token with F. Both signals
-    are pure reads and only connect pool members (the min_confidence>=0.7 FTS filter keeps
-    sub-0.7 candidates from surfacing as false neighbors)."""
+    """Undirected relatedness adjacency over the pool — GRAPH signal + a precision-tiered token
+    signal (run-2 ruling 1: the old per-token FTS union let ONE generic verb — 'requested',
+    'should' — transitively weld a 26-atom pool into a single mega-component; no chapter can
+    form from a blob). Edge rule:
+      - graph: F~G iff G is within F's neighborhood (depth<=graph_depth) — unchanged;
+      - same `sem/{topic}/` slug: ONE shared salient token suffices (the miner already grouped
+        them; a single signal confirms);
+      - DIFFERENT slugs (or no slug): >=2 DISTINCT shared salient tokens, IGNORING tokens whose
+        pool document-frequency exceeds 30% (generic-verb guard; floored at >2 members so the
+        statistic needs support — in a 2-member pool every shared token is trivially 100%).
+    Token matching is exact in-memory intersection over _salient_tokens (the FTS probe could
+    neither count distinct shared tokens nor see pool-level document frequency). Pure read.
+    `fts_top_k` is unused here (kept for signature stability; aux attachment still probes FTS)."""
     pool_ids = {f.id for f in pool}
     adj: dict[int, set[int]] = {f.id: set() for f in pool}
 
@@ -122,20 +140,27 @@ async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int
         adj[a].add(b)
         adj[b].add(a)
 
+    # (a) GRAPH signal: derived_from / member_of neighborhood — unchanged.
     for f in pool:
-        # (a) GRAPH signal: derived_from / member_of neighborhood.
         for nid, _depth in await store.neighborhood(f.id, depth=graph_depth):
             if nid in pool_ids and nid != f.id:
                 _link(f.id, nid)
-        # (b) FTS signal: per salient token (implicit-AND store -> per-token union), floored at the
-        # sem-atom entry 0.65 (MOVE 1) so mined atoms link while sub-0.65 operational rows (gate
-        # novelty 0.5, predgate 0.6) can't crowd the top-k out from under real pool members. The
-        # `hit.id in pool_ids` intersection is the correctness filter (operational rows never link);
-        # this floor is the STARVATION guard. Aux attachment is a separate, floorless probe.
-        for tok in _salient_tokens(f.value):
-            for hit in await store.query_facts(FactQuery(text=tok, limit=fts_top_k, min_confidence=0.65)):
-                if hit.id in pool_ids and hit.id != f.id:
-                    _link(f.id, hit.id)
+
+    # (b) TOKEN signal, precision-tiered by topic slug.
+    toks: dict[int, frozenset[str]] = {f.id: frozenset(_salient_tokens(f.value)) for f in pool}
+    df = Counter(t for s in toks.values() for t in s)
+    generic_cut = max(2, 0.30 * len(pool))
+    generic = {t for t, c in df.items() if c > generic_cut}
+    slugs = {f.id: _topic_slug(f.key) for f in pool}
+    ordered = list(pool)
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            shared = toks[a.id] & toks[b.id]
+            if slugs[a.id] is not None and slugs[a.id] == slugs[b.id]:
+                if shared:  # same topic: single signal suffices (as before)
+                    _link(a.id, b.id)
+            elif len(shared - generic) >= 2:  # cross-topic: two distinct non-generic tokens
+                _link(a.id, b.id)
     return adj
 
 
@@ -178,19 +203,43 @@ def _depth_from_tags(tags: list[str]) -> int:
     return 0
 
 
+async def _known_session_ids(store) -> frozenset[str]:
+    """All session ids this agent has ever opened — the authoritative sitting registry."""
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT id FROM sessions WHERE agent_id = ?", (store._agent_id,)
+    ) as cur:
+        return frozenset(r[0] for r in await cur.fetchall())
+
+
+def _is_sitting(prov: str, known: frozenset[str]) -> bool:
+    """Run-2 ruling 2: a bookkeeping provenance ('confirm:4517cb1b-…') counted as a session and
+    faked cross-sitting stability. A provenance counts as a sitting iff it IS a sessions-table
+    row, or it matches the session-id convention: no ':' — every derived/bookkeeping provenance
+    the subsystem mints is 'marker:detail' (confirm:/revert-of:/retire:/consolidated:/cluster:/
+    mined-from:), while real sitting ids (uuid4, sema05-*, designed-*) never carry a colon."""
+    return bool(prov) and (prov in known or ":" not in prov)
+
+
 async def _component_sessions(store, members) -> frozenset[str]:
-    """The distinct sittings a component spans. A promoted lesson's own provenance is
-    `consolidated:{N}-episodes` (NOT a session), so the session spread lives on its depth-1
-    derived_from source candidates (gate/* keys), whose provenance IS a session id
-    (consolidation.py:180). We union: (i) any member provenance that already looks like a
-    session (defensive — non-`consolidated:` shapes), and (ii) the gate/* sources one hop out."""
+    """The distinct SITTINGS a component spans (ruling 2: sessions must be sittings — never a
+    reconcile/consolidation breadcrumb). We union: (i) member provenance that passes _is_sitting
+    (a schema node's `cluster:sessA|sessB` provenance is EXPANDED into its constituent sitting
+    ids first — counting the raw string as one fake session was the old MAJOR-5 pollution, and
+    dropping it wholesale would make chapters-of-chapters permanently unstable; each expanded id
+    still passes the filter), and (ii) the gate/* sources one hop out, whose provenance IS a
+    session id by construction (consolidation.py:180) — same filter applied."""
+    known = await _known_session_ids(store)
     sessions: set[str] = set()
     for m in members:
-        if m.provenance and not m.provenance.startswith("consolidated:"):
-            sessions.add(m.provenance)
+        provs = (
+            m.provenance[len("cluster:"):].split("|")
+            if m.provenance.startswith("cluster:") else [m.provenance]
+        )
+        sessions.update(p for p in provs if _is_sitting(p, known))
         src_ids = [nid for nid, _d in await store.neighborhood(m.id, depth=1) if nid != m.id]
         for src in await store.get_facts_by_ids(src_ids):
-            if src.key.startswith("gate/") and src.provenance:
+            if src.key.startswith("gate/") and _is_sitting(src.provenance, known):
                 sessions.add(src.provenance)
     return frozenset(sessions)
 
