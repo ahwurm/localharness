@@ -672,8 +672,8 @@ class AgentLoop:
             session.messages.insert(0, {"role": "system", "content": system_prompt})
         session.push({"role": "user", "content": task})
 
-        # MOVE 0c: a fresh turn earns fresh compaction attempts — reset the per-turn fire cap +
-        # must-shrink latch so a prior turn's storm-guard never suppresses this turn's compaction.
+        # MOVE 0c: a fresh turn earns fresh compaction attempts — re-arm the per-turn fire cap
+        # so a prior turn's cap never suppresses this turn's compaction.
         if hasattr(self._ctx, "reset_compaction_guard"):
             self._ctx.reset_compaction_guard()
 

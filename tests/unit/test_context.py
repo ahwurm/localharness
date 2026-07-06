@@ -347,13 +347,15 @@ async def test_compaction_reduces_to_target_when_safe_cuts_exist():
 
     big = "word " * 150
     msgs = [{"role": "system", "content": "sys"}]
-    for i in range(12):
+    for i in range(16):
         msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": big})
     msgs.append({"role": "user", "content": "recent tail"})
     tc = TokenCounter()
     n = tc.count_messages(msgs)
-    # preserve 6/6: one pass keeps ~10 of 12 big messages -> ~0.7 utilization, ABOVE target 0.6.
-    pipeline = CompactionPipeline(tc, preserve_first_n=6, preserve_last_n=6, llm_summarize_fn=tiny)
+    # preserve 7/7 over 18 messages: the first summarize removes only 4 of 16 big messages ->
+    # ~0.75 of the input retained, ABOVE the target (0.6 of limit = ~0.706 of the 0.85-start
+    # input) -> the stage MUST widen (a second summarize) to land under target.
+    pipeline = CompactionPipeline(tc, preserve_first_n=7, preserve_last_n=7, llm_summarize_fn=tiny)
     cm = ContextManager(max_context_tokens=int(n / 0.85), pipeline=pipeline, token_counter=tc)
 
     _req, budget = await cm.build_messages(list(msgs))
