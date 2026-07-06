@@ -34,6 +34,11 @@ TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
 _TOOL_STUB_PREFIX = "[tool result evicted"
+# MOVE 0c (minimal, no redesign): bound the summary-compaction storm within one turn. The
+# expensive summarizer re-fired ~74x in one SEMA-05 sitting with context not reliably shrinking.
+# A per-turn fire cap + a must-shrink latch stop the storm. Deep re-trigger diagnosis is a
+# separate open item — see .planning/research/2026-07-06-semantic-recenter.md §1 Q5.
+MAX_COMPACTION_FIRES_PER_TURN: int = 3
 
 
 Origin = Literal["trusted", "untrusted"]
@@ -723,10 +728,21 @@ class ContextManager:
         self._agent_id = agent_id
         self._session_id = session_id
         self._iteration = 0
+        # MOVE 0c: per-turn compaction re-fire guard. `_compaction_fires` counts summary
+        # compactions in the current turn (capped); `_compaction_shrink_failed` latches once a
+        # fire fails to reduce utilization — both reset per turn by reset_compaction_guard().
+        self._compaction_fires = 0
+        self._compaction_shrink_failed = False
 
     def set_iteration(self, iteration: int) -> None:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
         self._iteration = int(iteration)
+
+    def reset_compaction_guard(self) -> None:
+        """MOVE 0c: the agent loop calls this at the start of each turn so the per-turn
+        summary-compaction fire cap + must-shrink latch reset (a new turn earns fresh attempts)."""
+        self._compaction_fires = 0
+        self._compaction_shrink_failed = False
 
     def repair_tool_pairing(self, messages: list[Message]) -> list[Message]:
         """Remove orphaned tool role messages.
@@ -797,24 +813,45 @@ class ContextManager:
                 tool_schema_tokens=tool_tokens,
             )
             if pre_budget.needs_summary_compact:
-                pre_frac = pre_budget.usage_fraction
-                repaired, any_modified = await self._pipeline.run(repaired, pre_budget)
-                if any_modified and self._bus is not None:
-                    post_usage = self._token_counter.count_messages(repaired)
-                    post_budget = TokenBudget(
-                        total_limit=self.max_context_tokens,
-                        current_usage=post_usage,
-                        tool_schema_tokens=tool_tokens,
+                # MOVE 0c: bound the per-turn summary-compaction storm. Skip re-running the
+                # expensive summarizer once this turn has hit the fire cap OR a prior fire this
+                # turn failed to shrink utilization — re-firing then is pure hot-path tax (the
+                # SEMA-05 day-6 storm: ~74 fires, context bouncing without shrinking).
+                if self._compaction_shrink_failed or self._compaction_fires >= MAX_COMPACTION_FIRES_PER_TURN:
+                    log.debug(
+                        "compaction guard: skip re-fire (fires=%d, shrink_failed=%s)",
+                        self._compaction_fires, self._compaction_shrink_failed,
                     )
-                    from localharness.core.events import CompactionTriggered
-                    await self._bus.publish(CompactionTriggered(
-                        agent_id=self._agent_id,
-                        session_id=self._session_id,
-                        iteration=self._iteration,
-                        pre_usage_fraction=pre_frac,
-                        post_usage_fraction=post_budget.usage_fraction,
-                        stages_modified=[],
-                    ))
+                else:
+                    pre_frac = pre_budget.usage_fraction
+                    repaired, any_modified = await self._pipeline.run(repaired, pre_budget)
+                    if any_modified:
+                        self._compaction_fires += 1
+                        post_usage = self._token_counter.count_messages(repaired)
+                        post_budget = TokenBudget(
+                            total_limit=self.max_context_tokens,
+                            current_usage=post_usage,
+                            tool_schema_tokens=tool_tokens,
+                        )
+                        # must-shrink latch: a fire that did not reduce utilization disables
+                        # further fires this turn (re-running it cannot help until the turn resets).
+                        if post_usage >= pre_usage:
+                            self._compaction_shrink_failed = True
+                            log.info(
+                                "compaction did not shrink context (%.0f%%->%.0f%%); latching off "
+                                "further fires this turn",
+                                pre_frac * 100, post_budget.usage_fraction * 100,
+                            )
+                        if self._bus is not None:
+                            from localharness.core.events import CompactionTriggered
+                            await self._bus.publish(CompactionTriggered(
+                                agent_id=self._agent_id,
+                                session_id=self._session_id,
+                                iteration=self._iteration,
+                                pre_usage_fraction=pre_frac,
+                                post_usage_fraction=post_budget.usage_fraction,
+                                stages_modified=[],
+                            ))
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.count_messages(repaired)
