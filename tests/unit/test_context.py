@@ -274,7 +274,11 @@ async def test_compaction_pipeline_preserves_tool_pairs():
         )
 
 
-# --- MOVE 0c: compaction re-fire guard (per-turn fire cap + must-shrink latch) ---
+# --- MOVE 0c (coordinator ruling 2026-07-06): compact-to-target + per-turn fire cap +
+# emergency hard floor. The earlier must-shrink LATCH is REMOVED: shrink-per-fire is often tiny
+# near the trigger (SEMA-05 sawtooth 82→70→80→81→73), so the latch switched compaction OFF
+# mid-long-turn and a live run overflowed to 101.1% utilization (designed-20260706T143144Z,
+# killed). Overflow must be impossible; compaction is never latched off while over budget. ---
 
 def _compactible_msgs():
     """system + 4 bulky middle messages + 1 recent — a compactible middle of 3 (preserve 1/1)."""
@@ -302,41 +306,83 @@ def _guard_cm(summarize_fn):
 
 
 @pytest.mark.asyncio
-async def test_compaction_guard_latches_when_it_does_not_shrink():
-    """MOVE 0c: compaction that fails to reduce context utilization must not re-fire every
-    iteration. The SEMA-05 pathology: one long sitting re-ran the summarizer ~74 times with
-    context bouncing 82->70->80->81->73 — a hidden hot-path tax. A must-shrink latch stops
-    the storm after the first non-shrinking fire; reset_compaction_guard() re-enables it."""
-    calls = {"n": 0}
+async def test_long_turn_with_bloating_compaction_never_exceeds_100_pct():
+    """Ruling test (a): overflow must be IMPOSSIBLE. Worst case — the summarizer BLOATS (a fire
+    never shrinks; the live-stall shape) while the session grows a big tool exchange every
+    iteration of ONE long turn (loop.py keeps the full session list and rebuilds each iteration).
+    Utilization must stay <= 100% at EVERY iteration: the fire cap bounds summarizer runs and the
+    emergency floor hard-truncates the oldest non-system messages at safe-cut boundaries."""
+    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
 
     async def bloating(middle):
+        return "X " * 3000  # a 'summary' larger than the whole budget — worst-case fire
+
+    tc = TokenCounter()
+    pipeline = CompactionPipeline(tc, preserve_first_n=1, preserve_last_n=1, llm_summarize_fn=bloating)
+    cm = ContextManager(max_context_tokens=2000, pipeline=pipeline, token_counter=tc)
+    session = [{"role": "system", "content": "sys"}, {"role": "user", "content": "the task"}]
+    for i in range(12):  # one long turn: the session list only ever grows
+        session.append({"role": "assistant", "content": None,
+                        "tool_calls": [{"id": f"tc{i}", "function": {"name": "bash", "arguments": "{}"}}]})
+        session.append({"role": "tool", "tool_call_id": f"tc{i}", "content": "result words " * 120})
+        _req, budget = await cm.build_messages(list(session))
+        assert budget.usage_fraction <= 1.0, f"context overflow at iteration {i}: {budget.usage_fraction:.2%}"
+
+
+@pytest.mark.asyncio
+async def test_compaction_reduces_to_target_when_safe_cuts_exist():
+    """Ruling test (b): a fire must land utilization AT TARGET (default 0.60 — well below the
+    0.80 trigger), not merely 'shrink a little' (the sawtooth). Head/tail sized so ONE summarize
+    pass at the configured preserve width CANNOT reach the target: the stage must WIDEN the
+    summarized span (>= 2 summarize calls) and end <= target."""
+    from localharness.agent.context import (
+        COMPACTION_TARGET_USAGE_FRACTION, CompactionPipeline, ContextManager, TokenCounter,
+    )
+
+    calls = {"n": 0}
+
+    async def tiny(middle):
         calls["n"] += 1
-        return "X " * 5000  # a 'summary' larger than what it replaces -> never shrinks
+        return "a compact summary"
 
-    cm, msgs = _guard_cm(bloating)
-    for _ in range(6):  # six iterations of ONE turn
-        await cm.build_messages(list(msgs))
-    assert calls["n"] == 1, f"non-shrinking compaction re-fired {calls['n']}x — the storm was not latched"
+    big = "word " * 150
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(12):
+        msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": big})
+    msgs.append({"role": "user", "content": "recent tail"})
+    tc = TokenCounter()
+    n = tc.count_messages(msgs)
+    # preserve 6/6: one pass keeps ~10 of 12 big messages -> ~0.7 utilization, ABOVE target 0.6.
+    pipeline = CompactionPipeline(tc, preserve_first_n=6, preserve_last_n=6, llm_summarize_fn=tiny)
+    cm = ContextManager(max_context_tokens=int(n / 0.85), pipeline=pipeline, token_counter=tc)
 
-    cm.reset_compaction_guard()  # a new turn
-    await cm.build_messages(list(msgs))
-    assert calls["n"] == 2, "reset_compaction_guard must re-enable one compaction attempt next turn"
+    _req, budget = await cm.build_messages(list(msgs))
+    assert budget.usage_fraction <= COMPACTION_TARGET_USAGE_FRACTION, (
+        f"compaction landed at {budget.usage_fraction:.2%}, above the "
+        f"{COMPACTION_TARGET_USAGE_FRACTION:.0%} target"
+    )
+    assert calls["n"] >= 2, "one narrow pass met the target — widen-to-target was never exercised"
 
 
 @pytest.mark.asyncio
 async def test_compaction_guard_caps_fires_per_turn():
-    """MOVE 0c: even when each fire shrinks momentarily (context regrows next iteration), a
-    per-turn fire cap bounds how many times the expensive summarizer runs in one turn."""
+    """Ruling test (c): the per-turn fire cap is the BACKSTOP — even when each fire genuinely
+    shrinks (context regrows next iteration), the expensive summarizer runs at most
+    MAX_COMPACTION_FIRES_PER_TURN times per turn; reset_compaction_guard re-arms a new turn."""
     calls = {"n": 0}
 
     async def shrinking(middle):
         calls["n"] += 1
-        return "s"  # a tiny summary -> each fire genuinely shrinks (latch never trips)
+        return "s"  # a tiny summary -> each fire genuinely shrinks and meets target in one call
 
     cm, msgs = _guard_cm(shrinking)
     for _ in range(6):  # same oversized input each iteration -> would fire every time, uncapped
         await cm.build_messages(list(msgs))
     assert calls["n"] == 3, f"per-turn fire cap not enforced: summarizer ran {calls['n']}x (cap 3)"
+
+    cm.reset_compaction_guard()  # a new turn re-arms the cap
+    await cm.build_messages(list(msgs))
+    assert calls["n"] == 4, "reset_compaction_guard must re-arm compaction for the next turn"
 
 
 # --- Phase 4: compact.md load path ---
