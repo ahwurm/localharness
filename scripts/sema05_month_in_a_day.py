@@ -108,6 +108,7 @@ from localharness.memory.sqlite import (  # noqa: E402
 
 _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this MemAvailable.
 _LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
+_TURN_FAILED_RATE_MAX = 0.20  # MOVE 0b: a sitting above this TurnFailed rate -> verdict INVALID.
 _GRADING_DOC = ".planning/phases/36-chapter-writer/36-SEMA05-GRADING.md"
 _GRADING_COMMITTED = "2026-07-05T17:43:47Z"  # the LOCKED pre-commitment timestamp (quoted in report)
 _ROLE = (
@@ -118,6 +119,20 @@ _ROLE = (
 
 class _WatchdogAbort(RuntimeError):
     """Raised when MemAvailable drops below the safety threshold mid-run (live mode)."""
+
+
+class _MeasurementInvalid(RuntimeError):
+    """MOVE 0b: a sitting's TurnFailed rate exceeded _TURN_FAILED_RATE_MAX — the instrument, not
+    the subject, failed. run() catches this and stamps verdict INVALID (measurement failure !=
+    INCONCLUSIVE), naming the failing sitting. Mirrors the probe's own TurnFailed gate."""
+
+    def __init__(self, *, day: str, session_id: str, failed: int, turns: int) -> None:
+        self.day, self.session_id, self.failed, self.turns = day, session_id, failed, turns
+        rate = failed / turns if turns else 1.0
+        super().__init__(
+            f"sitting {day} ({session_id}): TurnFailed rate {failed}/{turns} = {rate:.0%} "
+            f"> {_TURN_FAILED_RATE_MAX:.0%} — measurement failure, verdict INVALID"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +590,18 @@ async def _run_sittings(
         await acc.open()
         loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter)
 
+        # MOVE 0b: sitting-level TurnFailed gate. run_turn NEVER raises (errors become a TurnFailed
+        # event + a prose summary), so `turns` counts attempts, not successes — the failure signal
+        # is the event, exactly like the probe's gate. Count failures per sitting; a rate over the
+        # threshold aborts the run as INVALID (measurement failure), naming this sitting.
+        failed = 0
+
+        def _on_turn_failed(_ev: object) -> None:
+            nonlocal failed
+            failed += 1
+
+        bus.subscribe(TurnFailed, _on_turn_failed, agent_id=args.agent)
+
         turns = 0
         exit_reason = "complete"
         try:
@@ -612,8 +639,13 @@ async def _run_sittings(
                 except Exception:  # noqa: BLE001
                     pass
             await store.close()
-        sittings.append({"day": day, "session_id": sid, "turns": turns})
-        print(f"sitting {day}: {turns}/{len(queries)} real queries re-run (session {sid})")
+        sittings.append({"day": day, "session_id": sid, "turns": turns, "turn_failed": failed})
+        print(f"sitting {day}: {turns}/{len(queries)} real queries re-run "
+              f"({failed} failed) (session {sid})")
+        # MOVE 0b: abort LOUDLY at the failing sitting — a dead sitting must never be graded as
+        # if it held knowledge (the SEMA-05 verdict graded a 2-day store as 15 days silently).
+        if turns and failed / turns > _TURN_FAILED_RATE_MAX:
+            raise _MeasurementInvalid(day=day, session_id=sid, failed=failed, turns=turns)
     return sittings
 
 
@@ -1123,6 +1155,24 @@ async def run(args: argparse.Namespace) -> int:
         except _WatchdogAbort as exc:
             print(f"ABORT (machine-safety): {exc}. Partial isolated store left for inspection.",
                   file=sys.stderr)
+            return 1
+        except _MeasurementInvalid as exc:
+            # MOVE 0b: the instrument failed, not the subject. Stamp verdict INVALID with the
+            # failing sitting named — never grade a dead store (the SEMA-05 P0 silent 2-as-15).
+            invalid = {
+                "verdict": "INVALID",
+                "reason": f"sitting TurnFailed rate > {_TURN_FAILED_RATE_MAX:.0%} — {exc}",
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "method": "live_session_accumulation",
+                "grading_doc": _GRADING_DOC,
+                "grading_committed": _GRADING_COMMITTED,
+                "invalid_sitting": {"day": exc.day, "session_id": exc.session_id,
+                                    "failed": exc.failed, "turns": exc.turns},
+                "sittings": sittings,
+            }
+            (results / "verdict.json").write_text(json.dumps(invalid, indent=2) + "\n",
+                                                  encoding="utf-8")
+            print(f"INVALID (measurement failure): {exc}", file=sys.stderr)
             return 1
         if sum(s["turns"] for s in sittings) == 0:
             print("PROCESSING FAILURE: zero turns driven.", file=sys.stderr)
