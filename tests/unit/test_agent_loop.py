@@ -815,6 +815,47 @@ async def test_compact_md_path_from_constructor(tmp_path):
     assert "Prior context here" in compact_contents[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_compact_md_folds_into_single_leading_system_message(tmp_path):
+    """MOVE 0a regression: with a compact.md present, the composed request carries EXACTLY ONE
+    system message and it is index 0. A SECOND system message is rejected by strict chat
+    templates (vLLM/Qwen: 'System message must be at the beginning') — that latent live-harness
+    bug killed 13/15 SEMA-05 days (59/59 TurnFailed). Prior-session context must be FOLDED into
+    the first system message's content, never appended as its own system message."""
+    from localharness.config.models import AgentConfig
+    from tests.conftest import MockLLMClient, FakeLLMResponse
+
+    compact_file = tmp_path / "compact.md"
+    compact_file.write_text("user is building a research agent")
+
+    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    loop = AgentLoop(
+        config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
+        tool_registry=None, permission_evaluator=PermissionEvaluator(),
+        compact_md_path=compact_file,
+    )
+
+    requests: list[list] = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        requests.append(list(messages or []))
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+    await loop.run_turn("hello")
+
+    assert requests, "no request was sent to the LLM"
+    # EVERY request in the turn must carry exactly one system message, at index 0.
+    for req in requests:
+        sys_idx = [i for i, m in enumerate(req) if m.get("role") == "system"]
+        assert sys_idx == [0], f"expected one system message at index 0, got indices {sys_idx}"
+    first_sys = requests[0][0]["content"]
+    assert "[Prior Session Context]" in first_sys, "compact.md not folded into the system message"
+    assert "research agent" in first_sys
+
+
 def test_compact_md_path_default_fallback():
     """AgentLoop constructed without compact_md_path stores None (fallback activates in run_turn)."""
     from localharness.config.models import AgentConfig
