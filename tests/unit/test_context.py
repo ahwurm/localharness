@@ -274,6 +274,71 @@ async def test_compaction_pipeline_preserves_tool_pairs():
         )
 
 
+# --- MOVE 0c: compaction re-fire guard (per-turn fire cap + must-shrink latch) ---
+
+def _compactible_msgs():
+    """system + 4 bulky middle messages + 1 recent — a compactible middle of 3 (preserve 1/1)."""
+    big = "word " * 200
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": big},
+        {"role": "assistant", "content": big},
+        {"role": "user", "content": big},
+        {"role": "assistant", "content": big},
+        {"role": "user", "content": "recent short tail"},
+    ]
+
+
+def _guard_cm(summarize_fn):
+    """A ContextManager whose usage sits at ~85% (in [0.80, 0.95): summary-compaction fires,
+    the 95% full-auto path does NOT — so exactly one summarize call per fire)."""
+    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
+    tc = TokenCounter()
+    msgs = _compactible_msgs()
+    n = tc.count_messages(msgs)
+    pipeline = CompactionPipeline(tc, preserve_first_n=1, preserve_last_n=1, llm_summarize_fn=summarize_fn)
+    cm = ContextManager(max_context_tokens=int(n / 0.85), pipeline=pipeline, token_counter=tc)
+    return cm, msgs
+
+
+@pytest.mark.asyncio
+async def test_compaction_guard_latches_when_it_does_not_shrink():
+    """MOVE 0c: compaction that fails to reduce context utilization must not re-fire every
+    iteration. The SEMA-05 pathology: one long sitting re-ran the summarizer ~74 times with
+    context bouncing 82->70->80->81->73 — a hidden hot-path tax. A must-shrink latch stops
+    the storm after the first non-shrinking fire; reset_compaction_guard() re-enables it."""
+    calls = {"n": 0}
+
+    async def bloating(middle):
+        calls["n"] += 1
+        return "X " * 5000  # a 'summary' larger than what it replaces -> never shrinks
+
+    cm, msgs = _guard_cm(bloating)
+    for _ in range(6):  # six iterations of ONE turn
+        await cm.build_messages(list(msgs))
+    assert calls["n"] == 1, f"non-shrinking compaction re-fired {calls['n']}x — the storm was not latched"
+
+    cm.reset_compaction_guard()  # a new turn
+    await cm.build_messages(list(msgs))
+    assert calls["n"] == 2, "reset_compaction_guard must re-enable one compaction attempt next turn"
+
+
+@pytest.mark.asyncio
+async def test_compaction_guard_caps_fires_per_turn():
+    """MOVE 0c: even when each fire shrinks momentarily (context regrows next iteration), a
+    per-turn fire cap bounds how many times the expensive summarizer runs in one turn."""
+    calls = {"n": 0}
+
+    async def shrinking(middle):
+        calls["n"] += 1
+        return "s"  # a tiny summary -> each fire genuinely shrinks (latch never trips)
+
+    cm, msgs = _guard_cm(shrinking)
+    for _ in range(6):  # same oversized input each iteration -> would fire every time, uncapped
+        await cm.build_messages(list(msgs))
+    assert calls["n"] == 3, f"per-turn fire cap not enforced: summarizer ran {calls['n']}x (cap 3)"
+
+
 # --- Phase 4: compact.md load path ---
 
 def test_load_compact_md_returns_message_when_file_exists(tmp_path):
