@@ -485,6 +485,40 @@ async def test_off_chapter_answer_demotes_to_inconclusive(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
+async def test_sitting_turnfailed_rate_gate_stamps_invalid(tmp_path: Path, monkeypatch):
+    """MOVE 0b: a sitting whose TurnFailed rate exceeds 20% aborts the run loudly and stamps
+    verdict INVALID (measurement failure != INCONCLUSIVE). The SEMA-05 P0: 13/15 days failed
+    EVERY turn on the second-system-message HTTP-400, yet the verdict graded a 2-day store as
+    15 days with no failure signal. The probe already has a TurnFailed gate; sittings mirror it."""
+    orig = sema._OfflineLoopLLM.stream_complete
+
+    async def dying_accumulation(self, messages=None, tools=None, on_token=None):
+        last_user = next((m for m in reversed(messages or []) if m.get("role") == "user"), {})
+        task = str(last_user.get("content", ""))
+        if task.startswith(("What has the harness learned", "What durable domain knowledge")):
+            return await orig(self, messages, tools, on_token)  # the probe (never reached) still works
+        raise ConnectionError("400 — System message must be at the beginning")  # every driven turn dies
+
+    monkeypatch.setattr(sema._OfflineLoopLLM, "stream_complete", dying_accumulation)
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist)
+    args = sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", AGENT,
+    ])
+    code = await sema.run(args)
+    assert code == 1, "a measurement failure is NOT a successful measurement (exit 1, like ABORTED)"
+    v = json.loads((tmp_path / "results" / "verdict.json").read_text(encoding="utf-8"))
+    assert v["verdict"] == "INVALID"
+    assert "TurnFailed" in v["reason"]
+    # The failing sitting is NAMED (per-stage/site attribution is the point).
+    assert v["invalid_sitting"]["session_id"].startswith("sema05-")
+    assert v["invalid_sitting"]["failed"] >= 1 and v["invalid_sitting"]["turns"] >= 1
+    # A dead store was NEVER graded as if it held knowledge (no proxy fields fabricated).
+    assert "schemas_written" not in v and "zero_tool_answered" not in v
+
+
+@pytest.mark.asyncio
 async def test_watchdog_aborts_before_any_sitting(tmp_path: Path, monkeypatch):
     """Machine-safety: MemAvailable below threshold -> honest abort (exit 1) BEFORE any
     sitting fires a live prefill. (The KILL mid-sitting per-turn break is inspection-covered:
