@@ -27,7 +27,12 @@ import time
 from typing import TYPE_CHECKING
 
 from localharness.memory.clustering import find_stable_clusters
-from localharness.memory.idle_llm import complete_cancellable, ground_numbers, grounded
+from localharness.memory.idle_llm import (
+    complete_cancellable,
+    ground_numbers,
+    grounded,
+    strip_chapter_title,
+)
 from localharness.memory.sqlite import (
     SCHEMA_CONFIDENCE,
     SCHEMA_DEPTH_TAG_PREFIX,
@@ -122,8 +127,9 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
 
     prompt = (
         "Write ONE 1-2 sentence 'chapter' summarizing how this behaves, titled by the shared "
-        "theme. Assert ONLY what the lessons below support — invent no new facts, tools, or "
-        "numbers.\n\n" + corpus
+        "theme. COMPOSE THE BODY FROM THE LESSONS' OWN WORDING — reuse their exact terms and "
+        "phrases; introduce no word, tool, name, or number that is not already in the lessons "
+        "below. Assert ONLY what the lessons support.\n\n" + corpus
     )
     text = await complete_cancellable(llm, prompt, cancel_event, char_cap=corpus_char_cap)
     if text is None:
@@ -136,13 +142,15 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
         return None
 
     # Pre-committed KILL (ROADMAP): a chapter whose tokens aren't derivable from its members is
-    # worse than no chapter. grounded() is the broad majority-token net; ground_numbers layers the
-    # stricter numeric net (SEMA-05 rejects an unverified figure, unlike hierarchy's flag-only).
-    if not grounded(text, corpus):
+    # worse than no chapter. FIX 1a: ground the BODY, not the markdown title — the prompt asks for
+    # a titled chapter, so the model's "**Title**" heading tokens (never in the plain member
+    # corpus) would otherwise sink the majority net (run-3 KILLed all 3 grounded drafts on titles).
+    body = strip_chapter_title(text)
+    if not grounded(body, corpus):
         log.info("chapter-writer: ungrounded chapter rejected (kill)")
         attempt.update(grounded=False, grounded_majority=False, reason="ungrounded")
         return None
-    unverified = ground_numbers(text, member_bodies)
+    unverified = ground_numbers(body, member_bodies)
     if unverified:
         log.info("chapter-writer: chapter carries an unverified figure — rejected (kill)")
         attempt.update(grounded=False, grounded_majority=True,
