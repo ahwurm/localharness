@@ -73,6 +73,9 @@ class ConsolidationReport:
     # Run-2 ruling 4 (observability): EVERY chapter-writer attempt (written or rejected, with
     # its reason + grounding fields) — 'no chapter written' must leave a forensic trail.
     schema_attempts: list[dict] = field(default_factory=list)
+    # FIX 2c (run-3): the RAW miner completion per chunk (pre-parse) — run-3's were unrecoverable,
+    # making the shadow-duplicate root-cause inferential. A forensic trail for the supersede path.
+    mining_completions: list[dict] = field(default_factory=list)
 
 
 class ConsolidationPass:
@@ -311,7 +314,8 @@ class ConsolidationPass:
             return
         from localharness.memory.mining import mine_transcript
         m = await mine_transcript(
-            self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget
+            self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget,
+            completions_log=report.mining_completions,  # FIX 2c: persist raw completions
         )
         report.mined = m.written
 

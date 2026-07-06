@@ -57,11 +57,14 @@ _PROMPT = (
     "on, prefers, plans, or decides. One fact per line, formatted EXACTLY as pipe-separated "
     "fields:\n"
     "topic | claim | evidence\n"
-    "where `topic` is a 1-3 word subject (e.g. subagents, kyoto trip, gpu ops), `claim` is one "
-    "self-contained fact, and `evidence` is a short VERBATIM quote from the transcript that "
-    "supports it. If a fact CORRECTS or CONTRADICTS one of the known facts listed below on the "
-    "same topic, append a fourth field to that line: | replaces=<the known fact's id>. ONLY "
-    "facts explicitly stated in the transcript — no inference, no new numbers:\n\n"
+    "where `topic` is a SHORT, GENERIC 1-3 word subject label (e.g. subagents, kyoto trip, gpu "
+    "ops) — NOT a per-claim phrase, and NEVER a fact id or key. If a fact continues a topic "
+    "already present in the known facts listed below, REUSE that fact's exact topic label "
+    "verbatim instead of inventing a new one. `claim` is one self-contained fact, and `evidence` "
+    "is a short VERBATIM quote from the transcript that supports it. If a fact CORRECTS or "
+    "CONTRADICTS one of the known facts listed below on the same topic, append a fourth field to "
+    "that line: | replaces=<the known fact's id>. ONLY facts explicitly stated in the "
+    "transcript — no inference, no new numbers:\n\n"
 )
 
 
@@ -76,6 +79,35 @@ def _slug(topic: str) -> str:
     Same-topic atoms therefore share the `sem/{slug}/` prefix — a natural clustering handle."""
     s = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
     return s or "misc"
+
+
+def _slug_of_key(key: str) -> str:
+    """The `<slug>` component of a `sem/<slug>/<hash>` key — recovers a real topic label from a
+    key-shaped topic paste (falls back to _slug for a non-sem string)."""
+    parts = key.split("/")
+    return parts[1] if len(parts) >= 3 and parts[0] == "sem" and parts[1] else _slug(key)
+
+
+def _coerce_key_topic(topic: str, known_keys: set[str]) -> tuple[str | None, str] | None:
+    """FIX 2a (run-3): Qwen sometimes pastes a known atom's KEY (or its `sem/<slug>` prefix) into
+    the `topic` field instead of using `replaces=<id>`, which _slug() mangles into a shadow-
+    duplicate ('sem/sem-vllm-port-…') that leaves the stale value active beside its correction.
+    Detect that paste against the known ACTIVE atoms and recover the real slug so no shadow key is
+    minted. For an UNAMBIGUOUS full-key paste, also return the matched key as an implied `replaces`
+    so a correction supersedes the atom it names. A prefix-only paste is AMBIGUOUS (usually a NEW
+    fact on the topic, not a correction — run-3's summarizer id 57->62), so we recover the slug but
+    do NOT supersede (superseding a distinct fact would lose data). Returns
+    (implied_replaces_or_None, recovered_slug), or None when `topic` is not a key-shaped paste of a
+    known active atom (-> normal mint, current behavior)."""
+    if not topic.startswith("sem/"):
+        return None
+    for k in known_keys:  # exact / leading full-key paste -> implied supersede of that atom
+        if topic == k or topic.startswith(k + "/") or topic.startswith(k + ":"):
+            return k, _slug_of_key(k)
+    for k in known_keys:  # `sem/<slug>` prefix paste -> slug recovery only (no supersede)
+        if topic == k.rsplit("/", 1)[0]:
+            return None, _slug_of_key(k)
+    return None
 
 
 def _tokens(text: str, *, min_len: int = 5) -> list[str]:
@@ -145,10 +177,13 @@ async def mine_transcript(
     *,
     write_budget: int = 25,
     corpus_char_cap: int = 6000,
+    completions_log: list | None = None,
 ) -> MineReport:
     """Walk the un-mined transcript in `corpus_char_cap` chunks, extract typed `sem/` atoms
     (grounded, per-atom source provenance, 0.65), advancing the watermark per completed chunk.
-    Cancellable, budgeted, never raises. Returns a MineReport."""
+    Cancellable, budgeted, never raises. Returns a MineReport. FIX 2c: when `completions_log` is
+    provided, each chunk's RAW model completion (pre-parse) is appended for forensics (run-3's
+    completions were unrecoverable, making the shadow-duplicate root-cause inferential)."""
     report = MineReport()
     try:
         raw_wm = await _get_meta(store, _MINING_WATERMARK_KEY)
@@ -189,9 +224,15 @@ async def mine_transcript(
             # by an earlier chunk of this same pass is already replaceable by a later chunk.
             known = await _active_sem_atoms(store)
             known_keys = {k for k, _v in known}
+            # FIX 2b: SHORT OPAQUE ids ([a1]) alongside the topic label + full key — a short id is
+            # a cleaner `replaces=` target than a key-shaped string the model may mis-paste as a
+            # topic; the key + topic label stay visible so raw-key/reuse forms keep working.
+            short_ids = {f"a{n + 1}": k for n, (k, _v) in enumerate(known)}
             known_block = (
-                "Known facts already on file (id: claim):\n"
-                + "\n".join(f"{k}: {v[:120]}" for k, v in known) + "\n\n"
+                "Known facts already on file — REUSE a fact's topic when your new fact continues "
+                "it; to correct one, add `| replaces=<its id>` (e.g. replaces=a1):\n"
+                + "\n".join(f"[a{n + 1}] {k} (topic {_slug_of_key(k)}): {v[:120]}"
+                            for n, (k, v) in enumerate(known)) + "\n\n"
             ) if known else ""
 
             prompt = _PROMPT + known_block + corpus
@@ -199,6 +240,9 @@ async def mine_transcript(
                 llm, prompt, cancel_event,
                 char_cap=corpus_char_cap + len(_PROMPT) + len(known_block) + 64,
             )
+            if completions_log is not None and raw is not None:
+                completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
+                                        "chunk_records": len(chunk), "raw": raw})
             if raw is None:
                 # Cancelled mid-look — watermark NOT advanced past this chunk (next pass re-mines).
                 report.cancelled = True
@@ -215,12 +259,26 @@ async def mine_transcript(
                     report.rejected_ungrounded += 1
                     continue
                 provenance = src.get("session_id") or str(src.get("ts", ""))
-                key = f"sem/{_slug(topic)}/{_h8(claim)}"
-                # Ruling 3 supersede path: a VALID replaces marker (an active atom the miner was
-                # shown, same topic slug) writes the corrected value onto the OLD key — store_fact
-                # supersedes (history preserved), the stale value leaves the active set. An invalid
-                # marker (hallucinated id / cross-topic) falls back to a normal mint.
-                if replaces and replaces in known_keys and replaces.startswith(f"sem/{_slug(topic)}/"):
+                slug = _slug(topic)
+                # FIX 2a: the model pasted a known atom's key/prefix into the `topic` field instead
+                # of using replaces=<id>. Recover the real slug (kill the shadow-dup mangled key)
+                # and, for an unambiguous full-key paste, coerce an implied replaces so a correction
+                # supersedes — same validity checks as an explicit marker (active + same-slug below).
+                if not replaces:
+                    coerced = _coerce_key_topic(topic, known_keys)
+                    if coerced is not None:
+                        implied, slug = coerced
+                        replaces = implied or replaces
+                        log.warning("mining: coerced key-shaped topic %r -> slug=%r replaces=%r",
+                                    topic, slug, replaces)
+                if replaces in short_ids:  # FIX 2b: resolve a short opaque id (replaces=a1) to a key
+                    replaces = short_ids[replaces]
+                key = f"sem/{slug}/{_h8(claim)}"
+                # Ruling 3 supersede path: a VALID replaces (an active atom the miner was shown, same
+                # topic slug) writes the corrected value onto the OLD key — store_fact supersedes
+                # (history preserved), the stale value leaves the active set. An invalid replaces
+                # (hallucinated id / cross-topic) falls back to a normal mint.
+                if replaces and replaces in known_keys and replaces.startswith(f"sem/{slug}/"):
                     key = replaces
                 await store.store_fact(
                     key=key,

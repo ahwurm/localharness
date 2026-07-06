@@ -71,6 +71,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import string
 import sys
 import time
 from collections import Counter
@@ -96,7 +97,12 @@ from localharness.core.events import (  # noqa: E402
 )
 from localharness.memory.consolidation import ConsolidationPass  # noqa: E402
 from localharness.memory.gate import WriteGate  # noqa: E402
-from localharness.memory.idle_llm import LLMTextAdapter, ground_numbers, grounded  # noqa: E402
+from localharness.memory.idle_llm import (  # noqa: E402
+    LLMTextAdapter,
+    ground_numbers,
+    grounded,
+    strip_chapter_title,
+)
 from localharness.memory.predictive_gate import PredictiveGate  # noqa: E402
 from localharness.memory.predictive_write_gate import PredictiveWriteGate  # noqa: E402
 from localharness.memory.reconciliation import reconcile_corrections  # noqa: E402
@@ -769,8 +775,11 @@ def _member_tool(key: str) -> str | None:
 
 def _supermajority_grounded(claim: str, corpus: str, *, min_token_len: int = 6) -> bool:
     """The §6 sensitivity bar: >= 2/3 of >=6-char tokens verbatim in the corpus (vs the shipped
-    >= 1/2 majority). An empty-token claim is vacuously grounded."""
-    toks = [t for t in claim.split() if len(t) >= min_token_len]
+    >= 1/2 majority). An empty-token claim is vacuously grounded. Mirrors grounded()'s FIX 1b
+    case/punct-folding so the sensitivity re-grade measures the majority FRACTION (the deliberate
+    stricter bar), never case/punctuation noise that the writer gate already normalizes away."""
+    corpus = corpus.lower()
+    toks = [tok for t in claim.split() if len(tok := t.strip(string.punctuation).lower()) >= min_token_len]
     if not toks:
         return True
     matched = sum(1 for t in toks if t in corpus)
@@ -829,8 +838,12 @@ async def _static_checks(store: MemoryStore) -> dict:
     member_tools: list[str] = []
     for s in schemas:
         bodies, corpus = await _schema_corpus(store, s)
-        g_majority = grounded(s.value, corpus)            # the shipped >=50% majority-token net
-        unverified = ground_numbers(s.value, bodies)      # the numeric net (empty == clean)
+        # FIX 1a: grade the BODY, exactly as the writer gate does — a stored chapter keeps its
+        # markdown title, but the KILL re-check must ignore title tokens or a writer-accepted
+        # chapter spuriously re-KILLs here (the MAJOR-4 writer==grader invariant).
+        body = strip_chapter_title(s.value)
+        g_majority = grounded(body, corpus)               # the shipped >=50% majority-token net
+        unverified = ground_numbers(body, bodies)         # the numeric net (empty == clean)
         per_schema.append({
             "key": s.key,
             "value": s.value[:300],  # the actual chapter text, for the human read
@@ -896,7 +909,7 @@ async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> di
     holds_super = True
     for s in schemas:
         _bodies, corpus = await _schema_corpus(store, s)
-        if not _supermajority_grounded(s.value, corpus):
+        if not _supermajority_grounded(strip_chapter_title(s.value), corpus):  # FIX 1a: body only
             holds_super = False
     n_strict, cluster_sessions = await _stricter_clusters(store, cfg.cluster_min_sessions + 1)
     return {
@@ -1468,6 +1481,9 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         "stage_a": grade["stage_a"], "stage_b": grade["stage_b"], "stage_c": stage_c,
         "byte_stable": grade["byte_stable"], "per_schema_grounding": per_schema,
         "sensitivity": sens, "duration_s": round(time.monotonic() - t0, 2),
+        # FIX 2c: the raw per-chunk miner completions — a forensic trail for the supersede path
+        # (run-3's were unrecoverable, making the shadow-duplicate root-cause inferential).
+        "mining_completions": pass_report.mining_completions,
     }
     (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
     (results / "report.md").write_text(_manifest_report(v), encoding="utf-8")
@@ -1831,6 +1847,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # FIX 4: line-buffer stdout/stderr so a live `tail -f run.log` sees per-line progress instead
+    # of a 0-byte file (block-buffered when stdout is redirected — run-3 showed nothing for 73 min).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
     args = _parse_args(argv)
     sys.exit(asyncio.run(run(args)))
 

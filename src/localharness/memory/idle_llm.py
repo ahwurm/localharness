@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import string
 from collections.abc import Awaitable
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+_PUNCT = string.punctuation  # stripped from a token's edges before matching (FIX 1b)
 
 
 async def run_cancellable(coro: Awaitable[Any], cancel_event: asyncio.Event) -> Any | None:
@@ -85,13 +88,45 @@ def grounded(claim: str, corpus: str, *, min_token_len: int = 6) -> bool:
     verbatim in the corpus (extracted from consolidation.py:295-301; critic M4: an
     any-single-token check was trivially passed by confabulations sharing one common word
     like "contains"). An empty-token claim (all short words) -> True (nothing to verify).
-    This is the BROAD kill gate; `ground_numbers` layers the narrower numeric net on top
-    for figures specifically."""
-    tokens = [t for t in claim.split() if len(t) >= min_token_len]
+
+    FIX 1b: matching is case-folded and a token's leading/trailing punctuation is stripped, so
+    a chapter's own title casing/markdown ("Listens." / "**Port") can no longer make a
+    genuinely-derivable claim unmatchable (run-3: the majority net was case+punct-sensitive and
+    KILLed every grounded draft). Strictly more permissive on case/punctuation only — a token
+    absent from the corpus in EVERY case is still unmatched (the anti-hallucination intent holds).
+    This is the BROAD kill gate; `ground_numbers` layers the narrower numeric net on top."""
+    corpus = corpus.lower()
+    tokens = [tok for t in claim.split() if len(tok := t.strip(_PUNCT).lower()) >= min_token_len]
     if not tokens:
         return True
     matched = sum(1 for t in tokens if t in corpus)
     return matched * 2 >= len(tokens)
+
+
+def strip_chapter_title(text: str) -> str:
+    """Return a chapter's BODY for grounding — drop a leading markdown title line and strip
+    emphasis markers. The chapter-writer prompt asks for a *titled* chapter and the model renders
+    a markdown heading (e.g. "**Port Configuration**"), whose words are a HEADING, not an asserted
+    claim; counting them against the majority-token grounding bar is structurally unwinnable
+    (run-3: all three otherwise-grounded drafts KILLed on their title tokens). Grounding the body
+    only aligns the gate with what the chapter actually asserts. A single-line draft (no separate
+    title line) is returned intact (only markers stripped) — we never strip the sole content line."""
+    lines = text.splitlines()
+    if len(lines) > 1:
+        first = lines[0].strip()
+        core = first.strip("*_#` ").strip()
+        is_heading = bool(core) and (
+            first.startswith("#")
+            or (first.startswith("**") and first.endswith("**"))
+            or (first.startswith("__") and first.endswith("__"))
+            or (first.startswith("*") and first.endswith("*"))
+        )
+        if is_heading:
+            lines = lines[1:]
+    body = "\n".join(lines)
+    for mark in ("*", "`", "#"):  # de-emphasize; grounded() strips any residual token-edge punct
+        body = body.replace(mark, " ")
+    return body
 
 
 def ground_numbers(text: str, sources: list[str]) -> list[str]:
