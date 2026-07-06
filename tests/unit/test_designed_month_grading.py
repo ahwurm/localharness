@@ -192,6 +192,24 @@ async def test_grade_inconclusive_on_correction_arc_stale_active(store):
     assert g["stage_b"]["stale_active"] is True
 
 
+@pytest.mark.asyncio
+async def test_a1_denominator_respects_expects_extraction_flag(store):
+    """Ruling 4a: a (topic, day) sitting whose ONLY queries carry expects_extraction: false is
+    excluded from the A1 denominator — decision/bookkeeping queries aren't extraction targets,
+    and counting them starves A1 (run 2: INCONCLUSIVE @A1 on an inflated denominator)."""
+    m = await _seed_holds(store)
+    m["topics"]["race"] = {"expected_chapter": True, "days": ["day2"], "keywords": ["race"]}
+    m["queries"].append({"id": "d2-r", "day": "day2", "topic": "race",
+                         "text": "lock the build order decision", "expects_extraction": False})
+
+    g = await sema._grade_designed_month(store, m, _tqm(m))
+    # (race, day2) is all-flagged -> out of the denominator: 4 topic-sittings, not 5.
+    assert g["stage_a"]["a1_topic_sittings"] == 4
+    assert g["stage_a"]["a1_recall"] == 1.0
+    # race never extracts (0 atoms < min_cluster_size) -> a correct null; the grade still HOLDS.
+    assert g["verdict"] == "HOLDS"
+
+
 def test_shipped_manifest_is_well_formed():
     """The pre-committed designed-month manifest: 6 expected-chapter topics each spread across
     >= 2 days (the >=2-sitting stability bar), a correction arc, and query/topic coverage."""
@@ -251,3 +269,8 @@ async def test_offline_manifest_mode_runs_and_grades(tmp_path: Path):
     assert v["verdict"] == "HOLDS" and v["stage_b"]["ari"] == 1.0
     assert [pc["label"] for pc in v["stage_b"]["per_chapter"]] == ["subagents"]
     assert v["days"] == 2 and [s["session_id"] for s in v["sittings"]] == ["designed-day1", "designed-day2"]
+    # Ruling 4b (run-2 observability gap): per_schema_grounding carries EVERY chapter-writer
+    # attempt — never empty when the writer ran; each entry says whether it was written.
+    assert v["per_schema_grounding"], "chapter-writer attempts missing from per_schema_grounding"
+    assert all("written" in p for p in v["per_schema_grounding"])
+    assert any(p["written"] for p in v["per_schema_grounding"])  # the HOLDS chapter is recorded

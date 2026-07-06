@@ -653,6 +653,9 @@ async def test_phase36_pass_writes_schema_reconciles_and_mines(store: MemoryStor
     index = await store._render_memory_index(10)
     assert "### Knowledge" in index
     assert schemas[0][0] in index                       # the schema key routes in the index
+    # Ruling 4b: every chapter-writer attempt is observable on the report (run-2 gap: a
+    # rejected/failed write left per_schema_grounding empty with no forensic trail).
+    assert report.schema_attempts and report.schema_attempts[0]["written"] is True
 
     # (2) RECONCILE — the dispute is reverted and the ORIGINAL value is RESTORED (not cleared).
     assert report.reconciled >= 1

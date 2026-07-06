@@ -199,3 +199,61 @@ async def test_repeated_claim_corroborates_not_duplicates(store: MemoryStore):
 
     history = await store.get_fact_history(f"sem/{_slug('prefs')}/{_h8(claim)}")
     assert len(history) == 1  # corroboration on repeat: identical value == no duplicate row
+
+
+# ---------------------------------------------------------------------------
+# Ruling 3 (run-2 forensics): corrections must SUPERSEDE stale atoms. Claim-hash keys
+# (sem/{topic}/{h8(claim)}) can never collide, so the port-8000 atom stayed active beside the
+# 8081 correction (B4 fail). The miner is shown the topic's existing active atoms in-prompt and
+# may mark `replaces=<id>`; on replaces, store_fact writes the NEW value on the OLD key —
+# supersede chain, history preserved. Grounding still applies.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replaces_marker_supersedes_stale_atom(store: MemoryStore):
+    from localharness.memory.mining import _h8
+
+    stale_claim = "vLLM server listens on port 8000"
+    await store.append_history(
+        _rec(10, "for reference: our vLLM server listens on port 8000. remember that", sid="day2")
+    )
+    r1 = await mine_transcript(
+        store, _FakeLLM(f"gpu ops | {stale_claim} | server listens on port 8000"), asyncio.Event()
+    )
+    assert r1.written == 1
+    old_key = f"sem/gpu-ops/{_h8(stale_claim)}"
+    assert (await store.get_fact(old_key)).value == stale_claim
+
+    prompts: list[str] = []
+
+    class _CorrectingLLM:
+        async def complete(self, prompt: str) -> str:
+            prompts.append(prompt)
+            return (
+                "gpu ops | vLLM server moved to port 8081 | moved the vLLM server to port 8081 "
+                f"| replaces={old_key}"
+            )
+
+    await store.append_history(
+        _rec(20, "correction: we moved the vLLM server to port 8081, not 8000", sid="day3")
+    )
+    r2 = await mine_transcript(store, _CorrectingLLM(), asyncio.Event())
+    assert r2.written == 1
+
+    # The miner was shown the topic's existing active atoms in-prompt (id + claim, capped).
+    assert any(old_key in p and stale_claim in p for p in prompts), (
+        "existing active atoms never reached the miner's prompt"
+    )
+
+    # Exactly ONE active port atom — the corrected value, ON THE OLD KEY (supersede chain).
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    port_atoms = [f for f in active if "port" in f.value]
+    assert len(port_atoms) == 1, f"stale atom still active beside the correction: {port_atoms}"
+    assert port_atoms[0].value == "vLLM server moved to port 8081"
+    assert port_atoms[0].key == old_key
+    assert port_atoms[0].provenance == "day3"  # per-atom source provenance, as ever
+
+    history = await store.get_fact_history(old_key)
+    assert len(history) == 2  # supersede chain intact: 8000 -> 8081
+    assert any(h.value == stale_claim and h.status == "superseded" for h in history)
