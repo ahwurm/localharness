@@ -456,6 +456,41 @@ async def _build_loop(args, store_dir: Path, store: MemoryStore, bus: EventBus,
     )
 
 
+async def _purge_dangling_session(store: MemoryStore, agent_id: str, sid: str) -> None:
+    """Day-checkpoint resume: drop ALL partial state a hard freeze left under `sid` so the day
+    can be redone from turn 0 UNDER THE IDENTICAL id — never a forked/suffixed session, which
+    would inflate the >=2-distinct-sessions clustering bar (clustering.py:266) and flip the
+    grade. Deletes in FK-safe order (PRAGMA foreign_keys=ON): session-scoped facts first
+    (provenance == sid for the standard lesson/stat rows — gate.py:206, pwg.py:191 — plus the
+    rarer correction rows whose provenance is a user_signals.event_id for this session,
+    pwg.py:235/248), then the v4 collect tables (children before parents), then the row itself.
+    (Accumulation sittings create no edges — those are grading-phase only — so none are orphaned.)"""
+    db = store._db
+    assert db is not None
+    await db.execute(
+        "DELETE FROM facts WHERE agent_id = ? AND (provenance = ? OR provenance IN "
+        "(SELECT event_id FROM user_signals WHERE agent_id = ? AND session_id = ? "
+        "AND event_id IS NOT NULL))",
+        (agent_id, sid, agent_id, sid),
+    )
+    await db.execute(
+        "DELETE FROM staged_snapshots WHERE user_signal_id IN "
+        "(SELECT id FROM user_signals WHERE agent_id = ? AND session_id = ?)",
+        (agent_id, sid),
+    )
+    await db.execute(
+        "DELETE FROM surprise_scores WHERE agent_id = ? AND session_id = ?", (agent_id, sid)
+    )
+    await db.execute(
+        "DELETE FROM user_signals WHERE agent_id = ? AND session_id = ?", (agent_id, sid)
+    )
+    await db.execute(
+        "DELETE FROM tool_observations WHERE agent_id = ? AND session_id = ?", (agent_id, sid)
+    )
+    await db.execute("DELETE FROM sessions WHERE agent_id = ? AND id = ?", (agent_id, sid))
+    await db.commit()
+
+
 async def _run_sittings(
     args: argparse.Namespace,
     store_dir: Path,
@@ -477,20 +512,53 @@ async def _run_sittings(
 
     events_path = store_dir / "agents" / args.agent / "bus-events.jsonl"
     sittings: list[dict] = []
+
+    # DAY-GRANULARITY CHECKPOINT/RESUME (survive a hard freeze): a completed day is durable iff
+    # its sessions row has ended_at set (end_session, run in the finally below). Read the isolated
+    # store ONCE before the loop so a resumed run skips durable days, redoes a dangling
+    # (freeze-interrupted) day under the SAME id, and runs never-started days. No new checkpoint
+    # write — ended_at already IS the durability signal. Directions never cross: only a committed
+    # end_session sets ended_at, so a truly-done day can never read back as dangling, and a
+    # dangling day can never read back as done (worst case under synchronous=NORMAL a completed
+    # day whose WAL was not yet fsynced looks dangling and is redone — safe, only ever redundant).
+    done: set[str] = set()
+    dangling: set[str] = set()
+    db_path = store_dir / "agents" / args.agent / "memory.db"
+    if db_path.exists():
+        con = sqlite3.connect(str(db_path))
+        try:
+            for row_sid, ended in con.execute(
+                "SELECT id, ended_at FROM sessions WHERE id LIKE 'sema05-%'"
+            ):
+                if row_sid == "sema05-probe":
+                    continue  # the grading-phase probe is not an accumulation day
+                (done if ended is not None else dangling).add(row_sid)
+        finally:
+            con.close()
+    if done or dangling:
+        print(f"resume: {len(done)} day(s) durable (skip), {len(dangling)} dangling (redo same id)")
+
     for day, queries in day_queries:
+        sid = f"sema05-{day}"
+        capped = queries[: args.max_turns_per_day] if args.max_turns_per_day else queries
+        if sid in done:  # already durable — SKIP entirely (no create_session, no turns re-run)
+            sittings.append({"day": day, "session_id": sid, "turns": len(capped)})
+            print(f"sitting {day}: SKIPPED — already durable (session {sid})")
+            continue
         if (store_dir / "KILL").exists():  # MAJOR 6b: stop BEFORE starting another sitting
             print(f"KILL file present — stopping accumulation before sitting {day}.")
             break
         if not args.offline and not _watchdog_ok():
             raise _WatchdogAbort(f"MemAvailable below {_MIN_MEM_GIB} GiB before sitting {day}")
-        capped = queries[: args.max_turns_per_day] if args.max_turns_per_day else queries
 
         # Fresh per-sitting composition (mirrors start_cmd; one continuous bus-events log).
         bus = EventBus(persist_path=events_path)
         store = MemoryStore(agent_id=args.agent, division_id="", org_id="",
                             base_dir=str(store_dir), bus=bus)
         await store.open()
-        sid = f"sema05-{day}"
+        if sid in dangling:  # freeze-interrupted: drop the partial state, redo from turn 0 (SAME id).
+            await _purge_dangling_session(store, args.agent, sid)
+            print(f"sitting {day}: purged dangling partial state — redoing under {sid}")
         await store.create_session(sid, budget={}, model=model_label,
                                    context_tokens_available=_LOOP_CONTEXT_TOKENS)
         wg = WriteGate(store, bus, args.agent)
@@ -586,6 +654,9 @@ async def _probe_turn(args, store_dir: Path, question: str, loop_llm: object,
     await store.open()
     sid = "sema05-probe"
     try:
+        # Grading-phase resume: a prior run that froze during/after the probe left a dangling
+        # sema05-probe row; the probe is redone wholesale, so clear it first (never PK-collide).
+        await _purge_dangling_session(store, args.agent, sid)
         await store.create_session(sid, budget={}, model=model_label,
                                    context_tokens_available=_LOOP_CONTEXT_TOKENS)
         loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter,
