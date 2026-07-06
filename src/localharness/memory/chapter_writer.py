@@ -86,11 +86,35 @@ async def _dereference(store, rows: list["Fact"]) -> list[str]:
     return out
 
 
-async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap):
+def _attempt_entry(cluster, new_depth) -> dict:
+    """Run-2 ruling 4 (observability): the base record for ONE chapter-writer attempt. Field
+    names mirror the graders' per_schema_grounding entries (key/value/grounded/grounded_majority/
+    unverified_numbers) so rejected attempts render everywhere written schemas do."""
+    return {
+        "key": f"(unwritten:{_h8(*sorted(m.key for m in cluster.members))})",
+        "value": "",
+        "grounded": None,
+        "grounded_majority": None,
+        "unverified_numbers": [],
+        "written": False,
+        "reason": None,
+        "members": len(cluster.members),
+        "sessions": sorted(cluster.sessions),
+        "depth": new_depth,
+    }
+
+
+async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap,
+                     attempts_log: list | None = None):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
-    pre-committed kill in action; the caller decides break (cancel) vs continue (kill)."""
+    pre-committed kill in action; the caller decides break (cancel) vs continue (kill). Every
+    attempt (written or rejected, with its reason) is appended to attempts_log when provided —
+    run-2 ruling 4: 'no chapter written' must leave a forensic trail, never an empty grading."""
+    attempt = _attempt_entry(cluster, new_depth)
+    if attempts_log is not None:
+        attempts_log.append(attempt)
     members = cluster.members
     member_bodies = [m.value for m in members] + [a.value for a in cluster.aux_members]
     derefs = await _dereference(store, list(members) + list(cluster.aux_members))
@@ -103,9 +127,12 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
     )
     text = await complete_cancellable(llm, prompt, cancel_event, char_cap=corpus_char_cap)
     if text is None:
+        attempt["reason"] = "cancelled" if cancel_event.is_set() else "generation_failed"
         return None
     text = text.strip()
+    attempt["value"] = text[:300]
     if not text:
+        attempt["reason"] = "empty_generation"
         return None
 
     # Pre-committed KILL (ROADMAP): a chapter whose tokens aren't derivable from its members is
@@ -113,10 +140,15 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
     # stricter numeric net (SEMA-05 rejects an unverified figure, unlike hierarchy's flag-only).
     if not grounded(text, corpus):
         log.info("chapter-writer: ungrounded chapter rejected (kill)")
+        attempt.update(grounded=False, grounded_majority=False, reason="ungrounded")
         return None
-    if ground_numbers(text, member_bodies):
+    unverified = ground_numbers(text, member_bodies)
+    if unverified:
         log.info("chapter-writer: chapter carries an unverified figure — rejected (kill)")
+        attempt.update(grounded=False, grounded_majority=True,
+                       unverified_numbers=unverified, reason="unverified_figures")
         return None
+    attempt.update(grounded=True, grounded_majority=True, written=True, reason="written")
 
     schema = await store.store_fact(
         key=f"{SCHEMA_KEY_PREFIX}{_h8(*sorted(m.key for m in members))}",
@@ -127,6 +159,7 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
         provenance=f"cluster:{'|'.join(sorted(cluster.sessions))}"[:200],
         node_kind="schema",
     )
+    attempt["key"] = schema.key
     for m in members:
         try:
             await store.add_edge(schema.id, m.id, "member_of")
@@ -217,6 +250,7 @@ async def write_cluster_schemas(
     store, llm, cancel_event, *,
     min_cluster_size: int = 2, min_sessions: int = 2, write_budget: int = 3,
     depth_cap: int = 2, corpus_char_cap: int = 6000, stale_looks: int = 5,
+    attempts_log: list | None = None,
 ) -> list["Fact"]:
     """Turn stable lesson clusters into grounded chapter schema nodes — the SEMA-02/03 write half.
 
@@ -240,11 +274,16 @@ async def write_cluster_schemas(
         new_depth = cluster.depth + 1
         if new_depth > depth_cap:
             log.debug("chapter-writer: depth cap reached (%d > %d) — cluster refused", new_depth, depth_cap)
+            if attempts_log is not None:
+                attempts_log.append(dict(_attempt_entry(cluster, new_depth), reason="depth_cap"))
             continue
         try:
-            schema = await _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap)
+            schema = await _write_one(store, llm, cancel_event, cluster, new_depth,
+                                      corpus_char_cap, attempts_log=attempts_log)
         except Exception:
             log.exception("chapter-writer: cluster write failed (non-fatal)")
+            if attempts_log is not None and attempts_log and attempts_log[-1].get("reason") is None:
+                attempts_log[-1]["reason"] = "error"
             continue
         if schema is None:
             if cancel_event.is_set():

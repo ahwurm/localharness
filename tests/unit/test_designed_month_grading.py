@@ -211,14 +211,19 @@ async def test_a1_denominator_respects_expects_extraction_flag(store):
 
 
 def test_shipped_manifest_is_well_formed():
-    """The pre-committed designed-month manifest: 6 expected-chapter topics each spread across
-    >= 2 days (the >=2-sitting stability bar), a correction arc, and query/topic coverage."""
+    """The pre-committed designed-month manifest: >=5 expected-chapter topics (the coordinator
+    owns the exact set), each spread across >= 2 days (the >=2-sitting stability bar) with >= 1
+    EXTRACTION-EXPECTING query (ruling 4a flags must never starve a whole topic), a correction
+    arc, and query/topic coverage."""
     m = sema._load_manifest(_SCRIPTS / "sema05_designed_month_manifest.json")
     expected = {t: meta for t, meta in m["topics"].items() if meta.get("expected_chapter")}
-    assert len(expected) == 6, expected.keys()
+    assert len(expected) >= 5, expected.keys()
     for t, meta in expected.items():
         assert len(meta["days"]) >= 2, f"{t} must recur across >= 2 days"
         assert meta.get("keywords"), f"{t} needs Stage-C keywords"
+        assert any(q["topic"] == t and q.get("expects_extraction", True) for q in m["queries"]), (
+            f"{t} has no extraction-expecting query — it could never satisfy A1/B1"
+        )
     arc = m["correction_arc"]
     assert arc["stale"] and arc["corrected"] and arc["stale"] != arc["corrected"]
     topics_used = {q["topic"] for q in m["queries"]}

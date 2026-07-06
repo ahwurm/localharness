@@ -70,6 +70,9 @@ class ConsolidationReport:
     cancelled: bool = False
     duration_s: float = 0.0
     promoted_keys: list[str] = field(default_factory=list)
+    # Run-2 ruling 4 (observability): EVERY chapter-writer attempt (written or rejected, with
+    # its reason + grounding fields) — 'no chapter written' must leave a forensic trail.
+    schema_attempts: list[dict] = field(default_factory=list)
 
 
 class ConsolidationPass:
@@ -285,6 +288,7 @@ class ConsolidationPass:
             min_sessions=self._cfg.cluster_min_sessions,
             write_budget=self._cfg.schema_write_budget,
             depth_cap=self._cfg.schema_depth_cap,
+            attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
         )
         report.schemas_written = len(written)
 
