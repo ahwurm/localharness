@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -528,3 +530,140 @@ async def test_guards_refuse_live_store_shaped_paths(tmp_path: Path):
         "--store", str(tmp_path / "s"), "--results", str(tmp_path / "r"), "--agent", AGENT,
     ])
     assert await sema.run(args) == 2
+
+
+# ---------------------------------------------------------------------------
+# Day-granularity checkpoint/resume — survive a hard freeze, resume without redoing
+# completed days AND without changing the graded outcome (the load-bearing invariant).
+# ---------------------------------------------------------------------------
+
+# The proxy-independent / structural fields a deterministic resume MUST reproduce exactly.
+# Time-based fields (generated_at, duration_s, sittings[].turns provenance) are excluded —
+# the offline fake is content-deterministic, so everything below is a wall-clock invariant.
+_STRUCTURAL = (
+    "zero_tool_answered", "tool_calls", "schemas_written", "kill_triggered",
+    "byte_stable", "n_lessons", "reconcile", "drain_ok", "shape_a", "shape_b",
+)
+
+
+def _structural(v: dict) -> dict:
+    out = {k: v[k] for k in _STRUCTURAL}
+    # per-schema KILL re-check: compare the grounding DISPOSITION, order-independent. The schema
+    # KEY itself is deliberately dropped — it is _h8(sorted member lesson keys), and each member
+    # key embeds _h8(prior_error) (gate.py:133), whose synthetic offline error text contains the
+    # absolute missing path `{store_dir}/absent-*.md`. Baseline and a resumed run run in DIFFERENT
+    # store dirs by construction, so those hashes can never coincide across the two — a pure test-
+    # setup artifact, not a resume divergence. What must match is the grade: grounded, majority,
+    # no unverified numbers, and the same schema COUNT.
+    out["schema_count"] = len(v["per_schema_grounding"])
+    out["grounding"] = sorted(
+        (p["grounded"], p["grounded_majority"], tuple(p["unverified_numbers"]))
+        for p in v["per_schema_grounding"]
+    )
+    # session count is THE forked-id tripwire: a suffixed redo shows up as an extra session.
+    out["n_sittings"] = len(v["sittings"])
+    out["distinct_sessions"] = len({s["session_id"] for s in v["sittings"]})
+    out["sensitivity_holds"] = (
+        v["sensitivity"]["grounding_supermajority_holds"],
+        v["sensitivity"]["cluster_min_sessions_plus1_holds"],
+    )
+    return out
+
+
+def _sessions_count(storedir: Path) -> int:
+    db = next(storedir.rglob("memory.db"))
+    con = sqlite3.connect(str(db))  # plain connect: the frozen store's WAL may be uncheckpointed
+    try:
+        return con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        con.close()
+
+
+@pytest.mark.asyncio
+async def test_freeze_resume_matches_baseline_without_redoing_done_days(tmp_path: Path):
+    """A hard freeze mid-accumulation (box bricks — os._exit, no finally, no end_session) must
+    resume on the SAME command: skip durable days, redo the dangling day UNDER THE SAME id, run
+    never-started days, then grade to a verdict that equals a clean baseline on every structural
+    field. A forked-id regression surfaces as a differing session count (asserted below)."""
+    hist = tmp_path / "scratch" / "history.jsonl"
+    _write_month_history(hist, days=5)
+
+    # 1) BASELINE — a clean full offline run.
+    base_store, base_results = tmp_path / "store_b", tmp_path / "results_b"
+    assert await sema.run(sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(base_store),
+        "--results", str(base_results), "--agent", AGENT,
+    ])) == 0
+    baseline = json.loads((base_results / "verdict.json").read_text(encoding="utf-8"))
+
+    # 2) HARD FREEZE a fresh run: a driver hard-exits (os._exit — no finally, no end_session) at
+    # the 4th day's close-out, leaving days 1-3 durable + day 4 dangling (day 5 never created).
+    # A faithful brick, NOT a graceful KILL (which would write an ABORTED verdict instead).
+    kr_store, kr_results = tmp_path / "store_kr", tmp_path / "results_kr"
+    driver = tmp_path / "freeze_driver.py"
+    driver.write_text(textwrap.dedent(f"""
+        import asyncio, os, sys
+        sys.path.insert(0, {str(_SCRIPTS)!r})
+        import sema05_month_in_a_day as sema
+        from localharness.memory.sqlite import MemoryStore
+        _n = {{"d": 0}}
+        _oc, _oe = MemoryStore.create_session, MemoryStore.end_session
+        async def _c(self, session_id, *a, **k):
+            await _oc(self, session_id, *a, **k)
+            if session_id.startswith("sema05-") and session_id != "sema05-probe":
+                _n["d"] += 1
+        async def _e(self, session_id, *a, **k):
+            if session_id.startswith("sema05-") and session_id != "sema05-probe" and _n["d"] >= 4:
+                sys.stdout.flush(); os._exit(137)  # brick at day 4 close-out -> day 4 dangling
+            await _oe(self, session_id, *a, **k)
+        MemoryStore.create_session, MemoryStore.end_session = _c, _e
+        sys.exit(asyncio.run(sema.run(sema._parse_args(sys.argv[1:]))))
+    """), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(driver), "--offline", "--history", str(hist),
+         "--store", str(kr_store), "--results", str(kr_results), "--agent", AGENT],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 137, f"expected a hard-freeze exit 137, got {proc.returncode}: {proc.stderr[-800:]}"
+    assert not (kr_results / "verdict.json").exists(), "the frozen run must not have reached grading"
+
+    # The freeze left exactly the dangling shape: 3 durable days, 1 dangling, no probe.
+    kr_db = next(kr_store.rglob("memory.db"))
+    con = sqlite3.connect(str(kr_db))
+    rows = con.execute("SELECT id, ended_at FROM sessions WHERE id LIKE 'sema05-%'").fetchall()
+    con.close()
+    done_ids = sorted(r[0] for r in rows if r[1] is not None)
+    dangling_ids = [r[0] for r in rows if r[1] is None]
+    assert len(done_ids) == 3 and len(dangling_ids) == 1, f"unexpected freeze shape: {rows}"
+    assert "sema05-probe" not in [r[0] for r in rows]
+
+    # 3) RESUME — re-invoke the SAME command. Skips the 3 durable days, purges + redoes the
+    # dangling day UNDER THE SAME id, runs the never-started day 5, then grades to a verdict.
+    assert await sema.run(sema._parse_args([
+        "--offline", "--history", str(hist), "--store", str(kr_store),
+        "--results", str(kr_results), "--agent", AGENT,
+    ])) == 0
+    resumed = json.loads((kr_results / "verdict.json").read_text(encoding="utf-8"))
+
+    # The dangling day was redone under the SAME id, NOT forked: one row per day + one probe,
+    # identical session count to the baseline (a suffixed-id bug would make this 7, not 6).
+    assert _sessions_count(kr_store) == _sessions_count(base_store) == 6
+    con = sqlite3.connect(str(next(kr_store.rglob("memory.db"))))
+    n_dangle = con.execute("SELECT COUNT(*) FROM sessions WHERE id = ?", (dangling_ids[0],)).fetchone()[0]
+    con.close()
+    assert n_dangle == 1, "the redone day must reuse its id, never mint a second session"
+
+    # 4) The resumed verdict equals the baseline on every structural / proxy-independent field.
+    diffs = {k: (bv, resumed_v) for k, bv in _structural(baseline).items()
+             if (resumed_v := _structural(resumed)[k]) != bv}
+    assert not diffs, f"resume diverged from baseline on: {diffs}"
+
+    # Non-vacuous: the run actually produced a graded, zero-tool-answered chapter over 5 sittings
+    # (else the equality above would be a trivial match of two empty verdicts).
+    assert resumed["schemas_written"] >= 1 and resumed["zero_tool_answered"] is True
+    resumed_sids = {s["session_id"] for s in resumed["sittings"]}
+    assert len(resumed["sittings"]) == 5 and len(resumed_sids) == 5
+    # Every day the freeze had already made durable reappears in the resumed plan (skipped, not
+    # re-driven) — resume neither drops a done day nor forks a new id for the redone one.
+    assert set(done_ids).issubset(resumed_sids)
+    assert dangling_ids[0] in resumed_sids
