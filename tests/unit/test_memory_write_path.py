@@ -64,8 +64,60 @@ async def test_corroboration_touches_not_duplicates(store: MemoryStore):
     f1 = await store.store_fact("stable", "same claim", confidence=0.6)
     f2 = await store.store_fact("stable", "same claim", confidence=0.9)
     assert f2.id == f1.id  # same row — no duplicate, no supersede
-    assert f2.confidence == 0.9  # max(old, new)
+    assert f2.confidence == 0.9  # max(old, new) — non-semantic key keeps plain MAX
     assert len(await store.get_fact_history("stable")) == 1
+
+
+# ---------------------------------------------------------------------------
+# MOVE 3: the Bayesian recurrence ladder (distinct-day re-assertion EARNS confidence)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recurrence_ladder_steps_semantic_on_distinct_day(store: MemoryStore):
+    """A sem/ atom re-asserted (identical value) from a DIFFERENT provenance day steps confidence
+    up a ladder (+0.07) instead of plain MAX — the missing update rule: distinct-day recurrence
+    EARNS ambient status. A SAME-day re-assertion is a no-op touch (no step)."""
+    k, v = "sem/subagents/abcd1234", "user is building a summarizer subagent"
+    f0 = await store.store_fact(k, v, confidence=0.65, provenance="day1")
+    assert f0.confidence == 0.65
+    f1 = await store.store_fact(k, v, confidence=0.65, provenance="day2")   # distinct day -> +0.07
+    assert f1.id == f0.id and round(f1.confidence, 2) == 0.72
+    f2 = await store.store_fact(k, v, confidence=0.65, provenance="day3")   # distinct again -> +0.07
+    assert round(f2.confidence, 2) == 0.79
+    f3 = await store.store_fact(k, v, confidence=0.65, provenance="day3")   # SAME day -> no step
+    assert round(f3.confidence, 2) == 0.79
+    assert len(await store.get_fact_history(k)) == 1  # still one row — corroboration, not supersede
+
+
+@pytest.mark.asyncio
+async def test_recurrence_ladder_caps_at_085(store: MemoryStore):
+    """The ladder caps at 0.85 — confirmation nudges up, never runaway toward certainty."""
+    k, v = "mined/deadbeef", "the user runs a 27B model on vLLM"
+    prev = await store.store_fact(k, v, confidence=0.65, provenance="d0")
+    for i in range(1, 6):  # 0.65 -> .72 -> .79 -> .85(cap) -> .85 -> .85
+        prev = await store.store_fact(k, v, confidence=0.65, provenance=f"d{i}")
+    assert round(prev.confidence, 2) == 0.85
+
+
+@pytest.mark.asyncio
+async def test_recurrence_ladder_excludes_predgate_keeps_max(store: MemoryStore):
+    """predgate/ day-bucket rows keep plain MAX corroboration (operational track, NOT the
+    semantic ladder) — a distinct-day re-assertion does not step them up."""
+    k, v = "predgate/surprising_failure/read/20260101", "a surprising failure occurred"
+    await store.store_fact(k, v, confidence=0.6, provenance="d1")
+    f = await store.store_fact(k, v, confidence=0.6, provenance="d2")
+    assert f.confidence == 0.6  # MAX(0.6, 0.6), no ladder
+
+
+@pytest.mark.asyncio
+async def test_recurrence_ladder_rides_settled_corrections(store: MemoryStore):
+    """A settled correction (tier:reconcile_confirmed), re-observed on a later day, rides the
+    ladder even on a gate/ key (shape-b confirm keeps its key) — a user-confirmed fact re-seen
+    deserves ambient status (it was pinned <0.7 forever)."""
+    k, v = "gate/correction/read/x/s1", "vLLM listens on port 8081"
+    await store.store_fact(k, v, tags=["tier:reconcile_confirmed"], confidence=0.65, provenance="d1")
+    f = await store.store_fact(k, v, tags=["tier:reconcile_confirmed"], confidence=0.65, provenance="d2")
+    assert round(f.confidence, 2) == 0.72  # ladders via the reconcile-confirmed tag, despite gate/
 
 
 @pytest.mark.asyncio
