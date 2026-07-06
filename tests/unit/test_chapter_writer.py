@@ -204,9 +204,12 @@ async def test_writes_one_from_dereferenced_event(store):
 @pytest.mark.asyncio
 async def test_ungrounded_generation_writes_no_schema(store):
     """The pre-committed KILL: a chapter with a majority of tokens in NO member lesson is
-    rejected — no schema written (a hallucinated chapter is worse than no chapter)."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    rejected — no schema written (a hallucinated chapter is worse than no chapter).
+    (Seeds migrated to sem/ — the learned/ seeds left this test VACUOUS after MOVE 1: no
+    pool -> no cluster -> [] trivially; the kill path was silently unexercised.)"""
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    assert len(await find_stable_clusters(store)) == 1  # non-vacuous: the kill has a cluster to kill
 
     result = await write_cluster_schemas(
         store, _EchoLLM("Xylophones fabricate quarterly financials unicorns"), asyncio.Event()
@@ -219,9 +222,11 @@ async def test_ungrounded_generation_writes_no_schema(store):
 @pytest.mark.asyncio
 async def test_ungrounded_unverified_figure_rejected(store):
     """The numeric net layered on top: grounded prose that carries a figure derivable from NO
-    member lesson is rejected (SEMA-05 is stricter than hierarchy's flag-don't-reject)."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    member lesson is rejected (SEMA-05 is stricter than hierarchy's flag-don't-reject).
+    (Seeds migrated to sem/ for the same vacuousness reason as above.)"""
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    assert len(await find_stable_clusters(store)) == 1
 
     result = await write_cluster_schemas(
         store,
@@ -231,6 +236,38 @@ async def test_ungrounded_unverified_figure_rejected(store):
 
     assert result == []
     assert await _schema_cluster_count(store) == 0
+
+
+@pytest.mark.asyncio
+async def test_attempts_log_records_rejections_and_writes(store):
+    """Ruling 4 (run-2 observability gap): per_schema_grounding was EMPTY because only WRITTEN
+    schemas were graded — rejected attempts were invisible, so 'no chapter written' had no
+    forensic trail. write_cluster_schemas(attempts_log=...) records EVERY attempt: a rejected
+    one with its reason + grounding fields, a written one with its schema key."""
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+
+    attempts: list[dict] = []
+    result = await write_cluster_schemas(
+        store, _EchoLLM("Xylophones fabricate quarterly financials unicorns"),
+        asyncio.Event(), attempts_log=attempts,
+    )
+    assert result == []
+    assert len(attempts) == 1
+    a = attempts[0]
+    assert a["written"] is False and a["reason"] == "ungrounded"
+    assert a["grounded"] is False and a["grounded_majority"] is False
+    assert a["members"] == 2
+    for field in ("key", "value", "unverified_numbers"):  # _report-render compatibility
+        assert field in a
+
+    attempts2: list[dict] = []
+    result2 = await write_cluster_schemas(
+        store, _EchoLLM(_GROUNDED), asyncio.Event(), attempts_log=attempts2,
+    )
+    assert len(result2) == 1
+    assert attempts2[0]["written"] is True and attempts2[0]["reason"] == "written"
+    assert attempts2[0]["key"] == result2[0].key and attempts2[0]["grounded"] is True
 
 
 @pytest.mark.asyncio

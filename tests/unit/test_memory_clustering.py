@@ -142,6 +142,64 @@ async def test_related_lessons_form_one_component(store):
 
 
 @pytest.mark.asyncio
+async def test_cross_topic_generic_token_does_not_mega_blob(store):
+    """Ruling 1 (run-2 forensics: pool=26 -> ONE component of 26 -> no chapter). A generic verb
+    shared across topics must not transitively weld the whole pool: cross-slug links need >=2
+    distinct shared salient tokens AND tokens above 30% pool document-frequency are ignored
+    (generic-verb guard). Here EVERY atom shares 'requested'+'configuration' (df 100% -> generic),
+    so only same-slug links survive: >=5 components, no component mixing topic slugs."""
+    topics = ["subagents", "harness", "markets", "gpuops", "race", "kyoto"]
+    counts = [3, 4, 4, 5, 5, 6]
+    for t, c in zip(topics, counts):
+        for i in range(c):
+            await _seed_sem(
+                store, f"user requested the {t}alpha {t}beta configuration item {i}",
+                f"s{i % 3}", topic=t,
+            )
+
+    pool = await _load_pool(store)
+    assert len(pool) == sum(counts)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    comps = _connected_components(pool, adj)
+    assert len(comps) >= 5, f"mega-blob: only {len(comps)} component(s) from 6 topics"
+    for comp in comps:
+        slugs = {f.key.split("/")[1] for f in comp}
+        assert len(slugs) == 1, f"component mixes topic slugs: {slugs}"
+
+
+@pytest.mark.asyncio
+async def test_cross_topic_two_specific_shared_tokens_link(store):
+    """Ruling 1 boundary (no overcorrection): two atoms in DIFFERENT topic slugs sharing >=2
+    distinct low-frequency salient tokens still link — legitimate cross-topic relatedness."""
+    await _seed_sem(store, "user is training for the september marathon race", "s1", topic="race")
+    await _seed_sem(store, "the september marathon schedule needs a taper", "s2", topic="kyoto")
+
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [2]
+
+
+@pytest.mark.asyncio
+async def test_component_sessions_count_only_real_sittings(store):
+    """Ruling 2 (run-2 forensics): a bookkeeping provenance like 'confirm:4517cb1b-…' counted as
+    a session and faked cross-sitting stability. Only real sittings count: a provenance that
+    exists in the sessions table, or one matching the session-id convention (no ':' — every
+    bookkeeping provenance is 'marker:detail'). A pair whose only 'second session' is a
+    reconcile breadcrumb is NOT stable."""
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "confirm:4517cb1b-dead-beef")  # bookkeeping, not a sitting
+    assert await find_stable_clusters(store) == []
+
+    # A genuine second sitting (real sessions-table row) -> stable; the breadcrumb stays excluded.
+    await store.create_session("designed-day2", budget={}, model="m",
+                               context_tokens_available=1000)
+    await _seed_sem(store, _READ_C, "designed-day2")
+    clusters = await find_stable_clusters(store)
+    assert len(clusters) == 1
+    assert clusters[0].sessions == frozenset({"s1", "designed-day2"})
+
+
+@pytest.mark.asyncio
 async def test_graph_shared_candidate_forms_component(store):
     """Graph signal (independent of FTS): two lessons with NO shared salient tokens but a
     shared derived_from candidate are connected through the depth-2 neighborhood."""
