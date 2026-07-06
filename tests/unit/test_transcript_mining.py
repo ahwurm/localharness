@@ -257,3 +257,155 @@ async def test_replaces_marker_supersedes_stale_atom(store: MemoryStore):
     history = await store.get_fact_history(old_key)
     assert len(history) == 2  # supersede chain intact: 8000 -> 8081
     assert any(h.value == stale_claim and h.status == "superseded" for h in history)
+
+
+# ---------------------------------------------------------------------------
+# FIX 2/3 (run-3 forensics): the explicit `replaces=<id>` marker NEVER fired in run 3 — Qwen
+# instead pasted a known atom's KEY into the `topic` field, which _slug() mangled into a shadow-
+# duplicate ('sem/sem-vllm-port-…'), leaving the stale value active beside its correction (twice
+# in 41 turns). FIX 2a coerces a key-shaped topic into an implied replaces (full-key) or a slug
+# recovery (prefix); 2b shows short opaque ids + accepts replaces=aN; 2c persists the raw
+# completion; FIX 3 nudges stable, reused topic labels.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_key_shaped_topic_coerces_to_supersede(store: MemoryStore):
+    """FIX 2a (the run-3 port bug, id 70->74): the model pastes a known atom's FULL KEY into the
+    topic field with a corrected value and NO replaces marker. The parser coerces that into an
+    implied replaces → the correction supersedes on the OLD key; no shadow 'sem/sem-…' duplicate."""
+    from localharness.memory.mining import _h8
+
+    stale = "vLLM server listens on port 8000"
+    await store.append_history(_rec(10, "for reference our vLLM server listens on port 8000", sid="day2"))
+    r1 = await mine_transcript(
+        store, _FakeLLM(f"vllm port | {stale} | server listens on port 8000"), asyncio.Event()
+    )
+    assert r1.written == 1
+    old_key = f"sem/vllm-port/{_h8(stale)}"
+    assert (await store.get_fact(old_key)).value == stale
+
+    # Run-3 shape: old_key pasted into the TOPIC field, corrected value, NO replaces marker.
+    await store.append_history(_rec(20, "correction we moved the vLLM server to port 8081 not 8000", sid="day3"))
+    r2 = await mine_transcript(
+        store,
+        _FakeLLM(f"{old_key} | vLLM server moved to port 8081 | moved the vLLM server to port 8081"),
+        asyncio.Event(),
+    )
+    assert r2.written == 1
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    assert not any(f.key.startswith("sem/sem-") for f in active), "shadow mangled-slug dup minted"
+    port_atoms = [f for f in active if "port" in f.value]
+    assert len(port_atoms) == 1, f"stale atom still active beside the correction: {port_atoms}"
+    assert port_atoms[0].key == old_key
+    assert port_atoms[0].value == "vLLM server moved to port 8081"
+
+    history = await store.get_fact_history(old_key)
+    assert len(history) == 2  # supersede chain 8000 -> 8081, history preserved
+    assert any(h.value == stale and h.status == "superseded" for h in history)
+
+
+@pytest.mark.asyncio
+async def test_short_id_replaces_marker_accepted(store: MemoryStore):
+    """FIX 2b: the miner is shown short opaque ids ([a1]) for known atoms and may emit
+    `replaces=a1`; the parser resolves the short id to the atom's key and supersedes."""
+    from localharness.memory.mining import _h8
+
+    stale = "vLLM server listens on port 8000"
+    await store.append_history(_rec(10, "our vLLM server listens on port 8000 for now", sid="day2"))
+    r1 = await mine_transcript(
+        store, _FakeLLM(f"vllm port | {stale} | server listens on port 8000"), asyncio.Event()
+    )
+    assert r1.written == 1
+    old_key = f"sem/vllm-port/{_h8(stale)}"
+
+    prompts: list[str] = []
+
+    class _ShortIdLLM:
+        async def complete(self, prompt: str) -> str:
+            prompts.append(prompt)
+            return ("vllm port | vLLM server moved to port 8081 | "
+                    "moved the vLLM server to port 8081 | replaces=a1")
+
+    await store.append_history(_rec(20, "we moved the vLLM server to port 8081 not 8000", sid="day3"))
+    r2 = await mine_transcript(store, _ShortIdLLM(), asyncio.Event())
+    assert r2.written == 1
+    assert any("[a1]" in p for p in prompts), "short opaque id never reached the miner's prompt"
+
+    port_atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if "port" in f.value]
+    assert len(port_atoms) == 1
+    assert port_atoms[0].key == old_key
+    assert port_atoms[0].value == "vLLM server moved to port 8081"
+
+
+@pytest.mark.asyncio
+async def test_slug_prefix_topic_recovers_slug_without_superseding(store: MemoryStore):
+    """FIX 2a (documented deviation from the literal spec, run-3 summarizer case id 57->62): a
+    topic pasted as a known atom's `sem/<slug>` PREFIX is AMBIGUOUS and was a NEW fact on the
+    topic, not a correction. Superseding the distinct existing atom would LOSE data, so we recover
+    the real slug (killing the shadow-duplicate mangled key) but do NOT supersede — both stay
+    active under the clean slug."""
+    from localharness.memory.mining import _h8
+
+    first = "first subagent is a summarizer that condenses long text files"
+    await store.append_history(_rec(10, "the first subagent is a summarizer that condenses long text files", sid="day1"))
+    r1 = await mine_transcript(
+        store, _FakeLLM(f"summarizer subagent | {first} | summarizer that condenses long text"),
+        asyncio.Event(),
+    )
+    assert r1.written == 1
+    first_key = f"sem/summarizer-subagent/{_h8(first)}"
+    assert (await store.get_fact(first_key)).value == first
+
+    second = "summarizer subagent output is capped at 200 words"
+    await store.append_history(_rec(20, "the summarizer subagent output is capped at 200 words per file", sid="day2"))
+    r2 = await mine_transcript(
+        store, _FakeLLM(f"sem/summarizer-subagent | {second} | summarizer subagent output is capped"),
+        asyncio.Event(),
+    )
+    assert r2.written == 1
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    assert not any(f.key.startswith("sem/sem-") for f in active), "mangled shadow slug minted"
+    assert {f.value for f in active} == {first, second}          # BOTH facts survive (no data loss)
+    assert (await store.get_fact(first_key)).value == first      # original not superseded
+
+
+@pytest.mark.asyncio
+async def test_invalid_key_shaped_topic_falls_back_to_normal_mint(store: MemoryStore):
+    """FIX 2a: a key-shaped topic resolving to NO known active atom is not coerced — it falls
+    back to a normal mint (never a spurious supersede)."""
+    await store.append_history(_rec(10, "the user prefers the ristretto espresso blend daily", sid="s1"))
+    r = await mine_transcript(
+        store,
+        _FakeLLM("sem/ghost-topic/deadbeef | user prefers the ristretto espresso blend | ristretto espresso blend"),
+        asyncio.Event(),
+    )
+    assert r.written == 1
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    assert len(active) == 1 and active[0].value == "user prefers the ristretto espresso blend"
+
+
+@pytest.mark.asyncio
+async def test_raw_completion_persisted_to_log(store: MemoryStore):
+    """FIX 2c: run-3's raw miner completions were unrecoverable, making root-cause inferential.
+    mine_transcript appends each chunk's RAW completion (pre-parse) to a caller-supplied log."""
+    await _seed_sunburn(store)
+    completions: list[dict] = []
+    raw = "health | user got sunburnt today | super duper sunburnt today at the beach"
+    await mine_transcript(store, _FakeLLM(raw), asyncio.Event(), completions_log=completions)
+    assert completions and any(raw in c["raw"] for c in completions)
+
+
+def test_prompt_nudges_stable_topic_reuse():
+    """FIX 3: the miner must reuse a known topic's label verbatim when a claim continues it, and
+    keep labels short/generic — the designed same-slug fast path was dead all of run 3 (0 shared
+    slugs). Fully general: no manifest/eval vocabulary."""
+    from localharness.memory.mining import _PROMPT
+
+    p = _PROMPT.lower()
+    assert "reuse" in p and "topic" in p
+    assert "generic" in p or "short" in p
+    for banned in ("manifest", "designed", "grading", "chapter"):
+        assert banned not in p, f"eval-specific vocabulary leaked into the general prompt: {banned}"

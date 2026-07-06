@@ -17,7 +17,7 @@ import pytest
 from localharness.memory.chapter_writer import write_cluster_schemas
 from localharness.memory.clustering import _load_failure_queue, find_stable_clusters
 from localharness.memory.consolidation import _get_meta, _set_meta
-from localharness.memory.idle_llm import grounded
+from localharness.memory.idle_llm import grounded, strip_chapter_title
 from localharness.memory.sqlite import SCHEMA_KEY_PREFIX, FactQuery, MemoryStore
 
 # Three `read` lessons sharing the salient tokens "absolute"/"resolved" (they cluster); the
@@ -268,6 +268,53 @@ async def test_attempts_log_records_rejections_and_writes(store):
     assert len(result2) == 1
     assert attempts2[0]["written"] is True and attempts2[0]["reason"] == "written"
     assert attempts2[0]["key"] == result2[0].key and attempts2[0]["grounded"] is True
+
+
+# --- FIX 1: the grounding gate must ground the chapter BODY, not the markdown title -----
+# Run-3 reality: the writer prompt asks for a titled chapter, the model emits '**Title**\nbody',
+# and the title's tokens (never in the plain member corpus) sank the majority-token bar — all 3
+# grounded drafts were KILLed. CONTRACT: title tokens are never counted; a genuinely-grounded
+# body writes; a hallucinated body (new entity absent from the atoms) is STILL rejected.
+
+# Two clustering members (shared 'backend' topic slug). Body grounds 3/5 tokens (engineer,
+# refactored, database) — a BARE majority that the two unmatched title tokens would flip to a
+# minority (3/7) if counted. This isolates the title-strip as load-bearing, not run-3 overfit.
+_MEMBER_1 = "the engineer refactored the service cleanly"
+_MEMBER_2 = "the database was migrated by the engineer"
+_TITLED_GROUNDED = "**Backend Cleanup**\nThe engineer refactored the database module carefully."
+
+
+@pytest.mark.asyncio
+async def test_titled_chapter_grounds_on_body_not_title(store):
+    """A titled '**Backend Cleanup**\\nbody' draft whose BODY is a bare-majority match writes a
+    chapter — the two unmatched title tokens ('backend','cleanup') are not counted. Load-bearing
+    proof: the SAME text KILLs when the title is included, and passes once stripped."""
+    m1 = await _seed_sem(store, _MEMBER_1, "s1", topic="backend")
+    m2 = await _seed_sem(store, _MEMBER_2, "s2", topic="backend")
+    corpus = "\n".join([_MEMBER_1, _MEMBER_2])
+    # The gate must accept the body but reject the whole titled draft — that gap IS the fix.
+    assert grounded(_TITLED_GROUNDED, corpus) is False
+    assert grounded(strip_chapter_title(_TITLED_GROUNDED), corpus) is True
+
+    result = await write_cluster_schemas(store, _EchoLLM(_TITLED_GROUNDED), asyncio.Event())
+    assert len(result) == 1
+    assert await _member_of_dst(store, result[0].id) == {m1.id, m2.id}
+
+
+@pytest.mark.asyncio
+async def test_titled_chapter_with_hallucinated_body_still_rejected(store):
+    """The anti-hallucination intent survives the title-strip: a titled draft whose BODY
+    introduces entities absent from every member atom is STILL KILLed (no schema written)."""
+    await _seed_sem(store, _MEMBER_1, "s1", topic="backend")
+    await _seed_sem(store, _MEMBER_2, "s2", topic="backend")
+
+    result = await write_cluster_schemas(
+        store,
+        _EchoLLM("**Backend Cleanup**\nThe engineer deployed kubernetes across seven datacenters."),
+        asyncio.Event(),
+    )
+    assert result == []
+    assert await _schema_cluster_count(store) == 0
 
 
 @pytest.mark.asyncio

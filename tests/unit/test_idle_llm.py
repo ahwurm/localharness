@@ -17,6 +17,7 @@ from localharness.memory.idle_llm import (
     complete_cancellable,
     ground_numbers,
     grounded,
+    strip_chapter_title,
 )
 
 
@@ -141,3 +142,49 @@ def test_ground_numbers_flags_absent_figure():
 def test_ground_numbers_passes_present_figure():
     """A figure present in a source is grounded — no false alarm."""
     assert ground_numbers("failed 5 times", ["it failed 5 times yesterday"]) == []
+
+
+# ---------------------------------------------------------------------------
+# FIX 1b — grounding is case- and punctuation-INSENSITIVE (run-3: the majority-token net was
+# case+punct-sensitive, so a chapter's own title punctuation/case could never match a plain
+# corpus). CONTRACT: fold case + strip a token's leading/trailing punctuation before matching;
+# a token genuinely absent in EVERY case is STILL rejected (no over-permissive flip).
+# ---------------------------------------------------------------------------
+
+def test_grounded_case_and_punctuation_insensitive():
+    """'Listens.' (capitalised, trailing period) grounds against a corpus containing 'listens'
+    once case is folded and the token's edge punctuation is stripped — the run-3 unwinnability."""
+    assert grounded("Listens.", "the vllm server listens on port 8081") is True
+    # A whole claim whose tokens differ only by case/punctuation from the corpus is grounded.
+    assert grounded("Server LISTENS, quietly.", "the server listens quietly here") is True
+
+
+def test_grounded_case_fold_does_not_accept_absent_token():
+    """Folding must not flip a correct rejection into a wrong acceptance: a token in NO case
+    present in the corpus is still counted as unmatched (the anti-hallucination intent survives)."""
+    assert grounded("Kubernetes orchestrates deployments", "the server listens on a port") is False
+
+
+# ---------------------------------------------------------------------------
+# FIX 1a — strip_chapter_title: ground the chapter BODY, never the markdown heading. The writer
+# prompt asks for a titled chapter; the model renders '**Title**', whose words are a heading not a
+# claim. Counting them against the majority bar is structurally unwinnable (run-3 KILLed all 3).
+# ---------------------------------------------------------------------------
+
+def test_strip_chapter_title_drops_heading_line_and_markers():
+    """A leading '**Title**' line is dropped and emphasis markers are stripped — grounding sees
+    only the asserted body (mirrors run-3's exact 'Port Configuration' draft shape)."""
+    draft = "**Port Configuration**\nThe vLLM server listens on port 8081."
+    body = strip_chapter_title(draft)
+    assert "Port Configuration" not in body      # the heading words are gone
+    assert "**" not in body                       # emphasis markers stripped
+    assert "listens on port 8081" in body         # the asserted body survives
+
+
+def test_strip_chapter_title_handles_hash_heading_and_single_line():
+    """A '# Heading' line is dropped too; a single-line draft (no separate title) keeps its
+    only line (only markers stripped) — we never strip the sole content line."""
+    assert "Heading" not in strip_chapter_title("# Heading\nthe body sentence here")
+    assert "the body sentence here" in strip_chapter_title("# Heading\nthe body sentence here")
+    solo = strip_chapter_title("the server resolves the lookup failure")
+    assert "the server resolves the lookup failure" in solo
