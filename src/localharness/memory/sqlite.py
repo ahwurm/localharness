@@ -668,13 +668,32 @@ class MemoryStore:
             # expires_at/tags/node_kind follow the NEW call (critics 29-m2 + 32-m1:
             # the branch must not silently ignore caller-supplied metadata — same
             # contract as the supersede path, minus the new row).
+            #
+            # MOVE 3 — the Bayesian recurrence ladder (the missing update rule): a SEMANTIC atom
+            # (sem/, mined/, or a settled tier:reconcile_confirmed correction) re-asserted from a
+            # DIFFERENT provenance day steps confidence up a ladder (+0.07, cap 0.85) instead of
+            # plain MAX — distinct-day recurrence EARNS ambient status. Same-day re-assertion is a
+            # no-op touch (provenance is updated below so the NEXT day is measured against it).
+            # Operational rows (predgate/ day-buckets, plain gate/) keep MAX — a separate track.
+            new_tags = tags or []
+            ladder_eligible = (
+                key.startswith("sem/") or key.startswith("mined/")
+                or "tier:reconcile_confirmed" in existing.tags
+                or "tier:reconcile_confirmed" in new_tags
+            )
+            distinct_day = bool(prov) and bool(existing.provenance) and existing.provenance != prov
+            if ladder_eligible and distinct_day:
+                new_conf = min(0.85, existing.confidence + 0.07)
+            else:
+                new_conf = max(existing.confidence, confidence)
             await self._db.execute(
-                "UPDATE facts SET updated_at = ?, confidence = MAX(confidence, ?), "
+                "UPDATE facts SET updated_at = ?, confidence = ?, "
                 "expires_at = ?, tags = ?, node_kind = ?, "
+                "provenance = CASE WHEN ? = '' THEN provenance ELSE ? END, "
                 "source = CASE WHEN ? = '' THEN source ELSE ? END "
                 "WHERE agent_id = ? AND key = ? AND status = 'active'",
-                (now, confidence, expires_at, tags_json, node_kind,
-                 source, source, self._agent_id, key),
+                (now, new_conf, expires_at, tags_json, node_kind,
+                 prov, prov, source, source, self._agent_id, key),
             )
             await self._db.commit()
         else:
