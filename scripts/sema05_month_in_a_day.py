@@ -174,9 +174,14 @@ class _OfflineFakeLLM:
             return " ".join(lines[0].split()[:12]) if lines else "chapter"
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
-        if "colleague would remember" in prompt:  # transcript mining
-            return "user got sunburnt today"       # grounded on 'sunburnt' in the span
-        return ""  # replay seam + anything else: inert
+        if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
+            # Two subagent atoms grounded in the day-distinct fixture content; they attribute to
+            # two distinct sittings (per-atom source provenance) and cluster into one chapter.
+            return (
+                "subagents | building a summarizer subagent for the harness | summarizer subagent for the harness\n"
+                "subagents | building a citation subagent for the harness | citation subagent for the harness"
+            )
+        return ""  # anything else: inert
 
 
 class _Msg:

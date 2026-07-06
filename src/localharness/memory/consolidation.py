@@ -23,9 +23,10 @@ Owner rulings + critic fixes baked in structurally:
   owner spot-check) — fire counters alone can't see silent corruption.
 
 The deterministic core (fold, candidate promotion on cross-episode recurrence, decay,
-cap trim, proxies) runs with NO model at all. The LLM session-replay claim-extractor is
-a seam (`llm=` param): implemented + cancellable + guarded, wired OFF by default until
-its output quality is iterated live (owner: don't pause for slow items).
+cap trim, proxies) runs with NO model at all. The LLM passes (`llm=` param) are the idle
+extractors — mining (the primary semantic feeder, MOVE 2), the chapter-writer, and
+reconciliation — each cancellable + guarded and config-gated. (The old session-replay seam
+that wrote unreachable `replay/*` keys was retired into mining in MOVE 2.)
 
 Deliberate (whole-milestone critic m4): decay / cap-trim / untag write score columns
 via raw UPDATEs, bypassing store_fact's read-back-verify — these mutate derived ranking
@@ -109,10 +110,13 @@ class ConsolidationPass:
         steps = (
             self._step_fold,
             self._step_promote_recurring,
-            self._step_replay_llm,
-            self._step_write_schemas,   # Phase 36: chapter-writer (llm+config-gated)
+            # MOVE 2: mining is the primary semantic feeder and runs BEFORE clustering so the
+            # sem/ atoms it writes are available to the SAME pass's chapter-writer (else a
+            # freshly-mined atom waits a whole pass to be grouped). The orphaned replay seam
+            # (unreachable replay/* writes) is retired — mining is now the one idle extractor.
+            self._step_mine,            # Phase 36 / MOVE 2: typed-atom transcript mining
+            self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
             self._step_reconcile,       # Phase 36: correction-queue reconciliation
-            self._step_mine,            # Phase 36: transcript mining
             self._step_decay,
             self._step_cap_trim,
             self._step_proxies,
@@ -263,98 +267,14 @@ class ConsolidationPass:
         )
         await self._store._db.commit()
 
-    # -- 3. LLM session replay (seam; cancellable; OFF unless llm wired) --
-
-    async def _step_replay_llm(self, report: ConsolidationReport) -> None:
-        if self._llm is None:
-            return
-        claims = await self._replay_sessions()
-        report.replayed_claims = len(claims)
-
-    async def _replay_sessions(self) -> list[str]:
-        """Extract claim candidates from recent history via the (cancellable) LLM.
-        Guardrails: iteration cap; dedup-before-generate (skip claims already stored);
-        verify-against-leaf (a claim must share a ≥6-char token with the source text)."""
-        from localharness.memory.sqlite import FactQuery
-
-        history = await self._store.get_history(limit=200)
-        if not history:
-            return []
-        corpus = "\n".join(
-            str(r.get("content", ""))[:400] for r in history if r.get("content")
-        )[:8000]
-        if not corpus.strip():
-            return []
-        prompt = (
-            "Extract at most 5 durable, self-contained lessons from this agent transcript "
-            "(one per line, no numbering; only things worth knowing in FUTURE sessions):\n\n"
-            + corpus
-        )
-        raw = await self._cancellable_complete(prompt)
-        if raw is None:
-            return []
-        stored: list[str] = []
-        for line in raw.splitlines():
-            claim = line.strip(" -•\t")
-            if not claim or len(stored) >= min(5, self._cfg.iteration_cap):
-                continue
-            # verify-against-leaf (critic M4: any-single-token was trivially passed by
-            # confabulations sharing one common word like "contains"): a MAJORITY of
-            # the claim's ≥6-char tokens must appear verbatim in the source transcript.
-            tokens = [t for t in claim.split() if len(t) >= 6]
-            if tokens:
-                matched = sum(1 for t in tokens if t in corpus)
-                if matched * 2 < len(tokens):  # < 50% grounded → confabulation risk
-                    continue
-            # dedup-before-generate: skip if an equivalent fact already exists.
-            existing = await self._store.query_facts(FactQuery(text=claim[:60], limit=1))
-            if existing and existing[0].value.strip() == claim:
-                continue
-            await self._store.store_fact(
-                key=f"replay/{abs(hash(claim)) % 10**10}",
-                value=claim,
-                tags=["replay", "pending_consolidation"],
-                confidence=0.6,
-                source="consolidation_replay",
-            )
-            stored.append(claim)
-        return stored
-
-    async def _cancellable_complete(self, prompt: str) -> str | None:
-        """Race the generation against the cancel event — a user turn must never wait
-        behind a consolidation generation (the serial inference gate is non-preemptive
-        and held to the last token; CONS-02)."""
-        gen_task = asyncio.ensure_future(self._complete(prompt))
-        cancel_task = asyncio.ensure_future(self._cancel.wait())
-        done, _ = await asyncio.wait(
-            {gen_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if gen_task in done:
-            cancel_task.cancel()
-            try:
-                return await gen_task
-            except Exception:
-                log.exception("consolidation replay generation failed (non-fatal)")
-                return None
-        gen_task.cancel()  # releases the inference gate's slot
-        try:
-            await gen_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        return None
-
-    async def _complete(self, prompt: str) -> str:
-        result = self._llm.complete(prompt)
-        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
-            return await result
-        return result
-
-    # -- 3b. Phase-36 idle LLM passes (chapter-writer / reconcile / mine) --
-    # Each mirrors _step_replay_llm's gating (return immediately when self._llm is None) AND
-    # its own config axis, delegating to a Wave-2 sibling (all never-raise + cancellable via
-    # the shared idle_llm path) and threading self._cancel so a user turn stops them mid-look.
-    # Because they early-return with no LLM, every existing llm=None test sees identical
-    # behavior — the deterministic core is byte-unchanged.
+    # -- 3. Phase-36 idle LLM passes (mine / chapter-writer / reconcile) --
+    # The orphaned replay seam (MOVE 2) is RETIRED: it was a near-duplicate idle extractor that
+    # wrote unreachable `replay/*` keys (neither promotion nor clustering could consume them).
+    # Mining is now the ONE idle extractor. Each pass below mirrors the same gating (return
+    # immediately when self._llm is None) AND its own config axis, delegating to a Wave-2 sibling
+    # (all never-raise + cancellable via the shared idle_llm path) and threading self._cancel so a
+    # user turn stops them mid-look. Because they early-return with no LLM, every existing llm=None
+    # test sees identical behavior — the deterministic core is byte-unchanged.
 
     async def _step_write_schemas(self, report: ConsolidationReport) -> None:
         if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):

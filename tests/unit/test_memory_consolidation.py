@@ -134,7 +134,8 @@ async def test_user_turn_cancels_in_flight_generation(store: MemoryStore):
 
 
 # ---------------------------------------------------------------------------
-# CONS-04: replay guardrails (fake LLM — live quality iteration deferred)
+# CONS-04: grounding kill-net (the retired replay seam's discipline now lives in mining —
+# see test_transcript_mining.py; MOVE 2 removed the orphaned replay/* extractor).
 # ---------------------------------------------------------------------------
 
 class _FakeLLM:
@@ -143,24 +144,6 @@ class _FakeLLM:
 
     async def complete(self, prompt: str) -> str:
         return self.text
-
-
-@pytest.mark.asyncio
-async def test_replay_verifies_against_leaf_and_dedups(store: MemoryStore):
-    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "assistant_message", "id": "1",
-                                "session_id": "s", "ts": 1, "content": "Deploys require VPNACCESS before anything works"})
-    llm = _FakeLLM(
-        "Deploys require VPNACCESS enabled\n"          # grounded (VPNACCESS in corpus) → kept
-        "Unicorns fabricate quarterly numbers\n"        # confabulated (no ≥6-char token) → dropped
-    )
-    report = await ConsolidationPass(store, _cfg(), llm=llm).run()
-    assert report.replayed_claims == 1
-    stored = await store.query_facts(FactQuery(text="VPNACCESS", min_confidence=0.0))
-    assert any("pending_consolidation" in f.tags for f in stored)
-
-    # dedup-before-generate: the identical claim on a second pass is not re-stored.
-    report2 = await ConsolidationPass(store, _cfg(), llm=llm).run()
-    assert report2.replayed_claims == 0
 
 
 # ---------------------------------------------------------------------------
@@ -256,18 +239,6 @@ async def test_salient_single_episode_promotes(store: MemoryStore):
     assert report.promoted == 1
     promoted = await store.get_fact("learned/abc12345/stuck_recovered")
     assert promoted is not None and promoted.confidence >= 0.7
-
-
-@pytest.mark.asyncio
-async def test_verify_against_leaf_rejects_shared_common_word(store: MemoryStore):
-    """Critic M4: a confabulated claim sharing ONE common ≥6-char word with the corpus
-    ('contains') must be rejected — majority-token grounding required."""
-    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "assistant_message",
-                                "id": "1", "session_id": "s", "ts": 1,
-                                "content": "The database contains customer records"})
-    llm = _FakeLLM("The production database contains unencrypted admin passwords for all customers")
-    report = await ConsolidationPass(store, _cfg(), llm=llm).run()
-    assert report.replayed_claims == 0  # confidently-alarming junk stays OUT
 
 
 @pytest.mark.asyncio
@@ -589,20 +560,20 @@ _SUNBURN = "i got super duper sunburnt today at the beach"  # the live personal-
 
 
 class _DispatchLLM:
-    """One fake that dispatches on prompt content so a SINGLE pass drives all three new steps:
-    REVERT for the reconcile look (shape (a) prompt says "disputed"), a grounded personal fact
-    for the miner ("colleague would remember"), a grounded corpus slice for the chapter-writer
-    ("Write ONE"), and "" for the replay seam (inert — no stray replay/ facts)."""
+    """One fake that dispatches on prompt content so a SINGLE pass drives all three idle steps:
+    REVERT for the reconcile look (shape (a) prompt says "disputed"), a grounded TYPED atom for
+    the miner (MOVE 2 prompt says "USER'S WORLD"), and a grounded corpus slice for the
+    chapter-writer ("Write ONE")."""
     async def complete(self, prompt: str) -> str:
         if "disputed" in prompt:                      # reconciliation shape (a)
             return "REVERT"
-        if "colleague would remember" in prompt:      # transcript mining
-            return "user got sunburnt today"          # grounded on "sunburnt" (>=6-char token)
+        if "USER'S WORLD" in prompt:                  # MOVE 2 transcript mining (topic|claim|evidence)
+            return "health | user got sunburnt today | super duper sunburnt today at the beach"
         if "Write ONE" in prompt:                     # chapter-writer — echo a verbatim corpus slice
             corpus = prompt.split("\n\n")[-1]
             lines = [ln for ln in corpus.splitlines() if ln.strip()]
             return " ".join(lines[0].split()[:12]) if lines else "chapter"
-        return ""                                     # replay seam + anything else: inert
+        return ""                                     # anything else: inert
 
 
 async def _seed_cluster_lesson(store, tool, tier, body, sess, lesson):
@@ -690,12 +661,12 @@ async def test_phase36_pass_writes_schema_reconciles_and_mines(store: MemoryStor
     assert restored.value == _ORIG_FACT                 # pre-dispute value back, verbatim
     assert _DISPUTE_MARKER not in restored.value        # the marker is gone
 
-    # (3) MINE — a personal fact is mined and written INJECTABLE (>=0.7); this is what proves
-    # _step_mine is wired inside run() rather than skipped (WARNING 1).
+    # (3) MINE — a typed semantic atom is mined and written at 0.65 (searchable, sub-injection —
+    # ambient status is EARNED by recurrence/membership); proves _step_mine is wired in run().
     assert report.mined >= 1
-    mined = await store.query_facts(FactQuery(tags=["mined"]))
-    assert mined and mined[0].key.startswith("mined/")
-    assert mined[0].confidence >= 0.7
+    mined = await store.query_facts(FactQuery(tags=["sem"]))
+    assert mined and mined[0].key.startswith("sem/")
+    assert mined[0].confidence == 0.65
 
 
 @pytest.mark.asyncio

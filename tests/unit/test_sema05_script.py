@@ -85,12 +85,19 @@ async def _build_trace(tracedir: Path) -> None:
                                   content="nah id rather watch the fireworks from the park tomorrow",
                                   channel="terminal"))
 
-    # A mineable transcript (history.jsonl) — the live personal-fact specimen (36-CONTEXT).
+    # A mineable transcript (history.jsonl): two DAY-DISTINCT subagent lines in two sessions so
+    # MOVE-2 mining writes two sem/ atoms that cluster across ≥2 sittings into one chapter, plus
+    # the live personal-fact specimen (a lone atom — no cluster, exercises single-atom mining).
+    mine_rows = [
+        {"v": 1, "agent_id": AGENT, "type": "user_message", "id": "h1", "session_id": "s-mon",
+         "ts": 1_000_000, "content": "i am building a summarizer subagent for the harness"},
+        {"v": 1, "agent_id": AGENT, "type": "user_message", "id": "h2", "session_id": "s-tue",
+         "ts": 1_000_100, "content": "i am building a citation subagent for the harness"},
+        {"v": 1, "agent_id": AGENT, "type": "user_message", "id": "h3", "session_id": "s-wed",
+         "ts": 1_000_200, "content": "i got super duper sunburnt today at the beach"},
+    ]
     (tracedir / "history.jsonl").write_text(
-        json.dumps({"v": 1, "agent_id": AGENT, "type": "user_message", "id": "h1",
-                    "session_id": "sE", "ts": 1_000_000,
-                    "content": "i got super duper sunburnt today at the beach"}) + "\n",
-        encoding="utf-8",
+        "\n".join(json.dumps(r) for r in mine_rows) + "\n", encoding="utf-8",
     )
 
 
@@ -202,23 +209,27 @@ async def test_guard_refuses_shared_bench_results_dir(tmp_path: Path):
 # Live-session accumulation mode (--history) — the provable's method (owner steer)
 # ---------------------------------------------------------------------------
 
+_SUBAGENTS = ["summarizer", "citation", "screenshot", "linter", "formatter"]
+
+
 def _write_month_history(path: Path, *, days: int = 2) -> None:
-    """A tiny synthetic 'owner month' history.jsonl (fixture — tests may fabricate): the SAME
-    two queries repeated on `days` distinct calendar days (3 days apart), plus one assistant
-    row and one foreign-agent row that extraction must ignore. Day 0 carries the LEGACY root
-    alias agent_id='default' (the real month's shape — the 33.1 rename migrated the DB, not
-    old history lines); day 1 carries 'orchestrator' — extraction must unify them (B1). The
-    queries make the bundled offline loop-LLM read a missing path (real ReadTool error) then
-    recover — so the shipped WriteGate captures a real resolved_error lesson per query per
-    sitting, and recurrence across sittings promotes them (the ≥2-sittings warrant)."""
+    """A tiny synthetic 'owner month' history.jsonl (fixture — tests may fabricate): two queries
+    per day across `days` distinct calendar days (3 days apart), plus one assistant row and one
+    foreign-agent row that extraction must ignore. Day 0 carries the LEGACY root alias
+    agent_id='default' (the real month's shape); day 1 carries 'orchestrator' — extraction must
+    unify them (B1). q0 is topic-coherent (SUBAGENTS) but DAY-DISTINCT so post-re-center mining
+    writes one sem/ atom per day that clusters across ≥2 sittings into a chapter; q1 is a read
+    task that makes the offline loop read a missing path then recover (real tool observations)."""
     base = 1_750_000_000
     rows = []
     for d in range(days):
         alias = "default" if d % 2 == 0 else AGENT  # mixed root aliases across days (B1)
-        for i, tag in enumerate(("alpha", "beta")):
-            rows.append({"v": 1, "agent_id": alias, "type": "user_message", "id": f"m{d}{i}",
-                         "session_id": f"orig-{d}", "ts": base + d * 3 * 86400 + i * 60,
-                         "content": f"please read the {tag} file"})
+        rows.append({"v": 1, "agent_id": alias, "type": "user_message", "id": f"m{d}0",
+                     "session_id": f"orig-{d}", "ts": base + d * 3 * 86400,
+                     "content": f"i am building a {_SUBAGENTS[d % len(_SUBAGENTS)]} subagent for the harness"})
+        rows.append({"v": 1, "agent_id": alias, "type": "user_message", "id": f"m{d}1",
+                     "session_id": f"orig-{d}", "ts": base + d * 3 * 86400 + 60,
+                     "content": "please read the project notes file"})
     rows.append({"v": 1, "agent_id": AGENT, "type": "assistant_message", "id": "a0",
                  "session_id": "orig-0", "ts": base + 5, "content": "sure thing"})
     rows.append({"v": 1, "agent_id": "someone-else", "type": "user_message", "id": "f0",
