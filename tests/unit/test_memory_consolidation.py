@@ -625,13 +625,22 @@ async def _seed_cluster_lesson(store, tool, tier, body, sess, lesson):
     return promoted
 
 
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+    import hashlib
+    h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
+    return await store.store_fact(
+        key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
+        confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
+    )
+
+
 async def _seed_phase36(store) -> str:
     """Seed the three specimens the composed pass must consume; returns the disputed key K."""
     from localharness.memory.predictive_write_gate import _DISPUTE_MARKER
 
     # (i) a stable 2-lesson cluster spanning 2 sittings (s1, s2).
-    await _seed_cluster_lesson(store, "read", "resolved_error", _READ_A, "s1", "a1")
-    await _seed_cluster_lesson(store, "read", "permission", _READ_B, "s2", "b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
     # (ii) a SHAPE (a) disputed fact: a clean antecedent THEN the exact gate supersede-wrap on the
     # SAME key, so get_fact_history holds a pre-dispute row and REVERT RESTORES (marker disappears).
     k = "recall/editor_pref"

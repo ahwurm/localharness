@@ -83,17 +83,55 @@ async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None):
     return f
 
 
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+    """A SEMANTIC atom exactly as MOVE-2 mining writes it: key sem/{topic}/{h8(body)}, node_kind
+    'fact', provenance = the SOURCE session (so the cluster's session-spread comes from the atom's
+    OWN provenance — no gate/ derived_from needed), confidence 0.65 (pool-entry, sub-injection).
+    This is the post-MOVE-1 population; the old `learned/*` operational rows are a separate track."""
+    import hashlib
+    h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
+    return await store.store_fact(
+        key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
+        confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 1 — pool + relatedness graph + connected components
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_load_pool_is_semantic(store):
+    """MOVE 1: _load_pool is the SEMANTIC population — sem/, mined/, schema nodes, and settled
+    corrections (tier:reconcile_confirmed) at/above 0.6 — and EXCLUDES the operational track
+    (gate/, predgate/, learned/), which is a separate hierarchy (owner ruling c). A settled
+    correction on a gate/ key (shape-b confirm keeps its key) stays IN via the reconcile arm."""
+    a = await _seed_sem(store, "the user is researching HBM memory makers this month", "s1")
+    b = await store.store_fact(key="mined/deadbeef", value="the user runs a 27B model on vLLM",
+                               tags=["mined"], confidence=0.65, provenance="s2", node_kind="fact")
+    c = await store.store_fact(key="schema/cluster/xyz", value="a chapter body", tags=["schema"],
+                               confidence=0.8, provenance="cluster:x", node_kind="schema")
+    # A settled correction that KEPT its gate/ key (shape-b confirm) — must stay IN the pool.
+    d = await store.store_fact(key="gate/correction/read/x/s3", value="vLLM listens on port 8081",
+                               tags=["gate", "tier:reconcile_confirmed"], confidence=0.65, provenance="s3")
+    # Operational rows + a sub-floor atom — all EXCLUDED.
+    await store.store_fact(key="learned/read/resolved_error", value="op lesson", tags=["consolidated"],
+                           confidence=0.8, provenance="consolidated:2-episodes")
+    await _seed_failure(store, "bash_exec")  # predgate/
+    await store.store_fact(key="gate/novelty/read/x/s9", value="raw op candidate",
+                           tags=["gate", "pending_consolidation"], confidence=0.65, provenance="s9")
+    await _seed_sem(store, "a low-confidence atom below the floor", "s4", conf=0.55)  # < 0.6
+
+    pool_keys = {f.key for f in await _load_pool(store)}
+    assert pool_keys == {a.key, b.key, c.key, d.key}, f"unexpected pool: {pool_keys}"
+
+@pytest.mark.asyncio
 async def test_related_lessons_form_one_component(store):
     """FTS signal: two content-overlapping `read` lessons collapse into one component;
     an unrelated `grep` lesson stays a singleton."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_learned(store, "grep", "flag_missing", _GREP_C, ["s3"], lesson="c3")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_sem(store, _GREP_C, "s3")
 
     pool = await _load_pool(store)
     assert len(pool) == 3  # only the promoted lessons — sub-0.7 gate candidates excluded
@@ -107,12 +145,8 @@ async def test_related_lessons_form_one_component(store):
 async def test_graph_shared_candidate_forms_component(store):
     """Graph signal (independent of FTS): two lessons with NO shared salient tokens but a
     shared derived_from candidate are connected through the depth-2 neighborhood."""
-    d = await store.store_fact("learned/alpha/x/d", "alpha bravo charlie delta echo",
-                               tags=["consolidated", "tier:x"], confidence=0.8,
-                               provenance="consolidated:1-episodes")
-    e = await store.store_fact("learned/omega/y/e", "foxtrot golfing hotels indiana juliett",
-                               tags=["consolidated", "tier:y"], confidence=0.8,
-                               provenance="consolidated:1-episodes")
+    d = await _seed_sem(store, "alpha bravo charlie delta echo", "s1")
+    e = await _seed_sem(store, "foxtrot golfing hotels indiana juliett", "s2")
     shared = await store.store_fact("gate/x/alpha/shared/sess", "shared candidate body",
                                     tags=["gate", "pending_consolidation"],
                                     confidence=0.65, provenance="sess")
@@ -142,8 +176,8 @@ async def test_cluster_contract_has_aux_hook():
 @pytest.mark.asyncio
 async def test_cross_sitting_related_pair_is_stable(store):
     """Two related lessons whose sources span 2 distinct sittings → one stable cluster."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
 
     clusters = await find_stable_clusters(store)
     assert len(clusters) == 1
@@ -156,8 +190,8 @@ async def test_cross_sitting_related_pair_is_stable(store):
 async def test_single_sitting_no_cluster(store):
     """Two related lessons captured in ONE sitting are a double-stumble, not a chapter:
     the component exists but min_sessions filters it out (SEMA-01 'not one hot evening')."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s1"], lesson="b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s1")
 
     # the pair IS one component...
     pool = await _load_pool(store)
@@ -170,9 +204,9 @@ async def test_single_sitting_no_cluster(store):
 @pytest.mark.asyncio
 async def test_three_lesson_three_sitting_cluster(store):
     """A 3-lesson component spanning 3 sittings → one cluster, sessions of size 3."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_sem(store, _READ_C, "s3")
 
     clusters = await find_stable_clusters(store)
     assert len(clusters) == 1
@@ -183,11 +217,11 @@ async def test_three_lesson_three_sitting_cluster(store):
 @pytest.mark.asyncio
 async def test_clusters_sorted_biggest_first(store):
     """Deterministic order: the biggest chapter leads (writer's per-cycle budget)."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_learned(store, "read", "timeout", _READ_C, ["s3"], lesson="c3")
-    await _seed_learned(store, "docker", "build_fail", _DOCK_A, ["s4"], lesson="d1")
-    await _seed_learned(store, "docker", "start_fail", _DOCK_B, ["s5"], lesson="d2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_sem(store, _READ_C, "s3")
+    await _seed_sem(store, _DOCK_A, "s4")
+    await _seed_sem(store, _DOCK_B, "s5")
 
     clusters = await find_stable_clusters(store)
     assert [len(c.members) for c in clusters] == [3, 2]  # read (3) before docker (2)
@@ -199,8 +233,8 @@ async def test_clusters_sorted_biggest_first(store):
 @pytest.mark.asyncio
 async def test_find_stable_clusters_issues_no_writes(store, monkeypatch):
     """The whole entrypoint is pure read: any write attempt must raise."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
     before = await _fact_count(store)
 
     async def _boom(*a, **k):
@@ -233,9 +267,9 @@ async def test_load_failure_queue_excludes_faded(store):
 async def test_same_tool_failure_attaches_as_aux(store):
     """A surprising_failure row on a cluster member's tool attaches (domain match); the
     sub-0.7 row is attached, NEVER promoted."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    fail = await _seed_failure(store, "read")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    fail = await _seed_failure(store, "read", value="a recorded failure where the absolute path resolved it")
 
     clusters = await find_stable_clusters(store)
     assert len(clusters) == 1
@@ -247,8 +281,8 @@ async def test_same_tool_failure_attaches_as_aux(store):
 async def test_unrelated_tool_failure_not_attached(store):
     """A generic surprising_failure row on an unrelated tool with no graph/FTS link does
     not attach to the read cluster."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
     fail = await _seed_failure(store, "bash_exec")  # different tool, generic content
 
     clusters = await find_stable_clusters(store)
@@ -260,8 +294,8 @@ async def test_unrelated_tool_failure_not_attached(store):
 async def test_fts_adjacent_failure_attaches_despite_tool(store):
     """Graph/FTS adjacency REINFORCES the tool match, it doesn't gate it: a queue row on a
     different tool but sharing content tokens with a member attaches via the FTS branch."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
     fail = await _seed_failure(
         store, "write_file",
         value="A recorded failure where the absolute path resolved differently than usual.",
@@ -273,21 +307,24 @@ async def test_fts_adjacent_failure_attaches_despite_tool(store):
 
 @pytest.mark.asyncio
 async def test_aux_members_capped(store):
-    """aux_cap bounds the folded corpus even when many same-tool rows match."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
+    """aux_cap bounds the folded corpus even when many FTS-adjacent rows match. (Post-MOVE-1 the
+    members are semantic — no tool axis — so the 10 rows attach via the FTS arm on the shared
+    'absolute/resolved' tokens; fts_top_k is widened so all 10 candidates surface and aux_cap,
+    not the probe width, is what bounds them to 8.)"""
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
     for i in range(10):
-        await _seed_failure(store, "read", f"2026070{i}")
-    clusters = await find_stable_clusters(store, aux_cap=8)
+        await _seed_failure(store, "read", f"2026070{i}", value=f"absolute path resolved case {i}")
+    clusters = await find_stable_clusters(store, aux_cap=8, fts_top_k=15)
     assert len(clusters[0].aux_members) == 8
 
 
 @pytest.mark.asyncio
 async def test_attach_aux_issues_no_writes(store, monkeypatch):
     """Aux attachment is a pure READ — any write attempt must raise; queue rows untouched."""
-    await _seed_learned(store, "read", "resolved_error", _READ_A, ["s1"], lesson="a1")
-    await _seed_learned(store, "read", "permission", _READ_B, ["s2"], lesson="b2")
-    await _seed_failure(store, "read")
+    await _seed_sem(store, _READ_A, "s1")
+    await _seed_sem(store, _READ_B, "s2")
+    await _seed_failure(store, "read", value="absolute path resolved here")
     before = await _fact_count(store)
 
     async def _boom(*a, **k):
