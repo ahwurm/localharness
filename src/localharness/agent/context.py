@@ -34,11 +34,21 @@ TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
 _TOOL_STUB_PREFIX = "[tool result evicted"
-# MOVE 0c (minimal, no redesign): bound the summary-compaction storm within one turn. The
-# expensive summarizer re-fired ~74x in one SEMA-05 sitting with context not reliably shrinking.
-# A per-turn fire cap + a must-shrink latch stop the storm. Deep re-trigger diagnosis is a
-# separate open item — see .planning/research/2026-07-06-semantic-recenter.md §1 Q5.
+# MOVE 0c (coordinator ruling 2026-07-06, REPLACING the earlier must-shrink latch): bound the
+# summary-compaction storm with hysteresis + a hard floor — never by switching compaction off.
+# The latch inherited the root problem: shrink-per-fire near the trigger is often tiny (SEMA-05
+# sawtooth 82→70→80→81→73), so one "non-shrinking" fire disabled compaction mid-long-turn and a
+# live run overflowed to 101.1% utilization (designed-20260706T143144Z, killed). Now:
+# - COMPACTION_TARGET_USAGE_FRACTION: a fire must land utilization AT TARGET, well below the
+#   0.80 trigger — the stage WIDENS the summarized span until the target is met or no safe cut
+#   remains (hysteresis: trigger high, land low).
+# - MAX_COMPACTION_FIRES_PER_TURN: backstop cap on expensive summarizer runs per turn.
+# - Emergency floor (build_messages): overflow is IMPOSSIBLE — at the cap / with no safe cut,
+#   utilization above 100% hard-truncates the oldest non-system messages, loudly logged.
+# Deep re-trigger diagnosis stays a separate open item — see
+# .planning/research/2026-07-06-semantic-recenter.md §1 Q5.
 MAX_COMPACTION_FIRES_PER_TURN: int = 3
+COMPACTION_TARGET_USAGE_FRACTION: float = 0.60
 
 
 Origin = Literal["trusted", "untrusted"]
@@ -459,7 +469,13 @@ class BoundaryGuardStage:
 
 
 class SummaryCompactionStage:
-    """Stage 3: Summarize middle messages at >= 80% context utilization."""
+    """Stage 3: Summarize middle messages at >= 80% context utilization, COMPACTING TO TARGET.
+
+    MOVE 0c (coordinator ruling): triggering at 0.80 and landing "slightly lower" produced the
+    SEMA-05 sawtooth (82→70→80→81→73 — re-trigger nearly every iteration). A fire must instead
+    land utilization at `target_usage_fraction` (default 0.60), WIDENING the summarized span
+    (halving the preserved head/tail, floors 1/2) and re-summarizing until the target is met or
+    no safe cut remains. Hysteresis: trigger high, land low — real headroom per fire."""
 
     def __init__(
         self,
@@ -467,11 +483,13 @@ class SummaryCompactionStage:
         preserve_last_n: int,
         llm_summarize_fn: Any = None,
         compact_md_path: Path | None = None,
+        target_usage_fraction: float = COMPACTION_TARGET_USAGE_FRACTION,
     ) -> None:
         self.preserve_first_n = preserve_first_n
         self.preserve_last_n = preserve_last_n
         self.llm_summarize_fn = llm_summarize_fn
         self.compact_md_path = compact_md_path
+        self.target_usage_fraction = target_usage_fraction
 
     async def apply(
         self,
@@ -481,34 +499,40 @@ class SummaryCompactionStage:
     ) -> tuple[list[Message], bool]:
         if budget.usage_fraction < 0.80:
             return messages, False
-
-        first_boundary = self._safe_cut_boundary(messages, self.preserve_first_n, "forward")
-        last_boundary = self._safe_cut_boundary(messages, len(messages) - self.preserve_last_n, "backward")
-
-        if last_boundary <= first_boundary:
-            return messages, False
-
-        middle = messages[first_boundary:last_boundary]
-        if len(middle) <= 2:
-            return messages, False
-
         if self.llm_summarize_fn is None:
             return messages, False
 
-        try:
-            summary_text = await self.llm_summarize_fn(middle)
-        except Exception as exc:
-            log.warning("Summarization failed: %s. Skipping summary compaction.", exc)
-            return messages, False
-
-        summary_message = {"role": "assistant", "content": f"[Context Summary]\n{summary_text}"}
-        new_messages = messages[:first_boundary] + [summary_message] + messages[last_boundary:]
-
-        if self.compact_md_path is not None:
-            _write_compact_md(self.compact_md_path, summary_text)
-
-        log.info("Summary compaction: %d messages → 1 summary", len(middle))
-        return new_messages, True
+        # Mirror usage_fraction's math: message tokens must fit target*limit minus tool schemas.
+        target_tokens = self.target_usage_fraction * budget.total_limit - budget.tool_schema_tokens
+        working = messages
+        modified = False
+        first_n, last_n = self.preserve_first_n, self.preserve_last_n
+        while True:
+            first_boundary = self._safe_cut_boundary(working, first_n, "forward")
+            last_boundary = self._safe_cut_boundary(working, len(working) - last_n, "backward")
+            middle = working[first_boundary:last_boundary] if last_boundary > first_boundary else []
+            if len(middle) > 2:
+                try:
+                    summary_text = await self.llm_summarize_fn(middle)
+                except Exception as exc:
+                    log.warning("Summarization failed: %s. Stopping compaction at current state.", exc)
+                    return working, modified
+                summary_message = {"role": "assistant", "content": f"[Context Summary]\n{summary_text}"}
+                working = working[:first_boundary] + [summary_message] + working[last_boundary:]
+                modified = True
+                if self.compact_md_path is not None:
+                    _write_compact_md(self.compact_md_path, summary_text)
+                log.info(
+                    "Summary compaction: %d messages → 1 summary (preserve %d/%d)",
+                    len(middle), first_n, last_n,
+                )
+                if token_counter.count_messages(working) <= target_tokens:
+                    return working, modified  # landed at target — the point of the fire
+            # Above target (or nothing summarizable at this width): WIDEN the span and retry.
+            next_f, next_l = max(1, first_n // 2), max(2, last_n // 2)
+            if next_f >= first_n and next_l >= last_n:
+                return working, modified  # can't widen further / no safe cut remains
+            first_n, last_n = min(first_n, next_f), min(last_n, next_l)
 
     def _safe_cut_boundary(self, messages: list[Message], start_idx: int, direction: str) -> int:
         """Find a safe cut boundary that does not split tool_use/tool_result pairs."""
@@ -538,6 +562,7 @@ class FullAutoCompactStage:
         self,
         llm_summarize_fn: Any = None,
         compact_md_path: Path | None = None,
+        target_usage_fraction: float = COMPACTION_TARGET_USAGE_FRACTION,
     ) -> None:
         self.llm_summarize_fn = llm_summarize_fn
         self.compact_md_path = compact_md_path
@@ -547,6 +572,7 @@ class FullAutoCompactStage:
             preserve_last_n=2,
             llm_summarize_fn=llm_summarize_fn,
             compact_md_path=compact_md_path,
+            target_usage_fraction=target_usage_fraction,
         )
 
     async def apply(
@@ -578,6 +604,7 @@ class CompactionPipeline:
         preserve_last_n: int = 8,
         llm_summarize_fn: Any = None,
         compact_md_path: Path | None = None,
+        target_usage_fraction: float = COMPACTION_TARGET_USAGE_FRACTION,
     ) -> None:
         self._token_counter = token_counter
         self._stages: list = [
@@ -588,10 +615,12 @@ class CompactionPipeline:
                 preserve_last_n=preserve_last_n,
                 llm_summarize_fn=llm_summarize_fn,
                 compact_md_path=compact_md_path,
+                target_usage_fraction=target_usage_fraction,
             ),
             FullAutoCompactStage(
                 llm_summarize_fn=llm_summarize_fn,
                 compact_md_path=compact_md_path,
+                target_usage_fraction=target_usage_fraction,
             ),
         ]
 
@@ -642,6 +671,28 @@ def _is_safe_cut_after(messages: list[Message], idx: int) -> bool:
     if role == "assistant" and not msg.get("tool_calls"):
         return True
     return False
+
+
+def _hard_truncate_to_budget(
+    messages: list[Message], max_msg_tokens: int, token_counter: TokenCounter,
+) -> tuple[list[Message], int]:
+    """MOVE 0c emergency floor (coordinator ruling: overflow must be IMPOSSIBLE). Drop the
+    OLDEST non-system messages — whole safe-cut chunks at a time so tool pairs never split —
+    until the message tokens fit `max_msg_tokens`. The leading system message and the final
+    message are never dropped; pairing is repaired at the end as a belt. Returns
+    (truncated_messages, n_dropped). Lossy by design — this is the fallback that runs only when
+    compaction (capped or cut-less) could not get back under budget."""
+    working = list(messages)
+    start = 1 if working and working[0].get("role") == "system" else 0
+    dropped = 0
+    while token_counter.count_messages(working) > max_msg_tokens and len(working) - start > 1:
+        cut = next(
+            (i for i in range(start, len(working) - 1) if _is_safe_cut_after(working, i)),
+            start,  # no safe boundary at all: drop the single oldest non-system message
+        )
+        dropped += cut + 1 - start
+        del working[start:cut + 1]
+    return _repair_tool_pairing(working), dropped
 
 
 def _write_compact_md(path: Path, content: str) -> None:
@@ -728,11 +779,11 @@ class ContextManager:
         self._agent_id = agent_id
         self._session_id = session_id
         self._iteration = 0
-        # MOVE 0c: per-turn compaction re-fire guard. `_compaction_fires` counts summary
-        # compactions in the current turn (capped); `_compaction_shrink_failed` latches once a
-        # fire fails to reduce utilization — both reset per turn by reset_compaction_guard().
+        # MOVE 0c: `_compaction_fires` counts summary compactions in the current turn (backstop
+        # cap; reset per turn by reset_compaction_guard). No must-shrink latch exists (coordinator
+        # ruling): compaction is never switched off — compact-to-target + the emergency floor in
+        # build_messages own the not-shrinking case.
         self._compaction_fires = 0
-        self._compaction_shrink_failed = False
 
     def set_iteration(self, iteration: int) -> None:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
@@ -740,9 +791,8 @@ class ContextManager:
 
     def reset_compaction_guard(self) -> None:
         """MOVE 0c: the agent loop calls this at the start of each turn so the per-turn
-        summary-compaction fire cap + must-shrink latch reset (a new turn earns fresh attempts)."""
+        summary-compaction fire cap re-arms (a new turn earns fresh attempts)."""
         self._compaction_fires = 0
-        self._compaction_shrink_failed = False
 
     def repair_tool_pairing(self, messages: list[Message]) -> list[Message]:
         """Remove orphaned tool role messages.
@@ -813,36 +863,27 @@ class ContextManager:
                 tool_schema_tokens=tool_tokens,
             )
             if pre_budget.needs_summary_compact:
-                # MOVE 0c: bound the per-turn summary-compaction storm. Skip re-running the
-                # expensive summarizer once this turn has hit the fire cap OR a prior fire this
-                # turn failed to shrink utilization — re-firing then is pure hot-path tax (the
-                # SEMA-05 day-6 storm: ~74 fires, context bouncing without shrinking).
-                if self._compaction_shrink_failed or self._compaction_fires >= MAX_COMPACTION_FIRES_PER_TURN:
+                # MOVE 0c (coordinator ruling): the per-turn fire cap is the ONLY compaction
+                # limiter. Compaction is NEVER latched off — a fire that fails to shrink is the
+                # stage's compact-to-target problem (it widens the span), and the emergency
+                # floor below makes overflow impossible regardless.
+                if self._compaction_fires >= MAX_COMPACTION_FIRES_PER_TURN:
                     log.debug(
-                        "compaction guard: skip re-fire (fires=%d, shrink_failed=%s)",
-                        self._compaction_fires, self._compaction_shrink_failed,
+                        "compaction guard: fire cap reached this turn (%d) — relying on the "
+                        "emergency floor for overflow",
+                        self._compaction_fires,
                     )
                 else:
                     pre_frac = pre_budget.usage_fraction
                     repaired, any_modified = await self._pipeline.run(repaired, pre_budget)
                     if any_modified:
                         self._compaction_fires += 1
-                        post_usage = self._token_counter.count_messages(repaired)
-                        post_budget = TokenBudget(
-                            total_limit=self.max_context_tokens,
-                            current_usage=post_usage,
-                            tool_schema_tokens=tool_tokens,
-                        )
-                        # must-shrink latch: a fire that did not reduce utilization disables
-                        # further fires this turn (re-running it cannot help until the turn resets).
-                        if post_usage >= pre_usage:
-                            self._compaction_shrink_failed = True
-                            log.info(
-                                "compaction did not shrink context (%.0f%%->%.0f%%); latching off "
-                                "further fires this turn",
-                                pre_frac * 100, post_budget.usage_fraction * 100,
-                            )
                         if self._bus is not None:
+                            post_budget = TokenBudget(
+                                total_limit=self.max_context_tokens,
+                                current_usage=self._token_counter.count_messages(repaired),
+                                tool_schema_tokens=tool_tokens,
+                            )
                             from localharness.core.events import CompactionTriggered
                             await self._bus.publish(CompactionTriggered(
                                 agent_id=self._agent_id,
@@ -852,6 +893,24 @@ class ContextManager:
                                 post_usage_fraction=post_budget.usage_fraction,
                                 stages_modified=[],
                             ))
+
+        # MOVE 0c EMERGENCY FLOOR (coordinator ruling: overflow must be IMPOSSIBLE). If — fire
+        # cap reached, no safe cut, no pipeline at all — utilization still exceeds 100% of the
+        # budget, hard-truncate the oldest non-system messages at safe-cut boundaries until the
+        # request fits. Loud by design: this only runs when compaction could not save the turn
+        # (the live stall: 101.1% with compaction latched off — that latch no longer exists).
+        floor_usage = self._token_counter.count_messages(repaired)
+        if self.max_context_tokens > 0 and floor_usage + tool_tokens > self.max_context_tokens:
+            over_frac = (floor_usage + tool_tokens) / self.max_context_tokens
+            repaired, n_dropped = _hard_truncate_to_budget(
+                repaired, self.max_context_tokens - tool_tokens, self._token_counter,
+            )
+            log.error(
+                "EMERGENCY context floor: utilization %.1f%% exceeded 100%% of budget after "
+                "compaction — hard-truncated %d oldest message(s) to fit "
+                "(agent=%s session=%s iter=%d)",
+                over_frac * 100, n_dropped, self._agent_id, self._session_id, self._iteration,
+            )
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.count_messages(repaired)
