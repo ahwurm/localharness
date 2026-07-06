@@ -66,6 +66,7 @@ Exit codes: 0 = a measurement was produced (HOLDS / KILL / INCONCLUSIVE all succ
 from __future__ import annotations
 
 import argparse
+import re
 import asyncio
 import hashlib
 import json
@@ -110,6 +111,7 @@ _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this
 _LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
 _TURN_FAILED_RATE_MAX = 0.20  # MOVE 0b: a sitting above this TurnFailed rate -> verdict INVALID.
 _GRADING_DOC = ".planning/phases/36-chapter-writer/36-SEMA05-GRADING.md"
+_GRADING_DOC_36_1 = ".planning/phases/36-chapter-writer/36.1-DESIGNED-MONTH-GRADING.md"  # MOVE 4
 _GRADING_COMMITTED = "2026-07-05T17:43:47Z"  # the LOCKED pre-commitment timestamp (quoted in report)
 _ROLE = (
     "Personal assistant on the owner's box. Answer directly and use tools only when the "
@@ -175,12 +177,15 @@ class _OfflineFakeLLM:
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
         if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
-            # Two subagent atoms grounded in the day-distinct fixture content; they attribute to
-            # two distinct sittings (per-atom source provenance) and cluster into one chapter.
-            return (
-                "subagents | building a summarizer subagent for the harness | summarizer subagent for the harness\n"
-                "subagents | building a citation subagent for the harness | citation subagent for the harness"
-            )
+            # CORPUS-AWARE (like a real extractor): emit only atoms whose subject is actually in
+            # this chunk, so a per-day (between-sitting) pass mines only that day's atom and the
+            # two attribute to two distinct sittings (no cross-grounding, no provenance collapse).
+            out = []
+            if "summarizer" in prompt:
+                out.append("subagents | building a summarizer subagent for the harness | summarizer subagent for the harness")
+            if "citation" in prompt:
+                out.append("subagents | building a citation subagent for the harness | citation subagent for the harness")
+            return "\n".join(out)
         return ""  # anything else: inert
 
 
@@ -910,6 +915,296 @@ async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> di
     }
 
 
+# ===========================================================================
+# MOVE 4 — the designed-month manifest mode. Drive from a ground-truth manifest
+# (query -> expected topic) and grade GROUPING QUALITY DIRECTLY (Stages A/B/C per
+# .planning/phases/36-chapter-writer/36.1-DESIGNED-MONTH-GRADING.md), not the tool-avoidance
+# proxy. Session ids are `designed-{day}`; consolidation runs BETWEEN days (as today's pass).
+# ===========================================================================
+
+def _load_manifest(path: Path) -> dict:
+    return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+
+
+def _c2(n: int) -> int:
+    return n * (n - 1) // 2
+
+
+def _ari(labels_true: list, labels_pred: list) -> float:
+    """Adjusted Rand Index over two partitions of the same items (inline, no new deps). 1.0 =
+    identical partitions; ~0 = random; the overall Stage-B grouping-quality number."""
+    n = len(labels_true)
+    if n < 2:
+        return 1.0
+    cont: dict[tuple, int] = {}
+    for a, b in zip(labels_true, labels_pred):
+        cont[(a, b)] = cont.get((a, b), 0) + 1
+    a_sums = Counter(labels_true)
+    b_sums = Counter(labels_pred)
+    index = sum(_c2(v) for v in cont.values())
+    sum_a = sum(_c2(v) for v in a_sums.values())
+    sum_b = sum(_c2(v) for v in b_sums.values())
+    expected = (sum_a * sum_b) / _c2(n)
+    maximum = 0.5 * (sum_a + sum_b)
+    if maximum == expected:
+        return 1.0  # both partitions trivial (all-singletons or all-one) -> perfect agreement
+    return (index - expected) / (maximum - expected)
+
+
+def _tok5(text: str) -> set:
+    return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 5}
+
+
+def _day_of(prov: str) -> str:
+    """A sem atom's provenance is the SOURCE sitting session `designed-{day}`; strip to the day."""
+    return prov[len("designed-"):] if prov.startswith("designed-") else prov
+
+
+def _attribute_topic(atom_value: str, day_queries: list[dict]) -> str | None:
+    """The atom's GROUND-TRUTH topic (Stage-B join): the manifest topic of the best token-overlap
+    driven query within the atom's provenance day. None when nothing overlaps."""
+    probe = _tok5(atom_value)
+    best, best_score = None, 0
+    for q in day_queries:
+        score = len(probe & _tok5(q["text"]))
+        if score > best_score:
+            best, best_score = q, score
+    return best["topic"] if best else None
+
+
+async def _grade_designed_month(
+    store: MemoryStore, manifest: dict, turn_query_map: dict,
+    *, min_sessions: int = 2, min_cluster_size: int = 2,
+) -> dict:
+    """Grade the isolated store against the manifest — Stages A (extraction) + B (grouping, the
+    HEADLINE) + the verdict. PURE store read (no LLM). Stage C (behavior) is driven separately in
+    run() and is never part of the verdict. The failing stage is NAMED (per-stage attribution)."""
+    expected = {t for t, m in manifest["topics"].items() if m.get("expected_chapter")}
+    driven_by_day = {
+        d: [{"id": qid, "topic": tp, "text": txt} for (qid, tp, txt) in turn_query_map.get(d, [])]
+        for d in manifest["days"]
+    }
+    # Day transcript corpora (A2 grounds each atom against the text mining actually saw).
+    day_corpus: dict[str, list[str]] = {}
+    for r in await store.get_history(limit=1_000_000):
+        day_corpus.setdefault(_day_of(r.get("session_id") or ""), []).append(str(r.get("content", "")))
+    day_corpus = {d: "\n".join(v) for d, v in day_corpus.items()}
+
+    sem_atoms = await _active(store, "key LIKE 'sem/%'")
+    gt: dict[int, str | None] = {}          # atom.id -> ground-truth topic (or 'noise' or None)
+    a2_kill = False
+    a3_ok = True
+    for a in sem_atoms:
+        day = _day_of(a.provenance)
+        if not a.provenance or a.provenance.startswith("mined-from:"):
+            a3_ok = False                   # A3: batch-level provenance (the SEMA-05 defect)
+        gt[a.id] = _attribute_topic(a.value, driven_by_day.get(day, []))
+        if not grounded(a.value, day_corpus.get(day, "")):
+            a2_kill = True                  # A2: ungrounded atom -> KILL (zero tolerance)
+
+    # --- Stage A1 recall over topic-sittings ((topic, day) with >= 1 manifest query) ---
+    topic_sittings = sorted({(q["topic"], q["day"]) for q in manifest["queries"] if q["topic"] in expected})
+    covered = sum(
+        1 for (t, d) in topic_sittings
+        if any(gt.get(a.id) == t and _day_of(a.provenance) == d for a in sem_atoms)
+    )
+    a1_recall = covered / len(topic_sittings) if topic_sittings else 0.0
+
+    # --- Stage B: the DISCOVERED grouping (chapters + their sem members) ---
+    schemas = await _active(store, "node_kind='schema'")
+    chapter_members = {
+        s.id: [m for m in await _schema_members(store, s.id) if m.key.startswith("sem/")]
+        for s in schemas
+    }
+    chapter_label = {
+        sid: (Counter(l for m in members if (l := gt.get(m.id))).most_common(1) or [(None, 0)])[0][0]
+        for sid, members in chapter_members.items()
+    }
+    atoms_by_topic = Counter(gt.get(a.id) for a in sem_atoms)
+
+    # B1: >= 5/6 expected topics form a chapter — at most one may fail to form and only if it is a
+    # correct-null (< min_cluster_size atoms). Non-vacuous: >= 1 chapter MUST actually form (a
+    # degenerate run where every topic nulls is NOT a HOLD). Generalized for any manifest size.
+    formed = {lbl for lbl in chapter_label.values() if lbl in expected}
+    nullable = {t for t in expected if atoms_by_topic.get(t, 0) < min_cluster_size}
+    non_formed = expected - formed
+    b1_count = len(formed | (nullable & non_formed))
+    b1_ok = len(formed) >= max(1, len(expected) - 1) and all(t in nullable for t in non_formed)
+
+    # B2: per formed chapter member recall >= 0.6, precision >= 0.7; overall ARI.
+    per_chapter: list[dict] = []
+    b2_ok = True
+    for sid, members in chapter_members.items():
+        lbl = chapter_label[sid]
+        if lbl not in expected:
+            continue
+        tp = sum(1 for m in members if gt.get(m.id) == lbl)
+        precision = tp / len(members) if members else 0.0
+        total_lbl = sum(1 for a in sem_atoms if gt.get(a.id) == lbl)
+        recall = tp / total_lbl if total_lbl else 0.0
+        per_chapter.append({"label": lbl, "members": len(members),
+                            "precision": round(precision, 3), "recall": round(recall, 3)})
+        if recall < 0.6 or precision < 0.7:
+            b2_ok = False
+    order = [a.id for a in sem_atoms]
+    atom_chapter = {m.id: f"ch{sid}" for sid, members in chapter_members.items() for m in members}
+    true_labels = [gt.get(aid) or f"none-{aid}" for aid in order]
+    pred_labels = [atom_chapter.get(aid, f"solo-{aid}") for aid in order]
+    ari = round(_ari(true_labels, pred_labels), 3)
+
+    # B3: 0 noise-attributed atoms inside any chapter.
+    noise_in_chapter = sum(
+        1 for members in chapter_members.values() for m in members if gt.get(m.id) == "noise"
+    )
+    b3_ok = noise_in_chapter == 0
+
+    # B4: correction arc — corrected value reachable from the arc topic's chapter/members; the
+    # stale value NOT asserted current in any active fact.
+    arc = manifest.get("correction_arc", {})
+    corrected_nums = re.findall(r"\d+", arc.get("corrected", ""))
+    reachable = False
+    for sid, members in chapter_members.items():
+        if chapter_label[sid] != arc.get("topic"):
+            continue
+        s = next(s for s in schemas if s.id == sid)
+        blob = s.value + " " + " ".join(m.value for m in members)
+        if corrected_nums and all(nm in blob for nm in corrected_nums):
+            reachable = True
+    if not reachable and corrected_nums:  # or reachable directly from an arc-topic member atom
+        reachable = any(
+            gt.get(a.id) == arc.get("topic") and all(nm in a.value for nm in corrected_nums)
+            for a in sem_atoms
+        )
+    all_active = await _active(store, "1=1")
+    stale = arc.get("stale", "")
+    stale_active = bool(stale) and any(stale in f.value for f in all_active)
+    b4_ok = (not arc) or (reachable and not stale_active)  # no arc in the manifest -> vacuously ok
+
+    # B5 + byte-stability + the operational-rows-in-no-chapter invariant (reuse the store checks).
+    static = await _static_checks(store)
+    b5_kill = static["kill_triggered"]
+    byte_stable = static["byte_stable"]
+    op_in_chapter = sum(
+        1 for members in chapter_members.values() for m in members
+        if m.key.startswith(("gate/", "predgate/", "learned/"))
+    )
+
+    stage_a = {"a1_recall": round(a1_recall, 3), "a1_covered": covered,
+               "a1_topic_sittings": len(topic_sittings), "a1_ok": a1_recall >= 0.8,
+               "a2_kill": a2_kill, "a3_provenance_ok": a3_ok, "sem_atoms": len(sem_atoms)}
+    stage_b = {"b1_ok": b1_ok, "b1_chapters_or_null": b1_count, "formed_topics": sorted(formed),
+               "nullable_topics": sorted(nullable), "b2_ok": b2_ok, "per_chapter": per_chapter,
+               "ari": ari, "b3_ok": b3_ok, "noise_in_chapter": noise_in_chapter,
+               "b4_ok": b4_ok, "correction_reachable": reachable, "stale_active": stale_active,
+               "b5_kill": b5_kill, "operational_rows_in_chapter": op_in_chapter}
+
+    if not a3_ok:
+        verdict, failing = "INVALID", "A3 (batch provenance)"
+    elif a2_kill or b5_kill:
+        verdict, failing = "KILL", ("A2 (ungrounded atom)" if a2_kill else "B5 (chapter kill)")
+    elif b1_ok and b2_ok and b3_ok and b4_ok and byte_stable:
+        verdict, failing = "HOLDS", None
+    else:
+        failing = next(
+            name for name, ok in [
+                ("A1", stage_a["a1_ok"]), ("B1", b1_ok), ("B2", b2_ok),
+                ("B3", b3_ok), ("B4", b4_ok), ("byte_stable", byte_stable),
+            ] if not ok
+        )
+        verdict = "INCONCLUSIVE"
+    return {"verdict": verdict, "failing_stage": failing, "byte_stable": byte_stable,
+            "stage_a": stage_a, "stage_b": stage_b,
+            "per_schema_grounding": static["per_schema_grounding"]}
+
+
+async def _run_manifest_sittings(
+    args: argparse.Namespace, store_dir: Path, manifest: dict, loop_llm: object,
+    token_counter: object, model_label: str,
+) -> tuple[list[dict], dict]:
+    """Drive the manifest's days/queries as `designed-{day}` sittings through the REAL loop,
+    recording query_id per driven turn. The seam-ON ConsolidationPass runs ONCE at grading over
+    the accumulated store (as the --history runner does today) — equivalent to per-day idle
+    consolidation for grading, and robust to the offline fast-run's same-second timestamps (a
+    per-day pass would advance the mining watermark to that shared ts and skip later days).
+    Returns (sittings, turn_query_map: {day: [(qid, topic, text)]}). Mirrors _run_sittings'
+    composition + the MOVE-0b sitting TurnFailed gate."""
+    from localharness.cli.session_accumulator import SessionAccumulator, derive_session_summary
+    from localharness.memory.user_signals import UserSignalDetector
+
+    events_path = store_dir / "agents" / args.agent / "bus-events.jsonl"
+    sittings: list[dict] = []
+    turn_query_map: dict[str, list] = {}
+    cap = args.max_turns_per_day
+    for day in manifest["days"]:
+        sid = f"designed-{day}"
+        day_qs = [q for q in manifest["queries"] if q["day"] == day]
+        if cap:
+            day_qs = day_qs[:cap]
+        if (store_dir / "KILL").exists():
+            print(f"KILL file present — stopping accumulation before sitting {day}.")
+            break
+        if not args.offline and not _watchdog_ok():
+            raise _WatchdogAbort(f"MemAvailable below {_MIN_MEM_GIB} GiB before sitting {day}")
+
+        bus = EventBus(persist_path=events_path)
+        store = MemoryStore(agent_id=args.agent, division_id="", org_id="",
+                            base_dir=str(store_dir), bus=bus)
+        await store.open()
+        await store.create_session(sid, budget={}, model=model_label,
+                                   context_tokens_available=_LOOP_CONTEXT_TOKENS)
+        wg = WriteGate(store, bus, args.agent); await wg.open()
+        pg_cfg = PredictiveGateConfig(); pg_cfg.write_live = True
+        pg = PredictiveGate(store, bus, args.agent, pg_cfg); await pg.open()
+        usig = UserSignalDetector(store, bus, args.agent, pg_cfg); await usig.open()
+        pw = PredictiveWriteGate(store, bus, args.agent, pg_cfg); await pw.open()
+        acc = SessionAccumulator(bus, args.agent); await acc.open()
+        loop = await _build_loop(args, store_dir, store, bus, sid, loop_llm, token_counter)
+
+        failed = 0
+
+        def _on_turn_failed(_ev: object) -> None:
+            nonlocal failed
+            failed += 1
+
+        bus.subscribe(TurnFailed, _on_turn_failed, agent_id=args.agent)
+        driven: list = []
+        exit_reason = "complete"
+        try:
+            for q in day_qs:
+                if (store_dir / "KILL").exists():
+                    exit_reason = "kill_file"
+                    break
+                if not args.offline and not _watchdog_ok():
+                    exit_reason = "watchdog_abort"
+                    raise _WatchdogAbort(f"MemAvailable below {_MIN_MEM_GIB} GiB mid-sitting {day}")
+                await bus.publish(UserMessage(agent_id=args.agent, session_id=sid,
+                                              content=q["text"], channel="terminal"))
+                await loop.run_turn(task=q["text"])
+                driven.append((q["id"], q["topic"], q["text"]))
+        finally:
+            await acc.close()
+            try:
+                await store.end_session(sid, exit_reason=exit_reason,
+                                        summary=derive_session_summary(acc),
+                                        turn_count=acc.turn_count, action_count=acc.action_count,
+                                        tokens_in=acc.tokens_in, tokens_out=acc.tokens_out)
+            except Exception:  # noqa: BLE001
+                pass
+            for g in (pw, usig, pg, wg):
+                try:
+                    await g.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            await store.close()
+
+        turn_query_map[day] = driven
+        sittings.append({"day": day, "session_id": sid, "turns": len(driven), "turn_failed": failed})
+        print(f"designed sitting {day}: {len(driven)}/{len(day_qs)} queries ({failed} failed)")
+        if driven and failed / len(driven) > _TURN_FAILED_RATE_MAX:
+            raise _MeasurementInvalid(day=day, session_id=sid, failed=failed, turns=len(driven))
+    return sittings, turn_query_map
+
+
 # ---------------------------------------------------------------------------
 # Report (owner-facing, plain language first, hostile-read-proof)
 # ---------------------------------------------------------------------------
@@ -1031,6 +1326,148 @@ def _report(v: dict) -> str:
     return "\n".join(L)
 
 
+def _manifest_report(v: dict) -> str:
+    """Owner-facing report for the designed-month grade — plain verdict first, then the per-stage
+    attribution (grouping quality is the headline), hostile-read-proof."""
+    L: list[str] = []
+    a, b = v["stage_a"], v["stage_b"]
+    fail = f"  (failing stage: {v['failing_stage']})" if v["failing_stage"] else ""
+    L.append("# Designed-month grade — verdict\n")
+    L.append(f"**VERDICT: {v['verdict']}**{fail}  ({'offline rehearsal' if v['offline'] else 'live subject model'})\n")
+    L.append(f"Graded against `{v['grading_doc']}` (pre-committed). Manifest: `{v['manifest']}`.\n")
+    L.append("## Stage A — extraction\n")
+    L.append(f"- A1 recall: **{a['a1_recall']}** ({a['a1_covered']}/{a['a1_topic_sittings']} topic-sittings "
+             f"with a grounded atom) — pass(>=0.80): **{a['a1_ok']}**")
+    L.append(f"- A2 grounding kill: **{a['a2_kill']}**  ·  A3 per-atom provenance ok: **{a['a3_provenance_ok']}**  "
+             f"·  sem atoms mined: **{a['sem_atoms']}**\n")
+    L.append("## Stage B — grouping (THE HEADLINE)\n")
+    L.append(f"- B1 chapter recall: **{b['b1_ok']}** (formed+null {b['b1_chapters_or_null']}; "
+             f"formed={b['formed_topics']}, correct-null={b['nullable_topics']})")
+    L.append(f"- B2 membership: **{b['b2_ok']}**  ·  overall **ARI = {b['ari']}**")
+    for pc in b["per_chapter"]:
+        L.append(f"  - `{pc['label']}`: {pc['members']} members, precision {pc['precision']}, recall {pc['recall']}")
+    L.append(f"- B3 distractor exclusion: **{b['b3_ok']}** ({b['noise_in_chapter']} noise atoms in chapters)")
+    L.append(f"- B4 correction arc: **{b['b4_ok']}** (corrected reachable={b['correction_reachable']}, "
+             f"stale still active={b['stale_active']})")
+    L.append(f"- B5 chapter kill: **{b['b5_kill']}**  ·  operational rows in any chapter (ruling c): "
+             f"**{b['operational_rows_in_chapter']}**  ·  byte-stable: **{v['byte_stable']}**\n")
+    L.append("## Stage C — behavior (secondary, never the headline)\n")
+    for c in v["stage_c"]:
+        L.append(f"- `{c['topic']}`: {c['keyword_hits']} keyword hits (>=2: {c['answer_has_min2_hits']}), "
+                 f"zero-tool bonus: {c['zero_tool_bonus']}")
+    L.append("")
+    L.append(f"Sensitivity: supermajority-grounding holds={v['sensitivity']['grounding_supermajority_holds']}, "
+             f"min_sessions+1 holds={v['sensitivity']['cluster_min_sessions_plus1_holds']}.\n")
+    return "\n".join(L)
+
+
+async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir: Path) -> int:
+    """MOVE 4 orchestration: load the manifest, drive `designed-{day}` sittings (consolidation
+    between days), grade Stages A/B + the verdict (pure), then Stage C probes (secondary)."""
+    manifest = _load_manifest(Path(args.manifest))
+    if args.offline:
+        # The offline loop's recovery-read file must be NEUTRAL: reading the manifest (or any file
+        # with cross-day query text) would leak every day's content into every day's transcript,
+        # collapsing per-atom source provenance. A generic note keeps each day's corpus day-local.
+        neutral = store_dir / "_recovery_note.txt"
+        neutral.parent.mkdir(parents=True, exist_ok=True)
+        neutral.write_text("recovery note: the requested item was located and handled.\n")
+        m_llm: object = _OfflineFakeLLM()
+        m_loop_llm: object = _OfflineLoopLLM(str(neutral), str(store_dir))
+        m_tc: object = None
+    else:
+        if not args.model or not args.base_url:
+            print("REFUSED: live manifest mode requires --model and --base-url.", file=sys.stderr)
+            return 2
+        if not _watchdog_ok():
+            print("ABORT (machine-safety): MemAvailable below threshold — run attended.", file=sys.stderr)
+            return 1
+        from localharness.agent.context import TokenCounter
+        from localharness.provider.client import LLMClient, LLMConfig
+        client = LLMClient(LLMConfig(base_url=args.base_url, model=args.model))
+        await client.detect_capabilities()
+        m_loop_llm, m_llm = client, LLMTextAdapter(client)
+        m_tc = TokenCounter(base_url=args.base_url, model=args.model)
+
+    results.mkdir(parents=True, exist_ok=True)
+    t0 = time.monotonic()
+    try:
+        sittings, tqm = await _run_manifest_sittings(
+            args, store_dir, manifest, m_loop_llm, m_tc,
+            model_label=args.model or "offline-fake",
+        )
+    except _WatchdogAbort as exc:
+        print(f"ABORT (machine-safety): {exc}.", file=sys.stderr)
+        return 1
+    except _MeasurementInvalid as exc:  # MOVE 0b validity gate
+        invalid = {
+            "verdict": "INVALID", "mode": "designed_month_manifest",
+            "reason": f"sitting TurnFailed rate > {_TURN_FAILED_RATE_MAX:.0%} — {exc}",
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "grading_doc": _GRADING_DOC_36_1,
+            "invalid_sitting": {"day": exc.day, "session_id": exc.session_id,
+                                "failed": exc.failed, "turns": exc.turns},
+        }
+        (results / "verdict.json").write_text(json.dumps(invalid, indent=2) + "\n", encoding="utf-8")
+        print(f"INVALID (measurement failure): {exc}", file=sys.stderr)
+        return 1
+    if sum(s["turns"] for s in sittings) == 0:
+        print("PROCESSING FAILURE: zero turns driven from the manifest.", file=sys.stderr)
+        return 1
+
+    # GRADING-phase seam-ON consolidation (as today's --history runner): one pass over the
+    # accumulated month mines every sitting's atoms, clusters them, and settles corrections.
+    if not args.offline and not _watchdog_ok():
+        print("ABORT (machine-safety): MemAvailable dropped below threshold pre-consolidation.", file=sys.stderr)
+        return 1
+    store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
+    await store.open()
+    try:
+        await ConsolidationPass(store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm).run()
+        grade = await _grade_designed_month(store, manifest, tqm)
+        schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
+        sens = await _sensitivity(store, MemoryConsolidationConfig())
+    finally:
+        await store.close()
+
+    # Stage C (secondary): one domain probe per formed chapter; keyword-hit count only.
+    stage_c: list[dict] = []
+    for pc in grade["stage_b"]["per_chapter"]:
+        topic = pc["label"]
+        kws = [k.lower() for k in manifest["topics"].get(topic, {}).get("keywords", [])]
+        if not args.offline and not _watchdog_ok():
+            break
+        probe = await _probe_turn(
+            args, store_dir, f"what do you know about {topic.replace('_', ' ')}?",
+            m_loop_llm, m_tc, schema_values=schema_values, model_label=args.model or "offline-fake",
+        )
+        ans = (probe.get("answer") or "").lower()
+        hits = sum(1 for k in kws if k in ans)
+        stage_c.append({"topic": topic, "keyword_hits": hits, "answer_has_min2_hits": hits >= 2,
+                        "zero_tool_bonus": probe["tool_calls"] == 0 and not probe["turn_failed"]})
+
+    v = {
+        "verdict": grade["verdict"], "failing_stage": grade["failing_stage"],
+        "mode": "designed_month_manifest", "offline": bool(args.offline),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "grading_doc": _GRADING_DOC_36_1, "manifest": str(Path(args.manifest).resolve()),
+        "sittings": sittings, "days": len(sittings), "max_turns_per_day": args.max_turns_per_day,
+        "stage_a": grade["stage_a"], "stage_b": grade["stage_b"], "stage_c": stage_c,
+        "byte_stable": grade["byte_stable"], "per_schema_grounding": grade["per_schema_grounding"],
+        "sensitivity": sens, "duration_s": round(time.monotonic() - t0, 2),
+    }
+    (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
+    (results / "report.md").write_text(_manifest_report(v), encoding="utf-8")
+    a, b = grade["stage_a"], grade["stage_b"]
+    print(
+        f"DESIGNED-MONTH {v['verdict']}" + (f" (failing: {v['failing_stage']})" if v["failing_stage"] else "")
+        + f" | atoms={a['sem_atoms']} A1={a['a1_recall']} ARI={b['ari']} "
+        + f"B1={b['b1_ok']} B2={b['b2_ok']} B3={b['b3_ok']} B4={b['b4_ok']} byte_stable={v['byte_stable']}"
+    )
+    print(f"report: {results / 'report.md'}")
+    return 1 if v["verdict"] == "INVALID" else 0
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1061,6 +1498,11 @@ async def run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # MOVE 4 — the designed-month manifest mode: a self-contained flow (drive from a ground-truth
+    # manifest, grade grouping directly, Stages A/B/C). Bypasses the history/trace modes below.
+    if args.manifest:
+        return await _run_designed_month(args, results, store_dir)
 
     # GUARD: exactly ONE accumulation mode (the owner-directed live mode, or the legacy trace).
     if bool(args.history) == bool(args.trace):
@@ -1350,6 +1792,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="LEGACY cross-check: dir (or bus-events file) with the COPIED real trace "
                         "to replay through the shipped gates. READ-ONLY. Mutually exclusive with "
                         "--history.")
+    p.add_argument("--manifest", default=None,
+                   help="MOVE 4 designed-month mode: a ground-truth manifest JSON (query -> "
+                        "expected topic). Drives `designed-{day}` sittings with consolidation "
+                        "between days, then grades GROUPING directly (Stages A/B/C per "
+                        "36.1-DESIGNED-MONTH-GRADING.md). Bypasses --history/--trace.")
     p.add_argument("--store", required=True,
                    help="ISOLATED fresh store dir (base_dir). NEVER a live agent store.")
     p.add_argument("--results", required=True,
