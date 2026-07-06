@@ -313,8 +313,11 @@ class MemoryConsolidationConfig(BaseModel):
         description="An undecidable correction fact leaves the reconciliation queue after this many looks.",
     )
     mining_write_budget: int = Field(
-        default=5, ge=1, le=50,
-        description="Max mined facts written per idle cycle.",
+        default=25, ge=1, le=50,
+        description=(
+            "Max semantic atoms mined per idle cycle (MOVE 2: mining is the primary feeder; the "
+            "walk is idle-window local-GPU and cancellable, so the cost is sleep-time)."
+        ),
     )
 
 

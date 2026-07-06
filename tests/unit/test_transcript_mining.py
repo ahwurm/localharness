@@ -1,19 +1,18 @@
-"""PGATE-03 mining half (mining.py) — the bounded transcript model-look that closes the
-correction-recall gap the lexical tripwire structurally leaves (census ceiling 0.231) and
-mines plain personal facts a colleague would remember (live specimen: the sunburn line).
+"""MOVE 2 mining — the PRIMARY semantic feeder (mining.py). Domain knowledge about the user's
+world enters the semantic hierarchy here as TYPED atoms: `topic | claim | evidence` ->
+`sem/{topic-slug}/{h8(claim)}` at 0.65, node_kind='fact', provenance = the SOURCE record's
+session (PER ATOM), grounded against its cited record.
 
-These lock the load-bearing properties (CONTEXT ruling 3 — transcript-mined writes are
-injectable, budgeted, and grounded):
-  1. a grounded personal fact is written INJECTABLE (>=0.7, node_kind='fact') with span
-     provenance, and the watermark advances to the newest ts seen;
-  2. an ungrounded line (a hallucinated detail) is REJECTED — the number-provenance kill
-     discipline extends to mined facts;
-  3. a re-run with no new records writes nothing and the watermark HOLDS (cost is bounded
-     per-window, never O(lifetime history));
-  4. a SET cancel event returns fast, reports cancelled, writes nothing, and never hangs
-     or raises (machine-safety: the box hard-hangs on unattended long-context prefill).
-  5. [Task 2] the per-cycle write budget caps writes; a re-mined identical line supersedes
-     (corroborates) rather than duplicating.
+These lock the load-bearing properties:
+  1. a grounded typed atom writes at 0.65 (searchable, sub-injection) under sem/{slug}/, tags
+     ['sem','pending_consolidation'], provenance = the source record's session_id;
+  2. an ungrounded atom (a token in no source record) is REJECTED and counted — the kill net;
+  3. PER-ATOM provenance (research doc §4): two atoms from two different sessions carry the two
+     DISTINCT sessions, never one batch provenance — the ≥2-session cluster stability bar needs it;
+  4. the CHUNKED WALK covers the ENTIRE un-mined window in one pass (an atom grounded only in the
+     LAST chunk is still mined, and the watermark advances to the final record — not one nibble);
+  5. a SET cancel returns fast, reports cancelled, writes nothing, does not advance the watermark;
+  6. the per-pass write budget caps writes; a re-mined identical claim corroborates (no duplicate).
 """
 import asyncio
 from pathlib import Path
@@ -34,7 +33,7 @@ async def store(tmp_path: Path):
 
 
 class _FakeLLM:
-    """The precision instrument, stubbed — returns fixed lines regardless of prompt."""
+    """The precision instrument, stubbed — returns fixed `topic | claim | evidence` lines."""
 
     def __init__(self, text: str):
         self.text = text
@@ -51,64 +50,94 @@ class _SlowLLM:
 
     async def complete(self, prompt: str) -> str:
         await asyncio.sleep(self.delay)
-        return "slow result"  # pragma: no cover — must be cancelled first
+        return "topic | slow | slow"  # pragma: no cover — must be cancelled first
 
 
 def _rec(ts: int, content: str, sid: str = "s1", typ: str = "user_message") -> dict:
-    """A history.jsonl-shaped record (the fields HistoryWriter requires + content)."""
     return {"v": 1, "agent_id": "mine-agent", "type": typ, "id": f"h{ts}",
             "session_id": sid, "ts": ts, "content": content}
 
 
 async def _seed_sunburn(store: MemoryStore) -> None:
-    # The live personal-fact specimen. Single-word 'sunburnt' (an 8-char token) is used so
-    # the grounding gate is exercised on a REAL >=6-char token match, not a vacuous
-    # empty-token pass — the write must earn its grounding.
-    await store.append_history(_rec(10, "i got super duper sunburnt today at the beach"))
-    await store.append_history(_rec(20, "ok noted — hope it heals soon", typ="assistant_message"))
+    await store.append_history(_rec(10, "i got super duper sunburnt today at the beach", sid="beach-day"))
+    await store.append_history(_rec(20, "ok noted — hope it heals soon", typ="assistant_message", sid="beach-day"))
 
 
 @pytest.mark.asyncio
-async def test_personal_fact_written_injectable_and_watermark_advances(store: MemoryStore):
-    """A grounded personal fact writes at INJECTABLE confidence (0.7, node_kind='fact')
-    with span provenance, and the watermark advances to the newest ts seen (20)."""
+async def test_typed_atom_written_semantic_with_source_provenance(store: MemoryStore):
+    """A grounded typed atom writes at 0.65 under sem/{slug}/{h8}, node_kind='fact', tags
+    ['sem',...], provenance = the SOURCE record's session ('beach-day'), watermark -> 20."""
     await _seed_sunburn(store)
-    report = await mine_transcript(store, _FakeLLM("user got sunburnt today"), asyncio.Event())
+    llm = _FakeLLM("health | user got sunburnt today | super duper sunburnt today at the beach")
+    report = await mine_transcript(store, llm, asyncio.Event())
 
     assert isinstance(report, MineReport)
-    assert report.written == 1
-    assert report.cancelled is False
+    assert report.written == 1 and report.cancelled is False
 
-    mined = await store.query_facts(FactQuery(tags=["mined"]))
+    mined = await store.query_facts(FactQuery(tags=["sem"]))
     assert len(mined) == 1
     f = mined[0]
     assert f.value == "user got sunburnt today"
-    assert f.confidence == 0.7  # injectable — CONTEXT ruling 3, NOT sub-0.7
+    assert f.key.startswith("sem/health/")
+    assert f.confidence == 0.65          # searchable, sub-injection — ambient status is EARNED
     assert f.node_kind == "fact"
-    assert f.provenance.startswith("mined-from:")
+    assert f.provenance == "beach-day"   # the SOURCE record's session, PER ATOM
     assert "pending_consolidation" in f.tags
 
     assert int(await _get_meta(store, _MINING_WATERMARK_KEY)) == 20
 
 
 @pytest.mark.asyncio
-async def test_ungrounded_line_is_rejected_not_written(store: MemoryStore):
-    """A line whose >=6-char token ('lottery') is absent from the transcript span is
-    REJECTED — no un-derivable token enters a mined fact (kill discipline)."""
+async def test_ungrounded_atom_is_rejected_not_written(store: MemoryStore):
+    """An atom whose claim token ('lottery') is in no source record is REJECTED and counted."""
     await _seed_sunburn(store)
-    report = await mine_transcript(store, _FakeLLM("user won the lottery"), asyncio.Event())
+    llm = _FakeLLM("luck | user won the lottery jackpot | i got super duper sunburnt")
+    report = await mine_transcript(store, llm, asyncio.Event())
 
     assert report.written == 0
     assert report.rejected_ungrounded == 1
-    assert await store.query_facts(FactQuery(tags=["mined"])) == []
+    assert await store.query_facts(FactQuery(tags=["sem"])) == []
+
+
+@pytest.mark.asyncio
+async def test_per_atom_provenance_is_source_session(store: MemoryStore):
+    """Load-bearing (research doc §4): two atoms mined from two DIFFERENT sessions carry the two
+    distinct sessions — NOT one batch provenance — so the ≥2-session cluster stability bar can
+    ever be met. A batch-level provenance (the SEMA-05 defect) would collapse both onto one."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness", sid="mon"))
+    await store.append_history(_rec(20, "i am adding a citation subagent to the harness", sid="tue"))
+    llm = _FakeLLM(
+        "subagents | building a summarizer subagent for the harness | summarizer subagent\n"
+        "subagents | adding a citation subagent to the harness | citation subagent"
+    )
+    report = await mine_transcript(store, llm, asyncio.Event())
+
+    assert report.written == 2
+    provs = {f.provenance for f in await store.query_facts(FactQuery(tags=["sem"]))}
+    assert provs == {"mon", "tue"}       # two distinct source sessions, not a single mining batch
+
+
+@pytest.mark.asyncio
+async def test_chunked_walk_covers_the_full_window(store: MemoryStore):
+    """The walk mines the ENTIRE un-mined window in one pass (a loop of chunks, not one nibble):
+    an atom grounded ONLY in the LAST record is still written and the watermark reaches it."""
+    for ts in range(1, 6):
+        await store.append_history(_rec(ts * 10, f"early filler record number {ts} about nothing", sid="s1"))
+    await store.append_history(_rec(100, "the user prefers the ristretto espresso blend", sid="s1"))
+    # Grounds only in the LAST record; corpus_char_cap tiny -> forces a multi-chunk walk.
+    llm = _FakeLLM("coffee | user prefers the ristretto espresso blend | ristretto espresso blend")
+    report = await mine_transcript(store, llm, asyncio.Event(), corpus_char_cap=80)
+
+    assert report.written == 1
+    mined = await store.query_facts(FactQuery(tags=["sem"]))
+    assert mined and mined[0].value == "user prefers the ristretto espresso blend"
+    assert int(await _get_meta(store, _MINING_WATERMARK_KEY)) == 100  # walked to the last chunk
 
 
 @pytest.mark.asyncio
 async def test_watermark_holds_on_rerun_without_new_records(store: MemoryStore):
-    """A second pass with no post-watermark records writes nothing and the watermark HOLDS
-    — cost is per-window, never a full re-mine of the growing history."""
     await _seed_sunburn(store)
-    llm = _FakeLLM("user got sunburnt today")
+    llm = _FakeLLM("health | user got sunburnt today | sunburnt today at the beach")
     first = await mine_transcript(store, llm, asyncio.Event())
     assert first.written == 1
     wm = int(await _get_meta(store, _MINING_WATERMARK_KEY))
@@ -120,8 +149,6 @@ async def test_watermark_holds_on_rerun_without_new_records(store: MemoryStore):
 
 @pytest.mark.asyncio
 async def test_set_cancel_event_reports_cancelled_without_hanging(store: MemoryStore):
-    """A pre-SET cancel event (a user turn already waiting) returns fast, reports
-    cancelled, writes nothing, and does NOT advance the watermark (next pass re-mines)."""
     await _seed_sunburn(store)
     cancel = asyncio.Event()
     cancel.set()
@@ -132,49 +159,43 @@ async def test_set_cancel_event_reports_cancelled_without_hanging(store: MemoryS
 
     assert report.cancelled is True
     assert report.written == 0
-    assert await store.query_facts(FactQuery(tags=["mined"])) == []
+    assert await store.query_facts(FactQuery(tags=["sem"])) == []
     assert await _get_meta(store, _MINING_WATERMARK_KEY) is None  # watermark untouched
 
 
-# ---------------------------------------------------------------------------
-# Task 2: per-cycle write budget + supersede-on-repeat
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_write_budget_caps_writes_per_cycle(store: MemoryStore):
-    """10 grounded candidate lines with write_budget=5 writes at MOST 5 facts this cycle —
-    a bounded colleague-memory intake per idle cycle (owner-tunable)."""
+async def test_write_budget_caps_writes_per_pass(store: MemoryStore):
+    """10 grounded atoms with write_budget=5 write at MOST 5 this pass; the budget-truncated
+    chunk does NOT advance the watermark (the rest are re-mined next pass, corroborating)."""
     await store.append_history(
-        _rec(5, "the user reported several preference items worth remembering today")
+        _rec(5, "the user reported several distinct preference items worth remembering", sid="s1")
     )
-    # Each line grounds on 'reported'(8) + 'preference'(10), both present in the span;
-    # the trailing index makes the 10 lines distinct keys (so, uncapped, 10 facts).
-    llm = _FakeLLM("\n".join(f"user reported a preference item {i}" for i in range(10)))
+    llm = _FakeLLM("\n".join(
+        f"prefs | user reported preference item {i} worth remembering | reported several distinct preference"
+        for i in range(10)
+    ))
     report = await mine_transcript(store, llm, asyncio.Event(), write_budget=5)
 
     assert report.written == 5
-    assert len(await store.query_facts(FactQuery(tags=["mined"]))) == 5
+    assert len(await store.query_facts(FactQuery(tags=["sem"]))) == 5
+    assert await _get_meta(store, _MINING_WATERMARK_KEY) is None  # not advanced past a capped chunk
 
 
 @pytest.mark.asyncio
-async def test_repeated_line_supersedes_not_duplicates(store: MemoryStore):
-    """A re-mined identical line hits the SAME key (mined/{_h8(line)}) -> store_fact's
-    corroboration branch -> no duplicate row. The active history for the key stays at 1."""
-    from localharness.memory.mining import _h8
+async def test_repeated_claim_corroborates_not_duplicates(store: MemoryStore):
+    """A re-mined identical claim hits the SAME sem/ key -> corroboration, no duplicate row."""
+    from localharness.memory.mining import _h8, _slug
 
-    line = "user reported a preference for dark mode"
-    await store.append_history(_rec(5, "the user reported a preference for dark mode theme"))
-    llm = _FakeLLM(line)
+    claim = "user reported a preference for dark mode"
+    await store.append_history(_rec(5, "the user reported a preference for dark mode theme", sid="s1"))
+    llm = _FakeLLM(f"prefs | {claim} | reported a preference for dark mode")
 
     r1 = await mine_transcript(store, llm, asyncio.Event())
     assert r1.written == 1
 
-    # A NEWER record with identical content -> re-mined past the advanced watermark -> the
-    # same line -> the same key -> corroboration (no new row).
-    await store.append_history(_rec(50, "the user reported a preference for dark mode theme"))
+    await store.append_history(_rec(50, "the user reported a preference for dark mode theme", sid="s1"))
     r2 = await mine_transcript(store, llm, asyncio.Event())
     assert r2.written == 1
 
-    history = await store.get_fact_history(f"mined/{_h8(line)}")
-    assert len(history) == 1  # supersede-on-repeat: identical value == no duplicate row
+    history = await store.get_fact_history(f"sem/{_slug('prefs')}/{_h8(claim)}")
+    assert len(history) == 1  # corroboration on repeat: identical value == no duplicate row
