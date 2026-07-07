@@ -1,6 +1,7 @@
 """MemoryStore: SQLite facts, sessions, FTS5, bus integration."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -92,6 +93,29 @@ class MemoryContext:
     token_estimate: int
 
 
+# Stimulus-text cap for activation traces (design: the digest is the sha256 of the FULL
+# text plus the text truncated to ~200 chars — the hash keeps discriminating past the cap).
+_STIMULUS_TEXT_CAP = 200
+
+
+@dataclass(frozen=True)
+class ActivationTrace:
+    """One append-only retrieval-event row (tag-graph substrate P0). Records the stimulus
+    digest, the atoms it fired (search/recall hits), and the subset actually injected into
+    context — the non-backfillable history that later co-activation weights / pattern-
+    completion retrieval will consume. Pure bookkeeping: no scoring/weights/spreading here."""
+    id: int
+    agent_id: str
+    session_id: str
+    turn: int | None
+    stimulus_hash: str
+    stimulus_text: str
+    fired_ids: list[int]
+    injected_ids: list[int]
+    source: str
+    ts: int
+
+
 # ---------------------------------------------------------------------------
 # Phase 36 (SEMA-03/04): lesson-cluster "chapter" schema contract
 # ---------------------------------------------------------------------------
@@ -179,7 +203,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -458,6 +482,39 @@ PRAGMA user_version = 4;
 COMMIT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v5 — the activation-trace log (tag-graph substrate P0). ADDITIVE ONLY:
+# one new append-only table, zero touches to facts/sessions/edges — so the ambient
+# injected block stays byte-stable by construction (same discipline as v4). ONE
+# BEGIN IMMEDIATE ... PRAGMA user_version = 5; COMMIT transaction (critic M1: crash
+# -> rollback to intact v4 -> clean retry), matching the additive v3->v4 precedent.
+#
+# One row per retrieval event: the stimulus digest (stimulus_hash = sha256 of the FULL
+# query/recall text; stimulus_text = that text truncated to _STIMULUS_TEXT_CAP), the
+# fired atom ids (search/recall hits, JSON array), the injected subset (JSON array), the
+# session/turn context, source seam, ts. Append-only — no update/delete path exists.
+# Tag ids from the design are DEFERRED (tags don't exist yet): omitted, not a dead column.
+# ---------------------------------------------------------------------------
+
+MIGRATION_V4_TO_V5_SQL = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS activation_traces (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id       TEXT    NOT NULL,
+    session_id     TEXT    NOT NULL DEFAULT '',
+    turn           INTEGER,
+    stimulus_hash  TEXT    NOT NULL,
+    stimulus_text  TEXT    NOT NULL DEFAULT '',
+    fired_ids      TEXT    NOT NULL DEFAULT '[]',
+    injected_ids   TEXT    NOT NULL DEFAULT '[]',
+    source         TEXT    NOT NULL DEFAULT '',
+    ts             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activation_traces_agent ON activation_traces(agent_id, ts);
+PRAGMA user_version = 5;
+COMMIT;
+"""
+
 
 # ---------------------------------------------------------------------------
 # MemoryStore
@@ -591,6 +648,9 @@ class MemoryStore:
             v = await _version()
         if v == 3:
             await self._db.executescript(MIGRATION_V3_TO_V4_SQL)
+            v = await _version()
+        if v == 4:
+            await self._db.executescript(MIGRATION_V4_TO_V5_SQL)
             v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
@@ -1164,6 +1224,77 @@ class MemoryStore:
         ) as cur:
             rows = await cur.fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Activation-trace log (tag-graph substrate P0) — append-only bookkeeping.
+    # One row per retrieval event; NO update/delete path. Best-effort at the call
+    # site: a trace-write failure must never fail the retrieval itself. Traces cannot
+    # be backfilled, so the log ships before any consumer (co-activation weights,
+    # pattern-completion retrieval) exists. Read helpers are plain log reads for tests
+    # + forensics — no scoring, no weights, no spreading.
+    # ------------------------------------------------------------------
+
+    async def record_activation_trace(
+        self, *, stimulus: str, fired_ids: list[int], injected_ids: list[int],
+        source: str, session_id: str | None = None, turn: int | None = None,
+    ) -> int:
+        """Append one activation trace. `stimulus` is the raw query/recall text — the digest
+        stores sha256 of the FULL text plus the text truncated to _STIMULUS_TEXT_CAP.
+        `fired_ids` are the atoms the stimulus surfaced (search/recall hits); `injected_ids`
+        are the subset actually rendered into context (⊆ fired). session_id falls back to the
+        live session. Returns the new rowid. ONE INSERT, no reads."""
+        assert self._db is not None
+        text = stimulus or ""
+        stim_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        sess = session_id if session_id is not None else (self._current_session_id or "")
+        cur = await self._db.execute(
+            "INSERT INTO activation_traces "
+            "(agent_id, session_id, turn, stimulus_hash, stimulus_text, fired_ids, "
+            "injected_ids, source, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._agent_id, sess, turn, stim_hash, text[:_STIMULUS_TEXT_CAP],
+             json.dumps(fired_ids), json.dumps(injected_ids), source, int(time.time())),
+        )
+        await self._db.commit()
+        return cur.lastrowid
+
+    _TRACE_COLS = (
+        "id, agent_id, session_id, turn, stimulus_hash, stimulus_text, "
+        "fired_ids, injected_ids, source, ts"
+    )
+
+    async def recent_activation_traces(self, *, limit: int = 50) -> list[ActivationTrace]:
+        """Most-recent-first activation traces for this agent (forensics + tests)."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TRACE_COLS} FROM activation_traces "
+            "WHERE agent_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
+            (self._agent_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_activation_trace(r) for r in rows]
+
+    async def activation_traces_for_atom(
+        self, atom_id: int, *, limit: int = 50
+    ) -> list[ActivationTrace]:
+        """Traces where `atom_id` was among the fired atoms, newest-first (forensics). P0 has
+        no derived co-activation index (weights are a later rebuildable view per the design),
+        so this scans the agent's log and filters on the parsed JSON — exact membership, not
+        a substring LIKE that would confuse id 1 with 11. Read-only."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TRACE_COLS} FROM activation_traces "
+            "WHERE agent_id = ? ORDER BY ts DESC, id DESC",
+            (self._agent_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        out: list[ActivationTrace] = []
+        for r in rows:
+            t = _row_to_activation_trace(r)
+            if atom_id in t.fired_ids:
+                out.append(t)
+                if len(out) >= limit:
+                    break
+        return out
 
     # ------------------------------------------------------------------
     # History delegation
@@ -1838,4 +1969,20 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
         access_count=row[17] if len(row) > 17 else 0,
         last_accessed_at=row[18] if len(row) > 18 else None,
         node_kind=row[19] if len(row) > 19 else "fact",
+    )
+
+
+def _row_to_activation_trace(row: aiosqlite.Row) -> ActivationTrace:
+    """Reconstruct an ActivationTrace from a _TRACE_COLS row; JSON id-arrays parsed back."""
+    return ActivationTrace(
+        id=row["id"],
+        agent_id=row["agent_id"],
+        session_id=row["session_id"],
+        turn=row["turn"],
+        stimulus_hash=row["stimulus_hash"],
+        stimulus_text=row["stimulus_text"],
+        fired_ids=json.loads(row["fired_ids"]) if row["fired_ids"] else [],
+        injected_ids=json.loads(row["injected_ids"]) if row["injected_ids"] else [],
+        source=row["source"],
+        ts=row["ts"],
     )
