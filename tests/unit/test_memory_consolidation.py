@@ -596,13 +596,27 @@ async def _seed_cluster_lesson(store, tool, tier, body, sess, lesson):
     return promoted
 
 
-async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+_USE_TOPIC = object()  # sentinel: attach a child tag named after `topic` (Stage B co-tag edges)
+
+
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65, child_tag=_USE_TOPIC):
+    """Stage B: grouping is by shared CHILD tag — by default file the atom under an active child
+    tag named after `topic` so same-topic atoms co-tag-link (as the old same-slug token rule did)."""
     import hashlib
     h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
-    return await store.store_fact(
+    fact = await store.store_fact(
         key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
         confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
     )
+    tag_name = topic if child_tag is _USE_TOPIC else child_tag
+    if tag_name:
+        child = await store.get_tag(tag_name)
+        if child is None:
+            child = await store.create_tag(
+                tag_name, f"serves {tag_name}; example {tag_name}",
+                parent_id=(await store.get_tag("project")).id, status="active", origin="discovered")
+        await store.add_atom_tag(fact.id, child.id, "discovery")
+    return fact
 
 
 async def _seed_phase36(store) -> str:

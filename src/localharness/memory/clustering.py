@@ -39,6 +39,11 @@ from dataclasses import dataclass, field
 
 from localharness.memory.sqlite import Fact, FactQuery, _row_to_fact
 
+# Co-tag generic-hub guard (Stage B): a child tag on > _TAG_DF_FRACTION of the pool forms no
+# edges, floored at _TAG_DF_FLOOR members so a small homogeneous cluster survives a tiny pool.
+_TAG_DF_FRACTION = 0.30
+_TAG_DF_FLOOR = 3
+
 
 @dataclass(frozen=True)
 class Cluster:
@@ -124,19 +129,19 @@ def _topic_slug(key: str) -> str | None:
 
 
 async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int, set[int]]:
-    """Undirected relatedness adjacency over the pool — GRAPH signal + a precision-tiered token
-    signal (run-2 ruling 1: the old per-token FTS union let ONE generic verb — 'requested',
-    'should' — transitively weld a 26-atom pool into a single mega-component; no chapter can
-    form from a blob). Edge rule:
-      - graph: F~G iff G is within F's neighborhood (depth<=graph_depth) — unchanged;
-      - same `sem/{topic}/` slug: ONE shared salient token suffices (the miner already grouped
-        them; a single signal confirms);
-      - DIFFERENT slugs (or no slug): >=2 DISTINCT shared salient tokens, IGNORING tokens whose
-        pool document-frequency exceeds 30% (generic-verb guard; floored at >2 members so the
-        statistic needs support — in a 2-member pool every shared token is trivially 100%).
-    Token matching is exact in-memory intersection over _salient_tokens (the FTS probe could
-    neither count distinct shared tokens nor see pool-level document frequency). Pure read.
-    `fts_top_k` is unused here (kept for signature stability; aux attachment still probes FTS)."""
+    """Undirected relatedness adjacency over the pool — GRAPH signal + CO-TAG signal. Word-overlap
+    edges are REPLACED by shared-tag edges (tag-graph M3): chapters now form from the ontological
+    relatedness word-matching structurally cannot see (run-3 markets: 3 one-topic atoms, <=1 shared
+    token, 0 token edges). Edge rule:
+      - graph: F~G iff G is within F's neighborhood (depth<=graph_depth) — unchanged (this is real
+        derived_from/member_of structure, not word overlap, so it stays);
+      - co-tag: F~G iff F and G share an active CHILD tag. BUCKET tags NEVER form edges — they are
+        navigation, and 'project' as an edge source would mega-blob everything project
+        (child_tags_for_atoms returns children only, so this is structural, not just policy).
+    tag-df GUARD (the mega-blob defense, carried from tokens to tags): a child tag attached to
+    > 30% of the pool forms NO edges (generic hub), floored at > 2 members so the statistic needs
+    support in a tiny pool (mirrors the old token generic_cut). Pure read. `fts_top_k` is unused
+    here (kept for signature stability; aux attachment still probes FTS)."""
     pool_ids = {f.id for f in pool}
     adj: dict[int, set[int]] = {f.id: set() for f in pool}
 
@@ -150,21 +155,24 @@ async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int
             if nid in pool_ids and nid != f.id:
                 _link(f.id, nid)
 
-    # (b) TOKEN signal, precision-tiered by topic slug.
-    toks: dict[int, frozenset[str]] = {f.id: frozenset(_salient_tokens(f.value)) for f in pool}
-    df = Counter(t for s in toks.values() for t in s)
-    generic_cut = max(2, 0.30 * len(pool))
-    generic = {t for t, c in df.items() if c > generic_cut}
-    slugs = {f.id: _topic_slug(f.key) for f in pool}
-    ordered = list(pool)
-    for i, a in enumerate(ordered):
-        for b in ordered[i + 1:]:
-            shared = toks[a.id] & toks[b.id]
-            if slugs[a.id] is not None and slugs[a.id] == slugs[b.id]:
-                if shared:  # same topic: single signal suffices (as before)
-                    _link(a.id, b.id)
-            elif len(shared - generic) >= 2:  # cross-topic: two distinct non-generic tokens
-                _link(a.id, b.id)
+    # (b) CO-TAG signal (REPLACES word overlap): two atoms sharing an active CHILD tag link.
+    child_tags = await store.child_tags_for_atoms(list(pool_ids), edge_eligible=True)
+    tag_df = Counter(t for tags in child_tags.values() for t in tags)
+    # generic-hub guard: a child tag on > 30% of the pool forms no edges. Floored at count 3
+    # (not the token precedent's 2): the old token guard EXEMPTED same-slug pairs, so a same-topic
+    # cluster always linked; co-tag has no such exemption, so the absolute floor must protect a
+    # legitimate small (<=3-member) homogeneous cluster in a tiny pool from being read as a hub.
+    # In a real (large) pool the 30% fraction dominates the floor, so scale behaviour is unchanged.
+    df_cut = max(_TAG_DF_FLOOR, _TAG_DF_FRACTION * len(pool))
+    generic = {t for t, c in tag_df.items() if c > df_cut}
+    members_by_tag: dict[int, list[int]] = {}
+    for aid, tags in child_tags.items():
+        for t in tags - generic:
+            members_by_tag.setdefault(t, []).append(aid)
+    for member_ids in members_by_tag.values():
+        for i, a in enumerate(member_ids):
+            for b in member_ids[i + 1:]:
+                _link(a, b)
     return adj
 
 
