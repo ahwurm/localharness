@@ -405,3 +405,77 @@ async def test_attach_aux_failures_direct(store):
     queue = await _load_failure_queue(store)
     aux = await _attach_aux_failures(store, [m1, m2], queue, fts_top_k=5, graph_depth=2, aux_cap=8)
     assert [f.key for f in aux] == [fail.key]
+
+
+# ---------------------------------------------------------------------------
+# Stage B — CO-TAG relatedness edges (Amendment 2/M3): two atoms sharing an ACTIVE
+# CHILD tag get an edge; buckets never form edges; a child tag over the df cap forms
+# no edges (generic-hub guard carried from tokens to tags); token overlap alone no
+# longer links. Grouping now sees ontological relatedness word-matching cannot.
+# ---------------------------------------------------------------------------
+
+async def _child(store, name, bucket="project"):
+    """Create (or fetch) an edge-eligible active child tag under a bucket."""
+    existing = await store.get_tag(name)
+    if existing is not None:
+        return existing
+    b = await store.get_tag(bucket)
+    return await store.create_tag(name, f"serves {name}; example {name}", parent_id=b.id,
+                                  status="active", origin="discovered")
+
+
+@pytest.mark.asyncio
+async def test_co_tag_child_links_across_slugs_without_shared_tokens(store):
+    """The whole point: two atoms in DIFFERENT slugs with ZERO shared tokens still group when
+    they share an active CHILD tag — semantic/ontological relatedness token-matching can't see."""
+    a = await _seed_sem(store, "alpha bravo charlie delta echo", "s1", topic="topicone")
+    b = await _seed_sem(store, "foxtrot golf hotel india juliet", "s2", topic="topictwo")
+    child = await _child(store, "sharedchild")
+    await store.add_atom_tag(a.id, child.id, "discovery")
+    await store.add_atom_tag(b.id, child.id, "discovery")
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [2]
+
+
+@pytest.mark.asyncio
+async def test_token_overlap_alone_no_longer_links(store):
+    """Word overlap is REPLACED, not supplemented: two same-slug atoms sharing salient tokens but
+    NO shared child tag do NOT link (the run-3 markets 3-atom/1-token blob can't form spuriously)."""
+    await _seed_sem(store, "the absolute path resolved the read error cleanly", "s1", topic="reads")
+    await _seed_sem(store, "the absolute path resolved the permission error cleanly", "s2", topic="reads")
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_bucket_tag_never_forms_an_edge(store):
+    """Amendment 2/M3: a BUCKET tag is navigation, never an edge — two atoms sharing ONLY a
+    bucket (even with same slug + shared tokens) do not group ('project' would mega-blob)."""
+    a = await _seed_sem(store, "the absolute path resolved the read error", "s1", topic="reads")
+    b = await _seed_sem(store, "the absolute path resolved the write error", "s2", topic="reads")
+    proj = await store.get_tag("project")
+    await store.add_atom_tag(a.id, proj.id, "mint")
+    await store.add_atom_tag(b.id, proj.id, "mint")
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_tag_df_guard_excludes_generic_child(store):
+    """Mega-blob defense carried from tokens to tags: a child tag attached to > 30% of the pool
+    forms NO edges (generic hub), while a non-generic shared child still links its members."""
+    generic = await _child(store, "generichub")
+    specific = await _child(store, "specifictag")
+    atoms = []
+    for i, w in enumerate(["alpha bravo", "charlie delta", "echo foxtrot", "golf hotel", "india juliet"]):
+        a = await _seed_sem(store, f"{w} kilo{i} lima{i}", f"s{i}", topic=f"topic{i}")
+        await store.add_atom_tag(a.id, generic.id, "discovery")  # on ALL 5 (100% > 30% -> hub)
+        atoms.append(a)
+    await store.add_atom_tag(atoms[0].id, specific.id, "discovery")  # on 2 (40% -> not a hub)
+    await store.add_atom_tag(atoms[1].id, specific.id, "discovery")
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert sorted(len(c) for c in _connected_components(pool, adj)) == [1, 1, 1, 2]
