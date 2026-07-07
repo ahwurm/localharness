@@ -972,6 +972,17 @@ def _load_manifest(path: Path) -> dict:
     return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
 
 
+def _schema_write_budget(manifest: dict) -> int:
+    """FIX 1 (run-10): a NON-STARVING chapter-writer budget for the single grading-phase pass.
+    write_cluster_schemas attempts only clusters[:write_budget] (biggest-first); the production
+    default of 3 is tuned for recurring idle cycles, but the designed-month provable consolidates
+    exactly ONCE, so a month with >3 expected chapters would leave the smaller clusters permanently
+    unattempted (run-10's markets cluster — 4th biggest — never was). At most len(topics) clusters
+    can form, so budget every manifest topic (+1 headroom): grouping quality, not a write cap, is
+    what the eval measures. The production default (3) is untouched."""
+    return len(manifest.get("topics", {})) + 1
+
+
 def _c2(n: int) -> int:
     return n * (n - 1) // 2
 
@@ -1515,7 +1526,10 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # the [embeddings] extra is installed, else HashingEmbedder).
         embedder = HashingEmbedder() if args.offline else default_embedder()
         pass_report = await ConsolidationPass(
-            store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm, embedder=embedder
+            store,
+            MemoryConsolidationConfig(reconcile_enabled=True,
+                                      schema_write_budget=_schema_write_budget(manifest)),
+            llm=m_llm, embedder=embedder,
         ).run()
         grade = await _grade_designed_month(store, manifest, tqm)
         schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
