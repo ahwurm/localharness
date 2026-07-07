@@ -316,6 +316,7 @@ class ConsolidationPass:
         m = await mine_transcript(
             self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget,
             completions_log=report.mining_completions,  # FIX 2c: persist raw completions
+            file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
         )
         report.mined = m.written
 

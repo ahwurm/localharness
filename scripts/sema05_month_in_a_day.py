@@ -95,6 +95,7 @@ from localharness.core.events import (  # noqa: E402
     UserMessage,
 )
 from localharness.memory.consolidation import ConsolidationPass  # noqa: E402
+from localharness.memory.tag_classify import _BUCKET_MARKER, _CHILD_MARKER  # noqa: E402
 from localharness.memory.gate import WriteGate  # noqa: E402
 from localharness.memory.idle_llm import (  # noqa: E402
     LLMTextAdapter,
@@ -180,6 +181,26 @@ class _OfflineFakeLLM:
             corpus = prompt.split("\n\n", 1)[1] if "\n\n" in prompt else prompt
             lines = [ln for ln in corpus.splitlines() if ln.strip()]
             return " ".join(lines[0].split()[:12]) if lines else "chapter"
+        if _BUCKET_MARKER in prompt:  # mint-time bucket pick (dispatch on the memory line only,
+            mem = prompt.split("memory:")[-1].lower()  # NOT the menu defs, which name every example
+            return "project" if any(k in mem for k in (
+                "subagent", "harness", "vllm", "port", "gpu", "server", "chapter",
+                "summarizer", "citation", "cache")) else "personal"
+        if _CHILD_MARKER in prompt:  # mint-time child pick
+            mem = prompt.split("memory:")[-1].lower()
+            if any(k in mem for k in ("subagent", "build order", "summarizer", "citation")):
+                return "roadmap"
+            if any(k in mem for k in ("port", "vllm", "gpu", "server", "cache", "deploy")):
+                return "ops"
+            if any(k in mem for k in ("read-only", "capped", "rule", "convention", "standard")):
+                return "conventions"
+            if any(k in mem for k in ("race", "training", "knee", "taper", "10k", "run")):
+                return "health"
+            if any(k in mem for k in ("kyoto", "ryokan", "onsen", "trip", "travel", "nara")):
+                return "travel"
+            if any(k in mem for k in ("stock", "hbm", "earnings", "semiconductor", "momentum")):
+                return "preferences"
+            return "none"
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
         if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
@@ -1037,6 +1058,17 @@ async def _grade_designed_month(
         for sid, members in chapter_members.items()
     }
     atoms_by_topic = Counter(gt.get(a.id) for a in sem_atoms)
+    # Grader gap: per-topic sitting span. A topic with >= min_cluster_size atoms but spanning
+    # < min_sessions sittings is NOT a correct-null — the stability gate refuses it, so it is a
+    # REAL miss (reported), never silently excused as nullable.
+    sittings_by_topic: dict = {}
+    for a in sem_atoms:
+        sittings_by_topic.setdefault(gt.get(a.id), set()).add(_day_of(a.provenance))
+    low_span_topics = sorted(
+        t for t in expected
+        if atoms_by_topic.get(t, 0) >= min_cluster_size
+        and len(sittings_by_topic.get(t, set())) < min_sessions
+    )
 
     # B1: >= 5/6 expected topics form a chapter — at most one may fail to form and only if it is a
     # correct-null (< min_cluster_size atoms). Non-vacuous: >= 1 chapter MUST actually form (a
@@ -1105,11 +1137,35 @@ async def _grade_designed_month(
         if m.key.startswith(("gate/", "predgate/", "learned/"))
     )
 
+    # Grader gap (candidate-cluster observability): the stable clusters derivable from the store
+    # RIGHT NOW (schema-free pool) — so a cluster that exists in the data but never became a
+    # chapter leaves a forensic trace, and "clustered but never written" / "never clustered" is
+    # diagnosable from the artifact alone (pairs with per_schema_grounding's attempt list).
+    candidates_considered: list[dict] = []
+    try:
+        from localharness.memory import clustering as _clustering
+        cpool = [f for f in await _clustering._load_pool(store) if f.node_kind != "schema"]
+        if len(cpool) >= min_cluster_size:
+            cadj = await _clustering._relatedness_edges(store, cpool, fts_top_k=5, graph_depth=2)
+            for members in _clustering._connected_components(cpool, cadj):
+                if len(members) < min_cluster_size:
+                    continue
+                sess = {s for s in await _clustering._component_sessions(store, members)
+                        if not s.startswith("cluster:")}
+                lbl = (Counter(gt.get(m.id) for m in members if m.key.startswith("sem/"))
+                       .most_common(1) or [(None, 0)])[0][0]
+                candidates_considered.append(
+                    {"label": lbl, "size": len(members), "n_sittings": len(sess)})
+    except Exception:
+        candidates_considered = []
+
     stage_a = {"a1_recall": round(a1_recall, 3), "a1_covered": covered,
                "a1_topic_sittings": len(topic_sittings), "a1_ok": a1_recall >= 0.8,
                "a2_kill": a2_kill, "a3_provenance_ok": a3_ok, "sem_atoms": len(sem_atoms)}
     stage_b = {"b1_ok": b1_ok, "b1_chapters_or_null": b1_count, "formed_topics": sorted(formed),
-               "nullable_topics": sorted(nullable), "b2_ok": b2_ok, "per_chapter": per_chapter,
+               "nullable_topics": sorted(nullable), "low_span_topics": low_span_topics,
+               "candidates_considered": candidates_considered,
+               "b2_ok": b2_ok, "per_chapter": per_chapter,
                "ari": ari, "b3_ok": b3_ok, "noise_in_chapter": noise_in_chapter,
                "b4_ok": b4_ok, "correction_reachable": reachable, "stale_active": stale_active,
                "b5_kill": b5_kill, "operational_rows_in_chapter": op_in_chapter}

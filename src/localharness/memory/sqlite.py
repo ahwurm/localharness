@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiosqlite
@@ -116,6 +117,32 @@ class ActivationTrace:
     ts: int
 
 
+@dataclass(frozen=True)
+class Tag:
+    """A first-class tag row (schema v6 — the tag-graph spine). TWO layers only: a BUCKET has
+    parent_id IS NULL (the seeded superordinate — personal/project); a CHILD has parent_id set to
+    its bucket. v1 permits ONLY bucket->child (depth 2) and nothing deeper — a grandchild is
+    refused at creation (create_tag), so the classifier stays flat at <=2 picks forever.
+    `status`: seeded (fixed spine) | proposed (a discovery candidate accruing evidence) | active
+    (incorporated; edge-eligible) | merged (folded into `merged_into`) | retired (pruned).
+    `origin`: seeded | discovered. The evidence-ladder fields (distinct_sittings, reuse_count,
+    last_accrual_ts) accrue on proposed candidates with recency decay until they incorporate or
+    prune (Amendment 4's Bayesian synaptogenesis — v1 realises the weights as counts + decay)."""
+    id: int
+    agent_id: str
+    name: str
+    definition: str
+    status: str
+    parent_id: int | None
+    origin: str
+    merged_into: int | None = None
+    distinct_sittings: int = 0
+    reuse_count: int = 0
+    last_accrual_ts: int | None = None
+    created_at: int = 0
+    updated_at: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Phase 36 (SEMA-03/04): lesson-cluster "chapter" schema contract
 # ---------------------------------------------------------------------------
@@ -203,7 +230,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -517,6 +544,85 @@ COMMIT;
 
 
 # ---------------------------------------------------------------------------
+# Schema v6 — the tag graph (Amendment 4: two buckets, two layers). ADDITIVE ONLY:
+# two NEW tables (tags, atom_tags); facts/sessions/activation_traces untouched, so
+# _FACT_COLS / _row_to_fact / the ambient injected block are byte-stable by construction.
+# ONE BEGIN IMMEDIATE ... PRAGMA user_version = 6; COMMIT (crash -> rollback to v5).
+#
+# DEPTH CONVENTION (pinned as the critique's fix-before-build #4): `parent_id` NULL marks a
+# BUCKET (the seeded superordinate root); a non-NULL parent_id marks a CHILD of that bucket.
+# v1 permits EXACTLY these two layers (bucket -> child) and NOTHING deeper — a grandchild is
+# refused in create_tag (a soft, code-level constraint; a recursive SQL CHECK is not worth it
+# for a two-layer schema). The seeded spine + the mint classifier both stay flat at <= 2 picks.
+# ---------------------------------------------------------------------------
+
+MIGRATION_V5_TO_V6_SQL = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS tags (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id          TEXT    NOT NULL,
+    name              TEXT    NOT NULL,
+    definition        TEXT    NOT NULL DEFAULT '',
+    status            TEXT    NOT NULL DEFAULT 'proposed',   -- seeded|proposed|active|merged|retired
+    parent_id         INTEGER,                                -- NULL = bucket (root); set = child. v1: two layers only.
+    origin            TEXT    NOT NULL DEFAULT 'discovered',  -- seeded|discovered
+    merged_into       INTEGER,                                -- surviving tag id when status = 'merged'
+    distinct_sittings INTEGER NOT NULL DEFAULT 0,             -- evidence ladder: distinct sittings the members span
+    reuse_count       INTEGER NOT NULL DEFAULT 0,             -- evidence ladder: trace reuse / co-fire strength
+    last_accrual_ts   INTEGER,                                -- evidence ladder: recency anchor for decay
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tags_agent_name ON tags(agent_id, name);
+CREATE INDEX IF NOT EXISTS idx_tags_agent_parent ON tags(agent_id, parent_id, status);
+CREATE TABLE IF NOT EXISTS atom_tags (
+    atom_id     INTEGER NOT NULL,
+    tag_id      INTEGER NOT NULL,
+    provenance  TEXT    NOT NULL DEFAULT 'mint',   -- mint|discovery|curation
+    ts          INTEGER NOT NULL,
+    PRIMARY KEY (atom_id, tag_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_atom_tags_tag ON atom_tags(tag_id);
+PRAGMA user_version = 6;
+COMMIT;
+"""
+
+# Seeded spine (Amendment 4): TWO buckets, THREE children each, filed by what a memory SERVES
+# (a functional decision rule with an inline example — NEVER a bare "useful"). Every seed has
+# both real run-5 atom evidence AND prior-art convergence (survey §2.3). Idempotent per agent.
+_SEED_BUCKETS: list[tuple[str, str]] = [
+    ("personal",
+     "File here if the memory SERVES the user's own life — their body, interests, plans, and "
+     "pursuits — independent of any software project. Example: a Kyoto trip, a race-training "
+     "plan, or which stocks they follow."),
+    ("project",
+     "File here if the memory SERVES building, running, or configuring THIS software project — "
+     "its code, infrastructure, conventions, or roadmap. Example: the vLLM server port, a "
+     "subagent build order, or a read-only-subagents rule."),
+]
+_SEED_CHILDREN: dict[str, list[tuple[str, str]]] = {
+    "personal": [
+        ("health", "Serves the user's body, fitness, or medical life. Example: training for a "
+                   "10k, knee pain after intervals, or adding a pre-race taper."),
+        ("travel", "Serves a trip the user is planning or taking. Example: a Kyoto autumn-colors "
+                   "trip, whether a JR pass is worth it, or a ryokan onsen night."),
+        ("preferences", "Serves a standing personal taste or interest the user holds across "
+                        "topics. Example: follows HBM/semiconductor stocks, or prefers earnings "
+                        "quality over momentum."),
+    ],
+    "project": [
+        ("ops", "Serves running or configuring THIS project's infrastructure — ports, GPUs, "
+                "servers, deploys, debugging. Example: the vLLM server listens on port 8081, or "
+                "the KV-cache-spill mitigation."),
+        ("conventions", "Serves a rule or standard to follow in THIS project. Example: subagents "
+                        "are read-only unless stated, or the summarizer is capped at 200 words."),
+        ("roadmap", "Serves what is planned or being built in THIS project. Example: the subagent "
+                    "build order, or the first subagent is the summarizer."),
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
 # MemoryStore
 # ---------------------------------------------------------------------------
 
@@ -608,6 +714,7 @@ class MemoryStore:
         await self._db.create_function("lh_slow_score", 5, _slow_score, deterministic=True)
         await self._db.create_function("lh_fused_score", 7, _fused_score, deterministic=True)
         await self._apply_migrations()
+        await self._seed_tags()
 
         if self._bus is not None:
             from localharness.core.events import Action, Observation, UserMessage
@@ -651,6 +758,9 @@ class MemoryStore:
             v = await _version()
         if v == 4:
             await self._db.executescript(MIGRATION_V4_TO_V5_SQL)
+            v = await _version()
+        if v == 5:
+            await self._db.executescript(MIGRATION_V5_TO_V6_SQL)
             v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
@@ -866,6 +976,229 @@ class MemoryStore:
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_fact(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Tag graph (schema v6): seeded spine + mint-time filing edges + the
+    # discovery evidence ladder. Grouping reads CHILD-tag co-membership;
+    # buckets are navigation and NEVER form grouping edges (Amendment 2/M3).
+    # ------------------------------------------------------------------
+
+    _TAG_COLS = ("id, agent_id, name, definition, status, parent_id, origin, merged_into, "
+                 "distinct_sittings, reuse_count, last_accrual_ts, created_at, updated_at")
+
+    async def _seed_tags(self) -> None:
+        """Idempotently write the seeded spine (Amendment 4) for this agent. Runs every open()
+        after migrations; ON CONFLICT(agent_id, name) DO NOTHING makes re-seeding a no-op."""
+        assert self._db is not None
+        now = int(time.time())
+        for name, definition in _SEED_BUCKETS:
+            await self._db.execute(
+                "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
+                "created_at, updated_at) VALUES (?, ?, ?, 'seeded', NULL, 'seeded', ?, ?) "
+                "ON CONFLICT(agent_id, name) DO NOTHING",
+                (self._agent_id, name, definition, now, now),
+            )
+        await self._db.commit()
+        for bucket_name, children in _SEED_CHILDREN.items():
+            bucket = await self._get_tag_row(bucket_name)
+            assert bucket is not None
+            for name, definition in children:
+                await self._db.execute(
+                    "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
+                    "created_at, updated_at) VALUES (?, ?, ?, 'seeded', ?, 'seeded', ?, ?) "
+                    "ON CONFLICT(agent_id, name) DO NOTHING",
+                    (self._agent_id, name, definition, bucket.id, now, now),
+                )
+        await self._db.commit()
+
+    async def _get_tag_row(self, name: str) -> Tag | None:
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND name = ?",
+            (self._agent_id, name),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_tag(row) if row else None
+
+    async def get_tag(self, name: str) -> Tag | None:
+        return await self._get_tag_row(name)
+
+    async def get_tag_by_id(self, tag_id: int) -> Tag | None:
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND id = ?",
+            (self._agent_id, tag_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_tag(row) if row else None
+
+    async def list_tags(self, *, status: str | None = None) -> list[Tag]:
+        assert self._db is not None
+        q = f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ?"
+        params: list[Any] = [self._agent_id]
+        if status is not None:
+            q += " AND status = ?"
+            params.append(status)
+        q += " ORDER BY id"
+        async with self._db.execute(q, params) as cur:
+            return [_row_to_tag(r) for r in await cur.fetchall()]
+
+    async def buckets(self) -> list[Tag]:
+        """The seeded spine buckets (parent_id IS NULL) — navigation only, never edge sources."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND parent_id IS NULL "
+            "AND status = 'seeded' ORDER BY id",
+            (self._agent_id,),
+        ) as cur:
+            return [_row_to_tag(r) for r in await cur.fetchall()]
+
+    async def active_children(self, bucket_id: int) -> list[Tag]:
+        """Edge-eligible children of a bucket: seeded or incorporated (active) — the exact set a
+        mint-time menu shows and the exact set that forms grouping edges. proposed/merged/retired
+        are excluded (a candidate has no grouping rights until it incorporates)."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND parent_id = ? "
+            "AND status IN ('seeded', 'active') ORDER BY id",
+            (self._agent_id, bucket_id),
+        ) as cur:
+            return [_row_to_tag(r) for r in await cur.fetchall()]
+
+    async def create_tag(self, name: str, definition: str, *, parent_id: int | None = None,
+                         status: str = "proposed", origin: str = "discovered") -> Tag:
+        """Create a tag; DEPTH IS ENFORCED HERE (the v1 two-layer invariant). A child's parent
+        must be a bucket (parent_id IS NULL) — a grandchild (parent is itself a child) raises
+        ValueError, so the graph can never grow past bucket->child in v1. Idempotent on name."""
+        assert self._db is not None
+        if parent_id is not None:
+            parent = await self.get_tag_by_id(parent_id)
+            if parent is None or parent.parent_id is not None:
+                raise ValueError(
+                    f"tag depth: parent {parent_id} is not a bucket — v1 permits only bucket->child"
+                )
+        now = int(time.time())
+        await self._db.execute(
+            "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(agent_id, name) DO NOTHING",
+            (self._agent_id, name, definition, status, parent_id, origin, now, now),
+        )
+        await self._db.commit()
+        tag = await self._get_tag_row(name)
+        assert tag is not None
+        return tag
+
+    async def set_tag_status(self, tag_id: int, status: str, *, name: str | None = None,
+                             merged_into: int | None = None) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE tags SET status = ?, merged_into = COALESCE(?, merged_into), "
+            "name = COALESCE(?, name), updated_at = ? WHERE agent_id = ? AND id = ?",
+            (status, merged_into, name, int(time.time()), self._agent_id, tag_id),
+        )
+        await self._db.commit()
+
+    async def bump_tag_evidence(self, tag_id: int, *, distinct_sittings: int, reuse_count: int,
+                                last_accrual_ts: int) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE tags SET distinct_sittings = ?, reuse_count = ?, last_accrual_ts = ?, "
+            "updated_at = ? WHERE agent_id = ? AND id = ?",
+            (distinct_sittings, reuse_count, last_accrual_ts, int(time.time()),
+             self._agent_id, tag_id),
+        )
+        await self._db.commit()
+
+    async def add_atom_tag(self, atom_id: int, tag_id: int, provenance: str = "mint") -> None:
+        """Attach a tag to an atom (idempotent). provenance: mint|discovery|curation."""
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(atom_id, tag_id) DO NOTHING",
+            (atom_id, tag_id, provenance, int(time.time())),
+        )
+        await self._db.commit()
+
+    async def remove_atom_tags_for_tag(self, tag_id: int) -> None:
+        """Detach a tag from every atom (a pruned discovery candidate's members return to the
+        bucket-only pool so a later cycle can re-discover them)."""
+        assert self._db is not None
+        await self._db.execute("DELETE FROM atom_tags WHERE tag_id = ?", (tag_id,))
+        await self._db.commit()
+
+    async def move_atom_tags(self, from_tag_id: int, to_tag_id: int, provenance: str = "curation") -> None:
+        """Re-point a tag's atom memberships onto another tag (merge/fold). Idempotent."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT atom_id FROM atom_tags WHERE tag_id = ?", (from_tag_id,)
+        ) as cur:
+            atom_ids = [r[0] for r in await cur.fetchall()]
+        now = int(time.time())
+        for aid in atom_ids:
+            await self._db.execute(
+                "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(atom_id, tag_id) DO NOTHING",
+                (aid, to_tag_id, provenance, now),
+            )
+        await self._db.execute("DELETE FROM atom_tags WHERE tag_id = ?", (from_tag_id,))
+        await self._db.commit()
+
+    async def tags_for_atom(self, atom_id: int) -> list[Tag]:
+        assert self._db is not None
+        cols = ", ".join("t." + c for c in self._TAG_COLS.split(", "))
+        async with self._db.execute(
+            f"SELECT {cols} FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            "WHERE a.atom_id = ? AND t.agent_id = ? ORDER BY t.id",
+            (atom_id, self._agent_id),
+        ) as cur:
+            return [_row_to_tag(r) for r in await cur.fetchall()]
+
+    async def atom_tag_rows(self, atom_id: int) -> list[Any]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT atom_id, tag_id, provenance, ts FROM atom_tags WHERE atom_id = ?", (atom_id,)
+        ) as cur:
+            return [SimpleNamespace(atom_id=r[0], tag_id=r[1], provenance=r[2], ts=r[3])
+                    for r in await cur.fetchall()]
+
+    async def child_tags_for_atoms(
+        self, atom_ids: list[int], *, edge_eligible: bool = True
+    ) -> dict[int, set[int]]:
+        """{atom_id -> set of CHILD tag ids}. edge_eligible restricts to seeded/active children
+        (parent_id NOT NULL); buckets are ALWAYS excluded — they never form grouping edges."""
+        assert self._db is not None
+        if not atom_ids:
+            return {}
+        marks = ",".join("?" * len(atom_ids))
+        status_clause = "AND t.status IN ('seeded','active')" if edge_eligible else ""
+        out: dict[int, set[int]] = {}
+        async with self._db.execute(
+            f"SELECT a.atom_id, a.tag_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            f"WHERE a.atom_id IN ({marks}) AND t.agent_id = ? AND t.parent_id IS NOT NULL "
+            f"{status_clause}",
+            (*atom_ids, self._agent_id),
+        ) as cur:
+            for atom_id, tag_id in await cur.fetchall():
+                out.setdefault(atom_id, set()).add(tag_id)
+        return out
+
+    async def atoms_without_child_tag(self, *, bucket_id: int) -> list[Fact]:
+        """The DISCOVERY pool for a bucket: active semantic atoms filed into this bucket (a bucket
+        atom_tag) but carrying NO edge-eligible (seeded/active) child tag yet. Proposed-candidate
+        members ARE included (they are re-clustered and re-matched each cycle until they
+        incorporate or prune). Read-only."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts f "
+            "WHERE f.agent_id = ? AND f.status = 'active' "
+            "AND EXISTS (SELECT 1 FROM atom_tags ab WHERE ab.atom_id = f.id AND ab.tag_id = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM atom_tags ac JOIN tags tc ON tc.id = ac.tag_id "
+            "  WHERE ac.atom_id = f.id AND tc.parent_id IS NOT NULL "
+            "  AND tc.status IN ('seeded','active'))",
+            (self._agent_id, bucket_id),
+        ) as cur:
+            return [_row_to_fact(r) for r in await cur.fetchall()]
 
     async def delete_fact(self, key: str) -> bool:
         """Hard-DELETE a fact by key. Returns True if a row was deleted.
@@ -1926,6 +2259,17 @@ def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
     tokens = (text or "").split()
     quoted = ['"' + t.replace('"', '""') + '"' for t in tokens[:max_tokens] if t.strip('"')]
     return " ".join(quoted)
+
+
+def _row_to_tag(row: aiosqlite.Row) -> Tag:
+    """Reconstruct a Tag from a _TAG_COLS row (by-name; select may be t.-prefixed)."""
+    return Tag(
+        id=row["id"], agent_id=row["agent_id"], name=row["name"], definition=row["definition"],
+        status=row["status"], parent_id=row["parent_id"], origin=row["origin"],
+        merged_into=row["merged_into"], distinct_sittings=row["distinct_sittings"],
+        reuse_count=row["reuse_count"], last_accrual_ts=row["last_accrual_ts"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+    )
 
 
 def _row_to_fact(row: aiosqlite.Row) -> Fact:
