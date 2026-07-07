@@ -66,13 +66,28 @@ async def _seed_learned(store, tool, tier, body, sessions, *, lesson="", node_ki
     return promoted
 
 
-async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+_USE_TOPIC = object()  # sentinel: attach a child tag named after `topic` (Stage B co-tag edges)
+
+
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65, child_tag=_USE_TOPIC):
+    """Stage B: grouping is by SHARED CHILD TAG, so by default file the atom under an active child
+    tag named after `topic` (same-topic atoms co-tag-link, as the old same-slug token rule did).
+    Pass child_tag=None for bucket-only (no grouping edges) or a name to share across topics."""
     import hashlib
     h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
-    return await store.store_fact(
+    fact = await store.store_fact(
         key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
         confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
     )
+    tag_name = topic if child_tag is _USE_TOPIC else child_tag
+    if tag_name:
+        child = await store.get_tag(tag_name)
+        if child is None:
+            child = await store.create_tag(
+                tag_name, f"serves {tag_name}; example {tag_name}",
+                parent_id=(await store.get_tag("project")).id, status="active", origin="discovered")
+        await store.add_atom_tag(fact.id, child.id, "discovery")
+    return fact
 
 
 async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None, prov="sess-fail"):
@@ -91,14 +106,24 @@ async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None, pro
     return f
 
 
-async def _seed_schema(store, suffix, body, depth, prov):
-    """A chapter node exactly as the writer emits it (node_kind='schema', depth:N, 0.8) — used
-    to build a chapter-of-chapters cluster and to probe the depth cap."""
-    return await store.store_fact(
+async def _seed_schema(store, suffix, body, depth, prov, *, child_tag="chapters"):
+    """A chapter node exactly as the writer emits it (node_kind='schema', depth:N, 0.8) — used to
+    build a chapter-of-chapters cluster and to probe the depth cap. Stage B: chapter-of-chapters
+    clustering is now by shared CHILD tag (token overlap removed), so schema seeds meant to
+    cluster share `child_tag`."""
+    sch = await store.store_fact(
         key=f"schema/cluster/{suffix}", value=body,
         tags=["schema", "tier:schema", f"depth:{depth}"],
         confidence=0.8, source="chapter_writer", provenance=prov, node_kind="schema",
     )
+    if child_tag:
+        child = await store.get_tag(child_tag)
+        if child is None:
+            child = await store.create_tag(
+                child_tag, f"serves {child_tag}; example {child_tag}",
+                parent_id=(await store.get_tag("project")).id, status="active", origin="discovered")
+        await store.add_atom_tag(sch.id, child.id, "curation")
+    return sch
 
 
 async def _member_of_dst(store, src_id) -> set[int]:
@@ -323,8 +348,8 @@ async def test_write_budget_caps_schema_count(store):
     for stem in "abcde":
         a = f"{stem}zzzalpha {stem}zzzbravo {stem}zzzcharlie"
         b = f"{stem}zzzalpha {stem}zzzbravo {stem}zzzdelta"
-        await _seed_sem(store, a, f"{stem}s1")
-        await _seed_sem(store, b, f"{stem}s2")
+        await _seed_sem(store, a, f"{stem}s1", topic=f"topic-{stem}")  # 5 distinct child tags ->
+        await _seed_sem(store, b, f"{stem}s2", topic=f"topic-{stem}")  # 5 independent clusters
 
     assert len(await find_stable_clusters(store)) == 5  # five independent clusters
 
@@ -386,10 +411,10 @@ async def test_member_foldout_demotes_but_searchable(store):
 async def test_cancel_stops_further_clusters(store):
     """A cancel_event set mid-generation stops the pass without hanging (partial result) and the
     generation task is truly cancelled — the serial inference gate is released promptly."""
-    await _seed_sem(store, _READ_A, "s1")
-    await _seed_sem(store, _READ_B, "s2")
-    await _seed_sem(store, _DOCK_A, "s3")
-    await _seed_sem(store, _DOCK_B, "s4")
+    await _seed_sem(store, _READ_A, "s1", topic="reads")
+    await _seed_sem(store, _READ_B, "s2", topic="reads")
+    await _seed_sem(store, _DOCK_A, "s3", topic="docker")
+    await _seed_sem(store, _DOCK_B, "s4", topic="docker")
 
     llm = _SlowLLM(delay=10.0)
     cancel = asyncio.Event()

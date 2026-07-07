@@ -83,17 +83,33 @@ async def _seed_failure(store, tool, day="20260705", *, rs=None, value=None):
     return f
 
 
-async def _seed_sem(store, body, session, *, topic="topic", conf=0.65):
+_USE_TOPIC = object()  # sentinel: attach a child tag named after `topic` (Stage B: co-tag edges)
+
+
+async def _seed_sem(store, body, session, *, topic="topic", conf=0.65, child_tag=_USE_TOPIC):
     """A SEMANTIC atom exactly as MOVE-2 mining writes it: key sem/{topic}/{h8(body)}, node_kind
     'fact', provenance = the SOURCE session (so the cluster's session-spread comes from the atom's
     OWN provenance — no gate/ derived_from needed), confidence 0.65 (pool-entry, sub-injection).
-    This is the post-MOVE-1 population; the old `learned/*` operational rows are a separate track."""
+
+    Stage B (co-tag edges): grouping is now by SHARED CHILD TAG, not word overlap — so by default
+    the atom is filed under an active child tag named after `topic` (same-topic atoms therefore
+    co-tag-link, exactly as the old same-slug token rule did). Pass child_tag=None to file it
+    bucket-only (no grouping edges), or child_tag='name' to share a specific tag across topics."""
     import hashlib
     h = hashlib.sha1(body.strip().encode("utf-8")).hexdigest()[:8]
-    return await store.store_fact(
+    fact = await store.store_fact(
         key=f"sem/{topic}/{h}", value=body, tags=["sem", "pending_consolidation"],
         confidence=conf, source="transcript_mining", provenance=session, node_kind="fact",
     )
+    tag_name = topic if child_tag is _USE_TOPIC else child_tag
+    if tag_name:
+        child = await store.get_tag(tag_name)
+        if child is None:
+            child = await store.create_tag(
+                tag_name, f"serves {tag_name}; example {tag_name}",
+                parent_id=(await store.get_tag("project")).id, status="active", origin="discovered")
+        await store.add_atom_tag(fact.id, child.id, "discovery")
+    return fact
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +143,11 @@ async def test_load_pool_is_semantic(store):
 
 @pytest.mark.asyncio
 async def test_related_lessons_form_one_component(store):
-    """FTS signal: two content-overlapping `read` lessons collapse into one component;
-    an unrelated `grep` lesson stays a singleton."""
-    await _seed_sem(store, _READ_A, "s1")
-    await _seed_sem(store, _READ_B, "s2")
-    await _seed_sem(store, _GREP_C, "s3")
+    """Co-tag signal: two `read` lessons sharing a child tag collapse into one component; an
+    unrelated `grep` lesson under a different child tag stays a singleton."""
+    await _seed_sem(store, _READ_A, "s1", topic="reads")
+    await _seed_sem(store, _READ_B, "s2", topic="reads")
+    await _seed_sem(store, _GREP_C, "s3", topic="grep")
 
     pool = await _load_pool(store)
     assert len(pool) == 3  # only the promoted lessons — sub-0.7 gate candidates excluded
@@ -169,10 +185,15 @@ async def test_cross_topic_generic_token_does_not_mega_blob(store):
 
 @pytest.mark.asyncio
 async def test_cross_topic_two_specific_shared_tokens_link(store):
-    """Ruling 1 boundary (no overcorrection): two atoms in DIFFERENT topic slugs sharing >=2
-    distinct low-frequency salient tokens still link — legitimate cross-topic relatedness."""
-    await _seed_sem(store, "user is training for the september marathon race", "s1", topic="race")
-    await _seed_sem(store, "the september marathon schedule needs a taper", "s2", topic="kyoto")
+    """Co-tag boundary (no overcorrection): two atoms in DIFFERENT topic slugs that share an
+    active CHILD tag still link — legitimate cross-slug relatedness (discovery grouped them)."""
+    a = await _seed_sem(store, "user is training for the september marathon race", "s1",
+                        topic="race", child_tag=None)
+    b = await _seed_sem(store, "the september marathon schedule needs a taper", "s2",
+                        topic="kyoto", child_tag=None)
+    fitness = await _child(store, "fitness", bucket="personal")
+    await store.add_atom_tag(a.id, fitness.id, "discovery")
+    await store.add_atom_tag(b.id, fitness.id, "discovery")
 
     pool = await _load_pool(store)
     adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
@@ -201,10 +222,11 @@ async def test_component_sessions_count_only_real_sittings(store):
 
 @pytest.mark.asyncio
 async def test_graph_shared_candidate_forms_component(store):
-    """Graph signal (independent of FTS): two lessons with NO shared salient tokens but a
-    shared derived_from candidate are connected through the depth-2 neighborhood."""
-    d = await _seed_sem(store, "alpha bravo charlie delta echo", "s1")
-    e = await _seed_sem(store, "foxtrot golfing hotels indiana juliett", "s2")
+    """Graph signal (independent of tags): two lessons with NO shared tag but a shared
+    derived_from candidate are connected through the depth-2 neighborhood (graph edges survive
+    the co-tag swap — they are real structure, not word overlap)."""
+    d = await _seed_sem(store, "alpha bravo charlie delta echo", "s1", topic="ta", child_tag=None)
+    e = await _seed_sem(store, "foxtrot golfing hotels indiana juliett", "s2", topic="tb", child_tag=None)
     shared = await store.store_fact("gate/x/alpha/shared/sess", "shared candidate body",
                                     tags=["gate", "pending_consolidation"],
                                     confidence=0.65, provenance="sess")
@@ -275,11 +297,11 @@ async def test_three_lesson_three_sitting_cluster(store):
 @pytest.mark.asyncio
 async def test_clusters_sorted_biggest_first(store):
     """Deterministic order: the biggest chapter leads (writer's per-cycle budget)."""
-    await _seed_sem(store, _READ_A, "s1")
-    await _seed_sem(store, _READ_B, "s2")
-    await _seed_sem(store, _READ_C, "s3")
-    await _seed_sem(store, _DOCK_A, "s4")
-    await _seed_sem(store, _DOCK_B, "s5")
+    await _seed_sem(store, _READ_A, "s1", topic="reads")
+    await _seed_sem(store, _READ_B, "s2", topic="reads")
+    await _seed_sem(store, _READ_C, "s3", topic="reads")
+    await _seed_sem(store, _DOCK_A, "s4", topic="docker")
+    await _seed_sem(store, _DOCK_B, "s5", topic="docker")
 
     clusters = await find_stable_clusters(store)
     assert [len(c.members) for c in clusters] == [3, 2]  # read (3) before docker (2)
@@ -442,8 +464,10 @@ async def test_co_tag_child_links_across_slugs_without_shared_tokens(store):
 async def test_token_overlap_alone_no_longer_links(store):
     """Word overlap is REPLACED, not supplemented: two same-slug atoms sharing salient tokens but
     NO shared child tag do NOT link (the run-3 markets 3-atom/1-token blob can't form spuriously)."""
-    await _seed_sem(store, "the absolute path resolved the read error cleanly", "s1", topic="reads")
-    await _seed_sem(store, "the absolute path resolved the permission error cleanly", "s2", topic="reads")
+    await _seed_sem(store, "the absolute path resolved the read error cleanly", "s1",
+                    topic="reads", child_tag=None)
+    await _seed_sem(store, "the absolute path resolved the permission error cleanly", "s2",
+                    topic="reads", child_tag=None)
     pool = await _load_pool(store)
     adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
     assert [len(c) for c in _connected_components(pool, adj)] == [1, 1]
@@ -453,8 +477,10 @@ async def test_token_overlap_alone_no_longer_links(store):
 async def test_bucket_tag_never_forms_an_edge(store):
     """Amendment 2/M3: a BUCKET tag is navigation, never an edge — two atoms sharing ONLY a
     bucket (even with same slug + shared tokens) do not group ('project' would mega-blob)."""
-    a = await _seed_sem(store, "the absolute path resolved the read error", "s1", topic="reads")
-    b = await _seed_sem(store, "the absolute path resolved the write error", "s2", topic="reads")
+    a = await _seed_sem(store, "the absolute path resolved the read error", "s1",
+                        topic="reads", child_tag=None)
+    b = await _seed_sem(store, "the absolute path resolved the write error", "s2",
+                        topic="reads", child_tag=None)
     proj = await store.get_tag("project")
     await store.add_atom_tag(a.id, proj.id, "mint")
     await store.add_atom_tag(b.id, proj.id, "mint")
