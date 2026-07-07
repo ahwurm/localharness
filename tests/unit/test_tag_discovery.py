@@ -140,6 +140,44 @@ async def test_below_sitting_floor_stays_proposed(store):
 
 
 # ---------------------------------------------------------------------------
+# F5: trace fanout cap — a rich mixed-topic trace row is a generic probe, not pair evidence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mega_trace_row_does_not_link(store):
+    """F5: one rich retrieval event firing MANY atoms must not clique-link unrelated adjacent-
+    sitting atoms (temporal+trace with zero semantic agreement). A trace row over the fanout cap
+    contributes NO pair evidence — the hub-guard shape, carried from tags to trace rows."""
+    await store.create_session("designed-day1", budget={}, model="m", context_tokens_available=1000)
+    await store.create_session("designed-day2", budget={}, model="m", context_tokens_available=1000)
+    a = await _seed_bucket_atom(store, "alpha topic detail", "designed-day1")
+    b = await _seed_bucket_atom(store, "unrelated bravo item", "designed-day2")
+    await store.record_activation_trace(stimulus="broad probe",
+                                        fired_ids=[a.id, b.id] + list(range(9001, 9011)),
+                                        injected_ids=[a.id, b.id], source="memory_search")
+
+    report = await discover_tags(store, _NamerLLM("wrongtag"), asyncio.Event(),
+                                 embedder=_OneHotEmbedder(["zzz"]))
+    assert report.proposed == [] and report.incorporated == []
+    assert await store.get_tag("wrongtag") is None
+
+
+@pytest.mark.asyncio
+async def test_tight_trace_row_with_adjacent_sittings_still_links(store):
+    """Control for the fanout cap: a TIGHT co-fire row (a real reinstatement) plus sitting
+    adjacency is still 2-factor evidence — the cap suppresses generic probes, not real signal."""
+    await store.create_session("designed-day1", budget={}, model="m", context_tokens_available=1000)
+    await store.create_session("designed-day2", budget={}, model="m", context_tokens_available=1000)
+    a = await _seed_bucket_atom(store, "alpha topic detail", "designed-day1")
+    b = await _seed_bucket_atom(store, "related bravo detail", "designed-day2")
+    await _cofire(store, [a, b])
+
+    report = await discover_tags(store, _NamerLLM("pairtag"), asyncio.Event(),
+                                 embedder=_OneHotEmbedder(["zzz"]))
+    assert "pairtag" in report.incorporated
+
+
+# ---------------------------------------------------------------------------
 # Pruning: a candidate that stops accruing decays below the floor and is retired
 # ---------------------------------------------------------------------------
 

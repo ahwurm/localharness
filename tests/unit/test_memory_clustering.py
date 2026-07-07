@@ -158,26 +158,41 @@ async def test_related_lessons_form_one_component(store):
 
 
 @pytest.mark.asyncio
-async def test_cross_topic_generic_token_does_not_mega_blob(store):
-    """Ruling 1 (run-2 forensics: pool=26 -> ONE component of 26 -> no chapter). A generic verb
-    shared across topics must not transitively weld the whole pool: cross-slug links need >=2
-    distinct shared salient tokens AND tokens above 30% pool document-frequency are ignored
-    (generic-verb guard). Here EVERY atom shares 'requested'+'configuration' (df 100% -> generic),
-    so only same-slug links survive: >=5 components, no component mixing topic slugs."""
+async def test_cross_topic_generic_tag_does_not_mega_blob(store, monkeypatch):
+    """Ruling 1 re-derived for CO-TAG edges (run-2 forensics: pool=26 -> ONE component -> no
+    chapter). The old token fixture was VACUOUS under co-tag (exclusive per-topic auto-tags make
+    cross-topic links structurally impossible), so this rebuilds the mega-blob scenario in tag
+    space: 6 topics x [3,4,4,5,5,6] = 27 atoms, each carrying its own topic child tag PLUS one
+    shared generic child tag on ALL 27 (df 100% > the 30% cut). The tag-df guard is the ONLY
+    thing preventing one 27-atom mega-component — proven by the in-test BITE CHECK (guard
+    disabled -> exactly one component), so deleting the guard fails this test."""
+    from localharness.memory import clustering as clustering_mod
+
     topics = ["subagents", "harness", "markets", "gpuops", "race", "kyoto"]
     counts = [3, 4, 4, 5, 5, 6]
+    hub = await _child(store, "requested")  # the generic hub tag, attached to every atom
     for t, c in zip(topics, counts):
         for i in range(c):
-            await _seed_sem(
+            a = await _seed_sem(
                 store, f"user requested the {t}alpha {t}beta configuration item {i}",
                 f"s{i % 3}", topic=t,
             )
+            await store.add_atom_tag(a.id, hub.id, "discovery")
 
     pool = await _load_pool(store)
     assert len(pool) == sum(counts)
+
+    # BITE CHECK: with the df guard disabled, the shared tag welds ONE 27-atom mega-component —
+    # i.e. the guard (not the fixture's shape) is what prevents the blob.
+    monkeypatch.setattr(clustering_mod, "_TAG_DF_FLOOR", 10**6)
+    monkeypatch.setattr(clustering_mod, "_TAG_DF_FRACTION", 10**6)
+    adj_off = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj_off)] == [sum(counts)]
+    monkeypatch.undo()
+
     adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
     comps = _connected_components(pool, adj)
-    assert len(comps) >= 5, f"mega-blob: only {len(comps)} component(s) from 6 topics"
+    assert len(comps) == 6, f"mega-blob: {len(comps)} component(s) from 6 topics"
     for comp in comps:
         slugs = {f.key.split("/")[1] for f in comp}
         assert len(slugs) == 1, f"component mixes topic slugs: {slugs}"

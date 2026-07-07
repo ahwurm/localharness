@@ -25,7 +25,11 @@ async def store(tmp_path: Path):
 
 def _cfg(**over) -> MemoryConsolidationConfig:
     base = dict(enabled=True, idle_minutes=0.5, staleness_hours=6.0,
-                max_active_facts=256, decay_half_life_days=30.0, iteration_cap=200)
+                max_active_facts=256, decay_half_life_days=30.0, iteration_cap=200,
+                # Hermetic default: a unit-test pass must never lazily construct the REAL default
+                # embedder (once the optional sentence-transformers extra is installed that means
+                # a model load). Discovery tests opt in explicitly with an injected fake.
+                tag_discovery_enabled=False)
     base.update(over)
     return MemoryConsolidationConfig(**base)
 
@@ -684,6 +688,21 @@ async def test_phase36_pass_writes_schema_reconciles_and_mines(store: MemoryStor
     mined = await store.query_facts(FactQuery(tags=["sem"]))
     assert mined and mined[0].key.startswith("sem/")
     assert mined[0].confidence == 0.65
+
+
+class _FakeEmbedder:
+    def embed(self, texts):
+        return [[1.0] for _ in texts]
+
+
+@pytest.mark.asyncio
+async def test_discovery_step_reports_embedder_class(store: MemoryStore):
+    """F7 (run-9 forensics): the pass records WHICH embedder class discovery actually ran with —
+    MiniLM vs the HashingEmbedder fallback must be distinguishable from the report/verdict."""
+    report = await ConsolidationPass(
+        store, _cfg(tag_discovery_enabled=True), llm=_DispatchLLM(), embedder=_FakeEmbedder()
+    ).run()
+    assert report.embedder_used == "_FakeEmbedder"
 
 
 @pytest.mark.asyncio

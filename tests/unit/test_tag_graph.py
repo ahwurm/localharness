@@ -178,6 +178,47 @@ async def test_b4i_empty_replaces_supersedes_newest_same_slug(store):
     assert any(v.status == "superseded" and "8000" in v.value for v in hist)
 
 
+@pytest.mark.asyncio
+async def test_b4i_multi_atom_slug_invalid_marker_mints_normally(store):
+    """F1: a slug is a MANY-atom namespace (the prompt tells the model to reuse topic labels), so
+    a malformed replaces= on a new same-slug fact must NOT supersede an unrelated sibling. With
+    >1 active atom on the slug the rescue target is ambiguous -> normal mint, originals survive."""
+    await store.append_history(_rec(10, "researching hbm foundry stocks", sid="d1"))
+    await store.append_history(_rec(11, "watching micron earnings closely", sid="d1"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="markets | researching hbm foundry stocks | researching hbm foundry stocks\n"
+              "markets | watching micron earnings closely | watching micron earnings closely"),
+        asyncio.Event())
+    assert len(await store.query_facts(FactQuery(tags=["sem"]))) == 2
+
+    await store.append_history(_rec(20, "the markets closed mixed today", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="markets | the markets closed mixed today | the markets closed mixed today | replaces="),
+        asyncio.Event())
+
+    values = {f.value for f in await store.query_facts(FactQuery(tags=["sem"], limit=10))}
+    assert values == {"researching hbm foundry stocks", "watching micron earnings closely",
+                      "the markets closed mixed today"}, values  # 3 active — nothing superseded
+
+
+@pytest.mark.asyncio
+async def test_b4i_no_token_overlap_single_atom_mints_normally(store):
+    """F1: even with exactly ONE active atom on the slug, the rescue needs >=1 shared salient
+    token with the target's value — a token-disjoint claim is a NEW fact, not a correction."""
+    await store.append_history(_rec(10, "vLLM server listens on port 8000", sid="d1"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="vllm port | vLLM server listens on port 8000 | listens on port 8000"), asyncio.Event())
+
+    await store.append_history(_rec(20, "gardening flowers bloom nicely today", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="vllm port | gardening flowers bloom nicely today | gardening flowers bloom nicely today | replaces="),
+        asyncio.Event())
+
+    values = {f.value for f in await store.query_facts(FactQuery(tags=["sem"], limit=10))}
+    assert "vLLM server listens on port 8000" in values      # the original survives
+    assert "gardening flowers bloom nicely today" in values  # the new fact minted separately
+
+
 # ---------------------------------------------------------------------------
 # B4 defense (ii): a mined atom resurrecting a reconciled-away stale value is retracted
 # ---------------------------------------------------------------------------
@@ -202,3 +243,55 @@ async def test_b4ii_stale_resurrection_retracted_on_arrival(store):
     # No ACTIVE fact anywhere asserts the stale 8000 (the resurrection was retracted).
     actives = await store.query_facts(FactQuery(text="8000", include_superseded=False, limit=50))
     assert all("8000" not in f.value for f in actives), [f.key for f in actives if "8000" in f.value]
+
+
+@pytest.mark.asyncio
+async def test_b4ii_short_token_pair_does_not_retract_unrelated(store):
+    """F2: the resurrection net keys on SALIENT tokens (>=4 chars, non-stopword — the codebase
+    floor). A reconciled correction whose only distinctive tokens are short ('3' vs '7') must
+    never retract an unrelated fresh atom that merely mentions the digit 3."""
+    await store.store_fact(key="idle-timeout", value="idle timeout is 3 seconds",
+                           tags=["remember"], confidence=0.9, provenance="d1")
+    await store.store_fact(key="idle-timeout", value="idle timeout is 7 seconds",
+                           tags=["remember", "tier:reconcile_confirmed"], confidence=0.9, provenance="d2")
+
+    await store.append_history(_rec(30, "the harness caps sittings at 3 by default", sid="d3"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="harness | the harness caps sittings at 3 by default | caps sittings at 3 by default",
+        bucket="project", child="conventions"), asyncio.Event())
+
+    atoms = await store.query_facts(FactQuery(tags=["sem"]))
+    assert len(atoms) == 1 and "sittings" in atoms[0].value  # survives — NOT a resurrection
+
+
+# ---------------------------------------------------------------------------
+# F4: idle backfill classify — remember() facts get bucket/child tags and co-tag edges
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_idle_backfill_files_remember_fact_and_enables_co_tag_edge(store):
+    """F4: remember()-sourced facts reach the clustering pool but mint-time filing only runs
+    inside mine_transcript — without a backfill they could never get bucket/child tags, so never
+    co-tag-edge (Stage B) or enter discovery (which requires a bucket tag). The idle classify
+    step files pool-visible atoms lacking a bucket tag, bounded per cycle."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.clustering import _connected_components, _relatedness_edges
+    from localharness.memory.consolidation import ConsolidationPass
+
+    f = await store.store_fact(key="vllm-server-port", value="vLLM server listens on port 8081",
+                               tags=["remember"], confidence=0.9, source="remember", provenance="s1")
+    await store.store_fact(key="sem/gpu-ops/abc12345", value="the gpu server rack details",
+                           tags=["sem", "pending_consolidation"], confidence=0.65,
+                           provenance="s2", node_kind="fact")
+    cfg = MemoryConsolidationConfig(schema_writer_enabled=False, reconcile_enabled=False,
+                                    mining_enabled=False, tag_discovery_enabled=False)
+    report = await ConsolidationPass(
+        store, cfg, llm=_ClassifierLLM(bucket="project", child="ops")).run()
+
+    assert report.tags_backfilled == 2                       # both untagged pool atoms filed
+    assert {t.name for t in await store.tags_for_atom(f.id)} == {"project", "ops"}
+    assert {r.provenance for r in await store.atom_tag_rows(f.id)} == {"backfill"}
+    # The remember() fact is now co-tag-edge capable: it links to the ops-tagged sem atom.
+    pool = await _load_pool(store)
+    adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
+    assert [len(c) for c in _connected_components(pool, adj)] == [2]
