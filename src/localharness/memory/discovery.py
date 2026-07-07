@@ -51,6 +51,10 @@ _PRUNE_REUSE_FLOOR = 0.5     # decayed reuse below this (+ stale + unmatched) ->
 _PRUNE_AGE_S = 21 * 86400    # a candidate is "stale" once this long past its last accrual
 _MATCH_JACCARD = 0.5         # member-set overlap for a current group to be "the same" candidate
 _NAME_MEMBERS_SHOWN = 8      # member values shown to the namer (bounded prompt)
+# F5: a trace row that fired more atoms than this is a GENERIC probe (one rich mixed-topic
+# retrieval must not clique-link the pool via temporal+trace with zero semantic agreement) —
+# it contributes NO pair evidence. The same hub-guard shape as the tag-df cut, on trace rows.
+_TRACE_FANOUT_CAP = 10
 
 
 @dataclass
@@ -101,9 +105,13 @@ async def _sitting_rank(store: Any) -> dict[str, int]:
 
 
 async def _cofire_pairs(store: Any, atom_ids: set[int]) -> set[tuple[int, int]]:
-    """Unordered atom-id pairs that co-fired in >= 1 activation trace (both in fired_ids)."""
+    """Unordered atom-id pairs that co-fired in >= 1 activation trace (both in fired_ids). Rows
+    over _TRACE_FANOUT_CAP are skipped (F5): a stimulus that fired half the store is a generic
+    probe whose pairwise co-fire carries no discriminative signal."""
     pairs: set[tuple[int, int]] = set()
     for tr in await store.recent_activation_traces(limit=500):
+        if len(tr.fired_ids) > _TRACE_FANOUT_CAP:
+            continue  # hub-stimulus guard: a mega-row must not clique-link the pool
         fired = [i for i in tr.fired_ids if i in atom_ids]
         for i in range(len(fired)):
             for j in range(i + 1, len(fired)):
@@ -166,6 +174,10 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
     report = DiscoveryReport()
     if now is None:
         now = int(time.time())
+    # F7 (run-9 forensics): name the embedder actually in play — MiniLM vs the HashingEmbedder
+    # fallback must be distinguishable from logs alone.
+    log.info("tag discovery: embedder=%s",
+             type(embedder).__name__ if embedder is not None else "none")
     try:
         rank = await _sitting_rank(store)
         for bucket in await store.buckets():

@@ -53,6 +53,7 @@ log = logging.getLogger(__name__)
 _WATERMARK_KEY = "consolidation/last_run"
 _DEMOTED_RS = 0.15   # below the 0.2 index gate: out of the injected block, still searchable
 _PROMOTED_CONFIDENCE = 0.8  # above the 0.7 injection threshold: promoted facts surface
+_CLASSIFY_BACKFILL_CAP = 10  # tag-graph F4: max untagged pool atoms bucket-filed per idle cycle
 
 
 @dataclass
@@ -68,6 +69,8 @@ class ConsolidationReport:
     tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
     tags_incorporated: int = 0 # Tag-graph discovery: candidates promoted to active this pass
     tags_pruned: int = 0       # Tag-graph discovery: stale candidates retired this pass
+    tags_backfilled: int = 0   # Tag-graph F4: pool atoms bucket-filed by the idle classify step
+    embedder_used: str = ""    # Tag-graph F7: the embedder class discovery ran with (forensics)
     active_over_cap: int = 0
     churn_rate: float = 0.0
     cancelled: bool = False
@@ -126,6 +129,7 @@ class ConsolidationPass:
             # freshly-mined atom waits a whole pass to be grouped). The orphaned replay seam
             # (unreachable replay/* writes) is retired — mining is now the one idle extractor.
             self._step_mine,            # Phase 36 / MOVE 2: typed-atom transcript mining
+            self._step_classify_untagged,  # Tag-graph F4: file pool atoms lacking a bucket tag
             self._step_discover_tags,   # Tag-graph: discover NEW child tags before clustering reads them
             self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
             self._step_reconcile,       # Phase 36: correction-queue reconciliation
@@ -301,11 +305,42 @@ class ConsolidationPass:
         )
         report.schemas_written = len(written)
 
+    async def _step_classify_untagged(self, report: ConsolidationReport) -> None:
+        """Tag-graph F4: file pool-visible atoms that LACK a bucket tag through the SAME two-step
+        classifier mining uses at mint time. remember()-sourced facts are pool members but never
+        pass through mine_transcript, so without this step they could never co-tag-edge (Stage B)
+        or enter discovery (which requires a bucket tag); it also catches pre-existing untagged
+        atoms. Bounded per cycle (_CLASSIFY_BACKFILL_CAP); provenance='backfill' keeps mint vs
+        idle filing distinguishable in forensics. Same gating as mint filing."""
+        if self._llm is None or not getattr(self._cfg, "mint_tagging_enabled", False):
+            return
+        from localharness.memory.clustering import _load_pool
+        from localharness.memory.tag_classify import file_atom_tags
+        assert self._store._db is not None
+        async with self._store._db.execute(
+            "SELECT DISTINCT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            "WHERE t.agent_id = ? AND t.parent_id IS NULL", (self._store._agent_id,),
+        ) as cur:
+            bucketed = {r[0] for r in await cur.fetchall()}
+        todo = [f for f in await _load_pool(self._store)
+                if f.node_kind != "schema" and f.id not in bucketed][:_CLASSIFY_BACKFILL_CAP]
+        for f in todo:
+            if self._cancel.is_set():
+                return
+            topic = f.key.split("/")[1] if f.key.startswith("sem/") else f.key
+            bucket, _child = await file_atom_tags(
+                self._store, self._llm, self._cancel,
+                atom_id=f.id, topic=topic, claim=f.value, provenance="backfill")
+            if bucket is not None:
+                report.tags_backfilled += 1
+
     async def _step_discover_tags(self, report: ConsolidationReport) -> None:
         """Tag-graph discovery (Stage C): propose/incorporate/prune child tags over bucket-only
         atoms BEFORE the chapter-writer runs, so a just-incorporated tag forms co-tag edges in the
         SAME pass. Gated on the LLM (llm=None -> inert, deterministic core byte-unchanged) and its
-        config axis. The embedder falls back to the dep-free default when none was injected."""
+        config axis. The embedder falls back to the dep-free default when none was injected; the
+        class actually used is recorded on the report (F7 — run-9 forensics must tell MiniLM from
+        the HashingEmbedder fallback)."""
         if self._llm is None or not getattr(self._cfg, "tag_discovery_enabled", False):
             return
         from localharness.memory.discovery import discover_tags
@@ -313,6 +348,7 @@ class ConsolidationPass:
         if embedder is None:
             from localharness.memory.embeddings import default_embedder
             embedder = default_embedder()
+        report.embedder_used = type(embedder).__name__
         r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder)
         report.tags_proposed = len(r.proposed)
         report.tags_incorporated = len(r.incorporated)

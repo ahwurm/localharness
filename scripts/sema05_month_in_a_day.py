@@ -1556,6 +1556,9 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # FIX 2c: the raw per-chunk miner completions — a forensic trail for the supersede path
         # (run-3's were unrecoverable, making the shadow-duplicate root-cause inferential).
         "mining_completions": pass_report.mining_completions,
+        # F7: which embedder class the discovery step ran with (MiniLM vs HashingEmbedder).
+        "embedder_used": pass_report.embedder_used,
+        "tags_backfilled": pass_report.tags_backfilled,
     }
     (results / "verdict.json").write_text(json.dumps(v, indent=2) + "\n", encoding="utf-8")
     (results / "report.md").write_text(_manifest_report(v), encoding="utf-8")
@@ -1772,7 +1775,10 @@ async def run(args: argparse.Namespace) -> int:
             print("ABORT (machine-safety): MemAvailable dropped below threshold pre-consolidation.",
                   file=sys.stderr)
             return 1
-        report = await ConsolidationPass(store, cfg, llm=llm).run()
+        # Tag-discovery embedder: offline -> the deterministic dep-free HashingEmbedder;
+        # live -> default_embedder (MiniLM when the [embeddings] extra is installed).
+        embedder = HashingEmbedder() if args.offline else default_embedder()
+        report = await ConsolidationPass(store, cfg, llm=llm, embedder=embedder).run()
         cancel = asyncio.Event()
         rec = await reconcile_corrections(store, llm, cancel, ttl_looks=cfg.reconcile_ttl_looks)
 
@@ -1826,6 +1832,7 @@ async def run(args: argparse.Namespace) -> int:
         "grading_doc": _GRADING_DOC,
         "grading_committed": _GRADING_COMMITTED,
         "method": method,
+        "embedder_used": report.embedder_used,  # F7: discovery embedder forensics
         "sittings": sittings,
         "days": len(sittings) if sittings else None,
         "queries_total": queries_total if live_mode else None,

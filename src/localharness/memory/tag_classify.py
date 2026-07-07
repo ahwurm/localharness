@@ -39,10 +39,12 @@ def _menu(tags: list[Any]) -> str:
 
 async def file_atom_tags(
     store: Any, llm: Any, cancel_event: Any, *, atom_id: int, topic: str, claim: str,
+    provenance: str = "mint",
 ) -> tuple[str | None, str | None]:
-    """Two-step closed-set filing for one minted atom. Writes atom_tags rows (provenance='mint')
-    for the chosen bucket and, if any, the chosen child. Returns (bucket_name|None, child_name|None)
-    for observability. Never raises — a failure just leaves the atom less-tagged."""
+    """Two-step closed-set filing for one atom. Writes atom_tags rows (provenance='mint' at mint
+    time; 'backfill' from the idle classify step, F4) for the chosen bucket and, if any, the
+    chosen child. Returns (bucket_name|None, child_name|None) for observability. Never raises —
+    a failure just leaves the atom less-tagged."""
     try:
         buckets = await store.buckets()
         if not buckets:
@@ -57,7 +59,7 @@ async def file_atom_tags(
         bucket = _norm(raw_b or "")
         if bucket not in by_bucket:
             return None, None  # invalid bucket -> untagged (the mint already happened)
-        await store.add_atom_tag(atom_id, by_bucket[bucket].id, "mint")
+        await store.add_atom_tag(atom_id, by_bucket[bucket].id, provenance)
 
         children = await store.active_children(by_bucket[bucket].id)
         if not children:
@@ -72,7 +74,7 @@ async def file_atom_tags(
         raw_c = await complete_cancellable(llm, child_prompt, cancel_event, char_cap=_CLASSIFY_CHARS)
         child = _norm(raw_c or "")
         if child in by_child:
-            await store.add_atom_tag(atom_id, by_child[child].id, "mint")
+            await store.add_atom_tag(atom_id, by_child[child].id, provenance)
             return bucket, child
         return bucket, None  # 'none' or garbage -> bucket-only
     except Exception:

@@ -149,9 +149,21 @@ async def _active_sem_atoms(store: Any, cap: int = _KNOWN_ATOMS_CAP) -> list[tup
         return [(r[0], r[1]) for r in await cur.fetchall()]
 
 
-def _distinct_words(v: str) -> set[str]:
-    """Word/number tokens (numbers kept — a port like 8081 is 4 chars) for the B4(ii) net."""
-    return set(re.findall(r"[a-z0-9]+", v.lower()))
+_STOP_WORDS = frozenset({
+    "this", "that", "with", "from", "have", "been", "were", "will", "what", "when",
+    "then", "than", "they", "them", "their", "there", "your", "into", "also", "only",
+    "over", "some", "such", "very", "just", "like", "does", "each", "other", "which",
+    "would", "could", "should", "about", "after", "before", "where", "while",
+})
+
+
+def _salient_words(v: str) -> set[str]:
+    """SALIENT word/number tokens for BOTH B4 nets (F1 rescue overlap + F2 resurrection sweep):
+    >=4 chars (the embeddings.py floor — a port like 8081 passes; a bare '3' does not) and not a
+    common stopword. Keying both defenses on salient tokens means a short or generic shared token
+    can never supersede or retract a fact."""
+    return {t for t in re.findall(r"[a-z0-9]+", v.lower())
+            if len(t) >= 4 and t not in _STOP_WORDS}
 
 
 async def _active_corrections(store: Any, cap: int = 10) -> list[tuple[str, str]]:
@@ -182,18 +194,20 @@ async def _reconciled_pairs(store: Any) -> list[tuple[str, str]]:
 async def _sweep_resurrections(store: Any, minted_ids: list[int],
                                pairs: list[tuple[str, str]]) -> int:
     """Retract any freshly-minted atom that re-asserts a reconciled-away value. A resurrection =
-    the atom shares a token DISTINCT to the stale value (stale minus active) and NONE distinct to
-    the active value. Simplest sound mechanism: mark it superseded-on-arrival (a raw status UPDATE,
-    same derived-state precedent as consolidation's raw writes) so it never enters the active pool;
+    the atom shares a SALIENT token DISTINCT to the stale value (stale minus active) and NONE
+    distinct to the active value (F2: the salient floor keeps a short generic token like '3' from
+    retracting unrelated facts; a pair whose only distinction is sub-salient forms no net at all).
+    Simplest sound mechanism: mark it superseded-on-arrival (a raw status UPDATE, same
+    derived-state precedent as consolidation's raw writes) so it never enters the active pool;
     history is preserved. Returns the count retracted."""
     if not pairs or not minted_ids:
         return 0
     retracted = 0
     for atom in await store.get_facts_by_ids(minted_ids):
-        atoks = _distinct_words(atom.value)
+        atoks = _salient_words(atom.value)
         for stale, active in pairs:
-            stale_distinct = _distinct_words(stale) - _distinct_words(active)
-            active_distinct = _distinct_words(active) - _distinct_words(stale)
+            stale_distinct = _salient_words(stale) - _salient_words(active)
+            active_distinct = _salient_words(active) - _salient_words(stale)
             if stale_distinct and (atoks & stale_distinct) and not (atoks & active_distinct):
                 await store._db.execute(
                     "UPDATE facts SET status = 'superseded', "
@@ -355,16 +369,18 @@ async def mine_transcript(
                 if replaces and replaces in known_keys and replaces.startswith(f"sem/{slug}/"):
                     key = replaces
                 elif replaces_present:
-                    # B4(i): a PRESENT-but-invalid/empty replaces= marker (e.g. `replaces=` with
-                    # nothing, or a hallucinated id) on an atom whose slug matches an ACTIVE atom
-                    # -> rescue-supersede the NEWEST same-slug atom (same validity as a valid
-                    # marker: active + same slug), instead of minting a shadow that leaves the
-                    # stale value active beside its correction. `known` is newest-first.
-                    same_slug = next((k for k, _v in known if k.startswith(f"sem/{slug}/")), None)
-                    if same_slug:
-                        key = same_slug
+                    # B4(i), HARDENED (F1): a slug is a MANY-atom namespace (the prompt tells the
+                    # model to REUSE topic labels), so a present-but-invalid/empty replaces= may
+                    # ride a NEW same-topic fact, not a correction — force-superseding the newest
+                    # sibling would silently destroy an unrelated atom. Rescue ONLY when the
+                    # target is unambiguous: exactly ONE known ACTIVE atom on this slug AND the
+                    # new claim shares >=1 salient token with that atom's value. Anything else
+                    # falls back to a normal mint (degrades to a duplicate, never data loss).
+                    same_slug = [(k, v) for k, v in known if k.startswith(f"sem/{slug}/")]
+                    if len(same_slug) == 1 and _salient_words(claim) & _salient_words(same_slug[0][1]):
+                        key = same_slug[0][0]
                         log.warning("mining B4(i): present-but-invalid replaces=%r rescued -> "
-                                    "supersede newest same-slug %s", replaces, key)
+                                    "supersede sole same-slug %s", replaces, key)
                 fact = await store.store_fact(
                     key=key,
                     value=claim,
