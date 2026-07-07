@@ -409,3 +409,63 @@ def test_prompt_nudges_stable_topic_reuse():
     assert "generic" in p or "short" in p
     for banned in ("manifest", "designed", "grading", "chapter"):
         assert banned not in p, f"eval-specific vocabulary leaked into the general prompt: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (run-10 forensics, ids 51/52): a SINGLE completion emitted the same corrected fact TWICE
+# with two different replaces= targets, superseding BOTH stale atoms -> two active rows, identical
+# value, same slug. The in-pass dedupe skips a mint whose (slug, normalized value) already landed
+# on a DIFFERENT key this pass (or is already active on one) — same-KEY writes stay corroboration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_double_replace_markers_dedupe_to_one_active_row(store: MemoryStore):
+    """One completion, the same corrected value twice, two DISTINCT valid replaces targets on one
+    slug: exactly ONE corrected row is active afterwards (the duplicate mint is skipped), and the
+    second stale atom it pointed at is left untouched rather than clobbered into a duplicate."""
+    from localharness.memory.mining import _h8
+
+    await store.append_history(_rec(
+        10, "our vLLM server listens on port 8000 and the GPU box has 119 GiB unified memory",
+        sid="day2"))
+    stale_a = "vLLM server listens on port 8000"
+    stale_b = "GPU box has 119 GiB unified memory"
+    r1 = await mine_transcript(store, _FakeLLM(
+        f"gpu ops | {stale_a} | vLLM server listens on port 8000\n"
+        f"gpu ops | {stale_b} | GPU box has 119 GiB unified memory"), asyncio.Event())
+    assert r1.written == 2
+    key_a = f"sem/gpu-ops/{_h8(stale_a)}"
+    key_b = f"sem/gpu-ops/{_h8(stale_b)}"
+    assert (await store.get_fact(key_a)).value == stale_a
+    assert (await store.get_fact(key_b)).value == stale_b
+
+    # One completion emits the SAME corrected fact twice, replacing BOTH known atoms (the run-10 shape).
+    corrected = "vLLM server now runs on port 8081"
+    await store.append_history(_rec(
+        20, "correction: the vLLM server now runs on port 8081 after the move", sid="day3"))
+    dup = (f"gpu ops | {corrected} | vLLM server now runs on port 8081 | replaces={key_a}\n"
+           f"gpu ops | {corrected} | vLLM server now runs on port 8081 | replaces={key_b}")
+    r2 = await mine_transcript(store, _FakeLLM(dup), asyncio.Event())
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    corrected_rows = [f for f in active if f.value == corrected]
+    assert len(corrected_rows) == 1, f"duplicate corrected rows still active: {corrected_rows}"
+    assert r2.written == 1  # the second identical atom was deduped, not minted
+
+
+@pytest.mark.asyncio
+async def test_dedupe_leaves_same_key_corroboration_untouched(store: MemoryStore):
+    """The dedupe is KEY-AWARE: a re-mined identical claim lands on the SAME key (corroboration,
+    not a duplicate) and must NOT be skipped — regression guard beside the run-10 fix."""
+    from localharness.memory.mining import _h8, _slug
+
+    claim = "user prefers the ristretto espresso blend"
+    await store.append_history(_rec(5, "the user prefers the ristretto espresso blend daily", sid="s1"))
+    llm = _FakeLLM(f"coffee | {claim} | prefers the ristretto espresso blend")
+    assert (await mine_transcript(store, llm, asyncio.Event())).written == 1
+
+    await store.append_history(_rec(50, "again the user prefers the ristretto espresso blend daily", sid="s1"))
+    r2 = await mine_transcript(store, llm, asyncio.Event())
+    assert r2.written == 1  # same-key corroboration is not a duplicate — it proceeds
+    assert len(await store.get_fact_history(f"sem/{_slug('coffee')}/{_h8(claim)}")) == 1
