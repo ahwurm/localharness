@@ -45,6 +45,8 @@ from typing import Any
 
 from localharness.memory.consolidation import _get_meta, _set_meta
 from localharness.memory.idle_llm import complete_cancellable, grounded
+from localharness.memory.sqlite import FactQuery
+from localharness.memory.tag_classify import file_atom_tags
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +149,66 @@ async def _active_sem_atoms(store: Any, cap: int = _KNOWN_ATOMS_CAP) -> list[tup
         return [(r[0], r[1]) for r in await cur.fetchall()]
 
 
+def _distinct_words(v: str) -> set[str]:
+    """Word/number tokens (numbers kept — a port like 8081 is 4 chars) for the B4(ii) net."""
+    return set(re.findall(r"[a-z0-9]+", v.lower()))
+
+
+async def _active_corrections(store: Any, cap: int = 10) -> list[tuple[str, str]]:
+    """B4(ii) known-window: active tier:reconcile_confirmed facts (the CURRENT corrected values)
+    shown to the miner so a late chunk can't silently resurrect a value we already fixed."""
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT key, value FROM facts WHERE agent_id = ? AND status = 'active' "
+        "AND tags LIKE '%\"tier:reconcile_confirmed\"%' ORDER BY updated_at DESC, id DESC LIMIT ?",
+        (store._agent_id, cap),
+    ) as cur:
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def _reconciled_pairs(store: Any) -> list[tuple[str, str]]:
+    """B4(ii): for each active tier:reconcile_confirmed fact whose history has a superseded
+    predecessor, the (stale_value, active_value) pair — the exact value a late chunk must not
+    resurrect. Recovered via supersede history (get_fact_history), newest superseded first."""
+    pairs: list[tuple[str, str]] = []
+    for f in await store.query_facts(FactQuery(tags=["tier:reconcile_confirmed"], limit=200)):
+        stale = next((v.value for v in await store.get_fact_history(f.key)
+                      if v.status == "superseded"), None)
+        if stale and stale != f.value:
+            pairs.append((stale, f.value))
+    return pairs
+
+
+async def _sweep_resurrections(store: Any, minted_ids: list[int],
+                               pairs: list[tuple[str, str]]) -> int:
+    """Retract any freshly-minted atom that re-asserts a reconciled-away value. A resurrection =
+    the atom shares a token DISTINCT to the stale value (stale minus active) and NONE distinct to
+    the active value. Simplest sound mechanism: mark it superseded-on-arrival (a raw status UPDATE,
+    same derived-state precedent as consolidation's raw writes) so it never enters the active pool;
+    history is preserved. Returns the count retracted."""
+    if not pairs or not minted_ids:
+        return 0
+    retracted = 0
+    for atom in await store.get_facts_by_ids(minted_ids):
+        atoks = _distinct_words(atom.value)
+        for stale, active in pairs:
+            stale_distinct = _distinct_words(stale) - _distinct_words(active)
+            active_distinct = _distinct_words(active) - _distinct_words(stale)
+            if stale_distinct and (atoks & stale_distinct) and not (atoks & active_distinct):
+                await store._db.execute(
+                    "UPDATE facts SET status = 'superseded', "
+                    "retrieval_strength = MIN(retrieval_strength, 0.1) "
+                    "WHERE agent_id = ? AND id = ? AND status = 'active'",
+                    (store._agent_id, atom.id),
+                )
+                await store._db.commit()
+                log.warning("mining B4(ii): retracted resurrected stale value on %s (stale=%r)",
+                            atom.key, stale)
+                retracted += 1
+                break
+    return retracted
+
+
 def _source_record(claim: str, evidence: str, records: list[dict]) -> dict | None:
     """The record whose text best overlaps the atom's (claim+evidence) tokens — the atom's
     episodic source, whose session_id becomes the per-atom provenance. None when nothing
@@ -178,6 +240,7 @@ async def mine_transcript(
     write_budget: int = 25,
     corpus_char_cap: int = 6000,
     completions_log: list | None = None,
+    file_tags: bool = True,
 ) -> MineReport:
     """Walk the un-mined transcript in `corpus_char_cap` chunks, extract typed `sem/` atoms
     (grounded, per-atom source provenance, 0.65), advancing the watermark per completed chunk.
@@ -185,6 +248,7 @@ async def mine_transcript(
     provided, each chunk's RAW model completion (pre-parse) is appended for forensics (run-3's
     completions were unrecoverable, making the shadow-duplicate root-cause inferential)."""
     report = MineReport()
+    minted_ids: list[int] = []
     try:
         raw_wm = await _get_meta(store, _MINING_WATERMARK_KEY)
         try:
@@ -234,11 +298,20 @@ async def mine_transcript(
                 + "\n".join(f"[a{n + 1}] {k} (topic {_slug_of_key(k)}): {v[:120]}"
                             for n, (k, v) in enumerate(known)) + "\n\n"
             ) if known else ""
+            # B4(ii) known-window: current corrected values, so a late chunk sees the truth
+            # instead of resurrecting a value reconciliation already superseded.
+            corrections = await _active_corrections(store)
+            corrections_block = (
+                "Current corrected facts — these values are CURRENT; do NOT re-assert any older "
+                "value for these:\n"
+                + "\n".join(f"- {k}: {v[:120]}" for k, v in corrections) + "\n\n"
+            ) if corrections else ""
 
-            prompt = _PROMPT + known_block + corpus
+            prompt = _PROMPT + known_block + corrections_block + corpus
             raw = await complete_cancellable(
                 llm, prompt, cancel_event,
-                char_cap=corpus_char_cap + len(_PROMPT) + len(known_block) + 64,
+                char_cap=corpus_char_cap + len(_PROMPT) + len(known_block)
+                + len(corrections_block) + 64,
             )
             if completions_log is not None and raw is not None:
                 completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
@@ -260,6 +333,7 @@ async def mine_transcript(
                     continue
                 provenance = src.get("session_id") or str(src.get("ts", ""))
                 slug = _slug(topic)
+                replaces_present = replaces is not None  # B4(i): was a replaces= field present?
                 # FIX 2a: the model pasted a known atom's key/prefix into the `topic` field instead
                 # of using replaces=<id>. Recover the real slug (kill the shadow-dup mangled key)
                 # and, for an unambiguous full-key paste, coerce an implied replaces so a correction
@@ -280,7 +354,18 @@ async def mine_transcript(
                 # (hallucinated id / cross-topic) falls back to a normal mint.
                 if replaces and replaces in known_keys and replaces.startswith(f"sem/{slug}/"):
                     key = replaces
-                await store.store_fact(
+                elif replaces_present:
+                    # B4(i): a PRESENT-but-invalid/empty replaces= marker (e.g. `replaces=` with
+                    # nothing, or a hallucinated id) on an atom whose slug matches an ACTIVE atom
+                    # -> rescue-supersede the NEWEST same-slug atom (same validity as a valid
+                    # marker: active + same slug), instead of minting a shadow that leaves the
+                    # stale value active beside its correction. `known` is newest-first.
+                    same_slug = next((k for k, _v in known if k.startswith(f"sem/{slug}/")), None)
+                    if same_slug:
+                        key = same_slug
+                        log.warning("mining B4(i): present-but-invalid replaces=%r rescued -> "
+                                    "supersede newest same-slug %s", replaces, key)
+                fact = await store.store_fact(
                     key=key,
                     value=claim,
                     tags=["sem", "pending_consolidation"],
@@ -290,11 +375,21 @@ async def mine_transcript(
                     node_kind="fact",
                 )
                 report.written += 1
+                minted_ids.append(fact.id)
+                # Mint-time filing (M1): two-step closed-set classify -> atom_tags(provenance=mint).
+                # Never blocks the mint; skipped when tagging is disabled.
+                if file_tags:
+                    await file_atom_tags(store, llm, cancel_event,
+                                         atom_id=fact.id, topic=topic, claim=claim)
 
             if budget_hit:
                 break  # partially-written chunk: don't advance — next pass re-mines (corroborates)
             newest_ts = max(int(r.get("ts", 0) or 0) for r in chunk)
             await _set_meta(store, _MINING_WATERMARK_KEY, str(newest_ts))
+
+        # B4(ii) post-mining sweep: a newly minted atom that re-asserts a reconciled-away value is
+        # retracted on arrival (never enters the active pool). Runs once over this pass's mints.
+        await _sweep_resurrections(store, minted_ids, await _reconciled_pairs(store))
     except Exception:
         log.exception("mine_transcript failed (non-fatal; the idle look swallows)")
     return report

@@ -54,8 +54,11 @@ class Cluster:
 
 async def _load_pool(store) -> list[Fact]:
     """The SEMANTIC population (MOVE 1): active facts at/above pool-entry 0.6 that describe the
-    USER'S WORLD — mined atoms (`sem/`, `mined/`), discovered schemas (chapters), and settled
-    user corrections (`tier:reconcile_confirmed`). This filter is INCLUDE-ONLY by design:
+    USER'S WORLD — mined atoms (`sem/`, `mined/`), discovered schemas (chapters), settled user
+    corrections (`tier:reconcile_confirmed`), AND user-remembered facts (the `remember` tag —
+    tag-graph critique item 1: a `remember()`-sourced fact is declarative user/world content, not
+    operational telemetry, so it is a first-class taggable pool member, mirroring the `mined/`
+    fix). This filter is INCLUDE-ONLY by design:
     operational memory (`gate/`, `predgate/`, `learned/`) matches no arm and is thereby EXCLUDED
     — a separate track, never in the ontology (owner ruling c). A settled correction that happens
     to sit on a `gate/` key (shape-b confirm keeps its key) is a user-confirmed fact and MUST stay
@@ -69,7 +72,8 @@ async def _load_pool(store) -> list[Fact]:
         f"SELECT {store._FACT_COLS} FROM facts "
         "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.6 "
         "AND (key LIKE 'sem/%' OR key LIKE 'mined/%' OR node_kind = 'schema' "
-        "     OR tags LIKE '%\"tier:reconcile_confirmed\"%') "
+        "     OR tags LIKE '%\"tier:reconcile_confirmed\"%' "
+        "     OR tags LIKE '%\"remember\"%') "
         "AND (expires_at IS NULL OR expires_at > ?)",
         (store._agent_id, now),
     ) as cur:

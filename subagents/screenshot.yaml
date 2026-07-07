@@ -1,0 +1,89 @@
+# subagents/screenshot.yaml
+role: screenshot
+description: >
+  Renders HTML files in a headless browser and captures PNG screenshots.
+  Supports configurable viewport sizes, delays for dynamic content,
+  and full-page or viewport-only captures.
+
+system_prompt: |
+  You are a screenshot agent. Given an HTML file path (or inline HTML),
+  render it in a headless browser and capture a PNG screenshot.
+
+  Steps:
+  1. If the input is a file path, read the HTML. If it's inline HTML, write it
+     to a temporary file.
+  2. Launch a headless browser (chromium/playwright) to render the HTML.
+  3. If a delay is specified, wait for dynamic content to load before capturing.
+  4. Capture the screenshot as a PNG at the specified viewport size.
+  5. Return the path to the saved PNG.
+
+  Default settings:
+  - Viewport: 1280x720
+  - Full page: false (viewport only)
+  - Delay: 0s
+  - Output directory: ./screenshots/
+
+  If the browser fails or the HTML doesn't render, report the error clearly.
+
+input:
+  - type: html_source
+    description: >
+      Path to an HTML file, or inline HTML content to render.
+  - type: options
+    properties:
+      viewport_width:
+        type: integer
+        default: 1280
+        description: Width of the browser viewport in pixels.
+      viewport_height:
+        type: integer
+        default: 720
+        description: Height of the browser viewport in pixels.
+      full_page:
+        type: boolean
+        default: false
+        description: Capture the entire page or just the visible viewport.
+      delay_ms:
+        type: integer
+        default: 0
+        description: Milliseconds to wait after page load before capturing.
+      output_path:
+        type: string
+        default: null
+        description: >
+          Explicit output path for the PNG. If omitted, saves to
+          ./screenshots/<timestamp>.png
+
+output:
+  format: json
+  schema:
+    screenshot_path: string
+    viewport: { width: integer, height: integer }
+    full_page: boolean
+    timestamp: string
+
+examples:
+  - input:
+      html_source: "./index.html"
+      options:
+        viewport_width: 1920
+        viewport_height: 1080
+        full_page: true
+        delay_ms: 2000
+    expected_output:
+      screenshot_path: "./screenshots/2026-07-06T12-00-00.png"
+      viewport: { width: 1920, height: 1080 }
+      full_page: true
+      timestamp: "2026-07-06T12:00:00Z"
+
+read_only: false
+
+tools_allowed:
+  - read       # read HTML source files
+  - write      # write temp HTML files and output PNG manifests
+  - bash_exec  # run headless browser (chromium/playwright) to render & capture
+  - glob       # discover HTML files by pattern
+
+tools_denied: []
+
+temperature: 0.0

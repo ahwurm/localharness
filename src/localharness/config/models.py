@@ -319,6 +319,22 @@ class MemoryConsolidationConfig(BaseModel):
             "walk is idle-window local-GPU and cancellable, so the cost is sleep-time)."
         ),
     )
+    mint_tagging_enabled: bool = Field(
+        default=True,
+        description=(
+            "Tag-graph M1: file each freshly-mined atom via a two-step closed-set classifier into "
+            "a bucket (+optional child tag). Requires the mining LLM; a tagging failure never "
+            "blocks the mint (degrades recall, never integrity)."
+        ),
+    )
+    tag_discovery_enabled: bool = Field(
+        default=True,
+        description=(
+            "Tag-graph discovery (v1): an idle multi-factor pass proposes NEW child tags over "
+            "bucket-only atoms, accrues Bayesian evidence, and incorporates one (model NAMES it) "
+            "at threshold. Requires the LLM; degrades to 2-factor when no embedder is available."
+        ),
+    )
 
 
 class TriggerLexiconConfig(BaseModel):

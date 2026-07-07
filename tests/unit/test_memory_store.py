@@ -111,7 +111,7 @@ async def test_migration_v3_to_v4(tmp_path: Path):
     await store.open()
     try:
         async with store._db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 5  # ladder carried v3 -> v5 (through v4)
+            assert (await cur.fetchone())[0] == 6  # ladder carried v3 -> v6 (through v4/v5)
         async with store._db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
             "('tool_observations', 'surprise_scores', 'user_signals', 'staged_snapshots')"
@@ -145,7 +145,7 @@ async def test_migration_v4_idempotent_reopen(tmp_path: Path):
     await store2.open()
     try:
         async with store2._db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 5
+            assert (await cur.fetchone())[0] == 6
         async with store2._db.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'tool_observations'"
         ) as cur:
