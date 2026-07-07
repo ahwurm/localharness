@@ -95,6 +95,8 @@ from localharness.core.events import (  # noqa: E402
     UserMessage,
 )
 from localharness.memory.consolidation import ConsolidationPass  # noqa: E402
+from localharness.memory.discovery import _NAME_MARKER  # noqa: E402
+from localharness.memory.embeddings import HashingEmbedder, default_embedder  # noqa: E402
 from localharness.memory.tag_classify import _BUCKET_MARKER, _CHILD_MARKER  # noqa: E402
 from localharness.memory.gate import WriteGate  # noqa: E402
 from localharness.memory.idle_llm import (  # noqa: E402
@@ -201,6 +203,19 @@ class _OfflineFakeLLM:
             if any(k in mem for k in ("stock", "hbm", "earnings", "semiconductor", "momentum")):
                 return "preferences"
             return "none"
+        if _NAME_MARKER in prompt:  # discovery NAME call — label an already-bounded group
+            low = prompt.lower()
+            if "subagent" in low:
+                return "subagents"
+            if any(k in low for k in ("port", "vllm", "gpu", "cache", "server")):
+                return "hardware"
+            if any(k in low for k in ("kyoto", "ryokan", "onsen", "nara")):
+                return "travel"
+            if any(k in low for k in ("race", "training", "knee", "taper")):
+                return "fitness"
+            if any(k in low for k in ("hbm", "stock", "earnings", "semiconductor")):
+                return "investing"
+            return "group"
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
         if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
@@ -1495,8 +1510,12 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
     store = MemoryStore(agent_id=args.agent, division_id="", org_id="", base_dir=str(store_dir))
     await store.open()
     try:
+        # Tag discovery embedder: offline -> the dep-free deterministic HashingEmbedder (so the
+        # smoke is reproducible without the optional ML dep); live -> default_embedder (MiniLM if
+        # the [embeddings] extra is installed, else HashingEmbedder).
+        embedder = HashingEmbedder() if args.offline else default_embedder()
         pass_report = await ConsolidationPass(
-            store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm
+            store, MemoryConsolidationConfig(reconcile_enabled=True), llm=m_llm, embedder=embedder
         ).run()
         grade = await _grade_designed_month(store, manifest, tqm)
         schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
