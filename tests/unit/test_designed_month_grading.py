@@ -210,6 +210,46 @@ async def test_a1_denominator_respects_expects_extraction_flag(store):
     assert g["verdict"] == "HOLDS"
 
 
+@pytest.mark.asyncio
+async def test_grade_reports_low_session_span_as_real_miss(store):
+    """Grader gap: a topic with >= min_cluster_size atoms but spanning < min_sessions sittings is
+    NOT a correct-null — it is a real miss (the stability gate would refuse it), reported as such
+    so it can never be silently excused as nullable."""
+    m = await _seed_holds(store)  # markets, kyoto each span 2 days
+    m["topics"]["gpu"] = {"expected_chapter": True, "days": ["day1"], "keywords": ["gpu"]}
+    m["queries"].append({"id": "d1-g", "day": "day1", "topic": "gpu",
+                         "text": "gpu server config settings values"})
+    # Two gpu atoms, BOTH on day1: enough atoms, but only ONE sitting -> not chapter-able.
+    await _seed_atom(store, "gpu", "gpu server config settings values alpha", "day1",
+                     evidence="gpu server config settings values")
+    await _seed_atom(store, "gpu", "gpu server config settings values bravo", "day1",
+                     evidence="gpu server config settings values")
+    g = await sema._grade_designed_month(store, m, _tqm(m))
+    sb = g["stage_b"]
+    assert "gpu" not in sb["nullable_topics"]           # NOT excused as a correct-null
+    assert "gpu" in sb["low_span_topics"]               # reported as a real miss
+    assert g["verdict"] == "INCONCLUSIVE" and g["failing_stage"] == "B1"
+
+
+@pytest.mark.asyncio
+async def test_grade_reports_candidate_clusters_without_chapters(store):
+    """Grader gap: a cluster that exists in the data but never becomes a chapter must leave a
+    trace (candidates_considered) so 'clustered but never written' is diagnosable from artifacts."""
+    m = _holds_manifest()
+    mk1 = await _seed_atom(store, "markets", "researching hbm foundry stocks", "day1")
+    mk2 = await _seed_atom(store, "markets", "hbm foundry earnings port 8081", "day2")
+    ky1 = await _seed_atom(store, "kyoto", "planning a kyoto ryokan trip", "day1")
+    ky2 = await _seed_atom(store, "kyoto", "kyoto ryokan onsen recommendation", "day2")
+    # markets atoms are a real candidate cluster (shared child tag + shared slug) but get NO chapter.
+    pref = await store.get_tag("preferences")
+    await store.add_atom_tag(mk1.id, pref.id, "discovery")
+    await store.add_atom_tag(mk2.id, pref.id, "discovery")
+    await _seed_chapter(store, "kyoto ryokan onsen trip", [ky1, ky2])  # only kyoto is written
+    g = await sema._grade_designed_month(store, m, _tqm(m))
+    cc = g["stage_b"]["candidates_considered"]
+    assert any(c["label"] == "markets" and c["size"] >= 2 and c["n_sittings"] >= 2 for c in cc), cc
+
+
 def test_shipped_manifest_is_well_formed():
     """The pre-committed designed-month manifest: >=5 expected-chapter topics (the coordinator
     owns the exact set), each spread across >= 2 days (the >=2-sitting stability bar) with >= 1
