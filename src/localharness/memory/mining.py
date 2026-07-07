@@ -90,6 +90,11 @@ def _slug_of_key(key: str) -> str:
     return parts[1] if len(parts) >= 3 and parts[0] == "sem" and parts[1] else _slug(key)
 
 
+def _norm(value: str) -> str:
+    """Whitespace-collapsed, lowercased value — the in-pass duplicate-mint identity (FIX 2)."""
+    return " ".join(value.split()).lower()
+
+
 def _coerce_key_topic(topic: str, known_keys: set[str]) -> tuple[str | None, str] | None:
     """FIX 2a (run-3): Qwen sometimes pastes a known atom's KEY (or its `sem/<slug>` prefix) into
     the `topic` field instead of using `replaces=<id>`, which _slug() mangles into a shadow-
@@ -263,6 +268,9 @@ async def mine_transcript(
     completions were unrecoverable, making the shadow-duplicate root-cause inferential)."""
     report = MineReport()
     minted_ids: list[int] = []
+    # FIX 2 (run-10): (slug, normalized value) -> the key it was minted on THIS pass, so a second
+    # atom carrying the same value on a DIFFERENT key (the double-replace duplicate) is skipped.
+    minted_norm_key: dict[tuple[str, str], str] = {}
     try:
         raw_wm = await _get_meta(store, _MINING_WATERMARK_KEY)
         try:
@@ -302,6 +310,8 @@ async def mine_transcript(
             # by an earlier chunk of this same pass is already replaceable by a later chunk.
             known = await _active_sem_atoms(store)
             known_keys = {k for k, _v in known}
+            # FIX 2: the already-active side of the dedupe — (slug, normalized value) -> its key.
+            active_norm_key = {(_slug_of_key(k), _norm(v)): k for k, v in known}
             # FIX 2b: SHORT OPAQUE ids ([a1]) alongside the topic label + full key — a short id is
             # a cleaner `replaces=` target than a key-shaped string the model may mis-paste as a
             # topic; the key + topic label stay visible so raw-key/reuse forms keep working.
@@ -381,6 +391,19 @@ async def mine_transcript(
                         key = same_slug[0][0]
                         log.warning("mining B4(i): present-but-invalid replaces=%r rescued -> "
                                     "supersede sole same-slug %s", replaces, key)
+                # FIX 2 (run-10, ids 51/52): a completion emitting the SAME corrected fact twice
+                # with two different replaces= targets superseded BOTH stale atoms, leaving duplicate
+                # active rows (identical value, same slug, different keys). Skip a mint whose
+                # (slug, normalized value) already landed on a DIFFERENT key this pass or is already
+                # active on one. A SAME-key write is corroboration (store_fact), never a duplicate —
+                # the equality guard leaves it untouched.
+                norm_val = _norm(claim)
+                prior_key = (minted_norm_key.get((slug, norm_val))
+                             or active_norm_key.get((slug, norm_val)))
+                if prior_key is not None and prior_key != key:
+                    log.warning("mining: dedupe — value %r already active on %s; skip duplicate "
+                                "mint on %s", claim[:80], prior_key, key)
+                    continue
                 fact = await store.store_fact(
                     key=key,
                     value=claim,
@@ -392,6 +415,7 @@ async def mine_transcript(
                 )
                 report.written += 1
                 minted_ids.append(fact.id)
+                minted_norm_key[(slug, norm_val)] = key  # FIX 2: record for the rest of this pass
                 # Mint-time filing (M1): two-step closed-set classify -> atom_tags(provenance=mint).
                 # Never blocks the mint; skipped when tagging is disabled.
                 if file_tags:
