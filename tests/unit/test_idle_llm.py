@@ -166,6 +166,43 @@ def test_grounded_case_fold_does_not_accept_absent_token():
 
 
 # ---------------------------------------------------------------------------
+# FIX 1c — LIGHT DETERMINISTIC STEMMING (owner ruling 2026-07-07: deterministic correctness, not
+# prompt-wording hopes). A guarded suffix-stem fallback layered ON TOP of the substring net grounds
+# grammatical variants ('listening' ~ 'listens' share the stem 'listen'), while a fabricated
+# entity/number still cannot pass (stem EQUALITY, never mere suffix-sharing) and short/degenerate
+# stems are guarded out. Applies identically at every chapter-grading site (grounded is the one gate).
+# ---------------------------------------------------------------------------
+
+def test_grounded_stems_grammatical_variant():
+    """'listening' grounds against a corpus containing 'listens' — they share the stem 'listen'
+    (no match today, the run-3 draft-vs-member mismatch this fixes). Run-3 Port shape: after the
+    title strip the body {operates, listening, server} vs a corpus with listens/server/port is
+    grounded by a 2/3 majority (listening~listens + server; 'operates' is genuinely absent)."""
+    assert grounded("listening", "the vllm server listens on port 8081") is True
+    assert grounded("operates listening server", "the vllm server listens on port 8081") is True
+
+
+def test_grounded_stemming_still_rejects_fabrication():
+    """Anti-hallucination survives stemming: a body whose majority tokens are fabricated entities
+    or a long fabricated number is still KILLed — no corpus token shares their stem, and matching
+    is stem-EQUALITY not suffix-equality (three '-ing' words that share no root with the corpus
+    do not pass). Stemming only collapses grammatical variants; it cannot mint a shared root."""
+    corpus = "the vllm server listens on port 8081"
+    assert grounded("kubernetes orchestrates containers", corpus) is False
+    assert grounded("connection identifier 9999999", corpus) is False   # fabricated 7-digit number
+    assert grounded("restarting crashing rebooting", corpus) is False   # shared '-ing', no shared stem
+
+
+def test_grounded_stem_guard_short_and_degenerate():
+    """The guard keeps new entities from sneaking in via over-stemming: a <6-char token is NEVER
+    stemmed (even 'sing', which would degenerate to 's'), and a >=6-char token whose suffix-strip
+    would leave <4 chars is left whole ('seeing' -/-> 'see'). So a degenerate stem can never
+    manufacture a match to a shorter root."""
+    assert grounded("sing", "s", min_token_len=4) is False           # 'sing' not stemmed -> no 's' match
+    assert grounded("seeing", "he sees everything here") is False    # 'seeing' -/-> 'see', no 'sees' match
+
+
+# ---------------------------------------------------------------------------
 # FIX 1a — strip_chapter_title: ground the chapter BODY, never the markdown heading. The writer
 # prompt asks for a titled chapter; the model renders '**Title**', whose words are a heading not a
 # claim. Counting them against the majority bar is structurally unwinnable (run-3 KILLed all 3).
