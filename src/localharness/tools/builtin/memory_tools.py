@@ -3,10 +3,13 @@
 These serve the full persistent-fact bodies on demand so the system prompt can inline only a
 small INDEX (fact names + one-line descriptions) instead of the entire MEMORY.md every turn.
 """
+import logging
 from datetime import datetime, time as _dtime, timedelta
 from typing import Any
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+
+log = logging.getLogger(__name__)
 
 
 def resolve_time_expr(expr: str, *, end: bool = False) -> int:
@@ -135,6 +138,19 @@ class MemorySearchTool(Tool):
                 await touch([f.key for f in facts])
             except Exception:
                 pass  # staging is best-effort; retrieval must never fail on it
+        # P0 activation trace (tag-graph substrate): log this retrieval event best-effort.
+        # stimulus=query; fired=injected=the hits (all are rendered below). The graph
+        # neighborhood appended further down is spreading activation (a LATER phase) —
+        # deliberately NOT in the P0 fired/injected set, which is the direct search hits.
+        # A trace-write failure must NEVER fail the search (wrap + warn).
+        rec = getattr(self._mem, "record_activation_trace", None)
+        if rec is not None:
+            try:
+                hit_ids = [f.id for f in facts]
+                await rec(stimulus=query, fired_ids=hit_ids, injected_ids=hit_ids,
+                          source="memory_search")
+            except Exception:
+                log.warning("activation-trace write failed (memory_search)", exc_info=True)
         lines = []
         for f in facts:
             snippet = (f.value or "").strip().replace("\n", " ")
@@ -290,4 +306,13 @@ class MemoryGetTool(Tool):
                 await touch([fact.key])
             except Exception:
                 pass
+        # P0 activation trace: a memory_get surfaces one atom — a recall event
+        # (stimulus=name, fired=injected=[that atom]). Best-effort (wrap + warn).
+        rec = getattr(self._mem, "record_activation_trace", None)
+        if rec is not None:
+            try:
+                await rec(stimulus=name, fired_ids=[fact.id], injected_ids=[fact.id],
+                          source="memory_get")
+            except Exception:
+                log.warning("activation-trace write failed (memory_get)", exc_info=True)
         return self.ok(fact.value)

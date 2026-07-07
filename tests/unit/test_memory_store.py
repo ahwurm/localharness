@@ -111,7 +111,7 @@ async def test_migration_v3_to_v4(tmp_path: Path):
     await store.open()
     try:
         async with store._db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 4  # ladder carried v3 -> v4
+            assert (await cur.fetchone())[0] == 5  # ladder carried v3 -> v5 (through v4)
         async with store._db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
             "('tool_observations', 'surprise_scores', 'user_signals', 'staged_snapshots')"
@@ -135,7 +135,8 @@ async def test_migration_v3_to_v4(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_migration_v4_idempotent_reopen(tmp_path: Path):
-    """Open + close + reopen leaves the store at v4 — no duplicate tables, no error."""
+    """Open + close + reopen leaves the store at the current schema version — no duplicate
+    tables, no error."""
     store = make_store(tmp_path)
     await store.open()
     await store.close()
@@ -144,7 +145,7 @@ async def test_migration_v4_idempotent_reopen(tmp_path: Path):
     await store2.open()
     try:
         async with store2._db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 4
+            assert (await cur.fetchone())[0] == 5
         async with store2._db.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'tool_observations'"
         ) as cur:
