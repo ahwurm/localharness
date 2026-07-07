@@ -65,6 +65,9 @@ class ConsolidationReport:
     schemas_written: int = 0   # Phase 36 SEMA-02/03: chapters written this pass
     reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
     mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
+    tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
+    tags_incorporated: int = 0 # Tag-graph discovery: candidates promoted to active this pass
+    tags_pruned: int = 0       # Tag-graph discovery: stale candidates retired this pass
     active_over_cap: int = 0
     churn_rate: float = 0.0
     cancelled: bool = False
@@ -87,11 +90,13 @@ class ConsolidationPass:
         cfg: "MemoryConsolidationConfig",
         *,
         llm: Any = None,
+        embedder: Any = None,
         on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
     ) -> None:
         self._store = store
         self._cfg = cfg
         self._llm = llm
+        self._embedder = embedder
         self._on_promotion_sample = on_promotion_sample
         self._cancel = asyncio.Event()
         # Same-run promotion grace (critic BLOCKER 2): cap-trim must never demote what
@@ -121,6 +126,7 @@ class ConsolidationPass:
             # freshly-mined atom waits a whole pass to be grouped). The orphaned replay seam
             # (unreachable replay/* writes) is retired — mining is now the one idle extractor.
             self._step_mine,            # Phase 36 / MOVE 2: typed-atom transcript mining
+            self._step_discover_tags,   # Tag-graph: discover NEW child tags before clustering reads them
             self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
             self._step_reconcile,       # Phase 36: correction-queue reconciliation
             self._step_decay,
@@ -295,6 +301,23 @@ class ConsolidationPass:
         )
         report.schemas_written = len(written)
 
+    async def _step_discover_tags(self, report: ConsolidationReport) -> None:
+        """Tag-graph discovery (Stage C): propose/incorporate/prune child tags over bucket-only
+        atoms BEFORE the chapter-writer runs, so a just-incorporated tag forms co-tag edges in the
+        SAME pass. Gated on the LLM (llm=None -> inert, deterministic core byte-unchanged) and its
+        config axis. The embedder falls back to the dep-free default when none was injected."""
+        if self._llm is None or not getattr(self._cfg, "tag_discovery_enabled", False):
+            return
+        from localharness.memory.discovery import discover_tags
+        embedder = self._embedder
+        if embedder is None:
+            from localharness.memory.embeddings import default_embedder
+            embedder = default_embedder()
+        r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder)
+        report.tags_proposed = len(r.proposed)
+        report.tags_incorporated = len(r.incorporated)
+        report.tags_pruned = len(r.pruned)
+
     async def _step_reconcile(self, report: ConsolidationReport) -> None:
         if self._llm is None or not getattr(self._cfg, "reconcile_enabled", False):
             return
@@ -437,6 +460,7 @@ class ConsolidationScheduler:
         cfg: "MemoryConsolidationConfig",
         *,
         llm: Any = None,
+        embedder: Any = None,
         on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
     ) -> None:
         self._store = store
@@ -444,6 +468,7 @@ class ConsolidationScheduler:
         self._agent_id = agent_id
         self._cfg = cfg
         self._llm = llm
+        self._embedder = embedder
         self._on_promotion_sample = on_promotion_sample
         self._handles: list["SubscriptionHandle"] = []
         self._running: Optional[ConsolidationPass] = None
@@ -494,7 +519,7 @@ class ConsolidationScheduler:
         if self._run_task is not None and not self._run_task.done():
             return
         self._running = ConsolidationPass(
-            self._store, self._cfg, llm=self._llm,
+            self._store, self._cfg, llm=self._llm, embedder=self._embedder,
             on_promotion_sample=self._on_promotion_sample,
         )
         self._run_task = asyncio.create_task(self._run_and_record())

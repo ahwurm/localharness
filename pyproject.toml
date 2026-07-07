@@ -39,6 +39,11 @@ dependencies = [
 dispatch = [
     "discord.py>=2.3",
 ]
+# Tag-graph discovery's embedding-proximity leg. OPTIONAL: without it, discovery uses the
+# dep-free HashingEmbedder fallback. A small local CPU model — no GPU, no network at inference.
+embeddings = [
+    "sentence-transformers>=2.2,<6",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

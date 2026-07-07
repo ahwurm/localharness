@@ -1162,6 +1162,17 @@ class MemoryStore:
             return [SimpleNamespace(atom_id=r[0], tag_id=r[1], provenance=r[2], ts=r[3])
                     for r in await cur.fetchall()]
 
+    async def atoms_for_tag(self, tag_id: int) -> list[Fact]:
+        """Active atoms carrying a tag (its member set) — the discovery candidate's membership."""
+        assert self._db is not None
+        cols = ", ".join("f." + c for c in self._FACT_COLS.split(", "))  # f-qualify: atom_tags also has 'provenance'
+        async with self._db.execute(
+            f"SELECT {cols} FROM facts f JOIN atom_tags a ON a.atom_id = f.id "
+            "WHERE a.tag_id = ? AND f.agent_id = ? AND f.status = 'active'",
+            (tag_id, self._agent_id),
+        ) as cur:
+            return [_row_to_fact(r) for r in await cur.fetchall()]
+
     async def child_tags_for_atoms(
         self, atom_ids: list[int], *, edge_eligible: bool = True
     ) -> dict[int, set[int]]:
