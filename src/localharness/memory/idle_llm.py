@@ -32,6 +32,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _PUNCT = string.punctuation  # stripped from a token's edges before matching (FIX 1b)
+_STEM_SUFFIXES = ("ing", "ed", "es", "s")  # light inflectional suffixes stripped by _stem (FIX 1c)
 
 
 async def run_cancellable(coro: Awaitable[Any], cancel_event: asyncio.Event) -> Any | None:
@@ -83,24 +84,49 @@ async def complete_cancellable(llm: Any, prompt: str, cancel_event: asyncio.Even
     return await run_cancellable(llm.complete(prompt), cancel_event)
 
 
+def _stem(tok: str) -> str:
+    """Strip ONE light inflectional suffix so grammatical variants collapse to a shared root
+    (listening/listens -> listen). GUARDED: only tokens >=6 chars are stemmed, and only when the
+    residual stem stays >=4 chars — so short words are untouched and a stem can never degenerate
+    ('sing' -/-> 's'), which is what keeps a new entity/number from sneaking a match in via
+    over-stemming. Deterministic, no NLP dep; the substring net still carries the common case."""
+    if len(tok) < 6:
+        return tok
+    for suf in _STEM_SUFFIXES:
+        if tok.endswith(suf) and len(tok) - len(suf) >= 4:
+            return tok[: -len(suf)]
+    return tok
+
+
+def match_count(claim: str, corpus: str, *, min_token_len: int = 6) -> tuple[int, int]:
+    """(matched, total) of the claim's >=min_token_len tokens grounded in `corpus` — the shared
+    fold + edge-punct-strip + light-stem matcher behind BOTH the >=1/2 writer gate (`grounded`)
+    and the >=2/3 sensitivity re-grade (`_supermajority_grounded`), so every chapter-grading site
+    matches tokens identically (the writer==grader invariant). A token matches if it is a substring
+    of the folded corpus (FIX 1b) OR its stem equals the stem of any corpus token (FIX 1c)."""
+    corpus = corpus.lower()
+    tokens = [tok for t in claim.split() if len(tok := t.strip(_PUNCT).lower()) >= min_token_len]
+    corpus_stems = {_stem(c) for w in corpus.split() if (c := w.strip(_PUNCT))}
+    matched = sum(1 for t in tokens if t in corpus or _stem(t) in corpus_stems)
+    return matched, len(tokens)
+
+
 def grounded(claim: str, corpus: str, *, min_token_len: int = 6) -> bool:
     """A generated claim is grounded iff a MAJORITY of its >=min_token_len tokens appear
-    verbatim in the corpus (extracted from consolidation.py:295-301; critic M4: an
-    any-single-token check was trivially passed by confabulations sharing one common word
-    like "contains"). An empty-token claim (all short words) -> True (nothing to verify).
+    in the corpus (extracted from consolidation.py:295-301; critic M4: an any-single-token
+    check was trivially passed by confabulations sharing one common word like "contains").
+    An empty-token claim (all short words) -> True (nothing to verify).
 
     FIX 1b: matching is case-folded and a token's leading/trailing punctuation is stripped, so
     a chapter's own title casing/markdown ("Listens." / "**Port") can no longer make a
     genuinely-derivable claim unmatchable (run-3: the majority net was case+punct-sensitive and
-    KILLed every grounded draft). Strictly more permissive on case/punctuation only — a token
-    absent from the corpus in EVERY case is still unmatched (the anti-hallucination intent holds).
-    This is the BROAD kill gate; `ground_numbers` layers the narrower numeric net on top."""
-    corpus = corpus.lower()
-    tokens = [tok for t in claim.split() if len(tok := t.strip(_PUNCT).lower()) >= min_token_len]
-    if not tokens:
-        return True
-    matched = sum(1 for t in tokens if t in corpus)
-    return matched * 2 >= len(tokens)
+    KILLed every grounded draft). FIX 1c: a guarded light-stem fallback (see `match_count`/`_stem`)
+    grounds grammatical variants ("listening" ~ "listens"). Both are strictly more permissive on
+    surface form only — a token whose stem matches NO corpus token is still unmatched, so the
+    anti-hallucination intent holds. This is the BROAD kill gate; `ground_numbers` layers the
+    narrower numeric net on top."""
+    matched, total = match_count(claim, corpus, min_token_len=min_token_len)
+    return total == 0 or matched * 2 >= total
 
 
 def strip_chapter_title(text: str) -> str:

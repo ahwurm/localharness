@@ -71,7 +71,6 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-import string
 import sys
 import time
 from collections import Counter
@@ -101,6 +100,7 @@ from localharness.memory.idle_llm import (  # noqa: E402
     LLMTextAdapter,
     ground_numbers,
     grounded,
+    match_count,
     strip_chapter_title,
 )
 from localharness.memory.predictive_gate import PredictiveGate  # noqa: E402
@@ -774,16 +774,13 @@ def _member_tool(key: str) -> str | None:
 
 
 def _supermajority_grounded(claim: str, corpus: str, *, min_token_len: int = 6) -> bool:
-    """The §6 sensitivity bar: >= 2/3 of >=6-char tokens verbatim in the corpus (vs the shipped
-    >= 1/2 majority). An empty-token claim is vacuously grounded. Mirrors grounded()'s FIX 1b
-    case/punct-folding so the sensitivity re-grade measures the majority FRACTION (the deliberate
-    stricter bar), never case/punctuation noise that the writer gate already normalizes away."""
-    corpus = corpus.lower()
-    toks = [tok for t in claim.split() if len(tok := t.strip(string.punctuation).lower()) >= min_token_len]
-    if not toks:
-        return True
-    matched = sum(1 for t in toks if t in corpus)
-    return matched * 3 >= len(toks) * 2
+    """The §6 sensitivity bar: >= 2/3 of >=6-char tokens grounded in the corpus (vs the shipped
+    >= 1/2 majority). An empty-token claim is vacuously grounded. Reuses grounded()'s exact
+    matcher (`match_count`: FIX 1b case/punct-folding + FIX 1c light stemming) so the sensitivity
+    re-grade differs from the writer gate ONLY by the deliberate stricter FRACTION — never by a
+    divergent match rule (the writer==grader invariant)."""
+    matched, total = match_count(claim, corpus, min_token_len=min_token_len)
+    return total == 0 or matched * 3 >= total * 2
 
 
 async def _active(store: MemoryStore, where: str) -> list:
