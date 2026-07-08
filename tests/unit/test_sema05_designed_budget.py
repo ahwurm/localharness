@@ -89,3 +89,64 @@ async def test_manifest_budget_reaches_writer_and_unstarves_attempts(tmp_path, m
 
     assert await _attempts(3) == 3          # the starving production default: only 3 of 5 attempted
     assert await _attempts(budget) == 5     # the manifest budget attempts every eligible cluster
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (extraction-yield): mining's write_budget is a GLOBAL per-pass cap — once it mints, the
+# outer walk ABORTS every remaining chunk. The designed month consolidates exactly ONCE, so the
+# production default (25) silently dropped run-6's transcript TAIL (41% never reached the LLM;
+# sem_atoms landed at exactly 25). The runner must thread a non-starving single-pass-eval bound;
+# the production default (25) stays untouched (owner decides that separately).
+# ---------------------------------------------------------------------------
+
+
+def test_mining_write_budget_beats_starving_default():
+    """The runner's single-pass-eval mining bound is well above the production default (25) that
+    starved run-6, with headroom over any legitimate 3-day month's atom count (~40 densest observed,
+    ~200 records max) — so the global write cap can never bite mid-transcript in the one grading pass."""
+    sema = _load_script()
+    budget = sema._mining_write_budget()
+    assert budget > 25          # clears the run-6 ceiling of exactly 25 with generous headroom
+    assert budget == 500        # the documented single-pass-eval constant (NOT a production change)
+
+
+@pytest.mark.asyncio
+async def test_run_designed_month_threads_nonstarving_mining_budget(tmp_path, monkeypatch):
+    """FIX 1 wiring: the grading-phase consolidation config the RUNNER actually builds (a real
+    offline manifest run) carries mining_write_budget > 25 — proving the eval bound reaches the
+    single pass, not just that a helper returns it (owner rule: no green test on unwired code)."""
+    sema = _load_script()
+    captured: dict = {}
+    real_pass = sema.ConsolidationPass
+
+    def _capturing(store, cfg, **kw):
+        captured["mining_write_budget"] = cfg.mining_write_budget
+        return real_pass(store, cfg, **kw)
+
+    monkeypatch.setattr(sema, "ConsolidationPass", _capturing)
+
+    manifest = {
+        "days": ["day1", "day2"],
+        "topics": {"subagents": {"expected_chapter": True, "days": ["day1", "day2"],
+                                 "keywords": ["subagent", "summarizer", "citation"]},
+                   "noise": {"expected_chapter": False}},
+        "queries": [
+            {"id": "d1-q1", "day": "day1", "topic": "subagents",
+             "text": "i am building a summarizer subagent for the harness"},
+            {"id": "d1-q2", "day": "day1", "topic": "noise", "text": "whats the capital of mongolia"},
+            {"id": "d2-q1", "day": "day2", "topic": "subagents",
+             "text": "i am building a citation subagent for the harness"},
+            {"id": "d2-q2", "day": "day2", "topic": "noise", "text": "convert 5 kilometers to miles"},
+        ],
+    }
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    args = sema._parse_args([
+        "--offline", "--manifest", str(mpath), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", "orchestrator",
+    ])
+    code = await sema.run(args)
+
+    assert code == 0
+    assert captured.get("mining_write_budget", 25) > 25          # runner threaded a non-starving budget
+    assert captured["mining_write_budget"] == sema._mining_write_budget()
