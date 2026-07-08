@@ -53,6 +53,8 @@ log = logging.getLogger(__name__)
 _MINING_WATERMARK_KEY = "mining/last_ts"  # DISTINCT from consolidation/last_run
 _PER_RECORD_CHARS = 400   # per-record slice fed to the model (and grounded against)
 _KNOWN_ATOMS_CAP = 30     # existing active atoms shown to the miner (ruling 3), value-trimmed
+_RETRY_MIN_RECORDS = 3    # FIX 2: a substantive chunk (>= this many records) that parses ZERO
+                          # atoms is re-mined ONCE — below it, a chunk is legitimately empty
 
 _PROMPT = (
     "Extract durable facts about the USER'S WORLD from this transcript — what the user works "
@@ -287,6 +289,7 @@ async def mine_transcript(
             return report  # nothing new — watermark unchanged; cost paid only on the read
 
         i = 0
+        chunk_idx = 0
         budget_hit = False
         while i < len(window) and not budget_hit:
             if getattr(cancel_event, "is_set", lambda: False)():
@@ -332,20 +335,44 @@ async def mine_transcript(
             ) if corrections else ""
 
             prompt = _PROMPT + known_block + corrections_block + corpus
-            raw = await complete_cancellable(
-                llm, prompt, cancel_event,
-                char_cap=corpus_char_cap + len(_PROMPT) + len(known_block)
-                + len(corrections_block) + 64,
-            )
-            if completions_log is not None and raw is not None:
-                completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
-                                        "chunk_records": len(chunk), "raw": raw})
+            char_cap = (corpus_char_cap + len(_PROMPT) + len(known_block)
+                        + len(corrections_block) + 64)
+            raw = await complete_cancellable(llm, prompt, cancel_event, char_cap=char_cap)
             if raw is None:
                 # Cancelled mid-look — watermark NOT advanced past this chunk (next pass re-mines).
                 report.cancelled = True
                 break
+            atoms = _parse_atoms(raw)
+            # FIX 2 (extraction-yield): a SUBSTANTIVE chunk (>= _RETRY_MIN_RECORDS records) that
+            # parses ZERO atoms is a whiff — a flat refusal ("I cannot extract any facts…", live in
+            # run-5) or a bad roll — and the watermark would otherwise advance past it with nothing
+            # re-mined (there was no per-chunk floor). Re-mine the SAME chunk EXACTLY once (bounded —
+            # never loops); nothing minted yet, so the known-block is unchanged and the retry prompt
+            # is identical. A tiny chunk (< K records) is legitimately empty and is NOT retried.
+            retried = False
+            if not atoms and len(chunk) >= _RETRY_MIN_RECORDS:
+                retried = True
+                raw_retry = await complete_cancellable(llm, prompt, cancel_event, char_cap=char_cap)
+                if raw_retry is None:
+                    report.cancelled = True  # cancelled mid-retry — watermark NOT advanced
+                else:
+                    atoms = _parse_atoms(raw_retry)
+                    if completions_log is not None:  # keep the retry's raw for forensics too
+                        completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
+                                                "chunk_records": len(chunk), "raw": raw_retry,
+                                                "retry": True})
+                log.warning("mining FIX 2: re-mined zero-yield chunk idx=%d records=%d "
+                            "first_pass_yield=0 retry_yield=%d", chunk_idx, len(chunk), len(atoms))
+            # Per-chunk forensics (FIX 2c + attribution): records, final yield, whether re-mined —
+            # so run-12 can separate FIX-1's coverage gain from FIX-2's retry-recovered atoms.
+            if completions_log is not None:
+                completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
+                                        "chunk_records": len(chunk), "raw": raw,
+                                        "atoms_yielded": len(atoms), "retried": retried})
+            if report.cancelled:
+                break
 
-            for topic, claim, evidence, replaces in _parse_atoms(raw):
+            for topic, claim, evidence, replaces in atoms:
                 if report.written >= write_budget:
                     budget_hit = True
                     break
@@ -426,6 +453,7 @@ async def mine_transcript(
                 break  # partially-written chunk: don't advance — next pass re-mines (corroborates)
             newest_ts = max(int(r.get("ts", 0) or 0) for r in chunk)
             await _set_meta(store, _MINING_WATERMARK_KEY, str(newest_ts))
+            chunk_idx += 1
 
         # B4(ii) post-mining sweep: a newly minted atom that re-asserts a reconciled-away value is
         # retracted on arrival (never enters the active pool). Runs once over this pass's mints.
