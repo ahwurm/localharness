@@ -983,6 +983,17 @@ def _schema_write_budget(manifest: dict) -> int:
     return len(manifest.get("topics", {})) + 1
 
 
+def _mining_write_budget() -> int:
+    """FIX 1 (extraction-yield): mining's write_budget is a GLOBAL per-pass cap — hitting it aborts
+    every REMAINING chunk of the walk (mining.py), so the designed month (consolidated exactly ONCE)
+    silently dropped run-6's transcript TAIL: 41% of history never reached the LLM and sem_atoms
+    landed at exactly 25. Return a single-pass-eval bound generous enough the cap can never bite
+    mid-transcript (500 >> the ~40 densest atoms observed and the ~200 max month records). This is
+    NOT a production change: the config default (25, and its le=50 schema bound) is untouched — the
+    owner decides prod separately, so it is ASSIGNED onto the config post-build (the ctor caps 50)."""
+    return 500
+
+
 def _c2(n: int) -> int:
     return n * (n - 1) // 2
 
@@ -1525,12 +1536,14 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # smoke is reproducible without the optional ML dep); live -> default_embedder (MiniLM if
         # the [embeddings] extra is installed, else HashingEmbedder).
         embedder = HashingEmbedder() if args.offline else default_embedder()
-        pass_report = await ConsolidationPass(
-            store,
-            MemoryConsolidationConfig(reconcile_enabled=True,
-                                      schema_write_budget=_schema_write_budget(manifest)),
-            llm=m_llm, embedder=embedder,
-        ).run()
+        cfg = MemoryConsolidationConfig(reconcile_enabled=True,
+                                        schema_write_budget=_schema_write_budget(manifest))
+        # FIX 1 (extraction-yield): lift mining's per-pass write cap for the single grading pass so
+        # the global budget can't abort the transcript tail (run-6 lost 41%). Assigned here (not a
+        # ctor kwarg) because the production schema caps the field at le=50; this is the single-pass-
+        # eval bound, NOT a production change — the config default (25) is untouched.
+        cfg.mining_write_budget = _mining_write_budget()
+        pass_report = await ConsolidationPass(store, cfg, llm=m_llm, embedder=embedder).run()
         grade = await _grade_designed_month(store, manifest, tqm)
         schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
         sens = await _sensitivity(store, MemoryConsolidationConfig())
