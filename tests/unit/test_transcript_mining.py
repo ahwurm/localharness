@@ -15,6 +15,7 @@ These lock the load-bearing properties:
   6. the per-pass write budget caps writes; a re-mined identical claim corroborates (no duplicate).
 """
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -469,3 +470,96 @@ async def test_dedupe_leaves_same_key_corroboration_untouched(store: MemoryStore
     r2 = await mine_transcript(store, llm, asyncio.Event())
     assert r2.written == 1  # same-key corroboration is not a duplicate — it proceeds
     assert len(await store.get_fact_history(f"sem/{_slug('coffee')}/{_h8(claim)}")) == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (extraction-yield): no per-chunk yield FLOOR/RETRY existed — a SUBSTANTIVE chunk that
+# returns zero atoms (a flat refusal "I cannot extract any facts…", live in run-5 chunk4; or a bad
+# roll) silently advanced the watermark with nothing re-mined. A zero-PARSE chunk with >=K records
+# is re-mined exactly ONCE (bounded — never loops); a tiny (<K) chunk is legitimately empty and is
+# NOT retried. Instrumented: a log line on every retry + per-chunk {atoms_yielded, retried} and the
+# retry's raw kept in the completions log, so run-12 forensics separate coverage (FIX 1) from
+# retry-recovered atoms (FIX 2). K = 3.
+# ---------------------------------------------------------------------------
+
+
+class _RefusalThenAtomsLLM:
+    """A flat refusal on the FIRST mining look, real atoms on the re-mine. Mint-time tag-classify
+    calls are answered inertly and NEVER counted as mining looks (keyed on the mining prompt)."""
+
+    def __init__(self, atoms: str):
+        self._atoms = atoms
+        self.mining_calls = 0
+
+    async def complete(self, prompt: str) -> str:
+        if "Extract durable facts" not in prompt:  # a tag-classify call — inert, uncounted
+            return "none"
+        self.mining_calls += 1
+        return ("I cannot extract any facts because the provided text lacks a transcript to analyze."
+                if self.mining_calls == 1 else self._atoms)
+
+
+class _AlwaysRefusesLLM:
+    """Refuses every mining look — proves the re-mine is capped at ONE even when it also whiffs."""
+
+    def __init__(self):
+        self.mining_calls = 0
+
+    async def complete(self, prompt: str) -> str:
+        if "Extract durable facts" not in prompt:
+            return "none"
+        self.mining_calls += 1
+        return "I cannot extract any facts; please provide the transcript."
+
+
+@pytest.mark.asyncio
+async def test_zero_yield_substantive_chunk_is_remined_once(store: MemoryStore, caplog):
+    """A >=K-record chunk whose first look yields ZERO atoms (a refusal) is re-mined EXACTLY once;
+    the retry's atoms land, a retry log line is emitted, and the completions log records the retried
+    chunk (atoms_yielded>0, retried=True) AND keeps the retry's raw completion for forensics."""
+    await store.append_history(_rec(10, "the user prefers the ristretto espresso blend daily", sid="s1"))
+    await store.append_history(_rec(20, "some filler chatter about the weather outside today", sid="s1"))
+    await store.append_history(_rec(30, "more idle filler conversation with no durable facts", sid="s1"))
+    atoms = "coffee | user prefers the ristretto espresso blend | ristretto espresso blend"
+    llm = _RefusalThenAtomsLLM(atoms)
+    completions: list[dict] = []
+
+    with caplog.at_level(logging.WARNING, logger="localharness.memory.mining"):
+        report = await mine_transcript(store, llm, asyncio.Event(), completions_log=completions)
+
+    assert llm.mining_calls == 2                    # first refusal + exactly one re-mine
+    assert report.written == 1
+    mined = await store.query_facts(FactQuery(tags=["sem"]))
+    assert len(mined) == 1 and mined[0].value == "user prefers the ristretto espresso blend"
+    # Instrumentation: a retried chunk that recovered atoms, and the retry's raw kept in the log.
+    assert any(c.get("retried") and c.get("atoms_yielded", 0) > 0 for c in completions)
+    assert any(atoms in c["raw"] for c in completions)      # retry raw preserved for forensics
+    assert "re-mined zero-yield chunk" in caplog.text       # the per-retry attribution line
+
+
+@pytest.mark.asyncio
+async def test_tiny_empty_chunk_below_k_records_does_not_retry(store: MemoryStore):
+    """A legitimately-empty chunk with FEWER than K records is NOT re-mined — the floor only fires
+    on a substantive chunk, so tiny trailing chunks (run-5's 1-record refusal) don't burn a look."""
+    await store.append_history(_rec(10, "short note about nothing much here today ok", sid="s1"))
+    await store.append_history(_rec(20, "another brief filler line with no facts stated", sid="s1"))
+    llm = _AlwaysRefusesLLM()
+
+    report = await mine_transcript(store, llm, asyncio.Event())
+
+    assert llm.mining_calls == 1                    # 2 records (<K) -> no re-mine
+    assert report.written == 0
+
+
+@pytest.mark.asyncio
+async def test_zero_yield_retry_is_capped_at_one(store: MemoryStore):
+    """A >=K-record chunk that whiffs on BOTH the first look AND the re-mine is not looked at a
+    THIRD time — the retry is bounded to one (machine-safety: never loop on a stubborn refusal)."""
+    for ts in (10, 20, 30):
+        await store.append_history(_rec(ts, f"idle filler record at {ts} with no durable facts", sid="s1"))
+    llm = _AlwaysRefusesLLM()
+
+    report = await mine_transcript(store, llm, asyncio.Event())
+
+    assert llm.mining_calls == 2                    # first look + exactly one re-mine, then proceed
+    assert report.written == 0
