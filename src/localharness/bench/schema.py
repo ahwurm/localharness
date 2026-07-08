@@ -129,6 +129,25 @@ class SuccessCriteria(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def reject_vacuous_rubric(self) -> "SuccessCriteria":
+        """An empty needle/pattern matches EVERY output — `"" in text` and `re.search("", text)`
+        are both always True — so a scenario with e.g. `contains:` (nothing after the colon) scores
+        even a run that errored before emitting a token 1.0. Reject it at load, not at score time."""
+        for assertion in self.rubric:
+            if assertion.startswith("contains:"):
+                needle = assertion[len("contains:"):]
+            elif assertion.startswith("regex:"):
+                needle = assertion[len("regex:"):]
+            else:
+                needle = assertion
+            if not needle:
+                raise ValueError(
+                    f"rubric assertion {assertion!r} has an empty needle/pattern — it matches every "
+                    "output (including errored/empty runs). Use a literal the model must actually emit."
+                )
+        return self
+
     def evaluate(self, final_message: str, counts: dict[str, int] | None = None) -> bool:
         """Return True iff all configured assertions match. counts maps event-count
         name (e.g., 'deny_events') to observed integer count from MetricAccumulator."""
