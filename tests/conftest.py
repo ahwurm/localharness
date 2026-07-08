@@ -767,6 +767,26 @@ def _skip_live_vllm(request):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
 
 
+def live_target() -> tuple[str, str]:
+    """Single source of truth for the opted-in live (model_id, base_url) — the LOCALHARNESS_LIVE_*
+    env channel. BOTH the preflight fixture (live_endpoint, below) and the tests
+    (test_spine_real_e2e._live_provider) resolve through here, so they provably hit the SAME
+    endpoint/model: no split-brain preflight, and no silent baked default that could test the wrong
+    thing (issue #5). Hard-fails loud when an opted-in run is not pinned to a real target, per the
+    CLAUDE.md 'fail explicitly, never placeholder data' rule.
+    """
+    model = os.environ.get("LOCALHARNESS_LIVE_MODEL")
+    base_url = os.environ.get("LOCALHARNESS_LIVE_BASE_URL")
+    if not model or not base_url:
+        raise RuntimeError(
+            "live tests are opted in (LOCALHARNESS_LIVE_VLLM=1) but the target is not pinned. Set "
+            "BOTH LOCALHARNESS_LIVE_MODEL and LOCALHARNESS_LIVE_BASE_URL to your served model id and "
+            "endpoint, e.g. LOCALHARNESS_LIVE_MODEL=qwen3.6-27b "
+            "LOCALHARNESS_LIVE_BASE_URL=http://localhost:8000/v1"
+        )
+    return (model, base_url)
+
+
 # -----------------------------------------------------------------------------
 # Phase 23 (LIVE-01): reachability preflight for opted-in live runs.
 #
@@ -775,10 +795,11 @@ def _skip_live_vllm(request):
 #      This fires FIRST, so default/network-less CI never reaches this fixture and
 #      can never be reddened by it.
 #   2. REACHABILITY-GATE (this fixture): runs ONLY when the user opted in (env SET).
-#      An unreachable endpoint is then a REAL failure of an explicit request, so it
-#      HARD-FAILS via pytest.fail() — it does NOT skip and does NOT leak a bare
-#      exception. base_url is resolved from the loaded cfg (model-agnostic — never a
-#      baked :8000 literal or model id).
+#      An unreachable endpoint — or a pinned model the endpoint does not serve — is then
+#      a REAL failure of an explicit request, so it HARD-FAILS via pytest.fail(); it does
+#      NOT skip and does NOT leak a bare exception. (model, base_url) resolve from the ONE
+#      source, live_target() (the LOCALHARNESS_LIVE_* env channel) — the same target the
+#      tests hit, never a baked literal or a second, divergent config lookup.
 # -----------------------------------------------------------------------------
 
 
@@ -786,21 +807,27 @@ def _skip_live_vllm(request):
 def live_endpoint():
     import httpx
 
-    from localharness.cli.components_cmd import _build_loader
-
     # ENV-GATE first: this fixture is module-scoped, so it sets up BEFORE the
     # function-scoped _skip_live_vllm autouse gate — without this self-skip it
-    # would call load_harness() and ConfigNotFound-error at setup in default/CI
-    # runs (no ~/.localharness) before the skip could fire.
+    # would resolve the target and error at setup in default/CI runs (no opt-in)
+    # before the skip could fire.
     if not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
 
-    # Live env channel first (matches test_injection_redteam + _live_provider), else the loaded
-    # config. Module-scoped: runs BEFORE the function-scoped isolation fixture, so load_harness()
-    # here reads the REAL home config — but the env var keeps preflight + tests on one target.
-    base = os.environ.get("LOCALHARNESS_LIVE_BASE_URL") or _build_loader().load_harness().provider.base_url
+    # Resolve the SAME (model, base) the tests hit — single source (issue #5), so the preflight and
+    # the tests can never diverge. live_target() hard-fails loud if the opted-in run is not pinned.
+    model, base = live_target()
     try:
-        httpx.get(base.rstrip("/") + "/models", timeout=3.0).raise_for_status()
+        resp = httpx.get(base.rstrip("/") + "/models", timeout=3.0)
+        resp.raise_for_status()
     except Exception as e:  # noqa: BLE001 — any failure to reach the opted-in endpoint is a hard fail
         pytest.fail(f"LOCALHARNESS_LIVE_VLLM is set but vLLM is unreachable at {base}: {e}")
+    # The pinned model must actually be served — turns the confusing downstream capability-probe
+    # 404 (issue #5 repro) into a clear, actionable preflight failure instead.
+    served = {m.get("id") for m in resp.json().get("data", [])}
+    if model not in served:
+        pytest.fail(
+            f"LOCALHARNESS_LIVE_MODEL={model!r} is not served at {base} (served: {sorted(served)}). "
+            "Set LOCALHARNESS_LIVE_MODEL to a model the endpoint actually serves."
+        )
     return base
