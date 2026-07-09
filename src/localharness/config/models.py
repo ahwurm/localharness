@@ -325,6 +325,26 @@ class MemoryConsolidationConfig(BaseModel):
             "raised to 10_000 (iteration_cap's scale) so any single-pass/backfill bound is settable."
         ),
     )
+    mining_corpus_char_cap: int = Field(
+        default=6000, ge=500, le=100_000,
+        description=(
+            "FIX 3b: mining chunk size — the per-chunk corpus char budget the transcript walk "
+            "fills before one LLM look. Was a hardcoded 6000; surfaced as a knob so an empirical "
+            "sweep can tune it later (default preserves today's behaviour). Chunks never span a "
+            "session_id boundary; an oversized session sub-splits by this cap."
+        ),
+    )
+    mining_known_atoms_cap: int = Field(
+        default=50, ge=5, le=200,
+        description=(
+            "FIX 3: how many newest active sem/ atoms are shown to the miner as `replaces=` targets. "
+            "Was a fixed 30; per-session chunking multiplies chunk count (~+40%), scrolling this "
+            "window faster, so a same-pass correction of an atom minted many chunks earlier could "
+            "fall out and mint a shadow duplicate. Default 50 >= mining_write_budget, so every atom "
+            "a single pass mints stays visible (the DB surfaces this-pass mints first, by updated_at) "
+            "— keep it >= write_budget when raising the budget. Bounds prompt preamble."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(

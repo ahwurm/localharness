@@ -371,9 +371,11 @@ class ConsolidationPass:
     async def _step_mine(self, report: ConsolidationReport) -> None:
         if self._llm is None or not getattr(self._cfg, "mining_enabled", False):
             return
-        from localharness.memory.mining import mine_transcript
+        from localharness.memory.mining import _KNOWN_ATOMS_CAP, mine_transcript
         m = await mine_transcript(
             self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget,
+            corpus_char_cap=getattr(self._cfg, "mining_corpus_char_cap", 6000),  # FIX 3b chunk size
+            known_atoms_cap=getattr(self._cfg, "mining_known_atoms_cap", _KNOWN_ATOMS_CAP),  # FIX 3
             completions_log=report.mining_completions,  # FIX 2c: persist raw completions
             file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
         )

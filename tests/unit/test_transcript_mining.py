@@ -107,11 +107,19 @@ async def test_per_atom_provenance_is_source_session(store: MemoryStore):
     ever be met. A batch-level provenance (the SEMA-05 defect) would collapse both onto one."""
     await store.append_history(_rec(10, "i am building a summarizer subagent for the harness", sid="mon"))
     await store.append_history(_rec(20, "i am adding a citation subagent to the harness", sid="tue"))
-    llm = _FakeLLM(
-        "subagents | building a summarizer subagent for the harness | summarizer subagent\n"
-        "subagents | adding a citation subagent to the harness | citation subagent"
-    )
-    report = await mine_transcript(store, llm, asyncio.Event())
+
+    class _PerCorpusLLM:
+        """Models the real miner under FIX 3 per-session chunking: each session is shown its OWN
+        corpus in a separate chunk, so it emits only the atom grounded in what that chunk contains
+        (a fixed cross-session completion would half-ground the other session's atom onto the wrong
+        source record, since 'subagent'/'harness' are shared — the very mis-attribution session
+        chunking must avoid)."""
+        async def complete(self, prompt: str) -> str:
+            if "summarizer subagent for the harness" in prompt.rsplit("\n\n", 1)[-1]:
+                return "subagents | building a summarizer subagent for the harness | summarizer subagent"
+            return "subagents | adding a citation subagent to the harness | citation subagent"
+
+    report = await mine_transcript(store, _PerCorpusLLM(), asyncio.Event())
 
     assert report.written == 2
     provs = {f.provenance for f in await store.query_facts(FactQuery(tags=["sem"]))}

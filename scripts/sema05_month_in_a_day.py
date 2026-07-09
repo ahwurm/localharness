@@ -219,13 +219,21 @@ class _OfflineFakeLLM:
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
         if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
-            # CORPUS-AWARE (like a real extractor): emit only atoms whose subject is actually in
-            # this chunk, so a per-day (between-sitting) pass mines only that day's atom and the
-            # two attribute to two distinct sittings (no cross-grounding, no provenance collapse).
+            # CORPUS-AWARE, and it does NOT re-extract a fact already on file — modelling a real
+            # miner, which is shown the known facts to REUSE/CORRECT (replaces=), not to re-state.
+            # This matters under FIX 3 per-session chunking: a fact echoed into a LATER session's
+            # transcript (e.g. a tool_result that read prior history) must not be re-minted there and
+            # corroborated onto that sitting, which would advance its provenance (store_fact's
+            # distinct-day ladder) and collapse the two atoms onto ONE sitting — starving the
+            # >=2-session chapter cluster. `known` = the known-block; `corpus` = the transcript only.
+            m = re.search(r"Known facts already on file.*?\n\n", prompt, flags=re.S)
+            known = m.group(0) if m else ""
+            corpus = re.sub(r"Known facts already on file.*?\n\n", "", prompt, flags=re.S)
+            corpus = re.sub(r"Current corrected facts.*?\n\n", "", corpus, flags=re.S)
             out = []
-            if "summarizer" in prompt:
+            if "summarizer" in corpus and "summarizer" not in known:
                 out.append("subagents | building a summarizer subagent for the harness | summarizer subagent for the harness")
-            if "citation" in prompt:
+            if "citation" in corpus and "citation" not in known:
                 out.append("subagents | building a citation subagent for the harness | citation subagent for the harness")
             return "\n".join(out)
         return ""  # anything else: inert
