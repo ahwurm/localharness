@@ -339,10 +339,10 @@ class MemoryConsolidationConfig(BaseModel):
         description=(
             "FIX 3: how many newest active sem/ atoms are shown to the miner as `replaces=` targets. "
             "Was a fixed 30; per-session chunking multiplies chunk count (~+40%), scrolling this "
-            "window faster, so a same-pass correction of an atom minted many chunks earlier could "
-            "fall out and mint a shadow duplicate. Default 50 >= mining_write_budget, so every atom "
-            "a single pass mints stays visible (the DB surfaces this-pass mints first, by updated_at) "
-            "— keep it >= write_budget when raising the budget. Bounds prompt preamble."
+            "window faster. VISIBILITY only: supersede correctness never depends on this cap — "
+            "every this-pass mint stays a valid replaces= target via mining's in-pass minted "
+            "registry even after scrolling out — so write_budget may exceed it freely. The cap "
+            "bounds the prompt preamble (what the miner is SHOWN as reuse/correction targets)."
         ),
     )
     mining_operative_message_types: list[str] = Field(

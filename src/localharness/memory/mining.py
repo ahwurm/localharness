@@ -107,8 +107,12 @@ def _slug_of_key(key: str) -> str:
 
 
 def _norm(value: str) -> str:
-    """Whitespace-collapsed, lowercased value — the in-pass duplicate-mint identity (FIX 2)."""
-    return " ".join(value.split()).lower()
+    """Whitespace-collapsed, lowercased, trailing sentence punctuation stripped — the duplicate-
+    mint identity (FIX 2). REVIEW FIX: without the strip, 'X' vs 'X.' were distinct identities,
+    so the same value re-mined with a trailing period landed on a fresh _h8 key beside the
+    original as a duplicate ACTIVE row — the exact class the run-10 dedupe closed for
+    byte-identical strings."""
+    return " ".join(value.split()).lower().rstrip(" .,;:!?")
 
 
 def _coerce_key_topic(topic: str, known_keys: set[str]) -> tuple[str | None, str] | None:
@@ -294,6 +298,11 @@ async def mine_transcript(
     # FIX 2 (run-10): (slug, normalized value) -> the key it was minted on THIS pass, so a second
     # atom carrying the same value on a DIFFERENT key (the double-replace duplicate) is skipped.
     minted_norm_key: dict[tuple[str, str], str] = {}
+    # REVIEW FIX: key -> claim for every atom minted THIS pass. Unioned into the per-chunk
+    # replaces-resolution view so a same-pass correction still supersedes an atom that scrolled
+    # out of the capped known window (mints-in-pass > known_atoms_cap). The known window is a
+    # prompt-VISIBILITY cap; supersede correctness must never depend on it.
+    minted_pass: dict[str, str] = {}
     try:
         raw_wm = await _get_meta(store, _MINING_WATERMARK_KEY)
         try:
@@ -353,7 +362,12 @@ async def mine_transcript(
             # that leaves the stale value active forever. Reloaded PER CHUNK so an atom minted
             # by an earlier chunk of this same pass is already replaceable by a later chunk.
             known = await _active_sem_atoms(store, known_atoms_cap)
-            known_keys = {k for k, _v in known}
+            # REVIEW FIX: the replaces-RESOLUTION view = capped known window ∪ this pass's mints
+            # (minted last, so a this-pass supersede's corrected value wins a key collision).
+            # The cap bounds what the PROMPT shows; a same-pass target must resolve even after
+            # scrolling out of the window (write_budget may legally exceed the cap's own bound).
+            known_map = {**dict(known), **minted_pass}
+            known_keys = set(known_map)
             # FIX 2: the already-active side of the dedupe — (slug, normalized value) -> its key.
             active_norm_key = {(_slug_of_key(k), _norm(v)): k for k, v in known}
             # FIX 2b: SHORT OPAQUE ids ([a1]) alongside the topic label + full key — a short id is
@@ -454,7 +468,7 @@ async def mine_transcript(
                     # target is unambiguous: exactly ONE known ACTIVE atom on this slug AND the
                     # new claim shares >=1 salient token with that atom's value. Anything else
                     # falls back to a normal mint (degrades to a duplicate, never data loss).
-                    same_slug = [(k, v) for k, v in known if k.startswith(f"sem/{slug}/")]
+                    same_slug = [(k, v) for k, v in known_map.items() if k.startswith(f"sem/{slug}/")]
                     if len(same_slug) == 1 and _salient_words(claim) & _salient_words(same_slug[0][1]):
                         key = same_slug[0][0]
                         log.warning("mining B4(i): present-but-invalid replaces=%r rescued -> "
@@ -484,6 +498,9 @@ async def mine_transcript(
                 report.written += 1
                 minted_ids.append(fact.id)
                 minted_norm_key[(slug, norm_val)] = key  # FIX 2: record for the rest of this pass
+                minted_pass[key] = claim  # REVIEW FIX: a replaces-target for the whole pass
+                known_keys.add(key)       # ...and already within THIS chunk's remaining atoms
+                known_map[key] = claim
                 # Mint-time filing (M1): two-step closed-set classify -> atom_tags(provenance=mint).
                 # Never blocks the mint; skipped when tagging is disabled.
                 if file_tags:
