@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 import structlog
@@ -27,6 +28,7 @@ from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
 from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
+from localharness.tools.capabilities import UNTRUSTED_INGEST
 
 log = structlog.get_logger(__name__)
 
@@ -34,6 +36,33 @@ log = structlog.get_logger(__name__)
 _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
+
+# Burst consolidation: consecutive calls from one tool family collapse into a single
+# live counter line (`◆ web_search · web_fetch — the open web, a fresh window each · 30/30`)
+# instead of a line per call — a 30-hit research burst is one scrollback line, not 60.
+# Per-call truth (args, errors, timings) stays on the bus ledger (bus-events.jsonl);
+# this is display-only. Family membership reuses the capability metadata; labels are
+# the localharness.dev demo copy (owner call 2026-07-02: "consolidate — keep true
+# behavior" — the demos consolidated by hand, this emits the line for real).
+_BURST_GROUPS: tuple[tuple[frozenset[str], str, str | None], ...] = (
+    (UNTRUSTED_INGEST, "the open web, a fresh window each",
+     "web results — UNTRUSTED, treated as data only"),
+    (frozenset({"tool_result_get"}), "section reads, a fresh window each", None),
+)
+
+
+@dataclass
+class _Burst:
+    """Consolidation state for one open family burst (display-only)."""
+    family: frozenset[str]
+    label: str
+    close_note: str | None       # ✓ line printed once on close (None = no note)
+    tools: list[str] = field(default_factory=list)  # first-use order, deduped
+    calls: int = 0
+    done: int = 0
+    errors: int = 0
+    status: Status | None = None  # live spinner while the burst is open (TTY only)
+
 
 # Input bubble (Claude Code style): an inline prompt_toolkit Application drawing a
 # fully closed rounded box around the buffer — bottom border hugs the input line
@@ -221,6 +250,7 @@ class TerminalChannel(ChannelAdapter):
         self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
+        self._burst: _Burst | None = None  # open family-burst consolidation (display-only)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
         self._observation_handle = None
@@ -257,6 +287,7 @@ class TerminalChannel(ChannelAdapter):
                 self.bus.unsubscribe(handle)
 
         self._stop_thinking()
+        self._close_burst()  # teardown: flush an open counter so the count isn't lost
 
         if self._live is not None:
             self._live.stop()
@@ -273,6 +304,7 @@ class TerminalChannel(ChannelAdapter):
         """Print a message to the terminal. Wraps in Panel if agent_id provided."""
         async with self._output_lock:
             self._stop_thinking()
+            self._close_burst()
             self._ensure_idle()
             if agent_id:
                 self._console.print(Panel(
@@ -292,6 +324,7 @@ class TerminalChannel(ChannelAdapter):
         full_text = ""
         async with self._output_lock:
             self._stop_thinking()
+            self._close_burst()  # rich allows one live display — freeze before Live starts
             self._state = "STREAMING"
             panel_title = f"[agent.name]{agent_id or 'agent'}[/agent.name] [muted]streaming...[/muted]"
             live_panel = Panel("", title=panel_title, border_style="cyan")
@@ -324,12 +357,28 @@ class TerminalChannel(ChannelAdapter):
         arguments: dict[str, Any],
         agent_id: str | None = None,
     ) -> None:
-        """Display tool invocation inline. Format: ◆ tool_name key_arg"""
-        key_arg = _get_key_arg(arguments)
-        display = f"{_DIAMOND} {tool_name} {key_arg}".rstrip()
+        """Display tool invocation inline. Format: ◆ tool_name key_arg
+
+        Family tools (_BURST_GROUPS) don't print per-call: they open or extend a
+        consolidated burst counter that freezes to one line when the burst ends."""
         async with self._output_lock:
             self._stop_thinking()
-            self._console.print(f"  [tool.call]{display}[/tool.call]")
+            group = next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
+            if group is None:
+                self._close_burst()
+                key_arg = _get_key_arg(arguments)
+                display = f"{_DIAMOND} {tool_name} {key_arg}".rstrip()
+                self._console.print(f"  [tool.call]{display}[/tool.call]")
+                return
+            family, label, note = group
+            if self._burst is None or self._burst.family is not family:
+                self._close_burst()
+                self._burst = _Burst(family=family, label=label, close_note=note)
+            burst = self._burst
+            if tool_name not in burst.tools:
+                burst.tools.append(tool_name)
+            burst.calls += 1
+            self._burst_refresh(burst)
 
     async def send_tool_result(
         self,
@@ -338,10 +387,22 @@ class TerminalChannel(ChannelAdapter):
         is_error: bool,
         agent_id: str | None = None,
     ) -> None:
-        """Display tool result inline. Uses checkmark for success, cross for error."""
+        """Display tool result inline. Uses checkmark for success, cross for error.
+
+        Results belonging to the open burst tick its counter instead of printing;
+        errors are absorbed into the count and annotated on the frozen line (full
+        detail stays on the bus ledger)."""
         lines = result.strip().split("\n") if result else [""]
         async with self._output_lock:
             self._stop_thinking()
+            burst = self._burst
+            if burst is not None and tool_name in burst.family:
+                burst.done += 1
+                if is_error:
+                    burst.errors += 1
+                self._burst_refresh(burst)
+                return
+            self._close_burst()
             if is_error:
                 first = lines[0][:120] if lines else ""
                 self._console.print(f"  [tool.error]{_CROSS} {tool_name} (exit 1): {first}[/tool.error]")
@@ -356,7 +417,9 @@ class TerminalChannel(ChannelAdapter):
         agent_id: str | None = None,
     ) -> None:
         """Write error to stderr console."""
-        self._stop_thinking()
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()
         self._err_console.print(f"[system.error]Error:[/system.error] {error}")
         if detail:
             for line in detail.split("\n"):
@@ -366,7 +429,9 @@ class TerminalChannel(ChannelAdapter):
         """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
         if self._history is None:
             raise ChannelStartError("TerminalChannel.start() must be called before read_input()")
-        self._stop_thinking()
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()  # freeze any open counter before the input bubble draws
         self._state = "WAITING_INPUT"
         app = _build_input_app(
             self._history, prompt, hint="", context_pct=self._context_pct,
@@ -389,10 +454,48 @@ class TerminalChannel(ChannelAdapter):
         if self._state == "STREAMING":
             self._err_console.print("[warning]Warning: output during streaming state[/warning]")
 
+    def _burst_text(self, burst: _Burst, final: bool) -> str:
+        """Render the burst counter line: ◆ tools — label · done/calls [· N errors]."""
+        head = f"{_DIAMOND} {' · '.join(burst.tools)} — {burst.label}"
+        line = f"  [tool.call]{head}[/tool.call] [muted]· {burst.done}/{burst.calls}[/muted]"
+        if final and burst.errors:
+            plural = "s" if burst.errors > 1 else ""
+            line += f" [tool.error]· {burst.errors} error{plural}[/tool.error]"
+        return line
+
+    def _burst_refresh(self, burst: _Burst) -> None:
+        """Tick the live counter. TTY-only spinner; non-TTY counts silently and
+        prints just the frozen line on close (captures stay one line per burst)."""
+        text = self._burst_text(burst, final=False)
+        if burst.status is not None:
+            burst.status.update(text)
+        elif self._console.is_terminal and self._state == "IDLE":
+            try:
+                burst.status = self._console.status(text, spinner="dots")
+                burst.status.start()
+            except Exception:
+                burst.status = None  # a broken spinner must never break output
+
+    def _close_burst(self) -> None:
+        """Freeze an open burst into its final scrollback line (+ close note).
+        Call with _output_lock held, or from teardown where no writer can race."""
+        burst, self._burst = self._burst, None
+        if burst is None:
+            return
+        if burst.status is not None:
+            try:
+                burst.status.stop()
+            finally:
+                burst.status = None
+        self._console.print(self._burst_text(burst, final=True))
+        if burst.close_note and burst.done:
+            self._console.print(f"  [tool.result]{_CHECK} {burst.close_note}[/tool.result]")
+
     def _start_thinking(self) -> None:
         """Animated indicator while an LLM round-trip is in flight (REPL-02).
-        IDLE-only: never over the input bubble or a streaming panel."""
-        if self._thinking is None and self._state == "IDLE":
+        IDLE-only: never over the input bubble, a streaming panel, or an open
+        burst counter (the burst spinner is already the live indicator)."""
+        if self._thinking is None and self._burst is None and self._state == "IDLE":
             try:
                 self._thinking = self._console.status(
                     "[muted]thinking\u2026[/muted]", spinner="dots"
