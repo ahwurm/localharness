@@ -338,6 +338,7 @@ async def mine_transcript(
         chunk_idx = 0
         budget_hit = False
         mined_objs: set[int] = set()  # id() of every record in a fully-mined (committed) chunk
+        wm_idx = 0  # REVIEW FIX: forward-only cursor over window's mined ts-contiguous prefix
         while i < len(walk) and not budget_hit:
             if getattr(cancel_event, "is_set", lambda: False)():
                 report.cancelled = True
@@ -517,11 +518,12 @@ async def mine_transcript(
             # next pass re-mines it, corroborating). A full walk commits the global max, as before.
             mined_objs.update(id(r) for r in chunk)
             new_wm = watermark
-            for wr in window:
-                if id(wr) in mined_objs:
-                    new_wm = max(new_wm, int(wr.get("ts", 0) or 0))
-                else:
-                    break
+            # REVIEW FIX: forward-only cursor — mined_objs only grows and `window` is fixed, so
+            # the prefix never rewinds; the old from-zero rescan per chunk was O(chunks × window)
+            # on a large backfill (exactly the mode the raised write-budget ceiling invites).
+            while wm_idx < len(window) and id(window[wm_idx]) in mined_objs:
+                new_wm = max(new_wm, int(window[wm_idx].get("ts", 0) or 0))
+                wm_idx += 1
             if new_wm > watermark:
                 await _set_meta(store, _MINING_WATERMARK_KEY, str(new_wm))
                 watermark = new_wm
