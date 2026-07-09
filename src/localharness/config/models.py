@@ -313,10 +313,16 @@ class MemoryConsolidationConfig(BaseModel):
         description="An undecidable correction fact leaves the reconciliation queue after this many looks.",
     )
     mining_write_budget: int = Field(
-        default=25, ge=1, le=50,
+        default=50, ge=1, le=10_000,
         description=(
             "Max semantic atoms mined per idle cycle (MOVE 2: mining is the primary feeder; the "
-            "walk is idle-window local-GPU and cancellable, so the cost is sleep-time)."
+            "walk is idle-window local-GPU and cancellable, so the cost is sleep-time). Default 50 "
+            "= ~2x the densest single-pass yield observed on the designed month (~25 atoms), so a "
+            "normal idle window drains without deferral; if a pass still exceeds it the un-mined "
+            "tail is DEFERRED (watermark commits only per fully-mined chunk), never lost, so this "
+            "is a throughput knob, not a correctness one. The old le=50 ceiling couldn't express a "
+            "production-scale budget (the single-pass eval had to bypass the ctor to set 500) — "
+            "raised to 10_000 (iteration_cap's scale) so any single-pass/backfill bound is settable."
         ),
     )
     mint_tagging_enabled: bool = Field(
