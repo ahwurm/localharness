@@ -972,6 +972,11 @@ async def test_coverage_residue_identifies_uncited_records(store: MemoryStore):
     kyoto = next(r for r in report.residue if r["id"] == "h20")
     assert kyoto["session_id"] == "s1" and kyoto["ts"] == 20
     assert kyoto["chars"] == len("we are planning a kyoto trip in november this year")
+    # Stable cross-run identity: record ids are per-run uuids in production, so the Stage-3
+    # intersection keys on the content fingerprint (scripted turns are byte-stable across runs).
+    import hashlib
+    assert kyoto["content_h8"] == hashlib.sha1(
+        b"we are planning a kyoto trip in november this year").hexdigest()[:8]
 
 
 @pytest.mark.asyncio

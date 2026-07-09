@@ -1596,6 +1596,13 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # FIX 2c: the raw per-chunk miner completions — a forensic trail for the supersede path
         # (run-3's were unrecoverable, making the shadow-duplicate root-cause inferential).
         "mining_completions": pass_report.mining_completions,
+        # STAGE 1 (extraction science plan): per-run coverage/residue — the residue's stable record
+        # identity feeds the cross-run intersection (R, thresholds frozen pre-data in
+        # research/2026-07-09-extraction-science-plan.md) that adjudicates systematic vs stochastic
+        # under-extraction and gates which repair mechanism (if any) gets built.
+        "mining_coverage": {"records_seen": pass_report.mined_records_seen,
+                            "records_cited": pass_report.mined_records_cited,
+                            "residue": pass_report.mining_residue},
         # F7: which embedder class the discovery step ran with (MiniLM vs HashingEmbedder).
         "embedder_used": pass_report.embedder_used,
         "tags_backfilled": pass_report.tags_backfilled,

@@ -82,6 +82,12 @@ class ConsolidationReport:
     # FIX 2c (run-3): the RAW miner completion per chunk (pre-parse) — run-3's were unrecoverable,
     # making the shadow-duplicate root-cause inferential. A forensic trail for the supersede path.
     mining_completions: list[dict] = field(default_factory=list)
+    # STAGE 1 (extraction science plan): coverage/residue — committed records the miner processed,
+    # how many sourced a written atom, and the uncited rest (recall observability; the eval
+    # persists the residue per run for the cross-run intersection that gates any repair build).
+    mined_records_seen: int = 0
+    mined_records_cited: int = 0
+    mining_residue: list[dict] = field(default_factory=list)
 
 
 class ConsolidationPass:
@@ -382,6 +388,9 @@ class ConsolidationPass:
             file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
         )
         report.mined = m.written
+        report.mined_records_seen = m.records_seen      # STAGE 1 coverage
+        report.mined_records_cited = m.records_cited
+        report.mining_residue = m.residue
 
     # -- 4. retrieval-strength decay (RANK-03's time axis) ----------------
 

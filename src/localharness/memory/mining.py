@@ -41,7 +41,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from localharness.memory.consolidation import _get_meta, _set_meta
@@ -269,6 +269,13 @@ class MineReport:
     written: int = 0
     rejected_ungrounded: int = 0
     cancelled: bool = False
+    # STAGE 1 (extraction science plan): coverage/residue — recall observability, no behavior
+    # change. `residue` = committed records that were never the SOURCE of a WRITTEN atom (stable
+    # record id + session + ts + chars + preview); its cross-run intersection (R) adjudicates
+    # systematic vs stochastic under-extraction BEFORE any repair mechanism is built.
+    records_seen: int = 0
+    records_cited: int = 0
+    residue: list[dict] = field(default_factory=list)
 
 
 async def mine_transcript(
@@ -303,6 +310,9 @@ async def mine_transcript(
     # out of the capped known window (mints-in-pass > known_atoms_cap). The known window is a
     # prompt-VISIBILITY cap; supersede correctness must never depend on it.
     minted_pass: dict[str, str] = {}
+    # STAGE 1 coverage: committed records by stable id, and the ids that sourced a written atom.
+    seen_records: dict[str, dict] = {}
+    cited_ids: set[str] = set()
     try:
         raw_wm = await _get_meta(store, _MINING_WATERMARK_KEY)
         try:
@@ -497,6 +507,8 @@ async def mine_transcript(
                     node_kind="fact",
                 )
                 report.written += 1
+                if src.get("id") is not None:  # STAGE 1: this record sourced a WRITTEN atom
+                    cited_ids.add(str(src["id"]))
                 minted_ids.append(fact.id)
                 minted_norm_key[(slug, norm_val)] = key  # FIX 2: record for the rest of this pass
                 minted_pass[key] = claim  # REVIEW FIX: a replaces-target for the whole pass
@@ -517,6 +529,9 @@ async def mine_transcript(
             # property under reordering (a budget/cancel abort leaves the tail ts > watermark, so the
             # next pass re-mines it, corroborating). A full walk commits the global max, as before.
             mined_objs.update(id(r) for r in chunk)
+            for r in chunk:  # STAGE 1: committed — the miner fully processed these records
+                if r.get("id") is not None:
+                    seen_records[str(r["id"])] = r
             new_wm = watermark
             # REVIEW FIX: forward-only cursor — mined_objs only grows and `window` is fixed, so
             # the prefix never rewinds; the old from-zero rescan per chunk was O(chunks × window)
@@ -528,6 +543,18 @@ async def mine_transcript(
                 await _set_meta(store, _MINING_WATERMARK_KEY, str(new_wm))
                 watermark = new_wm
             chunk_idx += 1
+
+        # STAGE 1 coverage build: residue = committed records never cited by a written atom.
+        report.records_seen = len(seen_records)
+        report.records_cited = sum(1 for rid in seen_records if rid in cited_ids)
+        # content_h8: record ids are per-run uuids, so the CROSS-RUN intersection keys on a stable
+        # content fingerprint instead (manifest-scripted turns are byte-stable across runs).
+        report.residue = [
+            {"id": rid, "session_id": r.get("session_id"), "ts": int(r.get("ts", 0) or 0),
+             "chars": len(str(r.get("content", ""))), "preview": str(r.get("content", ""))[:80],
+             "content_h8": hashlib.sha1(str(r.get("content", "")).encode("utf-8")).hexdigest()[:8]}
+            for rid, r in seen_records.items() if rid not in cited_ids
+        ]
 
         # B4(ii) post-mining sweep: a newly minted atom that re-asserts a reconciled-away value is
         # retracted on arrival (never enters the active pool). Runs once over this pass's mints.
