@@ -563,3 +563,54 @@ async def test_zero_yield_retry_is_capped_at_one(store: MemoryStore):
 
     assert llm.mining_calls == 2                    # first look + exactly one re-mine, then proceed
     assert report.written == 0
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (production budget — owner "necessity"): the pass-wide write_budget aborts the walk once
+# hit. STEP-1 finding (traced, not assumed): the watermark advances ONLY per fully-mined chunk and
+# a budget-tripped chunk breaks BEFORE its commit, so the un-mined TAIL stays ts > watermark and the
+# NEXT pass re-mines it — DEFERRED, never permanently lost (production is recurring; only the single-
+# pass eval is lossy, which is why it overrides to 500). So the fix is (a) lock that no-loss property
+# and (b) make a sane production budget expressible (the le=50 ceiling couldn't) with a higher default.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_budget_abort_defers_tail_never_permanent_loss(store: MemoryStore):
+    """FIX 2 necessity, multi-chunk: early chunks mint and advance the watermark; a later chunk trips
+    the pass-wide budget and is NOT committed; a SECOND pass recovers the deferred tail. The watermark
+    only ever advances over records actually mined — the tail is never silently dropped."""
+    await store.append_history(_rec(10, "reminder the user prefers dark mode in the code editor", sid="s1"))
+    await store.append_history(_rec(20, "for the record the user timezone is pacific standard time", sid="s1"))
+    await store.append_history(_rec(30, "note the user drives a blue subaru outback wagon here", sid="s1"))
+    # One fixed completion; per-chunk grounding admits only the atom whose source record is in-chunk.
+    llm = _FakeLLM(
+        "prefs | user prefers dark mode in the code editor | prefers dark mode\n"
+        "timezone | user timezone is pacific standard time | pacific standard time\n"
+        "vehicle | user drives a blue subaru outback wagon | blue subaru outback"
+    )
+    # cap=40 -> one record per chunk (3 chunks); budget=2. The fixed completion emits all 3 lines
+    # every chunk, so chunk 2 trips the cap at its 3rd line (after prefs+timezone) -> chunk 2 is a
+    # partially-mined chunk that is NOT committed; only chunk 1 committed (watermark = 10).
+    r1 = await mine_transcript(store, llm, asyncio.Event(),
+                               write_budget=2, corpus_char_cap=40, file_tags=False)
+    assert r1.written == 2
+    vals1 = {f.value for f in await store.query_facts(FactQuery(tags=["sem"]))}
+    assert not any("subaru" in v for v in vals1)                    # tail NOT mined this pass
+    assert int(await _get_meta(store, _MINING_WATERMARK_KEY)) == 10  # advanced only over the mined chunk
+
+    # A second pass resumes at the deferred tail — the subaru fact is recovered, never lost (the
+    # re-mined timezone atom corroborates onto its existing key, so written counts it too).
+    await mine_transcript(store, llm, asyncio.Event(), corpus_char_cap=40, file_tags=False)
+    vals2 = {f.value for f in await store.query_facts(FactQuery(tags=["sem"]))}
+    assert any("subaru" in v for v in vals2)                        # tail recovered next pass
+    assert int(await _get_meta(store, _MINING_WATERMARK_KEY)) == 30  # now walked to the end
+
+
+def test_config_expresses_a_production_scale_mining_budget():
+    """FIX 2: the le=50 ceiling couldn't express a sane production budget (the eval had to bypass the
+    ctor to set 500). The raised ceiling makes a production-scale per-pass budget configurable, and the
+    default is lifted off the run-6-starving 25; deferral (test above) stays the safety net past it."""
+    from localharness.config.models import MemoryConsolidationConfig
+    assert MemoryConsolidationConfig().mining_write_budget >= 50       # better-justified default (was 25)
+    assert MemoryConsolidationConfig(mining_write_budget=200).mining_write_budget == 200  # expressible now
