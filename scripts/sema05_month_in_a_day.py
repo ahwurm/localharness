@@ -1602,7 +1602,12 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # under-extraction and gates which repair mechanism (if any) gets built.
         "mining_coverage": {"records_seen": pass_report.mined_records_seen,
                             "records_cited": pass_report.mined_records_cited,
-                            "residue": pass_report.mining_residue},
+                            "residue": pass_report.mining_residue,
+                            # repair-loop outcomes (residue ledger)
+                            "residue_enqueued": pass_report.mining_residue_enqueued,
+                            "residue_drained": pass_report.mining_residue_drained,
+                            "residue_rescued": pass_report.mining_residue_rescued,
+                            "residue_retired": pass_report.mining_residue_retired},
         # F7: which embedder class the discovery step ran with (MiniLM vs HashingEmbedder).
         "embedder_used": pass_report.embedder_used,
         "tags_backfilled": pass_report.tags_backfilled,

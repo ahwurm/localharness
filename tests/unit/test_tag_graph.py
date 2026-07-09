@@ -54,8 +54,9 @@ def _rec(ts, content, sid="s1", typ="user_message"):
 
 @pytest.mark.asyncio
 async def test_schema_v6_tables_and_version(store):
+    from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION
     async with store._db.execute("PRAGMA user_version") as cur:
-        assert (await cur.fetchone())[0] == 6
+        assert (await cur.fetchone())[0] == CURRENT_SCHEMA_VERSION  # v6 tables ride the ladder to current
     names = set()
     async with store._db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
         names = {r[0] for r in await cur.fetchall()}
