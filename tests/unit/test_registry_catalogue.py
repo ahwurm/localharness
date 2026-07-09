@@ -237,9 +237,14 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.memory.consolidation.mining_known_atoms_cap" in entries
     # FIX 4: mining's operative conversational surface (echo-collapse guard) is a config knob.
     assert "agent.memory.consolidation.mining_operative_message_types" in entries
-    assert len(entries) == 130, (
+    # Residue ledger (core repair loop): enabled + K + per-pass record budget + intake filter.
+    assert "agent.memory.consolidation.mining_residue_enabled" in entries
+    assert "agent.memory.consolidation.mining_residue_attempt_cap" in entries
+    assert "agent.memory.consolidation.mining_residue_record_budget" in entries
+    assert "agent.memory.consolidation.mining_residue_min_chars" in entries
+    assert len(entries) == 134, (
         f"catalogue should be 127 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x19 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x23 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
     )
 
 
@@ -303,9 +308,9 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 130, (
+    assert len(entries) == 134, (
         f"catalogue should be 127 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x19 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x23 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live]), got {len(entries)}"
     )
 
 
