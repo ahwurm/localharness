@@ -230,7 +230,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -587,6 +587,38 @@ PRAGMA user_version = 6;
 COMMIT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v7 — the mining-residue ledger (the repair half of the extraction loop, owner-directed
+# 2026-07-09). RECORD-level forgetting lifecycle, mirroring the atom tier's law one layer down:
+# a committed history record that never sourced a written atom is enqueued PENDING; each idle
+# pass re-mines a budgeted batch in ISOLATION; a record still barren after `attempt_cap` looks is
+# RETIRED — permanently out of the mining window, NEVER deleted (history.jsonl stays append-only;
+# retire selects, never destroys — same demote-not-delete ethic as retrieval_strength). ADDITIVE
+# ONLY: one new table; facts/sessions/tags untouched, so the ambient block is byte-stable by
+# construction. ONE BEGIN IMMEDIATE ... PRAGMA user_version = 7; COMMIT (crash -> rollback to v6).
+# ---------------------------------------------------------------------------
+
+MIGRATION_V6_TO_V7_SQL = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS mining_residue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    TEXT    NOT NULL,
+    record_id   TEXT    NOT NULL,
+    content_h8  TEXT    NOT NULL DEFAULT '',
+    session_id  TEXT    NOT NULL DEFAULT '',
+    ts          INTEGER NOT NULL DEFAULT 0,
+    chars       INTEGER NOT NULL DEFAULT 0,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    status      TEXT    NOT NULL DEFAULT 'pending',  -- pending|rescued|retired
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mining_residue_agent_record ON mining_residue(agent_id, record_id);
+CREATE INDEX IF NOT EXISTS idx_mining_residue_pending ON mining_residue(agent_id, status, ts);
+PRAGMA user_version = 7;
+COMMIT;
+"""
+
 # Seeded spine (Amendment 4): TWO buckets, THREE children each, filed by what a memory SERVES
 # (a functional decision rule with an inline example — NEVER a bare "useful"). Every seed has
 # both real run-5 atom evidence AND prior-art convergence (survey §2.3). Idempotent per agent.
@@ -761,6 +793,9 @@ class MemoryStore:
             v = await _version()
         if v == 5:
             await self._db.executescript(MIGRATION_V5_TO_V6_SQL)
+            v = await _version()
+        if v == 6:
+            await self._db.executescript(MIGRATION_V6_TO_V7_SQL)
             v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
@@ -1639,6 +1674,86 @@ class MemoryStore:
                 if len(out) >= limit:
                     break
         return out
+
+    # ------------------------------------------------------------------
+    # Mining-residue ledger (schema v7) — the repair half of the extraction loop.
+    # RECORD-level lifecycle: pending -> rescued (a later look minted from it) or
+    # -> retired (barren after `attempt_cap` isolated looks). Retire = out of the
+    # mining window ONLY; the history record itself is never touched (append-only).
+    # ------------------------------------------------------------------
+
+    async def residue_enqueue(self, entries: list[dict[str, Any]]) -> int:
+        """Enqueue uncited records as PENDING. Keyed (agent, record_id): a re-enqueue of a
+        known record is a no-op that PRESERVES its attempt count and status (re-surfacing
+        never resets the K clock). Returns how many entries were newly enqueued."""
+        assert self._db is not None
+        now = int(time.time())
+        n = 0
+        for e in entries:
+            cur = await self._db.execute(
+                "INSERT OR IGNORE INTO mining_residue "
+                "(agent_id, record_id, content_h8, session_id, ts, chars, attempts, status, "
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?)",
+                (self._agent_id, str(e["id"]), str(e.get("content_h8", "")),
+                 str(e.get("session_id") or ""), int(e.get("ts", 0) or 0),
+                 int(e.get("chars", 0) or 0), now, now),
+            )
+            n += 1 if cur.rowcount and cur.rowcount > 0 else 0
+        await self._db.commit()
+        return n
+
+    async def residue_pending(self, *, cap: int = 50) -> list[dict[str, Any]]:
+        """Oldest-first PENDING ledger rows, at most `cap` (the per-pass drain budget).
+        Pending implies attempts < the cap that would have retired it (residue_bump retires
+        at the threshold), so no attempt filter is needed here."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT record_id, content_h8, session_id, ts, chars, attempts, status "
+            "FROM mining_residue WHERE agent_id = ? AND status = 'pending' "
+            "ORDER BY ts ASC, id ASC LIMIT ?",
+            (self._agent_id, cap),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def residue_rescue(self, record_ids: list[str]) -> int:
+        """Mark PENDING rows rescued (their record sourced a written atom). Idempotent —
+        only pending rows flip. Returns how many flipped."""
+        assert self._db is not None
+        if not record_ids:
+            return 0
+        qs = ",".join("?" for _ in record_ids)
+        cur = await self._db.execute(
+            f"UPDATE mining_residue SET status = 'rescued', updated_at = ? "
+            f"WHERE agent_id = ? AND status = 'pending' AND record_id IN ({qs})",
+            (int(time.time()), self._agent_id, *[str(r) for r in record_ids]),
+        )
+        await self._db.commit()
+        return cur.rowcount or 0
+
+    async def residue_bump(self, record_ids: list[str], *, attempt_cap: int) -> int:
+        """One barren isolated look: attempts += 1 on the PENDING rows; any row reaching
+        `attempt_cap` is RETIRED (out of the mining window forever — the record itself is
+        never deleted). Returns how many rows retired on this bump."""
+        assert self._db is not None
+        if not record_ids:
+            return 0
+        now = int(time.time())
+        qs = ",".join("?" for _ in record_ids)
+        ids = [str(r) for r in record_ids]
+        await self._db.execute(
+            f"UPDATE mining_residue SET attempts = attempts + 1, updated_at = ? "
+            f"WHERE agent_id = ? AND status = 'pending' AND record_id IN ({qs})",
+            (now, self._agent_id, *ids),
+        )
+        cur = await self._db.execute(
+            f"UPDATE mining_residue SET status = 'retired', updated_at = ? "
+            f"WHERE agent_id = ? AND status = 'pending' AND attempts >= ? "
+            f"AND record_id IN ({qs})",
+            (now, self._agent_id, int(attempt_cap), *ids),
+        )
+        await self._db.commit()
+        return cur.rowcount or 0
 
     # ------------------------------------------------------------------
     # History delegation

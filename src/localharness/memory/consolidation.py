@@ -88,6 +88,11 @@ class ConsolidationReport:
     mined_records_seen: int = 0
     mined_records_cited: int = 0
     mining_residue: list[dict] = field(default_factory=list)
+    # RESIDUE LEDGER (repair loop): per-pass enqueue/drain/rescue/retire outcomes.
+    mining_residue_enqueued: int = 0
+    mining_residue_drained: int = 0
+    mining_residue_rescued: int = 0
+    mining_residue_retired: int = 0
 
 
 class ConsolidationPass:
@@ -384,6 +389,11 @@ class ConsolidationPass:
             known_atoms_cap=self._cfg.mining_known_atoms_cap,  # FIX 3
             # FIX 4: conversational surface only (no tool read-backs)
             operative_message_types=self._cfg.mining_operative_message_types,
+            # RESIDUE repair loop: amortized isolated re-mine of uncited records + K-trim
+            residue_enabled=self._cfg.mining_residue_enabled,
+            residue_attempt_cap=self._cfg.mining_residue_attempt_cap,
+            residue_record_budget=self._cfg.mining_residue_record_budget,
+            residue_min_chars=self._cfg.mining_residue_min_chars,
             completions_log=report.mining_completions,  # FIX 2c: persist raw completions
             file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
         )
@@ -391,6 +401,10 @@ class ConsolidationPass:
         report.mined_records_seen = m.records_seen      # STAGE 1 coverage
         report.mined_records_cited = m.records_cited
         report.mining_residue = m.residue
+        report.mining_residue_enqueued = m.residue_enqueued  # repair-loop outcomes
+        report.mining_residue_drained = m.residue_drained
+        report.mining_residue_rescued = m.residue_rescued
+        report.mining_residue_retired = m.residue_retired
 
     # -- 4. retrieval-strength decay (RANK-03's time axis) ----------------
 

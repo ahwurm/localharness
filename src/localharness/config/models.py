@@ -367,6 +367,41 @@ class MemoryConsolidationConfig(BaseModel):
             "I/O). Mirrors mining._OPERATIVE_MESSAGE_TYPES; empty => unrestricted (legacy all-types)."
         ),
     )
+    mining_residue_enabled: bool = Field(
+        default=True,
+        description=(
+            "RESIDUE LEDGER (core repair loop): the miner's first pass is attention-limited and "
+            "lossy by design; committed records that never sourced a written atom are enqueued and "
+            "re-mined in ISOLATION on the NEXT idle pass (amortized — a pass never drains its own "
+            "residue; a quiet store drains nothing). Off = enqueue and drain both inert; the "
+            "coverage metric still reports residue."
+        ),
+    )
+    mining_residue_attempt_cap: int = Field(
+        default=2, ge=1, le=10,
+        description=(
+            "K: isolated looks a residue record gets before RETIREMENT (out of the mining window "
+            "forever; the history record is never deleted — retire selects, never destroys). "
+            "Bounds the ledger: every record exits in <= K drains. Hyperparameter — sweep on the "
+            "eval, do not taste-pick."
+        ),
+    )
+    mining_residue_record_budget: int = Field(
+        default=40, ge=1, le=10_000,
+        description=(
+            "Max pending residue records drained per pass (sequential, isolated chunks — never "
+            "fanned out; single shared GPU). A cold backlog drains over several quiet cycles "
+            "instead of one long burst. Hyperparameter — sweep on the eval."
+        ),
+    )
+    mining_residue_min_chars: int = Field(
+        default=20, ge=0, le=4000,
+        description=(
+            "Intake triviality filter: an uncited record shorter than this never enters the "
+            "ledger ('ok'/'thanks' are not facts to rescue). The coverage METRIC still reports "
+            "it — the ledger just never chews it. Hyperparameter — sweep on the eval."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(

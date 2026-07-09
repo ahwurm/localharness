@@ -276,6 +276,13 @@ class MineReport:
     records_seen: int = 0
     records_cited: int = 0
     residue: list[dict] = field(default_factory=list)
+    # RESIDUE LEDGER (repair loop): enqueued = this pass's uncited non-trivial records entering
+    # the ledger; drained = pending records given an isolated look this pass; rescued/retired =
+    # this pass's DRAIN outcomes (the silent main-walk gap rescue is not counted here).
+    residue_enqueued: int = 0
+    residue_drained: int = 0
+    residue_rescued: int = 0
+    residue_retired: int = 0
 
 
 async def mine_transcript(
@@ -287,6 +294,10 @@ async def mine_transcript(
     corpus_char_cap: int = 6000,
     known_atoms_cap: int = _KNOWN_ATOMS_CAP,
     operative_message_types: Any = _OPERATIVE_MESSAGE_TYPES,
+    residue_enabled: bool = True,
+    residue_attempt_cap: int = 2,
+    residue_record_budget: int = 40,
+    residue_min_chars: int = 20,
     completions_log: list | None = None,
     file_tags: bool = True,
 ) -> MineReport:
@@ -299,7 +310,16 @@ async def mine_transcript(
 
     FIX 4: only records whose `type` is in `operative_message_types` are FETCHED — mining reads the
     conversational surface (user + assistant), never tool_result read-backs, so an echoed prior fact
-    can never re-mine and collapse its provenance (None/empty = unrestricted, the legacy fetch)."""
+    can never re-mine and collapse its provenance (None/empty = unrestricted, the legacy fetch).
+
+    RESIDUE repair loop (core design, 2026-07-09): after the main walk, PRIOR passes' pending
+    residue (committed records that never sourced a written atom) is re-mined in ISOLATION —
+    residue-only chunks where a skimmed fact cannot lose the attention contest again — sequentially,
+    at most `residue_record_budget` records per pass. Then THIS pass's uncited non-trivial records
+    (>= `residue_min_chars`) are enqueued for the NEXT pass: amortized — a pass never drains what it
+    just enqueued, and a quiet store drains nothing. A record still barren after
+    `residue_attempt_cap` isolated looks is RETIRED: permanently out of the mining window, never
+    deleted (history stays append-only — retire selects, never destroys)."""
     report = MineReport()
     minted_ids: list[int] = []
     # FIX 2 (run-10): (slug, normalized value) -> the key it was minted on THIS pass, so a second
@@ -330,8 +350,14 @@ async def mine_transcript(
             (r for r in records if int(r.get("ts", 0) or 0) > watermark and r.get("content")),
             key=lambda r: int(r.get("ts", 0) or 0),
         )
-        if not window:
-            return report  # nothing new — watermark unchanged; cost paid only on the read
+        # RESIDUE: fetch the ledger's pending set up front (the per-pass drain budget). Pending is
+        # PRIOR passes' residue only — this pass's own residue is enqueued at the end, after the
+        # drain, so a pass can never drain what it just enqueued (the amortized invariant).
+        pending: list[dict] = []
+        if residue_enabled:
+            pending = await store.residue_pending(cap=residue_record_budget)
+        if not window and not pending:
+            return report  # nothing new & nothing owed — cost paid only on the read
 
         # FIX 3a: group the ts-sorted window by session_id so a chunk never straddles two sittings.
         # A dict preserves first-seen order and `window` is ts-sorted, so sessions come out in
@@ -344,26 +370,15 @@ async def mine_transcript(
             sessions.setdefault(str(r.get("session_id") or ""), []).append(r)
         walk = [r for recs in sessions.values() for r in recs]
 
-        i = 0
-        chunk_idx = 0
-        budget_hit = False
-        mined_objs: set[int] = set()  # id() of every record in a fully-mined (committed) chunk
-        wm_idx = 0  # REVIEW FIX: forward-only cursor over window's mined ts-contiguous prefix
-        while i < len(walk) and not budget_hit:
-            if getattr(cancel_event, "is_set", lambda: False)():
-                report.cancelled = True
-                break
-            # Assemble one chunk up to corpus_char_cap chars — but NEVER across a session boundary
-            # (an oversized session sub-splits here via the same char-cap loop, now session-scoped).
-            chunk: list[dict] = []
-            chars = 0
-            sid0 = str(walk[i].get("session_id") or "")
-            while (i < len(walk) and chars < corpus_char_cap
-                   and str(walk[i].get("session_id") or "") == sid0):
-                r = walk[i]
-                chunk.append(r)
-                chars += len(str(r.get("content", ""))[:_PER_RECORD_CHARS]) + 1
-                i += 1
+        async def _mine_one_chunk(chunk: list[dict], *, retry_on_zero: bool,
+                                  drain: bool = False, idx: int = -1) -> tuple[set[str], bool]:
+            """One isolated model look at `chunk` — known/corrections preamble, one cancellable
+            completion (+ the FIX-2 zero-yield retry, MAIN walk only — the drain's attempt
+            ladder IS its retry), then the grounded/supersede/dedupe atom loop. Shared verbatim
+            by the main walk and the residue drain so the two paths can never drift. Returns
+            (record ids cited by THIS chunk's written atoms, budget_hit); sets report.cancelled
+            on a cancel (caller breaks; no state is committed for a cancelled look)."""
+            cited_chunk: set[str] = set()
             corpus = "\n".join(
                 str(r.get("content", ""))[:_PER_RECORD_CHARS] for r in chunk
             )[:corpus_char_cap]
@@ -405,9 +420,8 @@ async def mine_transcript(
                         + len(corrections_block) + 64)
             raw = await complete_cancellable(llm, prompt, cancel_event, char_cap=char_cap)
             if raw is None:
-                # Cancelled mid-look — watermark NOT advanced past this chunk (next pass re-mines).
-                report.cancelled = True
-                break
+                report.cancelled = True  # cancelled mid-look — caller breaks, nothing committed
+                return cited_chunk, False
             atoms = _parse_atoms(raw)
             # FIX 2 (extraction-yield): a SUBSTANTIVE chunk (>= _RETRY_MIN_RECORDS records) that
             # parses ZERO atoms is a whiff — a flat refusal ("I cannot extract any facts…", live in
@@ -416,7 +430,7 @@ async def mine_transcript(
             # never loops); nothing minted yet, so the known-block is unchanged and the retry prompt
             # is identical. A tiny chunk (< K records) is legitimately empty and is NOT retried.
             retried = False
-            if not atoms and len(chunk) >= _RETRY_MIN_RECORDS:
+            if not atoms and retry_on_zero and len(chunk) >= _RETRY_MIN_RECORDS:
                 retried = True
                 raw_retry = await complete_cancellable(llm, prompt, cancel_event, char_cap=char_cap)
                 if raw_retry is None:
@@ -428,20 +442,20 @@ async def mine_transcript(
                                                 "chunk_records": len(chunk), "raw": raw_retry,
                                                 "retry": True})
                 log.warning("mining FIX 2: re-mined zero-yield chunk idx=%d records=%d "
-                            "first_pass_yield=0 retry_yield=%d", chunk_idx, len(chunk), len(atoms))
+                            "first_pass_yield=0 retry_yield=%d", idx, len(chunk), len(atoms))
             # Per-chunk forensics (FIX 2c + attribution): records, final yield, whether re-mined —
             # so run-12 can separate FIX-1's coverage gain from FIX-2's retry-recovered atoms.
             if completions_log is not None:
                 completions_log.append({"chunk_start_ts": int(chunk[0].get("ts", 0) or 0),
                                         "chunk_records": len(chunk), "raw": raw,
-                                        "atoms_yielded": len(atoms), "retried": retried})
+                                        "atoms_yielded": len(atoms), "retried": retried,
+                                        "residue_drain": drain})
             if report.cancelled:
-                break
+                return cited_chunk, False
 
             for topic, claim, evidence, replaces in atoms:
                 if report.written >= write_budget:
-                    budget_hit = True
-                    break
+                    return cited_chunk, True
                 src = _source_record(claim, evidence, chunk)
                 # GROUNDING KILL-NET: reject an atom with no source or whose claim is not a
                 # majority-token match in the cited record's text (applies to replacements too).
@@ -509,6 +523,7 @@ async def mine_transcript(
                 report.written += 1
                 if src.get("id") is not None:  # STAGE 1: this record sourced a WRITTEN atom
                     cited_ids.add(str(src["id"]))
+                    cited_chunk.add(str(src["id"]))
                 minted_ids.append(fact.id)
                 minted_norm_key[(slug, norm_val)] = key  # FIX 2: record for the rest of this pass
                 minted_pass[key] = claim  # REVIEW FIX: a replaces-target for the whole pass
@@ -519,7 +534,31 @@ async def mine_transcript(
                 if file_tags:
                     await file_atom_tags(store, llm, cancel_event,
                                          atom_id=fact.id, topic=topic, claim=claim)
+            return cited_chunk, False
 
+        i = 0
+        chunk_idx = 0
+        budget_hit = False
+        mined_objs: set[int] = set()  # id() of every record in a fully-mined (committed) chunk
+        wm_idx = 0  # REVIEW FIX: forward-only cursor over window's mined ts-contiguous prefix
+        while i < len(walk) and not budget_hit:
+            if getattr(cancel_event, "is_set", lambda: False)():
+                report.cancelled = True
+                break
+            # Assemble one chunk up to corpus_char_cap chars — but NEVER across a session boundary
+            # (an oversized session sub-splits here via the same char-cap loop, now session-scoped).
+            chunk: list[dict] = []
+            chars = 0
+            sid0 = str(walk[i].get("session_id") or "")
+            while (i < len(walk) and chars < corpus_char_cap
+                   and str(walk[i].get("session_id") or "") == sid0):
+                r = walk[i]
+                chunk.append(r)
+                chars += len(str(r.get("content", ""))[:_PER_RECORD_CHARS]) + 1
+                i += 1
+            _, budget_hit = await _mine_one_chunk(chunk, retry_on_zero=True, idx=chunk_idx)
+            if report.cancelled:
+                break  # cancelled mid-look — watermark NOT advanced past this chunk (next pass re-mines)
             if budget_hit:
                 break  # partially-written chunk: don't advance — next pass re-mines (corroborates)
             # FIX 2/3 no-loss watermark: advance ONLY over the longest fully-mined ts-CONTIGUOUS
@@ -555,6 +594,62 @@ async def mine_transcript(
              "content_h8": hashlib.sha1(str(r.get("content", "")).encode("utf-8")).hexdigest()[:8]}
             for rid, r in seen_records.items() if rid not in cited_ids
         ]
+
+        # RESIDUE repair loop — drain PRIOR passes' residue, then enqueue this pass's own.
+        if residue_enabled:
+            # Gap rescue (silent): a pending record the MAIN walk just cited needs no drain —
+            # flip it rescued and drop it from this pass's drain (no double look).
+            if cited_ids:
+                await store.residue_rescue(sorted(cited_ids))
+                pending = [p for p in pending if str(p["record_id"]) not in cited_ids]
+            if pending and not report.cancelled and not budget_hit:
+                by_id = {str(r.get("id")): r for r in records if r.get("id") is not None}
+                residue_walk: list[dict] = []
+                orphans: list[str] = []
+                for p in pending:
+                    rec = by_id.get(str(p["record_id"]))
+                    residue_walk.append(rec) if rec is not None else orphans.append(str(p["record_id"]))
+                if orphans:
+                    # No longer fetchable (e.g. the operative surface narrowed since enqueue) — a
+                    # barren look by definition; bump toward retirement rather than pend forever.
+                    report.residue_drained += len(orphans)
+                    report.residue_retired += await store.residue_bump(
+                        orphans, attempt_cap=residue_attempt_cap)
+                    log.warning("mining residue: %d ledger records no longer fetchable; bumped",
+                                len(orphans))
+                # Isolated, sequential, per-session drain chunks (same assembly rule as the main
+                # walk). One look at a time — never fanned out (single shared GPU).
+                j = 0
+                while j < len(residue_walk):
+                    if getattr(cancel_event, "is_set", lambda: False)():
+                        report.cancelled = True
+                        break
+                    rchunk: list[dict] = []
+                    rchars = 0
+                    rsid0 = str(residue_walk[j].get("session_id") or "")
+                    while (j < len(residue_walk) and rchars < corpus_char_cap
+                           and str(residue_walk[j].get("session_id") or "") == rsid0):
+                        rr = residue_walk[j]
+                        rchunk.append(rr)
+                        rchars += len(str(rr.get("content", ""))[:_PER_RECORD_CHARS]) + 1
+                        j += 1
+                    cited_chunk, r_budget_hit = await _mine_one_chunk(
+                        rchunk, retry_on_zero=False, drain=True)
+                    if report.cancelled:
+                        break  # an aborted look is NOT a barren look — attempts stay unbumped
+                    rids = [str(r.get("id")) for r in rchunk if r.get("id") is not None]
+                    report.residue_drained += len(rids)
+                    report.residue_rescued += await store.residue_rescue(
+                        [rid for rid in rids if rid in cited_chunk])
+                    report.residue_retired += await store.residue_bump(
+                        [rid for rid in rids if rid not in cited_chunk],
+                        attempt_cap=residue_attempt_cap)
+                    if r_budget_hit:
+                        break  # write budget exhausted — the rest of pending waits, unbumped
+            # Enqueue THIS pass's residue for the NEXT pass (intake triviality filter: the metric
+            # above still reports trivial records; the ledger just never chews them).
+            report.residue_enqueued = await store.residue_enqueue(
+                [e for e in report.residue if e.get("chars", 0) >= residue_min_chars])
 
         # B4(ii) post-mining sweep: a newly minted atom that re-asserts a reconciled-away value is
         # retracted on arrival (never enters the active pool). Runs once over this pass's mints.
