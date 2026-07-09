@@ -614,3 +614,110 @@ def test_config_expresses_a_production_scale_mining_budget():
     from localharness.config.models import MemoryConsolidationConfig
     assert MemoryConsolidationConfig().mining_write_budget >= 50       # better-justified default (was 25)
     assert MemoryConsolidationConfig(mining_write_budget=200).mining_write_budget == 200  # expressible now
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (per-session chunking + configurable chunk size): today mine_transcript flattens ALL
+# sittings by ts and walks a HARDCODED 6000-char window, so a chunk can straddle two sessions. 3a
+# cuts chunks at session_id boundaries (session-by-session, chronological), sub-splitting an
+# oversized session with the existing char-cap loop. 3b makes the chunk size a config knob. The
+# critic's risk: +40% chunk count scrolls the known-atoms window (was 30) faster, so a same-pass
+# `replaces=` targeting an atom minted many chunks earlier can fall OUT of the window and silently
+# mint a shadow duplicate — the window is now a config knob defaulting >= the write budget.
+# ---------------------------------------------------------------------------
+
+
+class _CaptureLLM:
+    """Records every prompt the miner builds; mints nothing (empty completion) so the known-block
+    stays empty and each prompt's only content markers come from that chunk's corpus."""
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_chunks_never_span_a_session_boundary(store: MemoryStore):
+    """FIX 3a: two sittings interleaved in ts are mined session-by-session, so no single chunk's
+    corpus ever straddles two sessions (today's flat ts-walk co-mingles all four records in one
+    chunk). Sessions are walked in chronological (min-ts) order; both are covered."""
+    await store.append_history(_rec(10, "alpha one the subagent design notes go here now", sid="sessA"))
+    await store.append_history(_rec(20, "bravo one the kyoto trip planning notes are here", sid="sessB"))
+    await store.append_history(_rec(30, "alpha two more subagent design details noted here", sid="sessA"))
+    await store.append_history(_rec(40, "bravo two more kyoto trip planning details here", sid="sessB"))
+    llm = _CaptureLLM()
+
+    await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+
+    assert llm.prompts, "the miner never ran"
+    for p in llm.prompts:
+        assert not ("alpha" in p and "bravo" in p), "a chunk straddled two sessions"
+    assert any("alpha" in p for p in llm.prompts) and any("bravo" in p for p in llm.prompts)
+
+
+def test_corpus_char_cap_is_configurable_with_default_6000():
+    """FIX 3b: the mining chunk size is a config knob (was a hardcoded 6000), tunable for a later
+    empirical sweep; the default preserves today's behaviour."""
+    from localharness.config.models import MemoryConsolidationConfig
+    assert MemoryConsolidationConfig().mining_corpus_char_cap == 6000
+    assert MemoryConsolidationConfig(mining_corpus_char_cap=9000).mining_corpus_char_cap == 9000
+
+
+@pytest.mark.asyncio
+async def test_step_mine_threads_config_chunk_and_known_caps(store: MemoryStore, monkeypatch):
+    """FIX 3b wiring (owner rule: prove the knob is WIRED, not merely present): _step_mine passes the
+    config's corpus_char_cap AND known_atoms_cap into mine_transcript, not the hardcoded constants."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.consolidation import ConsolidationPass, ConsolidationReport
+
+    captured: dict = {}
+
+    async def _fake_mine(store_, llm_, cancel_, **kw):
+        captured.update(kw)
+        return MineReport()
+
+    monkeypatch.setattr("localharness.memory.mining.mine_transcript", _fake_mine)
+    cfg = MemoryConsolidationConfig(mining_corpus_char_cap=1234, mining_known_atoms_cap=42)
+    await ConsolidationPass(store, cfg, llm=object())._step_mine(ConsolidationReport())
+
+    assert captured.get("corpus_char_cap") == 1234
+    assert captured.get("known_atoms_cap") == 42
+
+
+@pytest.mark.asyncio
+async def test_correction_supersedes_across_many_intervening_mints(store: MemoryStore):
+    """FIX 3 (the critic's finding): per-session chunking multiplies chunk count, scrolling the
+    known-atoms window faster. A same-pass `replaces=` targeting an atom minted many chunks earlier —
+    with >30 OTHER atoms minted in between — must STILL supersede, not mint a shadow duplicate. The
+    known-atoms cap now defaults >= the write budget so the target stays visible across the pass."""
+    from localharness.memory.mining import _h8
+
+    target_claim = "vLLM endpoint listens on port 8000"
+    target_key = f"sem/gpu-ops/{_h8(target_claim)}"
+    corrected = "vLLM moved to port 8081 instead"
+    # ts=1 mints the target; ts=2..32 mint 31 UNRELATED fillers (>30 intervening); ts=100 corrects it.
+    await store.append_history(_rec(1, "the vLLM endpoint listens on port 8000 noted", sid="s1"))
+    for k in range(2, 33):
+        await store.append_history(
+            _rec(k, f"widgetnum{k} gadgetnum{k} are the two distinct markers here", sid="s1")
+        )
+    await store.append_history(_rec(100, "correction the vLLM moved to port 8081 instead now", sid="s1"))
+    # One fixed completion carrying all lines; per-chunk grounding admits only the in-chunk atom, and
+    # the correction only grounds against ts=100 (its salient token 'instead' lives nowhere else).
+    lines = (
+        [f"gpu ops | {target_claim} | endpoint listens on port 8000"]
+        + [f"filler | widgetnum{k} gadgetnum{k} | widgetnum{k} gadgetnum{k}" for k in range(2, 33)]
+        + [f"gpu ops | {corrected} | moved to port 8081 instead | replaces={target_key}"]
+    )
+    llm = _FakeLLM("\n".join(lines))
+    # Tiny cap -> one record per chunk (33 chunks) so the known window scrolls between target and fix.
+    await mine_transcript(store, llm, asyncio.Event(),
+                          write_budget=100, corpus_char_cap=40, file_tags=False)
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    gpu = [f for f in active if f.key.startswith("sem/gpu-ops/")]
+    assert len(gpu) == 1, f"correction did not supersede across the window (shadow dup): {gpu}"
+    assert gpu[0].key == target_key and gpu[0].value == corrected
