@@ -1012,3 +1012,175 @@ async def test_step_mine_surfaces_coverage_metric(store: MemoryStore, monkeypatc
     assert report.mined == 1
     assert report.mined_records_seen == 3 and report.mined_records_cited == 1
     assert report.mining_residue and report.mining_residue[0]["id"] == "h20"
+
+
+# ---------------------------------------------------------------------------
+# RESIDUE LEDGER (core repair loop, owner-directed 2026-07-09): encode -> check -> repair ->
+# forget. The miner's first pass is attention-limited and lossy BY DESIGN (run-12 Kyoto: a
+# crowded chunk minted 3 unrelated atoms and skimmed 9 Kyoto records IN THE SAME CHUNK). The
+# repair is AMORTIZED, never a same-pass second look: uncited non-trivial records enter a durable
+# ledger (schema v7 side table); the NEXT idle pass re-mines them in ISOLATION (a residue-only
+# chunk, where they cannot lose the attention contest), sequentially, budgeted. A record that
+# stays barren after `attempt_cap` isolated looks is RETIRED — permanently out of the mining
+# window but NEVER deleted (history.jsonl is append-only; same demote-never-destroy law as the
+# atom tier's retrieval_strength). K/budget/intake are config hyperparameters — swept later,
+# never taste-picked.
+# ---------------------------------------------------------------------------
+
+
+class _AttentionLimitedLLM:
+    """Models the measured live failure: in a CROWDED corpus the miner extracts the loudest fact
+    and skims the rest; shown the skimmed content in ISOLATION it extracts it. Branch order makes
+    'summarizer' always win a crowded corpus, then port, then kyoto."""
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        corpus = prompt.rsplit("\n\n", 1)[-1]
+        if "summarizer subagent" in corpus:
+            return "subagents | building a summarizer subagent for the harness | summarizer subagent"
+        if "listens on port 8081" in corpus:
+            return "gpu ops | vllm server listens on port 8081 | server listens on port 8081"
+        if "kyoto trip" in corpus:
+            return "kyoto trip | planning a kyoto trip in november | planning a kyoto trip in november"
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_residue_enqueued_then_rescued_by_isolated_drain_next_pass(store: MemoryStore):
+    """The amortized loop end-to-end: pass 1 skims the kyoto record (residue -> ledger, and the
+    SAME pass never drains what it just enqueued); pass 2 — with NO new records — re-mines the
+    residue in isolation, rescues the fact, and provenance stays the ORIGINAL record's session."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "we are planning a kyoto trip in november this year"))
+    llm = _AttentionLimitedLLM()
+
+    r1 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+    assert r1.written == 1
+    assert r1.residue_drained == 0          # amortized: a pass never drains its own residue
+    assert r1.residue_enqueued == 1         # the skimmed kyoto record entered the ledger
+    assert [p["record_id"] for p in await store.residue_pending(cap=10)] == ["h20"]
+
+    r2 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)  # no new records
+    assert r2.residue_drained == 1 and r2.residue_rescued == 1 and r2.written == 1
+    kyoto = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+             if f.key.startswith("sem/kyoto-trip/")]
+    assert len(kyoto) == 1 and kyoto[0].provenance == "s1"  # original session, not the drain pass
+    assert await store.residue_pending(cap=10) == []        # rescued — out of the queue
+    # Isolation: the drain corpus carries ONLY the residue record (the loud fact is absent).
+    assert "summarizer" not in llm.prompts[-1].rsplit("\n\n", 1)[-1]
+
+
+@pytest.mark.asyncio
+async def test_residue_retired_at_attempt_cap_history_never_deleted(store: MemoryStore):
+    """The forgetting half: a record that yields nothing after `attempt_cap` ISOLATED looks is
+    retired — out of the mining window forever — while the raw history record survives untouched
+    (append-only law: retire selects, never destroys)."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "the weather was surprisingly nice around here today"))
+    llm = _AttentionLimitedLLM()  # never emits a weather fact
+
+    r1 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_attempt_cap=2)
+    assert r1.residue_enqueued == 1
+    r2 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_attempt_cap=2)
+    assert r2.residue_drained == 1 and r2.residue_rescued == 0 and r2.residue_retired == 0
+    r3 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_attempt_cap=2)
+    assert r3.residue_drained == 1 and r3.residue_retired == 1   # attempts hit the cap
+    r4 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_attempt_cap=2)
+    assert r4.residue_drained == 0                                # retired = never re-fed
+    assert await store.residue_pending(cap=10) == []
+    # The substrate is intact: the record is still in history, readable by anything else.
+    assert any(x.get("id") == "h20" for x in await store.get_history(limit=100))
+
+
+@pytest.mark.asyncio
+async def test_residue_intake_filter_skips_trivial_records(store: MemoryStore):
+    """Belt to the cap's suspenders: a trivially short record ('ok') stays VISIBLE in the metric
+    but never enters the ledger — the queue stays small by construction, not by re-chewing."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "ok"))
+    llm = _AttentionLimitedLLM()
+
+    r1 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_min_chars=20)
+    assert {x["id"] for x in r1.residue} == {"h20"}   # the METRIC still sees it (honest coverage)
+    assert r1.residue_enqueued == 0                   # the LEDGER never chews it
+    assert await store.residue_pending(cap=10) == []
+
+
+@pytest.mark.asyncio
+async def test_drain_runs_after_new_window_and_isolated_from_it(store: MemoryStore):
+    """A pass with BOTH new records and pending residue does the new work first, then drains the
+    residue in its own isolated chunk — sequential (one look at a time), never fanned out, and the
+    two corpora never mix (residue must not lose the attention contest AGAIN)."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "we are planning a kyoto trip in november this year"))
+    llm = _AttentionLimitedLLM()
+    await mine_transcript(store, llm, asyncio.Event(), file_tags=False)   # kyoto -> ledger
+
+    await store.append_history(_rec(30, "the vllm server listens on port 8081 now", sid="s2"))
+    r2 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+
+    assert r2.written == 2 and r2.residue_rescued == 1
+    facts = {f.key.split("/")[1]: f.provenance for f in await store.query_facts(FactQuery(tags=["sem"]))}
+    assert facts["gpu-ops"] == "s2" and facts["kyoto-trip"] == "s1"
+    main_corpus = llm.prompts[-2].rsplit("\n\n", 1)[-1]
+    drain_corpus = llm.prompts[-1].rsplit("\n\n", 1)[-1]
+    assert "port 8081" in main_corpus and "kyoto" not in main_corpus
+    assert "kyoto" in drain_corpus and "port 8081" not in drain_corpus
+
+
+@pytest.mark.asyncio
+async def test_residue_disabled_is_inert(store: MemoryStore):
+    """The kill switch: residue_enabled=False neither enqueues nor drains (metric unaffected)."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "we are planning a kyoto trip in november this year"))
+    llm = _AttentionLimitedLLM()
+
+    r1 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_enabled=False)
+    assert r1.residue_enqueued == 0 and await store.residue_pending(cap=10) == []
+    assert {x["id"] for x in r1.residue} == {"h20"}   # metric still reports coverage
+    r2 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False, residue_enabled=False)
+    assert r2.residue_drained == 0
+
+
+@pytest.mark.asyncio
+async def test_residue_ledger_schema_v7_idempotent_enqueue(store: MemoryStore):
+    """Schema v7 carries the ledger; enqueue is keyed on (agent, record) — a re-enqueue of the
+    same record is a no-op that PRESERVES its attempt count (re-surfacing never resets the K clock)."""
+    async with store._db.execute("PRAGMA user_version") as cur:
+        assert (await cur.fetchone())[0] == 7
+    e = {"id": "hx", "session_id": "s1", "ts": 5, "chars": 30, "content_h8": "aabbccdd"}
+    assert await store.residue_enqueue([e]) == 1
+    assert await store.residue_enqueue([e]) == 0
+    await store.residue_bump(["hx"], attempt_cap=5)
+    assert await store.residue_enqueue([e]) == 0
+    assert (await store.residue_pending(cap=10))[0]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_step_mine_threads_residue_config_and_surfaces_counters(store: MemoryStore, monkeypatch):
+    """The four knobs are WIRED (config -> mine_transcript) and the counters surface on
+    ConsolidationReport so the eval persists them per run."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.consolidation import ConsolidationPass, ConsolidationReport
+
+    captured: dict = {}
+
+    async def _fake_mine(store_, llm_, cancel_, **kw):
+        captured.update(kw)
+        return MineReport(residue_enqueued=2, residue_drained=3, residue_rescued=1, residue_retired=1)
+
+    monkeypatch.setattr("localharness.memory.mining.mine_transcript", _fake_mine)
+    cfg = MemoryConsolidationConfig(mining_residue_enabled=True, mining_residue_attempt_cap=3,
+                                    mining_residue_record_budget=7, mining_residue_min_chars=5)
+    report = ConsolidationReport()
+    await ConsolidationPass(store, cfg, llm=object())._step_mine(report)
+
+    assert captured.get("residue_enabled") is True
+    assert captured.get("residue_attempt_cap") == 3
+    assert captured.get("residue_record_budget") == 7
+    assert captured.get("residue_min_chars") == 5
+    assert report.mining_residue_enqueued == 2 and report.mining_residue_drained == 3
+    assert report.mining_residue_rescued == 1 and report.mining_residue_retired == 1
