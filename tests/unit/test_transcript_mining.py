@@ -943,3 +943,67 @@ async def test_correction_supersedes_atom_scrolled_out_of_known_window(store: Me
     gpu = [f for f in active if f.key.startswith("sem/gpu-ops/")]
     assert len(gpu) == 1, f"scrolled-out target not superseded (shadow dup): {gpu}"
     assert gpu[0].key == target_key and gpu[0].value == corrected
+
+
+# ---------------------------------------------------------------------------
+# STAGE 1 (extraction science plan, 2026-07-09): the COVERAGE/RESIDUE metric — recall
+# observability, zero behavior change. Per pass: which committed records were never the SOURCE of a
+# WRITTEN atom (the residue). The residue's stable record identity feeds the cross-run intersection
+# (R) that adjudicates systematic vs stochastic under-extraction BEFORE any repair mechanism is
+# built (research/2026-07-09-extraction-science-plan.md — thresholds frozen pre-data). A record
+# whose only atom was rejected-ungrounded is residue: that is a recall failure, not coverage.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coverage_residue_identifies_uncited_records(store: MemoryStore):
+    """3 committed records, 1 written atom grounding in the first: the other two are residue,
+    carrying stable id + session + ts + chars (the cross-run intersection needs the id)."""
+    await store.append_history(_rec(10, "i am building a summarizer subagent for the harness"))
+    await store.append_history(_rec(20, "we are planning a kyoto trip in november this year"))
+    await store.append_history(_rec(30, "ok sounds good thanks"))
+    llm = _FakeLLM("subagents | building a summarizer subagent for the harness | summarizer subagent")
+
+    report = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+
+    assert report.written == 1
+    assert report.records_seen == 3 and report.records_cited == 1
+    assert {r["id"] for r in report.residue} == {"h20", "h30"}
+    kyoto = next(r for r in report.residue if r["id"] == "h20")
+    assert kyoto["session_id"] == "s1" and kyoto["ts"] == 20
+    assert kyoto["chars"] == len("we are planning a kyoto trip in november this year")
+
+
+@pytest.mark.asyncio
+async def test_coverage_rejected_ungrounded_atom_does_not_cite(store: MemoryStore):
+    """An atom killed by the grounding net does NOT mark its source record cited — the record
+    yielded no WRITTEN atom, so it is residue (extraction failed there)."""
+    await store.append_history(_rec(10, "i got super duper sunburnt today at the beach"))
+    llm = _FakeLLM("luck | user won the lottery jackpot | i got super duper sunburnt")
+
+    report = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+
+    assert report.written == 0 and report.rejected_ungrounded == 1
+    assert report.records_seen == 1 and report.records_cited == 0
+    assert [r["id"] for r in report.residue] == ["h10"]
+
+
+@pytest.mark.asyncio
+async def test_step_mine_surfaces_coverage_metric(store: MemoryStore, monkeypatch):
+    """The consolidation report carries the coverage fields (wired, not merely present) so the
+    eval harness can persist per-run residue for the Stage-3 cross-run intersection."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.consolidation import ConsolidationPass, ConsolidationReport
+
+    async def _fake_mine(store_, llm_, cancel_, **kw):
+        return MineReport(written=1, records_seen=3, records_cited=1,
+                          residue=[{"id": "h20", "session_id": "s1", "ts": 20,
+                                    "chars": 50, "preview": "we are planning a kyoto trip"}])
+
+    monkeypatch.setattr("localharness.memory.mining.mine_transcript", _fake_mine)
+    report = ConsolidationReport()
+    await ConsolidationPass(store, MemoryConsolidationConfig(), llm=object())._step_mine(report)
+
+    assert report.mined == 1
+    assert report.mined_records_seen == 3 and report.mined_records_cited == 1
+    assert report.mining_residue and report.mining_residue[0]["id"] == "h20"
