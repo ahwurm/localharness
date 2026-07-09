@@ -877,3 +877,69 @@ async def test_step_mine_threads_operative_message_types_config(store: MemorySto
     await ConsolidationPass(store, cfg, llm=object())._step_mine(ConsolidationReport())
 
     assert captured.get("operative_message_types") == ["user_message"]
+
+
+# ---------------------------------------------------------------------------
+# REVIEW FIXES (36.1 extraction-yield review pass): two edges the run-10/FIX-3 mechanisms
+# don't reach. (a) The dedupe identity ignored punctuation, so 'X' vs 'X.' minted duplicate
+# active rows — the exact class run-10 closed for byte-identical strings. (b) The known-atoms
+# window is a prompt-VISIBILITY cap, but supersede correctness silently depended on it: a
+# same-pass replaces target that scrolled out (mints-in-pass > cap) fell through to a shadow
+# duplicate. Correctness must come from an in-pass minted registry, not from keeping two
+# independently-bounded config knobs manually in sync.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_punctuation_variant_value_dedupes_to_one_active_row(store: MemoryStore):
+    """A re-mined claim differing from an active atom only by a trailing '.' is the SAME value:
+    it must fold into the existing row (dedupe skip), not land on a fresh _h8 key as a second
+    active duplicate."""
+    await store.append_history(_rec(10, "the vLLM server listens on port 8081 now", sid="day2"))
+    claim = "vLLM server listens on port 8081"
+    r1 = await mine_transcript(store, _FakeLLM(
+        f"gpu ops | {claim} | vLLM server listens on port 8081"), asyncio.Event())
+    assert r1.written == 1
+
+    await store.append_history(_rec(
+        20, "yes the vLLM server listens on port 8081. confirmed", sid="day3"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        f"gpu ops | {claim}. | vLLM server listens on port 8081."), asyncio.Event())
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    gpu = [f for f in active if f.key.startswith("sem/gpu-ops/")]
+    assert len(gpu) == 1, (
+        f"punctuation variant minted a duplicate active row: {[(f.key, f.value) for f in gpu]}")
+    assert r2.written == 0  # skipped as a duplicate of the active row, not minted
+
+
+@pytest.mark.asyncio
+async def test_correction_supersedes_atom_scrolled_out_of_known_window(store: MemoryStore):
+    """A same-pass `replaces=` whose target was minted this pass but scrolled OUT of the capped
+    known window (mints-in-pass > known_atoms_cap) must still supersede via the in-pass minted
+    registry — never mint a shadow duplicate. Guards the config space the raised write-budget
+    ceiling opened (write_budget may legally exceed the cap's own upper bound)."""
+    from localharness.memory.mining import _h8
+
+    target_claim = "vLLM endpoint listens on port 8000"
+    target_key = f"sem/gpu-ops/{_h8(target_claim)}"
+    corrected = "vLLM moved to port 8081 instead"
+    # ts=1 mints the target; ts=2..9 mint 8 fillers (> cap=5, target scrolls out); ts=100 corrects.
+    await store.append_history(_rec(1, "the vLLM endpoint listens on port 8000 noted", sid="s1"))
+    for k in range(2, 10):
+        await store.append_history(
+            _rec(k, f"widgetnum{k} gadgetnum{k} are the two distinct markers here", sid="s1"))
+    await store.append_history(_rec(100, "correction the vLLM moved to port 8081 instead now", sid="s1"))
+    lines = (
+        [f"gpu ops | {target_claim} | endpoint listens on port 8000"]
+        + [f"filler | widgetnum{k} gadgetnum{k} | widgetnum{k} gadgetnum{k}" for k in range(2, 10)]
+        + [f"gpu ops | {corrected} | moved to port 8081 instead | replaces={target_key}"]
+    )
+    # Tiny corpus cap -> one record per chunk, so the known window (cap=5) scrolls past the target.
+    await mine_transcript(store, _FakeLLM("\n".join(lines)), asyncio.Event(),
+                          write_budget=100, corpus_char_cap=40, known_atoms_cap=5, file_tags=False)
+
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    gpu = [f for f in active if f.key.startswith("sem/gpu-ops/")]
+    assert len(gpu) == 1, f"scrolled-out target not superseded (shadow dup): {gpu}"
+    assert gpu[0].key == target_key and gpu[0].value == corrected
