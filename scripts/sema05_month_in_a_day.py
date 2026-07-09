@@ -219,13 +219,15 @@ class _OfflineFakeLLM:
         if "quarantined pending review" in prompt or "disputed by a user correction" in prompt:
             return "REVERT"  # tri-outcome REVERT -> DRAIN (restore shape a / clear shape b)
         if "USER'S WORLD" in prompt:  # MOVE 2 transcript mining — typed topic|claim|evidence atoms
-            # CORPUS-AWARE, and it does NOT re-extract a fact already on file — modelling a real
-            # miner, which is shown the known facts to REUSE/CORRECT (replaces=), not to re-state.
-            # This matters under FIX 3 per-session chunking: a fact echoed into a LATER session's
-            # transcript (e.g. a tool_result that read prior history) must not be re-minted there and
-            # corroborated onto that sitting, which would advance its provenance (store_fact's
-            # distinct-day ladder) and collapse the two atoms onto ONE sitting — starving the
-            # >=2-session chapter cluster. `known` = the known-block; `corpus` = the transcript only.
+            # CORPUS-AWARE; emits a fact once by following the miner prompt's explicit REUSE/CORRECT
+            # instruction (a topic already in the known-block is not re-stated). This is NOT the echo-
+            # collapse GUARD — that guard is now DETERMINISTIC and model-independent (FIX 4: mining
+            # fetches only the operative conversational surface, so memory_search/memory_get read-backs
+            # are never mined), proven in tests/unit/test_transcript_mining.py with an UNFAITHFUL fixed
+            # double + an injected echo. The offline run carries 0 memory read-backs, so it cannot
+            # exercise the echo path; the `not in known` dedup only keeps this degenerate rehearsal
+            # coherent (a bare keyword like "summarizer" recurs across sittings as incidental mentions,
+            # NOT restatements of "building a summarizer") and is not load-bearing for correctness.
             m = re.search(r"Known facts already on file.*?\n\n", prompt, flags=re.S)
             known = m.group(0) if m else ""
             corpus = re.sub(r"Known facts already on file.*?\n\n", "", prompt, flags=re.S)

@@ -345,6 +345,23 @@ class MemoryConsolidationConfig(BaseModel):
             "— keep it >= write_budget when raising the budget. Bounds prompt preamble."
         ),
     )
+    mining_operative_message_types: list[str] = Field(
+        default_factory=lambda: ["user_message", "assistant_message"],
+        description=(
+            "FIX 4 (provenance-collapse guard) — mining consumes only this OPERATIVE CONVERSATIONAL "
+            "SURFACE (what the user and assistant actually said). Tool I/O (tool_result records) is "
+            "structurally OUT of scope at INPUT CONSTRUCTION, so a store read-back — "
+            "memory_search/memory_get echoing a prior fact VERBATIM into a LATER session — is never "
+            "read by the miner and can never be re-mined. Without this, per-session chunking would "
+            "re-mine an echoed fact and store_fact's distinct-day ladder would ADVANCE its provenance "
+            "to the later session, collapsing the >=2-distinct-session evidence a chapter needs (and "
+            "starving A1, which keys recall on provenance-day). A positive ALLOWLIST (not a denylist "
+            "of named echo tools) is robust: a NEW echo tool needs no upkeep to stay out, and mining "
+            "the user's actual words — not incidental file/command output — is also a quality gain. "
+            "Proven no-loss on the designed month (all 17 atoms ground in conversation; 0 need tool "
+            "I/O). Mirrors mining._OPERATIVE_MESSAGE_TYPES; empty => unrestricted (legacy all-types)."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(
