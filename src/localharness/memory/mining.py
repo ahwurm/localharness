@@ -13,11 +13,12 @@ two near-duplicate idle extractors are now ONE (the replay seam is retired into 
 
 Four bounds keep it honest and cheap (CONTEXT ruling 3, carried forward):
   1. WATERMARK-BOUNDED (cost): only history newer than "mining/last_ts" is read; the watermark
-     advances per COMPLETED chunk, so a cancelled/over-budget pass resumes where it stopped and
-     cost is per-window, never O(lifetime history).
-  2. CHUNKED FULL-COVERAGE: the ENTIRE un-mined window is walked in `corpus_char_cap` chunks
-     (a loop, not one nibble) so a long backlog is fully mined across a pass — one LLM look per
-     chunk, cancellation-checked between chunks.
+     advances over the longest fully-mined ts-CONTIGUOUS prefix (FIX 3: session walking is out of
+     ts-order, so a raw chunk-max could skip un-mined older records — the contiguous rule keeps a
+     cancelled/over-budget pass's tail for the next pass, cost per-window, never O(lifetime history)).
+  2. CHUNKED FULL-COVERAGE, PER-SESSION: the un-mined window is grouped by session_id and walked
+     session-by-session in chronological order, each session in `corpus_char_cap` chunks that never
+     straddle a sitting boundary (FIX 3a); one LLM look per chunk, cancellation-checked between chunks.
   3. GROUNDED (kill discipline): each atom is attributed to its SOURCE record (best token
      overlap of its claim+evidence) and the claim must pass `grounded` against that record's
      text — no token that isn't derivable from the cited span. Ungrounded atoms are rejected
@@ -52,7 +53,11 @@ log = logging.getLogger(__name__)
 
 _MINING_WATERMARK_KEY = "mining/last_ts"  # DISTINCT from consolidation/last_run
 _PER_RECORD_CHARS = 400   # per-record slice fed to the model (and grounded against)
-_KNOWN_ATOMS_CAP = 30     # existing active atoms shown to the miner (ruling 3), value-trimmed
+_KNOWN_ATOMS_CAP = 50     # existing active atoms shown to the miner (ruling 3), value-trimmed.
+                          # FIX 3: default known-window (config mining_known_atoms_cap) — >= the
+                          # write_budget default so every atom a single pass mints stays a valid
+                          # same-pass `replaces=` target despite per-session chunking's higher chunk
+                          # count (the DB surfaces this-pass mints first, by updated_at DESC).
 _RETRY_MIN_RECORDS = 3    # FIX 2: a substantive chunk (>= this many records) that parses ZERO
                           # atoms is re-mined ONCE — below it, a chunk is legitimately empty
 
@@ -258,13 +263,15 @@ async def mine_transcript(
     llm: Any,
     cancel_event: Any,
     *,
-    write_budget: int = 25,
+    write_budget: int = 50,
     corpus_char_cap: int = 6000,
+    known_atoms_cap: int = _KNOWN_ATOMS_CAP,
     completions_log: list | None = None,
     file_tags: bool = True,
 ) -> MineReport:
-    """Walk the un-mined transcript in `corpus_char_cap` chunks, extract typed `sem/` atoms
-    (grounded, per-atom source provenance, 0.65), advancing the watermark per completed chunk.
+    """Walk the un-mined transcript session-by-session in `corpus_char_cap` chunks (never crossing a
+    session boundary), extract typed `sem/` atoms (grounded, per-atom source provenance, 0.65),
+    advancing the watermark over the longest fully-mined ts-contiguous prefix (FIX 3 no-loss).
     Cancellable, budgeted, never raises. Returns a MineReport. FIX 2c: when `completions_log` is
     provided, each chunk's RAW model completion (pre-parse) is appended for forensics (run-3's
     completions were unrecoverable, making the shadow-duplicate root-cause inferential)."""
@@ -288,18 +295,33 @@ async def mine_transcript(
         if not window:
             return report  # nothing new — watermark unchanged; cost paid only on the read
 
+        # FIX 3a: group the ts-sorted window by session_id so a chunk never straddles two sittings.
+        # A dict preserves first-seen order and `window` is ts-sorted, so sessions come out in
+        # chronological (min-ts) order; `walk` re-lays the records session-contiguous in that order.
+        # This preserves the sequential `replaces=` visibility the supersede path needs: sessions are
+        # mined in order and _active_sem_atoms reloads per chunk, so an atom minted while mining an
+        # earlier session is a valid `replaces=` target while mining a later one.
+        sessions: dict[str, list[dict]] = {}
+        for r in window:
+            sessions.setdefault(str(r.get("session_id") or ""), []).append(r)
+        walk = [r for recs in sessions.values() for r in recs]
+
         i = 0
         chunk_idx = 0
         budget_hit = False
-        while i < len(window) and not budget_hit:
+        mined_objs: set[int] = set()  # id() of every record in a fully-mined (committed) chunk
+        while i < len(walk) and not budget_hit:
             if getattr(cancel_event, "is_set", lambda: False)():
                 report.cancelled = True
                 break
-            # Assemble one chunk up to corpus_char_cap chars of record content.
+            # Assemble one chunk up to corpus_char_cap chars — but NEVER across a session boundary
+            # (an oversized session sub-splits here via the same char-cap loop, now session-scoped).
             chunk: list[dict] = []
             chars = 0
-            while i < len(window) and chars < corpus_char_cap:
-                r = window[i]
+            sid0 = str(walk[i].get("session_id") or "")
+            while (i < len(walk) and chars < corpus_char_cap
+                   and str(walk[i].get("session_id") or "") == sid0):
+                r = walk[i]
                 chunk.append(r)
                 chars += len(str(r.get("content", ""))[:_PER_RECORD_CHARS]) + 1
                 i += 1
@@ -311,7 +333,7 @@ async def mine_transcript(
             # can mark `replaces=<id>` instead of minting a colliding-proof new claim-hash key
             # that leaves the stale value active forever. Reloaded PER CHUNK so an atom minted
             # by an earlier chunk of this same pass is already replaceable by a later chunk.
-            known = await _active_sem_atoms(store)
+            known = await _active_sem_atoms(store, known_atoms_cap)
             known_keys = {k for k, _v in known}
             # FIX 2: the already-active side of the dedupe — (slug, normalized value) -> its key.
             active_norm_key = {(_slug_of_key(k), _norm(v)): k for k, v in known}
@@ -451,8 +473,22 @@ async def mine_transcript(
 
             if budget_hit:
                 break  # partially-written chunk: don't advance — next pass re-mines (corroborates)
-            newest_ts = max(int(r.get("ts", 0) or 0) for r in chunk)
-            await _set_meta(store, _MINING_WATERMARK_KEY, str(newest_ts))
+            # FIX 2/3 no-loss watermark: advance ONLY over the longest fully-mined ts-CONTIGUOUS
+            # prefix of the (ts-sorted) window. Session walking is out of ts-order — a later-walked
+            # session may pre-date an earlier one — so committing a raw chunk-max could skip un-mined
+            # OLDER records and silently drop them; the contiguous-prefix rule keeps FIX 2's no-loss
+            # property under reordering (a budget/cancel abort leaves the tail ts > watermark, so the
+            # next pass re-mines it, corroborating). A full walk commits the global max, as before.
+            mined_objs.update(id(r) for r in chunk)
+            new_wm = watermark
+            for wr in window:
+                if id(wr) in mined_objs:
+                    new_wm = max(new_wm, int(wr.get("ts", 0) or 0))
+                else:
+                    break
+            if new_wm > watermark:
+                await _set_meta(store, _MINING_WATERMARK_KEY, str(new_wm))
+                watermark = new_wm
             chunk_idx += 1
 
         # B4(ii) post-mining sweep: a newly minted atom that re-asserts a reconciled-away value is
