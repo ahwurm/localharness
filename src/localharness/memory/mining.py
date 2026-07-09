@@ -60,6 +60,15 @@ _KNOWN_ATOMS_CAP = 50     # existing active atoms shown to the miner (ruling 3),
                           # count (the DB surfaces this-pass mints first, by updated_at DESC).
 _RETRY_MIN_RECORDS = 3    # FIX 2: a substantive chunk (>= this many records) that parses ZERO
                           # atoms is re-mined ONCE — below it, a chunk is legitimately empty
+# FIX 4 (provenance-collapse guard): mining consumes only the OPERATIVE CONVERSATIONAL SURFACE —
+# what the user and assistant actually said. Tool I/O (tool_result records) is structurally OUT of
+# scope, so a store read-back (memory_search/memory_get echoing a prior fact VERBATIM into a LATER
+# session) — and any FUTURE echo tool — is never even read: it cannot be re-mined and cannot advance
+# a fact's provenance via store_fact's distinct-day ladder. Positive allowlist, NOT a denylist of
+# named echo tools (which would need per-tool upkeep and silently miss a new one). Proven no-loss on
+# the designed month (all 17 atoms ground in conversation; 0 need tool I/O). Config-overridable via
+# mining_operative_message_types; None/empty means "unrestricted" (legacy all-types fetch).
+_OPERATIVE_MESSAGE_TYPES = ("user_message", "assistant_message")
 
 _PROMPT = (
     "Extract durable facts about the USER'S WORLD from this transcript — what the user works "
@@ -266,6 +275,7 @@ async def mine_transcript(
     write_budget: int = 50,
     corpus_char_cap: int = 6000,
     known_atoms_cap: int = _KNOWN_ATOMS_CAP,
+    operative_message_types: Any = _OPERATIVE_MESSAGE_TYPES,
     completions_log: list | None = None,
     file_tags: bool = True,
 ) -> MineReport:
@@ -274,7 +284,11 @@ async def mine_transcript(
     advancing the watermark over the longest fully-mined ts-contiguous prefix (FIX 3 no-loss).
     Cancellable, budgeted, never raises. Returns a MineReport. FIX 2c: when `completions_log` is
     provided, each chunk's RAW model completion (pre-parse) is appended for forensics (run-3's
-    completions were unrecoverable, making the shadow-duplicate root-cause inferential)."""
+    completions were unrecoverable, making the shadow-duplicate root-cause inferential).
+
+    FIX 4: only records whose `type` is in `operative_message_types` are FETCHED — mining reads the
+    conversational surface (user + assistant), never tool_result read-backs, so an echoed prior fact
+    can never re-mine and collapse its provenance (None/empty = unrestricted, the legacy fetch)."""
     report = MineReport()
     minted_ids: list[int] = []
     # FIX 2 (run-10): (slug, normalized value) -> the key it was minted on THIS pass, so a second
@@ -287,7 +301,12 @@ async def mine_transcript(
         except (TypeError, ValueError):
             watermark = 0
 
-        records = await store.get_history(limit=1_000_000)
+        # FIX 4: fetch ONLY the operative conversational surface — tool_result read-backs never enter
+        # the record stream, so an echoed prior fact is never read, never re-mined, never advances a
+        # fact's provenance. Exclusion is at INPUT CONSTRUCTION (get_history's type filter), not a
+        # post-assembly corpus trim. None/empty operative set => unrestricted (legacy all-types fetch).
+        mt = list(operative_message_types) if operative_message_types else None
+        records = await store.get_history(limit=1_000_000, message_types=mt)
         window = sorted(
             (r for r in records if int(r.get("ts", 0) or 0) > watermark and r.get("content")),
             key=lambda r: int(r.get("ts", 0) or 0),
