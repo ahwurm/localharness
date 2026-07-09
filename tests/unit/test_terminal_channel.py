@@ -97,8 +97,13 @@ class TestChannelAdapterABC:
 # ---------------------------------------------------------------------------
 
 
-def make_terminal_channel(out: StringIO | None = None, err_out: StringIO | None = None):
-    """Helper: create TerminalChannel with captured consoles for testing."""
+def make_terminal_channel(
+    out: StringIO | None = None, err_out: StringIO | None = None, force_terminal: bool = True,
+):
+    """Helper: create TerminalChannel with captured consoles for testing.
+
+    force_terminal=False gives a non-TTY console (is_terminal False) — the capture/pipe
+    path, where live spinners must be skipped and only frozen lines printed."""
     from rich.console import Console
     from localharness.channels.terminal import TerminalChannel, TERMINAL_THEME
     from localharness.core.bus import EventBus
@@ -107,11 +112,9 @@ def make_terminal_channel(out: StringIO | None = None, err_out: StringIO | None 
     ch = TerminalChannel(bus, {})
 
     if out is not None:
-        from rich.theme import Theme
-        ch._console = Console(file=out, force_terminal=True, width=120, theme=TERMINAL_THEME, highlight=False)
+        ch._console = Console(file=out, force_terminal=force_terminal, width=120, theme=TERMINAL_THEME, highlight=False)
     if err_out is not None:
-        from rich.theme import Theme
-        ch._err_console = Console(file=err_out, stderr=False, force_terminal=True, width=120, theme=TERMINAL_THEME, highlight=False)
+        ch._err_console = Console(file=err_out, stderr=False, force_terminal=force_terminal, width=120, theme=TERMINAL_THEME, highlight=False)
     return ch
 
 
@@ -344,3 +347,157 @@ class TestFormatArgsCompact:
         from localharness.channels.terminal import _format_args_compact
         result = _format_args_compact({"val": None})
         assert "null" in result
+
+
+class TestBurstConsolidation:
+    """Consecutive same-family tool calls collapse into ONE live counter line — the
+    localharness.dev demo line (`◆ web_search · web_fetch — the open web, a fresh
+    window each · 30/30`) becomes real product output instead of a line per call
+    (the run-run-run scrollback the site demos had to consolidate by hand; owner
+    call 2026-07-02 "consolidate — keep true behavior"). Per-call truth stays on
+    the bus ledger (bus-events.jsonl); the channel change is display-only."""
+
+    WEB_FROZEN = "◆ web_search · web_fetch — the open web, a fresh window each · 3/3"
+
+    @staticmethod
+    def _pipe_channel():
+        """Non-TTY console: no live frames in the capture, only frozen lines —
+        assertions can count occurrences exactly."""
+        out = StringIO()
+        return make_terminal_channel(out=out, force_terminal=False), out
+
+    @pytest.mark.asyncio
+    async def test_web_burst_prints_nothing_until_closed(self):
+        ch, out = self._pipe_channel()
+        await ch.send_tool_call("web_search", {"query": "DGX Spark specs"})
+        await ch.send_tool_result("web_search", "r1\nr2", is_error=False)
+        await ch.send_tool_call("web_fetch", {"url": "https://nvidia.com"})
+        await ch.send_tool_result("web_fetch", "page", is_error=False)
+        assert out.getvalue() == ""  # burst open: no per-call spam, no partial line
+
+    @pytest.mark.asyncio
+    async def test_web_burst_freezes_to_demo_line_on_next_tool(self):
+        ch, out = self._pipe_channel()
+        for tool, arg in (
+            ("web_search", {"query": "a"}),
+            ("web_fetch", {"url": "b"}),
+            ("web_search", {"query": "c"}),  # repeat tool: first-use order kept, no dup
+        ):
+            await ch.send_tool_call(tool, arg)
+            await ch.send_tool_result(tool, "ok", is_error=False)
+        await ch.send_tool_call("memory_search", {"query": "spark"})
+        rendered = out.getvalue()
+        assert rendered.count(self.WEB_FROZEN) == 1
+        assert "✓ web results — UNTRUSTED, treated as data only" in rendered
+        assert "✓ web_search" not in rendered  # per-call results absorbed
+        assert rendered.index(self.WEB_FROZEN) < rendered.index("memory_search")
+
+    @pytest.mark.asyncio
+    async def test_errors_absorbed_and_annotated(self):
+        ch, out = self._pipe_channel()
+        for i in range(3):
+            await ch.send_tool_call("web_fetch", {"url": f"u{i}"})
+            await ch.send_tool_result(
+                "web_fetch", "429 Too Many Requests" if i == 1 else "ok", is_error=(i == 1),
+            )
+        await ch.send_message("done")
+        rendered = out.getvalue()
+        assert "◆ web_fetch — the open web, a fresh window each · 3/3 · 1 error" in rendered
+        assert "✗" not in rendered      # no red per-call line mid-burst
+        assert "429" not in rendered    # detail lives in the bus ledger, not scrollback
+
+    @pytest.mark.asyncio
+    async def test_section_reads_burst_has_own_label_and_no_untrusted_note(self):
+        ch, out = self._pipe_channel()
+        for h in ("5613cfd00330", "695bb3032f1f"):
+            await ch.send_tool_call("tool_result_get", {"handle": h})
+            await ch.send_tool_result("tool_result_get", "section text", is_error=False)
+        await ch.send_message("combined")
+        rendered = out.getvalue()
+        assert "◆ tool_result_get — section reads, a fresh window each · 2/2" in rendered
+        assert "UNTRUSTED" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_interposed_call_splits_bursts(self):
+        """The demo sequence: researcher's web burst → ◆ agent search-verifier → the
+        verifier's own burst. Each burst freezes with its own honest count."""
+        ch, out = self._pipe_channel()
+        for i in range(2):
+            await ch.send_tool_call("web_search", {"query": f"q{i}"})
+            await ch.send_tool_result("web_search", "ok", is_error=False)
+        await ch.send_tool_call("agent", {"agent_name": "search-verifier"})
+        await ch.send_tool_call("web_fetch", {"url": "docs.nvidia.com"})
+        await ch.send_tool_result("web_fetch", "ok", is_error=False)
+        await ch.send_message("verdict")
+        rendered = out.getvalue()
+        assert "◆ web_search — the open web, a fresh window each · 2/2" in rendered
+        assert "◆ web_fetch — the open web, a fresh window each · 1/1" in rendered
+        assert "◆ agent search-verifier" in rendered
+
+    @pytest.mark.asyncio
+    async def test_burst_closes_before_streaming(self):
+        """send_streaming opens a rich Live — an open burst spinner must freeze first
+        (rich allows one live display per console)."""
+        out = StringIO()
+        ch = make_terminal_channel(out=out)  # force_terminal: exercises the real Status path
+
+        async def tokens() -> AsyncIterator[str]:
+            yield "answer"
+
+        await ch.send_tool_call("web_search", {"query": "q"})
+        await ch.send_tool_result("web_search", "ok", is_error=False)
+        result = await ch.send_streaming(tokens())
+        assert result == "answer"
+        rendered = out.getvalue()
+        assert "· 1/1" in rendered
+        assert ch._burst is None
+
+    @pytest.mark.asyncio
+    async def test_burst_flushes_on_stop(self):
+        ch, out = self._pipe_channel()
+        await ch.send_tool_call("web_search", {"query": "q"})
+        await ch.stop()
+        assert "◆ web_search — the open web, a fresh window each · 0/1" in out.getvalue()
+        assert ch._burst is None
+
+    @pytest.mark.asyncio
+    async def test_thinking_indicator_suppressed_during_burst(self):
+        """The burst spinner IS the live indicator — a Heartbeat mid-burst must not
+        start a second rich live display."""
+        from localharness.core.events import Heartbeat
+        ch = make_terminal_channel(out=StringIO())
+        hb = Heartbeat(agent_id="a", session_id="s", iteration=1, context_utilization_pct=10.0)
+        await ch.send_tool_call("web_search", {"query": "q"})
+        await ch.on_heartbeat(hb)
+        assert ch._thinking is None
+        assert ch._context_pct == 10.0  # meter tracking still updates
+        await ch.send_message("bye")    # closes burst, stops spinner thread
+        assert ch._burst is None
+
+    @pytest.mark.asyncio
+    async def test_live_counter_ticks_calls_and_done(self):
+        ch, _ = self._pipe_channel()
+        await ch.send_tool_call("web_search", {"query": "a"})
+        await ch.send_tool_result("web_search", "ok", is_error=False)
+        await ch.send_tool_call("web_fetch", {"url": "b"})
+        b = ch._burst
+        assert b is not None and (b.done, b.calls) == (1, 2)
+        assert "· 1/2" in ch._burst_text(b, final=False)
+        await ch.stop()
+
+    @pytest.mark.asyncio
+    async def test_orphan_family_result_prints_legacy_line(self):
+        """A family result with no open burst (shouldn't happen in the sequential
+        loop) must never be dropped — falls back to the per-call line."""
+        ch, out = self._pipe_channel()
+        await ch.send_tool_result("web_fetch", "late result", is_error=False)
+        assert "✓ web_fetch" in out.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_non_family_tools_keep_per_call_lines(self):
+        ch, out = self._pipe_channel()
+        await ch.send_tool_call("glob", {"pattern": "*.py"})
+        await ch.send_tool_result("glob", "a.py", is_error=False)
+        rendered = out.getvalue()
+        assert "◆ glob *.py" in rendered
+        assert "✓ glob (1 lines)" in rendered
