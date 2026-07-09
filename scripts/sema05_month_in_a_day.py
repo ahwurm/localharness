@@ -988,9 +988,11 @@ def _mining_write_budget() -> int:
     every REMAINING chunk of the walk (mining.py), so the designed month (consolidated exactly ONCE)
     silently dropped run-6's transcript TAIL: 41% of history never reached the LLM and sem_atoms
     landed at exactly 25. Return a single-pass-eval bound generous enough the cap can never bite
-    mid-transcript (500 >> the ~40 densest atoms observed and the ~200 max month records). This is
-    NOT a production change: the config default (25, and its le=50 schema bound) is untouched — the
-    owner decides prod separately, so it is ASSIGNED onto the config post-build (the ctor caps 50)."""
+    mid-transcript (500 >> the ~40 densest atoms observed and the ~200 max month records). This is a
+    SINGLE-PASS-EVAL bound, distinct from the production default (now 50 — the recurring path defers
+    any overflow tail across passes; the eval consolidates exactly ONCE, so it needs the headroom).
+    Assigned onto the config post-build to keep the eval-only override legible and isolated from the
+    shipped default (500 sits within the field's raised le=10_000 ceiling)."""
     return 500
 
 
@@ -1540,8 +1542,8 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
                                         schema_write_budget=_schema_write_budget(manifest))
         # FIX 1 (extraction-yield): lift mining's per-pass write cap for the single grading pass so
         # the global budget can't abort the transcript tail (run-6 lost 41%). Assigned here (not a
-        # ctor kwarg) because the production schema caps the field at le=50; this is the single-pass-
-        # eval bound, NOT a production change — the config default (25) is untouched.
+        # ctor kwarg) to keep the eval-only override legible; it is the single-pass-eval bound (500),
+        # distinct from the shipped production default (50), which the recurring path's deferral covers.
         cfg.mining_write_budget = _mining_write_budget()
         pass_report = await ConsolidationPass(store, cfg, llm=m_llm, embedder=embedder).run()
         grade = await _grade_designed_month(store, manifest, tqm)
