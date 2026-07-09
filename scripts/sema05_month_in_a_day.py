@@ -1548,13 +1548,14 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # smoke is reproducible without the optional ML dep); live -> default_embedder (MiniLM if
         # the [embeddings] extra is installed, else HashingEmbedder).
         embedder = HashingEmbedder() if args.offline else default_embedder()
-        cfg = MemoryConsolidationConfig(reconcile_enabled=True,
-                                        schema_write_budget=_schema_write_budget(manifest))
         # FIX 1 (extraction-yield): lift mining's per-pass write cap for the single grading pass so
-        # the global budget can't abort the transcript tail (run-6 lost 41%). Assigned here (not a
-        # ctor kwarg) to keep the eval-only override legible; it is the single-pass-eval bound (500),
-        # distinct from the shipped production default (50), which the recurring path's deferral covers.
-        cfg.mining_write_budget = _mining_write_budget()
+        # the global budget can't abort the transcript tail (run-6 lost 41%) — the single-pass-eval
+        # bound (500), distinct from the shipped production default (50), which the recurring path's
+        # deferral covers. REVIEW FIX: both eval budgets go through the CTOR so pydantic validates
+        # them (the old post-construction assignment silently bypassed field validation).
+        cfg = MemoryConsolidationConfig(reconcile_enabled=True,
+                                        schema_write_budget=_schema_write_budget(manifest),
+                                        mining_write_budget=_mining_write_budget())
         pass_report = await ConsolidationPass(store, cfg, llm=m_llm, embedder=embedder).run()
         grade = await _grade_designed_month(store, manifest, tqm)
         schema_values = [s.value for s in await _active(store, "node_kind='schema'")]
