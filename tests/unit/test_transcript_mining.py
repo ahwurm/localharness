@@ -54,9 +54,13 @@ class _SlowLLM:
         return "topic | slow | slow"  # pragma: no cover — must be cancelled first
 
 
-def _rec(ts: int, content: str, sid: str = "s1", typ: str = "user_message") -> dict:
-    return {"v": 1, "agent_id": "mine-agent", "type": typ, "id": f"h{ts}",
-            "session_id": sid, "ts": ts, "content": content}
+def _rec(ts: int, content: str, sid: str = "s1", typ: str = "user_message",
+         tool_name: str | None = None) -> dict:
+    r = {"v": 1, "agent_id": "mine-agent", "type": typ, "id": f"h{ts}",
+         "session_id": sid, "ts": ts, "content": content}
+    if tool_name is not None:
+        r["tool_name"] = tool_name  # tool_result records carry the emitting tool's name
+    return r
 
 
 async def _seed_sunburn(store: MemoryStore) -> None:
@@ -729,3 +733,147 @@ async def test_correction_supersedes_across_many_intervening_mints(store: Memory
     gpu = [f for f in active if f.key.startswith("sem/gpu-ops/")]
     assert len(gpu) == 1, f"correction did not supersede across the window (shadow dup): {gpu}"
     assert gpu[0].key == target_key and gpu[0].value == corrected
+
+
+# ---------------------------------------------------------------------------
+# FIX 4 (provenance-collapse guard — OPERATIVE-SURFACE allowlist): per-session chunking created a
+# latent risk. When the agent RE-READS its own stored content, memory_search/memory_get echo a prior
+# fact VERBATIM into a LATER session's tool_result. If mining walked that echo it would re-mine the
+# fact and store_fact's distinct-day ladder would ADVANCE its provenance to the later session,
+# collapsing the >=2-distinct-session evidence a chapter needs (and starving A1, which keys recall on
+# provenance-day). The guard is STRUCTURAL, at INPUT CONSTRUCTION: mining fetches only the OPERATIVE
+# CONVERSATIONAL SURFACE (user + assistant messages) via get_history(message_types=...), so tool I/O
+# — every store read-back, plus any FUTURE echo tool — is never even read. An allowlist (not a
+# denylist of named echo tools) needs no per-tool maintenance and is proven no-loss on the designed
+# month (all 17 atoms ground in conversation; 0 need tool I/O). The double below is DELIBERATELY
+# UNFAITHFUL — a fixed completion that re-states its atom on EVERY chunk, echo or not — so these
+# prove the guard holds WITHOUT assuming the miner self-censors.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_memory_read_echo_is_never_mined_provenance_preserved(store: MemoryStore):
+    """Load-bearing guard: a memory_get tool_result echoing a day-1 fact into day-2 is NOT part of
+    the mineable surface, so an UNFAITHFUL miner cannot re-mine it — the day-1 fact keeps
+    provenance=day1 (>=2-session evidence intact). Day-2's OWN conversational fact still mines
+    (the operative surface is not over-excluded)."""
+    from localharness.memory.mining import _h8
+
+    f_claim = "user got sunburnt at the beach"
+    g_claim = "user favorite programming language is python"
+    await store.append_history(_rec(10, "i got sunburnt at the beach yesterday afternoon", sid="day1"))
+    await store.append_history(_rec(20, "my favorite programming language is python nowadays", sid="day2"))
+    # The read-back: memory_get echoes the day-1 fact VERBATIM into day-2's transcript.
+    await store.append_history(_rec(30, "user got sunburnt at the beach", sid="day2",
+                                     typ="tool_result", tool_name="memory_get"))
+    # Fixed == unfaithful: BOTH lines emitted for every chunk; per-chunk grounding admits only the
+    # atom whose source record is present, and the echo is never in the fetched record stream.
+    llm = _FakeLLM(f"health | {f_claim} | sunburnt at the beach\n"
+                   f"prefs | {g_claim} | favorite programming language is python")
+
+    report = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+
+    assert report.written == 2
+    f = await store.get_fact(f"sem/health/{_h8(f_claim)}")
+    assert f.provenance == "day1"          # NOT advanced to day2 — the echo was never mined
+    assert f.confidence == 0.65            # never corroborated from a distinct day (no ladder step)
+    g = await store.get_fact(f"sem/prefs/{_h8(g_claim)}")
+    assert g.provenance == "day2"          # day-2's conversational fact still mines
+
+
+@pytest.mark.asyncio
+async def test_including_tool_result_surface_reproduces_the_collapse(store: MemoryStore):
+    """Negative control (the guard is LOAD-BEARING, not decorative): widen the operative surface to
+    INCLUDE tool_result and the SAME unfaithful double + echo DOES collapse — the day-1 fact is
+    re-mined off the day-2 echo, store_fact's distinct-day ladder advances its provenance to day2 and
+    steps confidence. This is exactly the failure the operative-surface restriction prevents (and the
+    A1-starving mechanism a live unfaithful miner would otherwise be exposed to)."""
+    from localharness.memory.mining import _h8
+
+    f_claim = "user got sunburnt at the beach"
+    await store.append_history(_rec(10, "i got sunburnt at the beach yesterday afternoon", sid="day1"))
+    await store.append_history(_rec(30, "user got sunburnt at the beach", sid="day2",
+                                     typ="tool_result", tool_name="memory_get"))
+    llm = _FakeLLM(f"health | {f_claim} | sunburnt at the beach")
+
+    await mine_transcript(store, llm, asyncio.Event(), file_tags=False,
+                          operative_message_types=["user_message", "assistant_message", "tool_result"])
+
+    f = await store.get_fact(f"sem/health/{_h8(f_claim)}")
+    assert f.provenance == "day2"          # collapsed — re-mined off the echo, provenance advanced
+    assert f.confidence > 0.65             # distinct-day ladder stepped it (0.65 -> 0.72)
+
+
+@pytest.mark.asyncio
+async def test_tool_result_content_is_structurally_out_of_scope(store: MemoryStore):
+    """STEP 4 (structural exclusion of tool I/O): a fact stated ONLY in a tool_result is NOT mined by
+    default — tool output (file reads, command output, store read-backs) is out of mining's operative
+    surface. The SAME fact stated in a user message IS mined, so the surface is conversational, not
+    empty."""
+    from localharness.memory.mining import _h8
+
+    claim = "the deploy runbook lives in docs slash ops"
+    llm = _FakeLLM(f"ops | {claim} | deploy runbook lives in docs")
+
+    # Only-in-a-tool_result: NOT mined.
+    await store.append_history(_rec(10, "the deploy runbook lives in docs/ops per the config file",
+                                     sid="s1", typ="tool_result", tool_name="read"))
+    r1 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+    assert r1.written == 0
+    assert await store.query_facts(FactQuery(tags=["sem"])) == []
+
+    # The same fact in a user message IS mined (the surface is conversational, not over-excluded).
+    await store.append_history(_rec(20, "the deploy runbook lives in docs/ops per the config file",
+                                     sid="s2"))
+    r2 = await mine_transcript(store, llm, asyncio.Event(), file_tags=False)
+    assert r2.written == 1
+    assert (await store.get_fact(f"sem/ops/{_h8(claim)}")).provenance == "s2"
+
+
+@pytest.mark.asyncio
+async def test_operative_surface_is_config_driven_extensible(store: MemoryStore):
+    """The operative surface is a config knob, not hardcoded: adding a record type widens what mining
+    reads with NO code change (here tool_result becomes mineable). Robust by construction — a new
+    echo-source needs no per-tool denylist entry to stay out; it is out unless the surface is widened."""
+    from localharness.memory.mining import _h8
+
+    claim = "the deploy runbook lives in docs slash ops"
+    await store.append_history(_rec(10, "the deploy runbook lives in docs/ops per the config file",
+                                     sid="s1", typ="tool_result", tool_name="read"))
+    llm = _FakeLLM(f"ops | {claim} | deploy runbook lives in docs")
+
+    await mine_transcript(store, llm, asyncio.Event(), file_tags=False,
+                          operative_message_types=["user_message", "assistant_message", "tool_result"])
+
+    assert (await store.get_fact(f"sem/ops/{_h8(claim)}")).provenance == "s1"
+
+
+def test_config_default_operative_message_types_is_conversation():
+    """The default operative surface is the conversational records (user + assistant); tool I/O is
+    excluded by construction."""
+    from localharness.config.models import MemoryConsolidationConfig
+    assert (MemoryConsolidationConfig().mining_operative_message_types
+            == ["user_message", "assistant_message"])
+    cfg = MemoryConsolidationConfig(mining_operative_message_types=["user_message"])
+    assert cfg.mining_operative_message_types == ["user_message"]  # narrowable/extensible verbatim
+
+
+@pytest.mark.asyncio
+async def test_step_mine_threads_operative_message_types_config(store: MemoryStore, monkeypatch):
+    """Owner rule (prove the knob is WIRED, not merely present): _step_mine passes the config's
+    mining_operative_message_types into mine_transcript — otherwise the guard would never fire in
+    production, where the live transcript DOES carry memory read-backs."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.consolidation import ConsolidationPass, ConsolidationReport
+
+    captured: dict = {}
+
+    async def _fake_mine(store_, llm_, cancel_, **kw):
+        captured.update(kw)
+        return MineReport()
+
+    monkeypatch.setattr("localharness.memory.mining.mine_transcript", _fake_mine)
+    cfg = MemoryConsolidationConfig(mining_operative_message_types=["user_message"])
+    await ConsolidationPass(store, cfg, llm=object())._step_mine(ConsolidationReport())
+
+    assert captured.get("operative_message_types") == ["user_message"]
