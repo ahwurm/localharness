@@ -318,3 +318,16 @@ def test_role_sections_defaults_empty():
     assert a.role_sections.tool_use == ""
     assert a.role_sections.stopping == ""
     assert a.role_sections.output == ""
+
+
+def test_write_budgets_express_manifest_scale_via_ctor():
+    """REVIEW FIX (36.1 pass): the designed-month eval derives schema_write_budget from its
+    manifest (len(topics)+1) and passes it to the CTOR, where pydantic validates immediately —
+    the old le=50 ceiling made a 50+-topic manifest a construction-time crash (and pushed
+    mining_write_budget into a post-construction assignment that bypassed validation entirely).
+    Both budgets must accept manifest/production scale through the validated constructor."""
+    from localharness.config.models import MemoryConsolidationConfig
+
+    cfg = MemoryConsolidationConfig(schema_write_budget=500, mining_write_budget=500)
+    assert cfg.schema_write_budget == 500
+    assert cfg.mining_write_budget == 500
