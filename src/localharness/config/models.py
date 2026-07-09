@@ -301,8 +301,13 @@ class MemoryConsolidationConfig(BaseModel):
         description="A cluster is chapter-worthy only if its members span at least this many distinct sittings.",
     )
     schema_write_budget: int = Field(
-        default=3, ge=1, le=50,
-        description="Max schema chapters written per idle cycle.",
+        default=3, ge=1, le=10_000,
+        description=(
+            "Max schema chapters written per idle cycle. Ceiling matches mining_write_budget's: "
+            "the designed-month eval derives this from its manifest (len(topics)+1) and passes it "
+            "to the CTOR, so any manifest-scale budget must validate instead of crashing "
+            "construction at le=50."
+        ),
     )
     schema_depth_cap: int = Field(
         default=2, ge=1, le=5,
