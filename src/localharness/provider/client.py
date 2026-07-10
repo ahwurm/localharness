@@ -375,13 +375,10 @@ class LLMClient:
                 kwargs["tools"] = _tools_to_api_format(tools)
             if self.config.stop_sequences:
                 kwargs["stop"] = self.config.stop_sequences
-            # Disable thinking for local subjects — same policy as the xml path.
-            # Qwen3.6 emits a long <think> block on every call (30s+ on trivial Q&A),
-            # which the native path otherwise never suppresses. The kwarg is a no-op
-            # for families whose chat template doesn't reference it, so this stays
-            # model-agnostic: it disables thinking where supported, is ignored elsewhere.
-            if self.config.is_local:
-                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            # Thinking is deliberately left ON for local subjects (#11): reasoning
+            # quality wins over latency. Do not re-add enable_thinking:False — the
+            # loop strips <think> blocks before history/parse, and the kwarg was
+            # silently dropped by Ollama and type-checked by llama.cpp anyway.
             async with _inference_gate(self.config):
                 if stream:
                     kwargs["stream"] = True
@@ -468,10 +465,6 @@ class LLMClient:
             kwargs["tools"] = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        # Disable thinking mode for xml tool-calling — reduces token waste 100x
-        if self.config.is_local:
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-
         try:
             # Gate scoped to the create alone: the except-path re-enters via
             # _complete_xml_fallback, which takes its own turn at the gate.
@@ -479,7 +472,7 @@ class LLMClient:
                 response = await self._client.chat.completions.create(**kwargs)
             return response.choices[0].message, response.usage
         except openai.BadRequestError:
-            # Server rejected tools/extra_body — fall back to system prompt injection
+            # Server rejected the request (e.g. tools param) — fall back to system prompt injection
             log.warning("Server rejected request, falling back to system prompt injection")
             return await self._complete_xml_fallback(messages, tools, stream)
         except Exception as exc:
@@ -510,8 +503,6 @@ class LLMClient:
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if self.config.is_local:
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
             async with _inference_gate(self.config):
                 response = await self._client.chat.completions.create(**kwargs)
