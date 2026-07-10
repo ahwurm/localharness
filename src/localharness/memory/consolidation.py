@@ -313,6 +313,9 @@ class ConsolidationPass:
             min_sessions=self._cfg.cluster_min_sessions,
             write_budget=self._cfg.schema_write_budget,
             depth_cap=self._cfg.schema_depth_cap,
+            # tier-1 embedding leg: same embedder discovery uses; 2-factor, never welds alone
+            embedder=self._embedder,
+            embed_sim=self._cfg.clustering_embed_sim_threshold,
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
         )
         report.schemas_written = len(written)

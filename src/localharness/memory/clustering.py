@@ -130,7 +130,8 @@ def _topic_slug(key: str) -> str | None:
     return parts[1] if len(parts) >= 3 and parts[0] == "sem" else None
 
 
-async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int, set[int]]:
+async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth,
+                             embedder=None, embed_sim: float = 0.55) -> dict[int, set[int]]:
     """Undirected relatedness adjacency over the pool — GRAPH signal + CO-TAG signal. Word-overlap
     edges are REPLACED by shared-tag edges (tag-graph M3): chapters now form from the ontological
     relatedness word-matching structurally cannot see (run-3 markets: 3 one-topic atoms, <=1 shared
@@ -175,7 +176,39 @@ async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int
         for i, a in enumerate(member_ids):
             for b in member_ids[i + 1:]:
                 _link(a, b)
+
+    # (c) EMBEDDING signal (tier-1 upgrade, owner 2026-07-10) — 2-FACTOR by doctrine: an
+    # embedding edge NEVER welds alone (the mega-blob lesson generalized; it also keeps the
+    # lexical HashingEmbedder fallback from inventing connections). A pair links iff
+    # cosine >= embed_sim AND the two atoms share >= 1 salient token — the token co-factor
+    # never welds alone either (word overlap was retired as a weld for over-linking; here it
+    # only gates the embedder). Catches same-topic atoms whose wording diverges below the
+    # co-tag/graph signals. Embedder failure degrades to the two structural legs, never raises.
+    if embedder is not None and len(pool) >= 2:
+        try:
+            vecs = embedder.embed([f.value for f in pool])
+        except Exception:
+            vecs = None
+            log.warning("clustering: embedder failed; embedding leg skipped", exc_info=True)
+        if vecs:
+            toks = {f.id: set(_salient_tokens(f.value)) for f in pool}
+            ordered = [f.id for f in pool]
+            for i, a in enumerate(ordered):
+                for j in range(i + 1, len(ordered)):
+                    b = ordered[j]
+                    if not (toks[a] & toks[b]):
+                        continue
+                    if _cosine(vecs[i], vecs[j]) >= embed_sim:
+                        _link(a, b)
     return adj
+
+
+def _cosine(u: list[float], v: list[float]) -> float:
+    """Cosine over two same-length vectors (mirrors discovery's; 0.0 on zero norms)."""
+    dot = sum(a * b for a, b in zip(u, v))
+    nu = sum(a * a for a in u) ** 0.5
+    nv = sum(b * b for b in v) ** 0.5
+    return dot / (nu * nv) if nu and nv else 0.0
 
 
 async def _chapter_member_ids(store, schema_ids: list[int]) -> dict[int, set[int]]:
@@ -334,6 +367,7 @@ async def _attach_aux_failures(
 async def find_stable_clusters(
     store, *, min_cluster_size: int = 2, min_sessions: int = 2,
     fts_top_k: int = 5, graph_depth: int = 2, aux_cap: int = 8,
+    embedder=None, embed_sim: float = 0.55,
 ) -> list[Cluster]:
     """Discover STABLE lesson clusters over the promoted population. A cluster is returned
     iff it has >= min_cluster_size (2) related members spanning >= min_sessions (2) distinct
@@ -347,7 +381,8 @@ async def find_stable_clusters(
     pool = await _load_pool(store)
     if len(pool) < min_cluster_size:
         return []
-    adj = await _relatedness_edges(store, pool, fts_top_k=fts_top_k, graph_depth=graph_depth)
+    adj = await _relatedness_edges(store, pool, fts_top_k=fts_top_k, graph_depth=graph_depth,
+                                   embedder=embedder, embed_sim=embed_sim)
     failure_queue = await _load_failure_queue(store)  # loaded ONCE for the whole pass
 
     clusters: list[Cluster] = []

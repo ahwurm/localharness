@@ -417,6 +417,16 @@ class MemoryConsolidationConfig(BaseModel):
             "deliberately conservative. Hyperparameter — sweep on the eval, do not taste-pick."
         ),
     )
+    clustering_embed_sim_threshold: float = Field(
+        default=0.55, ge=0.0, le=1.0,
+        description=(
+            "Tier-1 embedding leg of chapter clustering (owner 2026-07-10): two pool atoms link "
+            "when cosine(embed) >= this AND they share >= 1 salient token — 2-FACTOR by doctrine, "
+            "an embedding edge never welds a group alone (mega-blob lesson; also keeps the lexical "
+            "HashingEmbedder fallback safe). Matches discovery's _EMBED_SIM default (0.55). Only "
+            "active when consolidation has an embedder. Hyperparameter — sweep on the eval."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(

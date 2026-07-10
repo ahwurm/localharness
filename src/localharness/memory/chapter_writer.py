@@ -258,6 +258,7 @@ async def write_cluster_schemas(
     store, llm, cancel_event, *,
     min_cluster_size: int = 2, min_sessions: int = 2, write_budget: int = 3,
     depth_cap: int = 2, corpus_char_cap: int = 6000, stale_looks: int = 5,
+    embedder=None, embed_sim: float = 0.55,
     attempts_log: list | None = None,
 ) -> list["Fact"]:
     """Turn stable lesson clusters into grounded chapter schema nodes — the SEMA-02/03 write half.
@@ -270,7 +271,8 @@ async def write_cluster_schemas(
     rows drain after stale_looks idle cycles. Never raises into the idle pass; all LLM work is bounded
     + cancellable (machine-safety). Returns the schemas written this pass (partial on cancel)."""
     clusters = await find_stable_clusters(
-        store, min_cluster_size=min_cluster_size, min_sessions=min_sessions
+        store, min_cluster_size=min_cluster_size, min_sessions=min_sessions,
+        embedder=embedder, embed_sim=embed_sim,  # tier-1: embedding leg (2-factor, never alone)
     )
 
     schemas: list["Fact"] = []
