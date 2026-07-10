@@ -427,6 +427,18 @@ class MemoryConsolidationConfig(BaseModel):
             "active when consolidation has an embedder. Hyperparameter — sweep on the eval."
         ),
     )
+    chapter_refresh_overlap: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description=(
+            "CHAPTER REFRESH (run-14 fix): a new cluster whose member overlap with an existing "
+            "ACTIVE chapter (|intersection| / min(|old|, |new|)) clears this threshold ADOPTS "
+            "that chapter's key — store_fact supersedes on the old key (one active chapter, "
+            "history preserved) instead of minting a near-identical sibling. Membership drift "
+            "(a rescued residue atom joining, a correction row entering the pool) is an UPDATE, "
+            "not a new chapter. At most one adoption per key per pass, so a facet SPLIT of an "
+            "old chapter keeps both facets. Hyperparameter — sweep on the eval."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(

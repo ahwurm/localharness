@@ -316,6 +316,8 @@ class ConsolidationPass:
             # tier-1 embedding leg: same embedder discovery uses; 2-factor, never welds alone
             embedder=self._embedder,
             embed_sim=self._cfg.clustering_embed_sim_threshold,
+            # chapter refresh: membership drift supersedes the old chapter, never a sibling
+            refresh_overlap=self._cfg.chapter_refresh_overlap,
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
         )
         report.schemas_written = len(written)

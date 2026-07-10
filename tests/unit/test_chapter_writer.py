@@ -390,13 +390,16 @@ async def test_grown_cluster_supersedes_existing_chapter(store):
     key0 = r1[0].key
 
     m3 = await _seed_sem(store, _READ_C, "s3")   # the cluster grows by one member
-    r2 = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
+    # The regenerated body differs (it now covers m3) — grounded verbatim in _READ_C.
+    body2 = "read tool timed out once then using the absolute path directly resolved"
+    r2 = await write_cluster_schemas(store, _EchoLLM(body2), asyncio.Event())
     assert len(r2) == 1
 
     active = [f for f in await store.query_facts(FactQuery(tags=["tier:schema"], limit=50))]
     assert len(active) == 1, (
         f"membership drift minted a sibling chapter: {[(f.key, f.value[:40]) for f in active]}")
     assert active[0].key == key0                 # identity ADOPTED, not re-derived
+    assert active[0].value == body2              # the refresh actually refreshed the body
     assert len(await store.get_fact_history(key0)) >= 2   # old body superseded, history kept
     # The refreshed chapter carries the NEW member.
     assert store._db is not None
