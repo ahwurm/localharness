@@ -246,9 +246,11 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.memory.consolidation.mining_novelty_fold_threshold" in entries
     # Embedding edge signal (clustering tier-1): cosine threshold for the 2-factor link.
     assert "agent.memory.consolidation.clustering_embed_sim_threshold" in entries
-    assert len(entries) == 144, (
-        f"catalogue should be 144 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x25 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup]), got {len(entries)}"
+    # Chapter refresh (run-14 fix): member-overlap threshold for identity adoption.
+    assert "agent.memory.consolidation.chapter_refresh_overlap" in entries
+    assert len(entries) == 145, (
+        f"catalogue should be 145 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x26 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup]), got {len(entries)}"
     )
 
 
@@ -312,9 +314,9 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 144, (
-        f"catalogue should be 144 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x25 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup]), got {len(entries)}"
+    assert len(entries) == 145, (
+        f"catalogue should be 145 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x26 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup]), got {len(entries)}"
     )
 
 
