@@ -143,6 +143,50 @@ async def test_load_pool_is_semantic(store):
     pool_keys = {f.key for f in await _load_pool(store)}
     assert pool_keys == {a.key, b.key, c.key, d.key}, f"unexpected pool: {pool_keys}"
 
+class _CloseEmbedder:
+    """Everything embeds identically (cos=1.0) — isolates the token co-factor requirement."""
+    def embed(self, texts):
+        return [[1.0, 0.0] for _ in texts]
+
+
+class _FarEmbedder:
+    """Marrakech-marked texts orthogonal to everything else (cos=0.0 across the pair)."""
+    def embed(self, texts):
+        return [[1.0, 0.0] if "marrakech" in t else [0.0, 1.0] for t in texts]
+
+
+@pytest.mark.asyncio
+async def test_embedding_edge_links_only_with_token_cofactor(store):
+    """Tier-1 upgrade (owner 2026-07-10): the EMBEDDING signal links a pair ONLY under 2-factor
+    agreement — cosine >= threshold AND >= 1 shared salient token. An embedding edge never welds
+    alone (mega-blob doctrine; also keeps the lexical HashingEmbedder fallback safe). Here the
+    two workshop atoms share one token + close vectors -> linked into one cluster, while the
+    kyoto atom (close vector, ZERO shared tokens) stays out."""
+    a = await _seed_sem(store, "the pottery workshop trip in marrakech", "s1", topic="travel",
+                        child_tag="travel-x")
+    b = await _seed_sem(store, "a woodworking workshop plan for the garage", "s2", topic="hobby",
+                        child_tag="hobby-x")
+    await _seed_sem(store, "kyoto ryokan onsen booking notes", "s1", topic="kyoto",
+                    child_tag="kyoto-x")
+
+    clusters = await find_stable_clusters(store, embedder=_CloseEmbedder())
+
+    assert len(clusters) == 1, f"expected exactly the workshop pair, got {clusters}"
+    assert {m.id for m in clusters[0].members} == {a.id, b.id}
+
+
+@pytest.mark.asyncio
+async def test_embedding_edge_requires_cosine_not_just_token(store):
+    """Control: the same shared-token pair with FAR vectors does NOT link — the token co-factor
+    never welds alone either (it was retired as a weld precisely for over-linking)."""
+    await _seed_sem(store, "the pottery workshop trip in marrakech", "s1", topic="travel",
+                    child_tag="travel-x")
+    await _seed_sem(store, "a woodworking workshop plan for the garage", "s2", topic="hobby",
+                    child_tag="hobby-x")
+
+    assert await find_stable_clusters(store, embedder=_FarEmbedder()) == []
+
+
 @pytest.mark.asyncio
 async def test_chapter_never_clusters_with_its_own_members(store):
     """INCEST GUARD (caught live by the first two-pass eval run): a chapter co-clustering with
