@@ -1350,3 +1350,68 @@ async def test_step_mine_threads_novelty_threshold_and_surfaces_folded(store: Me
 
     assert captured.get("novelty_fold_threshold") == 0.7
     assert report.mining_folded == 4
+
+
+# ---------------------------------------------------------------------------
+# SELF-ECHO GUARD (completes FIX 4): only the USER'S OWN WORDS are recurrence evidence.
+# FIX 4 structurally excluded tool_result echoes; the remaining echo path was the ASSISTANT
+# restating a fact ("per memory, vLLM runs on 8081...") — mineable surface, so a restatement
+# could corroborate/fold and step the confidence ladder + advance provenance: the agent talking
+# itself into believing a fact harder, and fabricating multi-session evidence for chapters. Rule:
+# a fact may be BORN from any operative record (mint keeps real provenance), but it only GAINS
+# STRENGTH when the user re-asserts it — an assistant-sourced corroboration/fold refreshes
+# accessibility (updated_at) and NOTHING else (confidence and provenance untouched, via the
+# store_fact empty-provenance touch path). Deterministic; no new knobs — an epistemics rule,
+# not a tunable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_assistant_restatement_folds_but_never_strengthens(store: MemoryStore):
+    """An ASSISTANT paraphrase of a user-stated fact folds (no sibling row) but is evidence-inert:
+    confidence stays 0.65 and provenance stays the user's original day."""
+    await store.append_history(
+        _rec(10, "i plan to create a marketing launch document for localharness", sid="day1"))
+    r1 = await mine_transcript(store, _FakeLLM(
+        "projects | user plans to create a marketing launch document for localharness | "
+        "create a marketing launch document for localharness"), asyncio.Event(), file_tags=False)
+    assert r1.written == 1
+
+    await store.append_history(
+        _rec(20, "you still plan to create the marketing launch document", sid="day2",
+             typ="assistant_message"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        "projects | user plans to create a marketing launch document | "
+        "create the marketing launch document"), asyncio.Event(), file_tags=False)
+
+    assert r2.folded == 1 and r2.written == 0
+    atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+             if f.key.startswith("sem/projects/")]
+    assert len(atoms) == 1
+    assert abs(atoms[0].confidence - 0.65) < 1e-9   # NO ladder step from the agent's own mouth
+    assert atoms[0].provenance == "day1"            # NO fabricated second session
+
+
+@pytest.mark.asyncio
+async def test_assistant_verbatim_corroboration_is_evidence_inert(store: MemoryStore):
+    """The same rule on the VERBATIM path: an assistant record re-yielding the identical claim
+    corroborates (no duplicate row) but steps nothing — confidence 0.65, provenance day1."""
+    claim = "user plans to create a marketing launch document for localharness"
+    await store.append_history(
+        _rec(10, "i plan to create a marketing launch document for localharness", sid="day1"))
+    await mine_transcript(store, _FakeLLM(
+        f"projects | {claim} | create a marketing launch document for localharness"),
+        asyncio.Event(), file_tags=False)
+    await store.append_history(
+        _rec(20, "noted — you plan to create a marketing launch document for localharness",
+             sid="day2", typ="assistant_message"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        f"projects | {claim} | create a marketing launch document for localharness"),
+        asyncio.Event(), file_tags=False)
+
+    assert r2.written == 1                           # corroboration path still counts as a write
+    atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+             if f.key.startswith("sem/projects/")]
+    assert len(atoms) == 1
+    assert abs(atoms[0].confidence - 0.65) < 1e-9
+    assert atoms[0].provenance == "day1"
