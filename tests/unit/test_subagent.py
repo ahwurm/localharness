@@ -265,10 +265,20 @@ def test_web_researcher_role_rigor_gating(monkeypatch):
     monkeypatch.setenv("RESEARCH_RIGOR", "high")
     high = _build("web-researcher")
     assert "search-verifier" in high.role and "DISPUTED" in high.role
+    assert "VERIFY MATERIAL CLAIMS" in high.role  # high = verify without being asked
 
     monkeypatch.setenv("RESEARCH_RIGOR", "fast")
     fast = _build("web-researcher")
     assert "search-verifier" not in fast.role  # fast skips verification (speed dial)
+
+    # DEFAULT (owner latency ruling 2026-07-09): verifier runs ONLY when the task
+    # explicitly asks for a re-check — never auto-fires on material claims.
+    monkeypatch.delenv("RESEARCH_RIGOR", raising=False)
+    default = _build("web-researcher")
+    assert "VERIFY MATERIAL CLAIMS" not in default.role  # no auto-verification
+    assert "search-verifier" in default.role             # ...but reachable on request
+    assert "ONLY if your task explicitly asks" in default.role
+    assert "DISPUTED" in default.role  # verdict-tagging discipline kept for requested checks
 
 
 def test_format_web_findings_is_structured_summary():
