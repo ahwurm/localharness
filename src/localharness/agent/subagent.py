@@ -82,6 +82,20 @@ WEB_RESEARCHER_VERIFY_ADDENDUM = (
     "silently drop it. Verify only MATERIAL claims; skip background/color."
 )
 
+# On-request addendum (DEFAULT since 2026-07-09, owner latency ruling): the verifier stays
+# reachable but fires ONLY when the task explicitly asks for a re-check. Auto-verification
+# (rigor=high) cost two blind rounds ≈ +133s on a real research turn (demo-session.ts
+# provenance: 64.6s + 68.4s of a 1085.7s turn) plus its own web calls.
+WEB_RESEARCHER_VERIFY_ON_REQUEST_ADDENDUM = (
+    "\n\nVERIFY ONLY ON REQUEST (rigor=on-request): do NOT verify claims by default — report "
+    "findings with their source URLs and move on. ONLY if your task explicitly asks you to "
+    "verify / re-check / double-check a claim, delegate exactly that claim to the "
+    "search-verifier: agent(agent_id='search-verifier', task='claim: <the claim>\\nentity: "
+    "<the entity it is about>\\nsource_url: <the page you got it from>'). If its verdict is "
+    "NOT SUPPORTED, KEEP the claim in your summary but TAG it (e.g. '[DISPUTED: source is "
+    "about SPCX, not QNT]') — never silently drop it."
+)
+
 # Back-compat alias (the unverified / fast-path role). build_web_researcher_config assembles the
 # effective role from RESEARCH_RIGOR.
 WEB_RESEARCHER_ROLE = WEB_RESEARCHER_ROLE_BASE
@@ -153,21 +167,28 @@ def build_explore_config(name: str = "explore", kill_file: str | None = None) ->
 
 
 def _research_rigor() -> str:
-    """`high` (default) verifies material claims via the nested search-verifier; `fast` skips it
-    (the sequential-local speed/consistency dial). Read from RESEARCH_RIGOR at dispatch time."""
-    return os.environ.get("RESEARCH_RIGOR", "high").strip().lower()
+    """The sequential-local speed/consistency dial, read from RESEARCH_RIGOR at dispatch time.
+    `on-request` (default since 2026-07-09, owner latency ruling): verify only when the task
+    explicitly asks. `high`: auto-verify material claims via the nested search-verifier
+    (set explicitly for benches/experiments needing comparability with pre-07-09 runs).
+    `fast`: never verify — the verifier isn't even mentioned. Unknown values → on-request."""
+    return os.environ.get("RESEARCH_RIGOR", "on-request").strip().lower()
 
 
 def build_web_researcher_config(name: str = "web-researcher", kill_file: str | None = None) -> AgentConfig:
-    """Build the web-researcher-child AgentConfig. The role gains the verify-material-claims
-    addendum under RESEARCH_RIGOR=high (default); `fast` keeps the plain research role.
+    """Build the web-researcher-child AgentConfig. RESEARCH_RIGOR gates the role:
+    `high` → auto-verify material claims; `fast` → plain research role; anything else
+    (incl. the `on-request` default) → verify only when the task explicitly asks.
 
     `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
     pass a path to honor an external kill file.
     """
+    rigor = _research_rigor()
     role = WEB_RESEARCHER_ROLE_BASE
-    if _research_rigor() != "fast":
+    if rigor == "high":
         role += WEB_RESEARCHER_VERIFY_ADDENDUM
+    elif rigor != "fast":
+        role += WEB_RESEARCHER_VERIFY_ON_REQUEST_ADDENDUM
     return AgentConfig(
         name=_sanitize_agent_name(name),
         role=role,

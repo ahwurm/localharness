@@ -616,7 +616,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
     # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
-    # is primarily nested under web-researcher (rigor=high) but is also a standalone capability.
+    # is a standalone capability (route a user's "re-check X" straight to it); the web-researcher
+    # nests it only when its task asks for verification (rigor=on-request default) or under
+    # RESEARCH_RIGOR=high (auto-verify material claims).
     # v0.5.3: every default builtin is quarantined-or-read-only; bash-holding specialist roles
     # (data-analyst, frontend-designer) ship as opt-in examples/agents/ configs instead.
     available_agent_names = ["explore", "web-researcher", "cruncher",
