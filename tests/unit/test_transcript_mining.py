@@ -782,12 +782,14 @@ async def test_memory_read_echo_is_never_mined_provenance_preserved(store: Memor
 
 
 @pytest.mark.asyncio
-async def test_including_tool_result_surface_reproduces_the_collapse(store: MemoryStore):
-    """Negative control (the guard is LOAD-BEARING, not decorative): widen the operative surface to
-    INCLUDE tool_result and the SAME unfaithful double + echo DOES collapse — the day-1 fact is
-    re-mined off the day-2 echo, store_fact's distinct-day ladder advances its provenance to day2 and
-    steps confidence. This is exactly the failure the operative-surface restriction prevents (and the
-    A1-starving mechanism a live unfaithful miner would otherwise be exposed to)."""
+async def test_widened_surface_tool_echo_still_cannot_collapse_provenance(store: MemoryStore):
+    """DEFENSE IN DEPTH (was the FIX-4 negative control): originally, widening the operative
+    surface to include tool_result reproduced the provenance collapse — proving the allowlist
+    load-bearing. The SELF-ECHO GUARD then made non-user echoes evidence-inert at the
+    corroboration site itself, so the collapse is now blocked by a SECOND independent mechanism:
+    even with the allowlist deliberately misconfigured wide open, the tool echo re-mines as a
+    corroboration with provenance="" — the day-1 fact keeps provenance=day1 and confidence 0.65.
+    (FIX 4's input-construction virtues — never even reading tool I/O — keep their own tests.)"""
     from localharness.memory.mining import _h8
 
     f_claim = "user got sunburnt at the beach"
@@ -800,8 +802,8 @@ async def test_including_tool_result_surface_reproduces_the_collapse(store: Memo
                           operative_message_types=["user_message", "assistant_message", "tool_result"])
 
     f = await store.get_fact(f"sem/health/{_h8(f_claim)}")
-    assert f.provenance == "day2"          # collapsed — re-mined off the echo, provenance advanced
-    assert f.confidence > 0.65             # distinct-day ladder stepped it (0.65 -> 0.72)
+    assert f.provenance == "day1"          # NOT advanced — the echo is evidence-inert either way
+    assert f.confidence == 0.65            # no ladder step from a store read-back
 
 
 @pytest.mark.asyncio

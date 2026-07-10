@@ -481,6 +481,14 @@ async def mine_transcript(
                     report.rejected_ungrounded += 1
                     continue
                 provenance = src.get("session_id") or str(src.get("ts", ""))
+                # SELF-ECHO GUARD (completes FIX 4): only the USER'S OWN WORDS are recurrence
+                # evidence. A fact may be BORN from any operative record (mints below keep real
+                # provenance), but corroboration/fold from an ASSISTANT-sourced atom passes
+                # provenance="" — store_fact's touch path then refreshes accessibility
+                # (updated_at) while confidence and provenance stay untouched. Without this, the
+                # agent restating a fact would step the ladder and fabricate multi-session
+                # chapter evidence from its own mouth. Deterministic; no knob — epistemics.
+                user_evidence = str(src.get("type", "")) == "user_message"
                 slug = _slug(topic)
                 replaces_present = replaces is not None  # B4(i): was a replaces= field present?
                 # FIX 2a: the model pasted a known atom's key/prefix into the `topic` field instead
@@ -577,7 +585,8 @@ async def mine_transcript(
                                 tags=["sem", "pending_consolidation"],
                                 confidence=0.65,
                                 source="transcript_mining",
-                                provenance=provenance,
+                                # self-echo guard: assistant folds are evidence-inert
+                                provenance=provenance if user_evidence else "",
                                 node_kind="fact",
                             )
                             report.folded += 1
@@ -587,13 +596,22 @@ async def mine_transcript(
                             log.info("mining fold: %r ~ %s (J=%.2f) — corroborated, no sibling mint",
                                      claim[:70], best_key, best_j)
                             continue
+                # self-echo guard, verbatim path: this write CORROBORATES (identical active value
+                # on the key) rather than minting — if the source is not the user's own words,
+                # pass provenance="" so the ladder cannot step and provenance cannot advance.
+                # A genuinely NEW mint keeps its real provenance whatever the source type.
+                prov_arg = provenance
+                if not user_evidence:
+                    prior = await store.get_fact(key)
+                    if prior is not None and prior.value == claim:
+                        prov_arg = ""  # assistant restatement: accessibility refresh only
                 fact = await store.store_fact(
                     key=key,
                     value=claim,
                     tags=["sem", "pending_consolidation"],
                     confidence=0.65,  # searchable, sub-injection — ambient status is EARNED
                     source="transcript_mining",
-                    provenance=provenance,  # the SOURCE record's session, PER ATOM (load-bearing)
+                    provenance=prov_arg,  # the SOURCE record's session, PER ATOM (load-bearing)
                     node_kind="fact",
                 )
                 report.written += 1
