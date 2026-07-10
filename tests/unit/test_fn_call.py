@@ -372,3 +372,116 @@ def test_extract_hermes_json_multiple(converter: FnCallConverter):
     assert len(calls) == 2
     assert calls[0].name == "glob"
     assert calls[1].name == "read"
+
+
+# ---------------------------------------------------------------------------
+# Stray / unbalanced closing-tag tolerance (issue #14 — Qwen3.6 / llama.cpp drift)
+#
+# Runtimes emit stray, duplicated, or orphan </tool_call> closers that break the
+# balanced-pair regexes. A fallback pre-pass drops spurious closers and retries,
+# but ONLY when the normal parse found nothing — so working parses are untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_stray_duplicate_closer_after_qwen(converter: FnCallConverter):
+    """(1) Valid call followed by a stray duplicate </tool_call> still parses."""
+    text = (
+        "<tool_call>\n<function=list_files>\n<parameter=path>/tmp</parameter>\n"
+        "</function>\n</tool_call>\n</tool_call>"
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+    assert calls[0].arguments == {"path": "/tmp"}
+
+
+def test_orphan_closer_before_opening(converter: FnCallConverter):
+    """(2) Stray </tool_call> BEFORE the opener (leaked from a thinking block)."""
+    text = (
+        "</tool_call>\n<tool_call>\n<function=list_files>\n"
+        "<parameter=path>/tmp</parameter>\n</function>\n</tool_call>"
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+    assert calls[0].arguments == {"path": "/tmp"}
+
+
+def test_duplicated_closer_immediately_repeated(converter: FnCallConverter):
+    """(3) Duplicated closer immediately repeated (no whitespace between)."""
+    text = (
+        "<tool_call>\n<function=list_files>\n<parameter=path>/tmp</parameter>\n"
+        "</function>\n</tool_call></tool_call>"
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+
+
+def test_balanced_input_parses_identically(converter: FnCallConverter):
+    """(4) Control: balanced input is byte-identical through the pre-pass and parses the same."""
+    from localharness.provider.fn_call import _drop_spurious_toolcall_closers
+    text = (
+        "<tool_call>\n<function=list_files>\n<parameter=path>/tmp</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    # Pre-pass must be a no-op on well-formed input (conservatism guarantee).
+    assert _drop_spurious_toolcall_closers(text) == text
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+    assert calls[0].arguments == {"path": "/tmp"}
+
+
+def test_plain_text_with_lone_stray_closer(converter: FnCallConverter):
+    """(5) Plain text with a lone stray closer and NO tool call -> zero, no crash."""
+    text = "Here is my final answer.</tool_call> Nothing else to do."
+    calls = converter.extract_tool_calls(text)
+    assert calls == []
+
+
+def test_stray_closer_between_wrapper_and_function_qwen(converter: FnCallConverter):
+    """Observed drift: stray </tool_call> between the wrapper open and the function."""
+    text = (
+        "<tool_call>\n</tool_call>\n<function=list_files>\n"
+        "<parameter=path>/tmp</parameter>\n</function>\n</tool_call>"
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+    assert calls[0].arguments == {"path": "/tmp"}
+
+
+def test_stray_closer_between_wrapper_and_json_hermes(converter: FnCallConverter):
+    """Observed drift: stray </tool_call> between the wrapper open and the Hermes JSON."""
+    text = (
+        '<tool_call>\n</tool_call>\n'
+        '{"name": "get_weather", "arguments": {"city": "SF"}}\n</tool_call>'
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather"
+    assert calls[0].arguments == {"city": "SF"}
+
+
+def test_stray_closer_between_wrapper_and_name_legacy(converter: FnCallConverter):
+    """Observed drift: stray </tool_call> between the wrapper open and the legacy <name>."""
+    text = (
+        '<tool_call>\n</tool_call>\n<name>list_files</name>\n'
+        '<parameters>{"path": "/tmp"}</parameters>\n</tool_call>'
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "list_files"
+    assert calls[0].arguments == {"path": "/tmp"}
+
+
+def test_prepass_noop_on_balanced_multi_call(converter: FnCallConverter):
+    """Pre-pass leaves balanced multi-call input byte-identical (never fires on success)."""
+    from localharness.provider.fn_call import _drop_spurious_toolcall_closers
+    text = (
+        "<tool_call>\n<function=glob>\n<parameter=pattern>*.py</parameter>\n</function>\n</tool_call>\n"
+        "<tool_call>\n<function=bash_exec>\n<parameter=command>pwd</parameter>\n</function>\n</tool_call>"
+    )
+    assert _drop_spurious_toolcall_closers(text) == text
+    assert len(converter.extract_tool_calls(text)) == 2
