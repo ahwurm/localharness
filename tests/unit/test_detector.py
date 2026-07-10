@@ -249,7 +249,8 @@ def test_all_base_urls_include_v1():
 
 
 def test_default_ports_constant():
-    assert DEFAULT_PORTS == [8000, 11434, 1234, 8080]
+    # 8081 = harness-managed vLLM (init guided setup); 8000 = stock vLLM default.
+    assert DEFAULT_PORTS == [8081, 8000, 11434, 1234, 8080]
 
 
 def test_local_inference_timeout_min():
