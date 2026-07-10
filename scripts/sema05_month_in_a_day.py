@@ -1128,7 +1128,16 @@ async def _grade_designed_month(
     b1_count = len(formed | (nullable & non_formed))
     b1_ok = len(formed) >= max(1, len(expected) - 1) and all(t in nullable for t in non_formed)
 
-    # B2: per formed chapter member recall >= 0.6, precision >= 0.7; overall ARI.
+    # B2 (FACET RULING (a), owner 2026-07-10): a topic legitimately split across SIBLING chapters
+    # (run 11: subagents -> build-order vs read-only-policy) is correct grouping, not a miss.
+    # PRECISION stays PER FACET (>= 0.7 — an impure sibling still fails); RECALL is graded on the
+    # LABEL GROUP (the union of same-label chapters' members, >= 0.6) — jointly covering the topic
+    # is coverage. Nested parent/child chapters remain the deliberate later design (ruling (c)).
+    members_by_label: dict[str, set[int]] = {}
+    for sid, members in chapter_members.items():
+        lbl = chapter_label[sid]
+        if lbl in expected:
+            members_by_label.setdefault(lbl, set()).update(m.id for m in members)
     per_chapter: list[dict] = []
     b2_ok = True
     for sid, members in chapter_members.items():
@@ -1138,13 +1147,23 @@ async def _grade_designed_month(
         tp = sum(1 for m in members if gt.get(m.id) == lbl)
         precision = tp / len(members) if members else 0.0
         total_lbl = sum(1 for a in sem_atoms if gt.get(a.id) == lbl)
-        recall = tp / total_lbl if total_lbl else 0.0
+        facet_recall = tp / total_lbl if total_lbl else 0.0
+        group_tp = sum(1 for aid in members_by_label.get(lbl, ()) if gt.get(aid) == lbl)
+        label_recall = group_tp / total_lbl if total_lbl else 0.0
         per_chapter.append({"label": lbl, "members": len(members),
-                            "precision": round(precision, 3), "recall": round(recall, 3)})
-        if recall < 0.6 or precision < 0.7:
+                            "precision": round(precision, 3), "recall": round(facet_recall, 3),
+                            "label_recall": round(label_recall, 3)})
+        if label_recall < 0.6 or precision < 0.7:
             b2_ok = False
     order = [a.id for a in sem_atoms]
-    atom_chapter = {m.id: f"ch{sid}" for sid, members in chapter_members.items() for m in members}
+    # ARI: same-label chapters merge into ONE predicted cluster (the facet ruling); a chapter
+    # whose label is not an expected topic keeps its own id (splits there still count against).
+    atom_chapter = {}
+    for sid, members in chapter_members.items():
+        lbl = chapter_label[sid]
+        tag = f"ch-{lbl}" if lbl in expected else f"ch{sid}"
+        for m in members:
+            atom_chapter[m.id] = tag
     true_labels = [gt.get(aid) or f"none-{aid}" for aid in order]
     pred_labels = [atom_chapter.get(aid, f"solo-{aid}") for aid in order]
     ari = round(_ari(true_labels, pred_labels), 3)
