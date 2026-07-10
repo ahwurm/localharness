@@ -121,7 +121,9 @@ async def test_load_pool_is_semantic(store):
     """MOVE 1: _load_pool is the SEMANTIC population — sem/, mined/, schema nodes, and settled
     corrections (tier:reconcile_confirmed) at/above 0.6 — and EXCLUDES the operational track
     (gate/, predgate/, learned/), which is a separate hierarchy (owner ruling c). A settled
-    correction on a gate/ key (shape-b confirm keeps its key) stays IN via the reconcile arm."""
+    correction on a gate/ key (shape-b confirm keeps its key) stays IN via the reconcile arm.
+    Chapters stay pool members for the depth-2 (peer-chapter) path; the self-absorption case
+    is evicted at COMPONENT time (incest guard) — see test_chapter_never_clusters_with_its_own_members."""
     a = await _seed_sem(store, "the user is researching HBM memory makers this month", "s1")
     b = await store.store_fact(key="mined/deadbeef", value="the user runs a 27B model on vLLM",
                                tags=["mined"], confidence=0.65, provenance="s2", node_kind="fact")
@@ -140,6 +142,35 @@ async def test_load_pool_is_semantic(store):
 
     pool_keys = {f.key for f in await _load_pool(store)}
     assert pool_keys == {a.key, b.key, c.key, d.key}, f"unexpected pool: {pool_keys}"
+
+@pytest.mark.asyncio
+async def test_chapter_never_clusters_with_its_own_members(store):
+    """INCEST GUARD (caught live by the first two-pass eval run): a chapter co-clustering with
+    its OWN members would wrap itself in a fresh-keyed duplicate chapter every idle cycle —
+    the grounding gate guarantees the token overlap (a chapter's tokens derive from its
+    members), so without eviction the recursion is unbounded. The chapter is evicted from any
+    component containing its own members; the atoms still cluster (same members -> same
+    chapter key -> idempotent corroboration). Pure peer-chapter clusters (depth 2) survive —
+    that path is exercised by test_depth1_cluster_yields_depth2_chapter."""
+    m1 = await _seed_sem(store, "the user is building a summarizer subagent for the harness", "s1")
+    m2 = await _seed_sem(store, "the user is building a citation subagent for the harness", "s2")
+    chap = await store.store_fact(
+        key="schema/cluster/aaaa1111",
+        value="building summarizer and citation subagents for the harness",
+        tags=["schema", "depth:1"], confidence=0.8,
+        provenance="cluster:s1|s2", node_kind="schema")
+    await store.add_edge(chap.id, m1.id, "member_of")
+    await store.add_edge(chap.id, m2.id, "member_of")
+
+    clusters = await find_stable_clusters(store)
+
+    assert clusters, "the two member atoms must still form their cluster"
+    for c in clusters:
+        member_ids = {m.id for m in c.members}
+        assert chap.id not in member_ids, (
+            "chapter clustered with its own members — self-absorption wrapper imminent")
+    assert {m1.id, m2.id} <= {m.id for c in clusters for m in c.members}
+
 
 @pytest.mark.asyncio
 async def test_related_lessons_form_one_component(store):

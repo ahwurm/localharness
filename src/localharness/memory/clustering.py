@@ -59,7 +59,9 @@ class Cluster:
 
 async def _load_pool(store) -> list[Fact]:
     """The SEMANTIC population (MOVE 1): active facts at/above pool-entry 0.6 that describe the
-    USER'S WORLD — mined atoms (`sem/`, `mined/`), discovered schemas (chapters), settled user
+    USER'S WORLD — mined atoms (`sem/`, `mined/`), discovered schemas (chapters — pool members so
+    PURE peer-chapter clusters can abstract to depth 2; the self-absorption case is evicted at
+    component time by the incest guard in find_stable_clusters), settled user
     corrections (`tier:reconcile_confirmed`), AND user-remembered facts (the `remember` tag —
     tag-graph critique item 1: a `remember()`-sourced fact is declarative user/world content, not
     operational telemetry, so it is a first-class taggable pool member, mirroring the `mined/`
@@ -174,6 +176,23 @@ async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth) -> dict[int
             for b in member_ids[i + 1:]:
                 _link(a, b)
     return adj
+
+
+async def _chapter_member_ids(store, schema_ids: list[int]) -> dict[int, set[int]]:
+    """member_of edges for the given chapter ids (edge convention: src=chapter, dst=member) —
+    the incest guard's lookup."""
+    if not schema_ids:
+        return {}
+    assert store._db is not None
+    qs = ",".join("?" for _ in schema_ids)
+    out: dict[int, set[int]] = {}
+    async with store._db.execute(
+        f"SELECT src_id, dst_id FROM edges WHERE kind = 'member_of' AND src_id IN ({qs})",
+        schema_ids,
+    ) as cur:
+        for src, dst in await cur.fetchall():
+            out.setdefault(src, set()).add(dst)
+    return out
 
 
 def _connected_components(pool, adj) -> list[list[Fact]]:
@@ -333,6 +352,20 @@ async def find_stable_clusters(
 
     clusters: list[Cluster] = []
     for members in _connected_components(pool, adj):
+        # INCEST GUARD (2026-07-09; caught live by the first two-pass eval): a chapter
+        # co-clustering with its OWN members would wrap itself in a fresh-keyed duplicate every
+        # idle cycle — the grounding gate GUARANTEES the token overlap (a chapter's tokens derive
+        # from its members), so without eviction the recursion is unbounded. Evict the chapter
+        # from any component containing its own members; the atoms stay (same members -> same
+        # chapter key -> idempotent corroboration). A PURE peer-chapter component (depth-2
+        # abstraction) has no own-member overlap and passes through untouched.
+        schema_ids = [m.id for m in members if getattr(m, "node_kind", "") == "schema"]
+        if schema_ids:
+            own = await _chapter_member_ids(store, schema_ids)
+            comp_ids = {m.id for m in members}
+            members = [m for m in members
+                       if getattr(m, "node_kind", "") != "schema"
+                       or not (own.get(m.id, set()) & comp_ids)]
         if len(members) < min_cluster_size:
             continue
         sessions = await _component_sessions(store, members)
