@@ -113,6 +113,33 @@ async def _seed_holds(store):
 # --- Stage A/B + verdict --------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_facet_split_sibling_chapters_grade_as_one(store):
+    """FACET RULING (a) — owner, 2026-07-10: one manifest topic legitimately split across TWO
+    sibling chapters (each facet PURE, jointly covering the topic — run 11's subagents split
+    into build-order vs read-only-policy) is correct grouping, not a miss. Recall and ARI grade
+    same-label chapters as ONE logical chapter; precision stays PER FACET (an impure sibling
+    still fails B2). Nested parent/child chapters remain the later (c) endgame."""
+    m = _holds_manifest()
+    mk1 = await _seed_atom(store, "markets", "researching hbm foundry stocks", "day1")
+    mk2 = await _seed_atom(store, "markets", "hbm foundry earnings port 8081", "day2")
+    ky1 = await _seed_atom(store, "kyoto", "planning a kyoto ryokan trip", "day1")
+    ky2 = await _seed_atom(store, "kyoto", "kyoto ryokan onsen recommendation", "day2")
+    ky3 = await _seed_atom(store, "kyoto", "kyoto ryokan booking for november", "day1")
+    ky4 = await _seed_atom(store, "kyoto", "kyoto onsen etiquette notes", "day2")
+    await _seed_chapter(store, "hbm foundry earnings stocks", [mk1, mk2])
+    # The facet split: two sibling kyoto chapters (trip-logistics vs onsen-culture), each pure.
+    await _seed_chapter(store, "kyoto ryokan trip booking", [ky1, ky3])
+    await _seed_chapter(store, "kyoto onsen etiquette recommendation", [ky2, ky4])
+
+    g = await sema._grade_designed_month(store, m, _tqm(m))
+
+    assert g["stage_b"]["b1_ok"] is True
+    assert g["stage_b"]["b2_ok"] is True, g["stage_b"]["per_chapter"]  # label-group recall, not per-facet
+    assert g["stage_b"]["ari"] == 1.0                                   # same-label chapters merge for ARI
+    assert g["verdict"] == "HOLDS", g
+
+
+@pytest.mark.asyncio
 async def test_grade_holds_on_clean_designed_store(store):
     m = await _seed_holds(store)
     g = await sema._grade_designed_month(store, m, _tqm(m))
