@@ -109,8 +109,49 @@ def _attempt_entry(cluster, new_depth) -> dict:
     }
 
 
+async def _adopt_refresh_key(store, members, fresh_key: str, *,
+                             refresh_overlap: float, claimed: set[str]) -> str:
+    """CHAPTER REFRESH (run-14 fix): chapter identity must survive membership drift. The fresh
+    key is h8(exact member set), so a cluster that gained/lost ANY member (a rescued residue
+    atom, a correction row entering the pool, a foldout) would mint a near-identical SIBLING
+    beside the still-active old chapter (run 14: three duplicate pairs; the stale sibling failed
+    B4). If the new cluster's member overlap with an existing ACTIVE chapter — |∩| / min(|old|,
+    |new|) — clears `refresh_overlap`, ADOPT that chapter's key: store_fact then supersedes on
+    the old key (one active chapter, history preserved), the supersede-never-duplicate law one
+    level up. At most one adoption per key per pass (`claimed`): a facet SPLIT of an old chapter
+    keeps both facets — the second claimant falls back to its fresh key."""
+    new_ids = {m.id for m in members}
+    assert store._db is not None
+    best_key, best_ov = None, 0.0
+    async with store._db.execute(
+        "SELECT id, key FROM facts WHERE agent_id = ? AND status = 'active' "
+        "AND node_kind = 'schema'", (store._agent_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    for sid, skey in rows:
+        if skey in claimed:
+            continue
+        async with store._db.execute(
+            "SELECT dst_id FROM edges WHERE kind = 'member_of' AND src_id = ?", (sid,),
+        ) as cur:
+            mem = {r[0] for r in await cur.fetchall()}
+        if not mem:
+            continue
+        ov = len(mem & new_ids) / min(len(mem), len(new_ids))
+        if ov > best_ov:
+            best_ov, best_key = ov, skey
+    if best_key is not None and best_ov >= refresh_overlap and best_key != fresh_key:
+        log.info("chapter-writer refresh: adopting %s (overlap %.2f) — supersede, not sibling",
+                 best_key, best_ov)
+        claimed.add(best_key)
+        return best_key
+    claimed.add(fresh_key)
+    return fresh_key
+
+
 async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap,
-                     attempts_log: list | None = None):
+                     attempts_log: list | None = None, *,
+                     refresh_overlap: float = 0.7, claimed_keys: set[str] | None = None):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
@@ -158,8 +199,12 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
         return None
     attempt.update(grounded=True, grounded_majority=True, written=True, reason="written")
 
+    fresh_key = f"{SCHEMA_KEY_PREFIX}{_h8(*sorted(m.key for m in members))}"
+    key = await _adopt_refresh_key(store, members, fresh_key,
+                                   refresh_overlap=refresh_overlap,
+                                   claimed=claimed_keys if claimed_keys is not None else set())
     schema = await store.store_fact(
-        key=f"{SCHEMA_KEY_PREFIX}{_h8(*sorted(m.key for m in members))}",
+        key=key,
         value=text,
         tags=["schema", SCHEMA_TIER_TAG, f"{SCHEMA_DEPTH_TAG_PREFIX}{new_depth}"],
         confidence=SCHEMA_CONFIDENCE,
@@ -258,7 +303,7 @@ async def write_cluster_schemas(
     store, llm, cancel_event, *,
     min_cluster_size: int = 2, min_sessions: int = 2, write_budget: int = 3,
     depth_cap: int = 2, corpus_char_cap: int = 6000, stale_looks: int = 5,
-    embedder=None, embed_sim: float = 0.55,
+    embedder=None, embed_sim: float = 0.55, refresh_overlap: float = 0.7,
     attempts_log: list | None = None,
 ) -> list["Fact"]:
     """Turn stable lesson clusters into grounded chapter schema nodes — the SEMA-02/03 write half.
@@ -277,6 +322,7 @@ async def write_cluster_schemas(
 
     schemas: list["Fact"] = []
     claimed: set[int] = set()
+    claimed_refresh_keys: set[str] = set()  # one identity adoption per key per pass (facet split safe)
     for cluster in clusters[:write_budget]:
         if cancel_event.is_set():
             break
@@ -289,7 +335,9 @@ async def write_cluster_schemas(
             continue
         try:
             schema = await _write_one(store, llm, cancel_event, cluster, new_depth,
-                                      corpus_char_cap, attempts_log=attempts_log)
+                                      corpus_char_cap, attempts_log=attempts_log,
+                                      refresh_overlap=refresh_overlap,
+                                      claimed_keys=claimed_refresh_keys)
         except Exception:
             log.exception("chapter-writer: cluster write failed (non-fatal)")
             if attempts_log is not None and attempts_log and attempts_log[-1].get("reason") is None:
