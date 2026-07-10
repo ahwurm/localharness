@@ -501,3 +501,82 @@ class TestBurstConsolidation:
         rendered = out.getvalue()
         assert "◆ glob *.py" in rendered
         assert "✓ glob (1 lines)" in rendered
+
+
+class TestMarkupSafetyAndCompactCalls:
+    """FIX A/B/C — regression for the dogfood report where a `write` tool call dumped a
+    237-line file body into the chat view AND markup-injection silently ate the code:
+    lowercase-leading `[..]` spans are parsed as Rich style tags, so `[j]`/`[i]` vanished
+    and `projs = [calc(p) for p in M_DATA]` rendered as `projs =`.
+
+    A: every dynamic value interpolated into a markup-enabled print is escaped, so user/
+       model content can never be interpreted as a style tag (our own `[tool.call]` etc.
+       stay literal).
+    B: content-bearing tool calls collapse to one summary line — write/edit show
+       `<tool> <path> (<n> lines)`, every other tool caps its arg preview to one line.
+    C: the result label never claims a line count it can't back up."""
+
+    @staticmethod
+    def _pipe():
+        # non-TTY: plain text, no ANSI, no live frames — exact substring assertions
+        out = StringIO()
+        return make_terminal_channel(out=out, force_terminal=False), out
+
+    @pytest.mark.asyncio
+    async def test_write_call_collapses_to_one_summary_line_body_absent(self):
+        # content BEFORE path — the arg ordering that made _get_key_arg dump the body
+        body = "\n".join(
+            ["import data", "projs = [calc(p) for p in M_DATA]"]
+            + [f"row[{i}] = x[j] + y[i]  # line {i}" for i in range(198)]
+        )
+        assert body.count("\n") == 199  # exactly 200 lines
+        ch, out = self._pipe()
+        await ch.send_tool_call("write", {"content": body, "path": "docs/sim.py"})
+        rendered = out.getvalue()
+        assert rendered.strip().count("\n") == 0                # ONE line, not 200
+        assert "◆ write docs/sim.py (200 lines)" in rendered    # path + honest size hint
+        assert "calc(p) for p in M_DATA" not in rendered        # body never dumped
+        assert "# line 150" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_dynamic_brackets_render_verbatim_not_swallowed(self):
+        # the exact corruption from the report: lowercase-leading [..] are parsed as
+        # style tags and eaten unless escaped. A non-write tool's arg IS rendered.
+        cmd = "projs = [calc(p) for p in M_DATA]; a = x[j]; b = y[i]"
+        ch, out = self._pipe()
+        await ch.send_tool_call("bash", {"command": cmd})
+        rendered = out.getvalue()
+        assert "[calc(p) for p in M_DATA]" in rendered   # survived verbatim
+        assert "x[j]" in rendered
+        assert "y[i]" in rendered
+
+    @pytest.mark.asyncio
+    async def test_long_non_write_arg_truncated_to_one_line(self):
+        cmd = "echo " + "A" * 200
+        ch, out = self._pipe()
+        await ch.send_tool_call("bash", {"command": cmd})
+        rendered = out.getvalue()
+        assert rendered.strip().count("\n") == 0     # one line
+        assert "…" in rendered                  # ellipsis marks the truncation
+        assert "A" * 200 not in rendered             # full arg body not shown
+        assert "echo AAAA" in rendered               # prefix preserved
+
+    @pytest.mark.asyncio
+    async def test_write_result_label_omits_misleading_count(self):
+        ch, out = self._pipe()
+        # write returns a status line ("Written N bytes"), NOT the file body — old code
+        # printed "(1 lines)", implying one line was written.
+        await ch.send_tool_result(
+            "write", "Written 5678 bytes to /abs/docs/sim.py", is_error=False,
+        )
+        rendered = out.getvalue()
+        assert "✓ write" in rendered      # ✓ write
+        assert "lines)" not in rendered        # never a fabricated line count
+
+    @pytest.mark.asyncio
+    async def test_model_text_markup_prints_literally(self):
+        ch, out = self._pipe()
+        await ch.send_message("Result: [bold]not-a-style[/bold] and score[42]")
+        rendered = out.getvalue()
+        assert "[bold]not-a-style[/bold]" in rendered   # printed, not applied as a style
+        assert "score[42]" in rendered
