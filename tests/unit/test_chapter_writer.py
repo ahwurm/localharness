@@ -377,6 +377,58 @@ async def test_depth_cap_refuses_deep_cluster(store):
 
 
 @pytest.mark.asyncio
+async def test_grown_cluster_supersedes_existing_chapter(store):
+    """CHAPTER REFRESH (run-14 bug): chapter identity must survive membership drift. A cluster
+    that GAINS a member (run 14: a rescued atom / a correction row joining) re-writes the
+    EXISTING chapter — supersede on the OLD key, exactly one active chapter — never a
+    near-identical sibling (run 14 left three duplicate pairs, and the stale sibling is what
+    failed B4)."""
+    m1 = await _seed_sem(store, _READ_A, "s1")
+    m2 = await _seed_sem(store, _READ_B, "s2")
+    r1 = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
+    assert len(r1) == 1
+    key0 = r1[0].key
+
+    m3 = await _seed_sem(store, _READ_C, "s3")   # the cluster grows by one member
+    r2 = await write_cluster_schemas(store, _EchoLLM(_GROUNDED), asyncio.Event())
+    assert len(r2) == 1
+
+    active = [f for f in await store.query_facts(FactQuery(tags=["tier:schema"], limit=50))]
+    assert len(active) == 1, (
+        f"membership drift minted a sibling chapter: {[(f.key, f.value[:40]) for f in active]}")
+    assert active[0].key == key0                 # identity ADOPTED, not re-derived
+    assert len(await store.get_fact_history(key0)) >= 2   # old body superseded, history kept
+    # The refreshed chapter carries the NEW member.
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT COUNT(*) FROM edges WHERE kind='member_of' AND src_id=? AND dst_id=?",
+        (active[0].id, m3.id)) as cur:
+        assert (await cur.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_disjoint_clusters_never_cross_supersede(store):
+    """Facet safety: refresh only fires on substantial member OVERLAP — two disjoint-topic
+    chapters never adopt each other's identity; growing one leaves the other untouched."""
+    a1 = await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag="reads-x")
+    a2 = await _seed_sem(store, _READ_B, "s2", topic="reads", child_tag="reads-x")
+    b1 = await _seed_sem(store, "the kyoto ryokan trip is booked for early november this year",
+                         "s1", topic="kyoto", child_tag="kyoto-x")
+    b2 = await _seed_sem(store, "the kyoto onsen etiquette guide was saved for the november trip",
+                         "s2", topic="kyoto", child_tag="kyoto-x")
+    r1 = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
+    assert len(r1) == 2
+    keys0 = {f.key for f in r1}
+
+    await _seed_sem(store, _READ_C, "s3", topic="reads", child_tag="reads-x")  # grow reads only
+    await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event())
+
+    active = [f for f in await store.query_facts(FactQuery(tags=["tier:schema"], limit=50))]
+    assert len(active) == 2, f"cross-supersede or sibling mint: {[(f.key, f.value[:40]) for f in active]}"
+    assert {f.key for f in active} == keys0      # both identities stable across the refresh
+
+
+@pytest.mark.asyncio
 async def test_depth1_cluster_yields_depth2_chapter(store):
     """Chapter-of-chapters is allowed exactly once: a cluster of depth:1 chapters -> depth:2."""
     await _seed_schema(store, "d1A", _CHAP_A, 1, "cluster:xa")
