@@ -33,6 +33,7 @@ dependencies = [
     "prompt-toolkit>=3.0,<4",
     "tiktoken>=0.13.0",
     "mcp>=1.27.1",
+    "huggingface_hub>=0.26",
 ]
 
 [project.optional-dependencies]

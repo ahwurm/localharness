@@ -303,6 +303,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
     # AND the served context window (single source of truth for the budget).
     probe_ok, probed_mode, served_window = await _probe_llm(_probe_client)
+    if not probe_ok and harness.server is not None:
+        # Harness-managed server (init guided setup) — start it instead of erroring
+        # (covers reboots). If a pid is alive, it's mid-load: just wait.
+        from localharness.provider import server as managed_server
+        try:
+            if managed_server.server_pid(cfg_path) is None:
+                console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
+                managed_server.start_server(cfg_path, managed_server.serve_command(harness.server))
+            else:
+                console.print("Managed vLLM is still loading — waiting...")
+            await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
+            probe_ok, probed_mode, served_window = await _probe_llm(_probe_client)
+        except (RuntimeError, TimeoutError) as exc:
+            err_console.print(f"[bold red]Error:[/bold red] managed vLLM failed to start: {exc}")
     if not probe_ok:
         err_console.print(
             f"[bold red]Error:[/bold red] Cannot reach model '{resolved_model}' "
@@ -723,6 +737,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         channel=channel,
         bus=bus,
         config_dir=cfg_path,
+        harness_config=harness,
     )
 
     _exit_reason = "complete"

@@ -1385,6 +1385,33 @@ class SentinelConfig(BaseModel):
         description="Per-fixture train score counted as 'passing' for saturation (tolerates Wilson noise).")
 
 
+class ManagedServerConfig(BaseModel):
+    """A model server the harness itself launched (init guided setup) and may
+    restart — on `start` after a reboot, or on a REPL /model swap. Absent for
+    user-managed servers."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    runtime: Literal["vllm"] = "vllm"
+    launch: Literal["binary", "docker"] = Field(
+        default="binary",
+        description="binary = a vllm executable (system or harness venv); docker = foreground `docker run` (DGX Spark route).",
+    )
+    binary: Optional[str] = Field(default=None, description="Path to the vllm executable (launch=binary).")
+    docker_image: Optional[str] = Field(default=None, description="Image to run (launch=docker).")
+    model: str = Field(description="HF repo id or local checkpoint path passed to `vllm serve`.")
+    port: int = Field(default=8081, description="Host port the OpenAI API is served on.")
+    extra_args: list[str] = Field(default_factory=list, description="Extra `vllm serve` args (from the reference architecture).")
+    refarch: Optional[str] = Field(default=None, description="Reference-architecture key this setup came from.")
+
+    @model_validator(mode="after")
+    def _launch_target_present(self) -> "ManagedServerConfig":
+        if self.launch == "binary" and not self.binary:
+            raise ValueError("launch=binary requires `binary` (path to the vllm executable)")
+        if self.launch == "docker" and not self.docker_image:
+            raise ValueError("launch=docker requires `docker_image`")
+        return self
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -1392,6 +1419,10 @@ class HarnessConfig(BaseModel):
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
     org: OrgConfig = Field(default_factory=OrgConfig)
+    server: Optional[ManagedServerConfig] = Field(
+        default=None,
+        description="Harness-managed model server (written by init guided setup). None = user-managed.",
+    )
     proposer: Optional[ProposerConfig] = None
     sentinel: SentinelConfig = Field(
         default_factory=SentinelConfig,

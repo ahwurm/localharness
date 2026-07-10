@@ -15,8 +15,8 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_PORTS: list[int] = [8000, 11434, 1234, 8080]
-"""Probe order: vLLM, Ollama, LM Studio, llama.cpp"""
+DEFAULT_PORTS: list[int] = [8081, 8000, 11434, 1234, 8080]
+"""Probe order: vLLM (harness-managed :8081, stock :8000), Ollama, LM Studio, llama.cpp"""
 
 LOCAL_INFERENCE_TIMEOUT_MIN: float = 300.0
 """Minimum allowed timeout (seconds) for local endpoints."""

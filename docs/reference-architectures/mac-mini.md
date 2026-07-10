@@ -92,7 +92,7 @@ cost in agent loops. See [gaps.md](gaps.md) §8.
 
 ## Harness configuration
 
-`localharness init` detects vLLM on `:8000` (or the alternatives on their ports)
+`localharness init` detects vLLM on `:8081`/`:8000` (or the alternatives on their ports)
 automatically. Per-agent overrides required today:
 
 ```yaml
