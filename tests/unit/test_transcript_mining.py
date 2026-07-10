@@ -1417,3 +1417,110 @@ async def test_assistant_verbatim_corroboration_is_evidence_inert(store: MemoryS
     assert len(atoms) == 1
     assert abs(atoms[0].confidence - 0.65) < 1e-9
     assert atoms[0].provenance == "day1"
+
+
+# ---------------------------------------------------------------------------
+# FIX (run-15 forensics): on a 9B subject model the miner mis-slotted the `replaces=` supersede
+# directive into the WRONG field position — it emitted it as FIELD 2, not the canonical 4th. The
+# old parser only honored `replaces=` as the 4th field (parts[3:]), so the supersede silently
+# failed to parse: the line became a garbage atom (claim='replaces=…') and the stale atom (old
+# port) stayed active beside its correction. Deterministic fix (owner principle: code mechanisms
+# over prompt nudges): a whole-field `replaces=<id>` directive is honored in ANY position (first
+# wins), and the remaining fields are topic|claim|evidence in order — identical semantics to the
+# old 4th-field handling. A `replaces=` merely embedded in longer claim/evidence text is NOT one.
+# ---------------------------------------------------------------------------
+
+
+def test_replaces_directive_in_any_field_position_parses_as_supersede():
+    """(i) the exact run-15 malformed line: the directive is mis-slotted as FIELD 2. It must be
+    lifted out and the remaining fields read as topic|claim|evidence, so the line parses as a
+    supersede of sem/running/0d6dd96d with the CORRECT claim + evidence — not a garbage atom whose
+    claim is 'replaces=sem/running/0d6dd96d' and whose supersede never fires."""
+    from localharness.memory.mining import _parse_atoms
+
+    line = (
+        "running | replaces=sem/running/0d6dd96d | the user's vLLM server now listens on port 8081 "
+        "| \"actually no — correction on my setup note: we moved the vLLM server to port 8081, "
+        "not 8000. update that\""
+    )
+    atoms = _parse_atoms(line)
+    assert len(atoms) == 1
+    topic, claim, evidence, replaces = atoms[0]
+    assert replaces == "sem/running/0d6dd96d"      # the directive was honored despite its position
+    assert topic == "running"
+    assert claim == "the user's vLLM server now listens on port 8081"
+    assert evidence == (
+        "\"actually no — correction on my setup note: we moved the vLLM server to port 8081, "
+        "not 8000. update that\""
+    )
+
+
+def test_canonical_fourth_position_replaces_still_parses():
+    """(ii) regression guard: the canonical `topic | claim | evidence | replaces=<id>` shape still
+    parses identically — the any-position scan must not disturb the field that already worked."""
+    from localharness.memory.mining import _parse_atoms
+
+    atoms = _parse_atoms(
+        "gpu ops | vLLM moved to 8081 | moved the vLLM server to 8081 | replaces=sem/gpu-ops/abc12345"
+    )
+    assert atoms == [
+        ("gpu ops", "vLLM moved to 8081", "moved the vLLM server to 8081", "sem/gpu-ops/abc12345")
+    ]
+
+
+def test_replaces_substring_midtext_is_not_a_directive():
+    """(iii) a `replaces=` merely appearing INSIDE longer text is NOT a whole-field directive: the
+    claim is preserved verbatim and no supersede is parsed. The strict pattern is `^replaces=\\S+$`,
+    so a field starting with replaces= but whose id carries whitespace ('replaces=port 8081 moved')
+    is not one either — both, if mis-lifted, would corrupt the atom."""
+    from localharness.memory.mining import _parse_atoms
+
+    # (a) replaces= embedded mid-claim, not at a field boundary — claim kept whole, no supersede.
+    embedded = _parse_atoms(
+        "prefs | the new config replaces=default only when the old one is absent | some evidence here"
+    )
+    assert len(embedded) == 1
+    topic, claim, evidence, replaces = embedded[0]
+    assert replaces is None
+    assert claim == "the new config replaces=default only when the old one is absent"
+    assert evidence == "some evidence here"
+
+    # (b) a field starting with replaces= but whose id carries whitespace is not a strict directive.
+    spaced = _parse_atoms("gpu ops | vLLM on 8081 | replaces=port 8081 moved")
+    assert spaced == [("gpu ops", "vLLM on 8081", "replaces=port 8081 moved", None)]
+
+
+@pytest.mark.asyncio
+async def test_mislotted_replaces_supersedes_stale_atom_end_to_end(store: MemoryStore):
+    """End-to-end (the ACTUAL run-15 defect): a correction whose `replaces=<key>` marker is
+    mis-slotted into FIELD 2 (not the canonical 4th) STILL supersedes the stale atom through
+    mine_transcript — exactly ONE active port atom, the corrected value, on the OLD key. Before the
+    fix this silently failed to parse (claim='replaces=…', ungrounded) so the stale value stayed
+    active beside its correction."""
+    from localharness.memory.mining import _h8
+
+    stale_claim = "vLLM server listens on port 8000"
+    await store.append_history(
+        _rec(10, "for reference: our vLLM server listens on port 8000. remember that", sid="day2"))
+    r1 = await mine_transcript(
+        store, _FakeLLM(f"gpu ops | {stale_claim} | server listens on port 8000"),
+        asyncio.Event(), file_tags=False)
+    assert r1.written == 1
+    old_key = f"sem/gpu-ops/{_h8(stale_claim)}"
+    assert (await store.get_fact(old_key)).value == stale_claim
+
+    # run-15 shape: the `replaces=<key>` directive mis-slotted as FIELD 2, corrected value after it.
+    await store.append_history(
+        _rec(20, "correction: we moved the vLLM server to port 8081, not 8000", sid="day3"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        f"gpu ops | replaces={old_key} | vLLM server moved to port 8081 "
+        "| moved the vLLM server to port 8081"), asyncio.Event(), file_tags=False)
+    assert r2.written == 1
+
+    port_atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if "port" in f.value]
+    assert len(port_atoms) == 1, f"stale atom still active beside the correction: {port_atoms}"
+    assert port_atoms[0].value == "vLLM server moved to port 8081"
+    assert port_atoms[0].key == old_key
+    history = await store.get_fact_history(old_key)
+    assert len(history) == 2  # supersede chain intact: 8000 -> 8081
+    assert any(h.value == stale_claim and h.status == "superseded" for h in history)
