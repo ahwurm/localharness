@@ -143,8 +143,13 @@ def _tokens(text: str, *, min_len: int = 5) -> list[str]:
 
 
 def _parse_atoms(raw: str) -> list[tuple[str, str, str, str | None]]:
-    """Parse `topic | claim | evidence [| replaces=<id>]` lines into typed atoms; evidence falls
-    back to the claim when omitted; `replaces` (ruling 3) is optional and None when absent.
+    """Parse `topic | claim | evidence` lines into typed atoms; evidence falls back to the claim
+    when omitted. A `replaces=<id>` supersede directive (ruling 3) may sit in ANY field position —
+    a small subject model mis-slots it (run-15 emitted it as field 2, not the 4th) — so lift out
+    the ONE field that is ENTIRELY the directive (`^replaces=\\S+$`, first wins) and read the
+    remaining fields as topic|claim|evidence in order. Absent a whole-field directive, today's
+    4th-field handling is kept verbatim, so a present-but-empty `replaces=` marker still reaches the
+    B4(i) rescue. A `replaces=` merely embedded in longer claim/evidence text is NOT a directive.
     Malformed lines (no pipe, empty topic/claim) are skipped."""
     atoms: list[tuple[str, str, str, str | None]] = []
     for raw_line in raw.splitlines():
@@ -152,11 +157,18 @@ def _parse_atoms(raw: str) -> list[tuple[str, str, str, str | None]]:
         if "|" not in line:
             continue
         parts = [p.strip() for p in line.split("|")]
+        replaces = None
+        for idx, p in enumerate(parts):  # a whole-field replaces=<id> directive, ANY position
+            if re.fullmatch(r"replaces=\S+", p):
+                replaces = p[len("replaces="):]
+                parts = parts[:idx] + parts[idx + 1:]
+                break
+        if replaces is None:  # no whole-field directive: keep today's 4th-field handling verbatim
+            replaces = next(  # incl. a present-but-empty `replaces=` marker (-> B4(i) rescue)
+                (p[len("replaces="):].strip() for p in parts[3:] if p.startswith("replaces=")), None,
+            )
         topic, claim = parts[0], parts[1] if len(parts) > 1 else ""
         evidence = parts[2] if len(parts) > 2 and parts[2] else claim
-        replaces = next(
-            (p[len("replaces="):].strip() for p in parts[3:] if p.startswith("replaces=")), None,
-        )
         if topic and claim:
             atoms.append((topic, claim, evidence, replaces))
     return atoms
