@@ -1184,3 +1184,140 @@ async def test_step_mine_threads_residue_config_and_surfaces_counters(store: Mem
     assert captured.get("residue_min_chars") == 5
     assert report.mining_residue_enqueued == 2 and report.mining_residue_drained == 3
     assert report.mining_residue_rescued == 1 and report.mining_residue_retired == 1
+
+
+# ---------------------------------------------------------------------------
+# NOVELTY GATE (fold; 2026-07-09 live dogfood): mining's PRECISION half. The live store showed
+# 8 near-identical active atoms from ONE conversation ("craft a GTM plan" / "create a GTM plan" /
+# "build a GTM plan"...) — the exact-match dedupe can't see paraphrases, so every rewording minted
+# a sibling row. The gate: a NEW mint whose salient-token Jaccard vs an active same-slug atom
+# clears a config threshold FOLDS into that atom as CORROBORATION (same key + EXISTING value →
+# store_fact's recurrence ladder: +0.07 on a distinct provenance day) instead of minting. So
+# paraphrased recurrence EARNS ambient status exactly like verbatim recurrence — and the store
+# stays one-atom-per-fact. Supersedes are exempt BY CONSTRUCTION (a correction is similar to its
+# target; it must replace, not corroborate). Deterministic; threshold sweepable (1.0 ≈ off).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_paraphrase_mint_folds_to_corroboration(store: MemoryStore):
+    """'craft a marketing launch document' arriving after 'create a marketing launch document'
+    does NOT mint a sibling: the existing atom is corroborated — distinct-day ladder steps
+    confidence 0.65 -> 0.72, provenance advances to the new day, value keeps the ORIGINAL
+    phrasing — and the new record counts as MINED (cited), not residue."""
+    await store.append_history(
+        _rec(10, "i plan to create a marketing launch document for localharness", sid="day1"))
+    r1 = await mine_transcript(store, _FakeLLM(
+        "projects | user plans to create a marketing launch document | "
+        "create a marketing launch document"), asyncio.Event(), file_tags=False)
+    assert r1.written == 1 and r1.folded == 0
+
+    await store.append_history(
+        _rec(20, "i will craft a marketing launch document next week", sid="day2"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        "projects | user plans to craft a marketing launch document | "
+        "craft a marketing launch document"), asyncio.Event(), file_tags=False)
+
+    assert r2.folded == 1 and r2.written == 0
+    atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+             if f.key.startswith("sem/projects/")]
+    assert len(atoms) == 1, f"paraphrase minted a sibling: {[(a.key, a.value) for a in atoms]}"
+    a = atoms[0]
+    assert a.value == "user plans to create a marketing launch document"  # first phrasing wins
+    assert abs(a.confidence - 0.72) < 1e-9      # recurrence ladder stepped (distinct day)
+    assert a.provenance == "day2"               # genuine recurrence advances provenance
+    assert r2.residue == []                      # the folded record was mined, not missed
+    assert await store.residue_pending(cap=10) == []
+
+
+@pytest.mark.asyncio
+async def test_fold_never_blocks_supersede(store: MemoryStore):
+    """A correction is near-identical to its target BY CONSTRUCTION — with a valid replaces= it
+    must SUPERSEDE (value changes on the old key), never fold-corroborate the stale value."""
+    from localharness.memory.mining import _h8
+
+    old_claim = "vllm server listens on network port 8000"
+    target_key = f"sem/gpu-ops/{_h8(old_claim)}"
+    await store.append_history(
+        _rec(1, "the vllm server listens on network port 8000 for requests", sid="s1"))
+    r1 = await mine_transcript(store, _FakeLLM(
+        f"gpu ops | {old_claim} | server listens on network port 8000"),
+        asyncio.Event(), file_tags=False)
+    assert r1.written == 1
+
+    await store.append_history(
+        _rec(100, "correction the vllm server listens on network port 8081 now", sid="s2"))
+    corrected = "vllm server listens on network port 8081"
+    await mine_transcript(store, _FakeLLM(
+        f"gpu ops | {corrected} | listens on network port 8081 | replaces={target_key}"),
+        asyncio.Event(), file_tags=False)
+
+    gpu = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+           if f.key.startswith("sem/gpu-ops/")]
+    assert len(gpu) == 1 and gpu[0].key == target_key
+    assert gpu[0].value == corrected, "similar correction was folded instead of superseding"
+
+
+@pytest.mark.asyncio
+async def test_distinct_facts_same_slug_do_not_fold(store: MemoryStore):
+    """Two genuinely different facts sharing a topic slug both mint — the gate folds paraphrases,
+    not topics."""
+    await store.append_history(
+        _rec(10, "i prefer the ristretto espresso blend every morning", sid="day1"))
+    await store.append_history(
+        _rec(20, "i am planning a kyoto trip in november this year", sid="day1"))
+
+    class _TwoFactLLM:
+        async def complete(self, prompt: str) -> str:
+            return ("personal | user prefers the ristretto espresso blend | "
+                    "ristretto espresso blend\n"
+                    "personal | user is planning a kyoto trip in november | "
+                    "planning a kyoto trip in november")
+
+    r = await mine_transcript(store, _TwoFactLLM(), asyncio.Event(), file_tags=False)
+    assert r.written == 2 and r.folded == 0
+    assert len([f for f in await store.query_facts(FactQuery(tags=["sem"]))
+                if f.key.startswith("sem/personal/")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_identical_remine_still_self_corroborates(store: MemoryStore):
+    """Regression guard: a VERBATIM re-mine keeps the existing same-key corroboration path
+    (written counts, ladder steps) — the fold gate must not steal it onto a different atom."""
+    claim = "user plans to create a marketing launch document"
+    await store.append_history(
+        _rec(10, "i plan to create a marketing launch document for localharness", sid="day1"))
+    await mine_transcript(store, _FakeLLM(
+        f"projects | {claim} | create a marketing launch document"),
+        asyncio.Event(), file_tags=False)
+    await store.append_history(
+        _rec(20, "yes i still plan to create a marketing launch document", sid="day2"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        f"projects | {claim} | plan to create a marketing launch document"),
+        asyncio.Event(), file_tags=False)
+
+    assert r2.folded == 0 and r2.written == 1   # same-key corroboration, not a fold
+    atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
+             if f.key.startswith("sem/projects/")]
+    assert len(atoms) == 1 and abs(atoms[0].confidence - 0.72) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_step_mine_threads_novelty_threshold_and_surfaces_folded(store: MemoryStore, monkeypatch):
+    """The threshold knob is WIRED (config -> mine_transcript) and folded surfaces on
+    ConsolidationReport."""
+    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.consolidation import ConsolidationPass, ConsolidationReport
+
+    captured: dict = {}
+
+    async def _fake_mine(store_, llm_, cancel_, **kw):
+        captured.update(kw)
+        return MineReport(folded=4)
+
+    monkeypatch.setattr("localharness.memory.mining.mine_transcript", _fake_mine)
+    cfg = MemoryConsolidationConfig(mining_novelty_fold_threshold=0.7)
+    await ConsolidationPass(store, cfg, llm=object())._step_mine(report := ConsolidationReport())
+
+    assert captured.get("novelty_fold_threshold") == 0.7
+    assert report.mining_folded == 4
