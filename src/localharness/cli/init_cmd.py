@@ -58,6 +58,29 @@ def _detect_llamacpp_nctx(base_url: str) -> int | None:
         return None
 
 
+def _detect_lmstudio_ctx(base_url: str) -> int | None:
+    """LM Studio's /api/v0/models exposes the served window: the loaded model's
+    loaded_context_length, falling back to the largest max_context_length.
+
+    base_url is OpenAI-compat (…/v1); /api/v0 lives at the server root.
+    Returns None on any error (→ safe context default)."""
+    try:
+        import httpx
+        native = base_url.removesuffix("/v1")
+        data = httpx.get(f"{native}/api/v0/models", timeout=2.0).json()
+        entries = [e for e in (data.get("data") or []) if isinstance(e, dict)]
+        loaded = next(
+            (e for e in entries if e.get("state") == "loaded" and e.get("loaded_context_length")),
+            None,
+        )
+        if loaded:
+            return int(loaded["loaded_context_length"])
+        caps = [e["max_context_length"] for e in entries if e.get("max_context_length")]
+        return max(caps) if caps else None
+    except Exception:
+        return None
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -184,6 +207,8 @@ def init_app(
     org_kwargs: dict = {"default_model": selected_model}
     if result.provider_type == "llamacpp":
         max_len = _detect_llamacpp_nctx(result.base_url)
+    elif result.provider_type == "lmstudio":
+        max_len = _detect_lmstudio_ctx(result.base_url)
     else:
         max_len = _detect_max_model_len(result.base_url)
     if max_len:
@@ -192,6 +217,14 @@ def init_app(
         console.print(
             f"  [green]✓[/green] Context budget: {fitted:,} tokens "
             f"(served window {max_len:,} − 4,096 output reservation)"
+        )
+    elif result.provider_type == "ollama":
+        console.print(
+            "  [yellow]⚠[/yellow]  Ollama's served window (num_ctx) is VRAM-tiered and not "
+            "discoverable via the API — keeping the default budget. If your model runs a "
+            "larger context, set [bold]OLLAMA_CONTEXT_LENGTH[/bold] and a matching "
+            "[bold]org.context.max_context_tokens[/bold] in config.yaml (an oversized message "
+            "hard-errors on recent Ollama)."
         )
 
     harness = HarnessConfig(
