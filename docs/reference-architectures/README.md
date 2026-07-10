@@ -42,10 +42,14 @@ ships, both docs are revised together.
 ## Zero-config detection
 
 `localharness init` already auto-detects both architectures with no configuration:
-`provider/detector.py` probes ports `[8000, 11434, 1234, 8080]` in priority order
-(vLLM, Ollama, LM Studio, llama.cpp). **Both architectures answer on `:8000` with the
-same runtime family (vLLM)** — agent YAML is identical across machines except for the
-context/timeout profile. What does **not** work out of the box yet (context budgets,
+`provider/detector.py` probes ports `[8081, 8000, 11434, 1234, 8080]` in priority order
+(harness-managed vLLM, stock vLLM, Ollama, LM Studio, llama.cpp). **Both architectures
+run the same runtime family (vLLM)** — agent YAML is identical across machines except
+for the context/timeout profile. When nothing is running, `init` offers a guided setup:
+pick a reference architecture, it installs vLLM (venv or the NVIDIA container route),
+downloads the reference model, launches the server on `:8081`, and writes a `server:`
+block so `localharness start` restarts it after reboots and the REPL `/model` command
+can swap between downloaded models. What does **not** work out of the box yet (context budgets,
 timeouts, concurrency) is itemized in [gaps.md](gaps.md).
 
 ## Runtime support commitment

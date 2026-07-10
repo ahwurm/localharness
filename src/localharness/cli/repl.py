@@ -11,6 +11,7 @@ HELP_TEXT = """\
 Available commands:
   /help     Show this help message
   /agents   List configured agents
+  /model    List available models; /model <name|number> to switch
   /quit     Exit LocalHarness
   /exit     Exit LocalHarness
 
@@ -39,12 +40,14 @@ class OrchestratorREPL:
         channel: Any,
         bus: Any,
         config_dir: Path | None = None,
+        harness_config: Any = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
         self._channel = channel
         self._bus = bus
         self._config_dir = config_dir
+        self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
 
     async def run(self) -> None:
         """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
@@ -124,6 +127,11 @@ class OrchestratorREPL:
             )
             return True
 
+        if cmd_lower == "/model" or cmd_lower.startswith("/model "):
+            # Slice the ORIGINAL string — model ids are case-sensitive.
+            await self._handle_model_cmd(cmd.strip()[len("/model"):].strip())
+            return True
+
         if cmd_lower == "/agents":
             cards = self._orchestrator._card_registry.all_cards()
             if not cards:
@@ -144,6 +152,117 @@ class OrchestratorREPL:
 
         # Unknown slash command — pass through to orchestrator
         return False
+
+    # ------------------------------------------------------------------ #
+    # /model — list and swap models
+    # ------------------------------------------------------------------ #
+
+    async def _handle_model_cmd(self, arg: str) -> None:
+        """List models or switch. A model already served by the endpoint hot-swaps
+        (Ollama serves many); a different downloaded model on a harness-managed
+        vLLM triggers a server restart (vLLM serves one at a time)."""
+        llm = getattr(self._agent, "_llm", None)
+        if llm is None or self._harness is None or self._config_dir is None:
+            await self._send_info("Model switching is unavailable in this session.")
+            return
+
+        current = llm.config.model
+        live = await self._live_models(llm.config.base_url)
+        managed = self._harness.server
+        downloaded: list[str] = []
+        if managed is not None:
+            from localharness.provider import server as managed_server
+            downloaded = [m for m in managed_server.list_cached_models() if m not in live]
+        choices = live + downloaded
+
+        if not arg:
+            if not choices:
+                await self._send_info("No models visible at the endpoint or in the local download cache.")
+                return
+            lines = ["Models:"]
+            for i, m in enumerate(live, start=1):
+                mark = "  [active]" if m == current else ""
+                lines.append(f"  {i}. {m}  (serving){mark}")
+            for i, m in enumerate(downloaded, start=len(live) + 1):
+                lines.append(f"  {i}. {m}  (downloaded — switching restarts the managed server)")
+            lines.append("Switch with /model <name|number>.")
+            await self._send_info("\n".join(lines))
+            return
+
+        # Resolve target: number, exact name, or (managed only) a local checkpoint path.
+        if arg.isdigit() and 1 <= int(arg) <= len(choices):
+            target = choices[int(arg) - 1]
+        elif arg in choices:
+            target = arg
+        elif managed is not None and Path(arg).expanduser().exists():
+            target = arg
+        else:
+            await self._send_info(
+                f"Unknown model '{arg}'. /model lists what's available."
+            )
+            return
+
+        if target == current:
+            await self._send_info(f"{target} is already active.")
+            return
+
+        if target in live:
+            llm.config.model = target
+            cap = await llm.detect_capabilities()
+            self._persist_default_model(target)
+            await self._send_info(
+                f"Switched to {target} (tool calling: {cap.tool_call_mode})."
+            )
+            return
+
+        # Downloaded-but-not-served → managed restart
+        from localharness.provider import server as managed_server
+        await self._send_info(
+            f"Restarting managed vLLM with {target} — model load can take several minutes..."
+        )
+        try:
+            managed_server.stop_server(self._config_dir, launch=managed.launch)
+            managed.model = target
+            managed_server.start_server(self._config_dir, managed_server.serve_command(managed))
+            models = await managed_server.wait_ready(
+                llm.config.base_url, config_dir=self._config_dir
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            await self._channel.send_message(
+                f"Model swap failed: {exc}", metadata={"style": "system.error"}
+            )
+            return
+        served = models[0] if models else target
+        llm.config.model = served
+        cap = await llm.detect_capabilities()
+        self._persist_default_model(served)
+        await self._send_info(
+            f"Switched to {served} (tool calling: {cap.tool_call_mode}). "
+            "If this model serves a different context window, re-run `localharness init` to refit the budget."
+        )
+
+    async def _live_models(self, base_url: str) -> list[str]:
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0)
+                return [m["id"] for m in resp.json().get("data", [])]
+        except Exception:
+            return []
+
+    def _persist_default_model(self, model: str) -> None:
+        """Write the swap into config.yaml so the next start uses it."""
+        self._harness.provider.default_model = model
+        self._harness.org.default_model = model
+        if model not in self._harness.provider.available_models:
+            self._harness.provider.available_models.append(model)
+        from pydantic_yaml import to_yaml_str
+        (self._config_dir / "config.yaml").write_text(
+            to_yaml_str(self._harness), encoding="utf-8"
+        )
+
+    async def _send_info(self, text: str) -> None:
+        await self._channel.send_message(text, metadata={"style": "system.info"})
 
     def _detect_creation_intent(self, user_input: str) -> bool:
         """Check if user input signals agent creation intent."""

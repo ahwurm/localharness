@@ -1,19 +1,28 @@
-"""localharness init command — auto-detect LLM and write config."""
+"""localharness init command — auto-detect LLM (or guided setup) and write config."""
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
-from rich.prompt import Confirm, IntPrompt
+from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import ContextConfig, HarnessConfig, OrgConfig, ProviderConfig
+from localharness.config.models import (
+    ContextConfig,
+    HarnessConfig,
+    ManagedServerConfig,
+    OrgConfig,
+    ProviderConfig,
+)
+from localharness.provider import server as managed_server
 from localharness.provider.client import LLMClient, LLMConfig
 from localharness.provider.detector import DEFAULT_PORTS, DetectorResult, detect_provider
+from localharness.provider.refarch import REF_ARCHS
 
 console = Console()
 err_console = Console(stderr=True)
@@ -63,7 +72,7 @@ def init_app(
         str | None,
         typer.Option(
             "--endpoint", "-e",
-            help="Override auto-detection. Full base URL: http://localhost:8000/v1",
+            help="Override auto-detection. Full base URL: http://localhost:8081/v1",
             envvar="LOCALHARNESS_ENDPOINT",
         ),
     ] = None,
@@ -93,7 +102,7 @@ def init_app(
 ) -> None:
     """Auto-detect local LLM and write initial configuration.
 
-    Probes known ports in order: vLLM (:8000), Ollama (:11434),
+    Probes known ports in order: vLLM (:8081), Ollama (:11434),
     LM Studio (:1234), llama.cpp (:8080). Writes config to
     <config-dir>/config.yaml on success.
     """
@@ -127,36 +136,41 @@ def init_app(
             probe_duration_ms=0.0,
         )
         selected_model = model
+        server_config = None
     else:
         console.print("Probing for local LLM...")
         result = asyncio.run(detect_provider(timeout_seconds=1.0))
+        server_config = None
 
         if not result.found:
-            port_names = {8000: "vLLM", 11434: "Ollama", 1234: "LM Studio", 8080: "llama.cpp"}
+            port_names = {8081: "vLLM", 8000: "vLLM", 11434: "Ollama", 1234: "LM Studio", 8080: "llama.cpp"}
             console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
             console.print("Checked:")
             for port in DEFAULT_PORTS:
                 name = port_names.get(port, "unknown")
                 console.print(f"  http://localhost:{port}  ({name})  — connection refused")
-            console.print(
-                "\nStart your LLM server and run 'localharness init' again, or use:"
-            )
-            console.print(
-                "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
-            )
-            raise typer.Exit(1)
-
-        console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
-
-        if len(result.models) == 0:
-            err_console.print("[bold red]Error:[/bold red] No models available at detected endpoint.")
-            raise typer.Exit(1)
-        elif len(result.models) == 1:
-            selected_model = result.models[0]
-            console.print(f"  Model: [bold]{selected_model}[/bold] (auto-selected)")
+            guided = _guided_setup(config_path)
+            if guided is None:
+                console.print(
+                    "\nStart your LLM server and run 'localharness init' again, or use:"
+                )
+                console.print(
+                    "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
+                )
+                raise typer.Exit(1)
+            result, selected_model, server_config = guided
         else:
-            # Multiple models — check for hot model on Ollama, otherwise prompt
-            selected_model = _select_model(result)
+            console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
+
+            if len(result.models) == 0:
+                err_console.print("[bold red]Error:[/bold red] No models available at detected endpoint.")
+                raise typer.Exit(1)
+            elif len(result.models) == 1:
+                selected_model = result.models[0]
+                console.print(f"  Model: [bold]{selected_model}[/bold] (auto-selected)")
+            else:
+                # Multiple models — check for hot model on Ollama, otherwise prompt
+                selected_model = _select_model(result)
 
     # ------------------------------------------------------------------ #
     # Capability probe
@@ -206,6 +220,7 @@ def init_app(
             timeout_seconds=600.0,
         ),
         org=OrgConfig(**org_kwargs),
+        server=server_config,
     )
     config_file.write_text(to_yaml_str(harness), encoding="utf-8")
     console.print(f"\n[green]✓[/green] LocalHarness configured at {config_file}.")
@@ -214,6 +229,114 @@ def init_app(
         "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
         "[cyan]https://github.com/ahwurm/localharness[/cyan]"
     )
+
+
+def _guided_setup(
+    config_path: Path,
+) -> tuple[DetectorResult, str, ManagedServerConfig] | None:
+    """No server detected: install vLLM, download a reference model, launch, wait ready.
+
+    Returns (detection-equivalent result, served model, server config) so the caller
+    falls into the normal capability-probe/config-write path, or None if declined or
+    non-interactive (caller keeps the manual-instructions exit)."""
+    if not sys.stdin.isatty():
+        return None
+    if not Confirm.ask("\nSet up vLLM and a model now?", default=True):
+        return None
+
+    # --- Hardware ---------------------------------------------------------- #
+    console.print("\nPick your hardware (reference architectures):")
+    for i, ra in enumerate(REF_ARCHS, start=1):
+        console.print(f"  {i}. {ra.name}  [{ra.status}] — {ra.default_model}")
+    console.print(f"  {len(REF_ARCHS) + 1}. Other / set up manually")
+    choice = IntPrompt.ask("Select", default=1)
+    if not 1 <= choice <= len(REF_ARCHS):
+        return None
+    ra = REF_ARCHS[choice - 1]
+    console.print(f"  Reference doc: [cyan]{ra.doc}[/cyan]")
+    if not sys.platform.startswith(ra.platform):
+        console.print(
+            f"  [yellow]⚠[/yellow]  {ra.name} targets {ra.platform}; this machine is {sys.platform}. "
+            "Continuing, but the reference numbers won't apply."
+        )
+
+    # --- Runtime: existing binary > profile's install route ----------------- #
+    binary = managed_server.find_vllm(config_path)
+    launch, image = "binary", None
+    if binary:
+        console.print(f"  [green]✓[/green] vLLM found: {binary}")
+    elif ra.launch == "docker":
+        if shutil.which("docker") is None:
+            err_console.print(
+                "[bold red]Error:[/bold red] No vllm binary and no docker. "
+                f"This hardware's supported route is the NVIDIA container — see {ra.doc}."
+            )
+            raise typer.Exit(1)
+        launch, image = "docker", ra.docker_image
+        console.print(
+            f"  vLLM will run via Docker image [bold]{image}[/bold] (pulled on first launch; needs the NVIDIA container toolkit)."
+        )
+    else:
+        venv = managed_server.server_dir(config_path) / "venv"
+        if not Confirm.ask(f"  Install [bold]{ra.pip_package}[/bold] into {venv}?", default=True):
+            console.print(f"  Install it yourself, then re-run init — see {ra.doc}.")
+            raise typer.Exit(1)
+        try:
+            binary = managed_server.install_vllm_venv(config_path, str(ra.pip_package))
+        except RuntimeError as exc:
+            err_console.print(f"[bold red]Error:[/bold red] {exc}\nSee {ra.doc} for the manual route.")
+            raise typer.Exit(1)
+        console.print(f"  [green]✓[/green] Installed: {binary}")
+
+    # --- Model -------------------------------------------------------------- #
+    console.print(f"\n  Reference model: [bold]{ra.default_model}[/bold]")
+    console.print(f"  [dim]{ra.model_note}[/dim]")
+    model = Prompt.ask("  Model (HF repo id, or local checkpoint path)", default=ra.default_model)
+    if not Path(model).expanduser().exists():  # repo id → ensure it's in the HF cache
+        if managed_server.is_model_cached(model):
+            console.print("  [green]✓[/green] Already downloaded (Hugging Face cache).")
+        else:
+            if not Confirm.ask(f"  Download [bold]{model}[/bold] now?", default=True):
+                raise typer.Exit(1)
+            try:
+                managed_server.download_model(model)
+            except Exception as exc:
+                err_console.print(f"[bold red]Error:[/bold red] download failed: {exc}")
+                raise typer.Exit(1)
+            console.print("  [green]✓[/green] Download complete.")
+
+    # --- Launch + readiness --------------------------------------------------#
+    srv = ManagedServerConfig(
+        launch=launch,
+        binary=binary,
+        docker_image=image,
+        model=model,
+        port=8081,
+        extra_args=list(ra.serve_extra_args),
+        refarch=ra.key,
+    )
+    cmd = managed_server.serve_command(srv)
+    base_url = f"http://localhost:{srv.port}/v1"
+    console.print(f"\n  Launching: [dim]{' '.join(cmd)}[/dim]")
+    console.print(f"  Log: {managed_server.log_path(config_path)}")
+    managed_server.start_server(config_path, cmd)
+    console.print("  Waiting for the server — model load can take several minutes...")
+    try:
+        models = asyncio.run(managed_server.wait_ready(base_url, config_dir=config_path))
+    except (RuntimeError, TimeoutError) as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+    served = models[0] if models else model
+    console.print(f"  [green]✓[/green] vLLM serving [bold]{served}[/bold] on :{srv.port} (managed — `localharness start` restarts it after reboots)")
+    result = DetectorResult(
+        found=True,
+        provider_type="vllm",
+        base_url=base_url,
+        models=models or [model],
+        suggested_model=served,
+        probe_duration_ms=0.0,
+    )
+    return result, served, srv
 
 
 def _select_model(result: DetectorResult) -> str:
