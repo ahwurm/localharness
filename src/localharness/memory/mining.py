@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -546,8 +547,34 @@ async def mine_transcript(
                 prior_key = (minted_norm_key.get((slug, norm_val))
                              or active_norm_key.get((slug, norm_val)))
                 if prior_key is not None and prior_key != key:
-                    log.warning("mining: dedupe — value %r already active on %s; skip duplicate "
-                                "mint on %s", claim[:80], prior_key, key)
+                    # SUPERSEDE-PRESERVING DEDUPE (run-16): a replaces=/coerce/B4(i) directive may have
+                    # already REDIRECTED `key` onto a stale supersede TARGET (key != the fresh
+                    # sem/{slug}/{h8(claim)} mint key) whose corrected value is ALREADY active on a
+                    # DIFFERENT holder (prior_key). Skipping the mint must NOT also drop the supersede —
+                    # else the stale target stays active forever beside the value's real holder (the
+                    # port-8000/8081 defect). Retire the target with the store's supersede semantics —
+                    # the SAME status flip + retrieval drop store_fact's supersede branch runs, history
+                    # preserved via get_fact_history — WITHOUT minting a duplicate row (the value already
+                    # lives on prior_key). GUARD (B4(i)-consistent, never a false kill): only when the
+                    # target's active value shares a salient token with the claim, i.e. it is genuinely a
+                    # stale version of THIS fact — not an unrelated same-slug atom the model wrongly named
+                    # (the double-replace 119-GiB case, left untouched). The guard is auto-safe for a
+                    # target==holder self-replace (that never reaches this skip: prior_key == key) and for
+                    # a plain no-replaces duplicate (key is the fresh mint key, so `redirected` is False).
+                    redirected = key != f"sem/{slug}/{_h8(claim)}"
+                    if redirected and _salient_words(claim) & _salient_words(known_map.get(key, "")):
+                        await store._db.execute(
+                            "UPDATE facts SET status = 'superseded', updated_at = ?, "
+                            "retrieval_strength = MIN(retrieval_strength, 0.1) "
+                            "WHERE agent_id = ? AND key = ? AND status = 'active'",
+                            (int(time.time()), store._agent_id, key),
+                        )
+                        await store._db.commit()
+                        log.warning("mining: dedupe-skip with replaces — value %r already active on %s; "
+                                    "superseding stale target %s anyway", claim[:80], prior_key, key)
+                    else:
+                        log.warning("mining: dedupe — value %r already active on %s; skip duplicate "
+                                    "mint on %s", claim[:80], prior_key, key)
                     continue
                 # NOVELTY GATE (2026-07-09 dogfood — mining's PRECISION half): a fresh mint that
                 # PARAPHRASES an active same-slug atom must not land as a sibling row (live store:
