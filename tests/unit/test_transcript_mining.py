@@ -1189,41 +1189,47 @@ async def test_step_mine_threads_residue_config_and_surfaces_counters(store: Mem
 # ---------------------------------------------------------------------------
 # NOVELTY GATE (fold; 2026-07-09 live dogfood): mining's PRECISION half. The live store showed
 # 8 near-identical active atoms from ONE conversation ("craft a GTM plan" / "create a GTM plan" /
-# "build a GTM plan"...) — the exact-match dedupe can't see paraphrases, so every rewording minted
-# a sibling row. The gate: a NEW mint whose salient-token Jaccard vs an active same-slug atom
-# clears a config threshold FOLDS into that atom as CORROBORATION (same key + EXISTING value →
-# store_fact's recurrence ladder: +0.07 on a distinct provenance day) instead of minting. So
-# paraphrased recurrence EARNS ambient status exactly like verbatim recurrence — and the store
-# stays one-atom-per-fact. Supersedes are exempt BY CONSTRUCTION (a correction is similar to its
-# target; it must replace, not corroborate). Deterministic; threshold sweepable (1.0 ≈ off).
+# "build a GTM plan"...) — the exact-match dedupe can't see restatements, so every rewording
+# minted a sibling row. The gate: a NEW mint that is PROVABLY REDUNDANT vs an active same-slug
+# atom — its salient tokens a SUBSET of the atom's, number sets equal, Jaccard >= the config
+# floor — FOLDS into that atom as CORROBORATION (same key + EXISTING value → store_fact's
+# recurrence ladder: +0.07 on a distinct provenance day) instead of minting. So restated
+# recurrence EARNS ambient status exactly like verbatim recurrence — and the store stays
+# one-atom-per-fact. The SUBSET rule is the safety spine: token sets cannot tell synonyms
+# ("craft"/"create") from contrasts ("summarizer"/"citation" subagents — distinct projects!),
+# but a distinguishing token breaks subset in BOTH directions, so same-frame-different-slot
+# facts never fold. A missed fold is a dup that decay handles; a false fold destroys a fact.
+# Supersedes are exempt BY CONSTRUCTION (a correction is similar to its target; it must
+# replace, not corroborate). Deterministic; threshold sweepable (1.0 ≈ off).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_paraphrase_mint_folds_to_corroboration(store: MemoryStore):
-    """'craft a marketing launch document' arriving after 'create a marketing launch document'
-    does NOT mint a sibling: the existing atom is corroborated — distinct-day ladder steps
-    confidence 0.65 -> 0.72, provenance advances to the new day, value keeps the ORIGINAL
-    phrasing — and the new record counts as MINED (cited), not residue."""
+    """A day-2 SHORTHAND restatement ('create a marketing launch document' after day-1's
+    '...for localharness' — salient tokens a strict subset) does NOT mint a sibling: the
+    existing atom is corroborated — distinct-day ladder steps confidence 0.65 -> 0.72,
+    provenance advances to the new day, value keeps the ORIGINAL phrasing — and the new
+    record counts as MINED (cited), not residue."""
     await store.append_history(
         _rec(10, "i plan to create a marketing launch document for localharness", sid="day1"))
     r1 = await mine_transcript(store, _FakeLLM(
-        "projects | user plans to create a marketing launch document | "
-        "create a marketing launch document"), asyncio.Event(), file_tags=False)
+        "projects | user plans to create a marketing launch document for localharness | "
+        "create a marketing launch document for localharness"), asyncio.Event(), file_tags=False)
     assert r1.written == 1 and r1.folded == 0
 
     await store.append_history(
-        _rec(20, "i will craft a marketing launch document next week", sid="day2"))
+        _rec(20, "yes i still plan to create the marketing launch document", sid="day2"))
     r2 = await mine_transcript(store, _FakeLLM(
-        "projects | user plans to craft a marketing launch document | "
-        "craft a marketing launch document"), asyncio.Event(), file_tags=False)
+        "projects | user plans to create a marketing launch document | "
+        "create the marketing launch document"), asyncio.Event(), file_tags=False)
 
     assert r2.folded == 1 and r2.written == 0
     atoms = [f for f in await store.query_facts(FactQuery(tags=["sem"]))
              if f.key.startswith("sem/projects/")]
-    assert len(atoms) == 1, f"paraphrase minted a sibling: {[(a.key, a.value) for a in atoms]}"
+    assert len(atoms) == 1, f"restatement minted a sibling: {[(a.key, a.value) for a in atoms]}"
     a = atoms[0]
-    assert a.value == "user plans to create a marketing launch document"  # first phrasing wins
+    assert a.value == "user plans to create a marketing launch document for localharness"
     assert abs(a.confidence - 0.72) < 1e-9      # recurrence ladder stepped (distinct day)
     assert a.provenance == "day2"               # genuine recurrence advances provenance
     assert r2.residue == []                      # the folded record was mined, not missed
@@ -1278,6 +1284,29 @@ async def test_distinct_facts_same_slug_do_not_fold(store: MemoryStore):
     assert r.written == 2 and r.folded == 0
     assert len([f for f in await store.query_facts(FactQuery(tags=["sem"]))
                 if f.key.startswith("sem/personal/")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_number_distinguished_facts_do_not_fold(store: MemoryStore):
+    """Facts differing only by a NUMBER ('meeting room 3' vs 'meeting room 7') are distinct facts,
+    not paraphrases — a differing number set blocks the fold even at Jaccard 1.0 (short numerals
+    fall below the salient-token floor, so the word sets look identical)."""
+    await store.append_history(
+        _rec(10, "the weekly review happens in meeting room 3 downstairs usually", sid="day1"))
+    await store.append_history(
+        _rec(20, "the design sync happens in meeting room 7 downstairs usually", sid="day1"))
+
+    class _TwoRoomLLM:
+        async def complete(self, prompt: str) -> str:
+            return ("office | weekly review happens in meeting room 3 downstairs | "
+                    "meeting room 3 downstairs\n"
+                    "office | design sync happens in meeting room 7 downstairs | "
+                    "meeting room 7 downstairs")
+
+    r = await mine_transcript(store, _TwoRoomLLM(), asyncio.Event(), file_tags=False)
+    assert r.folded == 0 and r.written == 2
+    assert len([f for f in await store.query_facts(FactQuery(tags=["sem"]))
+                if f.key.startswith("sem/office/")]) == 2
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,7 @@ class ConsolidationReport:
     mining_residue_drained: int = 0
     mining_residue_rescued: int = 0
     mining_residue_retired: int = 0
+    mining_folded: int = 0  # novelty gate: paraphrase mints folded into corroboration
 
 
 class ConsolidationPass:
@@ -394,6 +395,8 @@ class ConsolidationPass:
             residue_attempt_cap=self._cfg.mining_residue_attempt_cap,
             residue_record_budget=self._cfg.mining_residue_record_budget,
             residue_min_chars=self._cfg.mining_residue_min_chars,
+            # Novelty gate: paraphrase mints fold into corroboration at this similarity
+            novelty_fold_threshold=self._cfg.mining_novelty_fold_threshold,
             completions_log=report.mining_completions,  # FIX 2c: persist raw completions
             file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
         )
@@ -405,6 +408,7 @@ class ConsolidationPass:
         report.mining_residue_drained = m.residue_drained
         report.mining_residue_rescued = m.residue_rescued
         report.mining_residue_retired = m.residue_retired
+        report.mining_folded = m.folded  # novelty-gate folds
 
     # -- 4. retrieval-strength decay (RANK-03's time axis) ----------------
 

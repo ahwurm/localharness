@@ -1617,7 +1617,8 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
              "residue_enqueued": r.mining_residue_enqueued,
              "residue_drained": r.mining_residue_drained,
              "residue_rescued": r.mining_residue_rescued,
-             "residue_retired": r.mining_residue_retired} for r in pass_reports]},
+             "residue_retired": r.mining_residue_retired,
+             "folded": r.mining_folded} for r in pass_reports]},
         # F7: which embedder class the discovery step ran with (MiniLM vs HashingEmbedder).
         "embedder_used": pass_report.embedder_used,
         "tags_backfilled": pass_report.tags_backfilled,
