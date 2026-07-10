@@ -19,6 +19,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.status import Status
 from rich.text import Text
@@ -221,6 +222,31 @@ def _get_key_arg(arguments: dict[str, Any]) -> str:
     return ""
 
 
+# write/edit carry a whole file body in their args — the view shows a one-line summary
+# (path + line count), never the body. Every other tool's arg preview is capped to one
+# line so a big argument can't flood the chat view either.
+_FILE_WRITE_TOOLS = frozenset({"write", "edit"})
+_MAX_ARG_PREVIEW = 120
+
+
+def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
+    """One-line, body-free summary of a tool call (no markup; caller adds ◆ + style).
+
+    write/edit collapse to `<tool> <path> (<n> lines)` so the view never fills with file
+    contents; `<n>` is the body the model actually emitted this call. Every other tool
+    shows its key argument on a single line, capped to _MAX_ARG_PREVIEW characters."""
+    if tool_name in _FILE_WRITE_TOOLS:
+        path = str(arguments.get("path", "")).strip()
+        body = arguments.get("content") or arguments.get("new_string") or ""
+        n = len(body.splitlines()) if isinstance(body, str) else 0
+        summary = f"{tool_name} {path}".rstrip()
+        return f"{summary} ({n} lines)" if n else summary
+    preview = _get_key_arg(arguments).split("\n", 1)[0]
+    if len(preview) > _MAX_ARG_PREVIEW:
+        preview = preview[: _MAX_ARG_PREVIEW - 1].rstrip() + "…"
+    return f"{tool_name} {preview}".rstrip()
+
+
 class TerminalChannel(ChannelAdapter):
     """Rich-formatted terminal channel with streaming output.
 
@@ -309,11 +335,11 @@ class TerminalChannel(ChannelAdapter):
             if agent_id:
                 self._console.print(Panel(
                     Markdown(content),
-                    title=f"[agent.name]{agent_id}[/agent.name]",
+                    title=f"[agent.name]{escape(agent_id)}[/agent.name]",
                     border_style="cyan",
                 ))
             else:
-                self._console.print(content)
+                self._console.print(escape(content))
 
     async def send_streaming(
         self,
@@ -326,7 +352,7 @@ class TerminalChannel(ChannelAdapter):
             self._stop_thinking()
             self._close_burst()  # rich allows one live display — freeze before Live starts
             self._state = "STREAMING"
-            panel_title = f"[agent.name]{agent_id or 'agent'}[/agent.name] [muted]streaming...[/muted]"
+            panel_title = f"[agent.name]{escape(agent_id or 'agent')}[/agent.name] [muted]streaming...[/muted]"
             live_panel = Panel("", title=panel_title, border_style="cyan")
 
             with Live(live_panel, console=self._console, refresh_per_second=20) as live:
@@ -345,7 +371,7 @@ class TerminalChannel(ChannelAdapter):
             # headers, bold) instead of raw text so the answer reads cleanly.
             self._console.print(Panel(
                 Markdown(full_text),
-                title=f"[agent.name]{agent_id or 'agent'}[/agent.name]",
+                title=f"[agent.name]{escape(agent_id or 'agent')}[/agent.name]",
                 border_style="green",
             ))
             self._state = "IDLE"
@@ -366,9 +392,13 @@ class TerminalChannel(ChannelAdapter):
             group = next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
             if group is None:
                 self._close_burst()
-                key_arg = _get_key_arg(arguments)
-                display = f"{_DIAMOND} {tool_name} {key_arg}".rstrip()
-                self._console.print(f"  [tool.call]{display}[/tool.call]")
+                summary = _tool_call_summary(tool_name, arguments)
+                # no_wrap + ellipsis: a long preview stays ONE physical line (cropped to
+                # the terminal), never wrapping the view open (FIX B).
+                self._console.print(
+                    f"  [tool.call]{_DIAMOND} {escape(summary)}[/tool.call]",
+                    no_wrap=True, overflow="ellipsis",
+                )
                 return
             family, label, note = group
             if self._burst is None or self._burst.family is not family:
@@ -403,12 +433,16 @@ class TerminalChannel(ChannelAdapter):
                 self._burst_refresh(burst)
                 return
             self._close_burst()
+            name = escape(tool_name)
             if is_error:
-                first = lines[0][:120] if lines else ""
-                self._console.print(f"  [tool.error]{_CROSS} {tool_name} (exit 1): {first}[/tool.error]")
+                first = escape(lines[0][:120]) if lines else ""
+                self._console.print(f"  [tool.error]{_CROSS} {name} (exit 1): {first}[/tool.error]")
+            elif tool_name in _FILE_WRITE_TOOLS:
+                # result is a status line ("Written N bytes"), not the lines written —
+                # omit the count rather than print a misleading one (FIX C).
+                self._console.print(f"  [tool.result]{_CHECK} {name}[/tool.result]")
             else:
-                line_count = len(lines)
-                self._console.print(f"  [tool.result]{_CHECK} {tool_name} ({line_count} lines)[/tool.result]")
+                self._console.print(f"  [tool.result]{_CHECK} {name} ({len(lines)} lines)[/tool.result]")
 
     async def send_error(
         self,
@@ -420,10 +454,10 @@ class TerminalChannel(ChannelAdapter):
         async with self._output_lock:
             self._stop_thinking()
             self._close_burst()
-        self._err_console.print(f"[system.error]Error:[/system.error] {error}")
+        self._err_console.print(f"[system.error]Error:[/system.error] {escape(error)}")
         if detail:
             for line in detail.split("\n"):
-                self._err_console.print(f"  {line}")
+                self._err_console.print(f"  {escape(line)}")
 
     async def read_input(self, prompt: str = ">") -> str:
         """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
@@ -456,7 +490,7 @@ class TerminalChannel(ChannelAdapter):
 
     def _burst_text(self, burst: _Burst, final: bool) -> str:
         """Render the burst counter line: ◆ tools — label · done/calls [· N errors]."""
-        head = f"{_DIAMOND} {' · '.join(burst.tools)} — {burst.label}"
+        head = f"{_DIAMOND} {escape(' · '.join(burst.tools))} — {burst.label}"
         line = f"  [tool.call]{head}[/tool.call] [muted]· {burst.done}/{burst.calls}[/muted]"
         if final and burst.errors:
             plural = "s" if burst.errors > 1 else ""
