@@ -64,6 +64,16 @@ def test_normalize_model_list_unknown():
     assert result == ["model-x"]
 
 
+def test_normalize_model_list_null_data():
+    """Ollama with zero models pulled returns {"data": null}; must not raise TypeError."""
+    assert _normalize_model_list("vllm", {"object": "list", "data": None}) == []
+
+
+def test_normalize_model_list_null_models():
+    """Symmetric guard for the ollama-shaped {"models": null}."""
+    assert _normalize_model_list("ollama", {"models": None}) == []
+
+
 # ---------------------------------------------------------------------------
 # _identify_provider
 # ---------------------------------------------------------------------------
@@ -96,6 +106,32 @@ def test_identify_provider_llamacpp():
     headers.get = MagicMock(return_value=None)
     result = _identify_provider(8080, {}, headers)
     assert result == "llamacpp"
+
+
+def test_identify_provider_llamacpp_off_port_self_identifies():
+    """Issue #12.2: llama.cpp behind a proxy on a non-8080 port self-identifies via
+    owned_by, so it is llamacpp — not the old 'data'-catch-all vllm."""
+    headers = MagicMock()
+    headers.get = MagicMock(return_value=None)
+    response = {"data": [{"id": "model.gguf", "owned_by": "llamacpp", "meta": {"n_ctx": 4096}}]}
+    assert _identify_provider(9000, response, headers) == "llamacpp"
+
+
+def test_identify_provider_vllm_off_port_self_identifies():
+    """vLLM self-identifies via owned_by on any port."""
+    headers = MagicMock()
+    headers.get = MagicMock(return_value=None)
+    response = {"data": [{"id": "m", "owned_by": "vllm", "max_model_len": 131072}]}
+    assert _identify_provider(9001, response, headers) == "vllm"
+
+
+def test_identify_provider_lmstudio_default_port_no_header():
+    """Issue #12.1: LM Studio 0.4.x drops x-lm-studio; on its default port the tie-break
+    still classifies it lmstudio (not vllm)."""
+    headers = MagicMock()
+    headers.get = MagicMock(return_value=None)
+    response = {"data": [{"id": "qwen", "owned_by": "organization_owner"}]}
+    assert _identify_provider(1234, response, headers) == "lmstudio"
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +226,71 @@ async def test_probe_lmstudio_port():
 
     assert result.found is True
     assert result.provider_type == "lmstudio"
+
+
+def _mk_response(body: dict, lm_header: str | None = None) -> MagicMock:
+    r = MagicMock()
+    r.status_code = 200
+    r.json.return_value = body
+    r.headers = MagicMock()
+    r.headers.get = MagicMock(side_effect=lambda k, d=None: lm_header if k == "x-lm-studio" else d)
+    return r
+
+
+async def _run_detect(routes: dict, ports: list[int]):
+    """routes: URL-fragment -> mock response (checked in insertion order); else 'refused'."""
+    async def fake_get(url, **kwargs):
+        for frag, resp in routes.items():
+            if frag in url:
+                return resp
+        raise Exception("connection refused")
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=fake_get)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+        return await detect_provider(timeout_seconds=1.0, ports=ports)
+
+
+@pytest.mark.asyncio
+async def test_probe_lmstudio_off_port_via_api_v0():
+    """Issue #12.1: LM Studio 0.4.x behind a proxy on :8000 with generic headers
+    (no x-lm-studio) — /v1/models looks like vLLM's, but /api/v0/models identifies it.
+    Must classify lmstudio, NOT vllm."""
+    v1 = _mk_response({"data": [{"id": "qwen", "owned_by": "organization_owner"}]})
+    v0 = _mk_response(
+        {"object": "list", "data": [
+            {"id": "qwen", "state": "loaded", "max_context_length": 32768, "loaded_context_length": 8192},
+        ]}
+    )
+    result = await _run_detect(
+        {"8000/api/v0/models": v0, "8000/v1/models": v1}, ports=[8000]
+    )
+    assert result.found is True
+    assert result.provider_type == "lmstudio"
+    assert "qwen" in result.models
+
+
+@pytest.mark.asyncio
+async def test_probe_llamacpp_off_port():
+    """Issue #12.2: llama.cpp on a non-8080 port self-identifies via owned_by -> llamacpp."""
+    v1 = _mk_response({"data": [{"id": "model.gguf", "owned_by": "llamacpp", "meta": {"n_ctx": 4096}}]})
+    result = await _run_detect({"9000/v1/models": v1}, ports=[9000])
+    assert result.found is True
+    assert result.provider_type == "llamacpp"
+    assert "model.gguf" in result.models
+
+
+@pytest.mark.asyncio
+async def test_probe_ollama_null_data_no_crash():
+    """Issue #12.3: zero-model Ollama on a non-11434 port returns {"data": null};
+    normalization must not raise TypeError and detection still returns a result."""
+    v1 = _mk_response({"object": "list", "data": None})
+    result = await _run_detect({"8000/v1/models": v1}, ports=[8000])
+    assert result.found is True
+    assert result.models == []
 
 
 @pytest.mark.asyncio

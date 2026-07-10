@@ -112,6 +112,8 @@ async def _probe_port(
         response = await client.get(url, timeout=timeout)
         response_json = response.json()
         provider_type = _identify_provider(port, response_json, response.headers)
+        if provider_type == "vllm" and await _is_lmstudio(client, port, timeout):
+            provider_type = "lmstudio"
         models = _normalize_model_list(provider_type, response_json)
         base_url = _build_base_url(port)
         return DetectorResult(
@@ -133,26 +135,58 @@ def _identify_provider(
     response_json: dict,
     response_headers: httpx.Headers,
 ) -> ProviderType:
-    """Heuristic provider identification from port, response shape, and headers."""
+    """Identify the backend by response shape first, port order as the tie-break.
+
+    llama.cpp and vLLM self-identify in /v1/models via ``owned_by``, so they classify
+    correctly on any port. LM Studio 0.4.x sends only generic headers and a plain
+    OpenAI list — the port-1234 tie-break (or the /api/v0/models probe in _probe_port)
+    catches it; the x-lm-studio header stays as a fast secondary hint.
+    """
     if port == 11434:
         return "ollama"
+    owners = {e.get("owned_by") for e in (response_json.get("data") or []) if isinstance(e, dict)}
+    if "llamacpp" in owners:
+        return "llamacpp"
+    if "vllm" in owners:
+        return "vllm"
+    if response_headers.get("x-lm-studio") is not None:
+        return "lmstudio"
     if port == 8080:
         return "llamacpp"
-    if port == 1234 and response_headers.get("x-lm-studio") is not None:
+    if port == 1234:
         return "lmstudio"
     if "data" in response_json:
         return "vllm"
     return "unknown"
 
 
+async def _is_lmstudio(
+    client: httpx.AsyncClient,
+    port: int,
+    timeout: float,
+) -> bool:
+    """Confirm LM Studio via its unique /api/v0/models surface. 0.4.x dropped the
+    x-lm-studio header, so a plain /v1/models is indistinguishable from vLLM's."""
+    try:
+        response = await client.get(f"http://localhost:{port}/api/v0/models", timeout=timeout)
+        entries = response.json().get("data") or []
+        return any(isinstance(e, dict) and "max_context_length" in e for e in entries)
+    except Exception:
+        return False
+
+
 def _normalize_model_list(
     provider_type: ProviderType,
     response_json: dict,
 ) -> list[str]:
-    """Extract model ID list regardless of API response shape."""
+    """Extract model ID list regardless of API response shape.
+
+    ``data``/``models`` can be present-but-null (Ollama with zero models pulled
+    returns ``{"data": null}``); ``or []`` guards the TypeError None iteration raises.
+    """
     if provider_type == "ollama":
-        return [m["name"] for m in response_json.get("models", [])]
-    return [m["id"] for m in response_json.get("data", [])]
+        return [m["name"] for m in response_json.get("models") or []]
+    return [m["id"] for m in response_json.get("data") or []]
 
 
 def is_local_endpoint(base_url: str) -> bool:
