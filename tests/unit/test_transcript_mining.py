@@ -485,6 +485,113 @@ async def test_dedupe_leaves_same_key_corroboration_untouched(store: MemoryStore
 
 
 # ---------------------------------------------------------------------------
+# BUG (run-16 forensics): when a mined line carries a replaces=/coerce/B4(i) supersede directive AND
+# its corrected value is ALREADY active on a DIFFERENT holder atom, the in-pass dedupe rightly skips
+# the duplicate MINT — but the skip ALSO swallowed the supersede, so the stale target it named stayed
+# active forever beside the value's real holder (port-8000 lived on beside port-8081; the non-sem KV
+# row for the same correction retired correctly, scoping the bug to this branch). The dedupe-skip must
+# STILL retire a genuine stale target (status flip, history preserved, no duplicate row) — guarded,
+# B4(i)-consistent, only to a target that shares a salient token with the claim.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dedupe_skip_still_applies_parsed_replaces_supersede(store: MemoryStore):
+    """(i) The run-16 shape end-to-end: the corrected value is ALREADY active on holder X (a distinct
+    atom) when a later line asserts that same value with replaces=Y (Y = the STALE sibling, still
+    active). The dedupe skips the duplicate mint, but Y MUST still be superseded (history preserved),
+    X stays the sole active holder, and no third atom is minted."""
+    from localharness.memory.mining import _h8
+
+    stale = "the vLLM inference server listens on port 8000"
+    corrected = "the vLLM inference server listens on port 8081"
+    # Y — the stale atom, minted first and left active (no correction marked yet).
+    await store.append_history(_rec(10, "for reference the vLLM inference server listens on port 8000", sid="d1"))
+    assert (await mine_transcript(
+        store, _FakeLLM(f"llm local | {stale} | vLLM inference server listens on port 8000"),
+        asyncio.Event(), file_tags=False)).written == 1
+    y_key = f"sem/llm-local/{_h8(stale)}"
+    # X — the corrected value minted as a SEPARATE active atom (the model didn't mark replaces then).
+    await store.append_history(_rec(20, "update the vLLM inference server listens on port 8081 now", sid="d2"))
+    assert (await mine_transcript(
+        store, _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081"),
+        asyncio.Event(), file_tags=False)).written == 1
+    x_key = f"sem/llm-local/{_h8(corrected)}"
+    assert x_key != y_key
+    assert (await store.get_fact(y_key)).value == stale         # both active, distinct atoms
+    assert (await store.get_fact(x_key)).value == corrected
+
+    # The run-16 line: assert the corrected value (already on X) WITH replaces=Y (the stale sibling).
+    await store.append_history(_rec(30, "correction the vLLM inference server listens on port 8081 not 8000", sid="d3"))
+    r = await mine_transcript(
+        store,
+        _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081 | replaces={y_key}"),
+        asyncio.Event(), file_tags=False)
+
+    assert r.written == 0                                        # duplicate value — no new atom minted
+    assert await store.get_fact(y_key) is None                  # Y RETIRED (the bug left it active)
+    assert (await store.get_fact(x_key)).value == corrected      # X still the sole active holder
+    port = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if "port" in f.value]
+    assert len(port) == 1 and port[0].key == x_key, f"stale target still active beside holder: {port}"
+    hist = await store.get_fact_history(y_key)                   # supersede history preserved
+    assert any(h.value == stale and h.status == "superseded" for h in hist)
+
+
+@pytest.mark.asyncio
+async def test_dedupe_skip_replaces_target_is_holder_itself_no_self_kill(store: MemoryStore):
+    """(ii) Same shape, but the replaces target IS the holder that already carries the value — the
+    model 'replaces' X with X's own value. This must NOT reach the retire path: X stays active and
+    untouched (a corroboration touch, never a self-kill)."""
+    from localharness.memory.mining import _h8
+
+    corrected = "the vLLM inference server listens on port 8081"
+    await store.append_history(_rec(10, "the vLLM inference server listens on port 8081 for now", sid="d1"))
+    assert (await mine_transcript(
+        store, _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081"),
+        asyncio.Event(), file_tags=False)).written == 1
+    x_key = f"sem/llm-local/{_h8(corrected)}"
+
+    # A later line re-asserts X's own value, naming X ITSELF as the replaces= target.
+    await store.append_history(_rec(20, "again the vLLM inference server listens on port 8081 confirmed", sid="d2"))
+    await mine_transcript(
+        store,
+        _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081 | replaces={x_key}"),
+        asyncio.Event(), file_tags=False)
+
+    assert (await store.get_fact(x_key)).value == corrected      # X still active, unchanged
+    assert len(await store.get_fact_history(x_key)) == 1         # never superseded — no self-kill
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    assert len(active) == 1 and active[0].key == x_key
+
+
+@pytest.mark.asyncio
+async def test_dedupe_skip_without_replaces_never_supersedes(store: MemoryStore):
+    """(iii) A plain duplicate with NO replaces directive (a trailing-period variant landing on a
+    fresh key) must skip exactly as before: the sole holder is neither minted-beside nor superseded.
+    Guards the retire path against over-firing when no supersede target was ever parsed (and against
+    ever superseding the HOLDER rather than a target)."""
+    from localharness.memory.mining import _h8
+
+    claim = "the user prefers the ristretto espresso blend"
+    await store.append_history(_rec(10, "the user prefers the ristretto espresso blend daily", sid="s1"))
+    assert (await mine_transcript(
+        store, _FakeLLM(f"coffee | {claim} | prefers the ristretto espresso blend"),
+        asyncio.Event(), file_tags=False)).written == 1
+    key = f"sem/coffee/{_h8(claim)}"
+
+    # A trailing-period variant: same normalized value, DIFFERENT _h8 key, NO replaces directive.
+    await store.append_history(_rec(20, "again the user prefers the ristretto espresso blend for sure", sid="s2"))
+    r2 = await mine_transcript(
+        store, _FakeLLM(f"coffee | {claim}. | prefers the ristretto espresso blend."),
+        asyncio.Event(), file_tags=False)
+
+    assert r2.written == 0                                       # skipped as a duplicate, not minted
+    active = await store.query_facts(FactQuery(tags=["sem"]))
+    assert len(active) == 1 and active[0].key == key            # sole holder untouched
+    assert len(await store.get_fact_history(key)) == 1         # NOT superseded — the fix never fired
+
+
+# ---------------------------------------------------------------------------
 # FIX 2 (extraction-yield): no per-chunk yield FLOOR/RETRY existed — a SUBSTANTIVE chunk that
 # returns zero atoms (a flat refusal "I cannot extract any facts…", live in run-5 chunk4; or a bad
 # roll) silently advanced the watermark with nothing re-mined. A zero-PARSE chunk with >=K records
