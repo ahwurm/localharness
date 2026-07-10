@@ -191,6 +191,20 @@ def _salient_words(v: str) -> set[str]:
             if len(t) >= 4 and t not in _STOP_WORDS}
 
 
+async def _active_slug_atoms(store: Any, slug: str) -> list[tuple[str, str]]:
+    """ALL active fact atoms in one `sem/{slug}/` namespace — the novelty gate's comparison set.
+    Unlike the capped known window, this is the WHOLE active slug (correctness must not depend
+    on prompt visibility — same principle as the in-pass minted registry)."""
+    assert store._db is not None
+    async with store._db.execute(
+        "SELECT key, value FROM facts WHERE agent_id = ? AND status = 'active' "
+        "AND node_kind = 'fact' AND key LIKE ?",
+        (store._agent_id, f"sem/{slug}/%"),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 async def _active_corrections(store: Any, cap: int = 10) -> list[tuple[str, str]]:
     """B4(ii) known-window: active tier:reconcile_confirmed facts (the CURRENT corrected values)
     shown to the miner so a late chunk can't silently resurrect a value we already fixed."""
@@ -283,6 +297,9 @@ class MineReport:
     residue_drained: int = 0
     residue_rescued: int = 0
     residue_retired: int = 0
+    # NOVELTY GATE (precision): fresh mints folded into an existing same-slug atom as
+    # corroboration because they paraphrase it (salient-token Jaccard >= threshold).
+    folded: int = 0
 
 
 async def mine_transcript(
@@ -298,6 +315,7 @@ async def mine_transcript(
     residue_attempt_cap: int = 2,
     residue_record_budget: int = 40,
     residue_min_chars: int = 20,
+    novelty_fold_threshold: float = 0.5,
     completions_log: list | None = None,
     file_tags: bool = True,
 ) -> MineReport:
@@ -511,6 +529,64 @@ async def mine_transcript(
                     log.warning("mining: dedupe — value %r already active on %s; skip duplicate "
                                 "mint on %s", claim[:80], prior_key, key)
                     continue
+                # NOVELTY GATE (2026-07-09 dogfood — mining's PRECISION half): a fresh mint that
+                # PARAPHRASES an active same-slug atom must not land as a sibling row (live store:
+                # 8 near-identical "GTM plan" atoms from one conversation; the exact-match dedupe
+                # above cannot see rewordings). Fold it into the best-matching atom as
+                # CORROBORATION — same key + EXISTING value routes store_fact to the recurrence
+                # ladder (+0.07 on a distinct provenance day, provenance advances), so paraphrased
+                # recurrence EARNS ambient status exactly like verbatim recurrence and the store
+                # stays one-atom-per-fact. First phrasing wins; value change remains supersede-only.
+                # Supersede-redirected keys (replaces=/B4(i)) never reach here (fresh-mint guard):
+                # a correction is similar to its target BY CONSTRUCTION and must replace.
+                # Deterministic: salient-token SUBSET + equal numbers + Jaccard floor (config;
+                # 1.0 ≈ off) — see the subset-rule comment below for why nothing looser is safe.
+                if key == f"sem/{slug}/{_h8(claim)}":
+                    probe = _salient_words(claim)
+                    # NUMBER GUARD: facts differing only by a number ("room 3" vs "room 7") are
+                    # DISTINCT, not paraphrases — short numerals fall below the salient floor, so
+                    # word sets alone would call them identical. Paraphrases share their numbers;
+                    # a differing number set blocks the fold outright.
+                    nums = set(re.findall(r"[0-9]+", claim))
+                    cands = await _active_slug_atoms(store, slug)
+                    cands += [(k, v) for k, v in minted_pass.items()
+                              if k.startswith(f"sem/{slug}/")]
+                    if len(probe) >= 2 and not any(k == key for k, _v in cands):
+                        best_key, best_val, best_j = None, "", 0.0
+                        for k, v in cands:
+                            if set(re.findall(r"[0-9]+", v)) != nums:
+                                continue  # number mismatch — a different fact, never a fold
+                            w = _salient_words(v)
+                            # SUBSET RULE: fold only PROVABLE redundancy — every salient token of
+                            # the new claim already lives in the existing atom (a restatement /
+                            # shorthand adds nothing). Same-frame-different-slot facts ("building a
+                            # SUMMARIZER subagent" vs "building a CITATION subagent") each carry a
+                            # distinguishing token, which breaks subset in both directions — token
+                            # sets cannot tell synonyms from contrasts, so anything less strict
+                            # destroys real facts. A missed fold is just a dup that decay handles;
+                            # a false fold is data loss. Asymmetric cost -> conservative rule.
+                            if not probe <= w:
+                                continue
+                            j = len(probe & w) / len(probe | w)
+                            if j > best_j:
+                                best_key, best_val, best_j = k, v, j
+                        if best_key is not None and best_j >= novelty_fold_threshold:
+                            await store.store_fact(
+                                key=best_key,
+                                value=best_val,  # EXISTING value — corroboration, never overwrite
+                                tags=["sem", "pending_consolidation"],
+                                confidence=0.65,
+                                source="transcript_mining",
+                                provenance=provenance,
+                                node_kind="fact",
+                            )
+                            report.folded += 1
+                            if src.get("id") is not None:  # the record WAS mined — cited, not residue
+                                cited_ids.add(str(src["id"]))
+                                cited_chunk.add(str(src["id"]))
+                            log.info("mining fold: %r ~ %s (J=%.2f) — corroborated, no sibling mint",
+                                     claim[:70], best_key, best_j)
+                            continue
                 fact = await store.store_fact(
                     key=key,
                     value=claim,

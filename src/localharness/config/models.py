@@ -402,6 +402,21 @@ class MemoryConsolidationConfig(BaseModel):
             "it — the ledger just never chews it. Hyperparameter — sweep on the eval."
         ),
     )
+    mining_novelty_fold_threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description=(
+            "NOVELTY GATE (mining precision): a fresh mint that is PROVABLY redundant vs an "
+            "active same-slug atom FOLDS into it as corroboration (recurrence ladder) instead of "
+            "minting a paraphrase sibling (live dogfood: 8 near-identical 'GTM plan' atoms from "
+            "one conversation). Fold requires ALL of: the new claim's salient tokens are a "
+            "SUBSET of the atom's (a restatement adds nothing; a distinguishing token — "
+            "'summarizer' vs 'citation' — blocks both directions), equal number sets ('room 3' "
+            "vs 'room 7' are different facts), and Jaccard >= this threshold (floor against a "
+            "tiny probe folding into a rich atom). Supersedes exempt. 1.0 ≈ off. A missed fold "
+            "is a dup that decay handles; a false fold destroys a fact — the rule is "
+            "deliberately conservative. Hyperparameter — sweep on the eval, do not taste-pick."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(
