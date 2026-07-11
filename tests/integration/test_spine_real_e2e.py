@@ -29,7 +29,6 @@ SC9 (sealed holdout): every scenario here is slice='train'. The holdout slice is
 """
 from __future__ import annotations
 
-import os
 import pathlib
 
 import pytest
@@ -220,18 +219,21 @@ def _make_train_corpus_repo(path):
     scen_dir.mkdir(parents=True)
     for n in ("noop_01", "noop_02"):
         # A COMPLETE valid ScenarioSpec (minimal name:/slice: stubs are dropped by
-        # _load_scenarios_from_paths). A zero-tool, trivially-satisfiable scenario keeps the
-        # live generation cheap while still driving the real spine.
+        # _load_scenarios_from_paths). A zero-tool scenario keeps the live generation cheap
+        # while still driving the real spine. The rubric is `contains:BENCH_NOOP_OK` (a literal
+        # the prompt tells the model to emit) — NOT the empty-needle `contains:` footgun that
+        # scored even an errored run 1.0 (issue #4): a run that dies before generating leaves an
+        # empty (or `[scenario_error: ...]`) final message that cannot contain the token -> 0.
         (scen_dir / f"{n}.yaml").write_text(
             "\n".join(
                 [
                     f"name: {n}",
                     "slice: train",
                     "category: tool_basics",
-                    "prompt: 'Reply however you like, then end your turn.'",
+                    "prompt: 'Reply with the token BENCH_NOOP_OK and then end your turn.'",
                     "success_criteria:",
                     "  rubric:",
-                    "    - 'contains:'",
+                    "    - 'contains:BENCH_NOOP_OK'",
                     "tools_allowed: []",
                     "budget:",
                     "  max_actions: 1",
@@ -359,19 +361,17 @@ async def test_live_full_loop_holdout_unreached(live_endpoint, tmp_path):
 
 
 def _live_provider() -> tuple[str, str]:
-    """(model_id, base_url) for opted-in live runs — the LOCALHARNESS_LIVE_* env channel.
+    """(model_id, base_url) for opted-in live runs — resolved from the SINGLE source
+    (conftest.live_target), so the preflight fixture and the tests provably hit the same target.
 
-    The autouse _isolate_localharness_home fixture (conftest.py) seeds EVERY test's config
-    with default_model 'test-model', which 404s vLLM's capability probe AND /tokenize — and
-    TokenCounter is server-or-fail by design, so every bench run dies inside
-    _build_agent_loop before a single generation. The env channel (established by
-    test_injection_redteam.py) is the live-run source of truth; the defaults mirror the
-    box reference architecture. Nothing is baked into src/, and env overrides both.
+    Previously this baked `qwen3.6-27b` / `localhost:8000` defaults: with LOCALHARNESS_LIVE_VLLM=1
+    but the model/url env vars unset, a user on a non-default setup silently tested the wrong model
+    (issue #5). live_target() now hard-fails loud when the target is not pinned, so an opted-in run
+    can no longer resolve to a baked default that differs from reality.
     """
-    return (
-        os.environ.get("LOCALHARNESS_LIVE_MODEL", "qwen3.6-27b"),
-        os.environ.get("LOCALHARNESS_LIVE_BASE_URL", "http://localhost:8000/v1"),
-    )
+    from tests.conftest import live_target
+
+    return live_target()
 
 
 def _live_cfg(cfg):
@@ -543,10 +543,22 @@ async def test_live_budget_cap_halts(live_endpoint, tool_scenario_corpus, tmp_pa
         )
         completed = samples[0]
 
-        # THE cap proof: the SECOND step never ran, so the run cannot reach success (success needs
-        # the bash step's executed HELLO_BENCH_OK output to satisfy the rubric). The loop halted at
-        # the cap after at most the first action. Asserted via the ABSENT second-step effect — never
-        # tool_call_count. (A live model that emits a single tool call is still capped at 1 action.)
+        # THE cap proof, causally tied to the cap (issue #3). `success is False` ALONE was vacuous:
+        # any unrelated failure (endpoint down, misconfigured client, scenario error) also makes it
+        # False, so the test passed without the cap ever being exercised. Instead assert EXACTLY one
+        # action was dispatched:
+        #   - an early-erroring run generates NOTHING -> tool_call_count == 0 -> FAILS here (was the
+        #     vacuous pass); the cap loop halts at budget.check (loop.py:129) BEFORE iteration 2, so a
+        #     working ReAct run dispatches exactly one action;
+        #   - an UNCAPPED run would dispatch both steps -> tool_call_count == 2 -> also FAILS here.
+        # This is a valid use of tool_call_count (proving GENERATION happened) — it is only the
+        # "green-check trap" when used to prove dispatch SUCCESS, which we do not.
+        assert completed.tool_call_count == 1, (
+            f"budget cap of 1 must dispatch exactly one action, got {completed.tool_call_count}: "
+            "0 == the run errored before generating (the old vacuous pass), >1 == the cap did not hold"
+        )
+        # And the SECOND step's success-producing side-effect is therefore absent: success needs the
+        # bash step's executed HELLO_BENCH_OK output, which the cap prevented.
         assert completed.success is False, (
             "with max_actions=1 the loop must halt after step 1; the second (bash) step's "
             "success-producing side-effect must be absent"

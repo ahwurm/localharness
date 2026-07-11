@@ -60,18 +60,15 @@ def _make_create_spy(captured: dict):
 # --------------------------------------------------------------------------- #
 
 
-async def test_xml_fallback_omits_stop_and_thinking():
-    """The xml-fallback create() (client.py:343-348) passes ONLY model/messages/temperature/
-    max_tokens — it drops BOTH `stop` and `extra_body{enable_thinking:False}` that its native/xml
-    siblings apply (client.py:274-275, :281-282 and :309-310, :312-313).
+async def test_xml_fallback_forwards_stop_without_thinking_disable():
+    """Sibling-parity contract for _complete_xml_fallback, post-#11: the fallback must
+    forward `stop` exactly like its native/xml siblings, and — like them — must NOT send
+    extra_body{enable_thinking:False}. Thinking is deliberately left ON for local subjects
+    (#11 ruling): the loop strips <think> blocks, and the kwarg was silently dropped by
+    Ollama / type-checked by llama.cpp anyway.
 
-    AUDIT-06 fix#2: enable_thinking=False is present on _complete_native (client.py:281-282) but
-    its fallback twin is UNFIXED on the fallback path.
-
-    The two asserts below are the fix target — they PASS once the fallback mirrors the siblings,
-    and FAIL today (the fallback omits both), so xfail(strict=True) keeps the suite green. Every
-    assertion is on the recorded create() kwargs via a capture-spy returning a fabricated _Resp
-    — no real model call.
+    Every assertion is on the recorded create() kwargs via a capture-spy returning a
+    fabricated _Resp — no real model call.
     """
     from localharness.provider.client import LLMClient, LLMConfig
 
@@ -104,12 +101,36 @@ async def test_xml_fallback_omits_stop_and_thinking():
         stream=False,
     )
 
-    # THE assertion (the D-fix target): the fallback MUST forward stop + enable_thinking like
-    # its siblings. Today it omits both -> RED -> xfail(strict=True) passes the suite.
     assert captured.get("stop") == ["X"], "fallback dropped stop_sequences (sibling divergence)"
-    assert captured.get("extra_body") == {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }, "fallback dropped enable_thinking=False (AUDIT-06 fix#2 native-thinking twin is UNFIXED on the fallback)"
+    assert "extra_body" not in captured, (
+        "thinking must stay ON for local subjects (#11) — no path may send enable_thinking:False"
+    )
+
+
+async def test_local_paths_send_no_thinking_disable():
+    """#11 regression, all remaining request paths: neither _complete_native nor
+    _complete_xml may send extra_body{enable_thinking:False} for a local subject.
+    Thinking stays ON (owner ruling); suppression was also unreliable per-runtime
+    (Ollama drops the field silently, llama.cpp 400s on a non-boolean)."""
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    for mode, method in (("native", "_complete_native"), ("xml", "_complete_xml")):
+        client = LLMClient(
+            LLMConfig(
+                base_url="http://localhost:0/v1",
+                model="m",
+                is_local=True,
+                tool_call_mode=mode,
+            )
+        )
+        captured: dict = {}
+        client._client.chat.completions.create = _make_create_spy(captured)
+        await getattr(client, method)(
+            messages=[{"role": "user", "content": "hi"}], tools=None, stream=False
+        )
+        assert "extra_body" not in captured, (
+            f"{method} sent extra_body for a local subject — thinking must stay ON (#11)"
+        )
 
 
 # --------------------------------------------------------------------------- #

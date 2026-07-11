@@ -4,6 +4,26 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.8.1] — 2026-07-09
+
+### Fixed
+- **The live bench suite can no longer pass vacuously.** Three open live-suite bugs shared
+  one disease: with a misconfigured vLLM endpoint the suite could run to GREEN while every
+  run errored (#3, #4, #5). The synthetic gate corpus scored its success rubric with an
+  empty `contains:` needle — `"" in text` is always true, so a run that died before
+  emitting a token still scored 1.0; the corpus now demands a literal the prompt tells the
+  model to emit, and `SuccessCriteria` rejects any empty-needle `contains:`/`regex:`/bare
+  rubric at load time so the footgun cannot silently recur. The budget-cap test asserted
+  only `success is False`, which any unrelated failure also satisfied — it now requires
+  exactly the capped behavior: one action dispatched (an early-erroring run dispatches
+  zero → RED, an uncapped run dispatches two → RED), the second step's effect absent. And
+  the live provider baked its own model/endpoint defaults while the preflight resolved
+  `base_url` from a different source, so an opted-in run could probe one server and test
+  another — both now share a single `live_target()` resolver (`LOCALHARNESS_LIVE_*` env)
+  that hard-fails loud when unpinned, and the preflight verifies the pinned model is
+  actually served. Verified against a live endpoint: the full live suite is green when
+  correctly pinned, and RED/loud on wrong-model, unpinned, and errored runs.
+
 ## [0.8.0] — 2026-07-05
 
 ### Added
