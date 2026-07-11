@@ -94,3 +94,101 @@ def test_doctor_shows_tool_mode(mock_httpx, tmp_path):
 
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert "Tool calling" in result.output
+
+
+# --- #9: /tokenize check branches by provider_type (not an unconditional vLLM probe) ---
+
+
+def _write_config(tmp_path: Path, provider_type: str, base_url: str, model: str = "m") -> None:
+    (tmp_path / "config.yaml").write_text(
+        'version: "1"\n'
+        "provider:\n"
+        f"  provider_type: {provider_type}\n"
+        f"  base_url: {base_url}\n"
+        f"  default_model: {model}\n"
+        "  available_models:\n"
+        f"    - {model}\n"
+        "  supports_function_calling: true\n"
+        "  timeout_seconds: 600.0\n"
+    )
+
+
+def _models_resp(payload: dict) -> MagicMock:
+    r = MagicMock()
+    r.json.return_value = payload
+    return r
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, tmp_path):
+    """#9: Ollama serves no /tokenize — doctor must NOT probe it or count a failure; an
+    INFO line explains approximate counting. Exit 0."""
+    _write_config(tmp_path, "ollama", "http://localhost:11434", model="m")
+    mock_httpx.get.return_value = _models_resp({"models": [{"name": "m"}]})
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "approximate" in result.output.lower()
+    assert "✗ /tokenize" not in result.output and "tokenize unreachable" not in result.output.lower()
+    mock_httpx.post.assert_not_called()  # no /tokenize probe on a runtime that has none
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_lmstudio_tokenize_is_info_not_failure(mock_httpx, tmp_path):
+    """#9: LM Studio has no /tokenize — INFO, not a failure. Exit 0, no probe."""
+    _write_config(tmp_path, "lmstudio", "http://localhost:1234/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "approximate" in result.output.lower()
+    mock_httpx.post.assert_not_called()
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_tokenize_exact(mock_httpx, tmp_path):
+    """#9: llama.cpp serves /tokenize with a {tokens:[...]} shape — doctor checks it with the
+    llama.cpp contract (POST {content}) and reports EXACT counts. Exit 0."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1, 2]}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "exact" in result.output.lower()
+    # probed with llama.cpp's {content} shape, not vLLM's {model,prompt}
+    _, kwargs = mock_httpx.post.call_args
+    assert "content" in kwargs.get("json", {})
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_vllm_tokenize_absent_still_fails(mock_httpx, tmp_path):
+    """#9: vLLM SHOULD serve /tokenize — a 404 there stays a real FAILURE (exit 1)."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    tok = MagicMock()
+    tok.status_code = 404
+    tok.json.return_value = {}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "tokenize" in result.output.lower()
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_meta_nctx_reconciles(mock_httpx, tmp_path):
+    """#9: llama.cpp reports its window as /v1/models meta.n_ctx — 5b must read it so it does
+    NOT print 'Served max_model_len not reported'."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m", "meta": {"n_ctx": 32768}}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1]}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert "not reported" not in result.output.lower()
