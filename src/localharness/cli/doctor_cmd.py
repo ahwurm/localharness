@@ -111,7 +111,12 @@ def doctor(
                 entries = data.get("data", []) if isinstance(data, dict) else []
                 for m in entries:
                     if m.get("id") == default_model or len(entries) == 1:
-                        served = m.get("max_model_len") or m.get("context_length")
+                        # #9: llama.cpp reports its served window as meta.n_ctx (no max_model_len).
+                        served = (
+                            m.get("max_model_len")
+                            or m.get("context_length")
+                            or (m.get("meta") or {}).get("n_ctx")
+                        )
                         break
             except Exception:
                 served = None
@@ -149,31 +154,61 @@ def doctor(
                     f"{_INFO}  Served max_model_len not reported — can't reconcile context budget"
                 )
 
-            # 5c. Real tokenizer (vLLM /tokenize) reachability — token counts are only
-            # accurate when this works; otherwise gates fire on a cl100k undercount.
+            # 5c. Token-counting capability — aligned with #8's runtime-aware detection.
+            # vLLM serves POST /tokenize -> {count}; llama.cpp serves POST /tokenize {content}
+            # -> {tokens:[...]}; Ollama and LM Studio serve NO tokenize endpoint, so approximate
+            # (tiktoken cl100k) counting is expected there — an INFO line, NOT a failure. Branch
+            # on the detected provider_type so a healthy non-vLLM runtime does not false-fail.
             root = base_url.rstrip("/")
             if root.endswith("/v1"):
                 root = root[: -len("/v1")]
-            try:
-                tk = httpx.post(
-                    f"{root}/tokenize",
-                    json={"model": default_model, "prompt": "token"},
-                    timeout=5.0,
+            provider_type = harness.provider.provider_type
+            if provider_type in ("ollama", "lmstudio"):
+                console.print(
+                    f"{_INFO}  Token counting: approximate (tiktoken cl100k) — {provider_type} "
+                    f"serves no /tokenize endpoint; budget gates fire conservatively. Use vLLM "
+                    f"or llama.cpp for exact counts."
                 )
-                if tk.status_code == 200 and "count" in tk.json():
-                    console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
-                else:
+            elif provider_type == "llamacpp":
+                try:
+                    tk = httpx.post(f"{root}/tokenize", json={"content": "token"}, timeout=5.0)
+                    if tk.status_code == 200 and isinstance(tk.json().get("tokens"), list):
+                        console.print(
+                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts (llama.cpp)"
+                        )
+                    else:
+                        console.print(
+                            f"{_FAIL} llama.cpp /tokenize returned {tk.status_code} — token "
+                            f"accounting falls back to tiktoken cl100k (approximate)."
+                        )
+                        failures.append("tokenize-unreachable")
+                except Exception:
                     console.print(
-                        f"{_FAIL} /tokenize returned {tk.status_code} — token accounting "
-                        f"falls back to tiktoken cl100k (inaccurate for non-cl100k models)."
+                        f"{_FAIL} llama.cpp /tokenize unreachable at {root}/tokenize — token "
+                        f"accounting falls back to tiktoken cl100k (approximate)."
                     )
                     failures.append("tokenize-unreachable")
-            except Exception:
-                console.print(
-                    f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "
-                    f"falls back to tiktoken cl100k (inaccurate for Qwen et al.)."
-                )
-                failures.append("tokenize-unreachable")
+            else:  # vllm (and unknown): the exact /tokenize {count} contract is expected here
+                try:
+                    tk = httpx.post(
+                        f"{root}/tokenize",
+                        json={"model": default_model, "prompt": "token"},
+                        timeout=5.0,
+                    )
+                    if tk.status_code == 200 and "count" in tk.json():
+                        console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
+                    else:
+                        console.print(
+                            f"{_FAIL} /tokenize returned {tk.status_code} — token accounting "
+                            f"falls back to tiktoken cl100k (inaccurate for non-cl100k models)."
+                        )
+                        failures.append("tokenize-unreachable")
+                except Exception:
+                    console.print(
+                        f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "
+                        f"falls back to tiktoken cl100k (inaccurate for Qwen et al.)."
+                    )
+                    failures.append("tokenize-unreachable")
 
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             console.print(f"{_FAIL} LLM endpoint unreachable: {base_url}")
