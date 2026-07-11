@@ -4,6 +4,52 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.0] — 2026-07-11
+
+### Added
+- **Amortized re-mining (the "residue ledger").** Transcript records the extractor saw but
+  never used are queued and re-mined during later idle passes in small isolated chunks,
+  with a bounded attempt cap that retires exhausted entries — nothing is deleted, coverage
+  becomes recoverable instead of lossy (schema v7).
+- **Mining coverage telemetry.** Every consolidation pass reports records seen, cited,
+  queued, re-mined, rescued, and retired.
+- **Novelty gate.** A re-extracted fact folds into its existing atom (strict token-subset +
+  matching numbers + similarity threshold) instead of minting a duplicate — deliberately
+  conservative so distinct facts never merge.
+- **Self-echo guard.** Only user-authored evidence advances a fact's confidence — the model
+  restating its own claims no longer reinforces them.
+- **Embedding-similarity clustering edge, two-factor.** Topics can relate via embedding
+  cosine similarity, but never on similarity alone — an edge still requires a shared
+  salient token.
+- **Chapter refresh.** A topic chapter keeps its identity as membership drifts — a grown
+  cluster supersedes its old chapter instead of spawning a duplicate.
+- **Cluster hygiene.** A chapter can no longer be absorbed into a cluster containing its
+  own member atoms.
+- Eval protocol: configurable idle passes; facet-aware chapter grading.
+
+### Changed
+- Terminal view: tool calls render as compact one-line summaries instead of full bodies;
+  all dynamic text is markup-escaped so bracketed content displays verbatim.
+- Production mining budget default raised to 50 records/pass; write budgets configurable
+  to 10k.
+
+### Fixed
+- A correction now retires the stale fact even when the corrected value already exists in
+  the store (the duplicate-skip previously dropped the supersede silently).
+- The supersede directive is recognized in any field position of an extraction line, not
+  only the canonical last field.
+- Terminal display corrupted bracketed text by interpreting it as style markup; misleading
+  result line counts removed.
+
+### Known issues
+- Under a stricter grounding re-grade (supermajority instead of majority) the passing
+  validation verdict flips; the standard-rule pass is disclosed as such by the eval.
+- Long-output models can pressure the context-compaction budget (emergency truncations
+  observed); compaction rework is queued.
+- Occasional recoverable HTTP 400s on parallel tool calls with larger models.
+- Tool-grounded and ungrounded numeric claims currently receive equal memory trust; a
+  source-reliability gate is planned.
+
 ## [0.8.1] — 2026-07-09
 
 ### Fixed
