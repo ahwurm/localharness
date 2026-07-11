@@ -593,7 +593,11 @@ class FullAutoCompactStage:
 
 
 class CompactionPipeline:
-    """Runs all 4 compaction stages in order."""
+    """Runs the 4 compaction stages. FIX 2 (root cause A): the stages are split into DETERMINISTIC
+    (ToolResultCapStage, BoundaryGuardStage — cheap, non-LLM) and LLM (SummaryCompactionStage,
+    FullAutoCompactStage). build_messages runs the deterministic stages on every over-threshold
+    pass, but only the LLM stages consume the per-turn fire budget — so oversized tool results are
+    always capped, even after the fire cap is spent. `run()` still runs ALL stages (back-compat)."""
 
     def __init__(
         self,
@@ -606,9 +610,11 @@ class CompactionPipeline:
         target_usage_fraction: float = COMPACTION_TARGET_USAGE_FRACTION,
     ) -> None:
         self._token_counter = token_counter
-        self._stages: list = [
+        self._deterministic_stages: list = [
             ToolResultCapStage(max_chars=tool_result_cap),
             BoundaryGuardStage(),
+        ]
+        self._llm_stages: list = [
             SummaryCompactionStage(
                 preserve_first_n=preserve_first_n,
                 preserve_last_n=preserve_last_n,
@@ -622,16 +628,15 @@ class CompactionPipeline:
                 target_usage_fraction=target_usage_fraction,
             ),
         ]
+        self._stages: list = self._deterministic_stages + self._llm_stages
 
-    async def run(
-        self,
-        messages: list[Message],
-        budget: TokenBudget,
+    async def _run_stages(
+        self, stages: list, messages: list[Message], budget: TokenBudget,
     ) -> tuple[list[Message], bool]:
         import inspect
         any_modified = False
         working = messages
-        for stage in self._stages:
+        for stage in stages:
             call = stage.apply(working, budget, self._token_counter)
             if inspect.iscoroutine(call):
                 result, modified = await call
@@ -648,6 +653,24 @@ class CompactionPipeline:
                     tool_schema_tokens=budget.tool_schema_tokens,
                 )
         return working, any_modified
+
+    async def run(
+        self, messages: list[Message], budget: TokenBudget,
+    ) -> tuple[list[Message], bool]:
+        """Run ALL stages (deterministic + LLM). Retained for back-compat / direct callers."""
+        return await self._run_stages(self._stages, messages, budget)
+
+    async def run_deterministic(
+        self, messages: list[Message], budget: TokenBudget,
+    ) -> tuple[list[Message], bool]:
+        """Cheap non-LLM stages (tool-result cap + boundary guard) — safe to run every pass."""
+        return await self._run_stages(self._deterministic_stages, messages, budget)
+
+    async def run_llm(
+        self, messages: list[Message], budget: TokenBudget,
+    ) -> tuple[list[Message], bool]:
+        """LLM-calling stages (summary + full-auto) — these consume the per-turn fire budget."""
+        return await self._run_stages(self._llm_stages, messages, budget)
 
 
 def _is_safe_cut_after(messages: list[Message], idx: int) -> bool:
@@ -675,23 +698,61 @@ def _is_safe_cut_after(messages: list[Message], idx: int) -> bool:
 def _hard_truncate_to_budget(
     messages: list[Message], max_msg_tokens: int, token_counter: TokenCounter,
 ) -> tuple[list[Message], int]:
-    """MOVE 0c emergency floor (coordinator ruling: overflow must be IMPOSSIBLE). Drop the
-    OLDEST non-system messages — whole safe-cut chunks at a time so tool pairs never split —
-    until the message tokens fit `max_msg_tokens`. The leading system message and the final
-    message are never dropped; pairing is repaired at the end as a belt. Returns
-    (truncated_messages, n_dropped). Lossy by design — this is the fallback that runs only when
-    compaction (capped or cut-less) could not get back under budget."""
+    """MOVE 0c emergency floor (coordinator ruling: overflow must be IMPOSSIBLE). Drop the OLDEST
+    user-turn EXCHANGES — a user message through everything before the NEXT user message — until
+    the message tokens fit `max_msg_tokens`. FIX 1 (root cause B): the deletion unit is a WHOLE
+    exchange, never a lone user message. Dropping just the oldest user would leave
+    [system, assistant, tool, ...] with no leading user turn, which the OpenAI-compatible server
+    rejects with HTTP 400 (discarding the whole turn). A user message and its response only ever
+    drop together, so the survivor always begins with a user turn. The leading system message is
+    never dropped, and a single remaining exchange is never emptied (content-shrink is the next
+    resort). Pairing is repaired at the end as a belt. Returns (truncated_messages, n_dropped).
+    Lossy by design — the fallback that runs only when compaction could not get back under budget."""
     working = list(messages)
     start = 1 if working and working[0].get("role") == "system" else 0
     dropped = 0
     while token_counter.count_messages(working) > max_msg_tokens and len(working) - start > 1:
-        cut = next(
-            (i for i in range(start, len(working) - 1) if _is_safe_cut_after(working, i)),
-            start,  # no safe boundary at all: drop the single oldest non-system message
+        first_user = next(
+            (i for i in range(start, len(working)) if working[i].get("role") == "user"), None
         )
-        dropped += cut + 1 - start
-        del working[start:cut + 1]
+        if first_user is None:
+            break  # no user exchange to drop — only content-shrink can reduce further
+        next_user = next(
+            (i for i in range(first_user + 1, len(working)) if working[i].get("role") == "user"),
+            None,
+        )
+        if next_user is None:
+            break  # a single exchange remains — never empty it; shrink its content instead
+        dropped += next_user - start
+        del working[start:next_user]
     return _repair_tool_pairing(working), dropped
+
+
+def _shrink_content_to_budget(
+    messages: list[Message], max_msg_tokens: int, token_counter: TokenCounter,
+    min_chars: int = 200,
+) -> tuple[list[Message], bool]:
+    """FIX 3 true last resort: when the un-droppable remnant (system + the final message) still
+    exceeds budget, dropping whole exchanges cannot help — so head+tail truncate message BODIES
+    (largest first, reusing `_head_tail`) until the total fits. Keeps every message (unlike
+    dropping) but shrinks the bytes, each with the visible elision marker. Returns
+    (new list, shrunk_any). Residual risk: if even the markers exceed budget it returns the
+    smallest it could reach (the `min_chars` floor) — genuine overflow is only possible below that."""
+    working = list(messages)
+    shrunk_any = False
+    guard, limit = 0, len(working) * 16 + 32
+    while token_counter.count_messages(working) > max_msg_tokens and guard < limit:
+        guard += 1
+        i = max(range(len(working)), key=lambda k: len(working[k].get("content") or ""))
+        content = working[i].get("content") or ""
+        if len(content) <= min_chars:
+            break  # largest body already minimal — no further shrink possible
+        shrunk = _head_tail(content, max(min_chars, len(content) // 2))
+        if len(shrunk) >= len(content):
+            break  # marker overhead dominates — cannot make progress
+        working[i] = {**working[i], "content": shrunk}
+        shrunk_any = True
+    return working, shrunk_any
 
 
 def _write_compact_md(path: Path, content: str) -> None:
@@ -862,19 +923,28 @@ class ContextManager:
                 tool_schema_tokens=tool_tokens,
             )
             if pre_budget.needs_summary_compact:
-                # MOVE 0c (coordinator ruling): the per-turn fire cap is the ONLY compaction
-                # limiter. Compaction is NEVER latched off — a fire that fails to shrink is the
-                # stage's compact-to-target problem (it widens the span), and the emergency
-                # floor below makes overflow impossible regardless.
+                pre_frac = pre_budget.usage_fraction  # before any compaction this pass
+                # FIX 2 (root cause A): the cheap DETERMINISTIC stages (tool-result cap + boundary
+                # guard) run on EVERY over-threshold build — no LLM, no fire budget — so oversized
+                # tool results are always capped, even after the per-turn LLM fire cap is spent.
+                repaired, det_modified = await self._pipeline.run_deterministic(repaired, pre_budget)
+                if det_modified:
+                    pre_budget = TokenBudget(
+                        total_limit=self.max_context_tokens,
+                        current_usage=self._token_counter.count_messages(repaired),
+                        tool_schema_tokens=tool_tokens,
+                    )
+                # Only the LLM-calling stages consume the fire budget. MOVE 0c: compaction is NEVER
+                # latched off — a fire that fails to shrink is the stage's compact-to-target problem
+                # (it widens the span), and the emergency floor below makes overflow impossible.
                 if self._compaction_fires >= MAX_COMPACTION_FIRES_PER_TURN:
                     log.debug(
-                        "compaction guard: fire cap reached this turn (%d) — relying on the "
-                        "emergency floor for overflow",
+                        "compaction guard: LLM fire cap reached this turn (%d) — deterministic "
+                        "capping still applied; relying on the emergency floor for overflow",
                         self._compaction_fires,
                     )
                 else:
-                    pre_frac = pre_budget.usage_fraction
-                    repaired, any_modified = await self._pipeline.run(repaired, pre_budget)
+                    repaired, any_modified = await self._pipeline.run_llm(repaired, pre_budget)
                     if any_modified:
                         self._compaction_fires += 1
                         if self._bus is not None:
@@ -893,23 +963,43 @@ class ContextManager:
                                 stages_modified=[],
                             ))
 
-        # MOVE 0c EMERGENCY FLOOR (coordinator ruling: overflow must be IMPOSSIBLE). If — fire
-        # cap reached, no safe cut, no pipeline at all — utilization still exceeds 100% of the
-        # budget, hard-truncate the oldest non-system messages at safe-cut boundaries until the
-        # request fits. Loud by design: this only runs when compaction could not save the turn
-        # (the live stall: 101.1% with compaction latched off — that latch no longer exists).
+        # MOVE 0c EMERGENCY FLOOR (coordinator ruling: overflow must be IMPOSSIBLE). When — fire
+        # cap reached, no safe cut, no pipeline at all — utilization still exceeds the budget, drop
+        # the oldest user-turn exchanges until the request fits. Loud by design: this only runs
+        # when compaction could not save the turn (the live stall: 101.1% with compaction latched
+        # off — that latch no longer exists).
+        # FIX 3 (reserve): compare against (budget - RESPONSE_RESERVE_TOKENS), not the full budget,
+        # so a "fits" verdict still leaves room for the model's reply. Degenerate configs whose
+        # whole budget is <= the reserve fall back to the full budget (you cannot reserve what you
+        # do not have).
+        reserve = RESPONSE_RESERVE_TOKENS if self.max_context_tokens > RESPONSE_RESERVE_TOKENS else 0
+        effective_limit = self.max_context_tokens - reserve
         floor_usage = self._token_counter.count_messages(repaired)
-        if self.max_context_tokens > 0 and floor_usage + tool_tokens > self.max_context_tokens:
+        if self.max_context_tokens > 0 and floor_usage + tool_tokens > effective_limit:
             over_frac = (floor_usage + tool_tokens) / self.max_context_tokens
             repaired, n_dropped = _hard_truncate_to_budget(
-                repaired, self.max_context_tokens - tool_tokens, self._token_counter,
+                repaired, effective_limit - tool_tokens, self._token_counter,
             )
             log.error(
-                "EMERGENCY context floor: utilization %.1f%% exceeded 100%% of budget after "
-                "compaction — hard-truncated %d oldest message(s) to fit "
+                "EMERGENCY context floor: utilization %.1f%% exceeded budget (incl. %d-token reply "
+                "reserve) after compaction — dropped %d oldest exchange message(s) to fit "
                 "(agent=%s session=%s iter=%d)",
-                over_frac * 100, n_dropped, self._agent_id, self._session_id, self._iteration,
+                over_frac * 100, reserve, n_dropped, self._agent_id, self._session_id, self._iteration,
             )
+            # FIX 3 (root cause C): dropping whole exchanges cannot help when the un-droppable
+            # remnant (system + the final message) itself exceeds budget. Shrink their CONTENT as
+            # the true last resort so the request actually fits — a distinct, louder failure mode.
+            if self._token_counter.count_messages(repaired) + tool_tokens > effective_limit:
+                repaired, shrunk = _shrink_content_to_budget(
+                    repaired, effective_limit - tool_tokens, self._token_counter,
+                )
+                if shrunk:
+                    log.error(
+                        "EMERGENCY context floor (content shrink): un-droppable message(s) still "
+                        "exceeded budget after truncation — head+tail shrank their bodies to fit "
+                        "(agent=%s session=%s iter=%d)",
+                        self._agent_id, self._session_id, self._iteration,
+                    )
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.count_messages(repaired)
