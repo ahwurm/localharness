@@ -233,6 +233,24 @@ async def test_matrix_path_probes(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# #10 / #13 — _build_bench_client must use the synced canonical defaults
+# --------------------------------------------------------------------------- #
+
+
+def test_build_bench_client_timeout_is_600(monkeypatch):
+    """#10: the bench client must not run a 300s read timeout — a full max_tokens completion
+    at slow single-stream decode (~410s) would time out mid-generation."""
+    from unittest.mock import patch
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import MatrixEntry
+
+    entry = MatrixEntry(name="m", provider="vllm", model_id="x", base_url="http://localhost:8000/v1")
+    with patch("localharness.provider.client.AsyncOpenAI"):
+        client = orch._build_bench_client(entry)
+    assert client.config.timeout_seconds == 600.0
+
+
+# --------------------------------------------------------------------------- #
 # Task 3A — AUDIT-03c: proposer hardcodes tool_call_mode='native' (RED)
 # --------------------------------------------------------------------------- #
 

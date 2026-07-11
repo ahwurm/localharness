@@ -24,7 +24,9 @@ from localharness.provider.fn_call import FnCallConverter
 
 def test_llm_config_defaults():
     config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
-    assert config.timeout_seconds == 300.0
+    # #10: default synced to 600s — a 4096-token completion at ~10 tok/s single-stream is
+    # ~410s, which the old 300s default killed mid-generation (e.g. bench/orchestrator.py).
+    assert config.timeout_seconds == 600.0
     assert config.temperature == 0.6
     assert config.max_tokens == 4096
     assert config.tool_call_mode == "native"
@@ -35,6 +37,13 @@ def test_llm_config_defaults():
     assert config.is_local is True
     assert config.extra_headers == {}
     assert config.stop_sequences == []
+
+
+def test_default_timeout_seconds_synced_to_600():
+    """#10: the module-level DEFAULT_TIMEOUT_SECONDS must match the LLMConfig/ProviderConfig
+    default (600s) so the documented slow-decode math holds everywhere it is referenced."""
+    from localharness.config.defaults import DEFAULT_TIMEOUT_SECONDS
+    assert DEFAULT_TIMEOUT_SECONDS == 600.0
 
 
 # ---------------------------------------------------------------------------
