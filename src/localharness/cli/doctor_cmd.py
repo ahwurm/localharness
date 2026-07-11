@@ -121,6 +121,30 @@ def doctor(
             except Exception:
                 served = None
 
+            # #13: LM Studio serves its window at /api/v0/models (not /v1/models). Query it the
+            # same way `init` fits the budget: the loaded model's loaded_context_length, else the
+            # largest max_context_length. Keeps doctor's reconciliation from false-reporting
+            # 'max_model_len not reported' on a healthy LM Studio.
+            if served is None and harness.provider.provider_type == "lmstudio":
+                native = base_url.rstrip("/")
+                if native.endswith("/v1"):
+                    native = native[: -len("/v1")]
+                try:
+                    lm = httpx.get(f"{native}/api/v0/models", timeout=5.0).json()
+                    lm_entries = [e for e in (lm.get("data") or []) if isinstance(e, dict)]
+                    loaded = next(
+                        (e for e in lm_entries
+                         if e.get("state") == "loaded" and e.get("loaded_context_length")),
+                        None,
+                    )
+                    if loaded:
+                        served = int(loaded["loaded_context_length"])
+                    else:
+                        caps = [e["max_context_length"] for e in lm_entries if e.get("max_context_length")]
+                        served = max(caps) if caps else None
+                except Exception:
+                    served = None
+
             cfg_ctx = None
             for _root_name in ("orchestrator", "default"):  # Phase 33.1: new root name, then pre-migration fallback
                 try:

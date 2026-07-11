@@ -32,6 +32,7 @@ from localharness.bench.config import (
 from localharness.bench.report import write_summary_json, write_summary_md
 from localharness.bench.runner import accumulate_runs
 from localharness.bench.schema import ScenarioSpec, load_scenario
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +104,8 @@ def _build_bench_client(entry: MatrixEntry) -> Any:
         api_key="none",
         # #10: inherit the 600s LLMConfig default (was a hardcoded 300s that timed out slow
         # single-stream decode — the exact bench symptom in the issue).
-        context_window=entry.num_ctx or 128_000,
+        # #13: fall back to the canonical served-window constant, not a bare 128_000 literal.
+        context_window=entry.num_ctx or DEFAULT_MAX_CONTEXT_TOKENS,
         is_local=True,
     )
     return LLMClient(cfg)
