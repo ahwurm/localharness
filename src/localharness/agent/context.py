@@ -792,7 +792,9 @@ def make_compaction_summarize_fn(llm: Any) -> Any:
                 f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in messages
             )},
         ]
-        result = await llm.complete(prompt, tools=None)
+        # Internal summarizer call — thinking off per-request (scoped #11 exception):
+        # its bounded completion must yield the summary, not hidden CoT.
+        result = await llm.complete(prompt, tools=None, disable_thinking=True)
         msg = result[0] if isinstance(result, tuple) else result  # (message, usage) tuple — DO NOT regress
         return (getattr(msg, "content", "") or "")
     return summarize

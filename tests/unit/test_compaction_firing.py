@@ -29,14 +29,14 @@ async def test_compaction_summarize_unpacks_tuple_and_returns_content():
     bare `result.content` on the tuple raises/returns '' HERE (direct call, not behind the stage's
     try/except that originally hid this for months)."""
     class _TupleLLM:
-        async def complete(self, prompt, tools=None):
+        async def complete(self, prompt, tools=None, disable_thinking=False):
             return (_Msg(), {"prompt_tokens": 1})  # production shape
 
     out = await make_compaction_summarize_fn(_TupleLLM())([{"role": "user", "content": "hi"}])
     assert out == "DENSE SUMMARY"
 
     class _BareLLM:  # robustness: a bare message (non-tuple) still works
-        async def complete(self, prompt, tools=None):
+        async def complete(self, prompt, tools=None, disable_thinking=False):
             return _Msg()
 
     assert await make_compaction_summarize_fn(_BareLLM())([{"role": "user", "content": "hi"}]) == "DENSE SUMMARY"
@@ -47,7 +47,7 @@ async def test_over_window_eviction_and_compaction_fire_in_build_messages(bus):
     """Over-window mid-run: build_messages must (a) evict a bulky tool result to the store
     LOSSLESSLY and (b) fire summary-compaction — not merely be 'wired'. Drives the real pipeline."""
     class _SummLLM:
-        async def complete(self, prompt, tools=None):
+        async def complete(self, prompt, tools=None, disable_thinking=False):
             return (_Msg(), None)
 
     tc = TokenCounter()  # tiktoken (no endpoint) — fine for the test
