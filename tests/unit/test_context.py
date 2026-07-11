@@ -114,14 +114,16 @@ def test_token_counter_messages():
     assert count < 200  # sanity
 
 
-def test_token_counter_remote_unreachable_fails_loud():
-    """base_url+model whose /tokenize is unreachable -> HARD error, no silent fallback.
-    An approximate meter on the live path is what hid the context-overflow bug, so the
-    counter refuses to construct rather than degrade."""
-    import pytest
+def test_token_counter_remote_unreachable_falls_back_to_approximate():
+    """#8: base_url+model whose /tokenize is unreachable must NOT hard-fail construction.
+    Capability detection: an absent/foreign /tokenize disables the exact remote path and
+    falls back to the approximate cl100k meter, so `start` works against Ollama/LM Studio/
+    llama.cpp instead of exiting 1. The exact path is only for runtimes that actually serve
+    vLLM's /tokenize contract."""
     from localharness.agent.context import TokenCounter
-    with pytest.raises(RuntimeError, match="exact token counting unavailable"):
-        TokenCounter(base_url="http://127.0.0.1:1/v1", model="nope")
+    tc = TokenCounter(base_url="http://127.0.0.1:1/v1", model="nope")  # nothing listening
+    assert tc._tokenize_url is None  # remote exact path disabled by capability detection
+    assert tc.count("hello world this is approximate") > 0  # tiktoken fallback still counts
 
 
 def test_token_counter_remote_path_and_cache(monkeypatch):
@@ -163,6 +165,96 @@ def test_token_counter_remote_count_strips_v1_and_reads_count(monkeypatch):
     tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen")
     assert captured["url"] == "http://localhost:8000/tokenize"
     assert tc.count("x") == 42
+
+
+# --- #8: per-runtime /tokenize capability detection (fakes mirror real API shapes) ---
+
+
+def _patch_urlopen(monkeypatch, handler):
+    """Route TokenCounter's urllib probe through `handler(url) -> bytes` (200) or a raised error."""
+    import urllib.request
+    from localharness.agent import context as ctxmod  # noqa: F401
+
+    class _Resp:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        return _Resp(handler(req.full_url))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_token_counter_vllm_ok_uses_exact_no_warning(monkeypatch, caplog):
+    """vLLM serves /tokenize -> {count}. Capability detection keeps the exact path; no fallback log."""
+    import logging
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen(monkeypatch, lambda url: b'{"count": 3}')
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.context"):
+        tc = TokenCounter(base_url="http://localhost:8000/v1", model="qwen")
+    assert tc._tokenize_url == "http://localhost:8000/tokenize"  # exact path live
+    assert tc.count("abc") == 3
+    assert not [r for r in caplog.records if "approximate" in r.getMessage().lower()]
+
+
+def test_token_counter_lmstudio_404_falls_back_to_approximate(monkeypatch):
+    """LM Studio (OpenAI-compatible) 404s on /tokenize -> approximate fallback, no raise."""
+    import urllib.error
+    import urllib.request
+    from localharness.agent.context import TokenCounter
+
+    def raise_404(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_404)
+    tc = TokenCounter(base_url="http://localhost:1234/v1", model="lmstudio-model")
+    assert tc._tokenize_url is None  # foreign/absent -> exact path disabled
+    assert tc.count("some tokens here") > 0  # tiktoken meter
+
+
+def test_token_counter_ollama_no_tokenize_falls_back_to_approximate(monkeypatch):
+    """Ollama has no tokenize API (/api/* only) -> the /tokenize probe errors -> approximate."""
+    import urllib.error
+    import urllib.request
+    from localharness.agent.context import TokenCounter
+
+    def refuse(req, timeout=0):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    tc = TokenCounter(base_url="http://localhost:11434/v1", model="qwen2.5")
+    assert tc._tokenize_url is None
+    assert tc.count("ollama runs approximate") > 0
+
+
+def test_token_counter_foreign_shape_falls_back(monkeypatch):
+    """A 200 with a llama.cpp-style {tokens:[...]} body (no `count` key) is a FOREIGN shape ->
+    capability detection declines the exact path and falls back to approximate."""
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen(monkeypatch, lambda url: b'{"tokens": [1, 2, 3]}')
+    tc = TokenCounter(base_url="http://localhost:8080/v1", model="llamacpp-model")
+    assert tc._tokenize_url is None
+    assert tc.count("llamacpp foreign shape") > 0
+
+
+def test_token_counter_fallback_logs_single_approximate_warning(monkeypatch, caplog):
+    """The fallback emits exactly ONE clear log line stating approximate counting is in effect."""
+    import logging
+    import urllib.error
+    import urllib.request
+    from localharness.agent.context import TokenCounter
+
+    def refuse(req, timeout=0):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.context"):
+        TokenCounter(base_url="http://localhost:11434/v1", model="qwen2.5")
+    approx = [r for r in caplog.records if "approximate" in r.getMessage().lower()]
+    assert len(approx) == 1, [r.getMessage() for r in caplog.records]
 
 
 def test_token_budget_usage_fraction():
