@@ -101,7 +101,8 @@ def _build_bench_client(entry: MatrixEntry) -> Any:
         base_url=base_url,
         model=entry.model_id,
         api_key="none",
-        timeout_seconds=300.0,
+        # #10: inherit the 600s LLMConfig default (was a hardcoded 300s that timed out slow
+        # single-stream decode — the exact bench symptom in the issue).
         context_window=entry.num_ctx or 128_000,
         is_local=True,
     )

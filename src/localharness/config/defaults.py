@@ -10,7 +10,10 @@ DEFAULT_DENY_PATTERNS: list[str] = [
     "bash(chmod 777 *)",
 ]
 
-DEFAULT_TIMEOUT_SECONDS: float = 300.0
+# #10: 600s suits slow local single-stream decode — a 4096-token completion at ~10 tok/s
+# is ~410s, which the previous 300s default killed mid-generation. Synced with
+# LLMConfig.timeout_seconds and ProviderConfig.timeout_seconds.
+DEFAULT_TIMEOUT_SECONDS: float = 600.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS: float = 5.0
 DEFAULT_TEMPERATURE: float = 0.6
 DEFAULT_MAX_TOKENS: int = 4096

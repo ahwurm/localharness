@@ -37,7 +37,10 @@ class LLMConfig:
     base_url: str
     model: str
     api_key: str = "none"
-    timeout_seconds: float = 300.0
+    # #10: 600s suits slow local single-stream decode — a 4096-token completion at ~10 tok/s
+    # is ~410s, which the previous 300s default killed mid-generation. Kept in sync with
+    # ProviderConfig.timeout_seconds and defaults.DEFAULT_TIMEOUT_SECONDS.
+    timeout_seconds: float = 600.0
     connect_timeout_seconds: float = 5.0
     temperature: float = 0.6
     max_tokens: int = 4096
