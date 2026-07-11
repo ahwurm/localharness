@@ -150,3 +150,110 @@ async def test_run_designed_month_threads_nonstarving_mining_budget(tmp_path, mo
     assert code == 0
     assert captured.get("mining_write_budget", 25) > 25          # runner threaded a non-starving budget
     assert captured["mining_write_budget"] == sema._mining_write_budget()
+
+
+# ---------------------------------------------------------------------------
+# SWEEP UNLOCK (--cfg-overrides): the designed-month runner hardcoded its consolidation config, so a
+# sweep could only vary --idle-passes. A JSON object of MemoryConsolidationConfig field overrides now
+# threads into the grading-phase cfg (built by the pure seam _build_consolidation_cfg). Overrides win
+# LAST over the three eval defaults; a typo'd/unknown knob must FAIL LOUDLY (extra=forbid) instead of
+# silently no-op'ing and voiding a whole sweep run; default "{}" reproduces today's build exactly.
+# ---------------------------------------------------------------------------
+
+_TINY_MANIFEST = {
+    "days": ["day1", "day2"],
+    "topics": {"subagents": {"expected_chapter": True, "days": ["day1", "day2"],
+                             "keywords": ["subagent", "summarizer", "citation"]},
+               "noise": {"expected_chapter": False}},
+    "queries": [
+        {"id": "d1-q1", "day": "day1", "topic": "subagents",
+         "text": "i am building a summarizer subagent for the harness"},
+        {"id": "d1-q2", "day": "day1", "topic": "noise", "text": "whats the capital of mongolia"},
+        {"id": "d2-q1", "day": "day2", "topic": "subagents",
+         "text": "i am building a citation subagent for the harness"},
+        {"id": "d2-q2", "day": "day2", "topic": "noise", "text": "convert 5 kilometers to miles"},
+    ],
+}
+
+
+def test_cfg_overrides_reach_constructed_config():
+    """(i) A --cfg-overrides knob lands on the cfg the runner builds — assert the FIELD VALUE on the
+    real cfg, not just that the helper accepts the arg. The three eval defaults still hold alongside."""
+    sema = _load_script()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    cfg = sema._build_consolidation_cfg(manifest, '{"mining_novelty_fold_threshold": 0.35}')
+    assert cfg.mining_novelty_fold_threshold == 0.35
+    assert cfg.reconcile_enabled is True
+    assert cfg.schema_write_budget == sema._schema_write_budget(manifest)
+    assert cfg.mining_write_budget == sema._mining_write_budget()
+
+
+def test_cfg_overrides_win_last_over_eval_defaults():
+    """An override colliding with one of the three explicit eval kwargs (reconcile_enabled /
+    schema_write_budget / mining_write_budget) WINS LAST via dict-merge — never a duplicate-keyword
+    TypeError at construction."""
+    sema = _load_script()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    cfg = sema._build_consolidation_cfg(
+        manifest, '{"reconcile_enabled": false, "mining_write_budget": 77}')
+    assert cfg.reconcile_enabled is False        # override beat the explicit reconcile_enabled=True
+    assert cfg.mining_write_budget == 77         # override beat _mining_write_budget()
+    assert cfg.schema_write_budget == sema._schema_write_budget(manifest)  # untouched default remains
+
+
+def test_cfg_overrides_default_reproduces_today_field_for_field():
+    """(ii) Default "{}" must reproduce the original hardcoded construction EXACTLY — the unlock is
+    additive, zero behaviour change when unused."""
+    sema = _load_script()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    built = sema._build_consolidation_cfg(manifest, "{}")
+    today = MemoryConsolidationConfig(
+        reconcile_enabled=True,
+        schema_write_budget=sema._schema_write_budget(manifest),
+        mining_write_budget=sema._mining_write_budget())
+    assert built.model_dump() == today.model_dump()
+
+
+def test_cfg_overrides_unknown_field_raises_loudly():
+    """(iii) A typo'd/unknown knob must FAIL LOUDLY (extra=forbid) — a silently ignored override
+    would void a whole sweep run."""
+    from pydantic import ValidationError
+    sema = _load_script()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    with pytest.raises(ValidationError):
+        sema._build_consolidation_cfg(manifest, '{"not_a_real_knob": 1}')
+
+
+def test_cfg_overrides_invalid_json_raises_loudly():
+    """Malformed JSON propagates at startup — no silent fallback to defaults."""
+    sema = _load_script()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    with pytest.raises(json.JSONDecodeError):
+        sema._build_consolidation_cfg(manifest, "{not json")
+
+
+@pytest.mark.asyncio
+async def test_run_designed_month_wires_cfg_overrides_arg(tmp_path, monkeypatch):
+    """WIRING: --cfg-overrides on the real CLI reaches the cfg the runner hands ConsolidationPass in
+    the grading pass (owner rule: no green test on unwired code)."""
+    sema = _load_script()
+    captured: dict = {}
+    real_pass = sema.ConsolidationPass
+
+    def _capturing(store, cfg, **kw):
+        captured["fold"] = cfg.mining_novelty_fold_threshold
+        return real_pass(store, cfg, **kw)
+
+    monkeypatch.setattr(sema, "ConsolidationPass", _capturing)
+
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(_TINY_MANIFEST), encoding="utf-8")
+    args = sema._parse_args([
+        "--offline", "--manifest", str(mpath), "--store", str(tmp_path / "store"),
+        "--results", str(tmp_path / "results"), "--agent", "orchestrator",
+        "--cfg-overrides", '{"mining_novelty_fold_threshold": 0.42}',
+    ])
+    code = await sema.run(args)
+
+    assert code == 0
+    assert captured.get("fold") == 0.42
