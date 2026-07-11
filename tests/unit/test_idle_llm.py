@@ -58,14 +58,17 @@ class _RecordingLLM:
 
 
 class _StubClient:
-    """Mimics the real LLMClient.complete(messages, tools, stream) -> (message, usage)."""
+    """Mimics the real LLMClient.complete(messages, tools, stream, disable_thinking)
+    -> (message, usage)."""
 
     def __init__(self, ret):
         self.ret = ret
         self.seen_messages = None
+        self.seen_disable_thinking = None
 
-    async def complete(self, messages, tools=None, stream=False):
+    async def complete(self, messages, tools=None, stream=False, disable_thinking=False):
         self.seen_messages = messages
+        self.seen_disable_thinking = disable_thinking
         return self.ret
 
 

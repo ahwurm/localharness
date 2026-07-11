@@ -71,7 +71,12 @@ class LLMTextAdapter:
         self._client = client
 
     async def complete(self, prompt: str) -> str:
-        msg, _usage = await self._client.complete([{"role": "user", "content": prompt}])
+        # Internal idle work disables thinking per-request (scoped #11 exception):
+        # under a reasoning parser these bounded completions otherwise spend their
+        # whole budget on hidden CoT (C0 sweep: extraction yield collapsed).
+        msg, _usage = await self._client.complete(
+            [{"role": "user", "content": prompt}], disable_thinking=True
+        )
         return getattr(msg, "content", None) or ""
 
 

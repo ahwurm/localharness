@@ -327,14 +327,23 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None = None,
         stream: bool = False,
+        disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
         Returns (message, usage) — usage is openai.types.CompletionUsage or None.
+
+        disable_thinking: per-call opt-in for INTERNAL harness calls (idle mining/
+        consolidation via LLMTextAdapter, compaction summarizer): sends
+        extra_body={"chat_template_kwargs": {"enable_thinking": false}} so their
+        bounded completion budgets aren't spent on hidden chain-of-thought under a
+        reasoning parser. Subject/user-facing turns must NOT set it (#11 — thinking
+        stays on; this is deliberately per-call, never an is_local blanket). A
+        documented no-op for chat templates without the flag — model-agnostic.
         """
         if self.config.tool_call_mode == "native":
-            return await self._complete_native(messages, tools, stream)
-        return await self._complete_xml(messages, tools, stream)
+            return await self._complete_native(messages, tools, stream, disable_thinking=disable_thinking)
+        return await self._complete_xml(messages, tools, stream, disable_thinking=disable_thinking)
 
     async def stream_complete(
         self,
@@ -353,6 +362,7 @@ class LLMClient:
         tools: list[ToolSchema] | None,
         stream: bool,
         on_token: Callable[[str], Awaitable[None]] | None = None,
+        disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -379,6 +389,11 @@ class LLMClient:
             # quality wins over latency. Do not re-add enable_thinking:False — the
             # loop strips <think> blocks before history/parse, and the kwarg was
             # silently dropped by Ollama and type-checked by llama.cpp anyway.
+            # Sole scoped exception: INTERNAL calls opt in per-request via
+            # disable_thinking (C0 sweep: mining/summarizer budgets starved by
+            # hidden CoT under --reasoning-parser) — never an is_local blanket.
+            if disable_thinking:
+                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             async with _inference_gate(self.config):
                 if stream:
                     kwargs["stream"] = True
@@ -447,6 +462,7 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
+        disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection, parse tool calls from text.
 
@@ -465,6 +481,8 @@ class LLMClient:
             kwargs["tools"] = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
+        if disable_thinking:  # internal-call opt-in — see complete()
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
             # Gate scoped to the create alone: the except-path re-enters via
             # _complete_xml_fallback, which takes its own turn at the gate.
@@ -474,7 +492,7 @@ class LLMClient:
         except openai.BadRequestError:
             # Server rejected the request (e.g. tools param) — fall back to system prompt injection
             log.warning("Server rejected request, falling back to system prompt injection")
-            return await self._complete_xml_fallback(messages, tools, stream)
+            return await self._complete_xml_fallback(messages, tools, stream, disable_thinking=disable_thinking)
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -483,6 +501,7 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None,
         stream: bool,
+        disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
         """Legacy fallback: inject tool schemas into system prompt as XML text.
 
@@ -503,6 +522,8 @@ class LLMClient:
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
+        if disable_thinking:  # internal-call opt-in — see complete()
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
             async with _inference_gate(self.config):
                 response = await self._client.chat.completions.create(**kwargs)
