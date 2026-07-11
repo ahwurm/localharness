@@ -55,6 +55,52 @@ def test_detect_llamacpp_nctx_returns_none_on_error(monkeypatch):
     assert init_cmd._detect_llamacpp_nctx("http://localhost:8080/v1") is None
 
 
+def test_detect_lmstudio_ctx_prefers_loaded(monkeypatch):
+    """Issue #13a: the loaded model's loaded_context_length is the served window."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    class _Resp:
+        def json(self):
+            return {"object": "list", "data": [
+                {"id": "a", "state": "not-loaded", "max_context_length": 131072},
+                {"id": "b", "state": "loaded", "max_context_length": 32768, "loaded_context_length": 16384},
+            ]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    # base_url carries /v1; /api/v0 lives at the server root
+    assert init_cmd._detect_lmstudio_ctx("http://localhost:1234/v1") == 16384
+
+
+def test_detect_lmstudio_ctx_falls_back_to_max(monkeypatch):
+    """Issue #13a: with no loaded model reporting loaded_context_length, fall back to
+    the largest max_context_length."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    class _Resp:
+        def json(self):
+            return {"object": "list", "data": [
+                {"id": "a", "state": "not-loaded", "max_context_length": 32768},
+                {"id": "b", "state": "not-loaded", "max_context_length": 131072},
+            ]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    assert init_cmd._detect_lmstudio_ctx("http://localhost:1234/v1") == 131072
+
+
+def test_detect_lmstudio_ctx_returns_none_on_error(monkeypatch):
+    """An LM Studio probe failure falls back to None (→ safe context default)."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert init_cmd._detect_lmstudio_ctx("http://localhost:1234/v1") is None
+
+
 def _make_detector_result(found: bool = True, models: list[str] | None = None) -> DetectorResult:
     models = models or ["test-model:7b"]
     return DetectorResult(
@@ -192,3 +238,46 @@ def test_init_endpoint_override(mock_client_cls, tmp_path):
     content = config_file.read_text()
     assert "9999" in content
     assert "custom-model" in content
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_lmstudio_fits_loaded_context(mock_client_cls, mock_detect, tmp_path, monkeypatch):
+    """Issue #13a: LM Studio init fits the budget to the loaded model's
+    loaded_context_length (16384 − 4096 reserve = 12288), not its max_context_length (32768)."""
+    import httpx
+    mock_detect.return_value = DetectorResult(
+        found=True, provider_type="lmstudio", base_url="http://localhost:1234/v1",
+        models=["qwen"], suggested_model="qwen", probe_duration_ms=1.0,
+    )
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return {"object": "list", "data": [
+                {"id": "qwen", "state": "loaded", "max_context_length": 32768, "loaded_context_length": 16384},
+            ]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    content = (tmp_path / "config.yaml").read_text()
+    assert "max_context_tokens: 12288" in content
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_ollama_prints_window_guidance(mock_client_cls, mock_detect, tmp_path):
+    """Issue #13b: Ollama's served window isn't discoverable — init surfaces
+    OLLAMA_CONTEXT_LENGTH guidance instead of silently keeping the default budget."""
+    mock_detect.return_value = _make_detector_result()  # provider_type="ollama"
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    assert "OLLAMA_CONTEXT_LENGTH" in result.output

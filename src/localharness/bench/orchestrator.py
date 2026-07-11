@@ -78,6 +78,7 @@ def _filter_scenarios_by_slice(scenarios: list[ScenarioSpec], slice_: str) -> li
 _DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://127.0.0.1:11434/v1",
     "vllm": "http://localhost:8000/v1",
+    "llamacpp": "http://localhost:8080/v1",
 }
 
 

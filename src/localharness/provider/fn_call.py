@@ -68,6 +68,47 @@ _LEGACY_PARTIAL = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Tolerant closer normalization (Qwen3.6 / llama.cpp thinking-mode drift)
+# ---------------------------------------------------------------------------
+
+# Runtimes intermittently emit stray, duplicated, or orphan </tool_call> closers
+# (QwenLM/Qwen3.6#178, ggml-org/llama.cpp#20837 & #22684). The extraction regexes
+# require balanced <tool_call>...</tool_call> pairs, so such noise drops the call.
+# This pre-pass removes </tool_call> closers that have no body-bearing open wrapper
+# to close — orphan closers (no matching open) and closers of a still-empty wrapper
+# (the stray/duplicated shapes). It is run only as a fallback after the normal
+# pipeline finds nothing, so it can never alter a successful parse; balanced,
+# well-formed input contains no such closers and is returned unchanged.
+_TOOLCALL_TOKEN = re.compile(r"<tool_call>|</tool_call>|<function=|<name[>=]|\{")
+
+
+def _drop_spurious_toolcall_closers(text: str) -> str:
+    """Drop orphan/empty-wrapper </tool_call> closers; return text unchanged if none."""
+    stack: list[bool] = []  # one body-seen flag per open <tool_call>
+    drops: list[tuple[int, int]] = []
+    for m in _TOOLCALL_TOKEN.finditer(text):
+        tok = m.group(0)
+        if tok == "<tool_call>":
+            stack.append(False)
+        elif tok == "</tool_call>":
+            if stack and stack[-1]:
+                stack.pop()  # closes a body-bearing wrapper — keep
+            else:
+                drops.append(m.span())  # orphan or empty-wrapper closer — drop
+        elif stack:
+            stack[-1] = True  # body token (<function=/<name/{) inside open wrapper
+    if not drops:
+        return text
+    out: list[str] = []
+    prev = 0
+    for s, e in drops:
+        out.append(text[prev:s])
+        prev = e
+    out.append(text[prev:])
+    return "".join(out)
+
+
+# ---------------------------------------------------------------------------
 # Converter
 # ---------------------------------------------------------------------------
 
@@ -92,22 +133,27 @@ class FnCallConverter:
         then legacy OpenHands format (<name>X</name><parameters>{JSON}</parameters>).
         """
         cleaned = strip_thinking_tags(response_text)
+        calls = self._extract_all(cleaned)
+        if calls:
+            return calls
+        # Fallback: drop stray/duplicated/orphan </tool_call> closers that break the
+        # balanced-pair regexes (Qwen3.6 / llama.cpp drift) and retry. Reached only
+        # when the normal parse found nothing, so working parses are never altered —
+        # only currently-zero inputs can change outcome.
+        normalized = _drop_spurious_toolcall_closers(cleaned)
+        if normalized != cleaned:
+            return self._extract_all(normalized)
+        return calls
 
+    def _extract_all(self, cleaned: str) -> list[ToolCall]:
+        """Run the format extractors in priority order; first non-empty wins."""
         # 1. Qwen 3.5/3.6 Coder: <function=NAME><parameter=P>value</parameter>
-        calls = self._extract_qwen_native(cleaned)
-        if calls:
-            return calls
-
         # 2. Hermes JSON: <tool_call>{"name": "X", "arguments": {...}}</tool_call>
-        calls = self._extract_hermes_json(cleaned)
-        if calls:
-            return calls
-
         # 3. Legacy OpenHands: <name>X</name><parameters>{JSON}</parameters>
-        calls = self._extract_legacy(cleaned)
-        if calls:
-            return calls
-
+        for extractor in (self._extract_qwen_native, self._extract_hermes_json, self._extract_legacy):
+            calls = extractor(cleaned)
+            if calls:
+                return calls
         # 4. Partial legacy (truncated output)
         return self._extract_legacy_partial(cleaned)
 
