@@ -658,7 +658,7 @@ async def _run_sittings(
         # threshold aborts the run as INVALID (measurement failure), naming this sitting.
         failed = 0
 
-        def _on_turn_failed(_ev: object) -> None:
+        async def _on_turn_failed(_ev: object) -> None:
             nonlocal failed
             failed += 1
 
@@ -1321,7 +1321,7 @@ async def _run_manifest_sittings(
 
         failed = 0
 
-        def _on_turn_failed(_ev: object) -> None:
+        async def _on_turn_failed(_ev: object) -> None:
             nonlocal failed
             failed += 1
 

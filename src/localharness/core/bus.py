@@ -11,6 +11,7 @@ All event records are well under this limit.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -26,7 +27,12 @@ from .types import AgentID, EventSeq, SessionID
 log = structlog.get_logger(__name__)
 
 E = TypeVar("E", bound=BaseEvent)
+# Internal wrapped-handler type: subscribe() always registers an async `filtered` wrapper.
 AsyncHandler = Callable[[Any], Coroutine[Any, Any, None]]
+# Public-facing handler type for subscribe()/on(): sync (plain def) AND async callables
+# are both accepted — dispatch awaits a handler's result only if it is awaitable, so a
+# sync handler's None return is never awaited (no `await None` TypeError).
+Handler = Callable[[Any], Any]
 
 
 class SubscriptionHandle:
@@ -112,11 +118,18 @@ class EventBus:
             log.error("persist_failed", event_id=event.id, seq=event.seq, path=str(path), error=str(exc))
 
     async def _deliver(self, event_key: str, event: AnyEvent) -> None:
-        """Deliver event to all matching subscribers. Exceptions are isolated."""
+        """Deliver event to all matching subscribers. Exceptions are isolated.
+
+        Registered handlers are normally async `filtered` wrappers, but the call
+        result is awaited only if awaitable, so a directly-registered sync handler
+        runs its side effects without an `await None` TypeError.
+        """
         handlers = list(self._subscriptions.get(event_key, []))
         for handler in handlers:
             try:
-                await asyncio.wait_for(handler(event), timeout=self._handler_timeout)
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=self._handler_timeout)
             except asyncio.TimeoutError:
                 log.warning("handler_timeout", event_key=event_key, seq=event.seq)
             except (SystemExit, KeyboardInterrupt):
@@ -134,10 +147,10 @@ class EventBus:
         *,
         agent_id: Optional[AgentID] = None,
         session_id: Optional[SessionID] = None,
-    ) -> Callable[[AsyncHandler], AsyncHandler]:
-        """Decorator that registers an async handler for a specific event type."""
+    ) -> Callable[[Handler], Handler]:
+        """Decorator that registers a handler (sync or async) for a specific event type."""
 
-        def decorator(handler: AsyncHandler) -> AsyncHandler:
+        def decorator(handler: Handler) -> Handler:
             self.subscribe(event_type, handler, agent_id=agent_id, session_id=session_id)
             return handler
 
@@ -146,12 +159,18 @@ class EventBus:
     def subscribe(
         self,
         event_type: Type[E],
-        handler: AsyncHandler,
+        handler: Handler,
         *,
         agent_id: Optional[AgentID] = None,
         session_id: Optional[SessionID] = None,
     ) -> SubscriptionHandle:
-        """Programmatic subscription. Returns a handle for unsubscription."""
+        """Programmatic subscription. Returns a handle for unsubscription.
+
+        `handler` may be async OR a plain sync `def`: dispatch awaits the handler's
+        result only if it is awaitable, so sync handlers run their side effects
+        first-class (nothing is awaited, nothing raises). A handler's own exception
+        propagates into the standard subscriber_error isolation either way.
+        """
         event_key = event_type.__name__
 
         async def filtered(event: AnyEvent) -> None:
@@ -159,7 +178,9 @@ class EventBus:
                 return
             if session_id is not None and getattr(event, "session_id", None) != session_id:
                 return
-            await handler(event)
+            result = handler(event)
+            if inspect.isawaitable(result):
+                await result
 
         self._subscriptions.setdefault(event_key, []).append(filtered)
         return SubscriptionHandle(event_key, filtered)
