@@ -284,13 +284,21 @@ class TokenCounter:
             if root.endswith("/v1"):
                 root = root[: -len("/v1")]
             self._tokenize_url = f"{root}/tokenize"
-            # Server-or-fail: NO silent fallback. An exact count is mandatory on the live
-            # path, so a probe failure is a HARD error — running on an approximate meter is
-            # exactly what hid the context-overflow bug. The start path surfaces this.
+            # Capability detection (#8): the exact remote path is used ONLY when the runtime
+            # actually serves vLLM's /tokenize contract (POST {model,prompt} -> {count}). A
+            # probe that 404s (LM Studio), errors (Ollama has no tokenize API), or returns a
+            # foreign shape (llama.cpp answers {tokens:[...]}, no `count`) DISABLES the remote
+            # path and falls back to the approximate cl100k meter — never a hard `start` failure
+            # for a non-vLLM runtime. Approximate counting makes the budget gates fire slightly
+            # early rather than overflow, which is the safe direction. `doctor` explains how to
+            # get exact counting. Self-disables once; never retried.
             if self._remote_count("token") is None:
-                raise RuntimeError(
-                    f"TokenCounter: exact token counting unavailable — /tokenize unreachable "
-                    f"at {self._tokenize_url}. Refusing to fall back to an approximate tokenizer."
+                self._tokenize_url = None
+                log.warning(
+                    "TokenCounter: %s/tokenize is not served (or has a non-vLLM shape) — using "
+                    "APPROXIMATE token counting (tiktoken cl100k). Budget gates fire "
+                    "conservatively; run vLLM for exact counts. (base_url=%s)",
+                    root + "/", base_url,
                 )
 
     def _remote_count(self, text: str) -> int | None:

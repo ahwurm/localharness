@@ -558,16 +558,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"mcp: {exc}")
 
     # --- 6b. Model-aware token counter (one instance, injected everywhere) ---
-    # Counts via the served model's exact tokenizer (vLLM /tokenize) so budget gates fire
-    # at the real fraction. FAIL LOUD if it's unavailable: an approximate meter is what
-    # caused the silent context overflows (400s), so refuse to run rather than mis-account.
+    # Counts via the served model's exact tokenizer (vLLM /tokenize) when the runtime serves it,
+    # so budget gates fire at the real fraction. #8: a runtime WITHOUT that endpoint (Ollama /
+    # LM Studio / llama.cpp) no longer hard-fails `start` — TokenCounter self-detects and falls
+    # back to the approximate cl100k meter with one clear log line (gates then fire conservatively
+    # rather than overflowing). This except only trips if NO tokenizer is available at all
+    # (tiktoken missing) — a genuinely unusable environment.
     try:
         token_counter = TokenCounter(base_url=provider.base_url, model=resolved_model)
     except RuntimeError as exc:
         err_console.print(
             f"[bold red]Error:[/bold red] {exc}\n"
-            f"Exact token counting is required (no approximate fallback) — ensure the model "
-            f"server at {provider.base_url} exposes /tokenize, then retry."
+            f"No token counter is available (tiktoken not installed). Run 'uv sync' to install it."
         )
         raise typer.Exit(1)
 
