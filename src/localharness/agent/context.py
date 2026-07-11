@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -256,18 +257,38 @@ def _evict_stale_web_results(
     return out, len(stale)
 
 
-class TokenCounter:
-    """Token counting. Prefers the SERVED model's exact tokenizer via vLLM's
-    POST {server_root}/tokenize (model-truth) when base_url+model are given; falls
-    back to tiktoken cl100k, then a char heuristic. Counts are content-hash cached.
+APPROX_TOKENIZE_SAFETY_FACTOR = 1.5
+"""Inflation applied to cl100k estimates on runtimes with NO tokenize endpoint (Ollama —
+ollama/ollama#12030 unmerged; LM Studio — none documented). cl100k UNDERcounts Qwen-family
+tokenizers — ~1.85x worst case on digit/code-heavy text, near parity on prose — so the factor
+biases budgets to OVER-count: compaction fires early instead of the provider 400ing on a real
+context overflow (issue #8)."""
 
-    cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the
-    only accurate source for non-cl100k models. The remote call is sync (urllib) — the
-    agent loop is serial and model-bottlenecked, so a ~9ms round-trip is acceptable —
-    and is probed once at construction; on any failure it self-disables and never retries.
+
+class TokenCounter:
+    """Token counting. Prefers the SERVED model's exact tokenizer (model-truth) when
+    base_url+model are given, selected by provider_type and probed once at construction:
+    vLLM's POST {server_root}/tokenize {model,prompt} -> {"count": N}, or llama.cpp's
+    POST {server_root}/tokenize {content} -> {"tokens": [...]}. Runtimes that serve no
+    tokenize endpoint (ollama, lmstudio) run in EXPLICIT approximate mode — cl100k inflated
+    by APPROX_TOKENIZE_SAFETY_FACTOR, surfaced via `.approximate` so `start` can warn.
+    Unknown/absent provider_type probes BOTH exact shapes and locks onto whichever answers.
+
+    cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the only
+    accurate source for non-cl100k models. The remote call is sync (urllib) — the agent loop
+    is serial and model-bottlenecked, so a ~9ms round-trip is acceptable — and is probed once
+    at construction. A runtime KNOWN to serve /tokenize (vllm/llamacpp) that is unreachable is
+    a HARD error (doctor's check 5c reports the same); an UNKNOWN runtime degrades to labeled
+    approximate rather than blocking `start` (#8's leniency for the ambiguous case). Counts
+    are content-hash cached.
     """
 
-    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        provider_type: str | None = None,
+    ) -> None:
         self._encoder = None
         try:
             import tiktoken
@@ -279,41 +300,86 @@ class TokenCounter:
         self._tokenize_url: str | None = None
         self._model = model
         self._cache: dict[str, int] = {}
+        # "off": offline cl100k estimator (no server configured — tests/bench). "vllm"/"llamacpp":
+        # exact remote via that runtime's /tokenize contract. "approximate": inflated cl100k (the
+        # runtime serves no tokenize endpoint, or an unknown runtime's probe found none).
+        self._mode: str = "off"
         if base_url and model:
+            ptype = (provider_type or "").lower()
+            if ptype in ("ollama", "lmstudio"):
+                # These runtimes serve NO /tokenize (Ollama: /api/* only; LM Studio: none
+                # documented). Approximate by DESIGN — never dial, label it, over-count.
+                if self._encoder is None:
+                    raise RuntimeError(
+                        f"TokenCounter: {ptype} serves no tokenize endpoint and tiktoken is "
+                        f"unavailable — no counting source exists. Install tiktoken."
+                    )
+                self._mode = "approximate"
+                return
             root = base_url.rstrip("/")
             if root.endswith("/v1"):
                 root = root[: -len("/v1")]
             self._tokenize_url = f"{root}/tokenize"
-            # Capability detection (#8): the exact remote path is used ONLY when the runtime
-            # actually serves vLLM's /tokenize contract (POST {model,prompt} -> {count}). A
-            # probe that 404s (LM Studio), errors (Ollama has no tokenize API), or returns a
-            # foreign shape (llama.cpp answers {tokens:[...]}, no `count`) DISABLES the remote
-            # path and falls back to the approximate cl100k meter — never a hard `start` failure
-            # for a non-vLLM runtime. Approximate counting makes the budget gates fire slightly
-            # early rather than overflow, which is the safe direction. `doctor` explains how to
-            # get exact counting. Self-disables once; never retried.
-            if self._remote_count("token") is None:
+            # Probe the runtime's /tokenize contract. Known llama.cpp speaks {content}->{tokens};
+            # vLLM speaks {model,prompt}->{count}. With no provider_type, try vLLM then llama.cpp
+            # so a mis/undetected runtime still locks onto whichever shape actually answers.
+            shapes = {"vllm": ("vllm",), "llamacpp": ("llamacpp",)}.get(ptype, ("vllm", "llamacpp"))
+            for shape in shapes:
+                self._mode = shape
+                if self._remote_count("token") is not None:
+                    break  # exact mode locked onto the shape the server actually speaks
+            else:
+                # No exact source answered. A runtime we KNOW serves /tokenize (vllm/llamacpp)
+                # being unreachable is a HARD error — exact counting is required and doctor
+                # reports the same failure. An UNKNOWN runtime degrades to labeled approximate.
                 self._tokenize_url = None
+                if ptype in ("vllm", "llamacpp"):
+                    raise RuntimeError(
+                        f"TokenCounter: exact token counting unavailable — {ptype} /tokenize "
+                        f"unreachable at {root}/tokenize. Refusing an approximate fallback for a "
+                        f"runtime that should count exactly."
+                    )
+                if self._encoder is None:
+                    raise RuntimeError(
+                        "TokenCounter: no tokenizer available (tiktoken missing, /tokenize "
+                        "unreachable)."
+                    )
+                self._mode = "approximate"
                 log.warning(
-                    "TokenCounter: %s/tokenize is not served (or has a non-vLLM shape) — using "
-                    "APPROXIMATE token counting (tiktoken cl100k). Budget gates fire "
-                    "conservatively; run vLLM for exact counts. (base_url=%s)",
-                    root + "/", base_url,
+                    "TokenCounter: %s/tokenize did not answer a known contract — using "
+                    "APPROXIMATE token counting (cl100k x %s). Budget gates fire conservatively; "
+                    "run vLLM or llama.cpp for exact counts. (base_url=%s)",
+                    root, APPROX_TOKENIZE_SAFETY_FACTOR, base_url,
                 )
 
+    @property
+    def approximate(self) -> bool:
+        """True when counting on the inflated cl100k estimator (the runtime serves no exact
+        /tokenize, or an unknown runtime's probe found none) — `start` surfaces a warning."""
+        return self._mode == "approximate"
+
     def _remote_count(self, text: str) -> int | None:
-        """Exact server-side count via vLLM /tokenize, or None on ANY failure."""
+        """Exact server-side count, or None on ANY failure. Shape follows self._mode:
+        "llamacpp" POSTs {"content"} and reads len("tokens") (llama-server has no "count"
+        field); otherwise POSTs {"model","prompt"} and reads "count" (vLLM contract)."""
         if not self._tokenize_url:
             return None
         import json as _json
         import urllib.request
         try:
-            body = _json.dumps({"model": self._model, "prompt": text}).encode("utf-8")
+            if self._mode == "llamacpp":
+                payload: dict = {"content": text}
+            else:
+                payload = {"model": self._model, "prompt": text}
+            body = _json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 self._tokenize_url, data=body, headers={"Content-Type": "application/json"}
             )
             with urllib.request.urlopen(req, timeout=10.0) as resp:
                 data = _json.loads(resp.read().decode("utf-8"))
+            if self._mode == "llamacpp":
+                tokens = data.get("tokens")
+                return len(tokens) if isinstance(tokens, list) else None
             count = data.get("count")
             return int(count) if count is not None else None
         except Exception:
@@ -326,7 +392,7 @@ class TokenCounter:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        if self._tokenize_url is not None:
+        if self._mode in ("vllm", "llamacpp"):
             # Live mode: the server tokenizer is the only source of truth. Fail loud on a miss.
             n = self._remote_count(text)
             if n is None:
@@ -335,9 +401,11 @@ class TokenCounter:
                     f"refusing to substitute an approximate count."
                 )
         elif self._encoder is not None:
-            # Non-live estimator (unit tests / bench, no server) — explicit, not a fallback.
-            # disallowed_special=() so literal special-token text is counted as ordinary text.
-            n = len(self._encoder.encode(text, disallowed_special=()))
+            # cl100k estimator. disallowed_special=() so literal special-token text is counted as
+            # ordinary text. Approximate mode inflates by the safety factor (over-count is safe);
+            # "off" (no server configured — tests/bench) is the plain, uninflated estimate.
+            raw = len(self._encoder.encode(text, disallowed_special=()))
+            n = math.ceil(raw * APPROX_TOKENIZE_SAFETY_FACTOR) if self._mode == "approximate" else raw
         else:
             raise RuntimeError("TokenCounter: no tokenizer available (tiktoken missing, no server).")
         if len(self._cache) < 50_000:
