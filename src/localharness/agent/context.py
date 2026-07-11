@@ -874,7 +874,13 @@ class ContextManager:
         actual size of the next outgoing request. Budget is always returned (never None).
         """
         import json as _json
-        copied = list(messages)
+        # Wire safety: no message may reach the payload with content=None — vLLM's
+        # request validation 400s on it ('Input should be a valid string'). Covers
+        # reasoning-parser tool turns plus persisted/legacy history, for ANY role;
+        # only None is rewritten (tool_calls and string content pass untouched).
+        copied = [
+            {**m, "content": ""} if m.get("content") is None else m for m in messages
+        ]
         repaired = self.repair_tool_pairing(copied)
         tool_tokens = self._token_counter.count_messages(
             [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
