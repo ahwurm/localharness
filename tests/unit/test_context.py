@@ -230,14 +230,78 @@ def test_token_counter_ollama_no_tokenize_falls_back_to_approximate(monkeypatch)
     assert tc.count("ollama runs approximate") > 0
 
 
-def test_token_counter_foreign_shape_falls_back(monkeypatch):
-    """A 200 with a llama.cpp-style {tokens:[...]} body (no `count` key) is a FOREIGN shape ->
-    capability detection declines the exact path and falls back to approximate."""
+def test_token_counter_unknown_provider_falls_through_to_llamacpp_shape(monkeypatch):
+    """#8 harvest: a 200 with llama.cpp's {tokens:[...]} body (no `count`) is a VALID exact
+    shape, NOT a foreign one. With no provider_type the counter tries the vLLM shape, finds no
+    `count`, then falls THROUGH to the llama.cpp shape and counts EXACTLY (len tokens) — it must
+    NOT degrade to the approximate meter (doctor already reports llama.cpp /tokenize as exact)."""
     from localharness.agent.context import TokenCounter
-    _patch_urlopen(monkeypatch, lambda url: b'{"tokens": [1, 2, 3]}')
+    _patch_urlopen(monkeypatch, lambda url: b'{"tokens": [7, 8]}')
     tc = TokenCounter(base_url="http://localhost:8080/v1", model="llamacpp-model")
-    assert tc._tokenize_url is None
-    assert tc.count("llamacpp foreign shape") > 0
+    assert tc._mode == "llamacpp"        # locked onto the exact tokens-shape
+    assert tc._tokenize_url is not None  # exact path LIVE, not disabled
+    assert tc.count("xy") == 2           # len(tokens), not a cl100k estimate
+    assert not tc.approximate
+
+
+def test_token_counter_llamacpp_shape(monkeypatch):
+    """provider_type=llamacpp POSTs {"content"} and counts len(tokens) — llama-server returns
+    {"tokens": [...]} with NO "count" field (verified against llama.cpp's /tokenize contract)."""
+    from localharness.agent import context as ctxmod
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"tokens": [1, 2, 3]}'
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["body"] = req.data
+        return _Resp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    tc = ctxmod.TokenCounter(
+        base_url="http://localhost:8080/v1", model="qwen", provider_type="llamacpp"
+    )
+    assert captured["url"] == "http://localhost:8080/tokenize"
+    assert b"content" in captured["body"] and b"prompt" not in captured["body"]
+    assert tc.count("hello world") == 3
+    assert not tc.approximate
+
+
+def test_token_counter_ollama_approximate_mode_never_dials():
+    """ollama serves no tokenize API: explicit approximate mode, ZERO network. Port 1 would
+    hard-fail any probe — constructing against it proves nothing is dialed. Counts are the
+    plain cl100k estimate inflated by the safety factor (over-count = the safe direction)."""
+    import math
+
+    from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR, TokenCounter
+    tc = TokenCounter(base_url="http://127.0.0.1:1/v1", model="m", provider_type="ollama")
+    assert tc.approximate
+    plain = TokenCounter()  # offline estimator baseline (no inflation)
+    text = "some digits 123456 and code()"
+    assert tc.count(text) == math.ceil(plain.count(text) * APPROX_TOKENIZE_SAFETY_FACTOR)
+
+
+def test_token_counter_lmstudio_approximate_mode():
+    """LM Studio documents no tokenize endpoint on either API surface — same policy as ollama."""
+    from localharness.agent.context import TokenCounter
+    tc = TokenCounter(base_url="http://127.0.0.1:1/v1", model="m", provider_type="lmstudio")
+    assert tc.approximate
+    assert tc.count("hello") >= TokenCounter().count("hello")
+
+
+def test_token_counter_llamacpp_unreachable_fails_loud():
+    """llama.cpp HAS a tokenize endpoint — an unreachable one stays a HARD error (doctor
+    reports the same failure), never a silent approximate meter for a should-be-exact runtime."""
+    import pytest
+
+    from localharness.agent.context import TokenCounter
+    with pytest.raises(RuntimeError, match="exact token counting unavailable"):
+        TokenCounter(base_url="http://127.0.0.1:1/v1", model="m", provider_type="llamacpp")
 
 
 def test_token_counter_fallback_logs_single_approximate_warning(monkeypatch, caplog):
