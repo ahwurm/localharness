@@ -434,10 +434,14 @@ async def test_compaction_publishes_event():
         async def publish(self, event):
             published.append(event)
 
-    # Stub pipeline that always reports modified=True
+    # Stub pipeline that always reports modified=True on the LLM stage (FIX 2 split interface)
     class StubPipeline:
         async def run(self, messages, budget):
             return messages[:1], True   # truncate to first message; any_modified=True
+        async def run_deterministic(self, messages, budget):
+            return messages, False
+        async def run_llm(self, messages, budget):
+            return messages[:1], True
 
     # Use a tiny budget so needs_summary_compact triggers
     cm = ContextManager(
@@ -477,6 +481,10 @@ async def test_compaction_no_publish_when_unchanged():
     class NoOpPipeline:
         async def run(self, messages, budget):
             return messages, False
+        async def run_deterministic(self, messages, budget):
+            return messages, False
+        async def run_llm(self, messages, budget):
+            return messages, False
 
     cm = ContextManager(
         max_context_tokens=100,
@@ -498,12 +506,18 @@ async def test_compaction_no_bus_no_publish():
     class StubPipeline:
         async def run(self, messages, budget):
             return messages[:1], True
+        async def run_deterministic(self, messages, budget):
+            return messages, False
+        async def run_llm(self, messages, budget):
+            return messages[:1], True
 
     cm = ContextManager(max_context_tokens=100, pipeline=StubPipeline())
     big = [{"role": "user", "content": "x" * 5000}] * 5
     out, _budget = await cm.build_messages(big, tool_schemas=None)
-    # Should not raise. No bus, no publication.
-    assert out == big[:1]
+    # Should not raise. No bus, no publication. The stub truncates to one message; the emergency
+    # floor then head+tail shrinks that oversized lone message to fit (FIX 3) — so assert structure,
+    # not byte-for-byte equality (the pre-FIX pass-through of an over-budget message was the bug).
+    assert len(out) == 1 and out[0]["role"] == "user"
 
 
 def test_default_deny_patterns_use_bash_exec():
