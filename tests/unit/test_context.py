@@ -599,3 +599,121 @@ async def test_build_messages_evicts_only_over_threshold():
     cm_big = ContextManager(max_context_tokens=1_000_000)
     built2, _ = await cm_big.build_messages(list(msgs), None)
     assert all("omitted" not in (m.get("content") or "") for m in built2)
+
+
+# ---------------------------------------------------------------------------
+# Emergency-floor compaction floors (FIX WAVE): the floor must preserve turn
+# structure (FIX 1), deterministic capping must survive the LLM fire cap (FIX 2),
+# and the floor must actually FIT the budget incl. the reply reserve (FIX 3).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_emergency_floor_drops_whole_exchange_not_lone_user():
+    """FIX 1 (root cause B): the emergency floor's deletion unit is a FULL user-turn exchange
+    (a user message through everything before the next user message), never a lone user message.
+    Dropping only the older user would leave [system, assistant, tool, ...] — no leading user turn —
+    which the OpenAI-compatible server 400s. Sized so dropping ONLY the old user satisfies budget."""
+    from localharness.agent.context import _hard_truncate_to_budget, TokenCounter
+    tc = TokenCounter()
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "OLD task " + "word " * 2000},   # big: dropping THIS alone fits
+        _make_assistant_with_tool_call("tc-1"),
+        _make_tool_result("tc-1", "ok-old"),
+        {"role": "user", "content": "NEW task"},
+        _make_assistant_with_tool_call("tc-2"),
+        _make_tool_result("tc-2", "ok-new"),
+    ]
+    # Budget fits everything EXCEPT the big old user message -> old code drops only that user and
+    # stops at [system, assistant, tool, ...]; the fix must drop the WHOLE old exchange instead.
+    budget = tc.count_messages([messages[0]] + messages[2:]) + 20
+    out, _dropped = _hard_truncate_to_budget(messages, budget, tc)
+    non_system = [m for m in out if m.get("role") != "system"]
+    assert non_system and non_system[0]["role"] == "user"          # FIX 1: leading user preserved
+    assert non_system[0]["content"] == "NEW task"                  # the OLD exchange dropped WHOLE
+    # invariant: truncation never leaves an assistant directly after the system message
+    assert not (len(out) >= 2 and out[0]["role"] == "system" and out[1]["role"] == "assistant")
+
+
+@pytest.mark.asyncio
+async def test_tool_result_cap_survives_exhausted_fire_budget():
+    """FIX 2 (root cause A): the per-turn LLM fire cap must gate ONLY the LLM stages. The cheap
+    deterministic ToolResultCapStage must still run when the cap is exhausted, so an oversized tool
+    result is capped instead of riding raw (52-72K chars) into the request."""
+    from localharness.agent.context import (
+        CompactionPipeline, ContextManager, TokenCounter, MAX_COMPACTION_FIRES_PER_TURN,
+    )
+
+    async def never_called(middle):
+        raise AssertionError("LLM summarizer must NOT run once the per-turn fire cap is exhausted")
+
+    tc = TokenCounter()
+    pipeline = CompactionPipeline(
+        token_counter=tc, tool_result_cap=1_000, llm_summarize_fn=never_called,
+        preserve_first_n=1, preserve_last_n=1,
+    )
+    cm = ContextManager(max_context_tokens=4_000, pipeline=pipeline, token_counter=tc)
+    cm._compaction_fires = MAX_COMPACTION_FIRES_PER_TURN  # fire budget already spent this turn
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _make_assistant_with_tool_call("tc-1"),
+        _make_tool_result("tc-1", "R" * 50_000),  # oversized: over the 0.80 window AND over the cap
+    ]
+    out, _budget = await cm.build_messages(messages)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, "the tool result must survive (capped), not be dropped by the floor"
+    assert len(tool_msgs[0]["content"]) <= 1_100, "oversized tool result must be capped to tool_result_cap"
+    assert "elided" in tool_msgs[0]["content"], "cap uses the head+tail keep marker"
+
+
+@pytest.mark.asyncio
+async def test_floor_shrinks_undroppable_final_message_with_marker():
+    """FIX 3 (root cause C): when the un-droppable remnant (system + the final message) itself
+    exceeds budget, dropping whole exchanges cannot help. The floor must head+tail SHRINK the
+    content as a true last resort so the request actually fits UNDER (budget - reply reserve)."""
+    from localharness.agent.context import ContextManager, TokenCounter, RESPONSE_RESERVE_TOKENS
+    tc = TokenCounter()
+    cm = ContextManager(max_context_tokens=8_000, token_counter=tc)  # no pipeline: floor is the only lever
+    huge = " ".join(f"tok{i}" for i in range(40_000))  # ~250K chars / tens of K tokens >> budget
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _make_assistant_with_tool_call("tc-1"),
+        _make_tool_result("tc-1", huge),  # final tool message larger than the whole budget
+    ]
+    out, budget = await cm.build_messages(messages)
+    # (1) the built request fits UNDER (budget - reserve) — room for the model's reply
+    assert budget.current_usage + budget.tool_schema_tokens <= cm.max_context_tokens - RESPONSE_RESERVE_TOKENS
+    # (2) content was visibly truncated with the head+tail marker (not silently dropped whole)
+    assert any("elided" in (m.get("content") or "") for m in out), "content must be shrunk with the marker"
+    assert out[-1].get("role") == "tool", "the final tool message must survive (shrunk), not be deleted"
+
+
+@pytest.mark.asyncio
+async def test_floor_reserves_response_headroom():
+    """FIX 3 (reserve): the floor must compare against (max_context_tokens - RESPONSE_RESERVE_TOKENS),
+    not the full budget — so a request that 'fits' still leaves room for the reply. A conversation
+    sized just above (max - reserve) but under max must trigger the floor and land headroom >= 0."""
+    from localharness.agent.context import ContextManager, TokenCounter, RESPONSE_RESERVE_TOKENS
+    tc = TokenCounter()
+    filler = " ".join(f"f{i}" for i in range(5_000))
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "OLD " + filler},   # big older exchange (droppable whole)
+        _make_assistant_with_tool_call("tc-1"),
+        _make_tool_result("tc-1", "ok-old"),
+        {"role": "user", "content": "NEW task"},
+        _make_assistant_with_tool_call("tc-2"),
+        _make_tool_result("tc-2", "ok-new"),
+    ]
+    total = tc.count_messages(messages)
+    # Place `total` inside (max - reserve, max]: old floor (keyed to max) would NOT fire, shipping a
+    # request with < reserve free; the fix (keyed to max - reserve) must fire and leave headroom >= 0.
+    max_ctx = total + RESPONSE_RESERVE_TOKENS // 2
+    assert max_ctx > RESPONSE_RESERVE_TOKENS, "budget must exceed the reserve so it actually applies"
+    cm = ContextManager(max_context_tokens=max_ctx, token_counter=tc)
+    out, budget = await cm.build_messages(messages)
+    assert budget.headroom >= 0, "floor must leave >= reserve tokens free for the model's reply"
+    non_system = [m for m in out if m.get("role") != "system"]
+    assert non_system and non_system[0]["role"] == "user"  # FIX 1 structure preserved by the floor
