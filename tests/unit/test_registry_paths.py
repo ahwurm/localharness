@@ -1,14 +1,13 @@
 """Phase 14 Wave 0 scaffolding for localharness.registry.paths + coerce.
 
 Covers walk_model_fields / get_value / set_value_in_dict / coerce_value
-(supporting REG-01..04). Tests xfail-strict=False so they XPASS once green.
+(supporting REG-01..04). Plan 14-02 landed; the xfail(strict=False) scaffolds are retired to plain assertions.
 """
 from __future__ import annotations
 
 import pytest
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_walk_model_fields_enumerates_harness_config_leaves():
     """walk_model_fields(HarnessConfig) yields all leaf dot-paths."""
     from localharness.config.models import HarnessConfig
@@ -19,7 +18,6 @@ def test_walk_model_fields_enumerates_harness_config_leaves():
     assert "org.audit_log_path" in paths
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_walk_model_fields_descends_nested_models():
     """walk_model_fields recurses into nested BaseModel fields."""
     from localharness.config.models import HarnessConfig
@@ -28,7 +26,6 @@ def test_walk_model_fields_descends_nested_models():
     assert any("." in p for p in paths)
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_walk_model_fields_treats_list_of_str_as_leaf():
     """list[str] fields are leaves; the walker MUST NOT descend into them."""
     from localharness.config.models import HarnessConfig
@@ -37,7 +34,6 @@ def test_walk_model_fields_treats_list_of_str_as_leaf():
     assert not any(p.startswith("permissions.deny_patterns.") for p in paths)
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_get_value_resolves_dot_path():
     """get_value walks getattr-style dot path against an object."""
     from localharness.config.models import HarnessConfig
@@ -50,7 +46,6 @@ def test_get_value_resolves_dot_path():
     assert isinstance(val, float)
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_get_value_unknown_path_raises_attribute_error():
     """get_value on a path that doesn't exist raises AttributeError."""
     from localharness.config.models import HarnessConfig
@@ -63,7 +58,6 @@ def test_get_value_unknown_path_raises_attribute_error():
         get_value(cfg, "totally.bogus.path")
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_set_value_in_dict_creates_nested_keys():
     """set_value_in_dict creates missing intermediate dict layers."""
     from localharness.registry.paths import set_value_in_dict
@@ -71,7 +65,6 @@ def test_set_value_in_dict_creates_nested_keys():
     assert result == {"a": {"b": {"c": 5}}}
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/paths.py not yet implemented", strict=False)
 def test_set_value_in_dict_preserves_siblings():
     """Setting a nested key never drops sibling entries."""
     from localharness.registry.paths import set_value_in_dict
@@ -80,21 +73,18 @@ def test_set_value_in_dict_preserves_siblings():
     assert base == {"a": {"b": 99, "c": 2}}
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/coerce.py not yet implemented", strict=False)
 def test_coerce_value_int():
     """coerce_value('5', int) returns 5."""
     from localharness.registry.coerce import coerce_value
     assert coerce_value("5", int) == 5
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/coerce.py not yet implemented", strict=False)
 def test_coerce_value_float():
     """coerce_value('0.75', float) returns 0.75."""
     from localharness.registry.coerce import coerce_value
     assert coerce_value("0.75", float) == 0.75
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/coerce.py not yet implemented", strict=False)
 def test_coerce_value_bool():
     """coerce_value handles canonical truthy/falsey strings against bool target."""
     from localharness.registry.coerce import coerce_value
@@ -102,7 +92,6 @@ def test_coerce_value_bool():
     assert coerce_value("false", bool) is False
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/coerce.py not yet implemented", strict=False)
 def test_coerce_value_rejects_bool_for_float_target():
     """Pitfall 4: 'False' must NOT silently coerce to 0.0 when target is float."""
     from localharness.registry.coerce import coerce_value
@@ -110,7 +99,6 @@ def test_coerce_value_rejects_bool_for_float_target():
         coerce_value("False", float)
 
 
-@pytest.mark.xfail(reason="Phase 14-02 registry/coerce.py not yet implemented", strict=False)
 def test_coerce_value_str_passthrough():
     """coerce_value('hello', str) returns 'hello' unchanged."""
     from localharness.registry.coerce import coerce_value

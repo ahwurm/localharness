@@ -1,10 +1,10 @@
-"""ARCH-03 — `localharness autoresearch archive` CLI surface (Phase 15 Wave 0 RED stubs).
+"""ARCH-03 — `localharness autoresearch archive` CLI surface.
 
-Each test is an xfail(strict=False) stub exercising one command path via CliRunner.
-Rows are seeded through an ArchiveStore opened on the SAME .localharness/archive.db
-path the CLI resolves from LOCALHARNESS_HOME (set by the components_home fixture).
-The `autoresearch archive` sub-app is wired in 15-04; until then invocations exit
-nonzero and these stubs go RED→GREEN as the CLI lands.
+Each test exercises one command path via CliRunner. Rows are seeded through an
+ArchiveStore opened on the SAME .localharness/archive.db path the CLI resolves from
+LOCALHARNESS_HOME (set by the components_home fixture). The `autoresearch archive`
+sub-app landed in 15-04; the Phase 15 Wave 0 xfail(strict=False) stubs are retired
+to plain assertions.
 """
 import json
 import os
@@ -55,7 +55,6 @@ async def _seed_rows(specs: list[dict]) -> ArchiveStore:
     return store
 
 
-@pytest.mark.xfail(strict=False, reason="autoresearch sub-app wired in 15-04")
 def test_subapp_registered():
     """`autoresearch archive --help` exits 0 and advertises list/show/approve."""
     result = runner.invoke(app, ["autoresearch", "archive", "--help"])
@@ -65,7 +64,6 @@ def test_subapp_registered():
     assert "approve" in result.output
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_list_table(components_home):
     """`archive list` renders a table containing each row's 8-char id + component."""
     ids = ["aaaaaaaa1111", "bbbbbbbb2222", "cccccccc3333"]
@@ -77,7 +75,6 @@ async def test_list_table(components_home):
     assert "agents.main.c0" in result.output
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_list_json(components_home):
     """`archive list --json` emits a list of dicts with the documented keys."""
     await _seed_rows([dict(id="json-row-1", train_score=0.5, p_value=0.01, cost=1.0)])
@@ -92,7 +89,6 @@ async def test_list_json(components_home):
     }.issubset(keys)
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_list_filters(components_home):
     """`--component`, `--status`, and `--limit` each narrow the result set."""
     await _seed_rows(
@@ -117,7 +113,6 @@ async def test_list_filters(components_home):
     assert len(json.loads(limited.stdout)) == 1
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_show_prefix_resolution(components_home):
     """`show <id[:8]>` resolves the unique row and prints fields + diff + lineage."""
     full_id = "abc12345deadbeef"
@@ -129,7 +124,6 @@ async def test_show_prefix_resolution(components_home):
     assert "lineage" in result.output.lower()
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_show_ambiguous_prefix(components_home):
     """`show <prefix>` matching >1 row exits 2 and lists the colliding ids."""
     await _seed_rows(
@@ -144,7 +138,6 @@ async def test_show_ambiguous_prefix(components_home):
     assert "dupprefix0002" in result.output
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_show_lineage_chain(components_home):
     """`show <c>` for an a->b->c chain lists c, b, a in lineage order."""
     await _seed_rows(
@@ -162,7 +155,6 @@ async def test_show_lineage_chain(components_home):
     assert -1 < pos_c < pos_b < pos_a  # rendered root-ward from the target
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-04")
 async def test_show_json(components_home):
     """`show <id> --json` includes a lineage array whose length equals the chain depth."""
     await _seed_rows(

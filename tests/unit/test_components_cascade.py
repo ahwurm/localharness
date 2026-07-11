@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 
-@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=False)
+@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=True)
 def test_user_overlay_wins_over_project(components_home):
     """User overrides.yaml wins over project config.yaml on the same path."""
     try:
@@ -35,7 +35,7 @@ def test_user_overlay_wins_over_project(components_home):
     raise NotImplementedError("Stub for 14-03")
 
 
-@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=False)
+@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=True)
 def test_project_wins_over_default(components_home):
     """Without a user overlay, project YAML value wins over Pydantic default."""
     try:
@@ -56,7 +56,7 @@ def test_project_wins_over_default(components_home):
     raise NotImplementedError("Stub for 14-03")
 
 
-@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=False)
+@pytest.mark.xfail(reason="Phase 14-03 cascade resolution not yet implemented", strict=True)
 def test_unknown_overlay_key_rejected_at_set_time(components_home):
     """extra=forbid: `set` with a typo'd dot-path exits non-zero AND does not write overlay."""
     try:
@@ -78,7 +78,7 @@ def test_unknown_overlay_key_rejected_at_set_time(components_home):
     raise NotImplementedError("Stub for 14-03")
 
 
-@pytest.mark.xfail(reason="Phase 17 experiment overlay layer not yet implemented", strict=False)
+@pytest.mark.xfail(reason="Phase 17 experiment overlay layer not yet implemented", strict=True)
 def test_experiment_overlay_wins_over_user(components_home):
     """Phase 17 forward-compat: experiment overlay wins over user overlay."""
     try:
