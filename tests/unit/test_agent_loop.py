@@ -1427,6 +1427,102 @@ async def test_act_guard_confirmed_surfaces_prior_reply(bus, tmp_path):
     assert session.terminated_reason == "complete"             # (d) clean finish
 
 
+# ---------------------------------------------------------------------------
+# Reasoning-parser tool turns: content=None must never enter history/payloads
+# (C0 sweep: vLLM request validation rejects replayed content:None -> HTTP 400,
+# poisoning every later turn in the session)
+# ---------------------------------------------------------------------------
+
+
+class _ReasoningParserToolCallLLM:
+    """Reasoning-parser shape (--reasoning-parser qwen3): the tool-call turn returns
+    content=None — ALL tokens went to reasoning + tool_calls. Records every outgoing
+    request payload so tests can assert exactly what would hit the server. Optional
+    first-turn content string covers the passthrough case."""
+
+    def __init__(self, first_content=None):
+        self.calls = 0
+        self.first_content = first_content
+        self.seen_payloads: list[list[dict]] = []
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.seen_payloads.append([dict(m) for m in (messages or [])])
+        self.calls += 1
+        if self.calls == 1:
+            return NS(content=self.first_content, tool_calls=[
+                {"id": "tc-none", "type": "function",
+                 "function": {"name": "glob", "arguments": '{"pattern": "*.py"}'}}]), None
+        return NS(content="all done", tool_calls=None), None
+
+
+async def _run_reasoning_parser_double(bus, tmp_path, llm):
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "none-content-agent", "role": "Test.",
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="none-content-agent", session_id="s-none", messages=[])
+    await loop._execute_loop(session, "list the python files", None)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_none_content_tool_turn_history_entry_normalized(bus, tmp_path):
+    """The assistant tool-call turn with content=None must land in history with
+    content:"" (never None) and tool_calls intact — every later request replays
+    the entry and vLLM rejects None ('Input should be a valid string')."""
+    llm = _ReasoningParserToolCallLLM()
+    session = await _run_reasoning_parser_double(bus, tmp_path, llm)
+
+    asst = next(m for m in session.messages
+                if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert asst["content"] == ""                              # not None
+    assert asst["tool_calls"][0]["id"] == "tc-none"           # tool_calls not dropped
+
+
+@pytest.mark.asyncio
+async def test_none_content_tool_turn_second_request_payload_valid(bus, tmp_path):
+    """Two-turn double: turn 1 returns content=None + tool_calls; the NEXT request's
+    actual outgoing payload must contain no None content in ANY message (the exact
+    shape vLLM 400s on) and the turn must complete."""
+    llm = _ReasoningParserToolCallLLM()
+    session = await _run_reasoning_parser_double(bus, tmp_path, llm)
+
+    assert llm.calls >= 2
+    second = llm.seen_payloads[1]
+    offenders = [m for m in second if m.get("content") is None]
+    assert offenders == []                                    # nothing None on the wire
+    asst = next(m for m in second if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert asst["content"] == ""
+    assert session.terminated_reason == "complete"
+
+
+@pytest.mark.asyncio
+async def test_string_content_tool_turn_passes_through_untouched(bus, tmp_path):
+    """Normalization only rewrites None: a tool-call turn WITH real string content
+    keeps it verbatim in history."""
+    llm = _ReasoningParserToolCallLLM(first_content="Let me check the files.")
+    session = await _run_reasoning_parser_double(bus, tmp_path, llm)
+
+    asst = next(m for m in session.messages
+                if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert asst["content"] == "Let me check the files."
+
+
 @pytest.mark.asyncio
 async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
     """The single act-guard nudge asks for the bare CONFIRMED sentinel and never invites a

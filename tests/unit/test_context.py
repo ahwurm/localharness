@@ -69,6 +69,28 @@ async def test_build_messages_calls_repair_internally():
     assert all(m.get("role") != "tool" for m in result)
 
 
+@pytest.mark.asyncio
+async def test_build_messages_normalizes_none_content_to_empty_string():
+    """Wire safety: vLLM's request validation rejects content:None ('Input should
+    be a valid string' -> HTTP 400). Reasoning-parser tool turns legitimately
+    produce assistant content=None, and persisted/legacy history may carry it for
+    any role — build_messages must never let None reach the payload (symmetric:
+    assistant/tool/user), while string content and tool_calls pass untouched."""
+    cm = ContextManager()
+    messages = [
+        {"role": "user", "content": "go"},
+        _make_assistant_with_tool_call("tc-1"),                      # content: None
+        {"role": "tool", "tool_call_id": "tc-1", "content": None},   # symmetric case
+        {"role": "assistant", "content": "plain reply"},
+    ]
+    result, _budget = await cm.build_messages(messages)
+    assert all(m.get("content") is not None for m in result)
+    asst = next(m for m in result if m.get("tool_calls"))
+    assert asst["content"] == ""                                     # normalized
+    assert asst["tool_calls"][0]["id"] == "tc-1"                     # tool_calls intact
+    assert result[-1]["content"] == "plain reply"                    # strings untouched
+
+
 # --- Phase 4: TokenCounter + TokenBudget ---
 
 def test_token_counter_tiktoken():
