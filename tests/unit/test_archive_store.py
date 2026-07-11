@@ -1,11 +1,11 @@
-"""ARCH-01 — ArchiveStore persistence contract (Phase 15 Wave 0 RED stubs).
+"""ARCH-01 — ArchiveStore persistence contract.
 
-Each test is an xfail(strict=False) stub: it encodes the intended behavior with a
-real assertion so it goes RED→GREEN as the ArchiveStore implementation lands
-(write/get/reopen/FK-RESTRICT/migration/event-emit/approval-history land in 15-02).
+These began as Phase 15 Wave 0 xfail(strict=False) RED stubs; the ArchiveStore
+implementation landed in 15-02 (write/get/reopen/FK-RESTRICT/migration/event-emit/
+approval-history), so the scaffolds are retired to plain assertions that fail loud
+on regression.
 
-Module-level import is guarded so collection never breaks before the module ships;
-once it exists the import resolves and the xfail markers govern pass/fail.
+Module-level import is guarded so collection never breaks if the module is absent.
 """
 import sqlite3
 
@@ -17,7 +17,6 @@ except ImportError:
     pytest.skip("ArchiveStore not yet implemented (15-02)", allow_module_level=True)
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_write_read_round_trip_all_fields(archive_store, seeded_archive):
     """All 12 fields (incl. nested per-fixture dict + diff JSON blob) round-trip exactly."""
     import json
@@ -57,7 +56,6 @@ async def test_write_read_round_trip_all_fields(archive_store, seeded_archive):
     assert got.status == "promoted"
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_survives_reopen(tmp_path):
     """A row written by one store is readable after closing and reopening a NEW store on the same path."""
     import json
@@ -91,7 +89,6 @@ async def test_survives_reopen(tmp_path):
     await reopened.close()
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_parent_delete_restricted(archive_store, seeded_archive):
     """Deleting a row that is a lineage parent raises IntegrityError (ON DELETE RESTRICT)."""
     await seeded_archive(
@@ -106,7 +103,6 @@ async def test_parent_delete_restricted(archive_store, seeded_archive):
         await archive_store._db.commit()
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_user_version_set_on_open(tmp_path):
     """PRAGMA user_version is 1 after open and stays 1 across a reopen (idempotent migration)."""
     path = tmp_path / ".localharness" / "archive.db"
@@ -125,7 +121,6 @@ async def test_user_version_set_on_open(tmp_path):
     await reopened.close()
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_write_emits_event(tmp_path, bus):
     """write() publishes a MutationArchived event whose mutation_id matches the written row id."""
     import json
@@ -164,7 +159,6 @@ async def test_write_emits_event(tmp_path, bus):
     await store.close()
 
 
-@pytest.mark.xfail(strict=False, reason="impl lands in 15-02")
 async def test_approval_appends_history(archive_store, seeded_archive):
     """add_approval twice updates mutations.approved_by to the latest approver and appends 2 history rows."""
     [entry] = await seeded_archive(archive_store, [dict(id="appr-1", status="in_flight")])

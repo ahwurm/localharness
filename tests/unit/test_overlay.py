@@ -1,14 +1,13 @@
 """Phase 14 Wave 0 scaffolding for localharness.config.overlay.
 
 Covers requirement REG-03 (atomic write + deep_merge + load round-trip).
-Plan 14-02 lands overlay.py — tests xfail-strict=False so they XPASS once green.
+Plan 14-02 landed overlay.py — the xfail(strict=False) scaffolds are retired to plain assertions.
 """
 from __future__ import annotations
 
 import pytest
 
 
-@pytest.mark.xfail(reason="Phase 14-02 overlay.py concurrency stress test", strict=False)
 def test_atomic_write_no_torn_file(components_home):
     """REG-03: 100 sequential writes with concurrent reads never produce torn YAML."""
     from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -20,7 +19,6 @@ def test_atomic_write_no_torn_file(components_home):
         assert restored == {"agent": {"counter": i}}
 
 
-@pytest.mark.xfail(reason="Phase 14-02 overlay.py not yet implemented", strict=False)
 def test_deep_merge_scalars_replace_recurse_dicts():
     """deep_merge replaces scalars and recurses into dicts."""
     from localharness.config.overlay import deep_merge
@@ -28,7 +26,6 @@ def test_deep_merge_scalars_replace_recurse_dicts():
     assert result == {"a": {"b": 99, "c": 2}}
 
 
-@pytest.mark.xfail(reason="Phase 14-02 overlay.py not yet implemented", strict=False)
 def test_load_overlay_missing_file_returns_empty_dict(components_home):
     """load_overlay returns {} when overlay file does not exist."""
     from localharness.config.overlay import load_overlay
@@ -37,7 +34,6 @@ def test_load_overlay_missing_file_returns_empty_dict(components_home):
     assert load_overlay(overlay_path) == {}
 
 
-@pytest.mark.xfail(reason="Phase 14-02 overlay.py not yet implemented", strict=False)
 def test_load_overlay_round_trip(components_home):
     """atomic_write_overlay then load_overlay returns identical dict."""
     from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -48,7 +44,6 @@ def test_load_overlay_round_trip(components_home):
     assert restored == data
 
 
-@pytest.mark.xfail(reason="Phase 14-02 overlay.py not yet implemented", strict=False)
 def test_atomic_write_uses_same_dir_tempfile(components_home, monkeypatch):
     """NamedTemporaryFile must receive dir=parent so os.replace stays atomic."""
     from localharness.config import overlay as overlay_mod
