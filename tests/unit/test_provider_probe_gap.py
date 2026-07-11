@@ -250,6 +250,20 @@ def test_build_bench_client_timeout_is_600(monkeypatch):
     assert client.config.timeout_seconds == 600.0
 
 
+def test_build_bench_client_context_window_uses_canonical_default(monkeypatch):
+    """#13: when a matrix entry sets no num_ctx, the bench client must fall back to the
+    canonical DEFAULT_MAX_CONTEXT_TOKENS (131_072), not a bare 128_000 literal."""
+    from unittest.mock import patch
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import MatrixEntry
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
+    entry = MatrixEntry(name="m", provider="vllm", model_id="x", base_url="http://localhost:8000/v1")
+    with patch("localharness.provider.client.AsyncOpenAI"):
+        client = orch._build_bench_client(entry)
+    assert client.config.context_window == DEFAULT_MAX_CONTEXT_TOKENS
+
+
 # --------------------------------------------------------------------------- #
 # Task 3A — AUDIT-03c: proposer hardcodes tool_call_mode='native' (RED)
 # --------------------------------------------------------------------------- #

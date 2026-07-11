@@ -192,3 +192,23 @@ def test_doctor_llamacpp_meta_nctx_reconciles(mock_httpx, tmp_path):
 
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert "not reported" not in result.output.lower()
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_lmstudio_reconciles_served_window(mock_httpx, tmp_path):
+    """#13: LM Studio reports its window at /api/v0/models (loaded_context_length /
+    max_context_length), NOT /v1/models. Doctor must query it to reconcile the budget instead
+    of reporting 'max_model_len not reported'."""
+    _write_config(tmp_path, "lmstudio", "http://localhost:1234/v1", model="m")
+    v1 = _models_resp({"data": [{"id": "m"}]})  # /v1/models exposes no window
+    apiv0 = _models_resp(
+        {"data": [{"id": "m", "state": "loaded", "loaded_context_length": 8192,
+                   "max_context_length": 32768}]}
+    )
+    mock_httpx.get.side_effect = [v1, apiv0]
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    urls = [c.args[0] for c in mock_httpx.get.call_args_list]
+    assert any("/api/v0/models" in u for u in urls), urls  # discovered the served window
+    assert "not reported" not in result.output.lower()
