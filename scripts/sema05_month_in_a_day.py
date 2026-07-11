@@ -119,8 +119,8 @@ from localharness.memory.sqlite import (  # noqa: E402
 _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this MemAvailable.
 _LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
 _TURN_FAILED_RATE_MAX = 0.20  # MOVE 0b: a sitting above this TurnFailed rate -> verdict INVALID.
-_GRADING_DOC = ".planning/phases/36-chapter-writer/36-SEMA05-GRADING.md"
-_GRADING_DOC_36_1 = ".planning/phases/36-chapter-writer/36.1-DESIGNED-MONTH-GRADING.md"  # MOVE 4
+_GRADING_DOC = "SEMA-05 month-in-a-day grading protocol (internal)"
+_GRADING_DOC_36_1 = "designed-month grading protocol (internal)"  # MOVE 4
 _GRADING_COMMITTED = "2026-07-05T17:43:47Z"  # the LOCKED pre-commitment timestamp (quoted in report)
 _ROLE = (
     "Personal assistant on the owner's box. Answer directly and use tools only when the "
@@ -973,8 +973,8 @@ async def _sensitivity(store: MemoryStore, cfg: MemoryConsolidationConfig) -> di
 
 # ===========================================================================
 # MOVE 4 — the designed-month manifest mode. Drive from a ground-truth manifest
-# (query -> expected topic) and grade GROUPING QUALITY DIRECTLY (Stages A/B/C per
-# .planning/phases/36-chapter-writer/36.1-DESIGNED-MONTH-GRADING.md), not the tool-avoidance
+# (query -> expected topic) and grade GROUPING QUALITY DIRECTLY (Stages A/B/C per the
+# pre-committed designed-month grading protocol, internal), not the tool-avoidance
 # proxy. Session ids are `designed-{day}`; consolidation runs BETWEEN days (as today's pass).
 # ===========================================================================
 

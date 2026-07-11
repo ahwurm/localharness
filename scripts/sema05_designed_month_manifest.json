@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "36.1 designed-month eval: 6 synthetic topics with known expected grouping across 3 sittings. Grading: .planning/phases/36-chapter-writer/36.1-DESIGNED-MONTH-GRADING.md (pre-committed). No PII; topics mirror real usage SHAPES, not content.",
+  "description": "36.1 designed-month eval: 6 synthetic topics with known expected grouping across 3 sittings. Grading: designed-month grading protocol (internal, pre-committed). No PII; topics mirror real usage SHAPES, not content.",
   "days": [
     "day1",
     "day2",

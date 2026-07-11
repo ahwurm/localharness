@@ -85,8 +85,9 @@ figure ([gaps.md](gaps.md) §1).
 ## Harness configuration
 
 `localharness init` detects vLLM on `:8081`/`:8000` automatically; with no server
-running, its guided setup can install the container runtime, download a checkpoint, and
-launch on `:8081` (this architecture). Per-agent overrides required
+running, its guided setup uses the container route — Docker and the NVIDIA container
+toolkit must already be installed — pulling the vLLM image, downloading a checkpoint, and
+launching on `:8081` (this architecture). Per-agent overrides required
 today (until the gaps below are closed):
 
 ```yaml
