@@ -670,7 +670,9 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
 
     class _StubTokenCounter:
         # the real TokenCounter FAILS LOUD without a /tokenize server
-        def __init__(self, base_url=None, model=None):
+        approximate = False
+
+        def __init__(self, base_url=None, model=None, provider_type=None):
             pass
 
         def count(self, text=""):

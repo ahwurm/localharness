@@ -558,20 +558,35 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"mcp: {exc}")
 
     # --- 6b. Model-aware token counter (one instance, injected everywhere) ---
-    # Counts via the served model's exact tokenizer (vLLM /tokenize) when the runtime serves it,
-    # so budget gates fire at the real fraction. #8: a runtime WITHOUT that endpoint (Ollama /
-    # LM Studio / llama.cpp) no longer hard-fails `start` — TokenCounter self-detects and falls
-    # back to the approximate cl100k meter with one clear log line (gates then fire conservatively
-    # rather than overflowing). This except only trips if NO tokenizer is available at all
-    # (tiktoken missing) — a genuinely unusable environment.
+    # Counts via the served model's exact tokenizer so budget gates fire at the real fraction.
+    # Provider-aware (#8): vLLM ({model,prompt}->{count}) and llama.cpp ({content}->{tokens})
+    # both count EXACTLY; a KNOWN exact runtime whose /tokenize is unreachable hard-fails here
+    # (doctor's check 5c reports the same) rather than silently mis-metering — an approximate
+    # meter is what hid the context overflows (400s). Ollama / LM Studio serve no tokenize
+    # endpoint, so they run in EXPLICIT approximate mode (cl100k x safety factor, over-counting)
+    # surfaced by the warning below. This except also trips if NO tokenizer exists (tiktoken
+    # missing) — a genuinely unusable environment.
     try:
-        token_counter = TokenCounter(base_url=provider.base_url, model=resolved_model)
+        token_counter = TokenCounter(
+            base_url=provider.base_url,
+            model=resolved_model,
+            provider_type=provider.provider_type,
+        )
     except RuntimeError as exc:
         err_console.print(
             f"[bold red]Error:[/bold red] {exc}\n"
-            f"No token counter is available (tiktoken not installed). Run 'uv sync' to install it."
+            f"Ensure the model server at {provider.base_url} exposes an exact tokenizer "
+            f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry."
         )
         raise typer.Exit(1)
+    if token_counter.approximate:
+        from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR
+        console.print(
+            f"[yellow]⚠[/yellow]  {provider.provider_type} serves no tokenize endpoint — "
+            f"token accounting uses a conservative estimate (cl100k × "
+            f"{APPROX_TOKENIZE_SAFETY_FACTOR}): budget gates fire early rather than overflow. "
+            f"For exact counts use vLLM or llama.cpp."
+        )
 
     # --- 7. Compaction pipeline (soft) ---
     pipeline: CompactionPipeline | None = None
