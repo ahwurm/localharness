@@ -681,6 +681,10 @@ class AgentLoop:
 
         while True:
             session.iteration += 1
+            # FIX 4: wire the real per-turn iteration into the ContextManager so the emergency-floor
+            # log and CompactionTriggered events carry it (production never called set_iteration).
+            if hasattr(self._ctx, "set_iteration"):
+                self._ctx.set_iteration(session.iteration)
             log.debug(
                 "agent=%s iter=%d actions=%d elapsed=%.1fs",
                 self._config.name,
@@ -797,9 +801,9 @@ class AgentLoop:
             except ProviderAPIError as exc:
                 if exc.status_code == 400:
                     log.error(
-                        "HTTP 400 from LLM in %s — possible orphaned tool_result. "
-                        "Request messages: %s",
+                        "HTTP 400 from LLM in %s — server error: %s. Request messages: %s",
                         self._config.name,
+                        str(exc)[:300],
                         json.dumps(request_messages, default=str),
                     )
                 session.terminated_reason = "error"
@@ -1136,6 +1140,8 @@ class AgentLoop:
             return StepResult(action="budget")
 
         session.iteration += 1
+        if hasattr(self._ctx, "set_iteration"):  # FIX 4: carry the real iteration into ctx (step path)
+            self._ctx.set_iteration(session.iteration)
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
