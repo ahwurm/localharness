@@ -1006,6 +1006,25 @@ def _mining_write_budget() -> int:
     return 500
 
 
+def _build_consolidation_cfg(manifest: dict, overrides_json: str = "{}") -> MemoryConsolidationConfig:
+    """Grading-phase consolidation config for the designed month, made SWEEPABLE.
+
+    The three eval defaults (reconcile ON + the two non-starving single-pass budgets) are the base;
+    a sweep passes `overrides_json` — a JSON object of MemoryConsolidationConfig field overrides —
+    which merges in LAST so any collision wins there (dict-merge into a single splat, so a duplicate
+    field can NEVER raise a duplicate-keyword TypeError). Failures are LOUD by design: malformed JSON
+    raises json.JSONDecodeError and a typo'd/unknown or out-of-range knob raises pydantic
+    ValidationError (extra='forbid') — a silently ignored override would void a whole sweep run.
+    Default "{}" reproduces the original hardcoded construction field-for-field."""
+    kwargs = {
+        "reconcile_enabled": True,
+        "schema_write_budget": _schema_write_budget(manifest),
+        "mining_write_budget": _mining_write_budget(),
+        **json.loads(overrides_json),
+    }
+    return MemoryConsolidationConfig(**kwargs)
+
+
 def _c2(n: int) -> int:
     return n * (n - 1) // 2
 
@@ -1571,10 +1590,10 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
         # the global budget can't abort the transcript tail (run-6 lost 41%) — the single-pass-eval
         # bound (500), distinct from the shipped production default (50), which the recurring path's
         # deferral covers. REVIEW FIX: both eval budgets go through the CTOR so pydantic validates
-        # them (the old post-construction assignment silently bypassed field validation).
-        cfg = MemoryConsolidationConfig(reconcile_enabled=True,
-                                        schema_write_budget=_schema_write_budget(manifest),
-                                        mining_write_budget=_mining_write_budget())
+        # them (the old post-construction assignment silently bypassed field validation). SWEEP
+        # UNLOCK: --cfg-overrides threads any MemoryConsolidationConfig knob through this same CTOR
+        # (last-wins over the three eval defaults), so a sweep varies more than just --idle-passes.
+        cfg = _build_consolidation_cfg(manifest, args.cfg_overrides)
         # REPAIR-LOOP protocol (2026-07-09): the residue ledger is AMORTIZED — pass N enqueues
         # what pass N+1 drains — so a single idle cycle structurally cannot grade the repair
         # loop (rescues would never fire and the eval would under-measure the shipped system).
@@ -2006,6 +2025,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Consolidation cycles before grading (default 2: the residue-repair loop "
                         "is amortized — pass N enqueues what pass N+1 drains — so a single-pass "
                         "eval structurally cannot grade rescues; a real month has many quiet cycles).")
+    p.add_argument("--cfg-overrides", default="{}",
+                   help='JSON object of MemoryConsolidationConfig field overrides, e.g. '
+                        '\'{"mining_novelty_fold_threshold": 0.35}\'. Merges LAST over the eval '
+                        'defaults; an unknown/typo\'d knob or bad JSON fails loudly at startup.')
     p.add_argument("--offline", action="store_true",
                    help="Use the bundled fakes + skip the live vLLM/watchdog (CI).")
     return p.parse_args(argv)
