@@ -1,6 +1,7 @@
 """Tests for localharness.core.bus — EventBus publish/subscribe/replay/wait_for/history."""
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,90 @@ async def test_subscriber_exception_isolated(bus: EventBus):
     await bus.publish(_action())
     # handler_b should still receive despite handler_a raising
     assert len(received_b) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sync (plain def) handlers — first-class dispatch, no await-None TypeError
+# ---------------------------------------------------------------------------
+
+class _LogSpy:
+    """Records the bus's error-isolation calls (log.exception) with the active exception."""
+
+    def __init__(self):
+        self.exceptions: list[tuple[str, BaseException | None]] = []
+
+    def exception(self, event_name, **kw):
+        self.exceptions.append((event_name, sys.exc_info()[1]))
+
+    def __getattr__(self, name):  # warning/error/info/debug — ignore
+        return lambda *a, **kw: None
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_dispatches_without_typeerror(bus: EventBus, monkeypatch):
+    """A plain `def` handler must be first-class: its side effect runs and NO
+    await-None TypeError is absorbed into the subscriber_error isolation log.
+    (Live bug: subscribe()'s `filtered` wrapper does `await handler(event)`
+    unconditionally — a sync handler returns None -> `await None` -> TypeError
+    on every real event, masking real errors in the publishing turn.)"""
+    spy = _LogSpy()
+    monkeypatch.setattr("localharness.core.bus.log", spy)
+    received = []
+
+    def sync_handler(event: Action):  # deliberately NOT async
+        received.append(event)
+
+    bus.subscribe(Action, sync_handler)
+    await bus.publish(_action())
+
+    assert len(received) == 1
+    assert spy.exceptions == []
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_handlers_coexist(bus: EventBus):
+    """Async handlers are still genuinely awaited when sync handlers share the event."""
+    got_sync, got_async = [], []
+
+    def sync_handler(event: Action):
+        got_sync.append(event)
+
+    async def async_handler(event: Action):
+        await asyncio.sleep(0)  # real suspension point — must be awaited to land
+        got_async.append(event)
+
+    bus.subscribe(Action, sync_handler)
+    bus.subscribe(Action, async_handler)
+    await bus.publish(_action())
+
+    assert len(got_sync) == 1
+    assert len(got_async) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_own_exception_still_isolated_not_swallowed(bus: EventBus, monkeypatch):
+    """A RAISING sync handler's own error still flows into the standard
+    subscriber_error isolation (fixing await-None must not swallow handler
+    errors), and other subscribers still receive the event."""
+    spy = _LogSpy()
+    monkeypatch.setattr("localharness.core.bus.log", spy)
+    received_b = []
+
+    def bad_sync_handler(event: Action):
+        raise ValueError("sync boom")
+
+    async def handler_b(event: Action):
+        received_b.append(event)
+
+    bus.subscribe(Action, bad_sync_handler)
+    bus.subscribe(Action, handler_b)
+    await bus.publish(_action())
+
+    assert len(received_b) == 1
+    assert len(spy.exceptions) == 1
+    _, exc = spy.exceptions[0]
+    assert isinstance(exc, ValueError)  # its OWN error — not an await-None TypeError
+    assert "sync boom" in str(exc)
 
 
 # ---------------------------------------------------------------------------
