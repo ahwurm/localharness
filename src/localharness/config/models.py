@@ -719,8 +719,11 @@ class ContextConfig(BaseModel):
         ge=100,
         le=500_000,
         description=(
-            "Maximum characters of tool output to include in a single Observation. "
-            "Output exceeding this limit is truncated with a '... [truncated]' suffix."
+            "Maximum characters of a single tool result kept in context. Consumed as the "
+            "compaction pipeline's tool_result_cap: on every over-threshold build the "
+            "deterministic ToolResultCapStage head+tail truncates any tool result longer than this "
+            "(keeping both ends, with an elision marker), before the LLM summary/compaction stages "
+            "run — so oversized results are capped even after the per-turn LLM fire cap is spent."
         ),
     )
 
