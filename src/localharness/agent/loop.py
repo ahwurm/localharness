@@ -831,7 +831,13 @@ class AgentLoop:
             # 6. Strip thinking tags and push assistant response to session
             from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
             raw_content = getattr(response_message, "content", None)
-            content = strip_thinking_tags(raw_content) if raw_content else raw_content
+            # Reasoning-parser tool turns (--reasoning-parser) legitimately return
+            # content=None — every token went to reasoning + tool_calls. None must never
+            # enter history: each later request replays the entry and vLLM's request
+            # validation rejects it ('content.str: Input should be a valid string' ->
+            # HTTP 400), poisoning the rest of the session. Normalize to "" here (and
+            # symmetrically at the build_messages egress); tool_calls stay untouched.
+            content = strip_thinking_tags(raw_content) if raw_content else ""
             raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
             try:
                 response_message.tool_calls = raw_tool_calls  # extraction must match history
