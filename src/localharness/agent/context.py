@@ -45,8 +45,7 @@ _TOOL_STUB_PREFIX = "[tool result evicted"
 # - MAX_COMPACTION_FIRES_PER_TURN: backstop cap on expensive summarizer runs per turn.
 # - Emergency floor (build_messages): overflow is IMPOSSIBLE — at the cap / with no safe cut,
 #   utilization above 100% hard-truncates the oldest non-system messages, loudly logged.
-# Deep re-trigger diagnosis stays a separate open item — see
-# .planning/research/2026-07-06-semantic-recenter.md §1 Q5.
+# Deep re-trigger diagnosis (why utilization re-approaches the trigger) stays a separate open item.
 MAX_COMPACTION_FIRES_PER_TURN: int = 3
 COMPACTION_TARGET_USAGE_FRACTION: float = 0.60
 

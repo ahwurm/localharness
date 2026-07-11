@@ -76,7 +76,7 @@ uv run localharness init    # probes vLLM :8081/:8000, Ollama :11434, LM Studio 
 uv run localharness start   # interactive session
 ```
 
-`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture), it installs vLLM, downloads the reference model, and launches the server — then `start` just works. Inside the REPL, `/model` lists served + downloaded models and swaps between them. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
+`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
 
 > Got it running? If LocalHarness saved you an API bill, a [star](https://github.com/ahwurm/localharness/stargazers) helps other local-LLM folks find it.
 
