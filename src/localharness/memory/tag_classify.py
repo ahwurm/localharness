@@ -10,9 +10,12 @@ char-capped idle path.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from localharness.memory.idle_llm import complete_cancellable
+
+if TYPE_CHECKING:
+    from localharness.memory.sqlite import Tag
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +40,14 @@ def _menu(tags: list[Any]) -> str:
     return "\n".join(f"  {t.name} — {t.definition}" for t in tags)
 
 
-async def file_atom_tags(
-    store: Any, llm: Any, cancel_event: Any, *, atom_id: int, topic: str, claim: str,
-    provenance: str = "mint",
-) -> tuple[str | None, str | None]:
-    """Two-step closed-set filing for one atom. Writes atom_tags rows (provenance='mint' at mint
-    time; 'backfill' from the idle classify step, F4) for the chosen bucket and, if any, the
-    chosen child. Returns (bucket_name|None, child_name|None) for observability. Never raises —
-    a failure just leaves the atom less-tagged."""
+async def classify_atom_tags(
+    store: Any, llm: Any, cancel_event: Any, *, topic: str, claim: str,
+) -> "tuple[Tag | None, Tag | None]":
+    """The CLASSIFY half of filing: two sequential closed-set picks (bucket, then child) returning
+    the chosen `Tag` OBJECTS (or None) and writing NOTHING. `file_atom_tags` = this + add_atom_tag.
+    RULING-D: mining reads the returned child Tag as the grouping axis BEFORE it decides the
+    fold/`replaces=` scope (classify ONCE per atom up front, then write the tags after the mint).
+    Never raises — a classify failure just yields (None, None) and the atom degrades to less-tagged."""
     try:
         buckets = await store.buckets()
         if not buckets:
@@ -59,11 +62,11 @@ async def file_atom_tags(
         bucket = _norm(raw_b or "")
         if bucket not in by_bucket:
             return None, None  # invalid bucket -> untagged (the mint already happened)
-        await store.add_atom_tag(atom_id, by_bucket[bucket].id, provenance)
+        bucket_tag = by_bucket[bucket]
 
-        children = await store.active_children(by_bucket[bucket].id)
+        children = await store.active_children(bucket_tag.id)
         if not children:
-            return bucket, None
+            return bucket_tag, None
         by_child = {c.name: c for c in children}
         child_prompt = (
             f"{_CHILD_MARKER}, or answer 'none'. Answer with EXACTLY one name and nothing else.\n"
@@ -74,9 +77,24 @@ async def file_atom_tags(
         raw_c = await complete_cancellable(llm, child_prompt, cancel_event, char_cap=_CLASSIFY_CHARS)
         child = _norm(raw_c or "")
         if child in by_child:
-            await store.add_atom_tag(atom_id, by_child[child].id, provenance)
-            return bucket, child
-        return bucket, None  # 'none' or garbage -> bucket-only
+            return bucket_tag, by_child[child]
+        return bucket_tag, None  # 'none' or garbage -> bucket-only
     except Exception:
-        log.warning("mint-time tag filing failed (non-fatal)", exc_info=True)
+        log.warning("mint-time tag classify failed (non-fatal)", exc_info=True)
         return None, None
+
+
+async def file_atom_tags(
+    store: Any, llm: Any, cancel_event: Any, *, atom_id: int, topic: str, claim: str,
+    provenance: str = "mint",
+) -> tuple[str | None, str | None]:
+    """Two-step closed-set filing for one atom = classify_atom_tags + write. Writes atom_tags rows
+    (provenance='mint' at mint time; 'backfill' from the idle classify step, F4) for the chosen
+    bucket and, if any, the chosen child. Returns (bucket_name|None, child_name|None) for
+    observability. Signature + return UNCHANGED (F4 caller depends on it). Never raises."""
+    bucket, child = await classify_atom_tags(store, llm, cancel_event, topic=topic, claim=claim)
+    if bucket is not None:
+        await store.add_atom_tag(atom_id, bucket.id, provenance)
+    if child is not None:
+        await store.add_atom_tag(atom_id, child.id, provenance)
+    return (bucket.name if bucket else None, child.name if child else None)

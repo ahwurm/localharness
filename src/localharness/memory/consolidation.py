@@ -404,6 +404,8 @@ class ConsolidationPass:
             novelty_fold_threshold=self._cfg.mining_novelty_fold_threshold,
             completions_log=report.mining_completions,  # FIX 2c: persist raw completions
             file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
+            # RULING-D: fold scope + replaces=/B4(i) validity key off the child tag (KILL lever)
+            tag_grouping=getattr(self._cfg, "tag_grouping_enabled", True),
         )
         report.mined = m.written
         report.mined_records_seen = m.records_seen      # STAGE 1 coverage
