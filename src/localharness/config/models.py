@@ -503,13 +503,15 @@ class MemoryConsolidationConfig(BaseModel):
         ),
     )
     tag_grouping_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
             "RULING-D grouping truth: when True, mining's fold scope + replaces=/B4(i) supersede "
             "validity key off the validated CHILD TAG axis (not the freely-guessed slug), so a "
             "wrong topic word can neither merge two unrelated facts nor authorize a correction. "
-            "False = the pre-committed KILL revert: tags return to decoration, mining falls back "
-            "byte-behavior-identical to the pre-36.2 slug scoping (migration atom_tags data kept). "
+            "SHIPS False: the re-key's pre-committed regression gate fired on its first live proof "
+            "(2026-07-12 — a real tag-identity reconciliation gap on the corrections axis), so the "
+            "mechanism ships dormant pending its re-attempt. False = byte-behavior-identical to "
+            "pre-36.2 slug scoping (any migration atom_tags data is kept, unused). "
             "Mutable via `localharness components set agent.memory.consolidation.tag_grouping_enabled <true|false>`."
         ),
     )
