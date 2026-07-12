@@ -382,6 +382,117 @@ async def test_grep_tool_context_lines(tmp_path: Path):
     assert "line4" in result.output
 
 
+# ---------------------------------------------------------------------------
+# grep bounded-walk guards (#21): exclusions, size/binary skips, scan caps.
+# Caps are module-level constants so these tests can patch them low.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grep_excludes_hidden_and_vendor_dirs_opt_in_with_flag(tmp_path: Path):
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("GITMATCH here\n")
+    (tmp_path / ".venv" / "lib").mkdir(parents=True)
+    (tmp_path / ".venv" / "lib" / "mod.py").write_text("VENVMATCH here\n")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("NODEMATCH here\n")
+
+    tool = GrepTool()
+    default = await tool.run(pattern="MATCH", path=str(tmp_path))
+    assert default.success is True
+    assert default.output == "(no matches)"  # hidden + vendor dirs pruned at walk time
+
+    revealed = await tool.run(pattern="MATCH", path=str(tmp_path), include_hidden=True)
+    assert revealed.success is True
+    assert "GITMATCH" in revealed.output       # hidden dir revealed by the flag
+    assert "VENVMATCH" in revealed.output       # hidden dir revealed by the flag
+    assert "NODEMATCH" not in revealed.output   # non-hidden vendor dir stays excluded
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_oversized_files(tmp_path: Path):
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    big = tmp_path / "big.log"
+    big.write_bytes(b"filler\n" * 200_000 + b"BIGTOKEN match here\n")  # ~1.4MB > 1MB
+    tool = GrepTool()
+    result = await tool.run(pattern="BIGTOKEN", path=str(tmp_path))
+    assert result.success is True
+    assert "BIGTOKEN" not in result.output
+    assert result.output == "(no matches)"
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_binary_files(tmp_path: Path):
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    (tmp_path / "data.bin").write_bytes(b"BINTOKEN\x00\x00\x00payload here\n")
+    tool = GrepTool()
+    result = await tool.run(pattern="BINTOKEN", path=str(tmp_path))
+    assert result.success is True
+    assert "BINTOKEN" not in result.output
+    assert result.output == "(no matches)"
+
+
+@pytest.mark.asyncio
+async def test_grep_file_count_cap_returns_partial_with_note(tmp_path: Path, monkeypatch):
+    from localharness.tools.builtin import grep_tool as grep_mod
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    for i in range(60):
+        (tmp_path / f"f{i:02d}.txt").write_text("CAPTOKEN line\n")
+    monkeypatch.setattr(grep_mod, "SCAN_FILE_CAP", 5)
+    tool = GrepTool()
+    result = await tool.run(pattern="CAPTOKEN", path=str(tmp_path))
+    assert result.success is True
+    assert "scan capped" in result.output              # honest truncation note
+    assert result.metadata.get("truncated") is True
+    assert "CAPTOKEN" in result.output                  # found-so-far returned, never nothing
+    assert result.output.count("CAPTOKEN") <= 5         # stopped at the cap
+
+
+@pytest.mark.asyncio
+async def test_grep_time_budget_returns_without_hang(tmp_path: Path, monkeypatch):
+    from localharness.tools.builtin import grep_tool as grep_mod
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    for i in range(10):
+        (tmp_path / f"f{i}.txt").write_text("TIMETOKEN\n")
+    monkeypatch.setattr(grep_mod, "SCAN_TIME_BUDGET_S", 0.0)
+    tool = GrepTool()
+    result = await tool.run(pattern="TIMETOKEN", path=str(tmp_path))
+    assert result.success is True
+    assert "scan capped" in result.output       # capped note even at zero budget
+    assert result.metadata.get("truncated") is True
+
+
+@pytest.mark.asyncio
+async def test_grep_small_tree_matches_path_line_format_unchanged(tmp_path: Path):
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    (tmp_path / "a.py").write_text("nope\nKEEPTOKEN yes\n")
+    tool = GrepTool()
+    result = await tool.run(pattern="KEEPTOKEN", path=str(tmp_path))
+    assert result.success is True
+    assert "KEEPTOKEN" in result.output
+    import re as _re
+
+    assert _re.search(r":\d+: ", result.output)   # path:line: content format preserved
+
+
+@pytest.mark.asyncio
+async def test_grep_clean_miss_reports_no_matches(tmp_path: Path):
+    from localharness.tools.builtin.grep_tool import GrepTool
+
+    (tmp_path / "a.py").write_text("alpha\nbeta\n")
+    tool = GrepTool()
+    result = await tool.run(pattern="ZZZ_ABSENT", path=str(tmp_path))
+    assert result.success is True
+    assert result.output == "(no matches)"
+
+
 @pytest.mark.asyncio
 async def test_read_tool_returns_numbered_lines(tmp_path: Path):
     from localharness.tools.builtin.read_tool import ReadTool
