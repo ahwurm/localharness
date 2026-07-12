@@ -56,7 +56,8 @@ dev = [
 localharness = "localharness.cli.app:main"
 
 [project.urls]
-Homepage = "https://github.com/ahwurm/localharness"
+Homepage = "https://localharness.dev"
+Documentation = "https://localharness.dev"
 Repository = "https://github.com/ahwurm/localharness"
 Issues = "https://github.com/ahwurm/localharness/issues"
 
