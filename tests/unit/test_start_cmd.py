@@ -444,6 +444,52 @@ def test_repl_active_workflow_routes_to_creation_handler():
     assert any("Tell me more" in str(c) for c in calls)
 
 
+def test_repl_agent_creation_uses_streaming_path():
+    """#18 RED: REPL agent-creation YAML generation must go through the client's STREAMING
+    path (it was a plain whole-response .complete). Drives the CONFIGURE branch directly."""
+    from types import SimpleNamespace
+
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.orchestrator.workflow import WorkflowState
+
+    calls = {"stream": 0, "complete": 0}
+
+    class _LLMSpy:
+        async def stream_complete(self, messages, tools=None, on_token=None):
+            calls["stream"] += 1
+            return SimpleNamespace(content="name: x"), None
+
+        async def complete(self, messages, tools=None, stream=False):
+            calls["complete"] += 1
+            return SimpleNamespace(content="name: x"), None
+
+    class _Workflow:
+        gathered = {"description": "an agent that reads files", "name": "reader"}
+
+        def transition(self, _x):
+            return WorkflowState.CONFIGURE  # enter the LLM-generation branch
+
+        def set_generated_yaml(self, _y):
+            pass
+
+    class _Channel:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, text, metadata=None):
+            self.messages.append(text)
+
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(active_workflow=_Workflow()),
+        agent_loop=SimpleNamespace(_llm=_LLMSpy()),
+        channel=_Channel(),
+        bus=SimpleNamespace(),
+    )
+    asyncio.run(repl._handle_creation_workflow("make me an agent that reads files"))
+    assert calls["stream"] == 1
+    assert calls["complete"] == 0
+
+
 def test_repl_creation_cancel_clears_workflow():
     """User types 'cancel' during workflow -> clears active workflow."""
     from localharness.cli.repl import OrchestratorREPL
