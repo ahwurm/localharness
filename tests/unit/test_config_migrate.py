@@ -124,8 +124,10 @@ def test_migrate_leaves_other_keys_semantically_unchanged(tmp_path):
     assert result.exit_code == 0, result.output
 
     after = yaml.safe_load(cfg.read_text())
-    before["org"]["permissions"].pop("deny_patterns")
-    after["org"]["permissions"].pop("deny_patterns")
+    for d in (before, after):
+        d["org"]["permissions"].pop("deny_patterns")
+        # the migration's own revision stamp is bookkeeping, not a user key
+        d["org"]["permissions"].pop("defaults_revision", None)
     assert after == before
 
 
@@ -186,4 +188,107 @@ def test_migrate_broken_yaml_fails(tmp_path):
     (tmp_path / "config.yaml").write_text("{ broken: [unterminated\n", encoding="utf-8")
     result = _run(tmp_path)
     assert result.exit_code != 0
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+# --------------------------------------------------------------------------- #
+# Revision-stamping semantics (redesign: the sync auto-applies on first start
+# after a package upgrade; the stamp is what makes auto-apply safe).
+# --------------------------------------------------------------------------- #
+
+def test_migrate_stamps_current_defaults_revision(tmp_path):
+    """After migrating, the config is stamped at the current shipped defaults revision."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    cfg = _write_config(tmp_path, OLD_7)
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load(cfg.read_text())
+    assert data["org"]["permissions"]["defaults_revision"] == CURRENT_DEFAULTS_REVISION
+
+
+def test_absent_revision_key_reads_as_zero_and_plans_migration(tmp_path):
+    """A config with no defaults_revision key = revision 0 → a migration is planned."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.migrate import plan
+
+    cfg = _write_config(tmp_path, OLD_7)
+    data = yaml.safe_load(cfg.read_text())
+    assert "defaults_revision" not in data["org"]["permissions"]
+
+    p = plan(data)
+    assert p is not None
+    assert p.from_revision == 0
+    assert p.to_revision == CURRENT_DEFAULTS_REVISION
+    assert len(p.added) > 0
+
+
+def test_migrate_respects_deliberate_removal_after_stamp(tmp_path):
+    """THE load-bearing property: a default deleted AFTER the config is stamped current is
+    never re-added — subsequent migrations/startups add nothing and never nag. This is why
+    auto-apply is safe."""
+    cfg = _write_config(tmp_path, OLD_7)
+    assert _run(tmp_path).exit_code == 0  # brings config to current revision + full list
+
+    # user deliberately deletes a shipped default
+    data = yaml.safe_load(cfg.read_text())
+    removed = "bash_exec(*poweroff*)"
+    assert removed in data["org"]["permissions"]["deny_patterns"]
+    data["org"]["permissions"]["deny_patterns"].remove(removed)
+    cfg.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+    before = cfg.read_bytes()
+
+    # migrate again → removal respected: nothing re-added, up to date, zero writes
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "up to date" in result.output.lower()
+    assert removed not in _deny(cfg)
+    assert cfg.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- #
+# Startup auto-apply seam (first `start` after a package upgrade folds it in).
+# Driven directly the way existing start_cmd tests import helpers.
+# --------------------------------------------------------------------------- #
+
+def test_start_auto_migrate_applies_stamps_and_backs_up_once_then_quiet(tmp_path):
+    """The `start` seam runs the same engine: a stale config is migrated, stamped, and
+    backed up exactly once; a second call is a no-op (zero writes, zero new backups)."""
+    from localharness.cli.start_cmd import _auto_migrate_deny_defaults
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    cfg = _write_config(tmp_path, OLD_7)
+    _auto_migrate_deny_defaults(cfg)
+
+    data = yaml.safe_load(cfg.read_text())
+    assert set(PermissionConfig().deny_patterns).issubset(
+        set(data["org"]["permissions"]["deny_patterns"])
+    )
+    assert data["org"]["permissions"]["defaults_revision"] == CURRENT_DEFAULTS_REVISION
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
+    after_first = cfg.read_bytes()
+
+    # second call: already at current revision → no-op
+    _auto_migrate_deny_defaults(cfg)
+    assert cfg.read_bytes() == after_first
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
+
+
+def test_start_auto_migrate_failure_does_not_raise(tmp_path, monkeypatch):
+    """A migration failure must NEVER block startup — the seam swallows it and returns."""
+    from localharness.cli import start_cmd
+    from localharness.config import migrate as migrate_mod
+
+    cfg = _write_config(tmp_path, OLD_7)
+    before = cfg.read_bytes()
+
+    def _boom(*a, **k):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(migrate_mod, "apply", _boom)
+
+    # must not raise out of startup
+    start_cmd._auto_migrate_deny_defaults(cfg)
+    # config untouched, no partial backup
+    assert cfg.read_bytes() == before
     assert list(tmp_path.glob("config.yaml.bak-*")) == []
