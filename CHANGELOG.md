@@ -19,6 +19,18 @@ All notable changes to LocalHarness are documented here. The format follows
   `localharness config migrate` to apply it explicitly (same engine).
 
 ### Fixed
+- **Background memory work no longer prints into the REPL — it shows as a quiet
+  "· dreaming…" status instead** (#20). When a session starts (or goes idle) with pending
+  work, the memory consolidation/mining pass used to spill its internal progress and
+  warning lines into the interactive prompt — landing over the input box before you had
+  typed anything, so it read as "something is broken." Those details now go to a log file
+  (`<agent-dir>/memory.log`) instead, and while a pass runs the terminal shows a single
+  unobtrusive `· dreaming…` spinner that clears the instant the pass ends, you start
+  typing, or a new turn begins — it never draws over the input box (it can only appear when
+  the prompt isn't up). Terminal-only: Discord, bench, and eval channels are unchanged. The
+  leak was Python's default last-resort stderr handler surfacing the memory subsystem's
+  `WARNING`/`EXCEPTION` log records, since the interactive start path configured no logging
+  handler of its own.
 - **Every LLM call path now streams at the transport level** (#18). Timeouts and
   cancellations no longer leave the local server generating into the void: with a
   whole-response request the client read-timeout races the *entire* generation, and a

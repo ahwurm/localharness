@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import pytest
@@ -9,6 +10,27 @@ from localharness.core.bus import EventBus
 from localharness.core.events import ScenarioCompleted
 from localharness.bench.runner import resolve_run_path
 from localharness.memory.sqlite import MemoryStore
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_logger():
+    """#20: the interactive REPL routes the memory subsystem's logs to a file via
+    start_cmd._route_memory_logs_to_file — a deliberate mutation of the shared
+    'localharness.memory' logger (file handler + propagate=False). Tests that drive the
+    real _start_async trip that mutation; without isolation it leaks into later
+    caplog-based memory tests (which need those records to propagate to root). Snapshot
+    and restore the logger around every test."""
+    lg = logging.getLogger("localharness.memory")
+    saved = (lg.handlers[:], lg.level, lg.propagate)
+    try:
+        yield
+    finally:
+        for h in lg.handlers[:]:
+            if h not in saved[0]:
+                h.close()  # release the tmp memory.log fd a _start_async drive opened
+        lg.handlers[:] = saved[0]
+        lg.setLevel(saved[1])
+        lg.propagate = saved[2]
 
 
 @pytest.fixture

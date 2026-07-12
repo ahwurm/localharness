@@ -1,4 +1,4 @@
-"""All 26 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 28 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -422,6 +422,24 @@ class SurpriseScored(BaseEvent):
     z_size: float = 0.0
 
 
+class ConsolidationStarted(BaseEvent):
+    """Published by ConsolidationScheduler when a background memory pass begins (#20).
+
+    The interactive terminal renders a quiet '· dreaming…' console.status while one is in
+    flight; non-interactive channels (Discord/bench/eval) don't subscribe, so it is a no-op
+    there. Fire-and-forget — a delivery fault never blocks or fails the pass."""
+
+    event_type: str = "ConsolidationStarted"
+
+
+class ConsolidationFinished(BaseEvent):
+    """Published by ConsolidationScheduler when a background memory pass ends — ANY outcome
+    (completed, cancelled by user activity, or crashed). Clears the terminal's '· dreaming…'
+    status (#20). Fire-and-forget, same contract as ConsolidationStarted."""
+
+    event_type: str = "ConsolidationFinished"
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -449,6 +467,8 @@ AnyEvent = Union[
     ExpectationAttached,
     OutcomeObserved,
     SurpriseScored,
+    ConsolidationStarted,
+    ConsolidationFinished,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -478,6 +498,8 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ExpectationAttached": ExpectationAttached,
     "OutcomeObserved": OutcomeObserved,
     "SurpriseScored": SurpriseScored,
+    "ConsolidationStarted": ConsolidationStarted,
+    "ConsolidationFinished": ConsolidationFinished,
 }
 
 

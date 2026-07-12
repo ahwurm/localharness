@@ -28,7 +28,16 @@ from rich.theme import Theme
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
+from localharness.core.events import (
+    Action,
+    ConsolidationFinished,
+    ConsolidationStarted,
+    Escalation,
+    Heartbeat,
+    Observation,
+    TaskComplete,
+    TurnFailed,
+)
 from localharness.tools.capabilities import UNTRUSTED_INGEST
 
 log = structlog.get_logger(__name__)
@@ -37,6 +46,9 @@ log = structlog.get_logger(__name__)
 _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
+
+# Official label for the background-memory ("dreaming") status (#20): middle-dot + ellipsis.
+_DREAMING_LABEL = "· dreaming…"   # · dreaming…
 
 # Burst consolidation: consecutive calls from one tool family collapse into a single
 # live counter line (`◆ web_search · web_fetch — the open web, a fresh window each · 30/30`)
@@ -276,6 +288,7 @@ class TerminalChannel(ChannelAdapter):
         self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
+        self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
         self._burst: _Burst | None = None  # open family-burst consolidation (display-only)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
@@ -284,6 +297,8 @@ class TerminalChannel(ChannelAdapter):
         self._escalation_handle = None
         self._heartbeat_handle = None
         self._turn_failed_handle = None
+        self._consolidation_started_handle = None
+        self._consolidation_finished_handle = None
 
     async def start(self) -> None:
         """Initialize input history and subscribe to bus events."""
@@ -298,6 +313,12 @@ class TerminalChannel(ChannelAdapter):
         self._turn_failed_handle = self.bus.subscribe(TurnFailed, self.on_turn_failed)
         self._escalation_handle = self.bus.subscribe(Escalation, self.on_escalation)
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
+        self._consolidation_started_handle = self.bus.subscribe(
+            ConsolidationStarted, self.on_consolidation_started
+        )
+        self._consolidation_finished_handle = self.bus.subscribe(
+            ConsolidationFinished, self.on_consolidation_finished
+        )
 
     async def stop(self) -> None:
         """Unsubscribe from bus, stop any active Live context, flush console."""
@@ -308,6 +329,8 @@ class TerminalChannel(ChannelAdapter):
             self._turn_failed_handle,
             self._escalation_handle,
             self._heartbeat_handle,
+            self._consolidation_started_handle,
+            self._consolidation_finished_handle,
         ):
             if handle is not None:
                 self.bus.unsubscribe(handle)
@@ -527,9 +550,11 @@ class TerminalChannel(ChannelAdapter):
 
     def _start_thinking(self) -> None:
         """Animated indicator while an LLM round-trip is in flight (REPL-02).
-        IDLE-only: never over the input bubble, a streaming panel, or an open
-        burst counter (the burst spinner is already the live indicator)."""
-        if self._thinking is None and self._burst is None and self._state == "IDLE":
+        IDLE-only: never over the input bubble, a streaming panel, an open burst
+        counter (the burst spinner is already the live indicator), or the dreaming
+        status (rich allows one live display \u2014 a turn beginning stops it first)."""
+        if (self._thinking is None and self._dreaming is None
+                and self._burst is None and self._state == "IDLE"):
             try:
                 self._thinking = self._console.status(
                     "[muted]thinking\u2026[/muted]", spinner="dots"
@@ -538,12 +563,35 @@ class TerminalChannel(ChannelAdapter):
             except Exception:
                 self._thinking = None  # a broken spinner must never break output
 
+    def _start_dreaming(self) -> None:
+        """Quiet '\u00b7 dreaming\u2026' status while a background memory consolidation/mining
+        pass runs (#20). Extends _start_thinking: same console.status, IDLE-only \u2014 so it can
+        never draw over the input bubble (WAITING_INPUT) or a stream, and never opens a second
+        live display alongside the thinking spinner or a burst counter."""
+        if (self._dreaming is None and self._thinking is None
+                and self._burst is None and self._state == "IDLE"):
+            try:
+                self._dreaming = self._console.status(
+                    f"[muted]{_DREAMING_LABEL}[/muted]", spinner="dots"
+                )
+                self._dreaming.start()
+            except Exception:
+                self._dreaming = None  # a broken spinner must never break output
+
+    def _stop_dreaming(self) -> None:
+        if self._dreaming is not None:
+            try:
+                self._dreaming.stop()
+            finally:
+                self._dreaming = None
+
     def _stop_thinking(self) -> None:
         if self._thinking is not None:
             try:
                 self._thinking.stop()
             finally:
                 self._thinking = None
+        self._stop_dreaming()  # #20: real output / input tears the dreaming dot down too (stop-first)
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
         """Track context utilization (shown in the next input bubble) and start the
@@ -551,4 +599,17 @@ class TerminalChannel(ChannelAdapter):
         is the 'model is now generating' signal (REPL-02)."""
         self._context_pct = event.context_utilization_pct
         async with self._output_lock:
+            self._stop_dreaming()  # a turn is beginning — replace the dreaming dot with thinking
             self._start_thinking()
+
+    async def on_consolidation_started(self, event: ConsolidationStarted) -> None:
+        """A background memory consolidation/mining pass began (#20): show the quiet
+        '· dreaming…' status if the REPL is idle (never over the input bubble or a stream)."""
+        async with self._output_lock:
+            self._start_dreaming()
+
+    async def on_consolidation_finished(self, event: ConsolidationFinished) -> None:
+        """The background pass ended (#20): clear the dreaming status. Touches only the
+        dreaming slot, so a thinking spinner started by a turn mid-pass is left intact."""
+        async with self._output_lock:
+            self._stop_dreaming()

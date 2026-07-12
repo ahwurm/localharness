@@ -598,7 +598,20 @@ class ConsolidationScheduler:
         )
         self._run_task = asyncio.create_task(self._run_and_record())
 
+    async def _emit_status(self, *, started: bool) -> None:
+        """Fire-and-forget dreaming-dot signal for the interactive REPL (#20). The terminal
+        channel shows/clears a quiet '· dreaming…' status on these; non-interactive channels
+        ignore them. A bus fault is swallowed — the pass must never break, and the terminal
+        clears the dot on the next turn regardless."""
+        from localharness.core.events import ConsolidationFinished, ConsolidationStarted
+        event = (ConsolidationStarted if started else ConsolidationFinished)(agent_id=self._agent_id)
+        try:
+            await self._bus.publish(event)
+        except Exception:
+            log.debug("consolidation status emit failed (non-fatal)", exc_info=True)
+
     async def _run_and_record(self) -> None:
+        await self._emit_status(started=True)
         try:
             assert self._running is not None
             self.last_report = await self._running.run()
@@ -615,6 +628,7 @@ class ConsolidationScheduler:
             log.exception("consolidation pass crashed (non-fatal)")
         finally:
             self._running = None
+            await self._emit_status(started=False)
 
     async def should_run(self) -> bool:
         """Session-start staleness: run when the watermark is old AND there is work
