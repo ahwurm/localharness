@@ -168,3 +168,109 @@ async def test_fold_switch_off_is_slug_baseline(store):
 
     assert r.folded == 1 and r.written == 0
     assert len(await store.query_facts(FactQuery(tags=["sem"], limit=10))) == 1  # slug fold
+
+
+# --- Task 3 (TAGG-02): replaces= validity + B4(i) rescue read the CHILD TAG axis ------------
+
+@pytest.mark.asyncio
+async def test_supersede_across_wrong_slug(store, monkeypatch):
+    """A `replaces=<target>` correction that SHARES the target's child tag supersedes it — writes
+    onto the target key, target leaves the active set — EVEN when the new atom's slug differs."""
+    project = await store.get_tag("project")
+    ops = await store.get_tag("ops")
+    target = await _seed_atom(store, "sem/gpu-ops/aaaaaaaa",
+                              "vLLM server listens on port 8000", ops.id)
+    _tag_stub(monkeypatch, project, ops)  # the correction classifies to the target's child tag
+
+    await store.append_history(_rec(20, "correction: vLLM server listens on port 8081", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms=f"investing | vLLM server listens on port 8081 | listens on port 8081 "
+              f"| replaces={target.key}"), asyncio.Event())
+
+    active = await store.get_fact(target.key)
+    assert active is not None and "8081" in active.value  # superseded across the wrong slug
+    hist = await store.get_fact_history(target.key)
+    assert any(v.status == "superseded" and "8000" in v.value for v in hist)
+
+
+@pytest.mark.asyncio
+async def test_supersede_blocked_on_slug_alone(store, monkeypatch):
+    """A slug match ALONE cannot authorize a supersede: a `replaces=` whose target does NOT share
+    the new atom's child tag is INVALID under tag_grouping — it falls back to a fresh mint even
+    though target_key starts with sem/{slug}/."""
+    project = await store.get_tag("project")
+    ops = await store.get_tag("ops")
+    conventions = await store.get_tag("conventions")
+    target = await _seed_atom(store, "sem/vllm-port/aaaaaaaa",
+                              "vLLM server listens on port 8000", ops.id)
+    _tag_stub(monkeypatch, project, conventions)  # correction does NOT share the target's ops tag
+
+    await store.append_history(_rec(20, "vLLM server listens on port 8081 now", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms=f"vllm port | vLLM server listens on port 8081 | listens on port 8081 "
+              f"| replaces={target.key}"), asyncio.Event())
+
+    active = await store.get_fact(target.key)
+    assert active is not None and "8000" in active.value  # NOT superseded (no shared tag)
+    vals = {f.value for f in await store.query_facts(FactQuery(tags=["sem"], limit=10))}
+    assert "vLLM server listens on port 8081" in vals  # correction minted as a fresh separate atom
+
+
+@pytest.mark.asyncio
+async def test_b4i_rescue_scopes_to_tag(store, monkeypatch):
+    """The B4(i) present-but-invalid/empty replaces= rescue scopes to the same-CHILD-TAG namespace
+    and stays conservative: it fires only on an UNAMBIGUOUS sole same-tag target with salient
+    overlap. A broad tag with >1 member yields no unique target, so it mints (asymmetric cost:
+    a missed rescue is a decay-handled dup; a false supersede is data loss)."""
+    project = await store.get_tag("project")
+    ops = await store.get_tag("ops")
+    conventions = await store.get_tag("conventions")
+    t1 = await _seed_atom(store, "sem/gpu-ops/aaaaaaaa",
+                          "vLLM server listens on port 8000", ops.id)  # SOLE ops atom
+    await _seed_atom(store, "sem/conv/bbbbbbbb", "use ruff for linting the codebase", conventions.id)
+    await _seed_atom(store, "sem/conv/cccccccc", "use pytest for testing the codebase", conventions.id)
+
+    # (A) sole ops target + salient overlap + empty replaces= on a WRONG slug -> rescue-supersede
+    _tag_stub(monkeypatch, project, ops)
+    await store.append_history(_rec(20, "correction: vLLM server listens on port 8081", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="investing | vLLM server listens on port 8081 | listens on port 8081 | replaces="),
+        asyncio.Event())
+    assert "8081" in (await store.get_fact(t1.key)).value  # rescued onto the sole same-tag target
+
+    # (B) TWO conventions atoms -> ambiguous -> an empty replaces= mints; both originals survive
+    _tag_stub(monkeypatch, project, conventions)
+    await store.append_history(_rec(30, "use ruff and black for linting the codebase", sid="d3"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms="conventions | use ruff and black for linting the codebase | ruff black linting | replaces="),
+        asyncio.Event())
+    vals = {f.value for f in await store.query_facts(FactQuery(tags=["sem"], limit=20))}
+    assert "use ruff for linting the codebase" in vals       # original 1 survived (ambiguous tag)
+    assert "use pytest for testing the codebase" in vals      # original 2 survived
+    assert "use ruff and black for linting the codebase" in vals  # minted fresh, no false rescue
+
+
+@pytest.mark.asyncio
+async def test_supersede_switch_off_is_slug_baseline(store):
+    """KILL-lever proof (supersede path, a DIFFERENT code path than the fold gate): with
+    tag_grouping=False a same-slug replaces= supersedes exactly as pre-36.2, and a cross-slug
+    shared-tag replaces= does NOT — the slug baseline, byte-for-byte."""
+    ops = await store.get_tag("ops")
+    a = await _seed_atom(store, "sem/vllm-port/aaaaaaaa",
+                         "vLLM server listens on port 8000", ops.id)
+
+    # (1) SAME-slug replaces= supersedes (pre-36.2 behavior)
+    await store.append_history(_rec(20, "vLLM server listens on port 8081 now", sid="d2"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms=f"vllm port | vLLM server listens on port 8081 | listens on port 8081 "
+              f"| replaces={a.key}"), asyncio.Event(), tag_grouping=False)
+    assert "8081" in (await store.get_fact(a.key)).value  # same-slug supersede fired
+
+    # (2) CROSS-slug shared-tag replaces= does NOT supersede under the slug baseline
+    b = await _seed_atom(store, "sem/gpu-ops/dddddddd",
+                         "the gpu box has 119 GiB unified memory", ops.id)
+    await store.append_history(_rec(30, "actually the gpu box has 128 GiB unified memory", sid="d3"))
+    await mine_transcript(store, _ClassifierLLM(
+        atoms=f"investing | the gpu box has 128 GiB unified memory | gpu box 128 GiB memory "
+              f"| replaces={b.key}"), asyncio.Event(), tag_grouping=False)
+    assert "119" in (await store.get_fact(b.key)).value  # cross-slug replaces did NOT supersede
