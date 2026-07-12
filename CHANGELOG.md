@@ -4,6 +4,20 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Added
+- **Security defaults now update themselves on first start after an upgrade** (#15).
+  `init` bakes the fully-resolved `org.permissions.deny_patterns` into your config.yaml,
+  so a later growth of the shipped default deny list (v0.9.1 grew it 7→24) used to require
+  a manual re-run or hand-edit — the gap the v0.9.1 notes disclosed. Now the first
+  `localharness start` after a package upgrade folds the new defaults in automatically:
+  additive only (your own entries are never removed or reordered, no other key is touched),
+  a timestamped backup is written first, and it is **revision-stamped** — so a default you
+  deliberately deleted is respected and never re-added, and an up-to-date config is a silent
+  zero-cost no-op. Run `localharness config migrate --dry-run` to preview it, or
+  `localharness config migrate` to apply it explicitly (same engine).
+
 ## [0.9.1] — 2026-07-12
 
 ### Security

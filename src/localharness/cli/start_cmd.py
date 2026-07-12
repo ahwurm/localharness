@@ -164,6 +164,39 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
     legacy.unlink(missing_ok=True)  # two-process first-start race: the other may have unlinked
 
 
+def _auto_migrate_deny_defaults(config_file: Path) -> None:
+    """First-start-after-upgrade fold-in of new shipped security defaults (issue #15).
+
+    Runs the SAME engine as `localharness config migrate`, revision-gated: silent with zero
+    writes when the config is already at the current defaults revision (the common path, and
+    the removal-respect path — a deliberately-deleted default stays deleted). Best-effort: a
+    migration failure NEVER blocks startup — we warn once and continue with the on-disk config.
+    """
+    from localharness.config import migrate as _migrate
+
+    try:
+        original, plan = _migrate.load_plan(config_file)
+    except _migrate.MigrationError:
+        return  # missing/unparseable → the loader below surfaces it with a proper error
+    if plan is None:
+        return  # already current: no output, no writes
+
+    try:
+        backup = _migrate.apply(config_file, original, plan)
+    except Exception as exc:
+        err_console.print(
+            f"[yellow]⚠[/yellow]  Could not auto-update security defaults: {exc}. "
+            "Run 'localharness config migrate' to apply them; continuing with the current config."
+        )
+        return
+
+    console.print(
+        f"[cyan]i[/cyan]  Security defaults updated (revision {plan.from_revision} → "
+        f"{plan.to_revision}): added {len(plan.added)} deny pattern(s) — additive only; "
+        f"backup at {backup}"
+    )
+
+
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
                        channel_mode: str = "terminal", subagents: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
@@ -195,6 +228,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.orchestrator.router import AgentCreationFlow
         console.print(AgentCreationFlow.no_config_message())
         raise typer.Exit(0)
+
+    # First start after a package upgrade: fold in any newer shipped security defaults
+    # (revision-stamped, additive, backed up) BEFORE the config is loaded. Best-effort —
+    # never blocks startup.
+    _auto_migrate_deny_defaults(config_file)
 
     # Load harness config
     loader = ConfigLoader(config_dir=cfg_path)

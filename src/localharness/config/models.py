@@ -248,6 +248,20 @@ class PermissionConfig(BaseModel):
         description="Execution budget for this agent.",
     )
 
+    defaults_revision: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Bookkeeping stamp: which revision of the SHIPPED default deny list "
+            "(config/defaults.py CURRENT_DEFAULTS_REVISION) this config was last synced to. "
+            "Absent/0 = a pre-sync config. `localharness config migrate` and the first "
+            "`localharness start` after a package upgrade additively add any newer shipped "
+            "defaults, then bump this to current. Gating the sync on this stamp — not on 'is "
+            "any default missing' — is what lets a user permanently delete a shipped default: "
+            "once stamped current, the sync adds nothing (deliberate removals are respected)."
+        ),
+    )
+
     @field_validator("deny_patterns")
     @classmethod
     def validate_pattern_format(cls, patterns: list[str]) -> list[str]:
