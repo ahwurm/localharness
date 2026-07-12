@@ -47,6 +47,8 @@ class EditTool(Tool):
                 f"Edit of credential/secret file blocked: {target}",
                 error_type="permission_denied",
             )
+        if (denied := self._outside_workspace(target)) is not None:
+            return denied
         if not target.exists():
             return self.err(f"File not found: {target}", error_type="not_found")
         if target.is_dir():

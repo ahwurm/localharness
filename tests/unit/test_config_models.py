@@ -61,7 +61,9 @@ def test_mcp_server_config_stdio_with_command_valid():
 def test_permission_config_deny_patterns_default_count():
     from localharness.config.models import PermissionConfig
     cfg = PermissionConfig()
-    assert len(cfg.deny_patterns) == 7
+    # issue #15 grew the list from 7 to 24: destructive service/process-op globs + the fixed
+    # sudo pattern + the embedded rm -rf form.
+    assert len(cfg.deny_patterns) == 24
 
 
 def test_permission_config_invalid_pattern_raises():

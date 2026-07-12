@@ -1,14 +1,8 @@
 """Default value constants for LocalHarness configuration."""
 
-DEFAULT_DENY_PATTERNS: list[str] = [
-    "write(*/.env)",
-    "write(*/secrets*)",
-    "write(*/config.yaml)",
-    "write(*/agents/*.yaml)",
-    "bash(sudo:*)",
-    "bash(rm -rf *)",
-    "bash(chmod 777 *)",
-]
+# (Removed dead DEFAULT_DENY_PATTERNS — issue #15: it named the tool "bash(...)" but the
+# registered tool is "bash_exec", was imported nowhere, and would have matched nothing if
+# wired. The live default deny list is PermissionConfig.deny_patterns in config/models.py.)
 
 # #10: 600s suits slow local single-stream decode — a 4096-token completion at ~10 tok/s
 # is ~410s, which the previous 300s default killed mid-generation. Synced with

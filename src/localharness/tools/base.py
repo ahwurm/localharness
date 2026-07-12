@@ -1,6 +1,7 @@
 """Tool base types: ToolProtocol, Tool ABC, ToolSchema, ToolParameter, ToolResult, ToolVetoed."""
 import asyncio
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -70,6 +71,27 @@ class Tool(ABC):
     """Base class for all LocalHarness tools. Subclass and implement info() and _execute()."""
 
     timeout_s: float | None = None
+    workspace_root: str | None = None  # opt-in write/exec confinement; None = unconfined (default)
+
+    def __init__(self, workspace_root: str | None = None) -> None:
+        # Filesystem-touching tools (write/edit/bash_exec) accept an optional confinement root.
+        # Store-backed tools override __init__ and simply inherit the class-attr default (None),
+        # so reading self.workspace_root is always safe.
+        self.workspace_root = workspace_root
+
+    def _outside_workspace(self, target: Path) -> "ToolResult | None":
+        """Opt-in confinement gate. If workspace_root is set and `target` (already .resolve()'d,
+        symlink-safe) is not inside it, return a permission_denied ToolResult; else None."""
+        root = self.workspace_root
+        if root is None:
+            return None
+        root_p = Path(root).expanduser().resolve()
+        if not target.is_relative_to(root_p):
+            return self.err(
+                f"Path outside workspace_root blocked: {target} (workspace_root: {root_p})",
+                error_type="permission_denied",
+            )
+        return None
 
     @abstractmethod
     def info(self) -> ToolSchema: ...
