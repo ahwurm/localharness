@@ -488,6 +488,17 @@ class MemoryConsolidationConfig(BaseModel):
             "blocks the mint (degrades recall, never integrity)."
         ),
     )
+    tag_grouping_enabled: bool = Field(
+        default=True,
+        description=(
+            "RULING-D grouping truth: when True, mining's fold scope + replaces=/B4(i) supersede "
+            "validity key off the validated CHILD TAG axis (not the freely-guessed slug), so a "
+            "wrong topic word can neither merge two unrelated facts nor authorize a correction. "
+            "False = the pre-committed KILL revert: tags return to decoration, mining falls back "
+            "byte-behavior-identical to the pre-36.2 slug scoping (migration atom_tags data kept). "
+            "Mutable via `localharness components set agent.memory.consolidation.tag_grouping_enabled <true|false>`."
+        ),
+    )
     tag_discovery_enabled: bool = Field(
         default=True,
         description=(

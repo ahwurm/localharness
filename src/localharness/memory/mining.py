@@ -48,7 +48,7 @@ from typing import Any
 from localharness.memory.consolidation import _get_meta, _set_meta
 from localharness.memory.idle_llm import complete_cancellable, grounded
 from localharness.memory.sqlite import FactQuery
-from localharness.memory.tag_classify import file_atom_tags
+from localharness.memory.tag_classify import classify_atom_tags, file_atom_tags
 
 log = logging.getLogger(__name__)
 
@@ -331,6 +331,7 @@ async def mine_transcript(
     novelty_fold_threshold: float = 0.5,
     completions_log: list | None = None,
     file_tags: bool = True,
+    tag_grouping: bool = True,
 ) -> MineReport:
     """Walk the un-mined transcript session-by-session in `corpus_char_cap` chunks (never crossing a
     session boundary), extract typed `sem/` atoms (grounded, per-atom source provenance, 0.65),
@@ -502,6 +503,15 @@ async def mine_transcript(
                 # agent restating a fact would step the ladder and fabricate multi-session
                 # chapter evidence from its own mouth. Deterministic; no knob — epistemics.
                 user_evidence = str(src.get("type", "")) == "user_message"
+                # RULING-D (TAGG-01/02): classify the atom ONCE, up front — the validated CHILD
+                # TAG is the grouping axis for the fold + replaces=/B4(i) decisions below (read
+                # pre-mint, tags written post-mint). Gated on tagging being meaningful; the
+                # classify degrades to (None, None) and never raises, so a miss just falls the
+                # scope checks back to the slug baseline (see the fold gate + supersede path).
+                bucket_tag = child_tag = None
+                if file_tags and tag_grouping:
+                    bucket_tag, child_tag = await classify_atom_tags(
+                        store, llm, cancel_event, topic=topic, claim=claim)
                 slug = _slug(topic)
                 replaces_present = replaces is not None  # B4(i): was a replaces= field present?
                 # FIX 2a: the model pasted a known atom's key/prefix into the `topic` field instead
@@ -662,11 +672,20 @@ async def mine_transcript(
                 minted_pass[key] = claim  # REVIEW FIX: a replaces-target for the whole pass
                 known_keys.add(key)       # ...and already within THIS chunk's remaining atoms
                 known_map[key] = claim
-                # Mint-time filing (M1): two-step closed-set classify -> atom_tags(provenance=mint).
-                # Never blocks the mint; skipped when tagging is disabled.
+                # Mint-time filing (M1): write the PRE-COMPUTED classify (RULING-D) — the SAME
+                # atom_tags rows file_atom_tags wrote, now from the classify done up front (so the
+                # fold/replaces decisions above could read the child tag). Never blocks the mint;
+                # skipped when tagging is disabled. With tag_grouping OFF, keep the original
+                # classify-after-mint call so the switch-off path stays byte-behavior-identical.
                 if file_tags:
-                    await file_atom_tags(store, llm, cancel_event,
-                                         atom_id=fact.id, topic=topic, claim=claim)
+                    if tag_grouping:
+                        if bucket_tag is not None:
+                            await store.add_atom_tag(fact.id, bucket_tag.id, "mint")
+                        if child_tag is not None:
+                            await store.add_atom_tag(fact.id, child_tag.id, "mint")
+                    else:
+                        await file_atom_tags(store, llm, cancel_event,
+                                             atom_id=fact.id, topic=topic, claim=claim)
             return cited_chunk, False
 
         i = 0
