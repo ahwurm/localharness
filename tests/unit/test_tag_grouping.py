@@ -1,8 +1,8 @@
 """RULING-D (Phase 36.2, TAGG-01 + TAGG-02): fold scope and `replaces=` supersede validity move
 from the freely-guessed slug to the validated CHILD TAG axis. A wrong topic word can no longer
 corrupt folding or corrections; a wrong slug WITH the correct tag folds/supersedes as intended.
-The whole re-key is behind agent.memory.consolidation.tag_grouping_enabled (default True) — the
-pre-committed KILL revert lever. These tests are the investing-class mis-file provables (owner
+The whole re-key is behind agent.memory.consolidation.tag_grouping_enabled (ships False after its
+pre-committed regression gate fired 2026-07-12; True = the re-attempt surface). These tests are the investing-class mis-file provables (owner
 dogfood 2026-07-09: "research Anthropic pricing" filed under sem/investing/)."""
 import asyncio
 
@@ -108,9 +108,10 @@ async def test_file_atom_tags_still_writes(store):
 
 
 @pytest.mark.asyncio
-async def test_tag_grouping_enabled_default_true():
-    """The RULING-D re-key is ON by default; the KILL revert lever is setting it False."""
-    assert MemoryConsolidationConfig().tag_grouping_enabled is True
+async def test_tag_grouping_enabled_default_false():
+    """The RULING-D re-key SHIPS OFF: its pre-committed regression gate fired on first live proof
+    (2026-07-12, B4 tag-identity reconciliation gap) — dormant pending the re-attempt."""
+    assert MemoryConsolidationConfig().tag_grouping_enabled is False
 
 
 # --- Task 2 (TAGG-01): fold scope reads the CHILD TAG axis, not the slug --------------------
