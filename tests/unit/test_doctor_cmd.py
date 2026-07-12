@@ -212,3 +212,61 @@ def test_doctor_lmstudio_reconciles_served_window(mock_httpx, tmp_path):
     urls = [c.args[0] for c in mock_httpx.get.call_args_list]
     assert any("/api/v0/models" in u for u in urls), urls  # discovered the served window
     assert "not reported" not in result.output.lower()
+
+
+# --- #16: doctor must build the model-probe URL from the STRIPPED root (base_url always
+# carries a /v1 suffix), hit Ollama's native /api/tags, and FAIL the model check on a
+# non-2xx probe instead of green-lighting an empty 404 body. ---
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_v1_base_probes_single_v1_models(mock_httpx, tmp_path):
+    """#16: a realistic base_url already ending in /v1 must probe exactly <root>/v1/models —
+    NOT /v1/v1/models (init always writes base_url WITH the /v1 suffix)."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
+    resp = _models_resp({"data": [{"id": "m"}]})
+    resp.status_code = 200
+    mock_httpx.get.return_value = resp
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"count": 1}
+    mock_httpx.post.return_value = tok
+
+    runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    get_urls = [c.args[0] for c in mock_httpx.get.call_args_list]
+    assert "http://localhost:8000/v1/models" in get_urls, get_urls
+    assert not any("/v1/v1" in u for u in get_urls), get_urls
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_ollama_v1_base_probes_native_api_tags(mock_httpx, tmp_path):
+    """#16: an Ollama base_url (…:11434/v1) must probe the native /api/tags at the server
+    root — NOT /v1/api/tags (Ollama's tags endpoint lives at the root, not under /v1)."""
+    _write_config(tmp_path, "ollama", "http://localhost:11434/v1", model="m")
+    resp = _models_resp({"models": [{"name": "m"}]})
+    resp.status_code = 200
+    mock_httpx.get.return_value = resp
+
+    runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    get_urls = [c.args[0] for c in mock_httpx.get.call_args_list]
+    assert "http://localhost:11434/api/tags" in get_urls, get_urls
+    assert not any("/v1/api/tags" in u for u in get_urls), get_urls
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_non_2xx_probe_fails_model_check(mock_httpx, tmp_path):
+    """#16: a non-2xx model-probe response (404, no model list) must FAIL the model check —
+    an empty error body must not sail through the benefit-of-doubt pass as 'Model available'."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
+    bad = MagicMock()
+    bad.status_code = 404
+    bad.json.return_value = {"error": "not found"}  # no data / models keys
+    mock_httpx.get.return_value = bad
+    tok = MagicMock()  # make /tokenize pass so the model check is the only failure
+    tok.status_code = 200
+    tok.json.return_value = {"count": 1}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert "✓ Model available" not in result.output, result.output
+    assert result.exit_code == 1, result.output
