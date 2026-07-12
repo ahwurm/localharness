@@ -101,6 +101,7 @@ share a machine. A laptop can run agents against a model served elsewhere on you
 | `init` | Detect endpoint/model, write config |
 | `start` | Interactive session |
 | `doctor` | Diagnose config/endpoint issues |
+| `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
 | `agent …` | Manage agent definitions |
 | `bench …` | Run the scenario benchmark |

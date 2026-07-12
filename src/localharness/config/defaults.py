@@ -17,3 +17,12 @@ DEFAULT_MAX_TOOL_OUTPUT_CHARS: int = 32_000
 DEFAULT_MAX_NOTES_CHARS: int = 16_000
 DEFAULT_MAX_ACTIONS: int = 100
 DEFAULT_MAX_DURATION_MINUTES: float = 30.0
+
+# Revision of the SHIPPED default deny list (PermissionConfig.deny_patterns). Bump by 1
+# whenever that list grows/changes in a release. A user config stamps the revision it was
+# last synced to in `org.permissions.defaults_revision`; `localharness config migrate` and
+# the first `localharness start` after an upgrade additively fold in any newer shipped
+# defaults, then stamp the config to this value. A config with the key absent = revision 0.
+#   0 -> pre-sync (<= v0.9.0's 7-pattern list, or never stamped)
+#   1 -> v0.9.1's 24-pattern list (issue #15: destructive service/process + embedded sudo/rm)
+CURRENT_DEFAULTS_REVISION: int = 1

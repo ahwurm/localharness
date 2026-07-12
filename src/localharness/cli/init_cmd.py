@@ -11,12 +11,14 @@ import typer
 from rich.console import Console
 from rich.prompt import Confirm, IntPrompt, Prompt
 
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
     ManagedServerConfig,
     OrgConfig,
+    PermissionConfig,
     ProviderConfig,
 )
 from localharness.provider import server as managed_server
@@ -218,7 +220,13 @@ def init_app(
 
     # Fit the context budget to the served window when the provider reports it —
     # a budget above the real window disables compaction and kills long turns.
-    org_kwargs: dict = {"default_model": selected_model}
+    # Stamp fresh configs at the current shipped-defaults revision so the first `start` never
+    # spuriously migrates and any later deliberate removal of a default is respected (the
+    # revision gate in config/migrate.py only protects configs stamped current at birth).
+    org_kwargs: dict = {
+        "default_model": selected_model,
+        "permissions": PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+    }
     if result.provider_type == "llamacpp":
         max_len = _detect_llamacpp_nctx(result.base_url)
     elif result.provider_type == "lmstudio":
