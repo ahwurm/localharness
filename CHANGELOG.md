@@ -4,6 +4,56 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.1] — 2026-07-12
+
+### Security
+- **Default deny list grows destructive service/process commands** (#15). New default-denied
+  `bash_exec` forms: `docker stop/kill/rm`, `systemctl
+  stop/disable/kill/mask`, `pkill`, `killall`, `kill`, `shutdown`, `reboot`, `poweroff`,
+  `docker compose down` / `docker-compose down`, plus embedded forms of `rm -rf` and `sudo`
+  (e.g. inside `x && …` chains). Read-only ops (`docker ps`, `systemctl status`, …) stay
+  allowed. Found in live use: an agent stopped its own vLLM inference containers mid-run.
+  **Behavior change:** agents that legitimately need these commands must now re-allow them
+  via an explicit `org.permissions.deny_patterns` override in the root config (division-
+  and agent-level config can only narrow, never re-allow). **Existing installs do not pick
+  the new list up automatically:** `localharness init` writes the fully-resolved deny list
+  into `~/.localharness/config.yaml`, so an already-generated config keeps its old
+  7-pattern list until you re-run `init` or add the new patterns to
+  `org.permissions.deny_patterns` by hand.
+- **The shipped `sudo` deny pattern had never matched.** `bash_exec(sudo:*)` required a
+  literal colon after `sudo`, so this defense-in-depth layer never fired on a real command
+  in any release. Corrected to `bash_exec(*sudo *)`, with tests that replay real commands.
+- **Opt-in workspace fence: `permissions.workspace_root`.** When set, `write`/`edit`
+  targets and `bash_exec`'s `working_dir` must resolve inside it (symlink-safe via
+  `resolve()`), and a confined bash call's default working directory becomes the workspace
+  root. Off by default (`None`) — existing file-write/run behavior is unchanged.
+  Motivating incident, also from live use: model-authored files landed inside the
+  harness's own repo checkout. The repo's own eval scripts now run their subject agent
+  confined to a per-run scratch directory.
+- Honest limits: deny patterns match raw argument strings (no shell parsing — a `cd`
+  inside a single command string is not caught); the no-OS-level-sandbox gap is unchanged
+  and documented in SECURITY.md. The deny list and the fence are policy layers, not a
+  sandbox.
+
+### Fixed
+- **`doctor` probed `/v1/v1/models` and reported the model check green anyway** (#16). The
+  model-availability probe appended `/v1/models` to a base URL that already ends in `/v1`
+  (and `/api/tags` onto the `/v1` base for Ollama, whose tags endpoint lives at the server
+  root), and a non-2xx response still passed. Doctor now builds probe URLs from the
+  stripped server root and fails the model check on HTTP errors. Present since the first
+  release.
+- Removed the dead `DEFAULT_DENY_PATTERNS` constant (`config/defaults.py`) — it referenced
+  a nonexistent tool name and was consumed nowhere; the live defaults are the
+  `PermissionConfig` field defaults.
+
+### Changed
+- **Memory: `mining_novelty_fold_threshold` default 0.5 → 0.70** — the parameter-sweep
+  winner. Folding is more conservative: near-duplicate facts still merge, distinct facts
+  are safer from erroneous merges.
+- Eval harness: the subject agent now runs with service-ops commands denied and a confined
+  per-run workspace; the eval loop's context bound was raised 32,768 → 131,072 tokens (the
+  served window) — the old 32k cap dated to a hardware fault since resolved by RMA.
+
 ## [0.9.0] — 2026-07-11
 
 ### Added
