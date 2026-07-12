@@ -18,6 +18,21 @@ All notable changes to LocalHarness are documented here. The format follows
   zero-cost no-op. Run `localharness config migrate --dry-run` to preview it, or
   `localharness config migrate` to apply it explicitly (same engine).
 
+### Fixed
+- **Every LLM call path now streams at the transport level** (#18). Timeouts and
+  cancellations no longer leave the local server generating into the void: with a
+  whole-response request the client read-timeout races the *entire* generation, and a
+  cancel leaves the engine decoding up to `max_tokens` of wasted GPU with no client
+  listening. Two defects are closed. (1) XML tool-call mode was silently non-streaming —
+  `_complete_xml` accepted a `stream` flag and ignored it, so any model whose capability
+  probe fell back to XML mode lost streaming across the whole agent loop, with no log
+  signal. (2) Four call sites still sent whole-response requests and now stream: the idle
+  memory-consolidation adapter (cancelled by design on every idle→active transition, so it
+  fired constantly), the compaction summarizer, the autoresearch proposer, and REPL
+  agent-creation. Streaming makes the read-timeout apply between chunks and a client
+  disconnect observable mid-generation. Present since the first release (the idle-
+  consolidation path since v0.9.0).
+
 ## [0.9.1] — 2026-07-12
 
 ### Security
