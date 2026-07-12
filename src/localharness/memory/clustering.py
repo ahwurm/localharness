@@ -13,11 +13,14 @@ Design (Claude's-discretion knobs are the signature defaults, real numbers):
     `learned/*`) is a SEPARATE track and is excluded (owner ruling c). Grouping runs over the
     episodic population and the chapter IS the promotion (>=0.7) — un-inverting CLS. The sub-0.7
     `predgate/surprising_failure/*` stat rows arrive only as aux_members (Task 3).
-  - Relatedness (undirected, precision-tiered — run-2 ruling 1): two pool atoms are RELATED if
-    graph-adjacent within `graph_depth` hops (store.neighborhood), OR same `sem/{topic}/` slug
-    with >=1 shared salient token, OR different slugs with >=2 distinct shared salient tokens
-    after dropping tokens above 30% pool document-frequency (generic-verb guard — one shared
-    'requested' must not weld the pool into a mega-component). Connected components
+  - Relatedness (undirected — tag/graph/embedding-keyed; RULING-D: the tag axis is the grouping
+    truth, slug is a display label only): two pool atoms are RELATED if (a) graph-adjacent within
+    `graph_depth` hops (store.neighborhood — real derived_from/member_of structure), OR (b) they
+    share an edge-eligible active CHILD tag (co-tag; BUCKET tags never edge — 'project' would
+    mega-blob — and a child tag on >30% of the pool is a generic hub that forms no edges, floored
+    at 3 members), OR (c) an embedding leg agrees 2-factor (cosine >= embed_sim AND >=1 shared
+    salient token — never welds alone). A shared `sem/{topic}/` slug forms NO grouping edge: that
+    word/slug-overlap edge was RETIRED and REPLACED by co-tag in 36.1. Connected components
     >= min_cluster_size are candidate clusters.
   - Stability (find_stable_clusters): a component is a STABLE cluster only if its members'
     source sittings span >= min_sessions distinct sessions — recurring experience across
@@ -26,10 +29,11 @@ Design (Claude's-discretion knobs are the signature defaults, real numbers):
     (PGATE-03 rider) — a pure READ; those sub-0.7 rows are attached for 36-04 to fold +
     drain, and are NEVER promoted into primary membership.
 
-FTS note: this store's FTS5 combines query terms with implicit AND, so a full-value query
-would collapse to near-exact-duplicate detection. Member relatedness therefore intersects
-_salient_tokens in memory (FTS can neither count distinct shared tokens nor see pool-level
-document frequency); FTS probes remain only in aux-failure attachment (_attach_aux_failures).
+FTS note: this store's FTS5 combines query terms with implicit AND, so a full-value query would
+collapse to near-exact-duplicate detection — member relatedness therefore never leaned on FTS,
+and since the 36.1 co-tag swap it no longer leans on word overlap at all. The _salient_tokens
+probe survives only as the embedding leg's 2-factor co-factor and in aux-failure attachment
+(_attach_aux_failures).
 """
 from __future__ import annotations
 
@@ -121,13 +125,6 @@ def _salient_tokens(value: str, *, max_tokens: int = 8) -> list[str]:
             if len(out) >= max_tokens:
                 break
     return out
-
-
-def _topic_slug(key: str) -> str | None:
-    """sem/{slug}/{h8} -> slug; anything else (schemas, mined/ legacy, settled gate/ keys) has
-    no topic axis -> None (such pairs take the strict cross-topic rule)."""
-    parts = key.split("/")
-    return parts[1] if len(parts) >= 3 and parts[0] == "sem" else None
 
 
 async def _relatedness_edges(store, pool, *, fts_top_k, graph_depth,
