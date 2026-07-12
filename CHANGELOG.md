@@ -4,7 +4,7 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.9.2] — 2026-07-12
 
 ### Added
 - **Security defaults now update themselves on first start after an upgrade** (#15).
@@ -70,6 +70,22 @@ All notable changes to LocalHarness are documented here. The format follows
   unchanged even after an agent axis has been set. Scope note: `bench`/eval and programmatic
   subagents build `AgentConfig` directly and do NOT read the overlay — only the live
   `localharness start` load path honors it. Present since `components set` first shipped.
+
+### Changed
+- **Tag-keyed memory grouping ships built-but-OFF, honestly.** This release contains the
+  "tags become grouping truth" re-key (memory folding and correction validity keyed to the
+  validated tag axis instead of the free-text topic word, so a wrong topic word cannot merge
+  unrelated facts or authorize a correction) behind
+  `agent.memory.consolidation.tag_grouping_enabled` — **default `false`**. Its pre-committed
+  regression gate fired on the first live proof: with tag-keying on, a correction whose tag
+  classification differs from its target's stopped superseding the stale value (a real
+  reconciliation gap the old topic-word keying caught). Per the pre-committed kill, the
+  mechanism ships dormant: `false` is byte-identical to the previous behavior (test-pinned on
+  both re-keyed paths), and the flag is the re-attempt surface. Also included, inert until
+  then: a backup-guarded, idempotent, bounded-revert tag backfill script and a reproducible
+  grouping-regression comparator.
+- Clustering cleanup: the dead slug-based grouping helper was removed; chapter membership has
+  derived from validated tags (not topic words) since v0.9.0 — now regression-locked both ways.
 
 ## [0.9.1] — 2026-07-12
 
