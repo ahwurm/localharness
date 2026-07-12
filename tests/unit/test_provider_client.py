@@ -76,3 +76,79 @@ async def test_stream_captures_final_usage_chunk():
     msg, usage = await LLMClient._consume_native_stream(_aiter(chunks), None)
     assert msg.content == "ok"
     assert usage.completion_tokens == 5
+
+
+# ---------------------------------------------------------------------------
+# #18 — XML tool-call mode must stream at the transport level. `_complete_xml` /
+# `_complete_xml_fallback` accepted a `stream` parameter and IGNORED it, so any
+# model whose capability probe falls back to XML mode silently issued whole-
+# response requests for the entire agent loop (read timeout races the whole
+# generation; a cancel leaves vLLM decoding into the void). No log signal.
+# ---------------------------------------------------------------------------
+
+from localharness.provider.client import LLMConfig
+
+
+def _xml_cfg() -> LLMConfig:
+    # is_local=False: skip the inference gate + the local-timeout floor; the subject
+    # here is whether `stream=True` reaches the transport, not gating.
+    return LLMConfig(base_url="http://127.0.0.1:9/v1", model="m", timeout_seconds=300.0,
+                     tool_call_mode="xml", is_local=False)
+
+
+class _StreamOrResp:
+    """A create() return that behaves as BOTH a whole-response object (.choices/.usage)
+    AND an async chunk stream — so the RED failure is a clean `stream=True` assertion,
+    never an AttributeError from whichever branch the code happens to take."""
+
+    def __init__(self, content: str):
+        self._content = content
+        self.choices = [NS(message=NS(content=content, tool_calls=None))]
+        self.usage = None
+
+    def __aiter__(self):
+        return self._agen()
+
+    async def _agen(self):
+        yield NS(usage=None, choices=[NS(delta=NS(content=self._content, tool_calls=None))])
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_xml_mode_passes_stream_true():
+    """RED: stream_complete() in XML mode must request transport streaming. The dead
+    `stream` param made XML mode silently non-streaming for the whole loop (#18)."""
+    from localharness.provider.client import LLMClient
+
+    client = LLMClient(_xml_cfg())
+    captured: list[dict] = []
+
+    async def fake_create(**kwargs):
+        captured.append(kwargs)
+        return _StreamOrResp("<tool_call>{}</tool_call>")
+
+    client._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, _usage = await client.stream_complete([{"role": "user", "content": "hi"}])
+    assert captured and captured[0].get("stream") is True
+    # Full text is buffered client-side BEFORE the XML parse still sees it.
+    assert msg.content == "<tool_call>{}</tool_call>"
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_fallback_streams_when_requested():
+    """RED: the system-prompt-injection fallback honors stream too — a BadRequestError
+    re-entry must not silently drop back to a whole-response request (#18)."""
+    from localharness.provider.client import LLMClient
+
+    client = LLMClient(_xml_cfg())
+    captured: list[dict] = []
+
+    async def fake_create(**kwargs):
+        captured.append(kwargs)
+        return _StreamOrResp("ok")
+
+    client._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, _usage = await client._complete_xml_fallback(
+        [{"role": "user", "content": "hi"}], None, stream=True
+    )
+    assert captured and captured[0].get("stream") is True
+    assert msg.content == "ok"

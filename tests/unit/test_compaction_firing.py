@@ -28,9 +28,14 @@ async def test_compaction_summarize_unpacks_tuple_and_returns_content():
     """complete() returns (message, usage). The shared summarize fn must unpack it. A regress to a
     bare `result.content` on the tuple raises/returns '' HERE (direct call, not behind the stage's
     try/except that originally hid this for months)."""
+    # #18: the summarizer migrated .complete -> .stream_complete; the fakes expose both so
+    # this tuple-unpack regression stays valid regardless of which route the fn takes.
     class _TupleLLM:
         async def complete(self, prompt, tools=None, disable_thinking=False):
             return (_Msg(), {"prompt_tokens": 1})  # production shape
+
+        async def stream_complete(self, prompt, tools=None, on_token=None, disable_thinking=False):
+            return (_Msg(), {"prompt_tokens": 1})
 
     out = await make_compaction_summarize_fn(_TupleLLM())([{"role": "user", "content": "hi"}])
     assert out == "DENSE SUMMARY"
@@ -39,7 +44,35 @@ async def test_compaction_summarize_unpacks_tuple_and_returns_content():
         async def complete(self, prompt, tools=None, disable_thinking=False):
             return _Msg()
 
+        async def stream_complete(self, prompt, tools=None, on_token=None, disable_thinking=False):
+            return _Msg()
+
     assert await make_compaction_summarize_fn(_BareLLM())([{"role": "user", "content": "hi"}]) == "DENSE SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_compaction_summarize_routes_through_stream_complete():
+    """#18 RED: the compaction summarizer must call the client's STREAMING path (a whole-
+    response summary races the read timeout and, on cancel, wastes GPU decoding into the
+    void). disable_thinking stays threaded so the bounded budget yields the summary, not CoT."""
+    class _Spy:
+        def __init__(self) -> None:
+            self.via_stream = False
+            self.disable_thinking = None
+
+        async def stream_complete(self, prompt, tools=None, on_token=None, disable_thinking=False):
+            self.via_stream = True
+            self.disable_thinking = disable_thinking
+            return (_Msg(), None)
+
+        async def complete(self, prompt, tools=None, disable_thinking=False):
+            return (_Msg(), None)
+
+    spy = _Spy()
+    out = await make_compaction_summarize_fn(spy)([{"role": "user", "content": "hi"}])
+    assert out == "DENSE SUMMARY"
+    assert spy.via_stream is True
+    assert spy.disable_thinking is True
 
 
 @pytest.mark.asyncio
@@ -48,6 +81,9 @@ async def test_over_window_eviction_and_compaction_fire_in_build_messages(bus):
     LOSSLESSLY and (b) fire summary-compaction — not merely be 'wired'. Drives the real pipeline."""
     class _SummLLM:
         async def complete(self, prompt, tools=None, disable_thinking=False):
+            return (_Msg(), None)
+
+        async def stream_complete(self, prompt, tools=None, on_token=None, disable_thinking=False):
             return (_Msg(), None)
 
     tc = TokenCounter()  # tiktoken (no endpoint) — fine for the test

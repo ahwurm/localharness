@@ -371,6 +371,7 @@ class FakeLLMClient:
     def __init__(self, content: str):
         self._content = content
         self.complete_calls = 0
+        self.stream_calls = 0
 
         class _Cfg:
             tool_call_mode = "native"
@@ -387,6 +388,13 @@ class FakeLLMClient:
         msg = _Msg()
         msg.content = self._content
         return msg, FakeCompletionUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20)
+
+    async def stream_complete(self, messages, tools=None, on_token=None):
+        # #18: the proposer migrated to the streaming path. Delegate to complete() so the
+        # (message, usage) shape + complete_calls seal accounting are unchanged; stream_calls
+        # lets a test assert the streaming route was actually taken.
+        self.stream_calls += 1
+        return await self.complete(messages, tools)
 
 
 def _scenario_yaml(name: str, slice_: str) -> str:

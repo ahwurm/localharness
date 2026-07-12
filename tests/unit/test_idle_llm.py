@@ -71,6 +71,13 @@ class _StubClient:
         self.seen_disable_thinking = disable_thinking
         return self.ret
 
+    async def stream_complete(self, messages, tools=None, on_token=None, disable_thinking=False):
+        # #18: the adapter migrated to the streaming path; the stub mirrors it so the
+        # (message, usage) -> content mapping test still exercises the real call route.
+        self.seen_messages = messages
+        self.seen_disable_thinking = disable_thinking
+        return self.ret
+
 
 @pytest.mark.asyncio
 async def test_set_cancel_event_returns_none_and_cancels_generation():
@@ -114,6 +121,63 @@ async def test_char_cap_truncates_before_call():
     llm = _RecordingLLM("ok")
     await complete_cancellable(llm, "x" * 10000, asyncio.Event(), char_cap=100)
     assert llm.seen is not None and len(llm.seen) <= 100
+
+
+# ---------------------------------------------------------------------------
+# #18 — the idle bridge is the SHARPEST call site: run_cancellable cancels it BY
+# DESIGN on every idle→active transition (consolidation.py). A whole-response
+# .complete() there races the entire generation and, on cancel, leaves vLLM
+# decoding into the void. The adapter must route through the client's STREAMING
+# path (read timeout applies between chunks), still threading disable_thinking.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adapter_routes_through_stream_complete_with_thinking_off():
+    """RED: LLMTextAdapter.complete must call stream_complete (not complete), and keep
+    disable_thinking=True (bounded idle budgets must not fund hidden CoT)."""
+
+    class _Spy:
+        def __init__(self) -> None:
+            self.via_stream = False
+            self.disable_thinking = None
+
+        async def stream_complete(self, messages, tools=None, on_token=None, disable_thinking=False):
+            self.via_stream = True
+            self.disable_thinking = disable_thinking
+            return SimpleNamespace(content="chapter"), None
+
+        async def complete(self, messages, tools=None, stream=False, disable_thinking=False):
+            return SimpleNamespace(content="chapter"), None
+
+    spy = _Spy()
+    out = await LLMTextAdapter(spy).complete("mine this transcript")
+    assert out == "chapter"
+    assert spy.via_stream is True
+    assert spy.disable_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_run_cancellable_cancel_returns_none_sentinel():
+    """Regression lock (idle behavior byte-compatible): a SET cancel event truly cancels
+    the in-flight generation (CancelledError raised inside it) and run_cancellable returns
+    its None sentinel without hanging."""
+    from localharness.memory.idle_llm import run_cancellable
+
+    cancelled = {"v": False}
+
+    async def _sleeper():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled["v"] = True
+            raise
+
+    ev = asyncio.Event()
+    ev.set()
+    out = await asyncio.wait_for(run_cancellable(_sleeper(), ev), timeout=3.0)
+    assert out is None
+    assert cancelled["v"] is True
 
 
 # ---------------------------------------------------------------------------

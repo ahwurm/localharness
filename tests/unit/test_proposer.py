@@ -118,6 +118,9 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
 
             return _Msg(), None
 
+        async def stream_complete(self, messages, tools=None, on_token=None):
+            return await self.complete(messages)  # #18: proposer uses the streaming path
+
     monkeypatch.setattr(prop_mod, "LLMClient", _SpyClient, raising=False)
     cfg = _cfg()
     await propose(
@@ -236,6 +239,22 @@ async def test_tokens_used_captured_from_usage(proposer_corpus, proposer_results
         results_path=proposer_results["results"],
     )
     assert proposal.tokens_used == 20
+
+
+async def test_propose_uses_streaming_path(proposer_corpus, proposer_results):
+    """#18 RED: propose() must reach the proposer model via the STREAMING path, so a slow
+    frontier completion's read timeout applies between chunks, not across the whole request."""
+    cfg = _cfg()
+    spy = FakeLLMClient(_good_payload())
+    await propose(
+        "agent.role",
+        [proposer_results["train_run_id"]],
+        cfg=cfg,
+        llm=spy,
+        corpus_path=proposer_corpus,
+        results_path=proposer_results["results"],
+    )
+    assert spy.stream_calls == 1
 
 
 def test_tokens_used_defaults_none():

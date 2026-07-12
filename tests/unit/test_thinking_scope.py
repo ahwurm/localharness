@@ -35,6 +35,17 @@ class _Recorder:
 
     async def create(self, **kwargs):
         self.kwargs.append(kwargs)
+        if kwargs.get("stream"):
+            # #18: idle mining + the compaction summarizer now take the streaming route, so
+            # the recorder must return an async chunk stream (the request kwargs — including
+            # extra_body/enable_thinking — are still captured for the assertion).
+            async def _agen():
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", tool_calls=None))],
+                )
+
+            return _agen()
         msg = SimpleNamespace(content="ok", tool_calls=None)
         return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
 
