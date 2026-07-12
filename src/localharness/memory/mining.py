@@ -605,9 +605,20 @@ async def mine_transcript(
                     # word sets alone would call them identical. Paraphrases share their numbers;
                     # a differing number set blocks the fold outright.
                     nums = set(re.findall(r"[0-9]+", claim))
-                    cands = await _active_slug_atoms(store, slug)
-                    cands += [(k, v) for k, v in minted_pass.items()
-                              if k.startswith(f"sem/{slug}/")]
+                    # TAGG-01: fold candidates come from the shared CHILD TAG (a wrong slug can no
+                    # longer merge unrelated facts, and a wrong-slug paraphrase with the correct
+                    # tag folds). atoms_for_tag reads COMMITTED rows, so it already surfaces this
+                    # pass's earlier mints (tagged right after their mint) — the minted_pass union
+                    # the slug path needs for in-pass visibility is unnecessary here. When the
+                    # classify declined a child (child_tag is None), the atom has no tag identity
+                    # to fold on — fall back to the slug set so a classify miss never silently
+                    # disables the precision gate.
+                    if tag_grouping and child_tag is not None:
+                        cands = [(f.key, f.value) for f in await store.atoms_for_tag(child_tag.id)]
+                    else:
+                        cands = await _active_slug_atoms(store, slug)
+                        cands += [(k, v) for k, v in minted_pass.items()
+                                  if k.startswith(f"sem/{slug}/")]
                     if len(probe) >= 2 and not any(k == key for k, _v in cands):
                         best_key, best_val, best_j = None, "", 0.0
                         for k, v in cands:
