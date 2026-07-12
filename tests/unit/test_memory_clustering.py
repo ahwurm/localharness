@@ -595,3 +595,52 @@ async def test_tag_df_guard_excludes_generic_child(store):
     pool = await _load_pool(store)
     adj = await _relatedness_edges(store, pool, fts_top_k=5, graph_depth=2)
     assert sorted(len(c) for c in _connected_components(pool, adj)) == [1, 1, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# TAGG-03 lock — clustering membership derives from the TAG AXIS; the slug is a
+# display label only. These two tests are each other's control: same sem/ setup,
+# the ONLY difference is a shared edge-eligible CHILD tag. With it, atoms group
+# ACROSS a slug mismatch; without it, a shared slug (even with shared tokens)
+# groups NOTHING. Driven through the public find_stable_clusters the
+# chapter-writer calls, embedder=None so only the co-tag/graph legs run.
+# Reintroducing any slug/word-overlap edge fails the negative test.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_membership_derives_from_tag_not_slug(store):
+    """TAGG-03 lock (positive): membership follows the shared CHILD tag, not the slug. Two sem/
+    atoms on DIFFERENT slugs (sem/investing/… vs sem/subagents/…) carrying the SAME edge-eligible
+    child tag, spanning two sittings, return as ONE stable cluster — the co-tag edge links them
+    despite the slug mismatch (36.1's grouping truth, RULING-D). embedder=None isolates co-tag."""
+    shared = await _child(store, "hbm-supply-chain")
+    a = await _seed_sem(store, "micron is ramping HBM3E output for the datacenter buildout", "s1",
+                        topic="investing", child_tag=None)
+    b = await _seed_sem(store, "a retrieval subagent keeps the planner context lean", "s2",
+                        topic="subagents", child_tag=None)
+    await store.add_atom_tag(a.id, shared.id, "discovery")
+    await store.add_atom_tag(b.id, shared.id, "discovery")
+    assert a.key.split("/")[1] != b.key.split("/")[1]  # genuinely different slugs
+
+    clusters = await find_stable_clusters(store, min_sessions=2, embedder=None)
+    assert len(clusters) == 1, f"expected one co-tag cluster across slugs, got {clusters}"
+    assert {a.key, b.key} <= {m.key for m in clusters[0].members}
+    assert clusters[0].sessions == frozenset({"s1", "s2"})
+
+
+@pytest.mark.asyncio
+async def test_shared_slug_alone_does_not_cluster(store):
+    """TAGG-03 lock (negative — the regression guard): a shared slug is NOT a grouping signal.
+    Two atoms on the SAME slug (sem/reads/…) across two sittings, sharing salient tokens but with
+    NO shared child tag, NO graph edge, and embedder=None, do NOT co-cluster. Were a slug (or the
+    retired word-overlap) edge ever reintroduced, these two WOULD group and this test would fail."""
+    a = await _seed_sem(store, "the absolute path resolved the read timeout cleanly", "s1",
+                        topic="reads", child_tag=None)
+    b = await _seed_sem(store, "the absolute path resolved the read permission error", "s2",
+                        topic="reads", child_tag=None)
+    assert a.key.split("/")[1] == b.key.split("/")[1] == "reads"  # same slug, shared tokens
+
+    clusters = await find_stable_clusters(store, min_sessions=2, embedder=None)
+    together = any({a.key, b.key} <= {m.key for m in c.members} for c in clusters)
+    assert not together, "same-slug atoms grouped without a shared tag/graph/embedding edge"
+    assert clusters == []  # in fact neither forms any multi-member component at all
