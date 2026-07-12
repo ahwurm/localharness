@@ -21,6 +21,20 @@ _FAIL = "[bold red]✗[/bold red]"
 _INFO = "[cyan]i[/cyan]"
 
 
+def _strip_v1(base_url: str) -> str:
+    """Return the server root: base_url minus a trailing slash and /v1 suffix.
+
+    ProviderConfig.base_url is always written WITH a /v1 suffix (config/models.py;
+    detector._build_base_url — "Always includes /v1"). Native endpoints — Ollama's
+    /api/tags, llama.cpp/vLLM's /tokenize, LM Studio's /api/v0 — live at the server root,
+    so probes must strip /v1 first (mirrors init_cmd's removesuffix("/v1")).
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    return root
+
+
 def doctor(
     config_dir: Annotated[
         str,
@@ -77,11 +91,13 @@ def doctor(
     # 4. LLM endpoint reachable
     if harness is not None:
         base_url = harness.provider.base_url
-        # Determine models endpoint
+        # base_url always carries a /v1 suffix — build probes from the stripped root so we
+        # hit <root>/v1/models (not /v1/v1/models) and Ollama's native <root>/api/tags.
+        root = _strip_v1(base_url)
         if "11434" in base_url:
-            models_url = base_url + "/api/tags"
+            models_url = root + "/api/tags"
         else:
-            models_url = base_url + "/v1/models"
+            models_url = root + "/v1/models"
         try:
             resp = httpx.get(models_url, timeout=5.0)
             console.print(f"{_PASS} LLM endpoint reachable: {base_url}")
@@ -89,6 +105,7 @@ def doctor(
             # 5. Model available
             default_model = harness.provider.default_model
             model_ids: list[str] = []
+            data: dict = {}
             try:
                 data = resp.json()
                 if "data" in data:
@@ -98,7 +115,15 @@ def doctor(
             except Exception:
                 pass
 
-            if not model_ids or default_model in model_ids:
+            status = getattr(resp, "status_code", None)
+            if isinstance(status, int) and not (200 <= status < 300):
+                # A real error status means the model list can't be trusted — an empty/404
+                # body must NOT sail through the benefit-of-doubt pass below. (A live
+                # httpx.Response always exposes an int status; the isinstance guard keeps
+                # under-specified test mocks on the benefit-of-doubt path.)
+                console.print(f"{_FAIL} Model check failed: {models_url} returned HTTP {status}")
+                failures.append("model-not-found")
+            elif not model_ids or default_model in model_ids:
                 console.print(f"{_PASS} Model available: {default_model}")
             else:
                 console.print(f"{_FAIL} Model not found: {default_model}")
@@ -126,11 +151,8 @@ def doctor(
             # largest max_context_length. Keeps doctor's reconciliation from false-reporting
             # 'max_model_len not reported' on a healthy LM Studio.
             if served is None and harness.provider.provider_type == "lmstudio":
-                native = base_url.rstrip("/")
-                if native.endswith("/v1"):
-                    native = native[: -len("/v1")]
                 try:
-                    lm = httpx.get(f"{native}/api/v0/models", timeout=5.0).json()
+                    lm = httpx.get(f"{root}/api/v0/models", timeout=5.0).json()
                     lm_entries = [e for e in (lm.get("data") or []) if isinstance(e, dict)]
                     loaded = next(
                         (e for e in lm_entries
@@ -183,9 +205,7 @@ def doctor(
             # -> {tokens:[...]}; Ollama and LM Studio serve NO tokenize endpoint, so approximate
             # (tiktoken cl100k) counting is expected there — an INFO line, NOT a failure. Branch
             # on the detected provider_type so a healthy non-vLLM runtime does not false-fail.
-            root = base_url.rstrip("/")
-            if root.endswith("/v1"):
-                root = root[: -len("/v1")]
+            # (root = _strip_v1(base_url) is computed once above and reused here.)
             provider_type = harness.provider.provider_type
             if provider_type in ("ollama", "lmstudio"):
                 console.print(
