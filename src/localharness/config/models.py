@@ -175,19 +175,49 @@ class PermissionConfig(BaseModel):
 
     deny_patterns: list[str] = Field(
         default_factory=lambda: [
+            # --- credential / config file writes ---
             "write(*/.env)",
             "write(*/secrets*)",
             "write(*/config.yaml)",
             "write(*/agents/*.yaml)",
-            "bash_exec(sudo:*)",
+            # --- privilege escalation + recursive delete + world-writable ---
+            # `sudo *` (bare) + `*sudo *` (embedded); the earlier `sudo:*` glob required a
+            # literal colon after 'sudo' (fnmatch) and so matched NO real sudo command.
+            "bash_exec(*sudo *)",
             "bash_exec(rm -rf *)",
+            "bash_exec(*rm -rf *)",  # embedded: `cd /tmp && rm -rf x`
             "bash_exec(chmod 777 *)",
+            # --- destructive service / process ops (issue #15: the 2026-07-11 run where the
+            # subject bash_exec'd `docker stop` against its OWN vLLM server). Destructive VERBS
+            # only — read-only ops (docker ps, docker logs, systemctl status, journalctl) stay
+            # allowed. Leading+trailing * catches bare AND embedded (`cd x && docker stop y`).
+            "bash_exec(*docker stop*)",
+            "bash_exec(*docker kill*)",
+            "bash_exec(*docker rm*)",  # covers `docker rm` and `docker rmi`
+            "bash_exec(*docker compose down*)",
+            "bash_exec(*docker-compose down*)",
+            "bash_exec(*systemctl stop*)",
+            "bash_exec(*systemctl disable*)",
+            "bash_exec(*systemctl kill*)",
+            "bash_exec(*systemctl mask*)",
+            "bash_exec(*pkill*)",
+            "bash_exec(*killall*)",
+            "bash_exec(kill *)",     # bare `kill -9 <pid>`
+            "bash_exec(* kill *)",   # embedded; space-delimited so `grep skill` is NOT matched
+            "bash_exec(*shutdown*)",
+            "bash_exec(*reboot*)",
+            "bash_exec(*poweroff*)",
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
             "'{tool_name}({argument_glob})'. "
             "A tool call is denied if its name and any argument matches a pattern. "
-            "Pattern matching uses fnmatch semantics. "
+            "Pattern matching uses fnmatch semantics over the RAW pre-expansion argument "
+            "strings (no shell parsing). The shipped defaults block credential/config writes, "
+            "privilege escalation (sudo), recursive delete, world-writable chmod, and "
+            "destructive service/process ops (docker stop/kill/rm, systemctl "
+            "stop/disable/kill/mask, pkill/killall/kill, shutdown/reboot/poweroff) — while "
+            "leaving read-only ops (docker ps, systemctl status, journalctl) allowed. "
             "The deny list is evaluated after inheritance resolution — "
             "an agent's deny list is the UNION of its own list and all inherited lists. "
             "Agents can add to the deny list but never remove inherited entries."
@@ -199,6 +229,17 @@ class PermissionConfig(BaseModel):
         description=(
             "Explicit allow list for 'manual' mode (v2). "
             "In 'auto' mode, this field is ignored."
+        ),
+    )
+
+    workspace_root: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opt-in filesystem confinement. When set, write/edit target paths and bash_exec "
+            "working_dir must resolve (symlink-safe, expanduser'd) INSIDE this directory or the "
+            "tool returns a permission_denied error. Default None = UNCONFINED: file-write "
+            "capability is a core product feature and stays fully enabled by default. Harness-run "
+            "evals set this to an isolated per-run scratch dir."
         ),
     )
 

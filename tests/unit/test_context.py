@@ -702,9 +702,11 @@ def test_default_deny_patterns_use_bash_exec():
     """Default deny_patterns reference bash_exec (the actual tool name), not legacy bash."""
     from localharness.config.models import PermissionConfig
     patterns = PermissionConfig().deny_patterns
-    assert "bash_exec(sudo:*)" in patterns
+    # issue #15: `sudo:*` (needed a literal colon, matched no real sudo cmd) -> `*sudo *`.
+    assert "bash_exec(*sudo *)" in patterns
     assert "bash_exec(rm -rf *)" in patterns
     assert "bash_exec(chmod 777 *)" in patterns
+    assert "bash_exec(sudo:*)" not in patterns
     assert "bash(sudo:*)" not in patterns
     assert "bash(rm -rf *)" not in patterns
 

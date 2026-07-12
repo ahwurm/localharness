@@ -8,6 +8,7 @@ async def register_builtin_tools(
     registry: ToolRegistry,
     memory_store=None,
     eviction_store=None,
+    workspace_root: str | None = None,
 ) -> None:
     """Register all built-in tools at global scope. Call once at harness startup.
 
@@ -15,7 +16,9 @@ async def register_builtin_tools(
     handle — the system prompt inlines only a fact index, full bodies served on demand).
     `eviction_store`: if provided, registers tool_result_get (restores tool-result bodies
     evicted to stubs by the ContextManager). Both are wired only when their backing store
-    exists so the bench/test paths that pass neither keep the original builtin set."""
+    exists so the bench/test paths that pass neither keep the original builtin set.
+    `workspace_root`: opt-in confinement (issue #15). When set, write/edit targets and
+    bash_exec working_dir must resolve inside it; None (default) = unconfined."""
     from localharness.tools.builtin.bash_tool import BashExecTool
     from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.edit_tool import EditTool
@@ -26,7 +29,9 @@ async def register_builtin_tools(
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
     from localharness.tools.builtin.write_tool import WriteTool
 
-    for tool in [GlobTool(), GrepTool(), ReadTool(), WriteTool(), EditTool(), BashExecTool(),
+    for tool in [GlobTool(), GrepTool(), ReadTool(),
+                 WriteTool(workspace_root=workspace_root), EditTool(workspace_root=workspace_root),
+                 BashExecTool(workspace_root=workspace_root),
                  WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool(), LoadDocumentTool()]:
         await registry.register(tool, scope="global")
 

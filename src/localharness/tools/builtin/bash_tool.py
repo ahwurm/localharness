@@ -46,6 +46,8 @@ class BashExecTool(Tool):
         self, command: str, timeout_s: float = 60.0, working_dir: str = "."
     ) -> ToolResult:
         cwd = Path(working_dir).resolve()
+        if (denied := self._outside_workspace(cwd)) is not None:
+            return denied
         if not cwd.exists():
             return self.err(f"working_dir does not exist: {cwd}")
 

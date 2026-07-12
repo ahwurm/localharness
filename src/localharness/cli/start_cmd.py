@@ -376,7 +376,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # --- 2. Core infrastructure ---
     tool_registry = ToolRegistry()
-    await register_builtin_tools(tool_registry)
+    # workspace_root (issue #15): opt-in; None (default) leaves write/edit/bash unconfined.
+    await register_builtin_tools(
+        tool_registry, workspace_root=agent_config.permissions.workspace_root
+    )
 
     # --- 3. Hook system (soft) ---
     hook_system: HookSystem | None = None

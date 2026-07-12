@@ -47,6 +47,9 @@ class WriteTool(Tool):
                 error_type="permission_denied",
             )
 
+        if (denied := self._outside_workspace(target)) is not None:
+            return denied
+
         target.parent.mkdir(parents=True, exist_ok=True)
 
         open_mode = "a" if mode == "append" else "w"

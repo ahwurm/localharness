@@ -443,7 +443,7 @@ def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, l
     return [(day, [c for _, c in sorted(rows)]) for day, rows in sorted(by_day.items())]
 
 
-def _root_agent_config(agent: str):
+def _root_agent_config(agent: str, workspace_root: str | None = None):
     """The composed AgentConfig, EXACTLY as start_cmd shapes the root agent's plus the
     live-store belt-and-braces (BLOCKER 3):
     - 32k context bound (machine-safety: far below the 96k hard-hang class);
@@ -464,6 +464,10 @@ def _root_agent_config(agent: str):
 
     a_cfg = AgentConfig(name=agent, role=_ROLE)
     a_cfg.context.max_context_tokens = _LOOP_CONTEXT_TOKENS
+    # issue #15: confine model-issued write/edit/bash to an isolated per-run scratch dir so a
+    # stray write can never land in the harness repo or a live store (belt-and-braces above the
+    # deny globs + the physical chmod layer). None in unit tests = unconfined.
+    a_cfg.permissions.workspace_root = workspace_root
     apply_root_capability_floor(a_cfg.tools)
     home_agents = str(Path.home() / ".localharness" / "agents")
     for form in (home_agents, "~/.localharness/agents"):
@@ -509,10 +513,15 @@ async def _build_loop(args, store_dir: Path, store: MemoryStore, bus: EventBus,
 
     registry = ToolRegistry()
     content_store = ContentStore()
-    await register_builtin_tools(registry, memory_store=store, eviction_store=content_store)
+    # issue #15: isolated per-run scratch under the (already-isolated) store dir — the ONLY place
+    # this run's model-issued write/edit/bash may touch. Build the config first so its
+    # workspace_root flows into the builtin tools at registration time.
+    ws_root = store_dir / "workspace"
+    ws_root.mkdir(parents=True, exist_ok=True)
+    a_cfg = _root_agent_config(args.agent, workspace_root=str(ws_root))
+    await register_builtin_tools(registry, memory_store=store, eviction_store=content_store,
+                                 workspace_root=a_cfg.permissions.workspace_root)
     bind_agent_store_tools(registry, content_store)
-
-    a_cfg = _root_agent_config(args.agent)
     if compact_md is None:
         compact_md = store_dir / "agents" / args.agent / "compact.md"  # isolated (never ~/. path)
     tc = token_counter or TokenCounter()  # offline: the same estimator ContextManager defaults to
