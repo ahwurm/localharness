@@ -32,7 +32,10 @@ class BashExecTool(Tool):
                     },
                     "working_dir": {
                         "type": "string",
-                        "description": "Working directory for the command. Defaults to CWD.",
+                        "description": (
+                            "Working directory for the command. Defaults to the workspace root "
+                            "when confined (relative paths anchor there), else the harness CWD."
+                        ),
                         "default": ".",
                     },
                 },
@@ -45,7 +48,14 @@ class BashExecTool(Tool):
     async def _execute(
         self, command: str, timeout_s: float = 60.0, working_dir: str = "."
     ) -> ToolResult:
-        cwd = Path(working_dir).resolve()
+        # Confined (workspace_root set): relative working_dir — including the untouched default
+        # "." — anchors at the workspace root, so the resting behavior is "your cwd IS the
+        # workspace", not "your default call errors". Escapes after resolve() ("../x") are still
+        # denied below. Unconfined (None): ambient-CWD resolution, unchanged.
+        if self.workspace_root is not None and not Path(working_dir).is_absolute():
+            cwd = (Path(self.workspace_root).expanduser().resolve() / working_dir).resolve()
+        else:
+            cwd = Path(working_dir).resolve()
         if (denied := self._outside_workspace(cwd)) is not None:
             return denied
         if not cwd.exists():

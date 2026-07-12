@@ -165,6 +165,50 @@ async def test_bash_working_dir_inside_workspace_root_runs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("call_kwargs", [{}, {"working_dir": "."}], ids=["omitted", "dot"])
+async def test_confined_bash_default_working_dir_is_workspace_root(tmp_path: Path, call_kwargs):
+    """Resting behavior: confined means 'your default cwd IS the workspace', not 'your default
+    bash call errors'. An untouched working_dir (omitted or the schema default '.') must run
+    with cwd == workspace_root, not be denied for resolving against the ambient harness CWD."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    tool = BashExecTool(workspace_root=str(root))
+    result = await tool.run(command="pwd", **call_kwargs)
+    assert result.success is True, f"default working_dir must run confined, got: {result.error}"
+    assert result.output.strip() == str(root.resolve())
+
+
+@pytest.mark.asyncio
+async def test_confined_bash_relative_working_dir_anchors_at_root(tmp_path: Path):
+    """Explicit relative working_dir resolves AGAINST workspace_root when confined
+    (working_dir='sub' -> <root>/sub), not against the ambient harness CWD."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    root = tmp_path / "ws"
+    (root / "sub").mkdir(parents=True)
+    tool = BashExecTool(workspace_root=str(root))
+    result = await tool.run(command="pwd", working_dir="sub")
+    assert result.success is True, f"relative working_dir must anchor at root, got: {result.error}"
+    assert result.output.strip() == str((root / "sub").resolve())
+
+
+@pytest.mark.asyncio
+async def test_confined_bash_relative_escape_still_denied(tmp_path: Path):
+    """A relative working_dir that escapes the root after resolve() ('../evil') stays denied."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (tmp_path / "evil").mkdir()
+    tool = BashExecTool(workspace_root=str(root))
+    result = await tool.run(command="pwd", working_dir="../evil")
+    assert result.success is False
+    assert result.error_type == "permission_denied"
+
+
+@pytest.mark.asyncio
 async def test_symlink_escape_is_blocked(tmp_path: Path):
     """resolve() must defeat a symlink inside the workspace that points outside it."""
     from localharness.tools.builtin.write_tool import WriteTool
