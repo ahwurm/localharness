@@ -292,6 +292,117 @@ class TestThinkingIndicator:
         assert ch._thinking is None          # stop() must not leak a running Status thread
 
 
+class TestDreamingIndicator:
+    """#20: a quiet '· dreaming…' console.status runs while a background memory
+    consolidation/mining pass is in flight and is torn down the instant it ends, the
+    user starts typing, or a turn begins. Extends the REPL-02 thinking machinery (same
+    console.status, IDLE-only start, stop-first) — the dot can never draw over the input
+    bubble because WAITING_INPUT is not IDLE. Terminal-only, driven by bus events."""
+
+    @staticmethod
+    def _channel():
+        # force_terminal so rich Status renders headlessly (mirrors the thinking tests)
+        return make_terminal_channel(out=StringIO())
+
+    @staticmethod
+    def _started():
+        from localharness.core.events import ConsolidationStarted
+        return ConsolidationStarted(agent_id="a")
+
+    @staticmethod
+    def _finished():
+        from localharness.core.events import ConsolidationFinished
+        return ConsolidationFinished(agent_id="a")
+
+    def test_dreaming_label_is_exact(self):
+        """The official label is exactly '· dreaming…' (middle-dot + ellipsis)."""
+        from localharness.channels.terminal import _DREAMING_LABEL
+        assert _DREAMING_LABEL == "· dreaming…"
+        assert [hex(ord(c)) for c in _DREAMING_LABEL[:1]] == ["0xb7"]  # leading middle-dot
+
+    @pytest.mark.asyncio
+    async def test_pass_start_shows_dreaming_when_idle(self):
+        ch = self._channel()
+        assert ch._state == "IDLE"
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None      # the dot appears the moment the pass starts
+        ch._stop_dreaming()                  # tidy the daemon refresh thread
+
+    @pytest.mark.asyncio
+    async def test_pass_end_clears_dreaming(self):
+        ch = self._channel()
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None
+        await ch.on_consolidation_finished(self._finished())
+        assert ch._dreaming is None          # cleared instantly when the pass ends
+
+    @pytest.mark.asyncio
+    async def test_dreaming_never_starts_over_the_prompt_or_a_stream(self):
+        # WAITING_INPUT (bubble up) and STREAMING (mid-generation): a pass-start must
+        # never draw the dot — this is the "never disturb the input prompt" guarantee.
+        for state in ("WAITING_INPUT", "STREAMING"):
+            ch = self._channel()
+            ch._state = state
+            await ch.on_consolidation_started(self._started())
+            assert ch._dreaming is None, f"dreaming must not start while {state}"
+
+    @pytest.mark.asyncio
+    async def test_output_path_stops_dreaming_first(self):
+        # _stop_thinking is the stop-first primitive every output path calls BEFORE it
+        # prints — it must tear the dreaming dot down too (no dot bleeding into output).
+        ch = self._channel()
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None
+        ch._stop_thinking()
+        assert ch._dreaming is None
+
+    @pytest.mark.asyncio
+    async def test_send_message_clears_dreaming(self):
+        ch = self._channel()
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None
+        await ch.send_message("hello")       # real output landing clears the dot first
+        assert ch._dreaming is None
+
+    @pytest.mark.asyncio
+    async def test_turn_begin_replaces_dreaming_with_thinking(self):
+        from localharness.core.events import Heartbeat
+        ch = self._channel()
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None
+        await ch.on_heartbeat(Heartbeat(
+            agent_id="a", session_id="s", iteration=1, context_utilization_pct=10.0,
+        ))
+        assert ch._dreaming is None          # a turn beginning clears the dreaming dot…
+        assert ch._thinking is not None      # …and the thinking spinner takes the slot
+        ch._stop_thinking()
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_dreaming(self):
+        ch = self._channel()
+        await ch.on_consolidation_started(self._started())
+        assert ch._dreaming is not None
+        await ch.stop()
+        assert ch._dreaming is None          # stop() must not leak a running Status thread
+
+    @pytest.mark.asyncio
+    async def test_terminal_subscribes_via_bus_and_discord_ignores(self, tmp_path):
+        # Terminal wires the dreaming dot through its bus subscription in start(); a
+        # representative non-interactive channel (Discord) has no such surface at all —
+        # the dot is REPL-terminal-only (the 33.3 thinking-spinner precedent).
+        from localharness.channels.discord import DiscordChannel
+        ch = self._channel()
+        ch._history_file = str(tmp_path / ".repl_history")
+        await ch.start()
+        try:
+            await ch.bus.publish(self._started())
+            assert ch._dreaming is not None  # delivered via the real bus subscription
+        finally:
+            await ch.stop()
+        assert not hasattr(DiscordChannel, "on_consolidation_started")
+        assert not hasattr(DiscordChannel, "on_consolidation_finished")
+
+
 class TestContextMeter:
     def test_levels_step_with_usage(self):
         from localharness.channels.terminal import _ctx_segments

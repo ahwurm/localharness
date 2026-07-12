@@ -48,6 +48,53 @@ def test_app_registers_agent_subcommand():
 
 
 # ---------------------------------------------------------------------------
+# #20: interactive REPL routes memory-subsystem logs to a file, not the terminal
+# ---------------------------------------------------------------------------
+
+def test_memory_logs_routed_to_file_not_repl_console(tmp_path):
+    """The real emitter behind #20: consolidation/mining use stdlib logging, and the
+    interactive start path configures no handler, so their log.warning/exception records
+    reach the REPL via logging.lastResort (stderr) over the input prompt.
+    _route_memory_logs_to_file sends the memory logger to a file AND stops propagation, so
+    records never reach a terminal-bound root handler — while the detail is kept in the file."""
+    import logging
+    from io import StringIO
+
+    from localharness.cli.start_cmd import _route_memory_logs_to_file
+
+    mem = logging.getLogger("localharness.memory")
+    root = logging.getLogger()
+    saved = (mem.handlers[:], mem.level, mem.propagate)
+    sink = StringIO()  # stand-in for the REPL's terminal-bound root handler (the leak target)
+    root_h = logging.StreamHandler(sink)
+    root_h.setLevel(logging.DEBUG)
+    root.addHandler(root_h)
+    try:
+        log_path = _route_memory_logs_to_file(tmp_path)
+        # exact lines the mining + consolidation paths actually emit today
+        logging.getLogger("localharness.memory.mining").warning(
+            "mining B4(ii): retracted resurrected stale value"
+        )
+        logging.getLogger("localharness.memory.consolidation").info(
+            "consolidation: folded=3 promoted=1 decayed=0 demoted=0 churn=0.10"
+        )
+        for h in mem.handlers:
+            h.flush()
+        terminal_out = sink.getvalue()
+        assert "retracted resurrected stale value" not in terminal_out  # not on the terminal
+        assert "folded=3" not in terminal_out
+        assert mem.propagate is False                                   # bubble stopped
+        file_text = Path(log_path).read_text(encoding="utf-8")
+        assert "retracted resurrected stale value" in file_text        # detail kept in the file
+        assert "folded=3" in file_text
+    finally:
+        root.removeHandler(root_h)
+        mem.handlers[:] = saved[0]
+        mem.setLevel(saved[1])
+        mem.propagate = saved[2]
+
+
+# ---------------------------------------------------------------------------
 # single-source window derivation: served -> effective -> override
 # ---------------------------------------------------------------------------
 

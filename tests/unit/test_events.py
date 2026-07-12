@@ -137,8 +137,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 26 event types."""
-    assert len(EVENT_TYPE_MAP) == 26
+    """EVENT_TYPE_MAP has entries for all 28 event types."""
+    assert len(EVENT_TYPE_MAP) == 28
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -146,6 +146,7 @@ def test_event_type_map_complete():
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
         "ComponentMutated", "MutationArchived", "SentinelAlert", "MemoryGateFired",
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
+        "ConsolidationStarted", "ConsolidationFinished",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -175,11 +176,14 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 26 event classes."""
+    """AnyEvent type contains all 28 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
+    # Import-inside-body (the file's 19-02 idiom) so the module still collects before the
+    # #20 consolidation-status events land — the assertions below fail RED until then.
+    from localharness.core.events import ConsolidationFinished, ConsolidationStarted
     args = typing.get_args(AnyEvent)
-    assert len(args) == 26
+    assert len(args) == 28
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -187,6 +191,7 @@ def test_any_event_union():
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
         ComponentMutated, MutationArchived, SentinelAlert, MemoryGateFired,
         ExpectationAttached, OutcomeObserved, SurpriseScored,
+        ConsolidationStarted, ConsolidationFinished,
     }
     assert set(args) == expected
 
@@ -540,3 +545,43 @@ async def test_predictive_events_replayable(tmp_path):
     assert isinstance(replayed[0], SurpriseScored)
     assert replayed[0].score == 0.5
     assert replayed[0].quadrant == "routine"
+
+
+# ---------------------------------------------------------------------------
+# #20: ConsolidationStarted / ConsolidationFinished — the dreaming-dot lifecycle
+# signal. Published on the persisted bus, so (Pitfall 2) they MUST round-trip through
+# deserialize_event and be registered in EVENT_TYPE_MAP / AnyEvent.
+# ---------------------------------------------------------------------------
+
+
+def test_consolidation_status_events_roundtrip_and_registered():
+    """Both events construct, are frozen, carry event_type == class name, live in
+    EVENT_TYPE_MAP + AnyEvent, and reconstruct exactly via deserialize_event."""
+    from typing import get_args
+
+    from localharness.core.events import ConsolidationFinished, ConsolidationStarted
+
+    for cls in (ConsolidationStarted, ConsolidationFinished):
+        ev = cls(agent_id=AgentID("cons-agent"))
+        assert ev.event_type == cls.__name__
+        with pytest.raises(Exception):        # frozen: BaseEvent immutability contract
+            ev.agent_id = "other"
+        assert EVENT_TYPE_MAP[cls.__name__] is cls
+        assert cls in get_args(AnyEvent)
+        restored = deserialize_event(ev.model_dump_json())
+        assert isinstance(restored, cls)
+        assert restored.agent_id == "cons-agent"
+        assert restored.id == ev.id
+
+
+async def test_consolidation_status_events_deliver_to_subscriber(bus):
+    """Publishing each event reaches a bus subscriber (the delivery seam the terminal
+    channel rides for the dreaming dot)."""
+    from localharness.core.events import ConsolidationFinished, ConsolidationStarted
+
+    seen = []
+    bus.subscribe(ConsolidationStarted, lambda e: seen.append(("start", e)))
+    bus.subscribe(ConsolidationFinished, lambda e: seen.append(("end", e)))
+    await bus.publish(ConsolidationStarted(agent_id=AgentID("a")))
+    await bus.publish(ConsolidationFinished(agent_id=AgentID("a")))
+    assert [k for k, _ in seen] == ["start", "end"]
