@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -13,6 +14,33 @@ from rich.table import Table
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+def _route_memory_logs_to_file(agent_dir: Path) -> Path:
+    """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
+    the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
+    and the interactive start path configures no handler, so their WARNING/EXCEPTION records
+    surface through `logging.lastResort` on stderr — landing in the REPL over the input
+    prompt while a background pass runs (the "something is broken" incident). Attaching a
+    file handler to `localharness.memory` and setting `propagate=False` keeps full detail in
+    `<agent_dir>/memory.log` and off the terminal. bench/eval use their own
+    `logging.basicConfig` and never call this — non-interactive channels are untouched."""
+    log_path = agent_dir / "memory.log"
+    mem_log = logging.getLogger("localharness.memory")
+    already = any(
+        isinstance(h, logging.FileHandler)
+        and getattr(h, "baseFilename", None) == str(log_path)
+        for h in mem_log.handlers
+    )
+    if not already:
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        mem_log.addHandler(handler)
+    mem_log.setLevel(logging.DEBUG)   # the file keeps full detail…
+    mem_log.propagate = False         # …and nothing bubbles to root/lastResort (the stderr leak)
+    return log_path
 
 
 async def _probe_llm(
@@ -409,6 +437,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     agent_dir = cfg_path / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
+    # #20: keep background consolidation/mining logs off the interactive terminal (file only)
+    # — otherwise their stdlib WARNING/EXCEPTION records leak onto the REPL via lastResort.
+    _route_memory_logs_to_file(agent_dir)
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     # LLMClient built above with probe-derived tool_call_mode.
 
