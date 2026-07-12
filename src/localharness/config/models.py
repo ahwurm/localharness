@@ -403,7 +403,7 @@ class MemoryConsolidationConfig(BaseModel):
         ),
     )
     mining_novelty_fold_threshold: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.70, ge=0.0, le=1.0,
         description=(
             "NOVELTY GATE (mining precision): a fresh mint that is PROVABLY redundant vs an "
             "active same-slug atom FOLDS into it as corroboration (recurrence ladder) instead of "
