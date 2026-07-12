@@ -74,7 +74,10 @@ class LLMTextAdapter:
         # Internal idle work disables thinking per-request (scoped #11 exception):
         # under a reasoning parser these bounded completions otherwise spend their
         # whole budget on hidden CoT (C0 sweep: extraction yield collapsed).
-        msg, _usage = await self._client.complete(
+        # #18: stream at the transport level — run_cancellable cancels this call BY DESIGN
+        # on every idle→active transition; a whole-response call there would leave vLLM
+        # decoding into the void. (message, usage) return shape is identical to complete().
+        msg, _usage = await self._client.stream_complete(
             [{"role": "user", "content": prompt}], disable_thinking=True
         )
         return getattr(msg, "content", None) or ""

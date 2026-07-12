@@ -314,7 +314,9 @@ async def propose(
     messages = _build_reflection_messages(
         component, before, entry.type_name, failed, pareto_evidence=pareto_evidence
     )
-    msg, usage = await llm.complete(messages)
+    # #18: stream at the transport level — a slow frontier completion's read timeout then
+    # applies between chunks, not across the whole request. Same (message, usage) shape.
+    msg, usage = await llm.stream_complete(messages)
     raw = msg.content or ""
     parsed = _parse(raw)
     try:

@@ -299,7 +299,9 @@ class OrchestratorREPL:
                 {"role": "system", "content": "Generate a LocalHarness agent YAML config. Return only the YAML, no explanation."},
                 {"role": "user", "content": gathered.get("description", user_input)},
             ]
-            response = await self._agent._llm.complete(messages, tools=None)
+            # #18: stream at the transport level. Return-value shape is unchanged
+            # (stream_complete returns the same (message, usage) as complete).
+            response = await self._agent._llm.stream_complete(messages, tools=None)
             yaml_str = getattr(response, "content", "") or ""
             # Strip markdown code fences if present (LLMs often wrap in ```yaml...```)
             yaml_str = re.sub(r'^```(?:yaml)?\s*\n?', '', yaml_str.strip())

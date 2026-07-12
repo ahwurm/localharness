@@ -47,6 +47,9 @@ class _FakeProposerClient:
 
         return _Msg(), None
 
+    async def stream_complete(self, messages, tools=None, on_token=None):
+        return await self.complete(messages)  # #18: proposer uses the streaming path
+
 
 def _setup(home, corpus, results, monkeypatch, tmp_path):
     """Wire a hermetic env: proposer-blocked config.yaml + tmp bench.yaml + faked client."""

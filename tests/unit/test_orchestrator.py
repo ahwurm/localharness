@@ -181,18 +181,18 @@ async def test_user_message_includes_session_id():
 
 @pytest.mark.asyncio
 async def test_yaml_generation_no_double_output():
-    """YAML gen uses llm.complete() directly -- no TaskComplete event, send_message called once."""
+    """YAML gen uses llm.stream_complete() directly (#18) -- no TaskComplete event, send_message called once."""
     from localharness.cli.repl import OrchestratorREPL
     from localharness.core.events import TaskComplete
     from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
 
-    # Mock agent loop with _llm.complete that returns YAML content
+    # Mock agent loop with _llm.stream_complete that returns YAML content
     mock_response = MagicMock()
     mock_response.content = "name: my-agent\nrole: test helper"
     mock_agent = MagicMock()
     mock_agent._config.name = "test-agent"
     mock_agent._llm = AsyncMock()
-    mock_agent._llm.complete = AsyncMock(return_value=mock_response)
+    mock_agent._llm.stream_complete = AsyncMock(return_value=mock_response)
     mock_agent.run_turn = AsyncMock(return_value="should not be called")
 
     # Mock bus that captures published events
@@ -226,11 +226,11 @@ async def test_yaml_generation_no_double_output():
     )
     await repl.run()
 
-    # Assert run_turn was NOT called (llm.complete used instead)
+    # Assert run_turn was NOT called (llm.stream_complete used instead)
     mock_agent.run_turn.assert_not_called()
 
-    # Assert llm.complete WAS called
-    mock_agent._llm.complete.assert_called_once()
+    # Assert llm.stream_complete WAS called
+    mock_agent._llm.stream_complete.assert_called_once()
 
     # Assert no TaskComplete events published
     task_completes = [e for e in published_events if isinstance(e, TaskComplete)]

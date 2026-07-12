@@ -870,7 +870,9 @@ def make_compaction_summarize_fn(llm: Any) -> Any:
         ]
         # Internal summarizer call — thinking off per-request (scoped #11 exception):
         # its bounded completion must yield the summary, not hidden CoT.
-        result = await llm.complete(prompt, tools=None, disable_thinking=True)
+        # #18: stream at the transport level (read timeout applies between chunks, not across
+        # the whole summary). stream_complete returns the same (message, usage) tuple.
+        result = await llm.stream_complete(prompt, tools=None, disable_thinking=True)
         msg = result[0] if isinstance(result, tuple) else result  # (message, usage) tuple — DO NOT regress
         return (getattr(msg, "content", "") or "")
     return summarize

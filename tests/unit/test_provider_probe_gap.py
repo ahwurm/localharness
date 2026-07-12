@@ -326,6 +326,9 @@ async def test_proposer_hardcodes_native_mode(proposer_corpus, proposer_results,
 
             return _M(), None
 
+        async def stream_complete(self, messages, tools=None, on_token=None):
+            return await self.complete(messages)  # #18: proposer uses the streaming path
+
     monkeypatch.setattr(prop, "LLMClient", _SpyClient, raising=False)
 
     cfg = _proposer_cfg()

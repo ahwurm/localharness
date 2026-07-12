@@ -353,11 +353,18 @@ class LLMClient:
         messages: list[Message],
         tools: list[ToolSchema] | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
+        disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
-        """Streaming completion with per-token callback. Returns (message, usage)."""
+        """Streaming completion with per-token callback. Returns (message, usage).
+
+        disable_thinking threads through for INTERNAL harness calls (idle mining/
+        consolidation via LLMTextAdapter, compaction summarizer) exactly as complete()
+        documents it — never set on subject/user-facing turns (#11)."""
         if self.config.tool_call_mode == "native":
-            return await self._complete_native(messages, tools, stream=True, on_token=on_token)
-        return await self._complete_xml(messages, tools, stream=True)
+            return await self._complete_native(
+                messages, tools, stream=True, on_token=on_token, disable_thinking=disable_thinking
+            )
+        return await self._complete_xml(messages, tools, stream=True, disable_thinking=disable_thinking)
 
     async def _complete_native(
         self,
@@ -398,15 +405,29 @@ class LLMClient:
             if disable_thinking:
                 kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             async with _inference_gate(self.config):
-                if stream:
-                    kwargs["stream"] = True
-                    kwargs["stream_options"] = {"include_usage": True}
-                    response = await self._client.chat.completions.create(**kwargs)
-                    return await self._consume_native_stream(response, on_token)
-                response = await self._client.chat.completions.create(**kwargs)
-                return response.choices[0].message, response.usage
+                return await self._create_and_consume(kwargs, stream, on_token)
         except Exception as exc:
             raise self._wrap_error(exc) from exc
+
+    async def _create_and_consume(
+        self,
+        kwargs: dict[str, Any],
+        stream: bool,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[Any, Any]:
+        """Issue the completion request and normalize to (message, usage). stream=True uses
+        TRUE HTTP streaming — the read-timeout applies BETWEEN chunks and a client disconnect
+        aborts engine-side generation — then buffers the full text client-side (parsing still
+        sees the whole response). stream=False is a whole-response request. MUST be called
+        inside _inference_gate: the GPU is held until the last chunk, not until create() returns.
+        Shared by the native and both XML paths so streaming can never silently diverge (#18)."""
+        if stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+            response = await self._client.chat.completions.create(**kwargs)
+            return await self._consume_native_stream(response, on_token)
+        response = await self._client.chat.completions.create(**kwargs)
+        return response.choices[0].message, response.usage
 
     @staticmethod
     async def _consume_native_stream(
@@ -487,11 +508,12 @@ class LLMClient:
         if disable_thinking:  # internal-call opt-in — see complete()
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
-            # Gate scoped to the create alone: the except-path re-enters via
-            # _complete_xml_fallback, which takes its own turn at the gate.
+            # #18: honor `stream` — a dead param here silently made XML mode non-streaming
+            # for the whole loop. Gate held across create + stream consumption; on
+            # BadRequestError the except runs AFTER __aexit__ releases this gate, so
+            # _complete_xml_fallback safely takes its own turn (no re-entrant deadlock).
             async with _inference_gate(self.config):
-                response = await self._client.chat.completions.create(**kwargs)
-            return response.choices[0].message, response.usage
+                return await self._create_and_consume(kwargs, stream)
         except openai.BadRequestError:
             # Server rejected the request (e.g. tools param) — fall back to system prompt injection
             log.warning("Server rejected request, falling back to system prompt injection")
@@ -529,8 +551,7 @@ class LLMClient:
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
             async with _inference_gate(self.config):
-                response = await self._client.chat.completions.create(**kwargs)
-            return response.choices[0].message, response.usage
+                return await self._create_and_consume(kwargs, stream)  # #18: honor stream here too
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
