@@ -218,6 +218,17 @@ async def _active_slug_atoms(store: Any, slug: str) -> list[tuple[str, str]]:
     return [(r[0], r[1]) for r in rows]
 
 
+async def _shares_tag_identity(store: Any, target_key: str, child_tag_id: int) -> bool:
+    """TAGG-02: does the active atom at `target_key` carry `child_tag_id`? The tag-axis replacement
+    for the `replaces.startswith('sem/{slug}/')` slug check — a `replaces=` correction is a valid
+    supersede only when its target shares the new atom's CHILD-TAG identity (a slug match alone
+    neither authorizes nor blocks it). None target (not active / not found) => not a valid target."""
+    f = await store.get_fact(target_key)
+    if f is None:
+        return False
+    return child_tag_id in (await store.child_tags_for_atoms([f.id])).get(f.id, set())
+
+
 async def _active_corrections(store: Any, cap: int = 10) -> list[tuple[str, str]]:
     """B4(ii) known-window: active tier:reconcile_confirmed facts (the CURRENT corrected values)
     shown to the miner so a late chunk can't silently resurrect a value we already fixed."""
@@ -532,7 +543,16 @@ async def mine_transcript(
                 # topic slug) writes the corrected value onto the OLD key — store_fact supersedes
                 # (history preserved), the stale value leaves the active set. An invalid replaces
                 # (hallucinated id / cross-topic) falls back to a normal mint.
-                if replaces and replaces in known_keys and replaces.startswith(f"sem/{slug}/"):
+                # TAGG-02: a VALID replaces= shares the target's CHILD-TAG identity (not merely its
+                # slug). The tag/slug choice sits INSIDE the truthiness short-circuit — `replaces`
+                # is None on most atoms and must never be dereferenced, so the ternary evaluates
+                # ONLY when `replaces` is truthy (a replaces=None atom short-circuits before either
+                # branch). tag_grouping on but child_tag None falls back to the slug check.
+                if replaces and replaces in known_keys and (
+                    (await _shares_tag_identity(store, replaces, child_tag.id))
+                    if (tag_grouping and child_tag is not None)
+                    else replaces.startswith(f"sem/{slug}/")
+                ):
                     key = replaces
                 elif replaces_present:
                     # B4(i), HARDENED (F1): a slug is a MANY-atom namespace (the prompt tells the
@@ -542,11 +562,18 @@ async def mine_transcript(
                     # target is unambiguous: exactly ONE known ACTIVE atom on this slug AND the
                     # new claim shares >=1 salient token with that atom's value. Anything else
                     # falls back to a normal mint (degrades to a duplicate, never data loss).
-                    same_slug = [(k, v) for k, v in known_map.items() if k.startswith(f"sem/{slug}/")]
-                    if len(same_slug) == 1 and _salient_words(claim) & _salient_words(same_slug[0][1]):
-                        key = same_slug[0][0]
+                    # TAGG-02: the rescue's unambiguous-target set is the same CHILD TAG (not the
+                    # slug prefix) when tag_grouping is on — atoms_for_tag reads committed rows, so
+                    # it surfaces this pass's earlier same-tag mints without a minted_pass union.
+                    if tag_grouping and child_tag is not None:
+                        same_tag = [(f.key, f.value) for f in await store.atoms_for_tag(child_tag.id)]
+                    else:
+                        same_tag = [(k, v) for k, v in known_map.items()
+                                    if k.startswith(f"sem/{slug}/")]
+                    if len(same_tag) == 1 and _salient_words(claim) & _salient_words(same_tag[0][1]):
+                        key = same_tag[0][0]
                         log.warning("mining B4(i): present-but-invalid replaces=%r rescued -> "
-                                    "supersede sole same-slug %s", replaces, key)
+                                    "supersede sole same-tag %s", replaces, key)
                 # FIX 2 (run-10, ids 51/52): a completion emitting the SAME corrected fact twice
                 # with two different replaces= targets superseded BOTH stale atoms, leaving duplicate
                 # active rows (identical value, same slug, different keys). Skip a mint whose
