@@ -32,6 +32,17 @@ All notable changes to LocalHarness are documented here. The format follows
   agent-creation. Streaming makes the read-timeout apply between chunks and a client
   disconnect observable mid-generation. Present since the first release (the idle-
   consolidation path since v0.9.0).
+- **Directory `grep` is bounded and returns partial results instead of hanging** (#21).
+  A directory search used to materialize the entire recursive tree (`sorted(rglob(...))`) with
+  no exclusions and read every file whole — including `.git`, virtualenvs, caches, and multi-GB
+  binaries — so a `grep` at a repo root hung the full tool timeout and returned nothing (observed
+  live: four `path: "."` greps each burned the 35 s timeout for zero output). The walk is now an
+  iterative `os.scandir` that prunes hidden and vendor/VCS dirs (`.git`, `.venv`, `node_modules`,
+  `__pycache__`, caches, `dist`/`build`) at traversal time, skips files over 1 MB and binaries
+  (NUL sniff), and stops at a 20 000-file / 20-second budget — returning the matches found so far
+  with an explicit `... (scan capped: …)` note and `truncated=True` rather than dying silent at
+  the harness timeout. Opt hidden/vendor dirs back in with `include_hidden=True`. Present since
+  the tool's first release.
 
 ## [0.9.1] — 2026-07-12
 
