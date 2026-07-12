@@ -226,10 +226,13 @@ class ConfigLoader:
         # Cache raw project dict so callers (e.g. components_cmd) can rebuild merged config
         self._raw_harness_dict = project_data
 
-        # Apply user overlay cascade (Phase 14)
+        # Apply user overlay cascade (Phase 14). The `agent:` section is an agent-scope default
+        # layer (issue #22) consumed by load_agent — NOT a HarnessConfig field (extra="forbid"),
+        # so it must be excluded from the harness merge/validation.
         overlay_path = _resolve_user_overlay_path()
         user_overlay = load_overlay(overlay_path)
-        merged = deep_merge(project_data, user_overlay) if user_overlay else project_data
+        harness_overlay = {k: v for k, v in user_overlay.items() if k != "agent"}
+        merged = deep_merge(project_data, harness_overlay) if harness_overlay else project_data
 
         result = self._validate_dict(HarnessConfig, merged, str(cfg_path), text)
         self._harness_cache = result
@@ -423,6 +426,15 @@ class ConfigLoader:
 
         perms_merged["deny_patterns"] = union_deny
         merged["permissions"] = perms_merged
+
+        # 5b. Overlay the user layer's `agent:` section as a LOW-priority default (issue #22):
+        #     the same layer `localharness components set agent.*` writes and `components get`
+        #     reads back. Per-agent yaml (and org/division inheritance) WINS — `merged` is
+        #     layered ON TOP of the overlay. Resolved via LOCALHARNESS_HOME like load_harness
+        #     (env-based, independent of config_dir).
+        overlay_agent = load_overlay(_resolve_user_overlay_path()).get("agent")
+        if isinstance(overlay_agent, dict) and overlay_agent:
+            merged = deep_merge(overlay_agent, merged)
 
         # 6. Validate merged dict
         line_map = _build_line_map(text)
