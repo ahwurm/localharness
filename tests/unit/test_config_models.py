@@ -295,3 +295,12 @@ def test_predictive_gate_registry_discovery():
     paths = {p for p, _ann in walk_model_fields(AgentConfig)}
     assert "memory.predictive_gate.enabled" in paths
     assert "memory.predictive_gate.lexicon.negation" in paths
+
+
+def test_mining_novelty_fold_threshold_default_is_sweep_winner():
+    """sweep-20260711d: NV-HI (0.70) was the sole HOLDS row (ARI 0.748 vs 0.542 baseline,
+    recall 1.000, 32 vs 60 atoms); the old default 0.5 was the worst tested novelty value.
+    See .planning/runs/sweep-20260711d/SYNTHESIS.md (untracked)."""
+    from localharness.config.models import MemoryConsolidationConfig
+
+    assert MemoryConsolidationConfig().mining_novelty_fold_threshold == 0.70

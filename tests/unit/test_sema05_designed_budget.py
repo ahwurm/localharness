@@ -257,3 +257,36 @@ async def test_run_designed_month_wires_cfg_overrides_arg(tmp_path, monkeypatch)
 
     assert code == 0
     assert captured.get("fold") == 0.42
+
+
+def test_root_agent_config_denies_subject_ops_commands():
+    """The 2026-07-11 sweep casualties: the subject model used bash_exec to docker-stop/rm its
+    own vLLM server (4 strikes, logged in the casualty stores). The eval policy must deny the
+    REAL strike commands — replayed verbatim here — while leaving ordinary commands alone."""
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.core.types import ToolCall
+
+    sema = _load_script()
+    a_cfg = sema._root_agent_config("orchestrator")
+    ev = PermissionEvaluator()
+
+    strikes = [
+        "docker stop vllm-sweep-35b && docker rm vllm-sweep-35b",
+        "cd /home/openclaw-user && PREFIX_CACHING=1 ./vllm-qwen-nvfp4-run.sh 2>&1",
+        "docker stop vllm-qwen36-35b-official && sleep 3 && docker ps -a | grep vllm",
+        'kill -9 2990349 2990862 2>/dev/null; sleep 2; echo "vLLM processes stopped"',
+        "systemctl list-units --type=service | grep -i serve",
+        "pkill -f vllm",
+    ]
+    for cmd in strikes:
+        res = ev.evaluate(ToolCall(name="bash_exec", arguments={"command": cmd}), a_cfg.permissions)
+        assert res.denied, f"strike command not denied: {cmd}"
+
+    innocuous = [
+        "echo hello",
+        "grep skill notes.md",   # 'skill' must not trip the kill pattern
+        "ls -la /tmp",
+    ]
+    for cmd in innocuous:
+        res = ev.evaluate(ToolCall(name="bash_exec", arguments={"command": cmd}), a_cfg.permissions)
+        assert not res.denied, f"innocuous command wrongly denied: {cmd} ({res.reason})"
