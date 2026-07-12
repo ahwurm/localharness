@@ -41,8 +41,8 @@ THEN (both modes — the LOCKED grading, unchanged):
      section + per-sitting turn counts); live-store organic counts read-only as a WATCH ITEM.
 
 MACHINE-SAFETY (binding — this box hard-hung twice in 24h under vLLM prefill): the live path is
-attended-only, context-bounded (32k loop window; idle passes char-capped), and gated by a
-MemAvailable watchdog checked before EVERY live turn (aborts below ~30 GiB). `touch <store>/KILL`
+attended-only, context-bounded (131072-token served-window loop; idle passes char-capped), and
+gated by a MemAvailable watchdog checked before EVERY live turn (aborts below ~30 GiB). `touch <store>/KILL`
 stops accumulation at the next turn/day boundary and aborts grading-phase LLM work with an
 honest ABORTED verdict. Offline never touches vLLM. Tools run FOR REAL during live sittings
 (bash/write/edit included; web_* structurally denied) — attended-only is the containment.
@@ -117,7 +117,7 @@ from localharness.memory.sqlite import (  # noqa: E402
 )
 
 _MIN_MEM_GIB = 30.0  # RANK-06 practice: kill/abort the live LLM path below this MemAvailable.
-_LOOP_CONTEXT_TOKENS = 32768  # machine-safety context bound: far below the 96k hard-hang class
+_LOOP_CONTEXT_TOKENS = 131072  # served window (matches DEFAULT_MAX_CONTEXT_TOKENS); the freeze-era 32k bound is retired — the hangs were a hardware fault (box RMA'd), not context prefill
 _TURN_FAILED_RATE_MAX = 0.20  # MOVE 0b: a sitting above this TurnFailed rate -> verdict INVALID.
 _GRADING_DOC = "SEMA-05 month-in-a-day grading protocol (internal)"
 _GRADING_DOC_36_1 = "designed-month grading protocol (internal)"  # MOVE 4
@@ -446,7 +446,7 @@ def _extract_day_queries(history_path: Path, agent_id: str) -> list[tuple[str, l
 def _root_agent_config(agent: str, workspace_root: str | None = None):
     """The composed AgentConfig, EXACTLY as start_cmd shapes the root agent's plus the
     live-store belt-and-braces (BLOCKER 3):
-    - 32k context bound (machine-safety: far below the 96k hard-hang class);
+    - 131072 context bound (served window; the freeze-era 32k cap is retired — HW fault, box RMA'd);
     - P-A capability floor: web_* (untrusted-ingest) DENIED for a bash/write/edit-holding
       agent (prompt-injection->host hole; the real root delegates ingestion to a subagent,
       which this bounded run omits);
