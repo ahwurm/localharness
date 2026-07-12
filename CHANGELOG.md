@@ -55,6 +55,21 @@ All notable changes to LocalHarness are documented here. The format follows
   with an explicit `... (scan capped: …)` note and `truncated=True` rather than dying silent at
   the harness timeout. Opt hidden/vendor dirs back in with `include_hidden=True`. Present since
   the tool's first release.
+- **`localharness components set agent.<axis> <value>` now works instead of always failing**
+  (#22). Every agent-scoped set — including the documented safety lever
+  `components set agent.memory.consolidation.tag_grouping_enabled <true|false>` — died with a
+  Pydantic `Extra inputs are not permitted` error before writing anything. The set validated the
+  whole merged config against `HarnessConfig`, whose top level has no `agent` key (agent axes live
+  in the separate `AgentConfig` model), so the advertised mechanism was structurally dead for every
+  agent axis even though `components get`/`list` displayed those axes fine. The set now routes
+  `agent.*` validation through `AgentConfig` and writes an `agent:` section into the user overlay
+  (`~/.localharness/overrides.yaml`) — the same layer `components get` reads back, and one that
+  `ConfigLoader.load_agent()` now deep-merges as a LOW-priority default beneath each agent's own
+  yaml (per-agent config still wins). `load_harness` and the harness-path validation exclude that
+  `agent:` section (it is not a `HarnessConfig` field), so `org.*`/`provider.*` sets are byte-
+  unchanged even after an agent axis has been set. Scope note: `bench`/eval and programmatic
+  subagents build `AgentConfig` directly and do NOT read the overlay — only the live
+  `localharness start` load path honors it. Present since `components set` first shipped.
 
 ## [0.9.1] — 2026-07-12
 

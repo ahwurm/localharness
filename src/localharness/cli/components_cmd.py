@@ -11,6 +11,7 @@ import asyncio
 import json as _json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import HarnessConfig
+from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.config.overlay import (
     atomic_write_overlay,
     deep_merge,
@@ -65,6 +66,69 @@ def _build_overlays(loader: ConfigLoader) -> dict[str, dict]:
     project_dict = loader.raw_harness_dict()
     user_dict = load_overlay(loader.user_overlay_path)
     return {"project": project_dict, "user": user_dict}
+
+
+# ------------------------------------------------------------------ #
+# Agent-scoped axes (issue #22)
+#
+# Agent axes live under the `agent.` namespace, which is a registry addressing
+# convention — NOT a field of HarnessConfig (extra="forbid"). They validate against
+# AgentConfig and are written to the user overlay's `agent:` section, the same layer
+# `load_agent`/`get` read back. Mirrors autoresearch.adoption's validation split so
+# both overlay-write paths share ONE contract.
+# ------------------------------------------------------------------ #
+
+_AGENT_KEY = "agent"
+_AGENT_PREFIX = _AGENT_KEY + "."
+# Placeholder identity so an agent-scoped overlay validates against AgentConfig (whose
+# name/role are required + name is format-checked). Mirrors adoption._AGENT_VALIDATE_BASE.
+_AGENT_VALIDATE_BASE = {"name": "components-validate", "role": "components-validate"}
+
+
+def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict) -> None:
+    """Validate `new_overlay` against the model that OWNS `path`; raise ValidationError on failure.
+
+    agent.* → AgentConfig (the merged `agent:` subtree); every other path → the merged
+    HarnessConfig with the agent-scope `agent:` section EXCLUDED (it is not a HarnessConfig
+    field). Before #22 every path validated against HarnessConfig, so agent.* always failed
+    'Extra inputs are not permitted'; and once the overlay carries an `agent:` section, a later
+    harness-path set would inherit that same failure unless `agent:` is excluded here too
+    (mirrors load_harness's overlay handling).
+    """
+    if path.startswith(_AGENT_PREFIX):
+        merged_agent = deep_merge(dict(_AGENT_VALIDATE_BASE), new_overlay.get(_AGENT_KEY, {}))
+        AgentConfig.model_validate(merged_agent)
+    else:
+        harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
+        HarnessConfig.model_validate(deep_merge(loader.raw_harness_dict(), harness_overlay))
+
+
+def _dig_dict(d: dict, dotpath: str) -> tuple[Any, bool]:
+    """Walk a dot-path through a nested dict. Returns (value, True) if present, else (None, False)."""
+    cur: Any = d
+    for part in dotpath.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+
+def _apply_agent_overlay_values(catalogue: dict, user_overlay: dict) -> dict:
+    """Reflect the user overlay's agent.* leaves in `current_value` so `get`/`list` read back
+    exactly what `set agent.*` wrote (the round-trip). Winning_layer is already resolved by
+    build_catalogue from the same overlay. Only paths EXPLICITLY present in the overlay are
+    patched — every other agent.* axis keeps its compiled-in default (so we never leak the
+    name-derived memory paths that model-validating a placeholder agent would introduce)."""
+    agent_overlay = user_overlay.get(_AGENT_KEY) if isinstance(user_overlay, dict) else None
+    if not isinstance(agent_overlay, dict):
+        return catalogue
+    for cat_path, entry in list(catalogue.items()):
+        if not cat_path.startswith(_AGENT_PREFIX):
+            continue
+        value, found = _dig_dict(agent_overlay, cat_path[len(_AGENT_PREFIX):])
+        if found:
+            catalogue[cat_path] = replace(entry, current_value=value)
+    return catalogue
 
 
 def _build_tool_registry() -> Any:
@@ -136,6 +200,7 @@ def components_list(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
+    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
 
     entries = list(catalogue.values())
     if layer is not None:
@@ -190,6 +255,7 @@ def components_get(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
+    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
     entry = catalogue.get(path)
     if entry is None:
         _err(
@@ -258,6 +324,7 @@ def components_set(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
+    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
     entry = catalogue.get(path)
     if entry is None:
         _err(json_output, f"Unknown path: {path!r}", exit_code=2)
@@ -276,16 +343,15 @@ def components_set(
 
     before = entry.current_value
 
-    # 4. Load existing overlay, deep-set new value, deep-merge with project, validate
+    # 4. Load existing overlay, deep-set new value, validate against the model that OWNS the path.
+    #    agent.* validates against AgentConfig; everything else against the merged HarnessConfig
+    #    (issue #22). No disk write happens until validation passes.
     overlay_path = loader.user_overlay_path
     existing_overlay = load_overlay(overlay_path)
     new_overlay = set_value_in_dict(dict(existing_overlay), path, typed_value)
 
-    project_dict = loader.raw_harness_dict()
-    merged = deep_merge(project_dict, new_overlay)
-
     try:
-        HarnessConfig.model_validate(merged)
+        _validate_overlay(loader, path, new_overlay)
     except ValidationError as exc:
         _err(
             json_output,

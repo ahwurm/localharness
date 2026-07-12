@@ -376,6 +376,29 @@ def test_set_org_axis_unchanged_by_fix(components_home):
     assert "agent" not in overlay
 
 
+def test_set_org_axis_after_agent_axis_still_validates(components_home):
+    """#22 (4, interaction): once the overlay carries an `agent:` section, a LATER org.* set must
+    still succeed — the harness-path validation excludes `agent:` (not a HarnessConfig field).
+
+    Caught by the live CLI drive: a naive fix that only special-cased the agent branch left the
+    org branch merging the whole overlay (incl. `agent:`) into HarnessConfig -> 'Extra inputs'.
+    """
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    r1 = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
+    assert r1.exit_code == 0, r1.output
+    r2 = runner.invoke(app, ["components", "set", "org.context.compaction_threshold_pct", "85.0"])
+    assert r2.exit_code == 0, r2.output
+    overlay = yaml.safe_load((components_home / "overrides.yaml").read_text(encoding="utf-8"))
+    assert overlay["agent"]["memory"]["consolidation"]["tag_grouping_enabled"] is False
+    assert overlay["org"]["context"]["compaction_threshold_pct"] == 85.0
+    # both axes still read back at layer=user
+    for dotpath, expected in ((_AGENT_AXIS, False), ("org.context.compaction_threshold_pct", 85.0)):
+        g = runner.invoke(app, ["components", "get", dotpath, "--json"])
+        assert g.exit_code == 0, g.output
+        payload = json.loads(g.stdout)
+        assert payload["value"] == expected and payload["layer"] == "user", (dotpath, payload)
+
+
 def test_set_invalid_agent_key_fails_clearly(components_home):
     """#22 (5): a genuinely invalid agent axis is refused (non-zero exit, no overlay write)."""
     _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
