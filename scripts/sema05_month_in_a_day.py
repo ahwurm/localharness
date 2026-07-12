@@ -472,6 +472,17 @@ def _root_agent_config(agent: str):
             f"edit({form}/*)",
             f"bash_exec(*{form}*)",
         ]
+    # The subject gets NO server/process ops: on 2026-07-11 it used bash_exec to docker-stop/rm
+    # the vLLM container serving its own weights (4 strikes, verbatim commands preserved in the
+    # sweep-20260711d casualty stores). A memory eval never needs docker/vllm/systemctl/kill.
+    a_cfg.permissions.deny_patterns += [
+        "bash_exec(*docker*)",
+        "bash_exec(*vllm*)",
+        "bash_exec(*systemctl*)",
+        "bash_exec(*pkill*)",
+        "bash_exec(kill *)",
+        "bash_exec(* kill *)",
+    ]
     return a_cfg
 
 
