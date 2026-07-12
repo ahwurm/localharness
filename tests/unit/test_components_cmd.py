@@ -288,3 +288,107 @@ def test_proposer_paths_enumerated(components_home):
     payload = json.loads(result.stdout)
     paths = [row["path"] for row in payload]
     assert any(p.startswith("proposer.") for p in paths), f"no proposer.* paths in {paths[:15]}..."
+
+
+# ------------------------------------------------------------------ #
+# Issue #22: `components set agent.*` must reach agent-scoped axes.
+#
+# Agent axes live in AgentConfig, NOT HarnessConfig. The set path validated the
+# merged doc against HarnessConfig (extra="forbid", no `agent` key), so EVERY
+# `set agent.<path> ...` died with "Extra inputs are not permitted" before any
+# write — the documented safety lever (models.py: `components set
+# agent.memory.consolidation.tag_grouping_enabled <true|false>`) was structurally
+# dead. The fix routes agent.* validation through AgentConfig and writes the same
+# user-overlay `agent:` section that `get`/`load_agent` read back.
+# ------------------------------------------------------------------ #
+
+_AGENT_AXIS = "agent.memory.consolidation.tag_grouping_enabled"
+
+
+def _write_agent_yaml(home: Path, name: str, body: dict) -> None:
+    """Seed home/agents/{name}.yaml so ConfigLoader().load_agent(name) can compose it."""
+    agents_dir = home / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / f"{name}.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
+
+
+def test_set_agent_axis_round_trip(components_home):
+    """#22 (1): `set agent.<axis> false` succeeds and `get` reads it back false @ layer=user.
+
+    RED before the fix: the set validated the merged doc against HarnessConfig and exited 2
+    ("Extra inputs are not permitted" on `agent`).
+    """
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    set_result = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
+    assert set_result.exit_code == 0, set_result.output
+    get_result = runner.invoke(app, ["components", "get", _AGENT_AXIS, "--json"])
+    assert get_result.exit_code == 0, get_result.output
+    payload = json.loads(get_result.stdout)
+    assert payload["value"] is False
+    assert payload["layer"] == "user"
+
+
+def test_set_agent_axis_writes_agent_section_to_overlay(components_home):
+    """#22 (1): the value lands under the overlay's `agent:` section — the layer get/load_agent read."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
+    assert r.exit_code == 0, r.output
+    overlay = yaml.safe_load((components_home / "overrides.yaml").read_text(encoding="utf-8"))
+    assert overlay["agent"]["memory"]["consolidation"]["tag_grouping_enabled"] is False
+
+
+def test_loaded_agent_without_override_reflects_set_value(components_home):
+    """#22 (2): a freshly loaded agent that does NOT set the axis reflects the overlay value."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    _write_agent_yaml(components_home, "plain", {"name": "plain", "role": "a plain agent"})
+    r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
+    assert r.exit_code == 0, r.output
+    from localharness.config.loader import ConfigLoader
+
+    agent = ConfigLoader().load_agent("plain")
+    assert agent.memory.consolidation.tag_grouping_enabled is False
+
+
+def test_per_agent_yaml_wins_over_set_value(components_home):
+    """#22 (3): a per-agent yaml override BEATS the overlay default (the overlay is low-priority)."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    _write_agent_yaml(
+        components_home,
+        "opinionated",
+        {"name": "opinionated", "role": "sets its own axis",
+         "memory": {"consolidation": {"tag_grouping_enabled": True}}},
+    )
+    r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
+    assert r.exit_code == 0, r.output
+    from localharness.config.loader import ConfigLoader
+
+    agent = ConfigLoader().load_agent("opinionated")
+    assert agent.memory.consolidation.tag_grouping_enabled is True
+
+
+def test_set_org_axis_unchanged_by_fix(components_home):
+    """#22 (4): the org.* set path is byte-identical — validates via HarnessConfig, no `agent` key grows."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    r = runner.invoke(app, ["components", "set", "org.context.compaction_threshold_pct", "85.0"])
+    assert r.exit_code == 0, r.output
+    overlay = yaml.safe_load((components_home / "overrides.yaml").read_text(encoding="utf-8"))
+    assert overlay["org"]["context"]["compaction_threshold_pct"] == 85.0
+    assert "agent" not in overlay
+
+
+def test_set_invalid_agent_key_fails_clearly(components_home):
+    """#22 (5): a genuinely invalid agent axis is refused (non-zero exit, no overlay write)."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    before = _read_overlay_bytes(components_home)
+    r = runner.invoke(app, ["components", "set", "agent.memory.consolidation.does_not_exist", "5"])
+    assert r.exit_code == 2, r.output
+    assert _read_overlay_bytes(components_home) == before
+
+
+def test_set_agent_axis_rejects_wrong_type(components_home):
+    """#22 (6): the value validates through the REAL field type — a bool axis rejects 'banana'."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    before = _read_overlay_bytes(components_home)
+    r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "banana"])
+    assert r.exit_code == 2, r.output
+    assert _read_overlay_bytes(components_home) == before
