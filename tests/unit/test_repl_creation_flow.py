@@ -129,3 +129,26 @@ def test_trigger_message_not_consumed_as_description(mock_llm_client):
     assert workflow.state == WorkflowState.DISCUSS
     assert "description" not in workflow.gathered
     assert any("I'd like to help you create an agent" in m for m in channel.sent)
+
+
+def test_generation_prompt_states_contract():
+    """#33: the generation system prompt stated NO schema, so the model guessed
+    the shape (agent: nesting, description-not-role, invented keys) and every
+    deploy died at AgentConfig validation. The prompt must state the real
+    contract — required fields + the allowed top-level keys — DERIVED from
+    AgentConfig.model_fields so prompt and schema can't drift."""
+    from localharness.cli.repl import _generation_system_prompt
+    from localharness.config.models import AgentConfig
+
+    prompt = _generation_system_prompt()
+    fields = AgentConfig.model_fields
+    required = [n for n, f in fields.items() if f.is_required()]
+
+    assert required == ["name", "role"]  # the only no-default fields
+    for r in required:  # required fields are named as required
+        assert r in prompt
+    for key in fields:  # every allowed top-level key is listed (derived, not typed)
+        assert key in prompt
+    # A concrete minimal YAML example (name + role) is shown, no agent: nesting.
+    assert "name:" in prompt and "role:" in prompt
+    assert "agent:" not in prompt
