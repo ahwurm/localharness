@@ -101,6 +101,7 @@ from localharness.memory.tag_classify import _BUCKET_MARKER, _CHILD_MARKER  # no
 from localharness.memory.gate import WriteGate  # noqa: E402
 from localharness.memory.idle_llm import (  # noqa: E402
     LLMTextAdapter,
+    _stem,
     ground_numbers,
     grounded,
     match_count,
@@ -859,6 +860,17 @@ async def _active(store: MemoryStore, where: str) -> list:
         return [_row_to_fact(r) for r in await cur.fetchall()]
 
 
+async def _all_facts(store: MemoryStore) -> list:
+    """Every fact for the agent REGARDLESS of status (active + superseded) — the B4 scenario-
+    collision detector (FIX 2) must see the superseded corrected-value row and its active
+    superseder, which the active-only `_active` cannot return."""
+    assert store._db is not None
+    async with store._db.execute(
+        f"SELECT {store._FACT_COLS} FROM facts WHERE agent_id=?", (store._agent_id,)
+    ) as cur:
+        return [_row_to_fact(r) for r in await cur.fetchall()]
+
+
 async def _schema_members(store: MemoryStore, schema_id: int) -> list:
     nb = await store.neighborhood(schema_id, depth=1)
     ids = [nid for nid, _d in nb if nid != schema_id]
@@ -1091,6 +1103,162 @@ def _attribute_topic(atom_value: str, day_queries: list[dict]) -> str | None:
     return best["topic"] if best else None
 
 
+# ---------------------------------------------------------------------------
+# FIX 1 (ANALYSIS §6.4) — paraphrase-tolerant ground-truth attribution, REPORTED ALONGSIDE v1.
+# _attribute_topic (v1) STAYS the grading ruler; _attribute_topic_v2 only ever RESCUES an atom
+# v1 left as None (strictly additive: v2 gt is a superset of v1 gt), so B1/B2/ARI/verdict are
+# unchanged and ari_v2 / per-chapter attribution_v2 / attribution_divergence are pure add-ons.
+# ---------------------------------------------------------------------------
+def _tok_tickers(text: str) -> set:
+    """Uppercase acronym/ticker tokens (>=3 chars: TSMC, HBM, INT4, NVIDIA), lowercased. _tok5's
+    >=5-char filter drops these, yet they are the most topic-discriminative tokens in a finance/
+    ops atom (§6.4: 'TSMC' is 4 chars, so v1 never saw it). The >=3 floor keeps real tickers while
+    excluding generic 2-char noise (AI/KV/SK) that would collide across topics."""
+    return {m.lower() for m in re.findall(r"\b[A-Z][A-Z0-9]{2,}\b", text)}
+
+
+def _attr_tokens(text: str) -> set:
+    """The v2 match vocabulary of a string: >=5-char tokens (exactly as v1) PLUS uppercase tickers."""
+    return _tok5(text) | _tok_tickers(text)
+
+
+def _stem_overlap(atom_tokens: set, corpus_tokens: set) -> int:
+    """Count of atom tokens grounded in a corpus token-set — substring-exact OR shared light stem
+    (reuses idle_llm._stem, the SAME stemmer the chapter-grounding gate uses), so 'intervals' ~
+    'interval' and 'sessions' ~ 'session' match without an NLP dep."""
+    corpus_stems = {_stem(c) for c in corpus_tokens}
+    return sum(1 for t in atom_tokens if t in corpus_tokens or _stem(t) in corpus_stems)
+
+
+def _attribute_topic_v2(
+    atom_value: str, day_queries: list[dict], all_queries: list[dict], manifest: dict,
+    *, min_rescue_hits: int = 2,
+) -> tuple[str | None, int]:
+    """Paraphrase-tolerant attribution (§6.4), CASCADE + strictly additive over `_attribute_topic`:
+      1. run v1 first — if it attributes a topic, return it UNCHANGED (v2 NEVER re-labels a
+         v1-owned atom; comparability is sacred);
+      2. only for a v1-None atom, RESCUE by best token overlap over a broadened per-topic corpus:
+         (a) each topic's manifest `expected_atoms` content text, (b) queries from ALL days (not
+         just the provenance day), plus the topic's keywords, matched with (c) uppercase tickers
+         and light stemming. A rescue needs >= min_rescue_hits token hits so a single generic /
+         homograph token ('memory', 'train') can never mint a spurious label.
+    Returns (topic|None, score): score is the winning hit count for a rescue, else 0 (a v1-owned
+    or unresolved atom). Deterministic, no LLM. (a) is dormant on a manifest without expected_atoms
+    — the current shipped manifest carries none — so on it v2 rescues only via (b)+keywords+(c)."""
+    v1 = _attribute_topic(atom_value, day_queries)
+    if v1 is not None:
+        return v1, 0
+    atok = _attr_tokens(atom_value)
+    if not atok:
+        return None, 0
+    # (topic, corpus-token-set) candidates: all-days queries + per-topic keywords + expected_atoms.
+    candidates: list[tuple[str, set]] = [(q["topic"], _attr_tokens(q["text"])) for q in all_queries]
+    for topic, meta in manifest.get("topics", {}).items():
+        kw: set = set()
+        for k in (meta.get("keywords") or []):
+            kw |= _tok_tickers(k)
+            kw |= {w for w in re.findall(r"[a-z0-9]+", k.lower()) if len(w) >= 3}
+        if kw:
+            candidates.append((topic, kw))
+        for a in (meta.get("expected_atoms") or []):
+            candidates.append((topic, _attr_tokens(a)))
+    best, best_score = None, 0
+    for topic, ctoks in candidates:
+        s = _stem_overlap(atok, ctoks)
+        if s > best_score:
+            best, best_score = topic, s
+    return (best, best_score) if best_score >= min_rescue_hits else (None, 0)
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (ANALYSIS §9) — B4 scenario-validity collision. The correction arc (stale 'port 8000' ->
+# scripted-correct 'port 8081') can be legitimately contradicted by a tool-capable model that
+# curl-verifies the REAL server (genuinely on 8000) and mints that truth, superseding the scripted
+# correction via the store's normal same-key rule (run3: CORRECT behavior graded a B4 failure).
+# Detected deterministically from what the B4 check already reads (store + history); an EXCUSED B4
+# is disclosed and only treated as non-failing via an explicit path in the verdict computation.
+# ---------------------------------------------------------------------------
+_PROBE_MARKERS = ("curl", "http://", "https://", "localhost")
+_PROBE_ERROR_MARKERS = (
+    "expecting value", "connection refused", "could not connect", "couldn't connect",
+    "failed to connect", "no route to host", "connection reset", "empty reply",
+    "not found", "refused", "timed out", "timeout", "[denied]",
+)
+
+
+def _looks_like_probe_error(text: str) -> bool:
+    """A network-probe tool_result that returned NOTHING real: empty, denied, or a standard
+    connect/parse failure. Deterministic marker match — no result counts as 'confirming' unless
+    it is a genuine non-error body."""
+    t = (text or "").strip().lower()
+    return (not t) or any(e in t for e in _PROBE_ERROR_MARKERS)
+
+
+def _b4_history_confirms_stale(history: list[dict], stale_nums: list[str],
+                               corrected_nums: list[str]) -> bool:
+    """HISTORY half: did the model tool-verify the environment against the arc? True iff a
+    network-probe tool_call (curl/http/localhost — never a memory tool) EITHER hit the STALE
+    endpoint and got a real (non-error) tool_result (confirming stale) OR hit the CORRECTED
+    endpoint and got an error/empty result (contradicting corrected). tool_call_ids are absent, so
+    calls are FIFO-paired to the results that follow (the ReAct loop drives one call -> one result)."""
+    pending: list[str] = []  # FIFO of tool_call argument-strings awaiting their results
+    for r in history:
+        t = r.get("type")
+        if t == "assistant_message":
+            for tc in (r.get("tool_calls") or []):
+                pending.append(json.dumps(tc.get("arguments", {})).lower())
+        elif t == "tool_result":
+            if not pending:
+                continue
+            args = pending.pop(0)
+            if not any(m in args for m in _PROBE_MARKERS):
+                continue  # not an environment probe (memory/read/glob calls carry no net marker)
+            content = str(r.get("content", ""))
+            if any(n in args for n in stale_nums) and not _looks_like_probe_error(content):
+                return True   # stale endpoint answered for real
+            if any(n in args for n in corrected_nums) and _looks_like_probe_error(content):
+                return True   # corrected endpoint was dead
+    return False
+
+
+def _b4_store_supersede_collision(facts: list, corrected_nums: list[str],
+                                  stale_nums: list[str]) -> bool:
+    """STORE half: the single-active-row-per-key rule overwrote the corrected value with the stale
+    value. True iff a NON-quarantine fact asserting the corrected value is `superseded` by a
+    SAME-KEY active fact that asserts the stale value but NOT the corrected one (a genuine
+    revert-to-stale — not a `correction/quarantine/` row whose verbatim user text mentions both)."""
+    by_id = {f.id: f for f in facts}
+    for c in facts:
+        if c.key.startswith("correction/quarantine/"):
+            continue  # raw user-correction capture, not a value atom (mentions both numbers)
+        if not (corrected_nums and all(n in c.value for n in corrected_nums)):
+            continue
+        if c.status != "superseded" or c.superseded_by is None:
+            continue
+        s = by_id.get(c.superseded_by)
+        if s is None or s.key != c.key or s.status != "active":
+            continue
+        if all(n in s.value for n in stale_nums) and not all(n in s.value for n in corrected_nums):
+            return True
+    return False
+
+
+def _b4_scenario_collision(facts: list, history: list[dict], arc: dict) -> bool:
+    """A B4 failure is a SCENARIO-VALIDITY COLLISION (not a memory-correction failure) iff BOTH:
+    the store shows the corrected value superseded back to the stale value under a same key (STORE
+    half) AND the run history shows the model tool-verified the real server (HISTORY half). The
+    conjunction is essential: the store half alone cannot tell a tool-verified revert from a
+    hallucinated one — the tool_result is what makes the stale value legitimate ground truth."""
+    if not arc:
+        return False
+    corrected_nums = re.findall(r"\d+", arc.get("corrected", ""))
+    stale_nums = re.findall(r"\d+", arc.get("stale", ""))
+    if not (corrected_nums and stale_nums):
+        return False
+    return (_b4_store_supersede_collision(facts, corrected_nums, stale_nums)
+            and _b4_history_confirms_stale(history, stale_nums, corrected_nums))
+
+
 async def _grade_designed_month(
     store: MemoryStore, manifest: dict, turn_query_map: dict,
     *, min_sessions: int = 2, min_cluster_size: int = 2,
@@ -1104,13 +1272,17 @@ async def _grade_designed_month(
         for d in manifest["days"]
     }
     # Day transcript corpora (A2 grounds each atom against the text mining actually saw).
+    history_records = await store.get_history(limit=1_000_000)  # reused by the FIX-2 B4 collision check
     day_corpus: dict[str, list[str]] = {}
-    for r in await store.get_history(limit=1_000_000):
+    for r in history_records:
         day_corpus.setdefault(_day_of(r.get("session_id") or ""), []).append(str(r.get("content", "")))
     day_corpus = {d: "\n".join(v) for d, v in day_corpus.items()}
+    # FIX 1 (§6.4): the paraphrase-tolerant v2 attributor is fed ALL driven queries (all days).
+    all_queries = [q for day_qs in driven_by_day.values() for q in day_qs]
 
     sem_atoms = await _active(store, "key LIKE 'sem/%'")
-    gt: dict[int, str | None] = {}          # atom.id -> ground-truth topic (or 'noise' or None)
+    gt: dict[int, str | None] = {}          # atom.id -> ground-truth topic (or 'noise' or None) — v1, the RULER
+    gt_v2: dict[int, str | None] = {}       # FIX 1: paraphrase-tolerant, REPORTED ALONGSIDE (never grades)
     a2_kill = False
     a3_ok = True
     for a in sem_atoms:
@@ -1118,6 +1290,7 @@ async def _grade_designed_month(
         if not a.provenance or a.provenance.startswith("mined-from:"):
             a3_ok = False                   # A3: batch-level provenance (the SEMA-05 defect)
         gt[a.id] = _attribute_topic(a.value, driven_by_day.get(day, []))
+        gt_v2[a.id], _ = _attribute_topic_v2(a.value, driven_by_day.get(day, []), all_queries, manifest)
         if not grounded(a.value, day_corpus.get(day, "")):
             a2_kill = True                  # A2: ungrounded atom -> KILL (zero tolerance)
 
@@ -1189,9 +1362,16 @@ async def _grade_designed_month(
         facet_recall = tp / total_lbl if total_lbl else 0.0
         group_tp = sum(1 for aid in members_by_label.get(lbl, ()) if gt.get(aid) == lbl)
         label_recall = group_tp / total_lbl if total_lbl else 0.0
+        # FIX 1 (REPORTED ALONGSIDE, never grades): the chapter's v2 majority label + v2 precision,
+        # so a hostile reader sees how far paraphrase-blind attribution dragged v1's precision
+        # (§6.4: run2's markets chapter is qualitatively pure yet v1 grades it 0.6).
+        lbl_v2 = (Counter(gt_v2.get(m.id) for m in members).most_common(1) or [(None, 0)])[0][0]
+        tp_v2 = sum(1 for m in members if gt_v2.get(m.id) == lbl_v2)
         per_chapter.append({"label": lbl, "members": len(members),
                             "precision": round(precision, 3), "recall": round(facet_recall, 3),
-                            "label_recall": round(label_recall, 3)})
+                            "label_recall": round(label_recall, 3),
+                            "attribution_v2": {"topic": lbl_v2,
+                                               "score": round(tp_v2 / len(members), 3) if members else 0.0}})
         if label_recall < 0.6 or precision < 0.7:
             b2_ok = False
     order = [a.id for a in sem_atoms]
@@ -1206,6 +1386,13 @@ async def _grade_designed_month(
     true_labels = [gt.get(aid) or f"none-{aid}" for aid in order]
     pred_labels = [atom_chapter.get(aid, f"solo-{aid}") for aid in order]
     ari = round(_ari(true_labels, pred_labels), 3)
+    # FIX 1 (REPORTED ALONGSIDE): ari_v2 re-scores the SAME predicted clustering against the
+    # paraphrase-tolerant ground truth (only the true labels change), and attribution_divergence
+    # counts atoms v2 re-labels — the exact measurement-sensitivity §6.4 flagged, surfaced not
+    # smoothed. ari itself is untouched, so the headline grade cannot move.
+    true_labels_v2 = [gt_v2.get(aid) or f"none-{aid}" for aid in order]
+    ari_v2 = round(_ari(true_labels_v2, pred_labels), 3)
+    attribution_divergence = sum(1 for aid in order if gt.get(aid) != gt_v2.get(aid))
 
     # B3: 0 noise-attributed atoms inside any chapter.
     noise_in_chapter = sum(
@@ -1233,7 +1420,20 @@ async def _grade_designed_month(
     all_active = await _active(store, "1=1")
     stale = arc.get("stale", "")
     stale_active = bool(stale) and any(stale in f.value for f in all_active)
-    b4_ok = (not arc) or (reachable and not stale_active)  # no arc in the manifest -> vacuously ok
+    b4_ok = (not arc) or (reachable and not stale_active)  # no arc in the manifest -> vacuously ok (UNCHANGED semantics)
+
+    # FIX 2 (§9): distinguish a genuine memory-correction failure from a SCENARIO-VALIDITY
+    # COLLISION — a tool-capable model that curl-verified the REAL server (genuinely on the stale
+    # port) and let that truth supersede the scripted correction via the store's normal same-key
+    # rule (run3). Detected deterministically from the SAME store + history the B4 check reads.
+    b4_scenario_collision = bool(arc) and _b4_scenario_collision(
+        await _all_facts(store), history_records, arc)
+    # Excuse ONLY when B4 failed specifically because the stale value is active again (its excusable
+    # cause) WHILE the corrected value is still reachable — i.e. the collision, not a lost correction.
+    b4_excused = b4_scenario_collision and (not b4_ok) and reachable and stale_active
+    # DISCLOSED PATH (no silent flip): the verdict below treats an EXCUSED B4 as non-failing via
+    # this named effective value; b4_ok keeps its raw semantics in the report.
+    b4_effective = b4_ok or b4_excused
 
     # B5 + byte-stability + the operational-rows-in-no-chapter invariant (reuse the store checks).
     static = await _static_checks(store)
@@ -1275,19 +1475,26 @@ async def _grade_designed_month(
                "b2_ok": b2_ok, "per_chapter": per_chapter,
                "ari": ari, "b3_ok": b3_ok, "noise_in_chapter": noise_in_chapter,
                "b4_ok": b4_ok, "correction_reachable": reachable, "stale_active": stale_active,
+               # FIX 2 (REPORTED): the collision flag + whether B4 is excused (b4_ok stays raw).
+               "b4_scenario_collision": b4_scenario_collision, "b4_excused": b4_excused,
+               # FIX 1 (REPORTED ALONGSIDE): paraphrase-tolerant ARI + how many atoms v2 re-labels.
+               "ari_v2": ari_v2, "attribution_divergence": attribution_divergence,
                "b5_kill": b5_kill, "operational_rows_in_chapter": op_in_chapter}
 
     if not a3_ok:
         verdict, failing = "INVALID", "A3 (batch provenance)"
     elif a2_kill or b5_kill:
         verdict, failing = "KILL", ("A2 (ungrounded atom)" if a2_kill else "B5 (chapter kill)")
-    elif b1_ok and b2_ok and b3_ok and b4_ok and byte_stable:
+    # FIX 2 DISCLOSED PATH: b4_effective (not b4_ok) gates HOLDS and the failing-stage scan, so a B4
+    # failure caused SOLELY by a tool-verified scenario collision does not fail the month. Every
+    # other stage is unchanged; when B4 is not excused, b4_effective == b4_ok (no behavior change).
+    elif b1_ok and b2_ok and b3_ok and b4_effective and byte_stable:
         verdict, failing = "HOLDS", None
     else:
         failing = next(
             name for name, ok in [
                 ("A1", stage_a["a1_ok"]), ("B1", b1_ok), ("B2", b2_ok),
-                ("B3", b3_ok), ("B4", b4_ok), ("byte_stable", byte_stable),
+                ("B3", b3_ok), ("B4", b4_effective), ("byte_stable", byte_stable),
             ] if not ok
         )
         verdict = "INCONCLUSIVE"
@@ -1505,6 +1712,14 @@ def _report(v: dict) -> str:
     return "\n".join(L)
 
 
+def _b4_verdict_str(b: dict) -> str:
+    """FIX 2: the composite B4 render. An EXCUSED B4 shows its raw value plus the disclosed reason
+    (`False(excused: scenario_collision)`) so no reader mistakes the flip for a passing B4."""
+    if b.get("b4_excused"):
+        return f"{b['b4_ok']}(excused: scenario_collision)"
+    return str(b["b4_ok"])
+
+
 def _manifest_report(v: dict) -> str:
     """Owner-facing report for the designed-month grade — plain verdict first, then the per-stage
     attribution (grouping quality is the headline), hostile-read-proof."""
@@ -1522,12 +1737,15 @@ def _manifest_report(v: dict) -> str:
     L.append("## Stage B — grouping (THE HEADLINE)\n")
     L.append(f"- B1 chapter recall: **{b['b1_ok']}** (formed+null {b['b1_chapters_or_null']}; "
              f"formed={b['formed_topics']}, correct-null={b['nullable_topics']})")
-    L.append(f"- B2 membership: **{b['b2_ok']}**  ·  overall **ARI = {b['ari']}**")
+    L.append(f"- B2 membership: **{b['b2_ok']}**  ·  overall **ARI = {b['ari']}** "
+             f"(paraphrase-tolerant ARI_v2 = {b.get('ari_v2')}, {b.get('attribution_divergence')} atom(s) re-attributed — reported, never graded)")
     for pc in b["per_chapter"]:
-        L.append(f"  - `{pc['label']}`: {pc['members']} members, precision {pc['precision']}, recall {pc['recall']}")
+        av2 = pc.get("attribution_v2") or {}
+        L.append(f"  - `{pc['label']}`: {pc['members']} members, precision {pc['precision']}, recall {pc['recall']}"
+                 f"  ·  v2: {av2.get('topic')} (precision {av2.get('score')})")
     L.append(f"- B3 distractor exclusion: **{b['b3_ok']}** ({b['noise_in_chapter']} noise atoms in chapters)")
-    L.append(f"- B4 correction arc: **{b['b4_ok']}** (corrected reachable={b['correction_reachable']}, "
-             f"stale still active={b['stale_active']})")
+    L.append(f"- B4 correction arc: **{_b4_verdict_str(b)}** (corrected reachable={b['correction_reachable']}, "
+             f"stale still active={b['stale_active']}, scenario_collision={b.get('b4_scenario_collision')})")
     L.append(f"- B5 chapter kill: **{b['b5_kill']}**  ·  operational rows in any chapter (ruling c): "
              f"**{b['operational_rows_in_chapter']}**  ·  byte-stable: **{v['byte_stable']}**\n")
     L.append("## Stage C — behavior (secondary, never the headline)\n")
@@ -1687,7 +1905,7 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
     print(
         f"DESIGNED-MONTH {v['verdict']}" + (f" (failing: {v['failing_stage']})" if v["failing_stage"] else "")
         + f" | atoms={a['sem_atoms']} A1={a['a1_recall']} ARI={b['ari']} "
-        + f"B1={b['b1_ok']} B2={b['b2_ok']} B3={b['b3_ok']} B4={b['b4_ok']} byte_stable={v['byte_stable']}"
+        + f"B1={b['b1_ok']} B2={b['b2_ok']} B3={b['b3_ok']} B4={_b4_verdict_str(b)} byte_stable={v['byte_stable']}"
     )
     print(f"report: {results / 'report.md'}")
     return 1 if v["verdict"] == "INVALID" else 0
