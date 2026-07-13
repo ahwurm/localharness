@@ -113,11 +113,29 @@ def test_deploy_config_no_name_honors_yaml_name(tmp_path: Path):
     assert yaml.safe_load(path.read_text())["name"] == "llm-chose-this"
 
 
-def test_deploy_config_no_name_anywhere_falls_back_valid(tmp_path: Path):
-    """#19: nameless YAML falls back to 'new-agent' — a VALID AgentConfig name
-    (the old 'new_agent' underscore default failed the hyphens-only rule, so
-    the default deploy path could never write)."""
+def test_deploy_config_no_name_anywhere_fails_explicitly(tmp_path: Path):
+    """#28: a generated config with no top-level name must FAIL explicitly, never
+    silently become a 'new-agent' placeholder (the project rule: fail loudly, never
+    placeholder). Replaces the earlier test that codified the placeholder default."""
     wf = AgentCreationWorkflow(config_dir=tmp_path)
     wf.set_generated_yaml("role: A helpful agent")
+    with pytest.raises(ValueError, match="name"):
+        wf.deploy_config()
+    agents = tmp_path / "agents"
+    assert not agents.exists() or list(agents.glob("*.yaml")) == []
+
+
+def test_deploy_config_refuses_to_overwrite_existing(tmp_path: Path):
+    """#28: deploy wrote a .tmp then os.replace with NO existence check, silently
+    clobbering an existing agent config. It must refuse and name the collision,
+    leaving the existing file untouched."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("name: dup-agent\nrole: The original agent")
     path = wf.deploy_config()
-    assert yaml.safe_load(path.read_text())["name"] == "new-agent"
+    original = path.read_text()
+
+    wf2 = AgentCreationWorkflow(config_dir=tmp_path)
+    wf2.set_generated_yaml("name: dup-agent\nrole: A DIFFERENT agent that would clobber")
+    with pytest.raises(ValueError, match="exists"):
+        wf2.deploy_config()
+    assert path.read_text() == original  # original untouched, no silent clobber
