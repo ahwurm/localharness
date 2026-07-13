@@ -707,3 +707,41 @@ async def test_containment_guard_off_preserves_twin_writing(store):
     assert (await _status(store, b.id))[0] == "active"
     assert len(await _active_chapters(store)) == 3                     # candidate + both strays
     assert counts.get("superseded", 0) == 0 and counts.get("folded", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_containment_and_incest_guards_converge_no_churn(store):
+    """COMPOSITION (--idle-passes style, full write_cluster_schemas so clustering's incest guard is
+    live): the containment guard and the incest guard converge to ONE stable chapter across repeated
+    idle passes with NO churn. Pass 1 supersedes a stranded strict-subset chapter; every later pass
+    changes nothing — the guard never re-supersedes and never fights the incest guard's eviction of
+    the survivor from its own cluster. The stranded chapter carries aux surprising_failure members
+    that dilute its FULL-set overlap below chapter_refresh_overlap (so _adopt_refresh_key leaves it —
+    exactly the live stranding), while its PRIMARY member set is a strict subset the guard catches."""
+    atoms = [await _seed_sem(store, f"subagent convergence item {i} for the harness build order",
+                             f"s{i % 2}", topic="subagents") for i in range(3)]   # default child tag -> they cluster
+    stranded = await _seed_chapter(
+        store, "stranded1", atoms[:1],
+        aux=(await _seed_failure(store, "bash_exec", day="20260701"),
+             await _seed_failure(store, "docker", day="20260702")))               # dilutes full-set overlap to 1/3
+
+    # Pass 1: the 3-atom cluster subsumes the stranded 1-primary-member chapter -> one active chapter.
+    counts1: dict = {}
+    r1 = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(), containment_counts=counts1)
+    assert len(r1) == 1
+    active1 = await _active_chapters(store)
+    assert len(active1) == 1, f"stranded chapter survived pass 1: {active1}"
+    assert (await _status(store, stranded.id))[0] == "superseded"
+    assert counts1.get("superseded", 0) == 1
+    survivor_id = next(iter(active1))
+
+    # Passes 2 & 3: stable. The atoms re-cluster, the incest guard evicts the survivor from its own
+    # component, its fresh_key equals the survivor's key -> the guard is INERT (no fold, no supersede)
+    # and store_fact corroborates on the shared key (no new row).
+    for _ in range(2):
+        counts: dict = {}
+        await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(), containment_counts=counts)
+        assert await _active_chapters(store) == active1, "a later pass churned the chapter set"
+        assert counts.get("superseded", 0) == 0, "guard re-superseded on a no-op pass"
+        assert counts.get("folded", 0) == 0, "guard fought the incest guard on a no-op pass"
+        assert len(await store.get_fact_history(active1[survivor_id])) == 1  # never superseded itself
