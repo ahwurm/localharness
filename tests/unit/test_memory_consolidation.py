@@ -559,6 +559,7 @@ async def test_has_work_ignores_non_gate_pending_facts(store: MemoryStore):
 # via the FTS relatedness signal (fixture-fake seed text; allowed in tests per 36-CONTEXT).
 _READ_A = "The read tool returned FileNotFound on a relative path; retrying with the absolute path resolved it."
 _READ_B = "The read tool raised a permission problem on a protected path; the absolute path form resolved it cleanly."
+_GROUNDED = "read tool returned FileNotFound retrying with the absolute path resolved"  # verbatim _READ_A slice
 _ORIG_FACT = "user's preferred editor is neovim"          # the wrongly-disputed remembered fact
 _SUNBURN = "i got super duper sunburnt today at the beach"  # the live personal-fact specimen (36-CONTEXT)
 
@@ -754,3 +755,174 @@ async def test_containment_counters_thread_onto_report(store: MemoryStore):
 
     assert hasattr(report, "chapters_folded")
     assert report.chapters_superseded_by_containment >= 1
+
+
+# ---------------------------------------------------------------------------
+# CHAPTER STALENESS RE-CHECK (ANALYSIS §7 / B5) — wired into the idle pass
+# ---------------------------------------------------------------------------
+# The '7-Day Taper' shape: M3 is the sole number-bearer; the body grounds by MAJORITY token on
+# M1+M2 alone but carries "7" only from M3 — so once M3 is superseded, the grader-equivalent
+# re-check reproduces the exact B5 signature (grounded_majority=True, unverified_numbers=["7"]).
+_G_M1 = "the runner trains on tuesdays and saturdays every week"
+_G_M2 = "the runner is preparing for a september marathon race"
+_G_M3 = "the coach added a 7 day taper to the training plan"
+_G_BODY = ("The runner is preparing for the september marathon and trains "
+           "tuesdays saturdays with a 7 day taper")
+
+
+async def _seed_chapter_body(store, suffix, member_ids, body, *, depth=1):
+    ch = await store.store_fact(
+        key=f"schema/cluster/{suffix}", value=body,
+        tags=["schema", "tier:schema", f"depth:{depth}"], confidence=0.8,
+        source="chapter_writer", provenance="cluster:s0|s1", node_kind="schema")
+    for mid in member_ids:
+        await store.add_edge(ch.id, mid, "member_of")
+    return ch
+
+
+async def _active_schema_ids(store) -> set:
+    async with store._db.execute(
+        "SELECT id FROM facts WHERE agent_id=? AND status='active' AND node_kind='schema'",
+        (store._agent_id,)) as cur:
+        return {r[0] for r in await cur.fetchall()}
+
+
+class _RefusingLLM:
+    """A writer that returns an UNGROUNDED chapter for every draft — its tokens derive from no
+    member, so the shared hallucination kill fires. Used to force the retire path."""
+    async def complete(self, prompt: str) -> str:
+        return "the deployment shipped kubernetes clusters across many datacenters"
+
+
+@pytest.mark.asyncio
+async def test_staleness_recheck_flag_off_preserves_current_behavior(store: MemoryStore):
+    """The kill lever: with chapter_staleness_recheck_enabled=False the step is INERT — a stale
+    chapter (sole number-bearer eroded) stays ACTIVE, byte-identical to pre-feature behavior, and
+    all three staleness counters are 0. Single-session members so the writer forms no cluster."""
+    m1 = await _seed_sem(store, _G_M1, "s1", topic="fitness", child_tag=None)
+    m2 = await _seed_sem(store, _G_M2, "s1", topic="fitness", child_tag=None)
+    m3 = await _seed_sem(store, _G_M3, "s1", topic="fitness", child_tag=None)
+    ch = await _seed_chapter_body(store, "taperoff", [m1.id, m2.id, m3.id], _G_BODY)
+    await store.store_fact(key=m3.key, value="the coach dropped the extra week", tags=["sem"],
+                           confidence=0.65, source="transcript_mining", provenance="s1")
+
+    cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
+               mint_tagging_enabled=False, chapter_staleness_recheck_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+
+    assert report.chapters_revalidated == 0
+    assert report.chapters_redrafted_stale == 0
+    assert report.chapters_retired_stale == 0
+    live = await store.get_fact(ch.key)
+    assert live is not None and live.id == ch.id                 # not superseded/retired
+    assert live.value == _G_BODY and live.updated_at == ch.updated_at   # wholly untouched
+
+
+@pytest.mark.asyncio
+async def test_staleness_counters_thread_onto_report(store: MemoryStore):
+    """All three re-check dispositions surface on the ConsolidationReport in ONE pass: a HEALTHY
+    chapter revalidates, a STALE-redraftable one (2 survivors, sole number-bearer eroded) redrafts,
+    and a STALE-empty one (all members eroded) retires. Members are single-session so the writer
+    forms no NEW cluster — the counters isolate the re-check."""
+    # HEALTHY: body is a verbatim slice of _READ_A -> grounded, no number.
+    h1 = await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag=None)
+    h2 = await _seed_sem(store, _READ_B, "s1", topic="reads", child_tag=None)
+    await _seed_chapter_body(store, "cH", [h1.id, h2.id], _GROUNDED)
+    # STALE-redraftable: erode the sole number-bearer; 2 survivors remain.
+    r1 = await _seed_sem(store, _G_M1, "s2", topic="fit2", child_tag=None)
+    r2 = await _seed_sem(store, _G_M2, "s2", topic="fit2", child_tag=None)
+    r3 = await _seed_sem(store, _G_M3, "s2", topic="fit2", child_tag=None)
+    chR = await _seed_chapter_body(store, "cR", [r1.id, r2.id, r3.id], _G_BODY)
+    await store.store_fact(key=r3.key, value="the coach dropped the extra week", tags=["sem"],
+                           confidence=0.65, source="transcript_mining", provenance="s2")
+    # STALE-empty: both members eroded -> retire.
+    z1 = await _seed_sem(store, "the special reserved allocation totals distinct measurable units",
+                         "s3", topic="zzz", child_tag=None)
+    z2 = await _seed_sem(store, "the special reserved allocation counts distinct measurable totals",
+                         "s3", topic="zzz", child_tag=None)
+    chZ = await _seed_chapter_body(store, "cZ", [z1.id, z2.id],
+                                   "the special reserved allocation totals distinct measurable units")
+    await store.store_fact(key=z1.key, value="one two three unrelated", tags=["sem"],
+                           confidence=0.65, source="transcript_mining", provenance="s3")
+    await store.store_fact(key=z2.key, value="four five six unrelated", tags=["sem"],
+                           confidence=0.65, source="transcript_mining", provenance="s3")
+
+    cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
+               mint_tagging_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+
+    assert report.chapters_revalidated >= 1
+    assert report.chapters_redrafted_stale >= 1
+    assert report.chapters_retired_stale >= 1
+    assert (await store.get_fact(chZ.key)) is None               # the empty chapter is retired
+    assert "7" not in (await store.get_fact(chR.key)).value      # redraft dropped the orphan figure
+    # Every staleness attempt is observable on the report (ANALYSIS §7 gap): the redraft + the retire.
+    stale_attempts = [a for a in report.schema_attempts if a.get("staleness_recheck_of")]
+    assert stale_attempts, "staleness re-check activity left no forensic trail on the report"
+
+
+@pytest.mark.asyncio
+async def test_staleness_composition_converges_no_pingpong(store: MemoryStore):
+    """COMPOSITION (--idle-passes style, all three guards live: staleness re-check + containment +
+    clustering incest). A '7-Day Taper'-shaped chapter goes stale; across two idle passes the system
+    converges to ONE grounded chapter with NO oscillation.
+
+    THE PING-PONG INVARIANT (why retire->rewrite->retire cannot happen): the re-check, the re-draft,
+    and the normal writer ALL apply the identical grounded()+ground_numbers() gate. A body that fails
+    the re-check therefore also fails the writer's mint gate, so a stale/ungrounded body can NEVER be
+    re-persisted — the only body ever written is one that PASSES grounding, which the re-check then
+    leaves untouched. Hence the loop can settle ONLY on a grounded chapter (allowed) or on no chapter.
+    If the same cluster re-forms from the surviving members, that is a FRESH draft grounded on current
+    evidence (explicitly allowed) — NOT a re-write of the retired stale content."""
+    m1 = await _seed_sem(store, _G_M1, "s0", topic="fitness")    # default child tag -> they cluster
+    m2 = await _seed_sem(store, _G_M2, "s1", topic="fitness")
+    m3 = await _seed_sem(store, _G_M3, "s0", topic="fitness")
+    ch = await _seed_chapter_body(store, "taper_g", [m1.id, m2.id, m3.id], _G_BODY)
+    await store.store_fact(key=m3.key, value="the coach revised and dropped the extra week",
+                           tags=["sem"], confidence=0.65, source="transcript_mining", provenance="s0")
+
+    cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
+               mint_tagging_enabled=False)
+
+    r1 = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+    assert r1.chapters_redrafted_stale == 1
+    active1 = await _active_schema_ids(store)
+    assert len(active1) == 1
+    assert (await store.get_fact(ch.key)).id in active1          # redraft adopted ch's key
+    hist1 = len(await store.get_fact_history(ch.key))
+    assert hist1 == 2                                            # one supersede: stale -> grounded
+
+    r2 = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+    assert r2.chapters_revalidated >= 1                          # now grounded -> revalidated
+    assert r2.chapters_redrafted_stale == 0 and r2.chapters_retired_stale == 0
+    assert await _active_schema_ids(store) == active1           # SAME chapter id — no oscillation
+    assert len(await store.get_fact_history(ch.key)) == hist1   # no new supersede on the stable pass
+    assert "7" not in (await store.get_fact(ch.key)).value      # orphan figure never resurfaces
+
+
+@pytest.mark.asyncio
+async def test_staleness_retire_stays_retired_no_pingpong(store: MemoryStore):
+    """The retire arm of the invariant: when the survivors cannot be grounded (refusing writer), the
+    stale chapter is retired in pass 1 and STAYS retired in pass 2 — the writer's shared kill blocks
+    any re-mint of the stale content, so there is no retire->rewrite->retire loop. 'No chapter' is the
+    stable fixpoint (a grounded re-form WOULD be allowed; the writer simply refuses here)."""
+    m1 = await _seed_sem(store, _G_M1, "s0", topic="fitness")
+    m2 = await _seed_sem(store, _G_M2, "s1", topic="fitness")
+    m3 = await _seed_sem(store, _G_M3, "s0", topic="fitness")
+    ch = await _seed_chapter_body(store, "taper_r", [m1.id, m2.id, m3.id], _G_BODY)
+    await store.store_fact(key=m3.key, value="the coach dropped the extra week entirely",
+                           tags=["sem"], confidence=0.65, source="transcript_mining", provenance="s0")
+
+    cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
+               mint_tagging_enabled=False)
+
+    r1 = await ConsolidationPass(store, cfg, llm=_RefusingLLM()).run()
+    assert r1.chapters_retired_stale == 1
+    assert await _active_schema_ids(store) == set()             # retired: no active chapter
+    hist1 = len(await store.get_fact_history(ch.key))
+    assert hist1 == 1                                           # status flip, no successor row
+
+    r2 = await ConsolidationPass(store, cfg, llm=_RefusingLLM()).run()
+    assert r2.chapters_retired_stale == 0 and r2.chapters_redrafted_stale == 0
+    assert await _active_schema_ids(store) == set()            # STILL no chapter — no resurrection
+    assert len(await store.get_fact_history(ch.key)) == hist1  # unchanged — no ping-pong

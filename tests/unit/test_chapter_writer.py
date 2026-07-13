@@ -745,3 +745,189 @@ async def test_containment_and_incest_guards_converge_no_churn(store):
         assert counts.get("superseded", 0) == 0, "guard re-superseded on a no-op pass"
         assert counts.get("folded", 0) == 0, "guard fought the incest guard on a no-op pass"
         assert len(await store.get_fact_history(active1[survivor_id])) == 1  # never superseded itself
+
+
+# ---------------------------------------------------------------------------------------
+# CHAPTER STALENESS RE-CHECK — a chapter's evidentiary base can erode after it is written
+# ---------------------------------------------------------------------------------------
+# Root cause measured in d1-replication-20260712 (ANALYSIS §7, "The 7-Day Taper" / B5): a chapter
+# was written correctly and grounded against 3 members, one of which was the SOLE bearer of the
+# number "7". That member atom was later superseded; get_facts_by_ids is active-only, so the chapter
+# silently lost its sole "7" source and sat ACTIVE with a figure nothing supported — the eval's
+# grader (which renders only ACTIVE members) then KILLed the run. recheck_stale_chapters catches this
+# BEFORE the writer runs each idle pass: it re-runs the grader's own grounded()/ground_numbers()
+# matchers against each chapter's CURRENT active members and, on a fail, re-drafts on the survivors
+# (grounded → supersede on the chapter's key) or retires the chapter (append-only, never deleted).
+
+# The B5 fixture, verbatim-shaped: M3 is the sole number-bearer; the body grounds by MAJORITY token
+# on M1+M2 alone (so the majority net stays green post-erosion) but carries "7" (only in M3) — so
+# after M3 is superseded the re-check reproduces the exact B5 signature grounded_majority=True,
+# unverified_numbers=["7"]. "taper" (5 chars) is below the >=6 grounding-token floor, so it never
+# props up the majority; the isolation is the numeric net, exactly as in the run.
+_TAPER_M1 = "the runner trains on tuesdays and saturdays every week"
+_TAPER_M2 = "the runner is preparing for a september marathon race"
+_TAPER_M3 = "the coach added a 7 day taper to the training plan"
+_TAPER_BODY = ("The runner is preparing for the september marathon and trains "
+               "tuesdays saturdays with a 7 day taper")
+
+
+async def _seed_taper_chapter(store):
+    """The '7-Day Taper' chapter: grounded on M1/M2/M3 at write time, M3 the sole '7' source."""
+    m1 = await _seed_sem(store, _TAPER_M1, "s1", topic="fitness", child_tag=None)
+    m2 = await _seed_sem(store, _TAPER_M2, "s2", topic="fitness", child_tag=None)
+    m3 = await _seed_sem(store, _TAPER_M3, "s1", topic="fitness", child_tag=None)
+    ch = await _seed_chapter(store, "taper001", [m1, m2, m3], body=_TAPER_BODY)
+    return ch, m1, m2, m3
+
+
+async def _erode(store, member, new_value):
+    """Supersede a member on its own key (the real B5 mechanism — a same-key supersede flips the
+    old row's status away from active), so the chapter's member_of edge now points at a superseded
+    (un-rendered) node exactly as it did live."""
+    await store.store_fact(key=member.key, value=new_value, tags=["sem", "pending_consolidation"],
+                           confidence=0.65, source="transcript_mining", provenance="s1",
+                           node_kind="fact")
+
+
+def _grounded_now(chapter_value, member_bodies):
+    """Grader-equivalent verdict: True iff the body still grounds against these member bodies
+    (mirrors sema05 _static_checks: majority-token AND clean numeric net, body-only)."""
+    corpus = "\n".join(member_bodies)
+    body = strip_chapter_title(chapter_value)
+    return grounded(body, corpus) and not ground_numbers(body, member_bodies)
+
+
+@pytest.mark.asyncio
+async def test_stale_chapter_redrafted_without_orphaned_number(store):
+    """B5, faithful writer: the sole number-bearer (M3) is superseded, so the chapter's "7" is no
+    longer grounded. A faithful re-draft on the SURVIVING members (M1,M2) drops the orphaned figure
+    and SUPERSEDES the stale chapter ON ITS OWN KEY (normal supersede, history preserved) — the
+    exclude-self path, without which the re-draft would fold back into the very chapter it replaces.
+    Load-bearing: the pre-erosion body grounds (M3 carries 7) and the post-erosion body does NOT."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+
+    ch, m1, m2, m3 = await _seed_taper_chapter(store)
+    assert _grounded_now(_TAPER_BODY, [_TAPER_M1, _TAPER_M2, _TAPER_M3])       # grounded at write time
+    await _erode(store, m3, "the coach revised the plan and dropped the extra week entirely")
+    assert not _grounded_now(_TAPER_BODY, [_TAPER_M1, _TAPER_M2])              # now stale (orphaned 7)
+
+    counts: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts)
+
+    assert counts.get("redrafted", 0) == 1 and counts.get("retired", 0) == 0
+    assert (await _status(store, ch.id))[0] == "superseded"        # stale row folded away (append-only)
+    live = await store.get_fact(ch.key)                            # re-draft adopted the SAME key
+    assert live is not None and live.id != ch.id and live.status == "active"
+    assert "7" not in live.value                                  # the orphaned figure is gone
+    assert len(await store.get_fact_history(ch.key)) == 2         # supersede chain, history kept
+    assert len(await _active_chapters(store)) == 1
+    # Members re-attached to the fresh chapter are the SURVIVORS only.
+    assert await _member_of_dst(store, live.id) == {m1.id, m2.id}
+    # Grader-equivalent re-check now comes back CLEAN — a second pass revalidates, no more churn.
+    counts2: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts2)
+    assert counts2.get("revalidated", 0) == 1 and counts2.get("redrafted", 0) == 0
+    assert len(await store.get_fact_history(ch.key)) == 2         # no new supersede on the clean pass
+
+
+@pytest.mark.asyncio
+async def test_stale_chapter_retired_when_redraft_refuses(store):
+    """B5, refusing writer: when the re-draft cannot produce a grounded chapter from the survivors
+    (the writer's hallucination kill fires), the stale chapter is RETIRED — marked non-active
+    (append-only, never deleted), leaving NO active chapter for the grader to KILL on. Clean either
+    way: the eval grades only active schemas, so a retired chapter contributes no B5."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+
+    ch, m1, m2, m3 = await _seed_taper_chapter(store)
+    await _erode(store, m3, "the coach revised the plan and dropped the extra week entirely")
+
+    counts: dict = {}
+    await recheck_stale_chapters(
+        store, _EchoLLM("the deployment shipped kubernetes clusters across datacenters"),
+        asyncio.Event(), counts=counts)
+
+    assert counts.get("retired", 0) == 1 and counts.get("redrafted", 0) == 0
+    assert (await _status(store, ch.id)) == ("superseded", None)   # retired: non-active, NO successor
+    assert await _active_chapters(store) == {}                     # nothing for the grader to KILL
+    assert len(await store.get_fact_history(ch.key)) == 1          # the row is kept, never deleted
+    # A second pass sees no active chapter — a stable, idempotent retire (no resurrection).
+    counts2: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts2)
+    assert counts2 == {} or all(v == 0 for v in counts2.values())
+
+
+@pytest.mark.asyncio
+async def test_healthy_chapter_idempotent_no_writes(store):
+    """A pass over an already-healthy chapter must write NOTHING and change NOTHING. Two re-check
+    passes: the chapter row (updated_at, status, value) and its history length are byte-identical
+    after both — the re-check touches nothing it revalidates (the idempotency/byte-stability law)."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+
+    h1 = await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag=None)
+    h2 = await _seed_sem(store, _READ_B, "s2", topic="reads", child_tag=None)
+    ch = await _seed_chapter(store, "healthy1", [h1, h2], body=_GROUNDED)  # _GROUNDED grounds on _READ_A
+    before = await store.get_fact(ch.key)
+
+    for _ in range(2):
+        counts: dict = {}
+        await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts)
+        assert counts.get("revalidated", 0) == 1
+        assert counts.get("redrafted", 0) == 0 and counts.get("retired", 0) == 0
+        after = await store.get_fact(ch.key)
+        assert after.id == before.id and after.status == "active"
+        assert after.value == before.value and after.updated_at == before.updated_at  # zero churn
+        assert len(await store.get_fact_history(ch.key)) == 1     # no supersede row minted
+    assert len(await _active_chapters(store)) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_active_members_retires(store):
+    """A chapter whose members ALL eroded (< 2 active members) is retired — no re-draft is even
+    attempted (there is nothing to re-draft from), so the writer is never called."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+
+    m1 = await _seed_sem(store, _TAPER_M1, "s1", topic="fitness", child_tag=None)
+    m2 = await _seed_sem(store, _TAPER_M2, "s2", topic="fitness", child_tag=None)
+    ch = await _seed_chapter(store, "empty001", [m1, m2],
+                             body="the special reserved allocation totals distinct measurable units")
+    await _erode(store, m1, "unrelated content one two three")
+    await _erode(store, m2, "unrelated content four five six")
+
+    counts: dict = {}
+    called = {"n": 0}
+
+    class _Tripwire:
+        async def complete(self, prompt):        # the writer must NEVER be called (no re-draft)
+            called["n"] += 1
+            return "should not run"
+
+    await recheck_stale_chapters(store, _Tripwire(), asyncio.Event(), counts=counts)
+
+    assert called["n"] == 0                       # zero-member chapter retires without a generation
+    assert counts.get("retired", 0) == 1
+    assert (await _status(store, ch.id)) == ("superseded", None)
+    assert await _active_chapters(store) == {}
+    assert len(await store.get_fact_history(ch.key)) == 1        # append-only
+
+
+@pytest.mark.asyncio
+async def test_recheck_cap_bounds_work_per_pass(store):
+    """The re-check is bounded: with `cap` chapters processed oldest-first (updated_at ASC, id ASC),
+    a store with more stale chapters than the cap processes exactly `cap` of them and leaves the rest
+    for later passes — the newest-written chapter (largest id) survives an under-cap pass untouched."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+
+    chapters = []
+    for i, suf in enumerate(("capA", "capB", "capC")):
+        m = await _seed_sem(store, f"an unrelated weather note about clouds and rainfall patterns {suf}",
+                            f"s{i}", topic="misc", child_tag=None)
+        ch = await _seed_chapter(store, suf, [m],
+                                 body=f"the reserved special allocation totals {40 + i} distinct units")
+        chapters.append(ch)
+
+    counts: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), cap=2, counts=counts)
+
+    assert counts.get("retired", 0) == 2                          # exactly cap processed, all stale
+    active = await _active_chapters(store)
+    assert len(active) == 1 and chapters[-1].id in active         # the newest chapter is left for later
