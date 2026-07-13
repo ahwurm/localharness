@@ -318,7 +318,25 @@ class TokenCounter:
         and are wrong for a different model). Called at construction AND after a REPL /model
         swap so mid-session counting tracks the live model, not the construction-time one (#25).
         Same fail-loud contract as construction: a KNOWN exact runtime (vllm/llamacpp) whose
-        /tokenize is unreachable raises; an unknown runtime degrades to labeled approximate."""
+        /tokenize is unreachable raises; an unknown runtime degrades to labeled approximate.
+        Exception-safe (#30): a failed re-probe RESTORES the prior binding before re-raising, so
+        the counter is never left _mode=live + _tokenize_url=None — the half-set state that made
+        count() raise on EVERY later turn (a bricked session the caller reported as a clean swap)."""
+        prev = (self._model, self._tokenize_url, self._mode, dict(self._cache))
+        try:
+            self._rebind_probe(base_url, model, provider_type)
+        except Exception:
+            self._model, self._tokenize_url, self._mode, self._cache = prev
+            raise
+
+    def _rebind_probe(
+        self,
+        base_url: str | None,
+        model: str | None,
+        provider_type: str | None,
+    ) -> None:
+        """Actual (re)probe + state mutation; MAY raise. rebind() wraps this and restores the
+        prior binding on failure so the counter always ends in a CONSISTENT, usable state."""
         self._model = model
         self._tokenize_url = None
         self._mode = "off"
@@ -445,6 +463,40 @@ class TokenCounter:
                 total += self.count(fn.get("name", ""))
                 total += self.count(fn.get("arguments", ""))
         return total
+
+
+def probe_served_window(
+    base_url: str | None, model: str | None, provider_type: str | None = None
+) -> int | None:
+    """Served context window for `model`, or None when the runtime doesn't expose it (#31).
+
+    The honest signal the /model refit needs: an int means "refit the budget to this", None
+    means "unknowable — disclose, don't guess". Blocking (httpx); callers run it OFF the event
+    loop (#32). vLLM/OpenAI-compat: the /v1/models entry whose id==model, field
+    max_model_len|context_length (id-matched, so a multi-model endpoint returns the TARGET
+    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama/LM Studio serve no
+    reliable per-model window here → None. Never raises."""
+    if not (base_url and model):
+        return None
+    import httpx
+    root = base_url.rstrip("/")
+    if (provider_type or "").lower() == "llamacpp":
+        try:
+            native = root.removesuffix("/v1")
+            props = httpx.get(f"{native}/props", timeout=3.0).json()
+            val = props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx")
+            return int(val) if val else None
+        except Exception:
+            return None
+    try:
+        data = httpx.get(f"{root}/models", timeout=3.0).json()
+        for m in (data.get("data") or []):
+            if m.get("id") == model:
+                val = m.get("max_model_len") or m.get("context_length")
+                return int(val) if val else None
+    except Exception:
+        return None
+    return None
 
 
 @dataclass

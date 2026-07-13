@@ -244,10 +244,10 @@ class OrchestratorREPL:
         if target in live:
             llm.config.model = target
             cap = await llm.detect_capabilities()
-            self._refresh_token_counter(target)
+            note = await self._refresh_token_counter(target)
             await self._persist_default_model(target)
             await self._send_info(
-                f"Switched to {target} (tool calling: {cap.tool_call_mode})."
+                f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
             )
             return
 
@@ -271,31 +271,68 @@ class OrchestratorREPL:
         served = models[0] if models else target
         llm.config.model = served
         cap = await llm.detect_capabilities()
-        self._refresh_token_counter(served)
+        note = await self._refresh_token_counter(served)
         await self._persist_default_model(served)
         await self._send_info(
-            f"Switched to {served} (tool calling: {cap.tool_call_mode}). "
-            "If this model serves a different context window, re-run `localharness init` to refit the budget."
+            f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
         )
 
-    def _refresh_token_counter(self, model: str) -> None:
-        """Rebind the shared TokenCounter to the new served model after a swap (#25). The counter
-        is ONE object shared by the context manager, compaction pipeline and subagent runner, so an
-        in-place rebind updates them all. Best-effort: a counting refresh must never abort a
-        completed swap (the runtime is already confirmed serving `model` at this point)."""
+    async def _refresh_token_counter(self, model: str) -> str:
+        """After a swap, refit the context-window budget (#31) and rebind the shared TokenCounter
+        (#25/#30) to the new served model. The counter is ONE object shared by the context manager,
+        compaction pipeline and subagent runner, so an in-place rebind/refit updates them all. Both
+        probes BLOCK (urllib/httpx, up to ~20s for two shapes), so they run OFF the event loop (#32)
+        — the Discord adapter and idle consolidation share it. Never aborts a completed swap; returns
+        a disclosure string (leading space; '' when clean) to append to the switch message so the
+        user is told on the CHANNEL — not a swallowed log line — when counting/budget can't track."""
+        import asyncio
+
+        from localharness.agent import context as context_mod
+        from localharness.cli.init_cmd import _fit_context_tokens
+
         ctx = getattr(self._agent, "_ctx", None)
+        base_url = self._agent._llm.config.base_url
+        ptype = getattr(getattr(self._harness, "provider", None), "provider_type", None)
+        notes: list[str] = []
+
+        # #31: refit the budget to the new model's served window, or disclose when unknowable — a
+        # stale 128K budget on a 32K model passes over-window requests that 400 mid-session. The
+        # ContextManager reads max_context_tokens live, so the in-place mutation updates every
+        # consumer (TokenBudget gates, compaction thresholds, emergency floor).
+        if getattr(ctx, "max_context_tokens", None):
+            try:
+                window = await asyncio.to_thread(
+                    context_mod.probe_served_window, base_url, model, ptype
+                )
+            except Exception:  # noqa: BLE001 — a probe error must never brick a done swap
+                window = None
+            if window:
+                fitted = _fit_context_tokens(window)
+                if fitted != ctx.max_context_tokens:
+                    ctx.max_context_tokens = fitted
+                    notes.append(
+                        f"context budget refit to {fitted:,} tokens (served window {window:,})."
+                    )
+            else:
+                notes.append(
+                    "context budget unchanged — couldn't read this model's served window; "
+                    "re-run `localharness init` if its window differs."
+                )
+
+        # #30: rebind the counter off-loop. rebind() is exception-safe (restores the prior binding
+        # on a failed re-probe), so a failure leaves an exact, usable counter — but bound to the OLD
+        # model, so DISCLOSE it on the channel and tell the user to retry (never a silent swap).
         rebind = getattr(getattr(ctx, "_token_counter", None), "rebind", None)
-        if rebind is None:
-            return
-        provider = getattr(self._harness, "provider", None)
-        try:
-            rebind(
-                base_url=self._agent._llm.config.base_url,
-                model=model,
-                provider_type=getattr(provider, "provider_type", None),
-            )
-        except Exception as exc:  # noqa: BLE001 — never let a counter refresh strand a done swap
-            log.warning("TokenCounter rebind after /model swap failed: %s", exc)
+        if rebind is not None:
+            try:
+                await asyncio.to_thread(rebind, base_url, model, ptype)
+            except Exception as exc:  # noqa: BLE001 — never let a counter refresh strand a done swap
+                log.warning("TokenCounter rebind after /model swap failed: %s", exc)
+                notes.append(
+                    f"token counting could not rebind to {model} and still uses the previous "
+                    "model, so counts may not match — re-run /model to retry."
+                )
+        return (" " + " ".join(notes)) if notes else ""
 
     async def _live_models(self, base_url: str) -> list[str]:
         try:
