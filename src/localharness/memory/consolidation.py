@@ -64,6 +64,10 @@ class ConsolidationReport:
     demoted: int = 0
     replayed_claims: int = 0
     schemas_written: int = 0   # Phase 36 SEMA-02/03: chapters written this pass
+    # Chapter containment guard: candidate ⊆ existing folded (no twin) / existing ⊊ candidate
+    # superseded (append-only). Closes the multi-contained gap chapter_refresh_overlap left.
+    chapters_folded: int = 0
+    chapters_superseded_by_containment: int = 0
     reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
     mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
     tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
@@ -308,6 +312,7 @@ class ConsolidationPass:
         if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):
             return
         from localharness.memory.chapter_writer import write_cluster_schemas
+        containment_counts = {"folded": 0, "superseded": 0}
         written = await write_cluster_schemas(
             self._store, self._llm, self._cancel,
             min_sessions=self._cfg.cluster_min_sessions,
@@ -318,9 +323,14 @@ class ConsolidationPass:
             embed_sim=self._cfg.clustering_embed_sim_threshold,
             # chapter refresh: membership drift supersedes the old chapter, never a sibling
             refresh_overlap=self._cfg.chapter_refresh_overlap,
+            # containment guard: fold set-contained duplicates / supersede EACH subsumed chapter
+            containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
+            containment_counts=containment_counts,
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
         )
         report.schemas_written = len(written)
+        report.chapters_folded = containment_counts["folded"]
+        report.chapters_superseded_by_containment = containment_counts["superseded"]
 
     async def _step_classify_untagged(self, report: ConsolidationReport) -> None:
         """Tag-graph F4: file pool-visible atoms that LACK a bucket tag through the SAME two-step

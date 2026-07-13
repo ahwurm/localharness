@@ -566,7 +566,8 @@ async def _active_chapters(store) -> dict[int, str]:
 async def _status(store, fact_id):
     async with store._db.execute(
         "SELECT status, superseded_by FROM facts WHERE id=?", (fact_id,)) as cur:
-        return await cur.fetchone()
+        row = await cur.fetchone()
+    return tuple(row) if row is not None else None
 
 
 async def _seed_chapter(store, suffix, members, *, body="a pre-existing subagents chapter body", aux=()):
