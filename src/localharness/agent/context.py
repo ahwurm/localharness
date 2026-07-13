@@ -296,61 +296,81 @@ class TokenCounter:
         except (ImportError, Exception):
             pass
 
+        # Model-identity state (owned by rebind so a /model swap can re-derive it):
         # /tokenize lives at the SERVER ROOT, not under /v1.
         self._tokenize_url: str | None = None
-        self._model = model
+        self._model: str | None = None
         self._cache: dict[str, int] = {}
         # "off": offline cl100k estimator (no server configured — tests/bench). "vllm"/"llamacpp":
         # exact remote via that runtime's /tokenize contract. "approximate": inflated cl100k (the
         # runtime serves no tokenize endpoint, or an unknown runtime's probe found none).
         self._mode: str = "off"
-        if base_url and model:
-            ptype = (provider_type or "").lower()
-            if ptype in ("ollama", "lmstudio"):
-                # These runtimes serve NO /tokenize (Ollama: /api/* only; LM Studio: none
-                # documented). Approximate by DESIGN — never dial, label it, over-count.
-                if self._encoder is None:
-                    raise RuntimeError(
-                        f"TokenCounter: {ptype} serves no tokenize endpoint and tiktoken is "
-                        f"unavailable — no counting source exists. Install tiktoken."
-                    )
-                self._mode = "approximate"
-                return
-            root = base_url.rstrip("/")
-            if root.endswith("/v1"):
-                root = root[: -len("/v1")]
-            self._tokenize_url = f"{root}/tokenize"
-            # Probe the runtime's /tokenize contract. Known llama.cpp speaks {content}->{tokens};
-            # vLLM speaks {model,prompt}->{count}. With no provider_type, try vLLM then llama.cpp
-            # so a mis/undetected runtime still locks onto whichever shape actually answers.
-            shapes = {"vllm": ("vllm",), "llamacpp": ("llamacpp",)}.get(ptype, ("vllm", "llamacpp"))
-            for shape in shapes:
-                self._mode = shape
-                if self._remote_count("token") is not None:
-                    break  # exact mode locked onto the shape the server actually speaks
-            else:
-                # No exact source answered. A runtime we KNOW serves /tokenize (vllm/llamacpp)
-                # being unreachable is a HARD error — exact counting is required and doctor
-                # reports the same failure. An UNKNOWN runtime degrades to labeled approximate.
-                self._tokenize_url = None
-                if ptype in ("vllm", "llamacpp"):
-                    raise RuntimeError(
-                        f"TokenCounter: exact token counting unavailable — {ptype} /tokenize "
-                        f"unreachable at {root}/tokenize. Refusing an approximate fallback for a "
-                        f"runtime that should count exactly."
-                    )
-                if self._encoder is None:
-                    raise RuntimeError(
-                        "TokenCounter: no tokenizer available (tiktoken missing, /tokenize "
-                        "unreachable)."
-                    )
-                self._mode = "approximate"
-                log.warning(
-                    "TokenCounter: %s/tokenize did not answer a known contract — using "
-                    "APPROXIMATE token counting (cl100k x %s). Budget gates fire conservatively; "
-                    "run vLLM or llama.cpp for exact counts. (base_url=%s)",
-                    root, APPROX_TOKENIZE_SAFETY_FACTOR, base_url,
+        self.rebind(base_url, model, provider_type)
+
+    def rebind(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        provider_type: str | None = None,
+    ) -> None:
+        """(Re)bind to a served model: re-probe /tokenize, reset mode + model identity, and
+        CLEAR the content-hash cache (cached counts were computed under the previous tokenizer
+        and are wrong for a different model). Called at construction AND after a REPL /model
+        swap so mid-session counting tracks the live model, not the construction-time one (#25).
+        Same fail-loud contract as construction: a KNOWN exact runtime (vllm/llamacpp) whose
+        /tokenize is unreachable raises; an unknown runtime degrades to labeled approximate."""
+        self._model = model
+        self._tokenize_url = None
+        self._mode = "off"
+        self._cache.clear()
+        if not (base_url and model):
+            return
+        ptype = (provider_type or "").lower()
+        if ptype in ("ollama", "lmstudio"):
+            # These runtimes serve NO /tokenize (Ollama: /api/* only; LM Studio: none
+            # documented). Approximate by DESIGN — never dial, label it, over-count.
+            if self._encoder is None:
+                raise RuntimeError(
+                    f"TokenCounter: {ptype} serves no tokenize endpoint and tiktoken is "
+                    f"unavailable — no counting source exists. Install tiktoken."
                 )
+            self._mode = "approximate"
+            return
+        root = base_url.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[: -len("/v1")]
+        self._tokenize_url = f"{root}/tokenize"
+        # Probe the runtime's /tokenize contract. Known llama.cpp speaks {content}->{tokens};
+        # vLLM speaks {model,prompt}->{count}. With no provider_type, try vLLM then llama.cpp
+        # so a mis/undetected runtime still locks onto whichever shape actually answers.
+        shapes = {"vllm": ("vllm",), "llamacpp": ("llamacpp",)}.get(ptype, ("vllm", "llamacpp"))
+        for shape in shapes:
+            self._mode = shape
+            if self._remote_count("token") is not None:
+                break  # exact mode locked onto the shape the server actually speaks
+        else:
+            # No exact source answered. A runtime we KNOW serves /tokenize (vllm/llamacpp)
+            # being unreachable is a HARD error — exact counting is required and doctor
+            # reports the same failure. An UNKNOWN runtime degrades to labeled approximate.
+            self._tokenize_url = None
+            if ptype in ("vllm", "llamacpp"):
+                raise RuntimeError(
+                    f"TokenCounter: exact token counting unavailable — {ptype} /tokenize "
+                    f"unreachable at {root}/tokenize. Refusing an approximate fallback for a "
+                    f"runtime that should count exactly."
+                )
+            if self._encoder is None:
+                raise RuntimeError(
+                    "TokenCounter: no tokenizer available (tiktoken missing, /tokenize "
+                    "unreachable)."
+                )
+            self._mode = "approximate"
+            log.warning(
+                "TokenCounter: %s/tokenize did not answer a known contract — using "
+                "APPROXIMATE token counting (cl100k x %s). Budget gates fire conservatively; "
+                "run vLLM or llama.cpp for exact counts. (base_url=%s)",
+                root, APPROX_TOKENIZE_SAFETY_FACTOR, base_url,
+            )
 
     @property
     def approximate(self) -> bool:
