@@ -911,3 +911,78 @@ async def test_floor_reserves_response_headroom():
     assert budget.headroom >= 0, "floor must leave >= reserve tokens free for the model's reply"
     non_system = [m for m in out if m.get("role") != "system"]
     assert non_system and non_system[0]["role"] == "user"  # FIX 1 structure preserved by the floor
+
+
+# --- #30: rebind must be exception-safe (a failed re-probe must not brick the session) --- #
+
+
+def test_rebind_failure_restores_prior_binding_and_count_survives(monkeypatch):
+    """#30: a failed re-probe must leave the counter in the PRIOR, consistent binding — never
+    _mode=live + _tokenize_url=None, which makes count() raise on EVERY later call (the brick
+    reported to the user as a successful swap). rebind still RAISES (the known-runtime fail-loud
+    contract) but the state is restored BEFORE it raises, so the session stays usable."""
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 5)
+    tc = TokenCounter(base_url="http://localhost:8000/v1", model="model-a", provider_type="vllm")
+    assert tc._mode == "vllm" and tc._model == "model-a"
+    prev_url = tc._tokenize_url
+    tc.count("prime the cache")  # counts cached under model-a's tokenizer
+
+    # Re-probe now fails for the new model on a KNOWN runtime → rebind must raise…
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: None)
+    with pytest.raises(RuntimeError):
+        tc.rebind(base_url="http://localhost:8000/v1", model="model-b", provider_type="vllm")
+
+    # …but leave the PRIOR binding intact — consistent, not a half-set brick.
+    assert tc._model == "model-a"
+    assert tc._tokenize_url == prev_url
+    assert tc._mode == "vllm"
+
+    # The #30 symptom was count() raising on EVERY later turn. The restored exact binding answers.
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 5)
+    assert tc.count("a later turn") == 5
+
+
+# --- #31: served-window probe (id-matched, never raises) feeds the /model budget refit --- #
+
+
+def test_probe_served_window_vllm_id_matched(monkeypatch):
+    from localharness.agent import context as ctxmod
+
+    class _Resp:
+        def json(self):
+            return {"data": [
+                {"id": "other", "max_model_len": 8192},
+                {"id": "model-b", "max_model_len": 32768},
+            ]}
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda url, timeout=0: _Resp())
+    assert ctxmod.probe_served_window("http://localhost:8000/v1", "model-b", "vllm") == 32768
+    # An id the endpoint doesn't serve → None (caller discloses instead of refitting a guess).
+    assert ctxmod.probe_served_window("http://localhost:8000/v1", "absent", "vllm") is None
+
+
+def test_probe_served_window_llamacpp_props(monkeypatch):
+    from localharness.agent import context as ctxmod
+    import httpx
+
+    class _Resp:
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": 16384}}
+
+    monkeypatch.setattr(httpx, "get", lambda url, timeout=0: _Resp())
+    assert ctxmod.probe_served_window("http://localhost:8080/v1", "m", "llamacpp") == 16384
+
+
+def test_probe_served_window_never_raises(monkeypatch):
+    """A probe error must degrade to None (→ the caller discloses), never crash the swap."""
+    from localharness.agent import context as ctxmod
+    import httpx
+
+    def _boom(url, timeout=0):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert ctxmod.probe_served_window("http://localhost:8000/v1", "model-b", "vllm") is None

@@ -315,3 +315,118 @@ async def test_model_swap_no_pin_warning_when_none_pinned(tmp_path):
     joined = "\n".join(channel.messages)
     assert "won't reach these agents" not in joined
     assert "Switched to model-b" in channel.messages[-1]
+
+
+# --- #30/#31/#32: swap must refit the window + disclose a failed counter rebind, off-loop --- #
+
+
+def _repl_with_ctx(tmp_path, tc, max_ctx=131_072, live=("model-a", "model-b")):
+    channel = FakeChannel()
+    ctx = SimpleNamespace(_token_counter=tc, max_context_tokens=max_ctx)
+    agent = SimpleNamespace(_llm=FakeLLM(), _ctx=ctx)
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
+        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=_harness(),
+    )
+
+    async def _live_models(base_url):
+        return list(live)
+
+    repl._live_models = _live_models
+    return repl, channel, agent, ctx
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_rebind_failure_discloses_and_stays_usable(tmp_path, monkeypatch):
+    """#30: when the counter rebind FAILS on a swap, the user MUST be told via a CHANNEL
+    message (not just a log line), the counter is left in a consistent PRIOR binding, and the
+    next count() does not raise-every-turn (the shipped brick reported as a successful swap)."""
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    tc.count("prime")
+    repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc)
+
+    # Isolate the rebind failure: no window info in this test.
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: None)
+    # The re-probe fails for the new model on a KNOWN runtime → rebind raises internally.
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: None)
+
+    await repl._handle_slash("/model model-b")
+
+    assert agent._llm.config.model == "model-b"  # the generation swap still completed
+    joined = "\n".join(channel.messages)
+    assert "model-b" in joined
+    # Disclosure landed in the CHANNEL (assert on messages, not logs) and is actionable.
+    low = joined.lower()
+    assert "count" in low and "/model" in joined
+    # Counter restored to the prior, consistent binding.
+    assert tc._model == "model-a"
+    # NEXT count() does not raise-every-turn — the prior exact binding answers again.
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    assert tc.count("a later turn") == 7
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_refits_context_window_budget(tmp_path, monkeypatch):
+    """#31: a hot-swap must refit ctx.max_context_tokens to the new served window and disclose
+    the refit, so a 128K->32K swap can't leave a stale budget that 400s mid-session."""
+    from localharness.agent.context import TokenCounter
+    from localharness.cli.init_cmd import _fit_context_tokens
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc, max_ctx=131_072)
+
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 32_768)
+    await repl._handle_slash("/model model-b")
+
+    assert ctx.max_context_tokens == _fit_context_tokens(32_768)  # refit to fit the 32K window
+    assert "budget" in "\n".join(channel.messages).lower()
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_window_probe_failure_discloses(tmp_path, monkeypatch):
+    """#31: when the served window can't be read, the budget stays put AND the user is told
+    (at least parity with the managed 're-run init' hint) — never a silent stale budget."""
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc, max_ctx=131_072)
+
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: None)
+    await repl._handle_slash("/model model-b")
+
+    assert ctx.max_context_tokens == 131_072  # unchanged — not silently trusting a stale budget
+    low = "\n".join(channel.messages).lower()
+    assert "budget" in low or "window" in low or "init" in low
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_counter_runs_off_loop(tmp_path, monkeypatch):
+    """#32: the /model-triggered rebind + window probe are blocking (urllib/httpx, up to ~20s
+    for two probe shapes). They must run OFF the event loop via asyncio.to_thread, or a slow
+    /tokenize freezes the Discord adapter + idle consolidation that share the loop."""
+    import asyncio
+    from localharness.agent.context import TokenCounter
+
+    assert asyncio.iscoroutinefunction(OrchestratorREPL._refresh_token_counter)
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc)
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 32_768)
+
+    dispatched = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        dispatched.append(fn)
+        return await real_to_thread(fn, *a, **k)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    await repl._refresh_token_counter("model-b")
+    # Both blocking calls (window probe + counter rebind) went through a worker thread.
+    assert len(dispatched) >= 2
