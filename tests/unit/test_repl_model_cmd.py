@@ -1,12 +1,23 @@
 """REPL /model — list, hot-swap, managed restart, persistence."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from localharness.cli.repl import OrchestratorREPL
-from localharness.config.models import HarnessConfig, ManagedServerConfig, ProviderConfig
+from localharness.config.models import (
+    HarnessConfig,
+    ManagedServerConfig,
+    OrgConfig,
+    ProviderConfig,
+)
+from localharness.config.overlay import (
+    _resolve_user_overlay_path,
+    atomic_write_overlay,
+    load_overlay,
+)
 
 
 class FakeChannel:
@@ -44,7 +55,7 @@ def _repl(tmp_path, harness, live):
     return repl, channel, agent
 
 
-def _harness(server=None):
+def _harness(server=None, audit_log_path=None):
     return HarnessConfig(
         provider=ProviderConfig(
             provider_type="vllm",
@@ -52,6 +63,7 @@ def _harness(server=None):
             default_model="model-a",
             available_models=["model-a"],
         ),
+        org=OrgConfig(default_model="model-a", audit_log_path=audit_log_path),
         server=server,
     )
 
@@ -77,8 +89,11 @@ async def test_model_hotswap_updates_client_and_persists(tmp_path):
 
     await repl._handle_slash("/model model-b")
     assert agent._llm.config.model == "model-b"
-    written = (tmp_path / "config.yaml").read_text()
-    assert "model-b" in written
+    # Persistence now goes to the atomic USER OVERLAY, not a config.yaml rewrite (issue #22).
+    assert not (tmp_path / "config.yaml").exists()
+    overlay = load_overlay(_resolve_user_overlay_path())
+    assert overlay["provider"]["default_model"] == "model-b"
+    assert overlay["org"]["default_model"] == "model-b"
     assert "Switched to model-b" in channel.messages[-1]
 
 
@@ -120,8 +135,9 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     assert calls == ["stop", "start", "wait"]
     assert agent._llm.config.model == "cached-b"
     assert harness.server.model == "cached-b"
-    written = (tmp_path / "config.yaml").read_text()
-    assert "cached-b" in written
+    assert not (tmp_path / "config.yaml").exists()
+    overlay = load_overlay(_resolve_user_overlay_path())
+    assert overlay["provider"]["default_model"] == "cached-b"
 
 
 @pytest.mark.asyncio
@@ -206,3 +222,54 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
     await repl._handle_slash("/model cached-b")
     assert agent._llm.config.model == "cached-b"
     assert tc._model == "cached-b"
+
+
+# --- Gap #22: /model persistence migrates to the atomic, audited user-overlay path --- #
+
+
+@pytest.mark.asyncio
+async def test_model_swap_persists_via_atomic_overlay_with_audit(tmp_path, components_home):
+    audit = components_home / "audit.jsonl"
+    harness = _harness(audit_log_path=str(audit))
+    repl, _, agent = _repl(tmp_path, harness, live=["model-a", "model-b"])
+
+    await repl._handle_slash("/model model-b")
+
+    # Overlay is the write target (atomic); config.yaml is never rewritten.
+    assert not (tmp_path / "config.yaml").exists()
+    overlay = load_overlay(components_home / "overrides.yaml")
+    assert overlay["provider"]["default_model"] == "model-b"
+    assert overlay["org"]["default_model"] == "model-b"
+    # available_models UNION-merges rather than clobbering (overlay deep_merge replaces lists).
+    assert set(overlay["provider"]["available_models"]) == {"model-a", "model-b"}
+
+    # ComponentMutated audit event emitted for the provider default.
+    events = [json.loads(l) for l in audit.read_text().splitlines() if l.strip()]
+    muts = [e for e in events if e.get("event_type") == "ComponentMutated"]
+    assert any(
+        e["path"] == "provider.default_model" and e["after_value"] == "model-b"
+        for e in muts
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_home):
+    """A model switch must not clobber pre-existing overlay keys — notably the agent-scope
+    slice (where the tag_grouping_enabled kill lever lives) and unrelated harness keys."""
+    overlay_path = components_home / "overrides.yaml"
+    atomic_write_overlay(
+        overlay_path,
+        {
+            "agent": {"stuck_detector": {"window_size": 9}},
+            "org": {"log_level": "debug"},
+        },
+    )
+    repl, _, _ = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+
+    await repl._handle_slash("/model model-b")
+
+    overlay = load_overlay(overlay_path)
+    assert overlay["agent"]["stuck_detector"]["window_size"] == 9  # untouched
+    assert overlay["org"]["log_level"] == "debug"  # unrelated harness key survives
+    assert overlay["provider"]["default_model"] == "model-b"
+    assert overlay["org"]["default_model"] == "model-b"
