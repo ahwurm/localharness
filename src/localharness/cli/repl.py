@@ -34,14 +34,18 @@ def _generation_system_prompt() -> str:
     Reading required fields + the allowed top-level keys off model_fields keeps
     the stated contract and the Pydantic schema (extra='forbid') from drifting:
     the model is told exactly the shape validation will accept, so it stops
-    guessing (agent: nesting, description-not-role, invented keys). Enforcement
-    still lives in AgentConfig; this just states the contract the model must hit.
+    guessing (agent: nesting, description-not-role, invented keys). The nested
+    tools/permissions shapes are stated the same derived way (live 0-for-4: a
+    "read-only tools" ask produced bare `permissions: read` / `tools: []`).
+    Enforcement still lives in AgentConfig; this just states the contract.
     """
-    from localharness.config.models import AgentConfig
+    from localharness.config.models import AgentConfig, PermissionConfig, ToolConfig
 
     fields = AgentConfig.model_fields
     required = ", ".join(n for n, f in fields.items() if f.is_required())
     allowed = ", ".join(fields)
+    tool_keys = ", ".join(ToolConfig.model_fields)
+    perm_keys = ", ".join(PermissionConfig.model_fields)
     return (
         "Generate a LocalHarness agent YAML config. Return ONLY the YAML, no prose.\n"
         f"Required top-level keys (no defaults): {required}.\n"
@@ -49,10 +53,17 @@ def _generation_system_prompt() -> str:
         "  - role: one sentence saying what the agent does.\n"
         "Every other key has a default — omit it unless the user asked for it.\n"
         f"Allowed top-level keys (no others; unknown keys are rejected): {allowed}.\n"
-        "Do not wrap the keys under any parent key; every key is top-level.\n\n"
-        "Example:\n"
+        "Do not wrap the keys under any parent key; every key is top-level.\n"
+        "tools and permissions are nested objects — never a bare string or list:\n"
+        f"  - tools object keys: {tool_keys}. To restrict tools, deny names:\n"
+        "      tools:\n"
+        "        deny: [bash, write]\n"
+        f"  - permissions object keys: {perm_keys}.\n\n"
+        "Example (a read-only agent):\n"
         "name: hn-monitor\n"
-        "role: monitor Hacker News and summarize the top stories each morning"
+        "role: monitor Hacker News and summarize the top stories each morning\n"
+        "tools:\n"
+        "  deny: [bash, write]"
     )
 
 
