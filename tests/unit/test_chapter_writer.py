@@ -17,7 +17,7 @@ import pytest
 from localharness.memory.chapter_writer import _write_one, write_cluster_schemas
 from localharness.memory.clustering import Cluster, _load_failure_queue, find_stable_clusters
 from localharness.memory.consolidation import _get_meta, _set_meta
-from localharness.memory.idle_llm import grounded, strip_chapter_title
+from localharness.memory.idle_llm import ground_numbers, grounded, strip_chapter_title
 from localharness.memory.sqlite import SCHEMA_KEY_PREFIX, FactQuery, MemoryStore
 
 # Three `read` lessons sharing the salient tokens "absolute"/"resolved" (they cluster); the

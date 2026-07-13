@@ -26,7 +26,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from localharness.memory.clustering import find_stable_clusters
+from localharness.memory.clustering import Cluster, _depth_from_tags, find_stable_clusters
 from localharness.memory.idle_llm import (
     complete_cancellable,
     ground_numbers,
@@ -217,7 +217,8 @@ async def _corroborate_chapter(store, chapter_id: int) -> None:
 async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap,
                      attempts_log: list | None = None, *,
                      refresh_overlap: float = 0.7, claimed_keys: set[str] | None = None,
-                     containment_guard: bool = True, containment_counts: dict | None = None):
+                     containment_guard: bool = True, containment_counts: dict | None = None,
+                     exclude_chapter_ids: frozenset[int] = frozenset()):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
@@ -277,6 +278,13 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
         member_ids = frozenset(m.id for m in members)
         chapters = await _active_chapter_primary_members(store)
         for eid, (ekey, existing) in chapters.items():
+            # STALENESS RE-DRAFT (exclude-self): the chapter being refreshed is EXCLUDED from the
+            # containment comparison. Its surviving primary members equal the re-draft's members, so
+            # without this the guard would FOLD the re-draft back into the very stale chapter it is
+            # meant to replace — leaving the stale body active. Excluding it lets _adopt_refresh_key
+            # (below) adopt the stale key and SUPERSEDE it (same-key refresh), the intended outcome.
+            if eid in exclude_chapter_ids:
+                continue
             if ekey == fresh_key:
                 continue
             if member_ids and member_ids <= existing:
@@ -291,7 +299,8 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
                 return None
         # E ⊊ M: existing chapters strictly inside the candidate — supersede each after the mint.
         contained_ids = [eid for eid, (ekey, existing) in chapters.items()
-                         if ekey != fresh_key and existing and existing < member_ids]
+                         if eid not in exclude_chapter_ids
+                         and ekey != fresh_key and existing and existing < member_ids]
 
     attempt.update(written=True, reason="written")
     key = await _adopt_refresh_key(store, members, fresh_key,
@@ -471,3 +480,151 @@ async def write_cluster_schemas(
     except Exception:
         log.exception("chapter-writer: stale-failure drain failed (non-fatal)")
     return schemas
+
+
+# ---------------------------------------------------------------------------
+# CHAPTER STALENESS RE-CHECK (d1-replication-20260712 §7 / B5) — evidentiary erosion
+# ---------------------------------------------------------------------------
+# A chapter can be grounded when written yet later carry a claim (esp. a figure) that NO active
+# member supports, because a member atom was superseded out from under it (get_facts_by_ids is
+# active-only). The eval's grader renders only ACTIVE members and KILLs such a chapter. This step
+# runs before the writer each idle pass and closes that gap with the grader's OWN matchers.
+
+
+def _bump(counts: dict | None, key: str) -> None:
+    if counts is not None:
+        counts[key] = counts.get(key, 0) + 1
+
+
+async def _retire_chapter(store, chapter_id: int) -> bool:
+    """Retire a stale chapter: mark it non-active (status='superseded', NO successor) and demote its
+    retrieval_strength. Mirrors _supersede_chapter but WITHOUT a superseded_by target — nothing
+    replaces it. APPEND-ONLY: the row stays queryable via get_fact_history, never deleted. Returns
+    False (no-op) if the row is already non-active — so a chapter the re-draft already superseded on
+    its own key is never double-processed."""
+    assert store._db is not None
+    cur = await store._db.execute(
+        "UPDATE facts SET status = 'superseded', updated_at = ?, "
+        "retrieval_strength = MIN(retrieval_strength, 0.1) "
+        "WHERE id = ? AND agent_id = ? AND status = 'active'",
+        (int(time.time()), chapter_id, store._agent_id),
+    )
+    await store._db.commit()
+    return cur.rowcount > 0
+
+
+async def _active_members(store, chapter_id: int) -> list["Fact"]:
+    """The chapter's CURRENT active members — grader-equivalent (mirrors sema05 `_schema_members`):
+    the depth-1 neighborhood resolved through get_facts_by_ids, which is active-only, so a superseded
+    member silently drops (exactly the B5 mechanism). Both the writer's fold-out members and any
+    consumed aux tier:surprising_failure rows are member_of dsts, so both surface here (the numeric
+    net grades against all of them, as the writer/grader corpus does)."""
+    nb = await store.neighborhood(chapter_id, depth=1)
+    ids = [nid for nid, _d in nb if nid != chapter_id]
+    return await store.get_facts_by_ids(ids)
+
+
+def _stale_attempt(chapter, n_members: int, *, reason: str) -> dict:
+    """A forensic attempts_log entry for a retire that never reaches _write_one (ANALYSIS §7: every
+    disposition must leave a trail). Field-compatible with _attempt_entry so it renders alongside the
+    writer's own attempts; `staleness_recheck_of` labels it as re-check activity."""
+    return {
+        "key": chapter.key, "value": chapter.value[:300],
+        "grounded": False, "grounded_majority": None, "unverified_numbers": [],
+        "written": False, "reason": reason, "members": n_members,
+        "sessions": [], "depth": _depth_from_tags(chapter.tags),
+        "staleness_recheck_of": chapter.key,
+    }
+
+
+async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, refresh_overlap,
+                       containment_guard, containment_counts, attempts_log, counts, claimed_keys):
+    """Re-validate ONE active chapter against its current active members; heal or retire on a fail."""
+    members = await _active_members(store, chapter.id)
+    bodies = [m.value for m in members]
+    derefs = await _dereference(store, members)
+    corpus = "\n".join(bodies + derefs)[:corpus_char_cap]
+    body = strip_chapter_title(chapter.value)
+    # The grader's exact verdict: majority-token grounding AND a clean numeric net, body-only.
+    if grounded(body, corpus) and not ground_numbers(body, bodies):
+        _bump(counts, "revalidated")
+        return  # healthy — write NOTHING, change NOTHING (idempotency law)
+
+    # STALE. Only substantive (non-failure-telemetry) members can seed a re-draft; aux
+    # tier:surprising_failure rows are opportunistic and never primary membership.
+    primary = [m for m in members if _FAILURE_TIER not in m.tags]
+    if len(primary) < 2:
+        # < 2 active members: nothing to re-draft from -> retire (append-only).
+        if await _retire_chapter(store, chapter.id):
+            _bump(counts, "retired")
+            if attempts_log is not None:
+                attempts_log.append(_stale_attempt(chapter, len(members),
+                                                   reason="stale_retired_insufficient_members"))
+        return
+
+    # ONE re-draft through the existing writer path on the surviving members (ALL guards apply:
+    # hallucination kill, numeric net, containment). This chapter is EXCLUDED from the containment
+    # comparison so the re-draft SUPERSEDES it on its own key rather than folding back into it.
+    orig_depth = _depth_from_tags(chapter.tags)
+    sessions = (frozenset(chapter.provenance[len("cluster:"):].split("|"))
+                if chapter.provenance.startswith("cluster:") else frozenset())
+    cluster = Cluster(members=sorted(primary, key=lambda m: m.key),
+                      sessions=sessions, depth=max(0, orig_depth - 1), aux_members=[])
+    schema = await _write_one(
+        store, llm, cancel_event, cluster, orig_depth, corpus_char_cap,
+        attempts_log=attempts_log, refresh_overlap=refresh_overlap, claimed_keys=claimed_keys,
+        containment_guard=containment_guard, containment_counts=containment_counts,
+        exclude_chapter_ids=frozenset({chapter.id}),
+    )
+    if attempts_log:  # label the re-draft attempt _write_one just appended as re-check activity
+        attempts_log[-1]["staleness_recheck_of"] = chapter.key
+    if cancel_event.is_set():
+        return  # cancelled mid-generation — leave the chapter untouched, catch it next pass
+    if schema is not None:
+        # Grounded re-draft written; it adopted this chapter's key and already superseded it. Defensive
+        # retire covers the rare tie where adoption chose another key — a no-op when already superseded.
+        await _retire_chapter(store, chapter.id)
+        _bump(counts, "redrafted")
+    else:
+        # Re-draft refused/failed/folded elsewhere (its rejection is already in attempts_log) ->
+        # retire the stale chapter so it can never KILL the grade. Append-only.
+        if await _retire_chapter(store, chapter.id):
+            _bump(counts, "retired")
+
+
+async def recheck_stale_chapters(
+    store, llm, cancel_event, *,
+    cap: int = 10, corpus_char_cap: int = 6000, refresh_overlap: float = 0.7,
+    containment_guard: bool = True, containment_counts: dict | None = None,
+    attempts_log: list | None = None, counts: dict | None = None,
+) -> None:
+    """Re-validate active chapters against their CURRENT active members and heal the stale ones.
+
+    For up to `cap` active chapters (oldest-touched first — updated_at ASC, id ASC — a re-drafted
+    chapter's fresh updated_at rotates it to the back): re-run the grader's grounded()+ground_numbers()
+    matchers. Grounded -> untouched. Stale with >= 2 active members -> ONE re-draft on the survivors
+    through the writer path (grounded -> supersede on the chapter's key, history preserved). Stale
+    with < 2 members, or a re-draft the writer refuses -> retire (mark non-active, append-only —
+    NEVER deleted). Idempotent on healthy chapters (writes nothing). Never raises into the idle pass;
+    the single re-draft generation is cancellable. `counts` accumulates revalidated/redrafted/retired."""
+    assert store._db is not None
+    async with store._db.execute(
+        f"SELECT {store._FACT_COLS} FROM facts "
+        "WHERE agent_id = ? AND status = 'active' AND node_kind = 'schema' "
+        "ORDER BY updated_at ASC, id ASC LIMIT ?",
+        (store._agent_id, cap),
+    ) as cur:
+        chapters = [_row_to_fact(r) for r in await cur.fetchall()]
+
+    claimed_keys: set[str] = set()  # one identity adoption per key per pass (facet-split safe)
+    for chapter in chapters:
+        if cancel_event.is_set():
+            return
+        try:
+            await _recheck_one(
+                store, llm, cancel_event, chapter,
+                corpus_char_cap=corpus_char_cap, refresh_overlap=refresh_overlap,
+                containment_guard=containment_guard, containment_counts=containment_counts,
+                attempts_log=attempts_log, counts=counts, claimed_keys=claimed_keys)
+        except Exception:
+            log.exception("chapter staleness re-check failed for %s (non-fatal)", chapter.key)
