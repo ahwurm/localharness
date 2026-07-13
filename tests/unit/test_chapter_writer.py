@@ -14,8 +14,8 @@ import time
 
 import pytest
 
-from localharness.memory.chapter_writer import write_cluster_schemas
-from localharness.memory.clustering import _load_failure_queue, find_stable_clusters
+from localharness.memory.chapter_writer import _write_one, write_cluster_schemas
+from localharness.memory.clustering import Cluster, _load_failure_queue, find_stable_clusters
 from localharness.memory.consolidation import _get_meta, _set_meta
 from localharness.memory.idle_llm import grounded, strip_chapter_title
 from localharness.memory.sqlite import SCHEMA_KEY_PREFIX, FactQuery, MemoryStore
@@ -541,3 +541,168 @@ async def test_unclaimed_not_drained_before_stale_looks(store):
     assert "pending_consolidation" in row.tags                 # still queued (4 < 5)
     assert "tier:consumed" not in row.tags
     assert await _get_meta(store, f"failure/looks/{aux.key}") == "4"   # counter bumped, not drained
+
+
+# ---------------------------------------------------------------------------------------
+# CHAPTER CONTAINMENT GUARD — set-contained duplicate chapters (write-time sibling seam)
+# ---------------------------------------------------------------------------------------
+# Root cause measured in validation-20260712-novelty070: a growing "subagents" cluster wrote a
+# 12-member chapter (id 121) beside an earlier chapter (id 112) whose PRIMARY members were a
+# strict subset — a nested-duplicate VIEW B2 graded at 0.667. _adopt_refresh_key only re-keys the
+# SINGLE best-overlap chapter, so a second strictly-contained chapter is stranded live. Critically,
+# the raw member_of edge sets were NOT subsets: id 112 also carried an aux surprising_failure member
+# (id 52) absent from 121, so containment shows up ONLY on the PRIMARY (aux-excluded) member sets —
+# the like-for-like set the candidate carries at guard time. These tests pin the guard on _write_one
+# (the exact mint seam), driving synthetic clusters so the assertion is the guard's decision, not the
+# small-pool tag-df clustering path.
+
+async def _active_chapters(store) -> dict[int, str]:
+    async with store._db.execute(
+        "SELECT id, key FROM facts WHERE agent_id=? AND status='active' AND node_kind='schema'",
+        (store._agent_id,)) as cur:
+        return {r[0]: r[1] for r in await cur.fetchall()}
+
+
+async def _status(store, fact_id):
+    async with store._db.execute(
+        "SELECT status, superseded_by FROM facts WHERE id=?", (fact_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def _seed_chapter(store, suffix, members, *, body="a pre-existing subagents chapter body", aux=()):
+    """An active chapter (node_kind schema) with member_of edges to `members` (+ any `aux` rows) —
+    the exact edge shape _consume_aux/_write_one emit. child_tag=None keeps it out of the co-tag graph
+    (irrelevant here; _write_one is fed a synthetic cluster)."""
+    ch = await _seed_schema(store, suffix, body, 1, "cluster:s0|s1", child_tag=None)
+    for m in list(members) + list(aux):
+        await store.add_edge(ch.id, m.id, "member_of")
+    return ch
+
+
+async def _subagent_atoms(store, n):
+    """n distinct sem atoms (topic subagents), split across two sittings — fed to _write_one as a
+    synthetic cluster's members (no clustering, so tag-df/pool size never enters)."""
+    return [await _seed_sem(store, f"subagent build setting number {i} governs the harness order",
+                            f"s{i % 2}", topic="subagents", child_tag=None) for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_containment_supersedes_stranded_subset_chapter(store):
+    """RETRO-FIXTURE (validation-20260712-novelty070): a 12-member candidate strictly contains an
+    earlier 6-member chapter (in PRIMARY members) that _adopt_refresh_key stranded — it re-keyed the
+    OTHER contained chapter (B, higher overlap) and left this one (A) a live duplicate. The guard
+    supersedes A: exactly ONE active chapter, A's row kept (append-only, chained to the survivor).
+    A also carries an aux surprising_failure member absent from the candidate, so a NAIVE full
+    member_of comparison would miss the containment — only the PRIMARY sets are subset."""
+    atoms = await _subagent_atoms(store, 12)
+    aux = await _seed_failure(store, "bash_exec", value="a subagent bash_exec surprising failure noted")
+    a = await _seed_chapter(store, "aaaaaaaa", atoms[:6], aux=(aux,))    # 6 primary + 1 aux (poisons naive full-set)
+    b = await _seed_chapter(store, "bbbbbbbb", atoms[6:10])              # 4 primary — _adopt_refresh_key re-keys THIS one
+
+    cluster = Cluster(members=atoms, sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts)
+
+    assert schema is not None
+    assert len(await _active_chapters(store)) == 1, "a strictly-contained chapter was stranded"
+    assert await _status(store, a.id) == ("superseded", schema.id)      # A folded away, chained (history kept)
+    assert (await _status(store, b.id))[0] == "superseded"              # B re-keyed away too
+    assert counts.get("superseded", 0) >= 1                            # the guard logged its supersede
+
+
+@pytest.mark.asyncio
+async def test_containment_folds_subset_candidate_no_twin(store):
+    """Reverse order: a richer chapter is already active when a strict-SUBSET cluster re-derives.
+    The guard folds — no twin minted, the richer chapter preserved intact (never shrunk by a
+    re-key), and the fold is counted."""
+    members = await _subagent_atoms(store, 8)
+    big = await _seed_chapter(store, "bigbig01", members, body="the full subagents chapter")
+    cluster = Cluster(members=members[:4], sessions=frozenset({"s0", "s1"}), depth=0)   # strict subset
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts)
+
+    assert schema is None                                              # no twin minted (folded)
+    assert await _active_chapters(store) == {big.id: big.key}          # Big preserved, still the only chapter
+    assert (await _status(store, big.id))[0] == "active"               # not shrunk / superseded by a re-key
+    assert (await store.get_fact(big.key)).value == "the full subagents chapter"
+    assert counts.get("folded", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_containment_equal_member_set_folds(store):
+    """Equality is a fold: a STICKY-keyed chapter (its key != h8(members)) with EXACTLY the
+    candidate's member set is preserved, the candidate not minted."""
+    members = await _subagent_atoms(store, 4)
+    ch = await _seed_chapter(store, "sticky01", members, body="the sticky equal chapter")
+    cluster = Cluster(members=members, sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts)
+
+    assert schema is None
+    assert await _active_chapters(store) == {ch.id: ch.key}            # preserved, no twin
+    assert (await store.get_fact(ch.key)).value == "the sticky equal chapter"
+    assert counts.get("folded", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_containment_partial_overlap_leaves_both(store):
+    """Genuine facet split (neither set contains the other): the guard does NOTHING — the candidate
+    mints and the existing chapter is untouched, both coexist."""
+    shared = await _subagent_atoms(store, 2)
+    only_p = await _seed_sem(store, "a subagent item only in the existing chapter for harness",
+                             "s0", topic="subagents", child_tag=None)
+    only_c = await _seed_sem(store, "a subagent item only in the fresh candidate for the harness",
+                             "s1", topic="subagents", child_tag=None)
+    p = await _seed_chapter(store, "partial1", shared + [only_p], body="the partial existing chapter")
+    cluster = Cluster(members=shared + [only_c], sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None                                          # facet split — the candidate mints
+    assert (await _status(store, p.id))[0] == "active"                 # existing untouched
+    assert (await store.get_fact(p.key)).value == "the partial existing chapter"
+    assert len(await _active_chapters(store)) == 2                     # both coexist
+    assert counts.get("folded", 0) == 0 and counts.get("superseded", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_containment_supersedes_multiple_contained(store):
+    """Two DISJOINT active chapters each strictly inside the candidate are BOTH superseded (log
+    each) — the exact gap _adopt_refresh_key left (it re-keys only the single best-overlap one).
+    refresh_overlap raised so BOTH route through the guard, proving it handles multiplicity."""
+    members = await _subagent_atoms(store, 4)
+    a = await _seed_chapter(store, "multiaaa", members[:2])
+    b = await _seed_chapter(store, "multibbb", members[2:4])
+    cluster = Cluster(members=members, sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None
+    assert await _status(store, a.id) == ("superseded", schema.id)
+    assert await _status(store, b.id) == ("superseded", schema.id)
+    assert len(await _active_chapters(store)) == 1
+    assert counts.get("superseded", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_containment_guard_off_preserves_twin_writing(store):
+    """The kill lever: guard OFF restores byte-old behaviour — a strictly-contained chapter is NOT
+    superseded (with re-key also disabled, both strays survive beside the fresh candidate)."""
+    members = await _subagent_atoms(store, 4)
+    a = await _seed_chapter(store, "offaaaa1", members[:2])
+    b = await _seed_chapter(store, "offbbbb1", members[2:4])
+    cluster = Cluster(members=members, sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_guard=False, containment_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None
+    assert (await _status(store, a.id))[0] == "active"                 # untouched — guard inert
+    assert (await _status(store, b.id))[0] == "active"
+    assert len(await _active_chapters(store)) == 3                     # candidate + both strays
+    assert counts.get("superseded", 0) == 0 and counts.get("folded", 0) == 0
