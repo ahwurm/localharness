@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from localharness.config.models import HarnessConfig
 from localharness.config.overlay import (
     _resolve_user_overlay_path,
@@ -93,3 +95,30 @@ async def persist_default_model(harness: Any, model: str, *, actor: str = "cli")
                 actor=actor,  # type: ignore[arg-type]
             )
         )
+
+
+def pinned_agents(config_dir: Path | None) -> list[tuple[str, str]]:
+    """Agents whose per-agent yaml pins a concrete ``model:`` (not ``"inherit"``).
+
+    A persisted org/provider ``default_model`` switch will NOT reach these on the next
+    ``start`` — ``start_cmd`` resolves the per-agent pin first. That precedence is BY DESIGN
+    (a deliberate override lever, e.g. the owner's orchestrator.yaml), so this only WARNS; it
+    changes no behavior. Read the RAW yaml ``model`` field, NOT ``load_agent().model``: the
+    loader RESOLVES ``inherit`` to the org default (a concrete string), which would make every
+    inheriting agent look pinned. Returns ``[(agent_name, pinned_model), ...]``.
+    """
+    out: list[tuple[str, str]] = []
+    if config_dir is None:
+        return out
+    agents_dir = Path(config_dir) / "agents"
+    if not agents_dir.is_dir():
+        return out
+    for yml in sorted(agents_dir.glob("*.yaml")):
+        try:
+            raw = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        m = raw.get("model") if isinstance(raw, dict) else None
+        if isinstance(m, str) and m and m != "inherit":
+            out.append((raw.get("name") or yml.stem, m))
+    return out
