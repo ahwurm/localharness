@@ -152,3 +152,59 @@ def test_generation_prompt_states_contract():
     # A concrete minimal YAML example (name + role) is shown, no agent: nesting.
     assert "name:" in prompt and "role:" in prompt
     assert "agent:" not in prompt
+
+
+class RaisingLLM:
+    """LLM double whose stream_complete RAISES — models a provider timeout.
+
+    conftest's MockLLMClient structurally cannot raise (it only returns scripted
+    responses), so #29 (an unhandled generation error tearing down the whole
+    session) needs a double that actually throws.
+    """
+
+    def __init__(self) -> None:
+        class _Config:
+            tool_call_mode = "native"
+            context_window = 128_000
+
+        self.config = _Config()
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        raise RuntimeError("provider timed out")
+
+
+def test_deploy_failure_never_claims_success(tmp_path, mock_llm_client):
+    """#27: on deploy failure the REPL sent 'Deploy failed' AND THEN, on the same
+    (both) path, 'Agent created.' plus reset the workflow as if it succeeded. The
+    failure path must never claim success; it must be truthful and abandon cleanly
+    with the session still alive."""
+    # 'Bad Name' (space + uppercase) fails AgentConfig's name rule -> deploy raises.
+    llm = mock_llm_client([mock_llm_client.Response(content=f"name: Bad Name\nrole: {ROLE}")])
+    channel = ScriptedChannel(
+        ["create an agent", f"it should {ROLE[0].lower()}{ROLE[1:]}", "yes"]
+    )
+    repl, orch, agent, bus = _repl(channel, llm, config_dir=tmp_path)
+
+    asyncio.run(repl.run())  # returns normally: session survives a failed deploy
+
+    assert not any("Agent created" in m for m in channel.sent)  # #27: the lie
+    assert any("Deploy failed" in m for m in channel.sent)  # truthful failure kept
+    assert any("NOT created" in m for m in channel.sent)  # explicit non-success
+    assert orch.active_workflow is None  # abandoned cleanly, back to normal convo
+    agents_dir = tmp_path / "agents"
+    assert not agents_dir.exists() or list(agents_dir.glob("*.yaml")) == []
+
+
+def test_generation_error_keeps_session_alive(tmp_path):
+    """#29: the generation stream_complete call had no try/except and the REPL loop
+    catches only EOFError, so a provider error during 'create an agent' propagated
+    out of run() and tore down the whole session. It must be caught: truthful
+    message, session alive, workflow in a sane (cleared) state."""
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE[0].lower()}{ROLE[1:]}"])
+    repl, orch, agent, bus = _repl(channel, RaisingLLM(), config_dir=tmp_path)
+
+    asyncio.run(repl.run())  # must NOT raise — the session survives the provider error
+
+    assert any("generation failed" in m.lower() for m in channel.sent)
+    assert not any("Agent created" in m for m in channel.sent)
+    assert orch.active_workflow is None
