@@ -720,3 +720,37 @@ async def test_phase36_deterministic_pass_unchanged_without_llm(store: MemorySto
     assert await _schema_rows(store) == []                       # no chapter without an LLM
     assert (await store.get_fact(k)).value.startswith(_DISPUTE_MARKER)  # dispute untouched
     assert await store.query_facts(FactQuery(tags=["mined"])) == []     # nothing mined
+
+
+async def _seed_chapter(store, suffix, member_ids):
+    ch = await store.store_fact(
+        key=f"schema/cluster/{suffix}", value=f"chapter {suffix} body",
+        tags=["schema", "tier:schema", "depth:1"], confidence=0.8,
+        source="chapter_writer", provenance="cluster:s0|s1", node_kind="schema")
+    for mid in member_ids:
+        await store.add_edge(ch.id, mid, "member_of")
+    return ch
+
+
+@pytest.mark.asyncio
+async def test_containment_counters_thread_onto_report(store: MemoryStore):
+    """CHAPTER CONTAINMENT GUARD (report threading): the guard's activity is observable on the
+    ConsolidationReport. The two counters exist and default 0 on an ordinary pass; a full pass whose
+    chapter-writer subsumes a strictly-contained chapter surfaces chapters_superseded_by_containment."""
+    report0 = await ConsolidationPass(store, _cfg(), llm=None).run()
+    assert report0.chapters_folded == 0
+    assert report0.chapters_superseded_by_containment == 0
+
+    # Two subagent atoms (2 sittings) cluster; two single-member chapters each sit strictly inside
+    # that cluster — _adopt_refresh_key re-keys one, the containment guard supersedes the other.
+    a1 = await _seed_sem(store, "the subagent runs read-only by default in the harness", "s0", topic="subagents")
+    a2 = await _seed_sem(store, "the subagent build order is summarizer then citation", "s1", topic="subagents")
+    await _seed_chapter(store, "subview01", [a1.id])
+    await _seed_chapter(store, "subview02", [a2.id])
+
+    cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
+               mint_tagging_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+
+    assert hasattr(report, "chapters_folded")
+    assert report.chapters_superseded_by_containment >= 1
