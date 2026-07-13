@@ -494,6 +494,22 @@ class MemoryConsolidationConfig(BaseModel):
             "old chapter keeps both facets. Hyperparameter — sweep on the eval."
         ),
     )
+    chapter_containment_guard_enabled: bool = Field(
+        default=True,
+        description=(
+            "CHAPTER CONTAINMENT GUARD (validation-20260712-novelty070 fix): at chapter-write "
+            "time, compare the candidate's PRIMARY member set against every active chapter's. "
+            "Candidate ⊆ existing → do NOT mint a twin (fold, corroboration touch on the survivor). "
+            "Existing ⊊ candidate → mint, then supersede EACH contained chapter (append-only) — "
+            "closing the gap chapter_refresh_overlap leaves, which re-keys only the single "
+            "best-overlap chapter and strands any other subsumed one. Genuine facet splits "
+            "(neither set contains the other) are untouched. PRIMARY = member_of minus aux "
+            "tier:surprising_failure rows (opportunistically attached, non-deterministic across "
+            "passes; the raw sets were not subsets live). Ships True; this flag is the kill lever "
+            "(mutable via `localharness components set "
+            "agent.memory.consolidation.chapter_containment_guard_enabled <true|false>`)."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(
