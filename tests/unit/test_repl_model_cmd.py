@@ -273,3 +273,45 @@ async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_
     assert overlay["org"]["log_level"] == "debug"  # unrelated harness key survives
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
+
+
+# --- Per-agent pin trap: a persisted switch never reaches a model-pinned agent --- #
+
+
+@pytest.mark.asyncio
+async def test_model_swap_warns_on_pinned_agent(tmp_path):
+    """A persisted switch silently never reaches an agent whose yaml pins a concrete model
+    (start_cmd resolves the per-agent pin first). Warn, naming the agent + its pin."""
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "pinned.yaml").write_text(
+        "name: pinned-agent\nrole: x\nmodel: some-pinned-model\n", encoding="utf-8"
+    )
+    (agents / "inheritor.yaml").write_text(
+        "name: inheritor\nrole: x\nmodel: inherit\n", encoding="utf-8"
+    )
+    repl, channel, _ = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+
+    await repl._handle_slash("/model model-b")
+
+    joined = "\n".join(channel.messages)
+    assert "won't reach these agents" in joined
+    assert "pinned-agent" in joined and "some-pinned-model" in joined
+    assert "inheritor" not in joined  # a plain inheriting agent is NOT named
+
+
+@pytest.mark.asyncio
+async def test_model_swap_no_pin_warning_when_none_pinned(tmp_path):
+    """No pin → no warning (only agents with a concrete non-inherit model trip it)."""
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "inheritor.yaml").write_text(
+        "name: inheritor\nrole: x\nmodel: inherit\n", encoding="utf-8"
+    )
+    repl, channel, agent = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+
+    await repl._handle_slash("/model model-b")
+
+    joined = "\n".join(channel.messages)
+    assert "won't reach these agents" not in joined
+    assert "Switched to model-b" in channel.messages[-1]
