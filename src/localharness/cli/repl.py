@@ -1,10 +1,13 @@
 """OrchestratorREPL -- interactive prompt_toolkit loop for LocalHarness."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from localharness.core.events import UserMessage
+
+log = logging.getLogger(__name__)
 
 
 HELP_TEXT = """\
@@ -213,6 +216,7 @@ class OrchestratorREPL:
         if target in live:
             llm.config.model = target
             cap = await llm.detect_capabilities()
+            self._refresh_token_counter(target)
             self._persist_default_model(target)
             await self._send_info(
                 f"Switched to {target} (tool calling: {cap.tool_call_mode})."
@@ -239,11 +243,31 @@ class OrchestratorREPL:
         served = models[0] if models else target
         llm.config.model = served
         cap = await llm.detect_capabilities()
+        self._refresh_token_counter(served)
         self._persist_default_model(served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}). "
             "If this model serves a different context window, re-run `localharness init` to refit the budget."
         )
+
+    def _refresh_token_counter(self, model: str) -> None:
+        """Rebind the shared TokenCounter to the new served model after a swap (#25). The counter
+        is ONE object shared by the context manager, compaction pipeline and subagent runner, so an
+        in-place rebind updates them all. Best-effort: a counting refresh must never abort a
+        completed swap (the runtime is already confirmed serving `model` at this point)."""
+        ctx = getattr(self._agent, "_ctx", None)
+        rebind = getattr(getattr(ctx, "_token_counter", None), "rebind", None)
+        if rebind is None:
+            return
+        provider = getattr(self._harness, "provider", None)
+        try:
+            rebind(
+                base_url=self._agent._llm.config.base_url,
+                model=model,
+                provider_type=getattr(provider, "provider_type", None),
+            )
+        except Exception as exc:  # noqa: BLE001 — never let a counter refresh strand a done swap
+            log.warning("TokenCounter rebind after /model swap failed: %s", exc)
 
     async def _live_models(self, base_url: str) -> list[str]:
         try:
