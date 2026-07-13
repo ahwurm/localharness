@@ -154,6 +154,35 @@ def test_generation_prompt_states_contract():
     assert "agent:" not in prompt
 
 
+def test_generation_prompt_demonstrates_nested_tool_permission_shapes():
+    """#33 follow-up (live 0-for-4 post-fix): with the top-level contract stated,
+    the model got name/role right but emitted BARE shapes (permissions: read,
+    tools: []) whenever the user asked to restrict tools — the prompt names
+    tools/permissions as allowed keys but never demonstrates their nested
+    object shape. The prompt must derive the sub-model keys (ToolConfig /
+    PermissionConfig, so it can't drift) and show a worked nested tools block,
+    so a "read-only tools" ask lands as tools.deny — not a bare string/list."""
+    from localharness.cli.repl import _generation_system_prompt
+    from localharness.config.models import PermissionConfig, ToolConfig
+
+    prompt = _generation_system_prompt()
+    for key in ToolConfig.model_fields:  # nested tools keys stated (derived)
+        assert key in prompt
+    for key in PermissionConfig.model_fields:  # nested permissions keys stated
+        assert key in prompt
+    # The bare-shape failure class is called out as forbidden.
+    assert "never a bare" in prompt
+    # A worked NESTED example: a top-level tools: line with an indented deny: child.
+    lines = prompt.splitlines()
+    tools_starts = [i for i, ln in enumerate(lines) if ln.strip() == "tools:"]
+    assert tools_starts, "prompt must show a tools: YAML block"
+    assert any(
+        ln.startswith((" ", "\t")) and "deny:" in ln
+        for i in tools_starts
+        for ln in lines[i + 1 : i + 3]
+    ), "the tools: block must demonstrate an indented deny: child"
+
+
 class RaisingLLM:
     """LLM double whose stream_complete RAISES — models a provider timeout.
 
