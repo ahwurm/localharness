@@ -437,7 +437,6 @@ def test_repl_creation_intent_starts_workflow():
     mock_orch = _make_mock_orchestrator()
 
     mock_workflow = MagicMock()
-    mock_workflow.transition = MagicMock(return_value="discuss")
     mock_orch.begin_agent_creation.return_value = mock_workflow
 
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
@@ -445,8 +444,11 @@ def test_repl_creation_intent_starts_workflow():
 
     # begin_agent_creation should have been called
     mock_orch.begin_agent_creation.assert_called_once()
-    # workflow.transition should have been called with the user input
-    mock_workflow.transition.assert_called_once_with("create an agent for handling finance tasks")
+    # #19: the trigger message must NOT be fed into the workflow — it was
+    # consumed as the agent DESCRIPTION and silently advanced DISCUSS->CONFIGURE
+    # (return value discarded), so YAML generation never ran. The description
+    # is the user's NEXT message.
+    mock_workflow.transition.assert_not_called()
     # Channel should show the creation start message
     calls = mock_channel.send_message.call_args_list
     assert any("I'd like to help you create an agent" in str(c) for c in calls)
