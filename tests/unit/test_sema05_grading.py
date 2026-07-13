@@ -262,8 +262,8 @@ async def _add_supersede_collision(store):
 
 
 async def _add_probe_history(store):
-    for rec in _run3_probe_history():
-        await store.append_history({"v": 1, "agent_id": AGENT, "ts": 9000, **rec})
+    for i, rec in enumerate(_run3_probe_history()):
+        await store.append_history({"v": 1, "id": f"probe{i}", "agent_id": AGENT, "ts": 9000, **rec})
 
 
 @pytest.fixture
