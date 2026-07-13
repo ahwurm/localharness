@@ -186,13 +186,18 @@ async def test_yaml_generation_no_double_output():
     from localharness.core.events import TaskComplete
     from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
 
-    # Mock agent loop with _llm.stream_complete that returns YAML content
+    # Mock agent loop whose _llm.stream_complete mirrors the REAL LLMClient
+    # contract: it returns a (message, usage) TUPLE, never a bare message
+    # (provider/client.py). Fidelity guarantee: code that reads .content off
+    # the tuple instead of the unpacked message sees "" — the exact defect of
+    # #19, which a bare-message mock here masked. Do not "simplify" this back
+    # to return_value=<message>.
     mock_response = MagicMock()
     mock_response.content = "name: my-agent\nrole: test helper"
     mock_agent = MagicMock()
     mock_agent._config.name = "test-agent"
     mock_agent._llm = AsyncMock()
-    mock_agent._llm.stream_complete = AsyncMock(return_value=mock_response)
+    mock_agent._llm.stream_complete = AsyncMock(return_value=(mock_response, None))
     mock_agent.run_turn = AsyncMock(return_value="should not be called")
 
     # Mock bus that captures published events
