@@ -291,6 +291,14 @@ class OrchestratorREPL:
                 f"Switched for this session, but persisting the new default failed: {exc}",
                 metadata={"style": "system.error"},
             )
+            return
+        # Pin trap: name any agent whose yaml pins a concrete model — the persisted default
+        # won't reach it next start (per-agent pin wins by design; this only warns).
+        pinned = model_ops.pinned_agents(self._config_dir)
+        if pinned:
+            lines = ["Note: this new default won't reach these agents until their yaml model pin changes:"]
+            lines += [f"  - {name} (pinned to {pin!r})" for name, pin in pinned]
+            await self._send_info("\n".join(lines))
 
     async def _send_info(self, text: str) -> None:
         await self._channel.send_message(text, metadata={"style": "system.info"})
