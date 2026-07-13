@@ -28,6 +28,34 @@ _CREATION_TRIGGERS = ("create an agent", "create agent", "make an agent",
                       "i need an agent", "set up an agent", "setup an agent")
 
 
+def _generation_system_prompt() -> str:
+    """System prompt for agent-YAML generation, DERIVED from AgentConfig (#33).
+
+    Reading required fields + the allowed top-level keys off model_fields keeps
+    the stated contract and the Pydantic schema (extra='forbid') from drifting:
+    the model is told exactly the shape validation will accept, so it stops
+    guessing (agent: nesting, description-not-role, invented keys). Enforcement
+    still lives in AgentConfig; this just states the contract the model must hit.
+    """
+    from localharness.config.models import AgentConfig
+
+    fields = AgentConfig.model_fields
+    required = ", ".join(n for n, f in fields.items() if f.is_required())
+    allowed = ", ".join(fields)
+    return (
+        "Generate a LocalHarness agent YAML config. Return ONLY the YAML, no prose.\n"
+        f"Required top-level keys (no defaults): {required}.\n"
+        "  - name: lowercase letters, digits and hyphens only, e.g. hn-monitor.\n"
+        "  - role: one sentence saying what the agent does.\n"
+        "Every other key has a default — omit it unless the user asked for it.\n"
+        f"Allowed top-level keys (no others; unknown keys are rejected): {allowed}.\n"
+        "Do not wrap the keys under any parent key; every key is top-level.\n\n"
+        "Example:\n"
+        "name: hn-monitor\n"
+        "role: monitor Hacker News and summarize the top stories each morning"
+    )
+
+
 class OrchestratorREPL:
     """Interactive REPL for the orchestrator layer.
 
@@ -335,7 +363,7 @@ class OrchestratorREPL:
             import re
             gathered = workflow.gathered
             messages = [
-                {"role": "system", "content": "Generate a LocalHarness agent YAML config. Return only the YAML, no explanation."},
+                {"role": "system", "content": _generation_system_prompt()},
                 {"role": "user", "content": gathered.get("description", user_input)},
             ]
             # #18: stream at the transport level. Return-value shape is unchanged
