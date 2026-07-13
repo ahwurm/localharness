@@ -9,6 +9,7 @@ from localharness.cli.config_cmd import config_app
 from localharness.cli.doctor_cmd import doctor
 from localharness.cli.experiment_cmd import experiment_app
 from localharness.cli.init_cmd import init_app
+from localharness.cli.model_cmd import model
 from localharness.cli.propose_cmd import propose
 # report_cmd registers `report`/`sentinel` on autoresearch_app at import time (sibling commands).
 from localharness.cli import report_cmd as _report_cmd  # noqa: F401
@@ -28,6 +29,7 @@ app.command("init")(init_app)
 app.command("start")(start_app)
 app.command("doctor")(doctor)
 app.command("validate")(validate)
+app.command("model")(model)
 app.command("propose")(propose)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")

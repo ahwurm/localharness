@@ -29,6 +29,23 @@ from localharness.registry import set_value_in_dict
 _AGENT_KEY = "agent"
 
 
+def list_live_models(base_url: str, timeout: float = 3.0) -> tuple[list[str], bool]:
+    """Probe the OpenAI-compatible ``/models`` endpoint. Returns ``(model_ids, reachable)``.
+
+    ``reachable`` is False ONLY when the endpoint could not be reached at all — kept distinct
+    from reached-but-empty so callers can fail-loud on a bad target vs. degrade-with-disclosure
+    on an unreachable runtime (the #16 lesson: a silently-wrong endpoint must not read as a
+    legitimate empty result). Parses only the OpenAI ``data`` shape; Ollama/LM-Studio-aware
+    listing (audit gap #2) is out of scope here — same shape the REPL /model list uses.
+    """
+    import httpx
+    try:
+        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        return [m["id"] for m in resp.json().get("data", [])], True
+    except Exception:
+        return [], False
+
+
 def _merged_available_models(harness: Any, existing_overlay: dict, model: str) -> list[str]:
     """Union every known model name. The overlay's ``deep_merge`` REPLACES lists wholesale
     (config/overlay.py), so writing a bare ``[model]`` would DROP the rest — read-merge the
