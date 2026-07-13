@@ -370,7 +370,19 @@ class OrchestratorREPL:
             # (stream_complete returns the same (message, usage) as complete).
             # #19: unpack the tuple — reading .content off the tuple itself always
             # yielded "" and the flow could never produce a config.
-            message, _usage = await self._agent._llm.stream_complete(messages, tools=None)
+            try:
+                message, _usage = await self._agent._llm.stream_complete(messages, tools=None)
+            except Exception as exc:
+                # #29: a provider error here must not tear down the whole session
+                # (the REPL loop catches only EOFError). Abandon creation
+                # truthfully; the session stays alive in normal conversation.
+                self._orchestrator._active_workflow = None
+                await self._channel.send_message(
+                    f"Agent generation failed: {exc}\nAgent was NOT created. "
+                    "Say 'create an agent' to try again.",
+                    metadata={"style": "system.error"},
+                )
+                return
             yaml_str = getattr(message, "content", "") or ""
             # Strip markdown code fences if present (LLMs often wrap in ```yaml...```)
             yaml_str = re.sub(r'^```(?:yaml)?\s*\n?', '', yaml_str.strip())
@@ -392,20 +404,25 @@ class OrchestratorREPL:
             name = workflow.gathered.get("name")
             try:
                 config_path = workflow.deploy_config(name)
-                await self._channel.send_message(
-                    f"Agent deployed to {config_path}",
-                    metadata={"style": "system.info"},
-                )
             except Exception as exc:
+                # #27: never claim success on failure. Abandon creation with a
+                # truthful message; the session stays alive in normal conversation.
+                self._orchestrator._active_workflow = None
                 await self._channel.send_message(
-                    f"Deploy failed: {exc}",
+                    f"Deploy failed: {exc}\nAgent was NOT created. "
+                    "Say 'create an agent' to try again.",
                     metadata={"style": "system.error"},
                 )
-            # Advance through aftercare
+                return
+            # Success path only: advance through aftercare, then confirm creation.
             workflow.transition("deployed")
             # Per user decision: after creation, back to prompt (no auto-handoff)
             workflow.transition("done")
             self._orchestrator._active_workflow = None
+            await self._channel.send_message(
+                f"Agent deployed to {config_path}",
+                metadata={"style": "system.info"},
+            )
             await self._channel.send_message(
                 "Agent created. Back to normal conversation.",
                 metadata={"style": "system.info"},
