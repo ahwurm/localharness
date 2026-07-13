@@ -217,7 +217,7 @@ class OrchestratorREPL:
             llm.config.model = target
             cap = await llm.detect_capabilities()
             self._refresh_token_counter(target)
-            self._persist_default_model(target)
+            await self._persist_default_model(target)
             await self._send_info(
                 f"Switched to {target} (tool calling: {cap.tool_call_mode})."
             )
@@ -244,7 +244,7 @@ class OrchestratorREPL:
         llm.config.model = served
         cap = await llm.detect_capabilities()
         self._refresh_token_counter(served)
-        self._persist_default_model(served)
+        await self._persist_default_model(served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}). "
             "If this model serves a different context window, re-run `localharness init` to refit the budget."
@@ -278,16 +278,19 @@ class OrchestratorREPL:
         except Exception:
             return []
 
-    def _persist_default_model(self, model: str) -> None:
-        """Write the swap into config.yaml so the next start uses it."""
-        self._harness.provider.default_model = model
-        self._harness.org.default_model = model
-        if model not in self._harness.provider.available_models:
-            self._harness.provider.available_models.append(model)
-        from pydantic_yaml import to_yaml_str
-        (self._config_dir / "config.yaml").write_text(
-            to_yaml_str(self._harness), encoding="utf-8"
-        )
+    async def _persist_default_model(self, model: str) -> None:
+        """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
+        start uses it — replaces the prior full, non-atomic config.yaml rewrite. Best-effort:
+        a persistence failure (e.g. the new default collides with a configured proposer.model)
+        is surfaced but never crashes the live session, which has already switched."""
+        from localharness.cli import model_ops
+        try:
+            await model_ops.persist_default_model(self._harness, model)
+        except Exception as exc:  # noqa: BLE001 — the in-session swap already succeeded
+            await self._channel.send_message(
+                f"Switched for this session, but persisting the new default failed: {exc}",
+                metadata={"style": "system.error"},
+            )
 
     async def _send_info(self, text: str) -> None:
         await self._channel.send_message(text, metadata={"style": "system.info"})
