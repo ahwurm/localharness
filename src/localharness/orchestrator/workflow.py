@@ -108,11 +108,13 @@ class AgentCreationWorkflow:
     def generated_yaml(self) -> str:
         return self._generated_yaml
 
-    def deploy_config(self, agent_name: str) -> Path:
+    def deploy_config(self, agent_name: str | None = None) -> Path:
         """Write the generated YAML to the config directory.
 
         Validates the YAML parses correctly and satisfies AgentConfig schema
-        before writing. Overrides the name field to match agent_name.
+        before writing. agent_name overrides the YAML's name field; when None
+        (#19), the confirmed YAML's own name is honored — deploying what the
+        user actually confirmed — with 'new-agent' as the last resort.
         Raises ValueError if YAML is invalid or fails schema validation.
         Returns the path to the written config file.
         """
@@ -129,6 +131,8 @@ class AgentCreationWorkflow:
             raise ValueError(f"Generated YAML is not a mapping (got {type(data).__name__})")
 
         # Override name to match the deployment target
+        if agent_name is None:
+            agent_name = data.get("name") or "new-agent"
         data["name"] = agent_name
 
         # Validate against AgentConfig schema

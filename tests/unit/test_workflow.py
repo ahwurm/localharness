@@ -102,3 +102,22 @@ def test_deploy_config_overrides_name(tmp_path: Path):
     path = wf.deploy_config("my-agent")
     data = yaml.safe_load(path.read_text())
     assert data["name"] == "my-agent"
+
+
+def test_deploy_config_no_name_honors_yaml_name(tmp_path: Path):
+    """#19: with no agent_name, deploy what the user confirmed — the YAML's own name."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("name: llm-chose-this\nrole: A helpful agent")
+    path = wf.deploy_config()
+    assert path.name == "llm-chose-this.yaml"
+    assert yaml.safe_load(path.read_text())["name"] == "llm-chose-this"
+
+
+def test_deploy_config_no_name_anywhere_falls_back_valid(tmp_path: Path):
+    """#19: nameless YAML falls back to 'new-agent' — a VALID AgentConfig name
+    (the old 'new_agent' underscore default failed the hyphens-only rule, so
+    the default deploy path could never write)."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.set_generated_yaml("role: A helpful agent")
+    path = wf.deploy_config()
+    assert yaml.safe_load(path.read_text())["name"] == "new-agent"

@@ -80,12 +80,14 @@ def test_agent_creation_e2e_writes_real_config(tmp_path, mock_llm_client):
 
     asyncio.run(repl.run())
 
-    config_path = tmp_path / "agents" / "new_agent.yaml"
+    # Deploy honors the CONFIRMED YAML's own name (no step gathers a name, and
+    # the old 'new_agent' fallback failed AgentConfig's hyphens-only rule).
+    config_path = tmp_path / "agents" / "finance-helper.yaml"
     assert config_path.exists(), (
         f"no agent config written; messages sent: {channel.sent}"
     )
     data = yaml.safe_load(config_path.read_text())
-    assert data["name"] == "new_agent"  # deploy overrides name
+    assert data["name"] == "finance-helper"  # what the user confirmed
     assert data["role"] == ROLE  # model's YAML survived, fences stripped
     # The confirm prompt showed the ACTUAL generated YAML, not an empty block
     assert any("finance-helper" in m for m in channel.sent)

@@ -74,11 +74,15 @@ class OrchestratorREPL:
 
                     # Check for creation intent in natural language
                     if self._detect_creation_intent(user_input):
-                        workflow = self._orchestrator.begin_agent_creation(
+                        self._orchestrator.begin_agent_creation(
                             config_dir=self._config_dir,
                         )
-                        # Feed the initial input into the workflow to start DISCUSS
-                        workflow.transition(user_input)
+                        # #19: do NOT transition with the trigger message. The workflow
+                        # already starts in DISCUSS; feeding the trigger here consumed
+                        # it as the agent DESCRIPTION and silently advanced to CONFIGURE
+                        # (returned state discarded), skipping the CONFIGURE branch in
+                        # _handle_creation_workflow — the only place YAML generation
+                        # runs. The user's NEXT message is the description.
                         await self._channel.send_message(
                             "I'd like to help you create an agent. "
                             "Tell me more about what you need it to do.",
@@ -301,8 +305,10 @@ class OrchestratorREPL:
             ]
             # #18: stream at the transport level. Return-value shape is unchanged
             # (stream_complete returns the same (message, usage) as complete).
-            response = await self._agent._llm.stream_complete(messages, tools=None)
-            yaml_str = getattr(response, "content", "") or ""
+            # #19: unpack the tuple — reading .content off the tuple itself always
+            # yielded "" and the flow could never produce a config.
+            message, _usage = await self._agent._llm.stream_complete(messages, tools=None)
+            yaml_str = getattr(message, "content", "") or ""
             # Strip markdown code fences if present (LLMs often wrap in ```yaml...```)
             yaml_str = re.sub(r'^```(?:yaml)?\s*\n?', '', yaml_str.strip())
             yaml_str = re.sub(r'\n?```\s*$', '', yaml_str.strip())
@@ -316,8 +322,11 @@ class OrchestratorREPL:
             return
 
         if new_state == WorkflowState.DEPLOY:
-            # User confirmed — deploy the config
-            name = workflow.gathered.get("name", "new_agent")
+            # User confirmed — deploy the config. #19: no step ever gathers a
+            # name, and the old 'new_agent' fallback failed AgentConfig's
+            # hyphens-only name rule — the default path could never deploy.
+            # Pass None so deploy_config honors the confirmed YAML's own name.
+            name = workflow.gathered.get("name")
             try:
                 config_path = workflow.deploy_config(name)
                 await self._channel.send_message(
