@@ -114,8 +114,10 @@ class AgentCreationWorkflow:
         Validates the YAML parses correctly and satisfies AgentConfig schema
         before writing. agent_name overrides the YAML's name field; when None
         (#19), the confirmed YAML's own name is honored — deploying what the
-        user actually confirmed — with 'new-agent' as the last resort.
-        Raises ValueError if YAML is invalid or fails schema validation.
+        user actually confirmed. A config with no name anywhere fails explicitly
+        (#28: never placeholder). Refuses to overwrite an existing agent config
+        (#28: os.replace silently clobbered it). Raises ValueError if the YAML is
+        invalid, unnamed, fails schema validation, or the target already exists.
         Returns the path to the written config file.
         """
         import yaml as _yaml
@@ -130,9 +132,16 @@ class AgentCreationWorkflow:
         if not isinstance(data, dict):
             raise ValueError(f"Generated YAML is not a mapping (got {type(data).__name__})")
 
-        # Override name to match the deployment target
+        # Determine the deployment name. #28: no placeholder — a generated config
+        # with no top-level name fails explicitly instead of silently becoming
+        # 'new-agent' and clobbering some other agent's slot.
         if agent_name is None:
-            agent_name = data.get("name") or "new-agent"
+            agent_name = data.get("name")
+        if not agent_name:
+            raise ValueError(
+                "Generated config has no 'name' field; cannot create the agent. "
+                "Regenerate with a top-level 'name'."
+            )
         data["name"] = agent_name
 
         # Validate against AgentConfig schema
@@ -142,6 +151,12 @@ class AgentCreationWorkflow:
         validated_yaml = _yaml.dump(data, default_flow_style=False, sort_keys=False)
 
         config_path = self._config_dir / "agents" / f"{agent_name}.yaml"
+        # #28: never silently overwrite an existing agent — os.replace clobbers.
+        if config_path.exists():
+            raise ValueError(
+                f"Agent {agent_name!r} already exists at {config_path}; refusing to "
+                "overwrite. Choose a different name or remove the existing config."
+            )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = config_path.with_suffix(".yaml.tmp")
         tmp_path.write_text(validated_yaml)
