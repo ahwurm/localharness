@@ -252,11 +252,14 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.memory.consolidation.chapter_refresh_overlap" in entries
     # Chapter containment guard (validation-20260712 fix): the set-containment kill lever.
     assert "agent.memory.consolidation.chapter_containment_guard_enabled" in entries
+    # Chapter staleness re-check (B5 / ANALYSIS §7 fix): the kill lever + its per-pass work cap.
+    assert "agent.memory.consolidation.chapter_staleness_recheck_enabled" in entries
+    assert "agent.memory.consolidation.chapter_staleness_recheck_cap" in entries
     # issue #15: the opt-in confinement lever is registry-addressable.
     assert "agent.permissions.workspace_root" in entries
-    assert len(entries) == 151, (
-        f"catalogue should be 151 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x28 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes]), got {len(entries)}"
+    assert len(entries) == 153, (
+        f"catalogue should be 153 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes]), got {len(entries)}"
     )
 
 
@@ -320,9 +323,9 @@ def test_role_sections_leaves_enumerate(components_home):
             f"{leaf} should be a str leaf, got {entries[leaf].annotation}"
         )
 
-    assert len(entries) == 151, (
-        f"catalogue should be 151 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x28 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes]), got {len(entries)}"
+    assert len(entries) == 153, (
+        f"catalogue should be 153 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes]), got {len(entries)}"
     )
 
 

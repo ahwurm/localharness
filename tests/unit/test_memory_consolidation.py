@@ -750,7 +750,11 @@ async def test_containment_counters_thread_onto_report(store: MemoryStore):
     await _seed_chapter(store, "subview02", [a2.id])
 
     cfg = _cfg(schema_writer_enabled=True, mining_enabled=False, reconcile_enabled=False,
-               mint_tagging_enabled=False)
+               mint_tagging_enabled=False,
+               # Isolate the containment guard: the synthetic subview seed chapters are ungrounded
+               # ("chapter subview01 body") 1-member stubs, which the (orthogonal) staleness re-check
+               # would retire BEFORE the containment guard runs. Turn the re-check off here.
+               chapter_staleness_recheck_enabled=False)
     report = await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
 
     assert hasattr(report, "chapters_folded")

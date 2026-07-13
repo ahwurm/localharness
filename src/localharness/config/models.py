@@ -510,6 +510,31 @@ class MemoryConsolidationConfig(BaseModel):
             "agent.memory.consolidation.chapter_containment_guard_enabled <true|false>`)."
         ),
     )
+    chapter_staleness_recheck_enabled: bool = Field(
+        default=True,
+        description=(
+            "CHAPTER STALENESS RE-CHECK (d1-replication-20260712 §7 / B5 fix): at the START of each "
+            "idle pass, before clustering/writing, re-run the grader's own grounded()+ground_numbers() "
+            "matchers on every active chapter against its CURRENT active members. A chapter whose "
+            "evidentiary base eroded (a member superseded out from under it — the '7-Day Taper' bug: "
+            "grounded when written, later carrying a figure nothing active supports) is caught HERE "
+            "instead of at the eval KILL: a grounded re-draft on the survivors supersedes it on its "
+            "own key (history preserved), else it is retired (marked non-active, append-only — never "
+            "deleted; also when < 2 active members remain). Ships True; this flag is the kill lever "
+            "(mutable via `localharness components set "
+            "agent.memory.consolidation.chapter_staleness_recheck_enabled <true|false>`)."
+        ),
+    )
+    chapter_staleness_recheck_cap: int = Field(
+        default=10, ge=1, le=10_000,
+        description=(
+            "Max active chapters the staleness re-check re-validates per idle pass (oldest-touched "
+            "first, updated_at ASC — a re-drafted chapter's fresh updated_at rotates it to the back). "
+            "Bounds the per-pass model work (each fail costs at most ONE re-draft generation through "
+            "the cancellable idle-LLM path). Throughput knob, not correctness: an unprocessed stale "
+            "chapter is simply caught a later pass. Hyperparameter — sweep on the eval, do not taste-pick."
+        ),
+    )
     mint_tagging_enabled: bool = Field(
         default=True,
         description=(

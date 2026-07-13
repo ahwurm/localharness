@@ -68,6 +68,12 @@ class ConsolidationReport:
     # superseded (append-only). Closes the multi-contained gap chapter_refresh_overlap left.
     chapters_folded: int = 0
     chapters_superseded_by_containment: int = 0
+    # Chapter staleness re-check (B5, ANALYSIS §7): active chapters re-validated against their current
+    # active members BEFORE the writer runs — grounded ones revalidated, eroded ones re-drafted on the
+    # survivors or retired. Closes the "chapter's evidentiary base shrank and nothing noticed" gap.
+    chapters_revalidated: int = 0
+    chapters_redrafted_stale: int = 0
+    chapters_retired_stale: int = 0
     reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
     mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
     tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
@@ -147,6 +153,7 @@ class ConsolidationPass:
             self._step_mine,            # Phase 36 / MOVE 2: typed-atom transcript mining
             self._step_classify_untagged,  # Tag-graph F4: file pool atoms lacking a bucket tag
             self._step_discover_tags,   # Tag-graph: discover NEW child tags before clustering reads them
+            self._step_recheck_stale,   # B5 (§7): re-validate active chapters BEFORE the writer runs
             self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
             self._step_reconcile,       # Phase 36: correction-queue reconciliation
             self._step_decay,
@@ -308,6 +315,32 @@ class ConsolidationPass:
     # user turn stops them mid-look. Because they early-return with no LLM, every existing llm=None
     # test sees identical behavior — the deterministic core is byte-unchanged.
 
+    async def _step_recheck_stale(self, report: ConsolidationReport) -> None:
+        """B5 (ANALYSIS §7): re-validate active chapters against their CURRENT active members before
+        the writer runs. Gated on the LLM (a re-draft needs a generation) and its own config axis;
+        llm=None or flag-off -> inert, so the deterministic core is byte-unchanged and a chapter-less
+        store finds nothing. Containment activity during a re-draft ACCUMULATES onto the same report
+        counters the writer step uses (both += so neither clobbers the other)."""
+        if self._llm is None or not getattr(self._cfg, "chapter_staleness_recheck_enabled", True):
+            return
+        from localharness.memory.chapter_writer import recheck_stale_chapters
+        counts = {"revalidated": 0, "redrafted": 0, "retired": 0}
+        containment_counts = {"folded": 0, "superseded": 0}
+        await recheck_stale_chapters(
+            self._store, self._llm, self._cancel,
+            cap=getattr(self._cfg, "chapter_staleness_recheck_cap", 10),
+            refresh_overlap=self._cfg.chapter_refresh_overlap,
+            containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
+            containment_counts=containment_counts,
+            attempts_log=report.schema_attempts,  # §7: staleness re-drafts/retires observable
+            counts=counts,
+        )
+        report.chapters_revalidated += counts["revalidated"]
+        report.chapters_redrafted_stale += counts["redrafted"]
+        report.chapters_retired_stale += counts["retired"]
+        report.chapters_folded += containment_counts["folded"]
+        report.chapters_superseded_by_containment += containment_counts["superseded"]
+
     async def _step_write_schemas(self, report: ConsolidationReport) -> None:
         if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):
             return
@@ -329,8 +362,10 @@ class ConsolidationPass:
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
         )
         report.schemas_written = len(written)
-        report.chapters_folded = containment_counts["folded"]
-        report.chapters_superseded_by_containment = containment_counts["superseded"]
+        # += (not =): the staleness re-check step may have folded/superseded during a re-draft; both
+        # steps contribute to these counters within one pass.
+        report.chapters_folded += containment_counts["folded"]
+        report.chapters_superseded_by_containment += containment_counts["superseded"]
 
     async def _step_classify_untagged(self, report: ConsolidationReport) -> None:
         """Tag-graph F4: file pool-visible atoms that LACK a bucket tag through the SAME two-step
