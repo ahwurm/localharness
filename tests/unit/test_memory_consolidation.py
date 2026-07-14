@@ -1036,3 +1036,107 @@ async def test_staleness_retire_stays_retired_no_pingpong(store: MemoryStore):
     assert r2.chapters_retired_stale == 0 and r2.chapters_redrafted_stale == 0
     assert await _active_schema_ids(store) == set()            # STILL no chapter — no resurrection
     assert len(await store.get_fact_history(ch.key)) == hist1  # unchanged — no ping-pong
+
+
+# ---------------------------------------------------------------------------
+# #65 — schema_writer_enabled is the MASTER kill lever: OFF stops BOTH the writer
+# AND the staleness re-check. chapter_staleness_recheck_enabled is the SUB-switch,
+# effective only while the master is ON. Before the fix the re-check ran on its own
+# flag alone, so flipping the documented kill lever left it minting/superseding chapters.
+# ---------------------------------------------------------------------------
+
+class _ChapterCountingLLM:
+    """A grounded chapter double that COUNTS 'Write ONE' looks — proves whether ANY chapter
+    generation (writer OR re-check redraft) fired at all, the #65 master-switch assertion."""
+    def __init__(self):
+        self.write_one_calls = 0
+
+    async def complete(self, prompt: str) -> str:
+        if "Write ONE" in prompt:
+            self.write_one_calls += 1
+            corpus = prompt.split("\n\n")[-1]
+            lines = [ln for ln in corpus.splitlines() if ln.strip()]
+            return " ".join(lines[0].split()[:12]) if lines else "chapter"
+        return ""
+
+
+async def _seed_stale_taper_chapter(store, suffix):
+    """A '7-Day Taper'-shaped chapter that is STALE (sole number-bearer eroded) — the re-check would
+    redraft or retire it if it ran. Single-session members so the WRITER forms no cluster from them."""
+    m1 = await _seed_sem(store, _G_M1, "s1", topic="fitness", child_tag=None)
+    m2 = await _seed_sem(store, _G_M2, "s1", topic="fitness", child_tag=None)
+    m3 = await _seed_sem(store, _G_M3, "s1", topic="fitness", child_tag=None)
+    ch = await _seed_chapter_body(store, suffix, [m1.id, m2.id, m3.id], _G_BODY)
+    await store.store_fact(key=m3.key, value="the coach dropped the extra week", tags=["sem"],
+                           confidence=0.65, source="transcript_mining", provenance="s1")
+    return ch
+
+
+async def _seed_writable_cluster(store):
+    """Two same-topic atoms across TWO sittings — find_stable_clusters yields one cluster the WRITER
+    would turn into a fresh chapter if the writer step runs."""
+    await _seed_sem(store, _READ_A, "w0", topic="writers")
+    await _seed_sem(store, _READ_B, "w1", topic="writers")
+
+
+@pytest.mark.asyncio
+async def test_master_switch_off_stops_both_writer_and_recheck(store: MemoryStore):
+    """#65 (the fix): schema_writer_enabled=False is the MASTER kill — NEITHER the writer NOR the
+    staleness re-check runs, EVEN with chapter_staleness_recheck_enabled=True. No LLM chapter look
+    fires, no chapter is written, and the stale chapter is byte-untouched (the kill lever kills)."""
+    stale = await _seed_stale_taper_chapter(store, "m65off")
+    await _seed_writable_cluster(store)
+    before = await store.get_fact(stale.key)
+    llm = _ChapterCountingLLM()
+
+    cfg = _cfg(schema_writer_enabled=False, chapter_staleness_recheck_enabled=True,
+               mining_enabled=False, reconcile_enabled=False, mint_tagging_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=llm).run()
+
+    assert llm.write_one_calls == 0                      # no chapter generation at all (writer or recheck)
+    assert report.schemas_written == 0
+    assert report.chapters_revalidated == 0
+    assert report.chapters_redrafted_stale == 0
+    assert report.chapters_retired_stale == 0
+    after = await store.get_fact(stale.key)
+    assert after.id == before.id and after.status == "active"
+    assert after.value == before.value and after.updated_at == before.updated_at
+    assert len(await _schema_rows(store)) == 1           # only the stale chapter, no new mint
+
+
+@pytest.mark.asyncio
+async def test_master_on_sub_off_writer_runs_recheck_inert(store: MemoryStore):
+    """#65: master ON, sub OFF — the writer runs (a fresh cluster becomes a chapter) but the staleness
+    re-check stays inert: the stale chapter is byte-untouched and all three re-check counters are 0."""
+    stale = await _seed_stale_taper_chapter(store, "m65sub")
+    await _seed_writable_cluster(store)
+    before = await store.get_fact(stale.key)
+
+    cfg = _cfg(schema_writer_enabled=True, chapter_staleness_recheck_enabled=False,
+               mining_enabled=False, reconcile_enabled=False, mint_tagging_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=_ChapterCountingLLM()).run()
+
+    assert report.schemas_written >= 1                   # writer ran
+    assert report.chapters_revalidated == 0              # re-check inert
+    assert report.chapters_redrafted_stale == 0
+    assert report.chapters_retired_stale == 0
+    after = await store.get_fact(stale.key)
+    assert after.id == before.id and after.value == before.value and after.updated_at == before.updated_at
+
+
+@pytest.mark.asyncio
+async def test_master_on_sub_on_both_run(store: MemoryStore):
+    """#65: master ON, sub ON — BOTH run. The writer mints the fresh cluster and the re-check acts on
+    the stale chapter (redrafts on its survivors or retires it)."""
+    stale = await _seed_stale_taper_chapter(store, "m65on")
+    await _seed_writable_cluster(store)
+
+    cfg = _cfg(schema_writer_enabled=True, chapter_staleness_recheck_enabled=True,
+               mining_enabled=False, reconcile_enabled=False, mint_tagging_enabled=False)
+    report = await ConsolidationPass(store, cfg, llm=_ChapterCountingLLM()).run()
+
+    assert report.schemas_written >= 1                                       # writer ran
+    assert (report.chapters_redrafted_stale + report.chapters_retired_stale
+            + report.chapters_revalidated) >= 1                              # re-check ran
+    live = await store.get_fact(stale.key)                                   # no longer active-and-stale
+    assert live is None or "7" not in live.value
