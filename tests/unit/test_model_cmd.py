@@ -87,6 +87,40 @@ def test_model_switch_unreachable_degrades_with_disclosure(components_home, monk
     assert overlay["provider"]["default_model"] == "future-model"
 
 
+def test_model_config_dir_isolates_overlay(tmp_path, monkeypatch):
+    """#35: `--config-dir` must isolate the overlay — a switch under dirA writes dirA's
+    overlay and NEVER touches a sibling config dir. Before the fix the overlay keyed only on
+    LOCALHARNESS_HOME/~-default, so `--config-dir` was ignored (isolation was a lie)."""
+    dir_a = tmp_path / "a"
+    dir_a.mkdir()
+    dir_b = tmp_path / "b"
+    dir_b.mkdir()
+    _seed_config(dir_a)
+    _seed_config(dir_b)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False
+    )
+    result = runner.invoke(app, ["model", "model-b", "--config-dir", str(dir_a)])
+    assert result.exit_code == 0, result.output
+    assert load_overlay(dir_a / "overrides.yaml")["provider"]["default_model"] == "model-b"
+    # Fully isolated: the sibling config dir is never written.
+    assert not (dir_b / "overrides.yaml").exists()
+
+
+def test_model_config_dir_env_var_honored(tmp_path, monkeypatch):
+    """#35: the LOCALHARNESS_DIR env var (what --config-dir binds) routes the overlay too."""
+    cfg_dir = tmp_path / "envdir"
+    cfg_dir.mkdir()
+    _seed_config(cfg_dir)
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(cfg_dir))
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False
+    )
+    result = runner.invoke(app, ["model", "model-b"])
+    assert result.exit_code == 0, result.output
+    assert load_overlay(cfg_dir / "overrides.yaml")["provider"]["default_model"] == "model-b"
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,
