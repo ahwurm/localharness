@@ -82,14 +82,20 @@ def test_created_agent_loads_through_config_loader(components_home, mock_llm_cli
 
 def test_deploy_rejects_unloadable_agent_leaves_no_file(components_home, mock_llm_client):
     """Negative half of the contract: a generated name that violates AgentConfig's name rule
-    fails deploy loudly (Deploy failed message) and writes NO file — the harness never ends up
-    with an agent yaml it cannot load."""
+    fails LOUDLY and writes NO file — the harness never ends up with an agent yaml it cannot
+    load. (#57 catches this even earlier now: an invalid config is rejected at the pre-confirm
+    generation gate — regenerated once, then abandoned — never reaching deploy or the channel
+    as a raw Pydantic wall. The contract holds; the loud message is the generation abort.)"""
     home = components_home
     # 'Finance Helper' — uppercase + space — is rejected by AgentConfig.validate_name_format.
+    # _drive_creation scripts a single response; the one regeneration retry (#57) re-serves the
+    # same invalid name, so creation is abandoned with no file written.
     gen = f"```yaml\nname: Finance Helper\nrole: {ROLE}\n```"
     channel = _drive_creation(home, mock_llm_client, gen)
 
-    assert any("Deploy failed" in m for m in channel.sent)
+    assert any("NOT created" in m for m in channel.sent)  # loud, truthful failure
+    assert not any("deployed" in m.lower() for m in channel.sent)  # never claimed success
+    assert not any("pydantic" in m.lower() for m in channel.sent)  # no raw ValidationError wall
     assert not (home / "agents" / "Finance Helper.yaml").exists()
     # Nothing loadable was written under any name derived from that config.
     assert ConfigLoader(config_dir=home).list_agents() == []

@@ -504,14 +504,17 @@ def test_repl_agent_creation_uses_streaming_path():
 
     calls = {"stream": 0, "complete": 0}
 
+    # #57: the pre-confirm gate validates the generated YAML, so the stub must be a VALID
+    # AgentConfig (name + role) — else it would trigger the one regeneration retry and this
+    # test's stream-count would be 2. Keeps the test's intent: generation uses stream, not complete.
     class _LLMSpy:
         async def stream_complete(self, messages, tools=None, on_token=None):
             calls["stream"] += 1
-            return SimpleNamespace(content="name: x"), None
+            return SimpleNamespace(content="name: reader\nrole: reads files for the user"), None
 
         async def complete(self, messages, tools=None, stream=False):
             calls["complete"] += 1
-            return SimpleNamespace(content="name: x"), None
+            return SimpleNamespace(content="name: reader\nrole: reads files for the user"), None
 
     class _Workflow:
         gathered = {"description": "an agent that reads files", "name": "reader"}

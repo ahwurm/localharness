@@ -6,7 +6,29 @@ from localharness.orchestrator.workflow import (
     AgentCreationWorkflow,
     WorkflowState,
     is_cancellation,
+    validate_agent_yaml,
 )
+
+
+# #57: the confirm step must never show YAML that will explode at deploy. validate_agent_yaml
+# is the pre-confirm gate: None == deployable, else a SHORT human error (no pydantic.dev wall).
+def test_validate_agent_yaml_accepts_valid():
+    assert validate_agent_yaml("name: good\nrole: monitor and summarize the news") is None
+
+
+def test_validate_agent_yaml_rejects_bad_enum_cleanly():
+    """The live receipt: permissions.mode: read_only (legal: auto|manual) surfaced a raw
+    Pydantic wall with a pydantic.dev URL. The error must be short and URL-free."""
+    err = validate_agent_yaml("name: good\nrole: does things\npermissions:\n  mode: read_only")
+    assert err is not None
+    assert "mode" in err  # names the offending field
+    assert "pydantic.dev" not in err  # no raw ValidationError URL
+    assert "https://" not in err
+
+
+def test_validate_agent_yaml_rejects_non_mapping_and_missing_name():
+    assert validate_agent_yaml("just a string") is not None
+    assert validate_agent_yaml("role: no name here") is not None
 
 
 # #59: deterministic, leading-anchored cancellation. A cancel word buried after real
