@@ -12,7 +12,7 @@ The CLI is the user's entry point to LocalHarness. It provides:
 
 1. `localharness init` — one-time setup (auto-detect LLM, write config)
 2. `localharness start` — launch the orchestrator REPL
-3. `localharness agent create|list|run|delete` — agent management
+3. `localharness agent create|list` — agent management (`run`, `delete`: **planned**, not yet implemented — see below)
 4. `localharness doctor` — prerequisite checks
 5. `localharness validate` — config validation
 
@@ -387,7 +387,26 @@ def agent_list(
 └─────────────────────┴──────────────┴──────────────────────┴────────┴──────────────┴─────────────────────┘
 ```
 
+#### Editing or removing an agent (today)
+
+`agent run` and `agent delete` below are **planned** and not yet implemented. Until they
+ship, manage an existing agent directly on disk:
+
+- **Edit:** open `<config-dir>/agents/<name>.yaml` (global) or `./.localharness/agents/<name>.yaml`
+  (project) and change `role`, `tools`, `permissions`, etc.
+- **Remove:** delete that YAML file (and, if you also want its memory gone,
+  `<config-dir>/agents/<name>/` which holds `memory.db`, `events.jsonl`, `MEMORY.md`).
+- **Pick up changes:** restart the session (`localharness start`). Edits and deletions of an
+  *existing* agent are read at startup. (A newly *created* agent — via `localharness start`'s
+  conversational flow — is registered into the running session immediately and needs no restart;
+  edits/removals still do.)
+- **Run a one-off task now:** `localharness start` and ask the orchestrator to delegate to the
+  agent by name.
+
 #### `localharness agent run`
+
+**Status: Planned — not yet implemented.** The design below is the intended surface; the command
+does not exist yet. To run an agent today, see "Editing or removing an agent (today)" above.
 
 ```python
 @agent_app.command("run")
@@ -439,6 +458,10 @@ def agent_run(
 ```
 
 #### `localharness agent delete`
+
+**Status: Planned — not yet implemented.** The design below is the intended surface; the command
+does not exist yet. To remove an agent today, delete its YAML (see "Editing or removing an agent
+(today)" above).
 
 ```python
 @agent_app.command("delete")
@@ -723,7 +746,7 @@ localharness --install-completion zsh
 localharness --install-completion fish
 ```
 
-Custom completions for agent names (used in `agent run`, `agent delete`) are provided via Typer's `typer.Completion` mechanism:
+Custom completions for agent names (planned for the not-yet-implemented `agent run`, `agent delete`) are provided via Typer's `typer.Completion` mechanism:
 
 ```python
 def complete_agent_id(ctx: typer.Context, param: typer.CallbackParam, incomplete: str):
@@ -776,4 +799,4 @@ def resolve_config(
 - `prompt_toolkit` and `rich` do not share terminal state automatically. The REPL must pause `rich.Live` before calling `PromptSession.prompt_async()` and resume it afterward. Pattern: `with Live(...) as live: ... live.stop() ... await session.prompt_async() ... live.start()`.
 - `localharness start` checks for the KILL file (`~/.localharness/KILL`) on startup and removes it if present (cleanup from a previous interrupted session).
 - The `--config-dir` option is repeated on every command rather than being a top-level app option. This is intentional — Typer's callback mechanism for top-level options has edge cases with subcommand groups. Repetition is the safer pattern.
-- `agent run` with `--task-file` reads the file and passes the path (not the contents) to the orchestrator delegation call. This is the lean context pattern applied at the CLI level.
+- (Planned) `agent run` with `--task-file` will read the file and pass the path (not the contents) to the orchestrator delegation call. This is the lean context pattern applied at the CLI level.
