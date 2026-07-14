@@ -62,7 +62,7 @@ def _merged_available_models(harness: Any, existing_overlay: dict, model: str) -
 
 async def persist_default_model(
     harness: Any, model: str, *, actor: str = "cli", config_dir: Any = None
-) -> None:
+) -> str | None:
     """Persist ``model`` as the org + provider default via the atomic USER OVERLAY — the same
     crash-safe, audited path ``components set`` uses (issue #22), replacing the prior full,
     non-atomic ``config.yaml`` rewrite.
@@ -77,6 +77,10 @@ async def persist_default_model(
     ``config_dir`` (#35): the SAME resolved dir the harness was loaded from. The overlay write
     target and the audit-log path resolve against it — so a persist tracks ``--config-dir``
     instead of leaking to ``~/.localharness``. Callers thread their loader's ``_config_dir``.
+
+    Returns None on clean success, or a warning string (#37) when ONLY the post-write audit
+    emit failed — the durable overlay write already succeeded, so callers surface this as a
+    secondary note and still report the switch as done (never as a persist failure).
     """
     before_provider = harness.provider.default_model
     before_org = harness.org.default_model
@@ -112,23 +116,30 @@ async def persist_default_model(
 
     # Audit trail (mirrors components_cmd): one ComponentMutated per path written. The audit
     # path resolves against the SAME config_dir (#35 — a bare default 'audit.jsonl' lands under it).
-    audit_path = harness.org.audit_log_path
-    bus = EventBus(
-        persist_path=resolve_runtime_path(audit_path, config_dir) if audit_path else None
-    )
-    for path, before in (
-        ("provider.default_model", before_provider),
-        ("org.default_model", before_org),
-    ):
-        await bus.publish(
-            ComponentMutated(
-                path=path,
-                before_value=before,
-                after_value=model,
-                layer="user",
-                actor=actor,  # type: ignore[arg-type]
-            )
+    # #37: scope the emit in its OWN try/except — it runs AFTER the durable overlay write, so a
+    # failure here (unwritable audit log) must NOT surface as a persist failure. Return a warning
+    # the callers show as a secondary note; the switch itself already succeeded.
+    try:
+        audit_path = harness.org.audit_log_path
+        bus = EventBus(
+            persist_path=resolve_runtime_path(audit_path, config_dir) if audit_path else None
         )
+        for path, before in (
+            ("provider.default_model", before_provider),
+            ("org.default_model", before_org),
+        ):
+            await bus.publish(
+                ComponentMutated(
+                    path=path,
+                    before_value=before,
+                    after_value=model,
+                    layer="user",
+                    actor=actor,  # type: ignore[arg-type]
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — the durable overlay write already succeeded
+        return f"persisted, but the audit log could not be written: {exc}"
+    return None
 
 
 def pinned_agents(config_dir: Path | None) -> list[tuple[str, str]]:
