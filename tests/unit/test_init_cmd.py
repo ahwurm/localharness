@@ -22,6 +22,18 @@ def _no_window_probe(monkeypatch):
     monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
 
 
+def test_init_help_probe_order_matches_detector():
+    """#52: `init --help` must list the real probe order derived from the detector's
+    DEFAULT_PORTS — so it can never again omit :8000 (vLLM's stock port) or drift."""
+    from localharness.provider.detector import DEFAULT_PORTS
+
+    result = runner.invoke(app, ["init", "--help"])
+    assert result.exit_code == 0, result.output
+    for port in DEFAULT_PORTS:
+        assert f":{port}" in result.output, (port, result.output)
+    assert ":8000" in result.output  # the specific omission #52 flags
+
+
 def test_fit_context_tokens_reserves_output():
     from localharness.cli.init_cmd import _fit_context_tokens
     assert _fit_context_tokens(65_536) == 61_440    # reference 64K window
