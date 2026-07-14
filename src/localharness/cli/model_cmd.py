@@ -48,7 +48,15 @@ def model(
         raise typer.Exit(2)
 
     provider = harness.provider
-    live, reachable = model_ops.list_live_models(provider.base_url)
+    try:
+        live, reachable = model_ops.list_live_models(provider.base_url)
+    except model_ops.MalformedModelListError as exc:
+        # #38: reached but the reply isn't a model list — its OWN message, not "Is it running?".
+        err_console.print(
+            f"[bold red]Error:[/bold red] the server at {provider.base_url} responded, but the "
+            f"response wasn't understood — is base_url pointing at an OpenAI-compatible API? ({exc})"
+        )
+        raise typer.Exit(2)
     downloaded: list[str] = []
     if harness.server is not None:
         from localharness.provider import server as managed_server

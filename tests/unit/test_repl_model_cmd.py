@@ -48,7 +48,7 @@ def _repl(tmp_path, harness, live):
     )
 
     async def _live_models(base_url):
-        return list(live)
+        return list(live), True  # (#38) shared (ids, reachable) contract
 
     repl._live_models = _live_models
     return repl, channel, agent
@@ -175,7 +175,7 @@ async def test_model_hotswap_rebinds_token_counter(tmp_path, monkeypatch):
     )
 
     async def _live_models(base_url):
-        return ["model-a", "model-b"]
+        return ["model-a", "model-b"], True
 
     repl._live_models = _live_models
 
@@ -215,7 +215,7 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
     )
 
     async def _live_models(base_url):
-        return ["model-a"]
+        return ["model-a"], True
 
     repl._live_models = _live_models
 
@@ -400,7 +400,7 @@ def _repl_with_ctx(tmp_path, tc, max_ctx=131_072, live=("model-a", "model-b")):
     )
 
     async def _live_models(base_url):
-        return list(live)
+        return list(live), True  # (#38) shared (ids, reachable) contract
 
     repl._live_models = _live_models
     return repl, channel, agent, ctx

@@ -28,21 +28,38 @@ from localharness.registry import set_value_in_dict
 _AGENT_KEY = "agent"
 
 
+class MalformedModelListError(Exception):
+    """The endpoint was REACHED but its ``/models`` reply wasn't an OpenAI-compatible model list
+    (HTML error page, wrong API, unexpected JSON shape). Kept distinct from unreachable (#38) so
+    callers stop rendering "is it running?" — the server IS running, base_url points at the
+    wrong thing."""
+
+
 def list_live_models(base_url: str, timeout: float = 3.0) -> tuple[list[str], bool]:
     """Probe the OpenAI-compatible ``/models`` endpoint. Returns ``(model_ids, reachable)``.
 
-    ``reachable`` is False ONLY when the endpoint could not be reached at all — kept distinct
-    from reached-but-empty so callers can fail-loud on a bad target vs. degrade-with-disclosure
-    on an unreachable runtime (the #16 lesson: a silently-wrong endpoint must not read as a
-    legitimate empty result). Parses only the OpenAI ``data`` shape; Ollama/LM-Studio-aware
-    listing (audit gap #2) is out of scope here — same shape the REPL /model list uses.
+    Three outcomes, three signals (#38 — previously one blanket ``except`` collapsed the last two
+    into a bogus ``reachable=False``, so a live-but-wrong endpoint read as "is it running?"):
+      - transport error (connection refused/DNS/timeout) -> ``([], False)`` = unreachable;
+      - reached, valid OpenAI ``data`` shape -> ``(ids, True)`` (empty list stays reachable — a
+        legit empty result, the #16 lesson);
+      - reached but the body isn't an OpenAI model list -> raise ``MalformedModelListError``.
+
+    Parses only the OpenAI ``data`` shape; Ollama/LM-Studio-aware listing (audit gap #2) is out
+    of scope here — same shape the REPL /model list uses (which now delegates here).
     """
     import httpx
     try:
         resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
-        return [m["id"] for m in resp.json().get("data", [])], True
-    except Exception:
-        return [], False
+    except httpx.RequestError:
+        return [], False  # transport failure → genuinely unreachable
+    try:
+        return [m["id"] for m in resp.json()["data"]], True
+    except (ValueError, KeyError, TypeError) as exc:
+        # Reached, but not an OpenAI /models list (bad JSON, missing `data`, wrong item shape).
+        raise MalformedModelListError(
+            f"{base_url} responded, but not with an OpenAI-compatible model list ({exc})"
+        ) from exc
 
 
 def _merged_available_models(harness: Any, existing_overlay: dict, model: str) -> list[str]:

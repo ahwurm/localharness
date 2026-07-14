@@ -123,7 +123,7 @@ def _model_switch(home, harness, target, *, live=("model-a", "model-b")):
     )
 
     async def _live_models(base_url):
-        return list(live)
+        return list(live), True  # (#38) shared (ids, reachable) contract
 
     repl._live_models = _live_models
     asyncio.run(repl._handle_slash(f"/model {target}"))
