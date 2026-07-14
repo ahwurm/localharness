@@ -691,3 +691,85 @@ class TestMarkupSafetyAndCompactCalls:
         rendered = out.getvalue()
         assert "[bold]not-a-style[/bold]" in rendered   # printed, not applied as a style
         assert "score[42]" in rendered
+
+
+# ---------------------------------------------------------------------------
+# #73: agent delegation-outcome receipts. Every `agent` completion prints a
+# truthful, harness-rendered line whose status comes from the TOOL RESULT
+# (is_error) — so the model can't pass its own prose off as the subagent's
+# ("the joke-writer gave me that one!") when the delegation actually failed.
+# Driven through the real on_action/on_observation dispatch seam (base.py).
+# ---------------------------------------------------------------------------
+
+
+def _agent_action(delegate: str, task: str = "Write three puns about databases."):
+    from localharness.core.events import Action
+    return Action(
+        agent_id="orchestrator", session_id="s1", action_type="tool_call",
+        tool_call_id="tc1", tool_name="agent",
+        tool_params={"agent_id": delegate, "task": task},
+    )
+
+
+def _agent_observation(output: str, error: str | None):
+    from localharness.core.events import Observation
+    return Observation(
+        agent_id="orchestrator", session_id="s1", observation_type="tool_result",
+        tool_call_id="tc1", tool_name="agent", output=output, error=error,
+    )
+
+
+# loop.py sets BOTH Observation fields to '[tool error] <msg>' on a tool failure.
+_FAIL_MSG = "[tool error] Agent 'joke-writer' failed: boom"
+
+
+class TestAgentDelegationReceipt:
+    def _pipe(self):
+        out = StringIO()
+        return make_terminal_channel(out=out, force_terminal=False), out
+
+    @pytest.mark.asyncio
+    async def test_success_receipt_names_delegate_and_says_completed(self):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("joke-writer"))
+        await ch.on_observation(_agent_observation(output="Three puns: ...", error=None))
+        rendered = out.getvalue()
+        assert "◆ agent joke-writer — completed" in rendered  # ◆ … — completed
+        assert "FAILED" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_failure_receipt_says_failed_with_first_line_detail(self):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("joke-writer"))
+        await ch.on_observation(_agent_observation(output=_FAIL_MSG, error=_FAIL_MSG))
+        rendered = out.getvalue()
+        assert "◆ agent joke-writer — FAILED:" in rendered
+        assert "Agent 'joke-writer' failed: boom" in rendered  # honest detail from the result
+        assert "[tool error]" not in rendered  # loop-internal prefix stripped from the receipt
+        assert "completed" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_failure_is_error_styled_success_is_not(self):
+        # TTY mode: a dropped delegation must be visually unmissable — the failure line
+        # carries the error style (bold red, \x1b[1;31m); success does not.
+        so, fo = StringIO(), StringIO()
+        cs = make_terminal_channel(out=so, force_terminal=True)
+        cf = make_terminal_channel(out=fo, force_terminal=True)
+        await cs.on_action(_agent_action("joke-writer"))
+        await cs.on_observation(_agent_observation(output="done", error=None))
+        await cf.on_action(_agent_action("joke-writer"))
+        await cf.on_observation(_agent_observation(output=_FAIL_MSG, error=_FAIL_MSG))
+        assert "\x1b[1;31m" in fo.getvalue()      # bold red on failure
+        assert "\x1b[1;31m" not in so.getvalue()  # success is not error-styled
+
+    @pytest.mark.asyncio
+    async def test_status_comes_from_result_flag_not_prose(self):
+        # The honesty spine (#73): status is a function of is_error, never of the text.
+        # A SUCCESS whose text is full of doom still reads 'completed'.
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("joke-writer"))
+        await ch.on_observation(_agent_observation(
+            output="could not find one, this failed to amuse anybody", error=None))
+        rendered = out.getvalue()
+        assert "— completed" in rendered
+        assert "FAILED" not in rendered
