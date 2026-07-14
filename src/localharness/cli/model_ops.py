@@ -89,6 +89,11 @@ async def persist_default_model(
     set_value_in_dict(new_overlay, "provider.default_model", model)
     set_value_in_dict(new_overlay, "org.default_model", model)
     set_value_in_dict(new_overlay, "provider.available_models", merged_avail)
+    # #34: with a managed server configured, ALSO persist server.model — else cold start rebuilds
+    # `vllm serve <srv.model>` from the stale config value and relaunches the old model. Only when
+    # a server block exists (never invent one: a bare server:{model} fails validation).
+    if harness.server is not None:
+        set_value_in_dict(new_overlay, "server.model", model)
 
     # Validate the SAME cascade the next `start` sees: current config ⊕ new overlay. Exclude the
     # agent-scope `agent:` section (not a HarnessConfig field — mirrors components_cmd and
@@ -102,6 +107,8 @@ async def persist_default_model(
     harness.provider.default_model = model
     harness.org.default_model = model
     harness.provider.available_models = merged_avail
+    if harness.server is not None:
+        harness.server.model = model
 
     # Audit trail (mirrors components_cmd): one ComponentMutated per path written. The audit
     # path resolves against the SAME config_dir (#35 — a bare default 'audit.jsonl' lands under it).
