@@ -1485,19 +1485,18 @@ async def _grade_designed_month(
         verdict, failing = "INVALID", "A3 (batch provenance)"
     elif a2_kill or b5_kill:
         verdict, failing = "KILL", ("A2 (ungrounded atom)" if a2_kill else "B5 (chapter kill)")
-    # FIX 2 DISCLOSED PATH: b4_effective (not b4_ok) gates HOLDS and the failing-stage scan, so a B4
-    # failure caused SOLELY by a tool-verified scenario collision does not fail the month. Every
-    # other stage is unchanged; when B4 is not excused, b4_effective == b4_ok (no behavior change).
-    elif b1_ok and b2_ok and b3_ok and b4_effective and byte_stable:
-        verdict, failing = "HOLDS", None
     else:
-        failing = next(
-            name for name, ok in [
-                ("A1", stage_a["a1_ok"]), ("B1", b1_ok), ("B2", b2_ok),
-                ("B3", b3_ok), ("B4", b4_effective), ("byte_stable", byte_stable),
-            ] if not ok
-        )
-        verdict = "INCONCLUSIVE"
+        # FIX 1 (#40): derive the HOLDS gate AND the failing-stage name from ONE ordered check list
+        # so the two can never drift — A1 gates HOLDS (matching the scan's long-standing intent).
+        # FIX 2 DISCLOSED PATH: b4_effective (not raw b4_ok) is the B4 check, so a B4 failure caused
+        # SOLELY by a tool-verified scenario collision does not fail the month; when B4 is not
+        # excused, b4_effective == b4_ok (no behavior change).
+        checks = [
+            ("A1", stage_a["a1_ok"]), ("B1", b1_ok), ("B2", b2_ok),
+            ("B3", b3_ok), ("B4", b4_effective), ("byte_stable", byte_stable),
+        ]
+        failing = next((name for name, ok in checks if not ok), None)
+        verdict = "HOLDS" if failing is None else "INCONCLUSIVE"
     return {"verdict": verdict, "failing_stage": failing, "byte_stable": byte_stable,
             "stage_a": stage_a, "stage_b": stage_b,
             "per_schema_grounding": static["per_schema_grounding"]}
