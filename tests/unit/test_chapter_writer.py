@@ -1209,3 +1209,26 @@ async def test_recheck_skips_item_superseded_mid_pass(store):
     assert llm.calls == 1                                     # only O1's redraft generated — O2 spent none
     assert (await _status(store, o2.id))[0] == "superseded"  # O2 stays dead (no resurrection)
     assert len(await _active_chapters(store)) == 1           # just the healed O1
+
+
+# ---------------------------------------------------------------------------
+# #69 — recheck and writer must share ONE claimed-refresh-key set per pass
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_writer_skips_a_shared_claimed_refresh_key(store):
+    """#69: write_cluster_schemas honors a SHARED claimed-refresh-key set (the set the recheck fills
+    earlier in the same pass). A grown cluster that would adopt an already-claimed chapter key K falls
+    back to a fresh key instead of re-adopting K and clobbering the vetted heal. Containment off to
+    isolate the adoption path; the pre-populated set stands in for the recheck's claim."""
+    a1 = await _seed_sem(store, _READ_A, "s0", topic="reads")
+    a2 = await _seed_sem(store, _READ_B, "s1", topic="reads")
+    a3 = await _seed_sem(store, _READ_C, "s0", topic="reads")     # the cluster grows to {a1,a2,a3}
+    kc = await _seed_chapter(store, "claimk01", [a1, a2], body="the vetted heal content under K",
+                             child_tag=None)
+
+    result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(),
+                                         containment_guard=False, claimed_refresh_keys={kc.key})
+    assert len(result) == 1
+    assert result[0].key != kc.key                                # claimed key NOT re-adopted
+    assert (await store.get_fact(kc.key)).value == "the vetted heal content under K"  # heal preserved
