@@ -184,6 +184,32 @@ def test_model_switch_no_server_never_invents_server_key(tmp_path):
     assert fresh.provider.default_model == "model-b" and fresh.server is None
 
 
+def test_model_switch_audit_failure_still_persists_exit_zero(components_home, monkeypatch):
+    """#37: an audit-log emit failure must NOT be reported as a persist failure. The durable
+    overlay write already succeeded — surface a secondary warning and exit 0, not exit 2."""
+    _seed_config(components_home)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False
+    )
+
+    class _BoomBus:
+        def __init__(self, *a, **k):
+            pass
+
+        async def publish(self, *a, **k):
+            raise RuntimeError("audit disk full")
+
+    monkeypatch.setattr(model_ops, "EventBus", _BoomBus)
+    result = runner.invoke(app, ["model", "model-b"])
+    assert result.exit_code == 0, result.output  # persist succeeded despite audit failure
+    # Overlay durably written.
+    assert (
+        load_overlay(components_home / "overrides.yaml")["provider"]["default_model"] == "model-b"
+    )
+    # Secondary warning surfaced, honestly labeled as audit-only.
+    assert "audit" in result.output.lower()
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,

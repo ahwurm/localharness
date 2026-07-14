@@ -277,6 +277,39 @@ async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_
     assert overlay["org"]["default_model"] == "model-b"
 
 
+# --- #37: an audit-emit failure is not a persist failure --- #
+
+
+@pytest.mark.asyncio
+async def test_model_swap_audit_failure_not_reported_as_persist_failure(tmp_path, monkeypatch):
+    """#37: when the audit emit raises AFTER the durable overlay write, the REPL must still
+    report the swap as succeeded (with a secondary audit warning), NOT 'persisting failed'."""
+    from localharness.cli import model_ops
+
+    harness = _harness(audit_log_path=str(tmp_path / "audit.jsonl"))
+    repl, channel, agent = _repl(tmp_path, harness, live=["model-a", "model-b"])
+
+    class _BoomBus:
+        def __init__(self, *a, **k):
+            pass
+
+        async def publish(self, *a, **k):
+            raise RuntimeError("audit disk full")
+
+    monkeypatch.setattr(model_ops, "EventBus", _BoomBus)
+
+    await repl._handle_slash("/model model-b")
+
+    assert agent._llm.config.model == "model-b"
+    joined = "\n".join(channel.messages)
+    assert "Switched to model-b" in joined
+    assert "persisting the new default failed" not in joined
+    # The overlay was still written durably.
+    assert load_overlay(tmp_path / "overrides.yaml")["provider"]["default_model"] == "model-b"
+    # A secondary, honestly-labeled audit warning is surfaced.
+    assert "audit" in joined.lower()
+
+
 # --- Per-agent pin trap: a persisted switch never reaches a model-pinned agent --- #
 
 
