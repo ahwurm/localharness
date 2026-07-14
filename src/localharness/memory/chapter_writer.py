@@ -451,7 +451,7 @@ async def write_cluster_schemas(
     depth_cap: int = 2, corpus_char_cap: int = 6000, stale_looks: int = 5,
     embedder=None, embed_sim: float = 0.55, refresh_overlap: float = 0.7,
     containment_guard: bool = True, containment_counts: dict | None = None,
-    attempts_log: list | None = None,
+    attempts_log: list | None = None, claimed_refresh_keys: set[str] | None = None,
 ) -> list["Fact"]:
     """Turn stable lesson clusters into grounded chapter schema nodes — the SEMA-02/03 write half.
 
@@ -469,7 +469,11 @@ async def write_cluster_schemas(
 
     schemas: list["Fact"] = []
     claimed: set[int] = set()
-    claimed_refresh_keys: set[str] = set()  # one identity adoption per key per pass (facet split safe)
+    # #69: ONE claimed-refresh-key set per PASS, shared with the recheck step (threaded from
+    # consolidation.py) — else the writer could re-adopt a key the recheck just healed onto and clobber
+    # the vetted row. Falls back to a local set for a direct call (facet split safe: one adoption/key/pass).
+    if claimed_refresh_keys is None:
+        claimed_refresh_keys = set()
     # #71: derive the active-primary member map ONCE and thread it into every _write_one (guard +
     # adoption) instead of re-deriving all chapters' member sets per write (~O(chapters × writes)).
     member_map = await _active_chapter_primary_members(store)
@@ -641,6 +645,7 @@ async def recheck_stale_chapters(
     cap: int = 10, corpus_char_cap: int = 6000, refresh_overlap: float = 0.7,
     containment_guard: bool = True, containment_counts: dict | None = None,
     attempts_log: list | None = None, counts: dict | None = None,
+    claimed_refresh_keys: set[str] | None = None,
 ) -> None:
     """Re-validate active chapters against their CURRENT active members and heal the stale ones.
 
@@ -661,7 +666,9 @@ async def recheck_stale_chapters(
     ) as cur:
         chapters = [_row_to_fact(r) for r in await cur.fetchall()]
 
-    claimed_keys: set[str] = set()  # one identity adoption per key per pass (facet-split safe)
+    # #69: ONE claimed-refresh-key set per PASS, shared with the writer step (threaded from
+    # consolidation.py) so a key this re-check adopts is visible to the writer and cannot be re-adopted.
+    claimed_keys = claimed_refresh_keys if claimed_refresh_keys is not None else set()
     # #71: one active-primary member map for the whole re-check pass, threaded into each heal's guard
     # + adoption (a per-pass snapshot; #70 re-reads each item's status so a mid-pass supersede is skipped).
     member_map = await _active_chapter_primary_members(store)

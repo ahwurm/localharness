@@ -1224,8 +1224,7 @@ async def test_writer_skips_a_shared_claimed_refresh_key(store):
     a1 = await _seed_sem(store, _READ_A, "s0", topic="reads")
     a2 = await _seed_sem(store, _READ_B, "s1", topic="reads")
     a3 = await _seed_sem(store, _READ_C, "s0", topic="reads")     # the cluster grows to {a1,a2,a3}
-    kc = await _seed_chapter(store, "claimk01", [a1, a2], body="the vetted heal content under K",
-                             child_tag=None)
+    kc = await _seed_chapter(store, "claimk01", [a1, a2], body="the vetted heal content under K")
 
     result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(),
                                          containment_guard=False, claimed_refresh_keys={kc.key})
