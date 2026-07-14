@@ -183,6 +183,32 @@ def test_generation_prompt_demonstrates_nested_tool_permission_shapes():
     ), "the tools: block must demonstrate an indented deny: child"
 
 
+def test_intent_and_confirm_prompts_advertise_cancel(tmp_path, mock_llm_client):
+    """#59(b): the escape word was 4 undocumented exact-matches. Advertise it — the
+    ask-description (intent) prompt AND the confirm prompt must mention 'cancel'."""
+    llm = mock_llm_client([mock_llm_client.Response(content=f"name: hn\nrole: {ROLE}")])
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}"])
+    repl, orch, agent, bus = _repl(channel, llm, config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    intent = next(m for m in channel.sent if "help you create an agent" in m)
+    assert "cancel" in intent.lower()  # the ask-description prompt advertises the escape
+    confirm = next(m for m in channel.sent if "look good" in m.lower())
+    assert "cancel" in confirm.lower()  # (yes/no/change, or 'cancel')
+
+
+def test_discuss_reask_prompt_advertises_cancel(tmp_path):
+    """#59(b): the DISCUSS re-ask ('Tell me more') must also advertise 'cancel'."""
+    channel = ScriptedChannel(["create an agent", "hi"])  # 'hi' too short -> re-ask
+    repl, orch, agent, bus = _repl(channel, RaisingLLM(), config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    reask = next(m for m in channel.sent if "Tell me more" in m)
+    assert "cancel" in reask.lower()
+
+
 class RaisingLLM:
     """LLM double whose stream_complete RAISES — models a provider timeout.
 

@@ -130,7 +130,8 @@ class OrchestratorREPL:
                         # runs. The user's NEXT message is the description.
                         await self._channel.send_message(
                             "I'd like to help you create an agent. "
-                            "Tell me more about what you need it to do.",
+                            "Tell me more about what you need it to do "
+                            "(or say 'cancel' to stop).",  # #59: advertise the escape
                             metadata={"style": "system.info"},
                         )
                         continue
@@ -544,7 +545,7 @@ class OrchestratorREPL:
             workflow.transition("configure_done")  # advance to CONFIRM
             await self._channel.send_message(
                 f"Here's the generated config:\n\n```yaml\n{yaml_str}\n```\n\n"
-                "Does this look good? (yes/no/change)",
+                "Does this look good? (yes/no/change, or 'cancel')",  # #59: advertise the escape
                 metadata={"style": "system.info"},
             )
             return
@@ -590,6 +591,6 @@ class OrchestratorREPL:
         if new_state == WorkflowState.DISCUSS:
             await self._channel.send_message(
                 "Tell me more. What tasks should this agent handle? "
-                "What tools does it need?",
+                "What tools does it need? (or say 'cancel' to stop)",  # #59: advertise the escape
                 metadata={"style": "system.info"},
             )

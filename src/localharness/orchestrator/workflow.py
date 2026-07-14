@@ -2,9 +2,68 @@
 from __future__ import annotations
 
 import os
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+
+# #59: deterministic, leading-anchored cancellation. The old escape was 4 undocumented
+# exact-matches (cancel/quit/exit/nevermind), so "actually, never mind, forget it" became
+# the agent DESCRIPTION. Each phrase is a tuple of adjacent tokens; matched longest-first so
+# "never mind" wins over any single token. NO model judgment — a pure, table-driven function.
+_CANCEL_PHRASES: tuple[tuple[str, ...], ...] = (
+    ("never", "mind"),
+    ("forget", "it"),
+    ("nevermind",),
+    ("cancel",),
+    ("stop",),
+    ("quit",),
+    ("exit",),
+    ("abort",),
+)
+# One optional leading softener ("actually forget it", "no, cancel").
+_CANCEL_PREFIXES = ("actually", "no")
+# Ignorable filler tokens allowed ONLY after a cancel phrase anchored the match ("cancel that").
+_CANCEL_FILLERS = ("it", "that", "this", "please", "then", "now", "everything", "all")
+
+
+def _cancel_phrase_len_at(words: list[str], i: int) -> int:
+    """Length of the longest cancel phrase whose tokens match starting at position i (0 if none)."""
+    best = 0
+    for phrase in _CANCEL_PHRASES:
+        n = len(phrase)
+        if n > best and tuple(words[i:i + n]) == phrase:
+            best = n
+    return best
+
+
+def is_cancellation(text: str) -> bool:
+    """Return True iff `text` is a cancellation of the creation flow (#59).
+
+    Normalizes (lowercase, punctuation -> space), drops ONE optional 'actually'/'no' prefix,
+    then requires the WHOLE remaining input to be cancel phrases (plus trailing fillers). So a
+    cancel word buried after real content ("an agent that helps me cancel subscriptions") never
+    fires — leading-anchor only — and a leading cancel word carrying real content after it
+    ("stop-loss monitor") doesn't either; only a pure escape cancels. Pure, no state.
+    """
+    words = re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
+    if not words:
+        return False
+    if words[0] in _CANCEL_PREFIXES and len(words) > 1:
+        words = words[1:]
+    i = 0
+    anchored = False
+    while i < len(words):
+        n = _cancel_phrase_len_at(words, i)
+        if n:
+            i += n
+            anchored = True
+        elif anchored and words[i] in _CANCEL_FILLERS:
+            i += 1  # fillers count only AFTER a cancel phrase anchored the match
+        else:
+            return False
+    return anchored
 
 
 # A description shorter than this can't advance DISCUSS -> CONFIGURE. It is also the
@@ -50,10 +109,9 @@ class AgentCreationWorkflow:
 
         Returns the new state after processing input.
         """
-        lower = user_input.lower().strip()
-
-        # Cancel from any state
-        if lower in ("cancel", "quit", "exit", "nevermind"):
+        # Cancel from any state — deterministic, leading-anchored (#59). Replaces the 4
+        # undocumented exact-matches that let "actually, never mind" slip through as a description.
+        if is_cancellation(user_input):
             self._state = WorkflowState.CANCELLED
             return self._state
 

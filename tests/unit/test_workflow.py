@@ -2,7 +2,56 @@
 import pytest
 import yaml
 from pathlib import Path
-from localharness.orchestrator.workflow import AgentCreationWorkflow, WorkflowState
+from localharness.orchestrator.workflow import (
+    AgentCreationWorkflow,
+    WorkflowState,
+    is_cancellation,
+)
+
+
+# #59: deterministic, leading-anchored cancellation. A cancel word buried after real
+# content NEVER fires (the subscription example); only input that is WHOLLY a cancel
+# phrase (optionally after one 'actually'/'no' prefix, with trailing fillers) cancels.
+@pytest.mark.parametrize("text", [
+    "cancel",
+    "Cancel.",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "stop",
+    "quit",
+    "exit",
+    "abort",
+    "actually, never mind",
+    "actually never mind, forget it",  # the live receipt that became the DESCRIPTION
+    "no, forget it",
+    "cancel that",          # trailing filler after the phrase
+    "  STOP  ",
+])
+def test_is_cancellation_true(text):
+    assert is_cancellation(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "an agent that helps me cancel subscriptions",  # 'cancel' is DEEPER, not leading
+    "stop-loss trading monitor",                    # leads with 'stop' but has real content
+    "cancel subscriptions for me automatically",    # leading 'cancel' + real content
+    "build me a research agent",
+    "it should summarize the news",
+    "no",           # bare 'no' at confirm means 'change', not cancel
+    "",
+    "   ",
+    "quitting-time reminder bot",                   # 'quit' is a substring, not a word
+])
+def test_is_cancellation_false(text):
+    assert is_cancellation(text) is False
+
+
+def test_is_cancellation_is_pure_no_side_effects():
+    """No model judgment, no state — same input, same answer, repeatable."""
+    for _ in range(3):
+        assert is_cancellation("forget it") is True
+        assert is_cancellation("an agent to cancel subscriptions") is False
 
 
 def test_workflow_starts_in_discuss():
