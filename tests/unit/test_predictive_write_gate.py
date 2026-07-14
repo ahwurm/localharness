@@ -201,8 +201,10 @@ async def test_correction_phrase_supersedes_single_staged_suspect(tmp_path: Path
         await store.store_fact(key="k1", value="the capital is Sydney", confidence=0.8)
         await store.touch_staged(["k1"])
         # BLOCKER 1(a): only the correction_phrase family ("i meant …") supersedes a staged
-        # suspect; a bare negation is quarantine-only (proven in the next test).
-        await bus.publish(_um("actually i meant the other one"))
+        # suspect; a bare negation is quarantine-only (proven in the next test). BUG #45: the
+        # correction must also be content-RELATED to the suspect — "capital" is the shared
+        # salient token here (the old placeholder "i meant the other one" shared none).
+        await bus.publish(_um("actually the capital is Canberra"))
         # k1's active row is now the disputed marker at 0.6 — a real, key-based supersede
         # that also drops the disputed suspect below the 0.7 injection gate.
         active = await store.get_fact("k1")
@@ -242,24 +244,28 @@ async def test_negation_with_suspects_quarantines_not_supersede(tmp_path: Path):
         await store.close()
 
 
-async def test_supersede_targets_only_the_single_most_recent_suspect(tmp_path: Path):
-    # BLOCKER 1(b): the blast radius is exactly ONE fact — the single most-recently-staged
-    # suspect (max last_accessed_staged, tie-break highest id) — never the whole sitting.
+async def test_supersede_targets_the_related_suspect_not_the_most_recent(tmp_path: Path):
+    # BUG #45 (this INVERTS the pre-fix pin, which superseded the single most-recently-staged
+    # suspect regardless of content): with several staged suspects, the dispute targets the one
+    # the correction is content-RELATED to — NOT merely the most recent. The blast radius is
+    # still exactly ONE fact.
     store, bus = await _open_gate(tmp_path)
     try:
-        await store.store_fact(key="k1", value="older staged fact", confidence=0.8)
-        await store.store_fact(key="k2", value="newer staged fact", confidence=0.8)
+        # k1 (RELATED to the coming correction) is staged FIRST / older; k2 (UNRELATED) is
+        # staged LAST / most-recent — so recency and relatedness point at different facts.
+        await store.store_fact(key="k1", value="the vLLM server listens on port 8000", confidence=0.8)
+        await store.store_fact(key="k2", value="the user's dog is named Rex", confidence=0.8)
         await store.touch_staged(["k1", "k2"])
-        # force a deterministic recency gap so "most-recent" is unambiguous (k2 newer).
         await store._db.execute("UPDATE facts SET last_accessed_staged = 1000 WHERE key = 'k1'")
         await store._db.execute("UPDATE facts SET last_accessed_staged = 2000 WHERE key = 'k2'")
         await store._db.commit()
-        await bus.publish(_um("actually i meant something else"))
+        # shares {vllm, server, port} with k1, nothing with k2.
+        await bus.publish(_um("actually the vLLM server port is 8081"))
         k1 = await store.get_fact("k1")
         k2 = await store.get_fact("k2")
-        # ONLY the most-recent (k2) is disputed; the older suspect is left untouched.
-        assert k2 is not None and k2.value.startswith("[disputed") and k2.confidence == 0.6
-        assert k1 is not None and k1.value == "older staged fact" and k1.confidence == 0.8
+        # the RELATED (older) suspect is disputed; the UNRELATED most-recent one is untouched.
+        assert k1 is not None and k1.value.startswith("[disputed") and k1.confidence == 0.6
+        assert k2 is not None and k2.value == "the user's dog is named Rex" and k2.confidence == 0.8
     finally:
         await store.close()
 
@@ -272,12 +278,67 @@ async def test_supersede_preserves_full_value_no_truncation(tmp_path: Path):
         long_value = "CAPITAL FACT: " + "x" * 300  # >> the old 180-char _preview cap
         await store.store_fact(key="k1", value=long_value, confidence=0.8)
         await store.touch_staged(["k1"])
-        await bus.publish(_um("actually i meant a different city"))
+        # BUG #45: correction is content-related to the suspect (shares "capital"/"fact").
+        await bus.publish(_um("actually the capital fact changed"))
         active = await store.get_fact("k1")
         assert active is not None
         assert active.value.startswith("[disputed")
         # the ENTIRE original survives behind the marker (no 180-char truncation).
         assert long_value in active.value
+    finally:
+        await store.close()
+
+
+async def test_unrelated_correction_disputes_nothing(tmp_path: Path):
+    # BUG #45 (the exact live repro): fact A is retrieved (staged), then the user corrects an
+    # UNRELATED fact B two turns later. Pre-fix, A was superseded to "[disputed …]" at 0.6 —
+    # silently vanishing from MEMORY.md. Post-fix, a correction only disputes a suspect it is
+    # content-related to; with none related, NOTHING is disputed and the correction is captured
+    # additively as a quarantine (so reconciliation / the model's own path can still act on it).
+    store, bus = await _open_gate(tmp_path)
+    try:
+        await store.store_fact(key="pet", value="the dog is named Rex", confidence=0.9)
+        await store.touch_staged(["pet"])
+        # correction_phrase family ("actually"), but shares NO salient token with the dog fact.
+        await bus.publish(_um("actually the bakery is in Boulder"))
+        # A is byte-untouched — same value, same confidence, still injectable.
+        a = await store.get_fact("pet")
+        assert a is not None
+        assert a.value == "the dog is named Rex"
+        assert a.confidence == 0.9
+        # nothing anywhere carries the dispute marker ...
+        assert not any(
+            f.value.startswith("[disputed") for f in await _active_facts(store)
+        )
+        # ... and the unrelated correction was captured additively (not lost, not a supersede).
+        quar = [
+            f for f in await _active_facts(store) if f.key.startswith("correction/quarantine/")
+        ]
+        assert len(quar) == 1
+    finally:
+        await store.close()
+
+
+async def test_correction_about_the_staged_fact_still_disputes(tmp_path: Path):
+    # BUG #45 true-positive guard (the sema05 eval's correction shape depends on this path): a
+    # correction that IS about the staged fact — sharing salient tokens like port/vLLM/server —
+    # still supersedes it exactly as before. Only content-UNRELATED disputes are suppressed.
+    store, bus = await _open_gate(tmp_path)
+    try:
+        await store.store_fact(
+            key="cfg/vllm_port", value="the vLLM server listens on port 8000", confidence=0.8
+        )
+        await store.touch_staged(["cfg/vllm_port"])
+        await bus.publish(_um("actually the vLLM server now runs on port 8081"))
+        active = await store.get_fact("cfg/vllm_port")
+        assert active is not None
+        assert active.value.startswith("[disputed")
+        assert "the vLLM server listens on port 8000" in active.value  # full value preserved
+        assert active.confidence == 0.6
+        assert "tier:correction_pending" in active.tags
+        # reversible: the original survives in history.
+        history = await store.get_fact_history("cfg/vllm_port")
+        assert any(v.value == "the vLLM server listens on port 8000" for v in history)
     finally:
         await store.close()
 
@@ -308,8 +369,9 @@ async def test_disputed_gate_candidate_is_not_promoted_into_injected_block(tmp_p
             source="write_gate", provenance=sess,
         )
         await store.touch_staged([gate_key])
-        # dispute it via a correction_phrase trigger (the class that supersedes post-BLOCKER-1).
-        await bus.publish(_um("actually i meant a different fix"))
+        # dispute it via a correction_phrase trigger (the class that supersedes post-BLOCKER-1);
+        # BUG #45: content-related to the gate suspect ("mytool"/"error" are shared salient tokens).
+        await bus.publish(_um("actually the mytool error is different"))
         disputed = await store.get_fact(gate_key)
         assert disputed is not None and disputed.value.startswith("[disputed")
         assert "tier:correction_pending" in disputed.tags
