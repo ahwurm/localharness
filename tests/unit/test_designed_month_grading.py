@@ -153,6 +153,27 @@ async def test_grade_holds_on_clean_designed_store(store):
 
 
 @pytest.mark.asyncio
+async def test_a1_failure_gates_holds_verdict(store):
+    """#40: a1_ok=False with EVERY B-stage green must NOT certify HOLDS. The HOLDS gate and the
+    failing-stage scan derive from ONE ordered check list, so A1 gates the verdict — previously
+    the 5-term HOLDS gate omitted A1 while the 6-term scan named it, so a1 failure with green
+    B-stages was graded a false HOLDS (failing_stage None)."""
+    m = await _seed_holds(store)
+    # Two extraction-expected day3 topic-sittings that produce NO atoms drag a1_recall to 4/6
+    # (< 0.8) while B1..B4 stay green: chapters still form from day1/day2 (recall is per-topic,
+    # not per-sitting) and no day3 atoms means no chapter pollution / no arc change.
+    m["days"].append("day3")
+    for t in ("markets", "kyoto"):
+        m["queries"].append({"id": f"d3-{t[0]}", "day": "day3", "topic": t,
+                             "text": f"follow-up {t} question on day three"})
+    g = await sema._grade_designed_month(store, m, _tqm(m))
+    sb = g["stage_b"]
+    assert g["stage_a"]["a1_ok"] is False and g["stage_a"]["a1_recall"] < 0.8
+    assert sb["b1_ok"] and sb["b2_ok"] and sb["b3_ok"] and sb["b4_ok"] and g["byte_stable"]
+    assert g["verdict"] == "INCONCLUSIVE" and g["failing_stage"] == "A1", g
+
+
+@pytest.mark.asyncio
 async def test_grade_kill_on_ungrounded_atom(store):
     """A2 zero tolerance: an atom whose claim is not grounded in its day's transcript -> KILL."""
     m = await _seed_holds(store)
