@@ -76,6 +76,39 @@ def test_workflow_gathered_stores_description():
     assert "fitness" in wf.gathered["description"].lower()
 
 
+def test_change_followup_updates_generation_input(tmp_path: Path):
+    """#56: after 'change' at confirm, the follow-up message must UPDATE the stored
+    description so regeneration runs on the CORRECTED input — the old code stored the
+    description once (`if 'description' not in gathered`) so 'change' regenerated an
+    IDENTICAL config. Choice: append-with-newline (original intent + correction both
+    reach the generator)."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.transition("Track stock prices and summarize the daily moves")  # -> CONFIGURE
+    wf.transition("")  # -> CONFIRM
+    original_desc = wf.gathered["description"]
+    wf.transition("change")  # -> DISCUSS
+    assert wf.state == WorkflowState.DISCUSS
+    wf.transition("also include crypto and alert on 5% swings")  # the correction
+    updated = wf.gathered["description"]
+    assert updated != original_desc  # generation input actually changed
+    assert "Track stock prices" in updated  # original intent preserved
+    assert "crypto" in updated  # correction folded in
+    assert wf.state == WorkflowState.CONFIGURE  # advances to regenerate
+
+
+def test_short_then_long_description_recovers(tmp_path: Path):
+    """#56 corollary: a first reply <=10 chars set the description but could never be
+    replaced (`if 'description' not in gathered`), wedging DISCUSS forever. A subsequent
+    longer description must REPLACE the too-short one and advance."""
+    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf.transition("agent")  # 5 chars — too short, stays in DISCUSS
+    assert wf.state == WorkflowState.DISCUSS
+    wf.transition("monitor hacker news for AI stories and summarize them")
+    assert wf.state == WorkflowState.CONFIGURE  # wedge dead — it advanced
+    # The too-short stub did NOT contaminate the real description.
+    assert wf.gathered["description"] == "monitor hacker news for AI stories and summarize them"
+
+
 def test_deploy_config_rejects_invalid_yaml(tmp_path: Path):
     """deploy_config must raise ValueError for unparseable YAML."""
     wf = AgentCreationWorkflow(config_dir=tmp_path)
