@@ -66,6 +66,48 @@ def is_cancellation(text: str) -> bool:
     return anchored
 
 
+def _short_validation_error(exc: Exception) -> str:
+    """Compact a Pydantic ValidationError to 'field: message' pairs — NO pydantic.dev URL,
+    no 'N validation errors for AgentConfig' header (#57: the raw wall is what the user got)."""
+    try:
+        from pydantic import ValidationError
+    except Exception:  # pragma: no cover
+        return str(exc)
+    if isinstance(exc, ValidationError):
+        parts = [
+            f"{'.'.join(str(x) for x in e.get('loc', ())) or '<root>'}: {e.get('msg', '')}"
+            for e in exc.errors()
+        ]
+        return "; ".join(parts) or str(exc)
+    return str(exc)
+
+
+def validate_agent_yaml(yaml_str: str) -> str | None:
+    """Parse + AgentConfig-validate a generated YAML WITHOUT writing (#57).
+
+    Returns None when the YAML is a deployable AgentConfig, else a SHORT, URL-free human
+    error. The REPL calls this BEFORE the confirm prompt so a user never approves YAML that
+    then explodes at deploy with a raw Pydantic wall (live: permissions.mode: read_only,
+    legal values auto|manual). Deploy still re-validates — this is the pre-confirm gate.
+    """
+    import yaml as _yaml
+    from localharness.config.models import AgentConfig
+
+    try:
+        data = _yaml.safe_load(yaml_str)
+    except _yaml.YAMLError as exc:
+        return f"not valid YAML: {exc}"
+    if not isinstance(data, dict):
+        return f"not a YAML mapping (got {type(data).__name__})"
+    if not data.get("name"):
+        return "missing required 'name' field"
+    try:
+        AgentConfig(**data)
+    except Exception as exc:
+        return _short_validation_error(exc)
+    return None
+
+
 # A description shorter than this can't advance DISCUSS -> CONFIGURE. It is also the
 # boundary #56 uses to decide replace-vs-append: at/below it the stored description is a
 # too-short stub to be REPLACED; above it, a valid description a 'change' follow-up APPENDS to.

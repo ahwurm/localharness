@@ -31,6 +31,17 @@ _CREATION_TRIGGERS = ("create an agent", "create agent", "make an agent",
                       "i need an agent", "set up an agent", "setup an agent")
 
 
+def _literal_values(annotation: Any) -> list[str]:
+    """Extract the string values of a Pydantic Literal field, drilling through list[Literal[...]]
+    (#57: derive permissions.mode / tools.inherit legal values off the schema, no hardcoding)."""
+    import typing
+
+    args = typing.get_args(annotation)
+    if args and typing.get_origin(annotation) in (list, set, tuple, frozenset):
+        return _literal_values(args[0])
+    return [a for a in args if isinstance(a, str)]
+
+
 def _generation_system_prompt() -> str:
     """System prompt for agent-YAML generation, DERIVED from AgentConfig (#33).
 
@@ -49,6 +60,11 @@ def _generation_system_prompt() -> str:
     allowed = ", ".join(fields)
     tool_keys = ", ".join(ToolConfig.model_fields)
     perm_keys = ", ".join(PermissionConfig.model_fields)
+    # #57(b): state the LEGAL enum values for the fields the prompt names, DERIVED from the
+    # Pydantic Literals so the stated contract and the schema (extra='forbid' + Literal) can't
+    # drift — the model stops guessing `permissions.mode: read_only` (live) or bad inherit scopes.
+    mode_values = ", ".join(_literal_values(PermissionConfig.model_fields["mode"].annotation))
+    inherit_values = ", ".join(_literal_values(ToolConfig.model_fields["inherit"].annotation))
     return (
         "Generate a LocalHarness agent YAML config. Return ONLY the YAML, no prose.\n"
         f"Required top-level keys (no defaults): {required}.\n"
@@ -58,10 +74,11 @@ def _generation_system_prompt() -> str:
         f"Allowed top-level keys (no others; unknown keys are rejected): {allowed}.\n"
         "Do not wrap the keys under any parent key; every key is top-level.\n"
         "tools and permissions are nested objects — never a bare string or list:\n"
-        f"  - tools object keys: {tool_keys}. To restrict tools, deny names:\n"
+        f"  - tools object keys: {tool_keys} (tools.inherit is a list of: {inherit_values}). "
+        "To restrict tools, deny names:\n"
         "      tools:\n"
         "        deny: [bash, write]\n"
-        f"  - permissions object keys: {perm_keys}.\n\n"
+        f"  - permissions object keys: {perm_keys} (permissions.mode is one of: {mode_values}).\n\n"
         "Example (a read-only agent):\n"
         "name: hn-monitor\n"
         "role: monitor Hacker News and summarize the top stories each morning\n"
@@ -511,25 +528,46 @@ class OrchestratorREPL:
             return
 
         if new_state == WorkflowState.CONFIGURE:
-            # Workflow gathered enough info — use LLM directly to generate YAML.
-            # Uses llm.complete() instead of run_turn() to avoid publishing
-            # TaskComplete events which cause double terminal output.
+            # Workflow gathered enough info — use the LLM directly to generate YAML.
+            # stream_complete (not run_turn) avoids publishing TaskComplete events (double output).
             import re
+
+            from localharness.orchestrator.workflow import validate_agent_yaml
+
             gathered = workflow.gathered
-            messages = [
+            description = gathered.get("description", user_input)
+            base_messages = [
                 {"role": "system", "content": _generation_system_prompt()},
-                {"role": "user", "content": gathered.get("description", user_input)},
+                {"role": "user", "content": description},
             ]
-            # #18: stream at the transport level. Return-value shape is unchanged
-            # (stream_complete returns the same (message, usage) as complete).
-            # #19: unpack the tuple — reading .content off the tuple itself always
-            # yielded "" and the flow could never produce a config.
+
+            async def _generate(msgs: list[dict]) -> str:
+                # #18 stream at the transport level; #19 unpack the (message, usage) tuple —
+                # reading .content off the tuple itself always yielded "".
+                message, _usage = await self._agent._llm.stream_complete(msgs, tools=None)
+                raw = getattr(message, "content", "") or ""
+                # Strip markdown code fences (LLMs often wrap in ```yaml...```).
+                raw = re.sub(r"^```(?:yaml)?\s*\n?", "", raw.strip())
+                return re.sub(r"\n?```\s*$", "", raw.strip())
+
             try:
-                message, _usage = await self._agent._llm.stream_complete(messages, tools=None)
+                yaml_str = await _generate(base_messages)
+                err = validate_agent_yaml(yaml_str)
+                if err is not None:
+                    # #57: NEVER show YAML that will explode at deploy. Regenerate ONCE, feeding
+                    # the exact validation error back so the model corrects that field.
+                    retry_messages = base_messages + [
+                        {"role": "assistant", "content": yaml_str},
+                        {"role": "user", "content": (
+                            f"That config is invalid: {err}. Fix ONLY that and return the "
+                            "corrected YAML, nothing else."
+                        )},
+                    ]
+                    yaml_str = await _generate(retry_messages)
+                    err = validate_agent_yaml(yaml_str)
             except Exception as exc:
                 # #29: a provider error here must not tear down the whole session
-                # (the REPL loop catches only EOFError). Abandon creation
-                # truthfully; the session stays alive in normal conversation.
+                # (the REPL loop catches only EOFError). Abandon creation truthfully.
                 self._orchestrator._active_workflow = None
                 await self._channel.send_message(
                     f"Agent generation failed: {exc}\nAgent was NOT created. "
@@ -537,10 +575,20 @@ class OrchestratorREPL:
                     metadata={"style": "system.error"},
                 )
                 return
-            yaml_str = getattr(message, "content", "") or ""
-            # Strip markdown code fences if present (LLMs often wrap in ```yaml...```)
-            yaml_str = re.sub(r'^```(?:yaml)?\s*\n?', '', yaml_str.strip())
-            yaml_str = re.sub(r'\n?```\s*$', '', yaml_str.strip())
+
+            if err is not None:
+                # #57: still invalid after one correction — abort truthfully. Never present
+                # invalid YAML for approval; the short, URL-free error says what went wrong
+                # (no raw Pydantic wall / pydantic.dev URL reaches the channel).
+                self._orchestrator._active_workflow = None
+                await self._channel.send_message(
+                    f"Agent generation produced an invalid config twice ({err}). "
+                    "Agent was NOT created — creation abandoned. "
+                    "Say 'create an agent' to try again.",
+                    metadata={"style": "system.error"},
+                )
+                return
+
             workflow.set_generated_yaml(yaml_str)
             workflow.transition("configure_done")  # advance to CONFIRM
             await self._channel.send_message(

@@ -209,6 +209,57 @@ def test_discuss_reask_prompt_advertises_cancel(tmp_path):
     assert "cancel" in reask.lower()
 
 
+_INVALID_YAML = "name: good-agent\nrole: monitor stuff\npermissions:\n  mode: read_only"
+_INVALID_YAML_2 = "name: good-agent\nrole: monitor stuff\ntemperature: 999"
+
+
+def test_invalid_then_valid_shows_valid_config(tmp_path, mock_llm_client):
+    """#57: invalid generated YAML must NOT be shown for approval. It regenerates ONCE
+    (error fed back) and the CONFIRM prompt shows the VALID config."""
+    valid = f"name: good-agent\nrole: {ROLE}"
+    llm = mock_llm_client([
+        mock_llm_client.Response(content=_INVALID_YAML),  # attempt 1 — invalid enum
+        mock_llm_client.Response(content=valid),           # attempt 2 — valid
+    ])
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}"])
+    repl, orch, agent, bus = _repl(channel, llm, config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    confirm = next((m for m in channel.sent if "look good" in m.lower()), None)
+    assert confirm is not None, f"no confirm prompt; sent={channel.sent}"
+    assert ROLE in confirm  # the VALID config is shown
+    assert "read_only" not in confirm  # the invalid one was never presented
+    assert orch.active_workflow is not None  # still mid-flow, awaiting confirm
+
+
+def test_invalid_twice_aborts_without_pydantic_dump(tmp_path, mock_llm_client):
+    """#57: two invalid configs in a row -> truthful abort. NO raw Pydantic wall
+    (pydantic.dev URL) ever reaches the channel; the config is never shown for approval."""
+    llm = mock_llm_client([
+        mock_llm_client.Response(content=_INVALID_YAML),
+        mock_llm_client.Response(content=_INVALID_YAML_2),
+    ])
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}"])
+    repl, orch, agent, bus = _repl(channel, llm, config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    assert not any("look good" in m.lower() for m in channel.sent)  # never asked to approve
+    assert not any("pydantic" in m.lower() for m in channel.sent)   # no raw ValidationError wall
+    assert any("NOT created" in m for m in channel.sent)            # truthful abort
+    assert orch.active_workflow is None                             # abandoned cleanly
+    assert not (tmp_path / "agents").exists() or not list((tmp_path / "agents").glob("*.yaml"))
+
+
+def test_generation_prompt_states_enum_legal_values():
+    """#57(b): the prompt must state the legal enum values for permissions.mode, DERIVED
+    from the Pydantic Literal so it can't drift from AgentConfig."""
+    from localharness.cli.repl import _generation_system_prompt
+    prompt = _generation_system_prompt()
+    assert "auto" in prompt and "manual" in prompt  # permissions.mode legal values
+
+
 class RaisingLLM:
     """LLM double whose stream_complete RAISES — models a provider timeout.
 
@@ -232,9 +283,17 @@ def test_deploy_failure_never_claims_success(tmp_path, mock_llm_client):
     """#27: on deploy failure the REPL sent 'Deploy failed' AND THEN, on the same
     (both) path, 'Agent created.' plus reset the workflow as if it succeeded. The
     failure path must never claim success; it must be truthful and abandon cleanly
-    with the session still alive."""
-    # 'Bad Name' (space + uppercase) fails AgentConfig's name rule -> deploy raises.
-    llm = mock_llm_client([mock_llm_client.Response(content=f"name: Bad Name\nrole: {ROLE}")])
+    with the session still alive.
+
+    (#57 moved schema-invalid configs to a pre-confirm generation abort, so the deploy
+    STAGE is now exercised with a genuine deploy-time failure: a VALID config whose
+    target already exists — deploy_config refuses to overwrite it (#28).)"""
+    (tmp_path / "agents").mkdir(parents=True)
+    existing = tmp_path / "agents" / "finance-helper.yaml"
+    existing.write_text("name: finance-helper\nrole: the original agent\n")
+    original = existing.read_bytes()
+
+    llm = mock_llm_client([mock_llm_client.Response(content=f"name: finance-helper\nrole: {ROLE}")])
     channel = ScriptedChannel(
         ["create an agent", f"it should {ROLE[0].lower()}{ROLE[1:]}", "yes"]
     )
@@ -246,8 +305,7 @@ def test_deploy_failure_never_claims_success(tmp_path, mock_llm_client):
     assert any("Deploy failed" in m for m in channel.sent)  # truthful failure kept
     assert any("NOT created" in m for m in channel.sent)  # explicit non-success
     assert orch.active_workflow is None  # abandoned cleanly, back to normal convo
-    agents_dir = tmp_path / "agents"
-    assert not agents_dir.exists() or list(agents_dir.glob("*.yaml")) == []
+    assert existing.read_bytes() == original  # refuse-overwrite left it byte-identical
 
 
 def test_generation_error_keeps_session_alive(tmp_path):
