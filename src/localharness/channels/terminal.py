@@ -50,6 +50,15 @@ _CROSS = "\u2717"     # ✗  tool result error
 # Official label for the background-memory ("dreaming") status (#20): middle-dot + ellipsis.
 _DREAMING_LABEL = "· dreaming…"   # · dreaming…
 
+# In-turn narration: an interstitial llm_response (content emitted ALONGSIDE tool calls)
+# carries the model's progress narration ("pulling the data…"). Rendered as one dim line
+# (middle-dot idiom, matching _DREAMING_LABEL / the burst separators) opening the coming
+# chunk of tool activity — cropped to the first non-empty line and hard-capped so a chatty
+# model can't wall-of-text the turn (per-call truth stays on the bus ledger). A tool-less
+# llm_response IS the final answer (rendered by the TaskComplete panel) — never here.
+_NARRATE = "·"        # ·  narration line indicator
+_MAX_NARRATION = 160       # hard char cap before the ellipsis
+
 # Burst consolidation: consecutive calls from one tool family collapse into a single
 # live counter line (`◆ web_search · web_fetch · 30/30`) instead of a line per call —
 # a 30-hit research burst is one scrollback line, not 60. Per-call truth (args, errors,
@@ -256,6 +265,21 @@ def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
     return f"{tool_name} {preview}".rstrip()
 
 
+def _narration_line(content: str | None, cap: int = _MAX_NARRATION) -> str:
+    """First non-empty line of `content`, hard-capped to `cap` chars with an ellipsis.
+
+    Returns '' when there is nothing to narrate — empty/whitespace content, which
+    reasoning-parser tool turns legitimately produce (all tokens went to reasoning +
+    tool_calls). The caller skips rendering on ''."""
+    if not content:
+        return ""
+    for raw in content.splitlines():
+        line = raw.strip()
+        if line:
+            return line[: cap - 1].rstrip() + "…" if len(line) > cap else line
+    return ""
+
+
 class TerminalChannel(ChannelAdapter):
     """Rich-formatted terminal channel with streaming output.
 
@@ -292,6 +316,10 @@ class TerminalChannel(ChannelAdapter):
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
         self._burst: _Burst | None = None  # open family-burst consolidation (display-only)
+        # Narration cadence guard: a narration line may open a chunk of tool activity only
+        # after a tool result has rendered since the last one — never two dim lines in a row.
+        # Starts True so the turn's first narration prints.
+        self._tool_result_since_narration: bool = True
         self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
         # call, consumed by its completion receipt (the success result carries only the summary)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
@@ -359,6 +387,7 @@ class TerminalChannel(ChannelAdapter):
             self._stop_thinking()
             self._close_burst()
             self._ensure_idle()
+            self._tool_result_since_narration = True  # a full message closes the chunk cadence
             if agent_id:
                 self._console.print(Panel(
                     Markdown(content),
@@ -457,6 +486,7 @@ class TerminalChannel(ChannelAdapter):
         lines = result.strip().split("\n") if result else [""]
         async with self._output_lock:
             self._stop_thinking()
+            self._tool_result_since_narration = True  # a rendered result re-opens narration
             burst = self._burst
             if burst is not None and tool_name in burst.family:
                 burst.done += 1
@@ -617,6 +647,37 @@ class TerminalChannel(ChannelAdapter):
             finally:
                 self._thinking = None
         self._stop_dreaming()  # #20: real output / input tears the dreaming dot down too (stop-first)
+
+    async def on_action(self, event: Action) -> None:
+        """Render interstitial narration for an llm_response that ALSO made tool calls, then
+        fall through to the base handler for tool_call display. A tool-less llm_response is
+        the final answer (rendered by the TaskComplete panel) — the has_tool_calls
+        discriminator keeps it from being echoed here (the double-print regression)."""
+        if event.action_type == "llm_response":
+            await self._render_narration(event)
+            return
+        await super().on_action(event)
+
+    async def _render_narration(self, event: Action) -> None:
+        """One dim line opening a chunk of tool activity. No-op unless the response also made
+        tool calls (final answers render elsewhere), its content has a non-empty first line,
+        and a tool result has rendered since the last narration — the cadence guard: at most
+        one narration line per chunk, never two dim lines in a row."""
+        if not event.has_tool_calls:
+            return
+        line = _narration_line(event.content)
+        if not line:
+            return
+        async with self._output_lock:
+            if not self._tool_result_since_narration:
+                return
+            self._stop_thinking()
+            self._close_burst()  # freeze the previous chunk's counter before this one opens
+            self._tool_result_since_narration = False
+            self._console.print(
+                f"  [muted]{_NARRATE} {escape(line)}[/muted]",
+                no_wrap=True, overflow="ellipsis",
+            )
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
         """Track context utilization (shown in the next input bubble) and start the

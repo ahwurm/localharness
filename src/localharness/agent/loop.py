@@ -613,6 +613,21 @@ class AgentLoop:
         # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
         _now = datetime.now().astimezone()
         system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
+        # Working directory + placement rule (#75). Without it the model invents paths under
+        # $HOME instead of the project dir it was launched from ("make a folder for yourself"
+        # -> wrong dir). Same deterministic-fact pattern as the date; cwd is stable across the
+        # process, so it doesn't churn the prefix cache per-turn.
+        system_prompt += (
+            f"\n\nWorking directory: {Path.cwd()}"
+            "\nUnless the user names another location, create any files or folders you make "
+            "under this working directory."
+        )
+        # Narration nudge (belt-and-suspenders — the terminal render is the mechanism): a
+        # one-line stage announcement keeps a long multi-step task legible as it runs.
+        system_prompt += (
+            "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
+            'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
+        )
         if tool_call_mode != "native":
             system_prompt += (
                 "\n\nWhen you have finished using tools, respond directly to the user. "
@@ -849,16 +864,20 @@ class AgentLoop:
                 "tool_calls": raw_tool_calls,
             })
 
-            # 7. Publish Action event
+            # 7. Extract tool calls FIRST, so the Action can carry has_tool_calls — the
+            # terminal's discriminator between interstitial narration (content arrives WITH
+            # tool calls) and a final answer (content alone, rendered via TaskComplete).
+            # Mode-correct: native reads response_message.tool_calls, xml/text parses content.
+            tool_calls = _extract_tool_calls(response_message, tool_call_mode)
+
+            # 8. Publish Action event
             await self._bus.publish(Action(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
                 action_type="llm_response",
                 content=content,
+                has_tool_calls=bool(tool_calls),
             ))
-
-            # 8. Extract tool calls
-            tool_calls = _extract_tool_calls(response_message, tool_call_mode)
 
             # 8b. In xml mode, populate assistant message tool_calls so
             # repair_tool_pairing doesn't strip tool results as orphaned
