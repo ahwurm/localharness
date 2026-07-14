@@ -277,6 +277,41 @@ async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_
     assert overlay["org"]["default_model"] == "model-b"
 
 
+# --- #38: the REPL /model list distinguishes malformed from unreachable (shared probe) --- #
+
+
+@pytest.mark.asyncio
+async def test_model_list_malformed_response_repl_path(tmp_path, monkeypatch):
+    """#38: the REPL /model list must render a reached-but-malformed body as its own message,
+    NOT a bare 'no models' — it now delegates to model_ops.list_live_models (the diverged
+    duplicate is gone), so both callers share ONE failure taxonomy."""
+    import json as _json
+
+    import httpx
+
+    class _HtmlResp:
+        def json(self):
+            raise _json.JSONDecodeError("Expecting value", "<html></html>", 0)
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _HtmlResp())
+    # No fake _live_models — exercise the REAL delegation to model_ops.list_live_models.
+    channel = FakeChannel()
+    agent = SimpleNamespace(_llm=FakeLLM())
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(),
+        agent_loop=agent,
+        channel=channel,
+        bus=SimpleNamespace(),
+        config_dir=tmp_path,
+        harness_config=_harness(),
+    )
+
+    await repl._handle_slash("/model")
+
+    joined = "\n".join(channel.messages).lower()
+    assert "wasn't understood" in joined or "openai-compatible" in joined
+
+
 # --- #37: an audit-emit failure is not a persist failure --- #
 
 

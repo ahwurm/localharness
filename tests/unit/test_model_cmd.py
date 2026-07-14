@@ -4,6 +4,9 @@ Offline: the live-model probe is faked at model_ops.list_live_models so no runti
 """
 from __future__ import annotations
 
+import json as _json
+
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -12,6 +15,60 @@ from localharness.cli.app import app
 from localharness.config.overlay import load_overlay
 
 runner = CliRunner()
+
+
+class _HtmlResp:
+    """A reached endpoint whose body isn't an OpenAI model list (e.g. an HTML error page)."""
+
+    def json(self):
+        raise _json.JSONDecodeError("Expecting value", "<html></html>", 0)
+
+
+def test_list_live_models_unreachable_on_network_error(monkeypatch):
+    """#38: a transport error (connection refused/DNS/timeout) is unreachable → ([], False)."""
+    import httpx
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert model_ops.list_live_models("http://localhost:9/v1") == ([], False)
+
+
+def test_list_live_models_malformed_raises_distinct_signal(monkeypatch):
+    """#38: reached-but-malformed (bad JSON / wrong shape) is NOT unreachable — it's a distinct
+    typed signal so callers stop saying 'is it running?' at a live-but-wrong endpoint."""
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _HtmlResp())
+    with pytest.raises(model_ops.MalformedModelListError):
+        model_ops.list_live_models("http://localhost:8081/v1")
+
+
+def test_list_live_models_empty_body_is_reachable(monkeypatch):
+    """Reached-but-empty ({"data": []}) stays distinct from unreachable (a legit empty result)."""
+    import httpx
+
+    class _EmptyResp:
+        def json(self):
+            return {"data": []}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _EmptyResp())
+    assert model_ops.list_live_models("http://x/v1") == ([], True)
+
+
+def test_model_list_malformed_response_distinct_from_unreachable(components_home, monkeypatch):
+    """#38: a reached-but-malformed /models body renders as its OWN message, NOT 'Is it running?'
+    (which wrongly implies the server is down)."""
+    import httpx
+
+    _seed_config(components_home)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _HtmlResp())
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 2, result.output
+    out = result.output.lower()
+    assert "is it running" not in out
+    assert "wasn't understood" in out or "openai-compatible" in out
 
 
 def _seed_config(home, *, agents=None) -> None:
