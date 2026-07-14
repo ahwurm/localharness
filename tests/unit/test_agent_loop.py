@@ -561,6 +561,68 @@ async def test_recovery_nudge_reaches_next_request_and_persists(mock_llm_client,
 
 
 @pytest.mark.asyncio
+async def test_stuck_escalation_returns_wrapup_summary(mock_llm_client, bus):
+    """#83: on stuck escalation the loop makes ONE no-tools wrap-up pass and returns the
+    model's partial-work summary (plus a stuck tail), not a dead '[Agent stuck: …]' notice."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    tc = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
+
+    class _StuckThenWrapupLLM:
+        class config:
+            tool_call_mode = "native"
+            context_window = 128_000
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            if tools is None:  # the forced no-tools wrap-up pass
+                return Response(content="Wrote /tmp/out.txt; the parser step is still TODO."), None
+            return Response(content=None, tool_calls=[tc]), None
+
+    loop = _make_agent_loop(mock_llm_client, [], bus, tool_registry=_SameResultRegistry())
+    loop._llm = _StuckThenWrapupLLM()
+    summary = await loop.run_turn("task")
+
+    assert "Wrote /tmp/out.txt; the parser step is still TODO." in summary
+    assert "partial completion" in summary
+    assert "[Agent stuck: repeated identical tool calls" in summary
+    # telemetry stays honest: still terminates as stuck + fires TurnFailed
+    failed = bus.history(event_types=[TurnFailed])
+    assert any(e.reason == "stuck_detected" for e in failed)
+    # instruction + reply pushed into durable history (budget-path parity)
+    assert any(m.get("role") == "assistant"
+               and "parser step is still TODO" in (m.get("content") or "")
+               for m in loop._conversation)
+
+
+@pytest.mark.asyncio
+async def test_stuck_escalation_falls_back_when_wrapup_raises(mock_llm_client, bus):
+    """#83: if the wrap-up provider call fails, fall back cleanly to the plain stuck notice —
+    the summary pass must never kill the turn."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    tc = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
+
+    class _StuckThenRaiseLLM:
+        class config:
+            tool_call_mode = "native"
+            context_window = 128_000
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            if tools is None:
+                raise RuntimeError("provider boom")
+            return Response(content=None, tool_calls=[tc]), None
+
+    loop = _make_agent_loop(mock_llm_client, [], bus, tool_registry=_SameResultRegistry())
+    loop._llm = _StuckThenRaiseLLM()
+    summary = await loop.run_turn("task")
+
+    assert "Escalating to orchestrator." in summary   # _format_stuck_summary fallback wording
+    assert "partial completion" not in summary
+    failed = bus.history(event_types=[TurnFailed])
+    assert any(e.reason == "stuck_detected" for e in failed)
+
+
+@pytest.mark.asyncio
 async def test_run_turn_handles_provider_connection_error_with_retry(mock_llm_client, bus):
     """ProviderConnectionError triggers one retry; if second also fails, returns summary."""
     from localharness.provider.client import ProviderConnectionError
