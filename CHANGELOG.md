@@ -4,6 +4,46 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.4] — 2026-07-14
+
+The second wave of the same audit (see 0.9.3): seven agent-lifecycle bugs found by driving
+the full create → see → use → persist → collide → escape journey against a live server
+(#55–#61), each filed before its fix and fixed test-first.
+
+### Fixed
+- **`localharness agent create` refuses to overwrite an existing agent** (#55): it
+  previously reported "✓ created" while silently replacing the file — erasing, in the live
+  test, the user's explicit read-only tool restriction. Now: an explicit error naming the
+  path, exit 1; `--force` opts into replacement. This brings the CLI path in line with the
+  invariant the conversational flow already enforced.
+- **Answering "change" at the creation confirm prompt now actually changes something**
+  (#56): the follow-up is appended to the stored description so both the original intent
+  and the correction reach the generator — previously the correction was silently discarded
+  and an identical config regenerated. A too-short first description no longer wedges the
+  wizard permanently.
+- **Generated YAML is validated before you are asked to approve it** (#57): validation
+  previously ran only at deploy, so you could approve the product's own output and then get
+  a raw Pydantic error wall (complete with a pydantic.dev link). Now an invalid generation
+  triggers one regeneration with the error fed back, then a truthful abort; errors are
+  compacted to `field: message`; and the generation prompt states the legal values for the
+  enum fields it names, derived from the models so they cannot drift.
+- **A newly created agent exists immediately** (#58): deploy now registers it into the live
+  session — `/agents` lists it and the delegation tool advertises it — where previously it
+  was invisible and unreachable until restart. Covered by unit/integration tests (not a
+  live-model run); editing an existing agent's YAML by hand still needs a restart.
+- **You can escape the creation wizard like a human** (#59): leading cancellation phrases
+  ("never mind", "forget it", "actually, cancel", …) deterministically cancel — previously
+  only four undocumented exact-match words worked, and "actually, never mind, forget it"
+  became the agent's description. Descriptions that merely contain such words ("an agent
+  that helps me cancel subscriptions") are unaffected, and the escape is now advertised in
+  the wizard's own prompts.
+- **`/quit` mid-wizard cancels the wizard, not your session** (#60): it previously
+  hard-exited the entire session silently while bare "quit" cancelled safely. The first
+  `/quit` now cancels creation and says so; a second one exits.
+- **The CLI spec no longer documents commands that don't exist** (#61): `agent run` and
+  `agent delete` are marked as planned (design retained), and a note documents how to edit
+  or remove an agent today.
+
 ## [0.9.3] — 2026-07-14
 
 A hardening release: 28 bugs found by a systematic post-ship audit — adversarial code
