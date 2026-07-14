@@ -5,6 +5,7 @@ in-flight LLM work (CONS-02), fold + cross-episode recurrence promotion + guardr
 (CONS-03/04), the SOFT cap trim (CONS-05), and churn/sample quality proxies (CONS-06).
 """
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -704,6 +705,48 @@ async def test_discovery_step_reports_embedder_class(store: MemoryStore):
         store, _cfg(tag_discovery_enabled=True), llm=_DispatchLLM(), embedder=_FakeEmbedder()
     ).run()
     assert report.embedder_used == "_FakeEmbedder"
+
+
+@pytest.mark.asyncio
+async def test_discovery_fallback_embedder_constructed_once_across_passes(
+    store: MemoryStore, monkeypatch,
+):
+    """#76: with no injected embedder, the fallback was built FRESH inside every pass —
+    MiniLM reloaded its weights each idle cycle (and spilled loader output over the
+    input box). The first pass's fallback must be cached on the scheduler and reused."""
+    import localharness.memory.embeddings as emb_mod
+
+    calls = {"n": 0}
+
+    def counting_default(model_name=None):
+        calls["n"] += 1
+        return _FakeEmbedder()
+
+    monkeypatch.setattr(emb_mod, "default_embedder", counting_default)
+    cp = ConsolidationPass(store, _cfg(tag_discovery_enabled=True), llm=_DispatchLLM())
+    await cp.run()
+    await cp.run()
+    assert calls["n"] == 1  # one construction, both passes served by the cache
+
+
+def test_quiet_ml_output_swallows_stream_writes_and_sets_env(monkeypatch, capfd):
+    """#76: HF/torch/tqdm write progress directly to stdout/stderr (bypassing logging) —
+    the guard must keep those writes off the interactive terminal and set the
+    progress-suppression env flags; exceptions still propagate."""
+    import sys
+
+    from localharness.memory.embeddings import _quiet_ml_output
+
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    with _quiet_ml_output():
+        print("loading weights…")
+        print("progress bar noise", file=sys.stderr)
+        assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    out, err = capfd.readouterr()
+    assert "loading weights" not in out and "noise" not in err
+    with pytest.raises(ValueError):
+        with _quiet_ml_output():
+            raise ValueError("errors must propagate")
 
 
 @pytest.mark.asyncio
