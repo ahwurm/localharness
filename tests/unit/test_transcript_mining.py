@@ -1631,3 +1631,80 @@ async def test_mislotted_replaces_supersedes_stale_atom_end_to_end(store: Memory
     history = await store.get_fact_history(old_key)
     assert len(history) == 2  # supersede chain intact: 8000 -> 8081
     assert any(h.value == stale_claim and h.status == "superseded" for h in history)
+
+
+# ---------------------------------------------------------------------------
+# BUG #63: the B4(ii) resurrection sweep (_sweep_resurrections) tokenizes each
+# reconciled (stale, active) pair to find the value distinct to the stale side.
+# A shape-(b) reconcile predecessor is stored WITH a bookkeeping prefix
+# ("user correction (pending reconciliation): …"); its words (user, correction,
+# pending, reconciliation) leak into stale_distinct, so a mined atom that merely
+# CONTAINS "user" (etc.) forms a spurious net and is falsely retracted. The fix
+# strips the dispute prefix(es) from BOTH pair values before tokenization, so the
+# net is formed only from the real corrected-away content.
+# ---------------------------------------------------------------------------
+
+
+async def _mint(store: MemoryStore, key: str, value: str):
+    """Mint one active sem/ atom the way mining does, returning the Fact (for its id)."""
+    return await store.store_fact(
+        key=key, value=value, tags=["sem", "pending_consolidation"],
+        confidence=0.65, source="transcript_mining", provenance="p", node_kind="fact",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_retract_atom_on_dispute_prefix_pollution(store: MemoryStore):
+    """The issue repro: a shape-(b) predecessor carries the quarantine prefix, and its clean
+    settled value differs from it ONLY by that prefix. A freshly-mined atom containing 'user'
+    (a prefix word) must NOT be retracted — the prefix is bookkeeping, not corrected-away content."""
+    from localharness.memory.mining import _sweep_resurrections
+
+    # (stale, active) exactly as _reconciled_pairs yields for a shape-(b) confirm: identical
+    # real content, the stale side still prefixed with the stored quarantine marker.
+    pairs = [(
+        "user correction (pending reconciliation): the kyoto trip is in april",
+        "the kyoto trip is in april",
+    )]
+    atom = await _mint(store, "sem/prefs/aa", "the user prefers dark mode over lightscheme")
+
+    retracted = await _sweep_resurrections(store, [atom.id], pairs)
+
+    assert retracted == 0
+    assert (await store.get_fact("sem/prefs/aa")).status == "active"
+
+
+@pytest.mark.asyncio
+async def test_sweep_still_retracts_a_genuine_resurrection_through_the_prefix(store: MemoryStore):
+    """Stripping the prefix must not blind the sweep: when the stale side carries the prefix AND a
+    genuinely superseded value (port 8000 vs the corrected 8081), an atom re-asserting 8000 is
+    still retracted — the real distinct token survives the strip."""
+    from localharness.memory.mining import _sweep_resurrections
+
+    pairs = [(
+        "user correction (pending reconciliation): the vllm port is 8000",
+        "the vllm port is 8081",
+    )]
+    atom = await _mint(store, "sem/gpu/bb", "the vllm port is 8000")
+
+    retracted = await _sweep_resurrections(store, [atom.id], pairs)
+
+    assert retracted == 1
+    assert await store.get_fact("sem/gpu/bb") is None  # retracted out of the active pool
+
+
+@pytest.mark.asyncio
+async def test_sweep_prefixless_pairs_behaviour_unchanged(store: MemoryStore):
+    """Prefix-less pairs are stripped to themselves (no-op), so behaviour is identical: the atom
+    re-asserting the stale distinct token is retracted, an unrelated atom is left active."""
+    from localharness.memory.mining import _sweep_resurrections
+
+    pairs = [("the deploy uses nginx server", "the deploy uses caddy server")]
+    resurrect = await _mint(store, "sem/ops/cc", "we switched back to nginx recently")
+    unrelated = await _mint(store, "sem/ops/dd", "the user drinks coffee daily")
+
+    retracted = await _sweep_resurrections(store, [resurrect.id, unrelated.id], pairs)
+
+    assert retracted == 1
+    assert await store.get_fact("sem/ops/cc") is None       # resurrection retracted
+    assert (await store.get_fact("sem/ops/dd")).status == "active"  # unrelated untouched
