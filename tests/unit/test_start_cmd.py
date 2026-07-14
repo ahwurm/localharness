@@ -258,8 +258,10 @@ def test_repl_slash_agents_with_cards():
     assert any("finance-agent" in str(c) for c in calls)
 
 
-def test_repl_unknown_slash_passes_through():
-    """Unknown slash command passes through to the agent loop."""
+def test_repl_unknown_slash_rejected_deterministically():
+    """#48: an unknown single-token slash command is rejected CLIENT-SIDE (no LLM turn),
+    not passed through to the agent loop. (This test previously asserted the pass-through,
+    which was the bug #48 fixes — a /frobnicate burned a full non-deterministic turn.)"""
     from localharness.cli.repl import OrchestratorREPL
 
     responses = ["/unknown"]
@@ -286,13 +288,12 @@ def test_repl_unknown_slash_passes_through():
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
     asyncio.run(repl.run())
 
-    mock_loop.run_turn.assert_called_once_with(task="/unknown", on_token=None)
-    # REPL should NOT call send_message with the summary
-    summary_calls = [
-        c for c in mock_channel.send_message.call_args_list
-        if len(c[0]) > 0 and c[0][0] == "Done."
-    ]
-    assert len(summary_calls) == 0
+    # No generation turn — a deterministic client-side rejection instead.
+    mock_loop.run_turn.assert_not_called()
+    mock_channel.send_message.assert_any_call(
+        "Unknown command: /unknown — /help lists commands.",
+        metadata={"style": "system.error"},
+    )
 
 
 # ---------------------------------------------------------------------------
