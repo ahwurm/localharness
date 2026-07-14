@@ -1116,25 +1116,30 @@ async def test_agent_loop_instantiates_stuck_detector_from_config(mock_llm_clien
 
     real_init = loop_mod.StuckDetector.__init__
 
-    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3):
+    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
+                 max_nudges_per_turn=3):
         captured["window_size"] = window_size
         captured["recovery_threshold"] = recovery_threshold
         captured["escalation_threshold"] = escalation_threshold
+        captured["max_nudges_per_turn"] = max_nudges_per_turn
         real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
-                  escalation_threshold=escalation_threshold)
+                  escalation_threshold=escalation_threshold,
+                  max_nudges_per_turn=max_nudges_per_turn)
 
     monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
 
     cfg = AgentConfig(
         name="test-agent",
         role="t",
-        stuck_detector={"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4},
+        stuck_detector={"window_size": 7, "recovery_threshold": 3,
+                        "escalation_threshold": 4, "max_nudges_per_turn": 5},
     )
     Response = mock_llm_client.Response
     loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
     await loop.run_turn("task")
 
-    assert captured == {"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4}
+    assert captured == {"window_size": 7, "recovery_threshold": 3,
+                        "escalation_threshold": 4, "max_nudges_per_turn": 5}
 
 
 @pytest.mark.asyncio
@@ -1146,12 +1151,15 @@ async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus
     captured: dict = {}
     real_init = loop_mod.StuckDetector.__init__
 
-    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3):
+    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
+                 max_nudges_per_turn=3):
         captured["window_size"] = window_size
         captured["recovery_threshold"] = recovery_threshold
         captured["escalation_threshold"] = escalation_threshold
+        captured["max_nudges_per_turn"] = max_nudges_per_turn
         real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
-                  escalation_threshold=escalation_threshold)
+                  escalation_threshold=escalation_threshold,
+                  max_nudges_per_turn=max_nudges_per_turn)
 
     monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
 
@@ -1160,7 +1168,8 @@ async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus
     loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
     await loop.run_turn("task")
 
-    assert captured == {"window_size": 5, "recovery_threshold": 2, "escalation_threshold": 3}
+    assert captured == {"window_size": 5, "recovery_threshold": 2,
+                        "escalation_threshold": 3, "max_nudges_per_turn": 3}
 
 
 def test_agent_loop_uses_config_recovery_message_not_hardcoded():
