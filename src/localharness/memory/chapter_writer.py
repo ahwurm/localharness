@@ -239,7 +239,7 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
                      containment_guard: bool = True, containment_counts: dict | None = None,
                      exclude_chapter_ids: frozenset[int] = frozenset(),
                      member_map: dict[int, tuple[str, frozenset[int]]] | None = None,
-                     prefer_key: str | None = None):
+                     prefer_key: str | None = None, derefs: list[str] | None = None):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
@@ -251,7 +251,10 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
         attempts_log.append(attempt)
     members = cluster.members
     member_bodies = [m.value for m in members] + [a.value for a in cluster.aux_members]
-    derefs = await _dereference(store, list(members) + list(cluster.aux_members))
+    # #72: reuse the caller's deref corpus when threaded (the recheck path already derefed these members
+    # — each deref is a full history read); derive it here only when absent (the write path is unchanged).
+    if derefs is None:
+        derefs = await _dereference(store, list(members) + list(cluster.aux_members))
     corpus = "\n".join(member_bodies + derefs)[:corpus_char_cap]
 
     prompt = (
@@ -621,6 +624,7 @@ async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, re
         containment_guard=containment_guard, containment_counts=containment_counts,
         exclude_chapter_ids=frozenset({chapter.id}), member_map=member_map,
         prefer_key=chapter.key,   # #64: adoption HARD-PREFERS the chapter being healed on an overlap tie
+        derefs=derefs,            # #72: reuse the corpus already dereferenced above — no second history read
     )
     if attempts_log:  # label the re-draft attempt _write_one just appended as re-check activity
         attempts_log[-1]["staleness_recheck_of"] = chapter.key
