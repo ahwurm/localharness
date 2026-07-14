@@ -87,6 +87,14 @@ def model(
                 f"  {i}. {m}  (downloaded — `localharness start` will launch it)", markup=False
             )
         console.print("Switch with `localharness model <name|number>`.")
+        # #50: a reachable server whose served/downloaded set omits the configured default
+        # otherwise shows NO [active] marker and no other signal — the moment of highest risk
+        # (checking in on an unverified degrade-persist) gets none. State it plainly.
+        if reachable and current not in choices:
+            console.print(
+                f"[yellow]⚠[/yellow]  configured default {current!r} is not among the served "
+                f"models — switch with `localharness model <name|number>` or check the server."
+            )
         return
 
     # --- Switch: resolve the target --- #
