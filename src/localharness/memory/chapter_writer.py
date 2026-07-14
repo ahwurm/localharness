@@ -650,7 +650,8 @@ async def recheck_stale_chapters(
     through the writer path (grounded -> supersede on the chapter's key, history preserved). Stale
     with < 2 members, or a re-draft the writer refuses -> retire (mark non-active, append-only —
     NEVER deleted). Idempotent on healthy chapters (writes nothing). Never raises into the idle pass;
-    the single re-draft generation is cancellable. `counts` accumulates revalidated/redrafted/retired."""
+    the single re-draft generation is cancellable. `counts` accumulates revalidated/redrafted/retired/
+    skipped_superseded (#70: an item killed mid-pass by an earlier heal's containment supersede)."""
     assert store._db is not None
     async with store._db.execute(
         f"SELECT {store._FACT_COLS} FROM facts "
@@ -667,6 +668,16 @@ async def recheck_stale_chapters(
     for chapter in chapters:
         if cancel_event.is_set():
             return
+        # #70: the snapshot was fetched ONCE; an earlier item's redraft can supersede a LATER item via
+        # the containment guard. Re-read status — a chapter killed mid-pass is SKIPPED (no wasted redraft
+        # generation, no resurrection under its now-vacated key), counted for observability.
+        async with store._db.execute(
+            "SELECT 1 FROM facts WHERE id = ? AND agent_id = ? AND status = 'active'",
+            (chapter.id, store._agent_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                _bump(counts, "skipped_superseded")
+                continue
         try:
             await _recheck_one(
                 store, llm, cancel_event, chapter,

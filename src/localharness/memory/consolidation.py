@@ -74,6 +74,9 @@ class ConsolidationReport:
     chapters_revalidated: int = 0
     chapters_redrafted_stale: int = 0
     chapters_retired_stale: int = 0
+    # #70: recheck items superseded MID-PASS (by an earlier item's containment supersede) are skipped —
+    # a stale one-time snapshot must not redraft a chapter that no longer exists.
+    chapters_skipped_stale: int = 0
     reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
     mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
     tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
@@ -341,7 +344,7 @@ class ConsolidationPass:
                 or not getattr(self._cfg, "chapter_staleness_recheck_enabled", True)):  # sub-switch
             return
         from localharness.memory.chapter_writer import recheck_stale_chapters
-        counts = {"revalidated": 0, "redrafted": 0, "retired": 0}
+        counts = {"revalidated": 0, "redrafted": 0, "retired": 0, "skipped_superseded": 0}
         containment_counts = {"folded": 0, "superseded": 0}
         await recheck_stale_chapters(
             self._store, self._llm, self._cancel,
@@ -355,6 +358,7 @@ class ConsolidationPass:
         report.chapters_revalidated += counts["revalidated"]
         report.chapters_redrafted_stale += counts["redrafted"]
         report.chapters_retired_stale += counts["retired"]
+        report.chapters_skipped_stale += counts["skipped_superseded"]
         report.chapters_folded += containment_counts["folded"]
         report.chapters_superseded_by_containment += containment_counts["superseded"]
 
