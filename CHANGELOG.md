@@ -4,6 +4,60 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.5] — 2026-07-14
+
+The third audit wave: 13 fixes (#62–#74) closing out every verified finding from the
+post-ship audit — including the memory (chapter-writer) batch that needed maintainer
+design rulings. Same discipline: each bug filed before its fix, fixed test-first, closed
+by its fixing commit.
+
+### Fixed
+- **Healing a memory chapter can no longer steal another chapter's identity** (#64): when
+  the staleness recheck rewrites a chapter, the rewrite previously re-picked which chapter
+  to replace by best overlap with no preference for the original — on a tie (common, since
+  a chapter overlaps itself perfectly) the healed content could take over a near-duplicate's
+  identity while the original's history dead-ended. The heal now hard-prefers the original's
+  key and only moves to another chapter when strictly better, always recording a successor.
+- **The chapter-writing kill switch now kills** (#65, maintainer-ruled): setting
+  `schema_writer_enabled: false` stops BOTH chapter-writing paths — the writer AND the
+  staleness recheck, which previously kept minting/rewriting chapters with the "kill lever"
+  off. The recheck keeps its own sub-switch for fine control when the master is on.
+- **Chapter bookkeeping integrity** (#66, #67, #69, #70, #71): containment and
+  refresh-adoption now score against the same ACTIVE-primary member sets — dead members and
+  auxiliary rows no longer skew the comparisons that decide folding vs minting (the
+  duplicate-sibling-chapter class); one claimed-key set is shared per consolidation pass
+  (the writer can no longer undo the recheck's heal in the same pass); chapters superseded
+  mid-pass are skipped instead of redrafted; and member maps are built once per pass
+  instead of per write (thousands of redundant queries removed).
+- **The chapter recheck no longer starves** (#68): a healthy revalidation now advances the
+  chapter's recheck cursor, so the oldest-first window rotates across the whole population
+  instead of re-checking the same few forever. Disclosed behavior note: decay and ranking
+  read the same timestamp, so a chapter that keeps passing revalidation now also stays
+  fresher — revalidation counts as corroboration, consistent with how folds already work.
+- **Chapter redrafts read history once, asynchronously** (#72): previously each redraft
+  performed two synchronous full-file history reads on the event loop.
+- **Doomed inference requests fail fast; queue waits are visible and bounded** (#62,
+  maintainer-ruled semantics): a dead endpoint is now detected by a sub-millisecond TCP
+  probe BEFORE entering the inference queue — previously such a request could wait 90+
+  seconds behind unrelated work with only a generic spinner. Waiting for a busy-but-healthy
+  server logs its state after ~2s and is bounded by a new, generous
+  `provider.inference_queue_wait_seconds` (default 600, 0 disables) — the ceiling applies
+  to the WAIT only; a generation in flight is never timed out.
+- **Delegation outcomes are receipted** (#73): every `agent` tool completion now renders a
+  truthful terminal line derived from the tool result — `◆ agent <name> — completed` or
+  `— FAILED: <reason>` — so a failed delegation is visible regardless of how the model
+  narrates it (observed live: a failure presented as a sub-agent success). The delegation
+  tool's description now teaches passing a self-contained task, with worked examples.
+- **The glob tool finds files under a trailing `**`** (#74): Python's `pathlib` returns
+  directories only for patterns ending in a bare `**`; the tool now normalizes these, and
+  its description discloses that `~` is expanded and relative patterns root at the process
+  working directory. This combination had let the assistant confidently tell a user their
+  own agent was "a built-in" that couldn't be edited.
+- **Internal eval-sweep token pollution** (#63 — dev-only script, not shipped in the
+  package): dispute-bookkeeping prefixes are stripped before the stale-token comparison,
+  preventing false retractions of freshly mined facts containing ordinary words like
+  "user".
+
 ## [0.9.4] — 2026-07-14
 
 The second wave of the same audit (see 0.9.3): seven agent-lifecycle bugs found by driving
