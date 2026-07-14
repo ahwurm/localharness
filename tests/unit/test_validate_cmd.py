@@ -64,6 +64,21 @@ def test_validate_invalid_config(tmp_path):
     assert "invalid" in combined.lower() or "error" in combined.lower()
 
 
+def test_validate_strict_prints_reserved_note(tmp_path):
+    """#54: --strict is a reserved no-op (no warning-level checks exist yet). It must say so
+    when passed, and must not change the exit code vs the default run."""
+    _setup_config_dir(tmp_path)
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "test-agent.yaml").write_text(_VALID_AGENT)
+
+    plain = runner.invoke(app, ["validate", "--config-dir", str(tmp_path)])
+    strict = runner.invoke(app, ["validate", "--strict", "--config-dir", str(tmp_path)])
+    assert plain.exit_code == 0 and strict.exit_code == 0, (plain.output, strict.output)
+    assert "reserved" in strict.output.lower()  # the note fires when the flag is passed
+    assert "reserved" not in plain.output.lower()  # silent by default
+
+
 def test_validate_no_configs(tmp_path):
     """Empty config dir (no config.yaml, no agents) -> exit code 2."""
     result = runner.invoke(app, ["validate", "--config-dir", str(tmp_path)])
