@@ -1550,3 +1550,211 @@ async def test_predictive_write_gate_kill_lever_reverts_writes_keeps_telemetry(t
     # telemetry ON: the collect-only scorer still persisted surprise scores
     _obs, scores, _corr = _read_predictive_counts(tmp_path)
     assert scores >= 1, "the collect-only scorer keeps persisting scores as telemetry (KILL-revert shape)"
+
+
+# ===========================================================================================
+# #44: the capability probe never raises — it reports failures via CapabilityResult.probe_error,
+# which _probe_llm ignored, so probe_ok was ALWAYS True. The "Cannot reach model" hard-fail, its
+# retry and fallback were DEAD CODE: start proceeded against unserved models / dead endpoints and
+# then MISATTRIBUTED the cause at the TokenCounter step ("exposes an exact tokenizer..."). These
+# tests pin the fix: a real reachability probe_error aborts start BEFORE the memory store opens,
+# with a cause-naming message; an "HTTP 400" probe_error (server rejects the tools param — reachable
+# AND serving the model, detect_capabilities forces xml) still proceeds in xml mode.
+# ===========================================================================================
+
+def _cap_result(probe_error, *, tool_call_mode="xml", context_window=262_144):
+    from localharness.provider.client import CapabilityResult
+    return CapabilityResult(
+        tool_call_mode=tool_call_mode,
+        context_window=context_window,
+        supports_streaming=True,
+        probe_duration_ms=0.0,
+        probe_error=probe_error,
+    )
+
+
+def _capture_err_console(monkeypatch):
+    """Capture start_cmd's err_console output — the reachability failure message lands there."""
+    import localharness.cli.start_cmd as _sc
+    printed: list[str] = []
+    monkeypatch.setattr(
+        _sc.err_console, "print", lambda *a, **k: printed.append(" ".join(str(x) for x in a))
+    )
+    return printed
+
+
+def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_models=None):
+    """Stub every boundary EXCEPT the probe: LLMClient.detect_capabilities returns a chosen
+    CapabilityResult so the REAL _probe_llm logic runs (the code under test). Cold-start retries
+    run instantly (asyncio.sleep no-op). TokenCounter/REPL/plugins are stubbed so a probe that
+    PROCEEDS runs offline."""
+    lines = [
+        "version: '1'",
+        "provider:",
+        "  provider_type: vllm",
+        "  base_url: http://localhost:8000/v1",
+        "  default_model: test-model",
+        "  api_key: none",
+    ]
+    if available_models:
+        lines.append("  available_models: [" + ", ".join(available_models) + "]")
+    (tmp_path / "config.yaml").write_text("\n".join(lines) + "\n")
+
+    async def fake_detect(self):
+        return _cap_result(probe_error)
+    monkeypatch.setattr("localharness.provider.client.LLMClient.detect_capabilities", fake_detect)
+
+    async def fast_sleep(*a, **k):
+        return None
+    monkeypatch.setattr("asyncio.sleep", fast_sleep)  # collapse the cold-start retry backoff
+
+    class _StubTokenCounter:
+        approximate = False
+
+        def __init__(self, base_url=None, model=None, provider_type=None):
+            pass
+
+        def count(self, text=""):
+            return max(1, len(str(text)) // 4)
+
+        def count_messages(self, messages):
+            return sum(self.count(m.get("content", "")) for m in messages)
+    monkeypatch.setattr("localharness.agent.context.TokenCounter", _StubTokenCounter)
+
+    async def default_repl_run(self):
+        return None
+    monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", default_repl_run)
+
+    async def fake_discover(self):
+        return []
+    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.discover_all", fake_discover)
+
+
+def _spy_store_open(monkeypatch):
+    """Record every MemoryStore.open() (call-through). Empty list == the store never opened."""
+    from localharness.memory.sqlite import MemoryStore
+    calls: list = []
+    real_open = MemoryStore.open
+
+    async def spy_open(self):
+        calls.append(self)
+        return await real_open(self)
+    monkeypatch.setattr(MemoryStore, "open", spy_open)
+    return calls
+
+
+# --- direct _probe_llm unit tests (the fix's core) -----------------------------------------
+
+async def test_probe_llm_reports_reachability_failure(monkeypatch):
+    """_probe_llm inspects CapabilityResult.probe_error: a connection error -> (False, None, None,
+    err), surfacing the concrete cause for the caller's message (was dead — the except only ever
+    saw a raise, and detect_capabilities never raises)."""
+    from localharness.cli.start_cmd import _probe_llm
+
+    async def fast_sleep(*a, **k):
+        return None
+    monkeypatch.setattr("asyncio.sleep", fast_sleep)
+
+    class _LLM:
+        async def detect_capabilities(self):
+            return _cap_result("Connection error.")
+
+    reachable, mode, window, err = await _probe_llm(_LLM(), max_retries=2, delay=0.0)
+    assert reachable is False
+    assert mode is None and window is None
+    assert err == "Connection error."
+
+
+async def test_probe_llm_http_400_is_reachable_xml():
+    """An 'HTTP 400' probe_error is NOT a reachability failure: the server rejected the tools param
+    but IS reachable and serving the model. _probe_llm returns reachable=True in xml mode — else
+    every function-calling-less server would be wrongly blocked from starting."""
+    from localharness.cli.start_cmd import _probe_llm
+
+    class _LLM:
+        async def detect_capabilities(self):
+            return _cap_result("HTTP 400: tools not supported", tool_call_mode="xml", context_window=99_000)
+
+    reachable, mode, window, err = await _probe_llm(_LLM())
+    assert reachable is True
+    assert mode == "xml"
+    assert window == 99_000
+    assert err is None
+
+
+async def test_probe_llm_clean_probe_succeeds():
+    """A clean probe (probe_error=None) returns reachable=True with the probed mode + window."""
+    from localharness.cli.start_cmd import _probe_llm
+
+    class _LLM:
+        async def detect_capabilities(self):
+            return _cap_result(None, tool_call_mode="native", context_window=131_072)
+
+    reachable, mode, window, err = await _probe_llm(_LLM())
+    assert (reachable, mode, window, err) == (True, "native", 131_072, None)
+
+
+# --- through the real _start_async: the hard-fail must fire BEFORE the store opens ----------
+
+async def test_probe_connection_error_aborts_before_store(tmp_path, monkeypatch):
+    """A connection-level probe_error (endpoint down) now aborts start BEFORE the memory store is
+    constructed — the pre-resource hard-fail the dead code was supposed to be. The message names
+    'unreachable' and points at doctor; it does NOT blame the tokenizer."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_realprobe(tmp_path, monkeypatch, probe_error="Connection error.")
+    open_calls = _spy_store_open(monkeypatch)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path))
+    assert ei.value.exit_code != 0
+    assert open_calls == [], "start must abort at the probe, BEFORE opening the memory store (#44)"
+
+    out = "\n".join(errs).lower()
+    assert "unreachable" in out
+    assert "doctor" in out
+    assert "tokenizer" not in out, "a reachability failure must not be misattributed to the tokenizer"
+
+
+async def test_probe_model_not_served_aborts_and_names_model(tmp_path, monkeypatch):
+    """A 404 'model does not exist' probe_error aborts before the store and names the concrete
+    cause (the unserved model) + points at `localharness model` / `localharness doctor`, with a
+    best-effort list of the configured models."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_realprobe(
+        tmp_path, monkeypatch,
+        probe_error="Error code: 404 - {'error': {'message': 'The model `test-model` does not exist.'}}",
+        available_models=["served-a", "served-b"],
+    )
+    open_calls = _spy_store_open(monkeypatch)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path))
+    assert ei.value.exit_code != 0
+    assert open_calls == [], "an unserved model must abort BEFORE the store opens (#44)"
+
+    out = "\n".join(errs)
+    assert "test-model" in out
+    assert "not served" in out.lower()
+    assert "localharness model" in out and "localharness doctor" in out
+    assert "served-a" in out, "the message should hint the configured/served models"
+
+
+async def test_probe_http_400_proceeds_in_xml_mode(tmp_path, monkeypatch):
+    """The critical regression guard: an 'HTTP 400' probe_error means the server rejected the tools
+    param but IS reachable and serving the model (detect_capabilities forces xml). Start must PROCEED
+    — open the store, write a session row — not hard-fail. Only real reachability errors abort."""
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_realprobe(tmp_path, monkeypatch, probe_error="HTTP 400: tools param not supported")
+
+    await _start_async(None, False, False, str(tmp_path))  # must NOT raise
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete", \
+        "a 400 tools-rejection is reachable + served — start proceeds in xml, does not hard-fail"
