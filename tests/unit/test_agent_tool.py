@@ -28,6 +28,22 @@ def test_agent_tool_description_lists_agents():
     assert "researcher" in schema.description
 
 
+def test_agent_tool_task_description_distills_and_gives_examples():
+    """#73(b): the `task` field must steer the model to write a SELF-CONTAINED
+    instruction for the subagent, never the user's verbatim sentence — with
+    worked GOOD/BAD examples so the nudge lands on a local model."""
+    tool = _make_agent_tool()
+    task_desc = tool.info().parameters["properties"]["task"]["description"]
+    lowered = task_desc.lower()
+    assert "self-contained" in lowered
+    assert "verbatim" in lowered
+    # The worked GOOD example (a concrete directive, not "ask the joke-writer…").
+    assert "Write three puns about databases." in task_desc
+    # At least two GOOD/BAD contrast pairs are spelled out.
+    assert lowered.count("good:") >= 2
+    assert lowered.count("bad:") >= 2
+
+
 @pytest.mark.asyncio
 async def test_agent_tool_delegates_to_runner():
     runner = AsyncMock(return_value="Done: created hello.py")
