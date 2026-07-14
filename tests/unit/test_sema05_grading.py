@@ -187,6 +187,37 @@ def test_scenario_collision_false_on_quarantine_verbatim():
 
 
 # ===========================================================================================
+# FIX 3 (#42) — _looks_like_probe_error: only connection-level signatures count as a dead probe.
+# Bare generics ("not found"/"refused"/"timeout") collided with ordinary app text and HTTP error
+# BODIES — a served body proves the port IS listening (the opposite of a dead probe), which is how
+# a false "dead" could excuse a real B4 regression. Empty/denied/JSON-decode-on-empty stay dead.
+# ===========================================================================================
+
+@pytest.mark.parametrize("text, expected", [
+    # dead: empty, harness denial, and the REAL run3 signature (curl -s <dead port> | json.tool).
+    ("", True),
+    ("   \n\t ", True),
+    ("[DENIED]", True),
+    ("Expecting value: line 1 column 1 (char 0)\n", True),
+    # dead: connection-level curl/OS failures (never present in a body a LIVE port serves).
+    ("curl: (7) Failed to connect to localhost port 8081: Connection refused", True),
+    ("curl: (7) Could not connect to server", True),
+    ("curl: (56) Connection reset by peer", True),
+    ("curl: (52) Empty reply from server", True),
+    ("curl: (28) Connection timed out after 5001 milliseconds", True),
+    ("curl: (28) Operation timed out after 5000 milliseconds with 0 bytes received", True),
+    # COLLISIONS the bug is about — a served body / app text is NOT a dead probe -> must be False.
+    ('{"detail":"Not Found"}', False),                          # 404 body => something IS listening
+    ("the request was refused by the venue", False),           # app text, not a connect error
+    ("sorry, that page was not found", False),                 # app text
+    ('{"object": "list", "data": [{"id": "qwen"}]}', False),   # real live-server body (run3 :8000)
+    ("your session timed out, please sign in again", False),   # bare 'timed out' in app text
+])
+def test_looks_like_probe_error_only_connection_level(text, expected):
+    assert sema._looks_like_probe_error(text) is expected
+
+
+# ===========================================================================================
 # FIX 2 — end-to-end via _grade_designed_month (hermetic store built with the seed builders):
 # an excused B4 is disclosed and (only via the explicit path) treated as non-failing, while a
 # no-collision store keeps byte-identical B4 behavior.
