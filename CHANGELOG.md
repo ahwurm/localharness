@@ -4,6 +4,49 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.7] — 2026-07-14
+
+Five bugs (#79–#83) found by forensic analysis of a failed live replay session — two of
+four user turns died in stuck-loop escalations, and the run's own event ledger showed
+why: the harness misled the model (a bash tool that wasn't bash, "success" lines for
+writes that changed nothing), then its stuck failsafe warned off stale evidence, forgot
+its own warning, and killed turns without a summary. All five fixes are deterministic
+mechanisms, filed first and fixed test-first. They are designed to break repeat loops
+and end unrecoverable turns honestly; live validation is a single replay (n=1) still
+pending at release time — no reliability improvement is claimed beyond the mechanisms
+described.
+
+### Fixed
+- **`bash_exec` now actually runs bash** (#79): it executed via the platform `/bin/sh`
+  (dash on Debian/Ubuntu), so bashisms silently misbehaved — observed live as
+  `mkdir -p …/{a,b}` creating a literal junk `{a`-named tree with exit 0, corrupting the
+  model's picture of its own workspace from its first action. Note: commands that relied
+  on strict POSIX-sh behavior now get bash semantics.
+- **Write tool reports create/overwrite/no-change honestly** (#80): overwrite results are
+  now `Created … (N bytes)`, `Overwrote … (was M bytes, now N bytes)`, or — for
+  byte-identical content — an explicit `No change: … do not rewrite it; take the next
+  step.` with `unchanged=True`. Previously every write returned the same
+  `Written N bytes` success line, so a model rewriting an identical file saw progress
+  each time (observed live: the same bytes written 3× in each of two failed turns).
+  Anything parsing the old overwrite message must adapt; `mode=append` is unchanged.
+- **Stuck detector gives a clean slate after warning** (#81): the repeat-detection window
+  is now cleared when a recovery warning fires, and escalation requires fresh evidence —
+  the same signature repeated again post-warning, or more than `max_nudges_per_turn`
+  (new config, default 3) warnings in one turn. Previously the window was never cleared:
+  a model that complied with the warning was re-warned on stale counts, and one further
+  repeat killed the turn. Behavior change: uniformly-identical repeats now escalate one
+  iteration later (warn at 2, clean slate, escalate on the post-warning repeat).
+- **Recovery warnings persist in the conversation** (#82): the nudge was appended only to
+  the immediate LLM request and vanished from context the next iteration — session
+  ledgers showed the model replying to a warning that wasn't in its history. It is now a
+  durable user-role message; history consumers will see it.
+- **Stuck escalation ends with the model's partial work, not a dead notice** (#83): on
+  escalation the agent now gets one forced tool-less wrap-up ("what's done, what
+  remains, next step" — mirroring the existing budget-exhaustion summary) before the
+  turn fails; the plain notice remains as fallback on provider error. Costs one extra
+  LLM call at escalation time. Turn telemetry (`TurnFailed`, reason `stuck_detected`)
+  is unchanged.
+
 ## [0.9.6] — 2026-07-14
 
 Shaped by a maintainer live-dogfooding session: four bugs found in real use (#75–#78,
