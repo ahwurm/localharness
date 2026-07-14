@@ -824,3 +824,13 @@ async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
     from localharness.tools.builtin.glob_tool import GlobTool
     g = await GlobTool().run(pattern="~/notes/*.txt")
     assert g.success and "a.txt" in g.output
+
+
+def test_write_tool_description_steers_large_files_to_smaller_writes():
+    """#77 belt-and-suspenders: the write tool's own description must nudge large files
+    toward several smaller calls (first write, then mode=append) so an oversized argument
+    isn't cut off at the output-token limit."""
+    from localharness.tools.builtin.write_tool import WriteTool
+    desc = WriteTool().info().description.lower()
+    assert "append" in desc
+    assert "output-token" in desc or "cut off" in desc
