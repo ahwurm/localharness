@@ -582,8 +582,14 @@ async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, re
     body = strip_chapter_title(chapter.value)
     # The grader's exact verdict: majority-token grounding AND a clean numeric net, body-only.
     if grounded(body, corpus) and not ground_numbers(body, bodies):
+        # #68 (starvation): advance the recheck cursor. The re-check window is ORDER BY updated_at ASC
+        # LIMIT cap, so a revalidation that wrote NOTHING left the same <=cap grounded chapters filling
+        # every window forever — erosion OUTSIDE them never detected. Bump updated_at (freshness only,
+        # mirroring _corroborate_chapter; a re-confirmed chapter earning freshness is consistent with the
+        # fold-touch) so the chapter rotates to the BACK. Content/trust/rs/id/history all untouched.
+        await _corroborate_chapter(store, chapter.id)
         _bump(counts, "revalidated")
-        return  # healthy — write NOTHING, change NOTHING (idempotency law)
+        return  # healthy — content unchanged (idempotency); only the recheck cursor advances
 
     # STALE. Only substantive (non-failure-telemetry) members can seed a re-draft; aux
     # tier:surprising_failure rows are opportunistic and never primary membership.
