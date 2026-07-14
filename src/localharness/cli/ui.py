@@ -13,8 +13,13 @@ _GREEN = "#56dc85"
 _WORDMARK = '██╗      ██████╗  ██████╗ █████╗ ██╗             \n██║     ██╔═══██╗██╔════╝██╔══██╗██║             \n██║     ██║   ██║██║     ███████║██║             \n██║     ██║   ██║██║     ██╔══██║██║             \n███████╗╚██████╔╝╚██████╗██║  ██║███████╗███████╗\n╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝\n                                                 \n██╗  ██╗ █████╗ ██████╗ ███╗   ██╗███████╗███████╗███████╗\n██║  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝██╔════╝\n███████║███████║██████╔╝██╔██╗ ██║█████╗  ███████╗███████╗\n██╔══██║██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ╚════██║╚════██║\n██║  ██║██║  ██║██║  ██║██║ ╚████║███████╗███████║███████║\n╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝\n                                                          '
 
 
-def startup_banner(model: str, is_returning: bool) -> RenderableType:
-    """The local_harness wordmark in green, with model and cwd."""
+def startup_banner(model: str, is_returning: bool, show_hint: bool = True) -> RenderableType:
+    """The local_harness wordmark in green, with model and cwd.
+
+    show_hint gates the first-run '/help' guidance line. Interactive TTY sessions pass
+    show_hint=False and render the hint inside the input bubble instead (#49) — a banner
+    hint is fragile scrollback the prompt_toolkit box repaints over. Piped/non-interactive
+    sessions keep it in the banner (show_hint default True), unchanged."""
     try:
         version = metadata.version("localharness")
     except metadata.PackageNotFoundError:
@@ -29,7 +34,7 @@ def startup_banner(model: str, is_returning: bool) -> RenderableType:
     info.append(f"v{version}", style="dim")
     info.append(f"    {model}")
     info.append(f"    {cwd}", style="dim")
-    if not is_returning:
+    if show_hint and not is_returning:
         info.append("\n\nDescribe a task, or ", style="dim")
         info.append("/help", style=_GREEN)
         info.append(" for commands.", style="dim")
