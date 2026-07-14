@@ -1758,3 +1758,115 @@ async def test_probe_http_400_proceeds_in_xml_mode(tmp_path, monkeypatch):
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete", \
         "a 400 tools-rejection is reachable + served — start proceeds in xml, does not hard-fail"
+
+
+# ===========================================================================================
+# #43: ANY hard startup failure AFTER MemoryStore.open() must close the store (and every
+# component opened in the resource window) and exit NON-ZERO — never leak aiosqlite's NON-DAEMON
+# worker thread, which parks in tx.get() and hangs interpreter shutdown (threading._shutdown
+# joins it) forever. The only teardown that closed the store used to wrap repl.run() alone, so a
+# fail in the ~190-line window between open() and repl.run() (today: the TokenCounter fail-loud)
+# skipped it entirely. Two proofs: an in-process spy that the widened finally closes every opened
+# store, and a subprocess that the PROCESS actually exits (the reported symptom).
+# ===========================================================================================
+
+async def test_hard_fail_in_resource_window_closes_store(tmp_path, monkeypatch):
+    """Structural proof: force the TokenCounter fail-loud (constructed AFTER the store opens) and
+    assert _start_async exits NON-ZERO and the widened finally closed EVERY store it opened.
+    Hang-safe: the test's own finally reaps any store a regression leaves open, so a RED run can't
+    wedge the suite on the leaked non-daemon aiosqlite thread."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+    from localharness.memory.sqlite import MemoryStore
+
+    _stub_start_boundaries(tmp_path, monkeypatch)  # probe OK -> we reach the resource window
+
+    class _BoomTokenCounter:
+        def __init__(self, *a, **k):
+            raise RuntimeError("no exact tokenizer served at the endpoint")
+    monkeypatch.setattr("localharness.agent.context.TokenCounter", _BoomTokenCounter)
+
+    opened: list = []
+    closed: list = []
+    real_open, real_close = MemoryStore.open, MemoryStore.close
+
+    async def spy_open(self):
+        opened.append(self)
+        return await real_open(self)
+
+    async def spy_close(self):
+        closed.append(self)
+        return await real_close(self)
+
+    monkeypatch.setattr(MemoryStore, "open", spy_open)
+    monkeypatch.setattr(MemoryStore, "close", spy_close)
+
+    try:
+        with pytest.raises(typer.Exit) as ei:
+            await _start_async(None, False, False, str(tmp_path))
+        assert ei.value.exit_code != 0, "a hard window failure must exit non-zero"
+        assert opened, "the store must have opened (else the window under test was never entered)"
+        assert closed == opened, "the widened finally must close EVERY store opened in the window (#43)"
+    finally:
+        for s in opened:
+            if s not in closed:
+                await real_close(s)  # hang-safety on a RED run: reap the leaked worker thread
+
+
+def test_hard_fail_in_resource_window_process_exits_not_hangs(tmp_path):
+    """The reported symptom, faithfully: a hard startup failure after MemoryStore.open() must let
+    the PROCESS exit (promptly + non-zero) instead of hanging forever on aiosqlite's non-daemon
+    worker thread at interpreter shutdown. Run in a subprocess under a hard timeout so a RED (hang)
+    surfaces as a clean test failure, never a wedged suite."""
+    import subprocess
+    import sys
+    import textwrap
+
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: ollama\n"
+        "  base_url: http://localhost:11434/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+    )
+    marker = tmp_path / "store_closed.marker"
+    driver = tmp_path / "drive_43.py"
+    driver.write_text(textwrap.dedent(f"""
+        import asyncio, sys
+        import typer
+        import localharness.cli.start_cmd as sc
+        import localharness.agent.context as ctx
+        import localharness.memory.sqlite as sq
+
+        async def fake_probe(llm, max_retries=3, delay=2.0):
+            return (True, "native", 262_144, None)   # 4-tuple: (reachable, mode, window, probe_error)
+        sc._probe_llm = fake_probe
+
+        class BoomTokenCounter:  # the fail-loud lives right after MemoryStore.open()
+            def __init__(self, *a, **k):
+                raise RuntimeError("no exact tokenizer served")
+        ctx.TokenCounter = BoomTokenCounter
+
+        _real_close = sq.MemoryStore.close
+        async def spy_close(self):
+            open({str(marker)!r}, "w").write("closed")
+            return await _real_close(self)
+        sq.MemoryStore.close = spy_close
+
+        try:
+            asyncio.run(sc._start_async(None, False, False, {str(tmp_path)!r}))
+        except typer.Exit as e:
+            sys.exit(e.exit_code or 1)
+    """))
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(driver)],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("start hung after MemoryStore.open() — #43 regression (leaked non-daemon aiosqlite thread)")
+
+    assert proc.returncode != 0, f"a hard startup failure must exit non-zero (stderr: {proc.stderr})"
+    assert marker.exists(), "the store must be closed during the failing shutdown (#43 finally coverage)"
