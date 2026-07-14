@@ -47,6 +47,10 @@ from typing import Any
 
 from localharness.memory.consolidation import _get_meta, _set_meta
 from localharness.memory.idle_llm import complete_cancellable, grounded
+# BUG #63: the dispute prefix stripper lives beside the prefix constants it strips
+# (reconciliation._DISPUTE_MARKER / _QUARANTINE_PREFIX) so the two can never drift; the
+# resurrection sweep reuses it to clean stored bookkeeping prefixes before tokenization.
+from localharness.memory.reconciliation import _strip_dispute_prefix
 from localharness.memory.sqlite import FactQuery
 from localharness.memory.tag_classify import classify_atom_tags, file_atom_tags
 
@@ -269,8 +273,16 @@ async def _sweep_resurrections(store: Any, minted_ids: list[int],
     for atom in await store.get_facts_by_ids(minted_ids):
         atoks = _salient_words(atom.value)
         for stale, active in pairs:
-            stale_distinct = _salient_words(stale) - _salient_words(active)
-            active_distinct = _salient_words(active) - _salient_words(stale)
+            # BUG #63: a shape-(b) reconcile predecessor is STORED with a bookkeeping prefix
+            # ("user correction (pending reconciliation): …"); its words leak into stale_distinct
+            # and falsely retract any atom that merely contains one (e.g. "user"). Strip the
+            # dispute prefix(es) from BOTH pair values before tokenizing so the net is formed only
+            # from the real corrected-away content. Shared stripper lives beside the prefix
+            # constants (reconciliation) so prefix and stripper can never drift; no stored value
+            # changes — this reads the pair for comparison only.
+            stale_s, active_s = _strip_dispute_prefix(stale), _strip_dispute_prefix(active)
+            stale_distinct = _salient_words(stale_s) - _salient_words(active_s)
+            active_distinct = _salient_words(active_s) - _salient_words(stale_s)
             if stale_distinct and (atoks & stale_distinct) and not (atoks & active_distinct):
                 await store._db.execute(
                     "UPDATE facts SET status = 'superseded', "
