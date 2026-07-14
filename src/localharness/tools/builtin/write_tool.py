@@ -55,8 +55,35 @@ class WriteTool(Tool):
 
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        open_mode = "a" if mode == "append" else "w"
+        new_bytes = content.encode()
+        n = len(new_bytes)
         loop = asyncio.get_running_loop()
+
+        # Overwrite reports create/overwrite/no-op honestly: a re-write of byte-identical
+        # content returns a STOP signal (unchanged=True) instead of another "success" line
+        # a stuck model reacts to by rewriting the same file forever. Append is unchanged.
+        if mode == "overwrite":
+            old_bytes = None
+            if target.exists():
+                try:
+                    old_bytes = await loop.run_in_executor(None, target.read_bytes)
+                except OSError:
+                    old_bytes = None
+            if old_bytes == new_bytes:  # only True when the file existed AND matched
+                return self.ok(
+                    f"No change: {target} already contains exactly this content "
+                    f"({n} bytes). The file is already written — do not rewrite it; "
+                    f"take the next step.",
+                    path=str(target), bytes_written=n, unchanged=True,
+                )
+            message = (
+                f"Created {target} ({n} bytes)" if old_bytes is None
+                else f"Overwrote {target} (was {len(old_bytes)} bytes, now {n} bytes)"
+            )
+        else:
+            message = f"Written {n} bytes to {target}"
+
+        open_mode = "a" if mode == "append" else "w"
         try:
             await loop.run_in_executor(
                 None, lambda: target.open(open_mode, encoding="utf-8").write(content)
@@ -66,8 +93,4 @@ class WriteTool(Tool):
         except OSError as exc:
             return self.err(str(exc))
 
-        return self.ok(
-            f"Written {len(content.encode())} bytes to {target}",
-            path=str(target),
-            bytes_written=len(content.encode()),
-        )
+        return self.ok(message, path=str(target), bytes_written=n, unchanged=False)
