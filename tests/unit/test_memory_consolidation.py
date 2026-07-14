@@ -1140,3 +1140,40 @@ async def test_master_on_sub_on_both_run(store: MemoryStore):
             + report.chapters_revalidated) >= 1                              # re-check ran
     live = await store.get_fact(stale.key)                                   # no longer active-and-stale
     assert live is None or "7" not in live.value
+
+
+# ---------------------------------------------------------------------------
+# #69 — ONE claimed-refresh-key set threaded across the recheck AND writer steps
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_consolidation_threads_one_claimed_set_into_both_steps(store: MemoryStore):
+    """#69: within a pass the recheck and the writer must share ONE claimed-refresh-key set (else the
+    writer can independently re-adopt a key the recheck just healed, superseding the vetted row). The
+    ConsolidationPass owns the set and threads the SAME object into both steps."""
+    import localharness.memory.chapter_writer as cw
+    seen: dict = {}
+    orig_recheck, orig_write = cw.recheck_stale_chapters, cw.write_cluster_schemas
+
+    async def _rc(*a, claimed_refresh_keys=None, **k):
+        seen["recheck"] = claimed_refresh_keys
+        return await orig_recheck(*a, claimed_refresh_keys=claimed_refresh_keys, **k)
+
+    async def _wr(*a, claimed_refresh_keys=None, **k):
+        seen["writer"] = claimed_refresh_keys
+        return await orig_write(*a, claimed_refresh_keys=claimed_refresh_keys, **k)
+
+    cw.recheck_stale_chapters, cw.write_cluster_schemas = _rc, _wr
+    try:
+        # A chapter (so the recheck step actually invokes recheck_stale_chapters) + both flags on.
+        await _seed_chapter_body(store, "share69", [
+            (await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag=None)).id], _GROUNDED)
+        cfg = _cfg(schema_writer_enabled=True, chapter_staleness_recheck_enabled=True,
+                   mining_enabled=False, reconcile_enabled=False, mint_tagging_enabled=False)
+        await ConsolidationPass(store, cfg, llm=_DispatchLLM()).run()
+    finally:
+        cw.recheck_stale_chapters, cw.write_cluster_schemas = orig_recheck, orig_write
+
+    assert seen.get("recheck") is not None, "recheck step got no shared claimed set"
+    assert seen.get("writer") is not None, "writer step got no shared claimed set"
+    assert seen["recheck"] is seen["writer"], "recheck and writer got DIFFERENT claimed sets (#69)"
