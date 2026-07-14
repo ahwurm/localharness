@@ -50,6 +50,14 @@ def test_doctor_all_pass(mock_httpx, tmp_path):
     assert result.output  # has output
 
 
+def test_doctor_fix_help_states_real_scope(tmp_path):
+    """#53: `--fix` only creates a missing agents directory today — its help must name that
+    real, narrow scope, not overpromise a generic 'Attempt to auto-fix detected issues'."""
+    result = runner.invoke(app, ["doctor", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "agents" in result.output.lower()  # states its actual scope
+
+
 def test_doctor_no_config(tmp_path):
     """No config.yaml -> exit code 1, output contains 'config' failure."""
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
