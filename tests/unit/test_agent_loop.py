@@ -115,6 +115,60 @@ def test_stuck_clear_when_window_too_small():
     assert sd.check() == StuckState.CLEAR
 
 
+# --- #81: clean-slate-after-warning escalation ladder ---
+
+def _stuck_iter(sd, name):
+    """One loop-iteration's worth of bookkeeping: record a single tool call, then ask
+    the detector for its decision — mirrors loop.py's record-then-classify cadence."""
+    sd.record(name, {})
+    state, _sig = sd.classify()
+    return state
+
+
+def test_stuck_clean_slate_no_rewarn_after_compliant_action():
+    """#81 (i): after a warning the window is wiped, so ONE compliant different call
+    stays CLEAR instead of re-triggering RECOVERING on stale counts (today it re-warns)."""
+    sd = StuckDetector()
+    assert _stuck_iter(sd, "A") == StuckState.CLEAR
+    assert _stuck_iter(sd, "A") == StuckState.RECOVERING   # 2 identical → warn + clean slate
+    assert _stuck_iter(sd, "B") == StuckState.CLEAR         # compliant change: no re-warn
+
+
+def test_stuck_escalates_when_warned_signature_reaccumulates():
+    """#81 (ii): warn → a different call → the SAME call twice again → ESCALATE (the
+    warning demonstrably failed once the model re-hit 2 identical after a clean slate)."""
+    sd = StuckDetector()
+    assert _stuck_iter(sd, "A") == StuckState.CLEAR
+    assert _stuck_iter(sd, "A") == StuckState.RECOVERING
+    assert _stuck_iter(sd, "B") == StuckState.CLEAR
+    assert _stuck_iter(sd, "A") == StuckState.CLEAR         # window [B, A]
+    assert _stuck_iter(sd, "A") == StuckState.ESCALATE      # window [B, A, A]: A already warned
+
+
+def test_stuck_never_escalates_when_model_truly_varies():
+    """#81 (iii): one warning, then genuinely different calls forever → never ESCALATE."""
+    sd = StuckDetector()
+    assert _stuck_iter(sd, "A") == StuckState.CLEAR
+    assert _stuck_iter(sd, "A") == StuckState.RECOVERING
+    for name in ["B", "C", "D", "E", "F", "G", "H", "I", "J"]:
+        assert _stuck_iter(sd, name) == StuckState.CLEAR
+
+
+def test_stuck_escalates_at_max_nudges_cap_across_distinct_signatures():
+    """#81 (iv): varied flailing — 4 distinct signatures each hit the 2-identical warn
+    threshold; the per-turn nudge cap (default 3) escalates the 4th regardless of sig."""
+    sd = StuckDetector()  # max_nudges_per_turn defaults to 3
+
+    def warn(name):
+        _stuck_iter(sd, name)          # first record after a clean slate → CLEAR
+        return _stuck_iter(sd, name)   # second → RECOVERING, or ESCALATE at the cap
+
+    assert warn("s1") == StuckState.RECOVERING
+    assert warn("s2") == StuckState.RECOVERING
+    assert warn("s3") == StuckState.RECOVERING
+    assert warn("s4") == StuckState.ESCALATE
+
+
 # ---------------------------------------------------------------------------
 # Permission pattern matching tests
 # ---------------------------------------------------------------------------
