@@ -111,7 +111,8 @@ def _attempt_entry(cluster, new_depth) -> dict:
 
 async def _adopt_refresh_key(store, members, fresh_key: str, *,
                              refresh_overlap: float, claimed: set[str],
-                             chapters: dict[int, tuple[str, frozenset[int]]] | None = None) -> str:
+                             chapters: dict[int, tuple[str, frozenset[int]]] | None = None,
+                             prefer_key: str | None = None) -> str:
     """CHAPTER REFRESH (run-14 fix): chapter identity must survive membership drift. The fresh
     key is h8(exact member set), so a cluster that gained/lost ANY member (a rescued residue
     atom, a correction row entering the pool, a foldout) would mint a near-identical SIBLING
@@ -126,22 +127,40 @@ async def _adopt_refresh_key(store, members, fresh_key: str, *,
     built here if absent), the SAME sets the containment guard compares — NOT raw member_of. Before
     #67 the old side counted raw member_of (dead members + aux tier:surprising_failure rows) while the
     candidate side counted primary-only, so aux inflated the min() denominator and a legitimate refresh
-    scored below threshold -> a duplicate sibling minted beside the still-active original."""
+    scored below threshold -> a duplicate sibling minted beside the still-active original.
+
+    #64 (identity heal): on the recheck path `prefer_key` is the ORIGINAL chapter being healed. Its own
+    surviving-member set self-scores 1.0, and a near-duplicate can tie at 1.0 — so adoption HARD-PREFERS
+    the original: a DIFFERENT chapter's key is adopted only when its overlap is STRICTLY GREATER than the
+    original's. A tie therefore keeps the heal on the original's key (store_fact same-key supersede,
+    history preserved) instead of misattributing the healed content to another chapter's identity."""
     new_ids = {m.id for m in members}
     if chapters is None:
         chapters = await _active_chapter_primary_members(store)
+    prefer_ov = 0.0
     best_key, best_ov = None, 0.0
     for _sid, (skey, mem) in chapters.items():
-        if skey in claimed or not mem:
+        if not mem:
             continue
         ov = len(mem & new_ids) / min(len(mem), len(new_ids))
+        if prefer_key is not None and skey == prefer_key:
+            prefer_ov = ov               # the original is the fallback identity, never an "other"
+            continue
+        if skey in claimed:
+            continue
         if ov > best_ov:
             best_ov, best_key = ov, skey
-    if best_key is not None and best_ov >= refresh_overlap and best_key != fresh_key:
+    # #64 hard-prefer: adopt a DIFFERENT chapter only when STRICTLY better than the original's overlap
+    # (prefer_ov is 0.0 on the write path, where prefer_key is None -> unchanged best-overlap behavior).
+    strictly_better = prefer_key is None or best_ov > prefer_ov
+    if best_key is not None and best_ov >= refresh_overlap and strictly_better and best_key != fresh_key:
         log.info("chapter-writer refresh: adopting %s (overlap %.2f) — supersede, not sibling",
                  best_key, best_ov)
         claimed.add(best_key)
         return best_key
+    if prefer_key is not None and prefer_key != fresh_key:
+        claimed.add(prefer_key)          # heal keeps the original's identity (tie or no better other)
+        return prefer_key
     claimed.add(fresh_key)
     return fresh_key
 
@@ -219,7 +238,8 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
                      refresh_overlap: float = 0.7, claimed_keys: set[str] | None = None,
                      containment_guard: bool = True, containment_counts: dict | None = None,
                      exclude_chapter_ids: frozenset[int] = frozenset(),
-                     member_map: dict[int, tuple[str, frozenset[int]]] | None = None):
+                     member_map: dict[int, tuple[str, frozenset[int]]] | None = None,
+                     prefer_key: str | None = None):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
@@ -314,7 +334,7 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
     key = await _adopt_refresh_key(store, members, fresh_key,
                                    refresh_overlap=refresh_overlap,
                                    claimed=claimed_keys if claimed_keys is not None else set(),
-                                   chapters=chapters)
+                                   chapters=chapters, prefer_key=prefer_key)
     schema = await store.store_fact(
         key=key,
         value=text,
@@ -509,18 +529,19 @@ def _bump(counts: dict | None, key: str) -> None:
         counts[key] = counts.get(key, 0) + 1
 
 
-async def _retire_chapter(store, chapter_id: int) -> bool:
-    """Retire a stale chapter: mark it non-active (status='superseded', NO successor) and demote its
-    retrieval_strength. Mirrors _supersede_chapter but WITHOUT a superseded_by target — nothing
-    replaces it. APPEND-ONLY: the row stays queryable via get_fact_history, never deleted. Returns
-    False (no-op) if the row is already non-active — so a chapter the re-draft already superseded on
-    its own key is never double-processed."""
+async def _retire_chapter(store, chapter_id: int, *, successor: int | None = None) -> bool:
+    """Retire a stale chapter: mark it non-active (status='superseded') and demote its retrieval_strength.
+    `successor` sets superseded_by (#64 — when the heal replaced the chapter under a DIFFERENT key, the
+    retired original must forward to its replacement, never dead-end at superseded_by=NULL); default None
+    is the plain retire (nothing replaces it — the <2-members / refused-redraft arms). APPEND-ONLY: the
+    row stays queryable via get_fact_history, never deleted. Returns False (no-op) if the row is already
+    non-active — so a chapter the re-draft already superseded on its own key is never double-processed."""
     assert store._db is not None
     cur = await store._db.execute(
-        "UPDATE facts SET status = 'superseded', updated_at = ?, "
+        "UPDATE facts SET status = 'superseded', updated_at = ?, superseded_by = ?, "
         "retrieval_strength = MIN(retrieval_strength, 0.1) "
         "WHERE id = ? AND agent_id = ? AND status = 'active'",
-        (int(time.time()), chapter_id, store._agent_id),
+        (int(time.time()), successor, chapter_id, store._agent_id),
     )
     await store._db.commit()
     return cur.rowcount > 0
@@ -589,15 +610,18 @@ async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, re
         attempts_log=attempts_log, refresh_overlap=refresh_overlap, claimed_keys=claimed_keys,
         containment_guard=containment_guard, containment_counts=containment_counts,
         exclude_chapter_ids=frozenset({chapter.id}), member_map=member_map,
+        prefer_key=chapter.key,   # #64: adoption HARD-PREFERS the chapter being healed on an overlap tie
     )
     if attempts_log:  # label the re-draft attempt _write_one just appended as re-check activity
         attempts_log[-1]["staleness_recheck_of"] = chapter.key
     if cancel_event.is_set():
         return  # cancelled mid-generation — leave the chapter untouched, catch it next pass
     if schema is not None:
-        # Grounded re-draft written; it adopted this chapter's key and already superseded it. Defensive
-        # retire covers the rare tie where adoption chose another key — a no-op when already superseded.
-        await _retire_chapter(store, chapter.id)
+        # Grounded re-draft written. If it adopted THIS chapter's key (the hard-prefer default, #64),
+        # store_fact already superseded it with a successor and this retire is a no-op. If adoption chose
+        # a DIFFERENT key (only when strictly better), the original is still active — retire it WITH the
+        # successor so its history forwards to the replacement, never dead-ending at superseded_by=NULL.
+        await _retire_chapter(store, chapter.id, successor=schema.id)
         _bump(counts, "redrafted")
     else:
         # Re-draft refused/failed/folded elsewhere (its rejection is already in attempts_log) ->
