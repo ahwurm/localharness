@@ -110,6 +110,44 @@ def test_regression_detected_low_a1_recall(tmp_path):
     _assert_detected(tmp_path, reg, notes)
 
 
+def test_no_regression_when_b4_raw_false_but_excused(tmp_path):
+    """#41: an EXCUSED B4 run (raw b4_ok False, b4_excused True, verdict HOLDS — the grader's own
+    b4_effective path) is NOT a regression. The comparator must derive the same effective value the
+    grader folds into its verdict; reading raw b4_ok alone wrongly flagged these excused runs."""
+    c = _candidate_ok()
+    c["stage_b"]["b4_ok"] = False
+    c["stage_b"]["b4_excused"] = True
+    reg, notes = trc.compare(c, _baseline())
+    assert reg is False and notes == []
+    out = tmp_path / "verdict.md"
+    trc.write_verdict(out, reg, notes, candidate_path="c.json", baseline_path="b.json")
+    assert _one_regression_line(out.read_text()) == "regression: none"
+
+
+def test_regression_when_b4_raw_false_and_not_excused(tmp_path):
+    """#41: a genuinely-failing arc (raw b4_ok False, b4_excused False) is still a regression — the
+    effective value is false, so tightening the excusal spares only truly-excused runs."""
+    c = _candidate_ok()
+    c["stage_b"]["b4_ok"] = False
+    c["stage_b"]["b4_excused"] = False
+    reg, notes = trc.compare(c, _baseline())
+    assert reg is True and any("b4" in n for n in notes)
+    _assert_detected(tmp_path, reg, notes)
+
+
+def test_b4_old_shape_verdict_without_excused_key_unchanged(tmp_path):
+    """#41: an old verdict.json with no b4_excused key falls back to raw b4_ok exactly as before —
+    b4_ok True -> no note; b4_ok False -> regression. No behavior change for pre-excusal runs."""
+    ok = _candidate_ok()                       # b4_ok True, no b4_excused key
+    assert "b4_excused" not in ok["stage_b"]
+    reg, notes = trc.compare(ok, _baseline())
+    assert reg is False and not any("b4" in n for n in notes)
+    bad = _candidate_ok()
+    bad["stage_b"]["b4_ok"] = False            # raw false, no b4_excused key
+    reg2, notes2 = trc.compare(bad, _baseline())
+    assert reg2 is True and any("b4" in n for n in notes2)
+
+
 def test_run17_self_compare_is_none(tmp_path):
     """The committed run-17 baseline compared to ITSELF is by definition no-regression — the
     reproducibility anchor Plan 04's verify greps."""
