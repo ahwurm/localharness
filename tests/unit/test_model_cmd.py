@@ -333,6 +333,30 @@ def test_model_switch_empty_name_rejected_before_checkpoint_branch(components_ho
     assert not (components_home / "overrides.yaml").exists()
 
 
+def test_model_list_warns_when_default_not_served(components_home, monkeypatch):
+    """#50: server reachable but the configured default is NOT among the served models —
+    the list must state so plainly instead of silently showing no [active] marker anywhere."""
+    _seed_config(components_home)  # default_model = model-a
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-x", "model-y"]), raising=False
+    )
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 0, result.output
+    assert "not among the served models" in result.output
+    assert "model-a" in result.output  # names the stale default
+
+
+def test_model_list_no_warning_when_default_served(components_home, monkeypatch):
+    """#50: when the configured default IS served, the mismatch warning must NOT fire."""
+    _seed_config(components_home)  # default_model = model-a
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False
+    )
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 0, result.output
+    assert "not among the served models" not in result.output
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,
