@@ -155,6 +155,22 @@ def test_init_writes_config(mock_client_cls, mock_detect, tmp_path):
 
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
+def test_init_creates_agents_directory(mock_client_cls, mock_detect, tmp_path):
+    """#53: a fresh init must create the agents directory. doctor points a user at `init`
+    as the remedy for a missing agents dir, so init has to actually create one."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    agents_dir = tmp_path / "agents"
+    assert agents_dir.exists() and agents_dir.is_dir(), "init should create the agents directory"
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
 def test_init_stamps_current_defaults_revision(mock_client_cls, mock_detect, tmp_path):
     """A freshly-init'd config is born stamped at the current defaults revision, so the first
     `start` never spuriously migrates AND a later deliberate removal of a default is respected
