@@ -486,6 +486,80 @@ async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
     assert len(completed) == 1
 
 
+class _SameResultRegistry:
+    """Every dispatch returns the same output — used to drive the stuck detector."""
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolResult
+        return ToolResult(output="same", success=True)
+
+
+@pytest.mark.asyncio
+async def test_recovery_nudge_persisted_in_session_after_tool_result(mock_llm_client, bus):
+    """#82 (i): the stuck-recovery nudge is pushed into session.messages as a user message
+    positioned right after the iteration's tool result — durable history, not a transient
+    request-only append that leaves the model replying to a message that no longer exists."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    tc_same = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc_same]),   # iter1
+        Response(content=None, tool_calls=[tc_same]),   # iter2 → RECOVERING (nudge pushed)
+        Response(content="done"),                        # iter3 → complete
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_SameResultRegistry())
+    nudge = loop._config.recovery_injection.message
+    await loop.run_turn("task")
+
+    msgs = loop._conversation
+    idxs = [i for i, m in enumerate(msgs)
+            if m.get("role") == "user" and m.get("content") == nudge]
+    assert len(idxs) == 1, "nudge must appear exactly once in durable session history"
+    assert msgs[idxs[0] - 1].get("role") == "tool", "nudge must land right after the tool result"
+
+
+@pytest.mark.asyncio
+async def test_recovery_nudge_reaches_next_request_and_persists(mock_llm_client, bus):
+    """#82 (ii)+(iii): the nudge is in the NEXT LLM request exactly once AND — unlike the old
+    transient request-only append — is STILL present one iteration later (the durability
+    regression: the old mechanism dropped it after a single build)."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    tc_same = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
+    tc_x = ToolCallObj(id="b", name="bash", arguments={"cmd": "pwd"})
+    tc_y = ToolCallObj(id="c", name="bash", arguments={"cmd": "whoami"})
+    responses = [
+        Response(content=None, tool_calls=[tc_same]),   # iter1 (call 0)
+        Response(content=None, tool_calls=[tc_same]),   # iter2 (call 1) → RECOVERING
+        Response(content=None, tool_calls=[tc_x]),      # iter3 (call 2): NEXT request
+        Response(content=None, tool_calls=[tc_y]),      # iter4 (call 3): durability
+        Response(content="done"),                        # iter5 (call 4): complete
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_SameResultRegistry())
+    nudge = loop._config.recovery_injection.message
+
+    requests: list = []
+    original = loop._llm.stream_complete
+
+    async def capturing(messages=None, tools=None, on_token=None):
+        requests.append(list(messages or []))
+        return await original(messages=messages, tools=tools, on_token=on_token)
+
+    loop._llm.stream_complete = capturing
+    await loop.run_turn("task")
+
+    def count_nudge(req):
+        return sum(1 for m in req if m.get("role") == "user" and m.get("content") == nudge)
+
+    assert count_nudge(requests[0]) == 0             # absent before recovery fires
+    assert count_nudge(requests[1]) == 0
+    assert count_nudge(requests[2]) == 1             # (ii) NEXT request: exactly once
+    assert count_nudge(requests[3]) == 1             # (iii) still present one iteration later
+
+
 @pytest.mark.asyncio
 async def test_run_turn_handles_provider_connection_error_with_retry(mock_llm_client, bus):
     """ProviderConnectionError triggers one retry; if second also fails, returns summary."""
