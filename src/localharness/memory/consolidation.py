@@ -623,14 +623,30 @@ class ConsolidationScheduler:
         self._run_task: Optional[asyncio.Task] = None
         self._timer_task: Optional[asyncio.Task] = None
         self._last_activity = time.monotonic()
+        self._turn_in_flight = False  # #78: an agent turn is mid-flight (defers/cancels passes)
         self.last_report: Optional[ConsolidationReport] = None
 
     async def start(self) -> None:
         if not self._cfg.enabled:
             return
-        from localharness.core.events import UserMessage
+        from localharness.core.events import UserMessage, TurnStarted, TurnCompleted, TurnFailed
         self._handles.append(
             self._bus.subscribe(UserMessage, self._on_user_activity)
+        )
+        # #78: track the agent turn in flight. UserMessage alone was insufficient — it fires at
+        # turn START, so the idle clock ran from there and a long turn let idle_minutes elapse
+        # while the agent was still working, launching a pass onto the same serial inference
+        # gate. TurnStarted -> (TurnCompleted|TurnFailed) is a guaranteed 1:1 bracket per turn.
+        # Filter to THIS agent_id: nested subagent turns ride the same bus with their own
+        # agent_id and are already inside the root turn's bracket — they must not toggle it.
+        self._handles.append(
+            self._bus.subscribe(TurnStarted, self._on_turn_started, agent_id=self._agent_id)
+        )
+        self._handles.append(
+            self._bus.subscribe(TurnCompleted, self._on_turn_ended, agent_id=self._agent_id)
+        )
+        self._handles.append(
+            self._bus.subscribe(TurnFailed, self._on_turn_ended, agent_id=self._agent_id)
         )
         if await self.should_run():
             self.launch()
@@ -658,12 +674,30 @@ class ConsolidationScheduler:
         self._last_activity = time.monotonic()
         self.cancel_running()
 
+    async def _on_turn_started(self, event: Any) -> None:
+        """An agent turn is mid-flight (#78): defer STARTING a pass (via the launch() guard)
+        and cancel any RUNNING one — the same cooperative yield as user activity, so the pass
+        releases the serial inference gate at its next per-step check. Does NOT reset the idle
+        clock: idle is measured from turn END so a long turn can't look idle mid-flight."""
+        self._turn_in_flight = True
+        self.cancel_running()
+
+    async def _on_turn_ended(self, event: Any) -> None:
+        """Turn finished (TurnCompleted or TurnFailed): clear the in-flight gate and reset the
+        idle clock so idle_minutes is counted from turn END — the actual fix for #78."""
+        self._turn_in_flight = False
+        self._last_activity = time.monotonic()
+
     def cancel_running(self) -> None:
         if self._running is not None:
             self._running.cancel()
 
     def launch(self) -> None:
-        """Fire a pass as a background task (idempotent while one is running)."""
+        """Fire a pass as a background task (idempotent while one is running; deferred while an
+        agent turn is in flight — #78). Bench/eval never call this (they run ConsolidationPass
+        directly), so their path is unaffected by the turn guard."""
+        if self._turn_in_flight:
+            return
         if self._run_task is not None and not self._run_task.done():
             return
         self._running = ConsolidationPass(
