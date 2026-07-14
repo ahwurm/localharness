@@ -1033,3 +1033,82 @@ async def test_member_map_derived_once_per_pass(store):
 
     assert len(result) == 3                                      # three clusters written
     assert calls["n"] == 1, f"member map re-derived {calls['n']}x (must be once per pass, #71)"
+
+
+# ---------------------------------------------------------------------------
+# #64 (CRITICAL) — a heal must PRESERVE the chapter's identity on an overlap tie
+# ---------------------------------------------------------------------------
+# The recheck redraft re-derives its supersede target by unconstrained best-overlap with no preference
+# for the chapter being healed. A chapter's own surviving-member set self-scores 1.0; a near-duplicate
+# also scoring 1.0 can win by scan order — the healed content then adopts the WRONG chapter's key and
+# the original is retired at superseded_by=NULL (history dead-ends, content misattributed). The fix
+# threads the original's key into adoption, HARD-PREFERS it (a different key only when STRICTLY better),
+# and records the successor on every retire.
+
+@pytest.mark.asyncio
+async def test_stale_heal_preserves_identity_on_overlap_tie(store):
+    """#64: a near-dup chapter scoring the SAME 1.0 overlap must NOT hijack a heal's identity. The
+    redraft of an eroded chapter O adopts O'S OWN key (hard-prefer) — superseding O on its key with
+    history preserved and a successor recorded — never the near-dup's key with O dead-ended. The near-
+    dup is seeded FIRST so the unconstrained best-overlap scan would land on it (the pre-fix bug)."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+    m1 = await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag=None)
+    # Near-dup D: a grounded single-member {m1} chapter — revalidates (survives) and ties at overlap 1.0
+    # with O's survivors. Seeded FIRST (lower id) -> first in the best-overlap scan (pre-fix would pick it).
+    dup = await _seed_chapter(store, "neardup1", [m1], body=_GROUNDED)
+    m2 = await _seed_sem(store, _READ_B, "s2", topic="reads", child_tag=None)
+    m3 = await _seed_sem(store, "the read retry took 7 attempts before the absolute path resolved", "s1",
+                         topic="reads", child_tag=None)
+    o_body = "read tool returned FileNotFound retrying with the absolute path resolved after 7"
+    orig = await _seed_chapter(store, "origchap", [m1, m2, m3], body=o_body)   # grounds on m1/m2, "7" from m3
+    await _erode_member(store, m3, "the read retry succeeded once the working path was corrected")  # orphan the 7
+
+    counts: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts)
+
+    assert counts.get("redrafted", 0) == 1
+    live = await store.get_fact(orig.key)                        # healed content under O's OWN key
+    assert live is not None and live.status == "active" and live.id != orig.id
+    assert live.key == orig.key
+    assert await _status(store, orig.id) == ("superseded", live.id)   # successor recorded — NOT a dead-end
+    assert (await store.get_fact(dup.key)) is None               # near-dup did NOT receive the healed identity
+    assert len(await _active_chapters(store)) == 1               # exactly one active chapter (O, healed)
+
+
+@pytest.mark.asyncio
+async def test_adopt_hard_prefers_original_but_takes_strictly_better(store):
+    """#64: _adopt_refresh_key hard-prefers the ORIGINAL's key on an overlap TIE, and adopts a DIFFERENT
+    chapter's key ONLY when strictly better. Direct on the adoption function with controlled maps."""
+    from localharness.memory.chapter_writer import _adopt_refresh_key
+    m1 = await _seed_sem(store, _READ_A, "s1", child_tag=None)
+    m2 = await _seed_sem(store, _READ_B, "s2", child_tag=None)
+    members = [m1, m2]                                           # new_ids = {m1, m2}
+    korig, kdup, kbetter, kfresh = ("schema/cluster/orig", "schema/cluster/dup",
+                                    "schema/cluster/better", "schema/cluster/fresh")
+
+    # TIE: original {m1,m2} (ov 1.0) vs near-dup {m1} (ov 1.0), dup listed FIRST. prefer_key wins.
+    tie_map = {11: (kdup, frozenset({m1.id})), 10: (korig, frozenset({m1.id, m2.id}))}
+    key = await _adopt_refresh_key(store, members, kfresh, refresh_overlap=0.7, claimed=set(),
+                                   chapters=tie_map, prefer_key=korig)
+    assert key == korig                                         # tie -> original's identity kept, not the dup's
+
+    # STRICTLY BETTER: original {m1, phantom} (ov 0.5) vs other {m2} (ov 1.0). the other wins.
+    better_map = {10: (korig, frozenset({m1.id, 9_999_999})), 12: (kbetter, frozenset({m2.id}))}
+    key2 = await _adopt_refresh_key(store, members, kfresh, refresh_overlap=0.7, claimed=set(),
+                                    chapters=better_map, prefer_key=korig)
+    assert key2 == kbetter                                      # strictly-better other adopted
+
+
+@pytest.mark.asyncio
+async def test_retire_chapter_records_successor(store):
+    """#64: _retire_chapter can record a successor (no superseded_by=NULL dead-end) so the heal's retire
+    of the original points to its replacement; the default (no successor) keeps the plain-retire form."""
+    from localharness.memory.chapter_writer import _retire_chapter
+    m1 = await _seed_sem(store, _READ_A, "s1", child_tag=None)
+    ch = await _seed_chapter(store, "retire01", [m1])
+    succ = await _seed_chapter(store, "retire02", [m1])
+    assert await _retire_chapter(store, ch.id, successor=succ.id)
+    assert await _status(store, ch.id) == ("superseded", succ.id)   # successor recorded, not NULL
+    ch2 = await _seed_chapter(store, "retire03", [m1])
+    assert await _retire_chapter(store, ch2.id)                     # default: plain retire, no successor
+    assert await _status(store, ch2.id) == ("superseded", None)
