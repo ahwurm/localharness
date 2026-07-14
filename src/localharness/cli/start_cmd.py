@@ -525,377 +525,390 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"memory: {exc} (in-memory mode)")
         memory_store = None
 
-    # SESS-02: open the sessions row for this sitting (soft — a session-row failure must
-    # not cost the whole memory subsystem). All three args are already-resolved locals.
-    _session_started = False
-    if memory_store is not None:
-        try:
-            await memory_store.create_session(
-                sitting_id,
-                budget=agent_config.permissions.budget.model_dump(),
-                model=resolved_model,
-                context_tokens_available=_cfg_window,
-            )
-            _session_started = True
-        except Exception as exc:
-            warnings.append(f"session-start: {exc}")
-
-    # Prediction-error write gate (WRITE-03/06): harness-initiated memory writes from bus
-    # signals. Default-on, config-off (agent.memory.write_gate_enabled) — cruncher-style.
+    # --- Resource-owning window (#43) ---
+    # Everything constructed AFTER the store opens must be torn down by the finally below. A hard
+    # failure in this window (e.g. the TokenCounter fail-loud) otherwise skips cleanup and leaks
+    # aiosqlite's NON-DAEMON worker thread — hanging interpreter shutdown forever. Pre-bind every
+    # component the finally inspects so an early failure can't UnboundLocalError past the close.
     write_gate = None
-    if memory_store is not None and getattr(agent_config.memory, "write_gate_enabled", True):
-        try:
-            from localharness.memory.gate import WriteGate
-            write_gate = WriteGate(memory_store, bus, agent_name_str)
-            await write_gate.open()
-        except Exception as exc:
-            warnings.append(f"memory write-gate: {exc}")
-            write_gate = None
-
-    # SESS-02/05: sitting-scoped counters feeding the payload-first close-out summary
-    # (zero model calls — derived from bus signals the gate already composes payload-first).
-    # Same agent_id-filtered bus seam as the write gate; closed before the summary reads.
     session_acc = None
-    if memory_store is not None:
-        try:
-            from localharness.cli.session_accumulator import SessionAccumulator
-            session_acc = SessionAccumulator(bus, agent_name_str)
-            await session_acc.open()
-        except Exception as exc:
-            warnings.append(f"session-accumulator: {exc}")
-
-    # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
-    # idle timer, cooperatively cancelled by any user turn. Phase 36: the LLM replay seam is
-    # now ON in production — the real LLMClient is bridged through LLMTextAdapter (36-03, the
-    # SINGLE cancellable + char-bounded idle path) and passed as llm=, so the pass can write
-    # chapters, reconcile the correction queue, and mine transcripts. Each of those is gated
-    # per-step by an agent.memory.consolidation.* axis (schema_writer/reconcile/mining_enabled)
-    # AND early-returns when llm is None, so the deterministic core stays byte-unchanged. The
-    # try/except soft-degrades a wiring fault back to the deterministic pass (warnings.append).
-    # on_promotion_sample=None DEFERRED (CONS-06): the SEMA-05 report already surfaces generated
-    # chapters to the owner; wiring the Discord sample hook needs channel-construction reordering
-    # (§10), out of scope here. Named seam, same contract as llm.
     consolidation_scheduler = None
-    _cons_cfg = getattr(agent_config.memory, "consolidation", None)
-    if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
-        try:
-            from localharness.memory.consolidation import ConsolidationScheduler
-            from localharness.memory.idle_llm import LLMTextAdapter
-            consolidation_scheduler = ConsolidationScheduler(
-                memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm)
-            )
-            await consolidation_scheduler.start()
-        except Exception as exc:
-            warnings.append(f"memory consolidation: {exc}")
-            consolidation_scheduler = None
-
-    # Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
-    # score every outcome; user-signal triggers log labeled prediction errors. Score
-    # everything, gate nothing — pure measurement feeding Phase 35's thresholds. Additive
-    # bus subscribers only (WriteGate shape); zero loop changes, zero model calls.
     predictive_gate = None
     user_signal_detector = None
-    _pg_cfg = getattr(agent_config.memory, "predictive_gate", None)
-    if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled:
-        try:
-            from localharness.memory.predictive_gate import PredictiveGate
-            predictive_gate = PredictiveGate(memory_store, bus, agent_name_str, _pg_cfg)
-            await predictive_gate.open()
-        except Exception as exc:
-            warnings.append(f"predictive-gate: {exc}")
-            predictive_gate = None
-        try:
-            from localharness.memory.user_signals import UserSignalDetector
-            user_signal_detector = UserSignalDetector(memory_store, bus, agent_name_str, _pg_cfg)
-            await user_signal_detector.open()
-        except Exception as exc:
-            warnings.append(f"user-signals: {exc}")
-            user_signal_detector = None
-
-    # PredictiveWriteGate (Phase 35, PGATE-01/02/03): the LIVE write decision — turns 34's
-    # already-published SurpriseScored + correction-worded UserMessage into gated sub-0.7 fact
-    # writes. Sibling subscriber (WriteGate shape), reusing the same _pg_cfg; gated on write_live
-    # (the pre-committed KILL-revert lever) AND enabled. Its OWN try/except so a wiring fault
-    # soft-degrades to motif-only capture and never crashes start.
     predictive_write_gate = None
-    if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled and getattr(_pg_cfg, "write_live", True):
-        try:
-            from localharness.memory.predictive_write_gate import PredictiveWriteGate
-            predictive_write_gate = PredictiveWriteGate(memory_store, bus, agent_name_str, _pg_cfg)
-            await predictive_write_gate.open()
-        except Exception as exc:
-            warnings.append(f"predictive-write-gate: {exc}")
-            predictive_write_gate = None
-
-    # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
-    # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
-    # the ContextManager below so eviction-writes and restore-reads hit the same map.
-    from localharness.agent.context import ContentStore
-    eviction_store = ContentStore()
-    try:
-        if memory_store is not None:
-            # ALL memory tools register whenever a store exists (critic M5): the
-            # inject_into_context flag gates INJECTION, not tool availability —
-            # otherwise injection-off produces write-only memory (remember succeeds,
-            # nothing can ever read it back).
-            from localharness.tools.builtin.memory_tools import (
-                MemoryGetTool,
-                MemoryRememberTool,
-                MemorySearchTool,
-            )
-            await tool_registry.register(MemorySearchTool(memory_store), scope="global")
-            await tool_registry.register(MemoryGetTool(memory_store), scope="global")
-            await tool_registry.register(MemoryRememberTool(memory_store), scope="global")
-        if agent_config.context.tool_result_eviction:
-            from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
-            await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
-    except Exception as exc:
-        warnings.append(f"queryable-handle tools: {exc}")
-
-    # Bind the root agent's store-backed verb tools (web_fetch / web_page_query / tool_result_get)
-    # to the root ContentStore, so the root has ONE per-agent store (web pages + evicted bodies) and
-    # children — which rebind to their OWN store in dispatch — are isolated from it.
-    from localharness.tools.builtin import bind_agent_store_tools
-    bind_agent_store_tools(tool_registry, eviction_store)
-
-    # --- 5. Plugin loader (soft) ---
-    plugin_loader: PluginLoader | None = None
-    try:
-        if hook_system is not None:
-            plugin_loader = PluginLoader(tool_registry, hook_system)
-            loaded_names = await plugin_loader.discover_all()
-            plugins_loaded = len(loaded_names)
-    except Exception as exc:
-        warnings.append(f"plugins: {exc}")
-
-    # --- 6. MCP client manager (soft) ---
-    mcp_manager: MCPClientManager | None = None
-    try:
-        mcp_configs = agent_config.tools.mcp_servers
-        if mcp_configs:
-            mcp_manager = MCPClientManager(tool_registry)
-            results = await mcp_manager.startup(mcp_configs)
-            mcp_connected = sum(1 for v in results.values() if v > 0)
-            mcp_failed = sum(1 for v in results.values() if v == 0)
-    except Exception as exc:
-        warnings.append(f"mcp: {exc}")
-
-    # --- 6b. Model-aware token counter (one instance, injected everywhere) ---
-    # Counts via the served model's exact tokenizer so budget gates fire at the real fraction.
-    # Provider-aware (#8): vLLM ({model,prompt}->{count}) and llama.cpp ({content}->{tokens})
-    # both count EXACTLY; a KNOWN exact runtime whose /tokenize is unreachable hard-fails here
-    # (doctor's check 5c reports the same) rather than silently mis-metering — an approximate
-    # meter is what hid the context overflows (400s). Ollama / LM Studio serve no tokenize
-    # endpoint, so they run in EXPLICIT approximate mode (cl100k x safety factor, over-counting)
-    # surfaced by the warning below. This except also trips if NO tokenizer exists (tiktoken
-    # missing) — a genuinely unusable environment.
-    try:
-        token_counter = TokenCounter(
-            base_url=provider.base_url,
-            model=resolved_model,
-            provider_type=provider.provider_type,
-        )
-    except RuntimeError as exc:
-        # #44 defense-in-depth: the probe above already hard-fails an unreachable/unserved model,
-        # so reaching here means the model IS served but its /tokenize is unavailable (or tiktoken
-        # is missing) — the tokenizer message is now accurate. Still point at doctor for the rare
-        # case where /tokenize is a separate seam from the chat endpoint the probe reached.
-        err_console.print(
-            f"[bold red]Error:[/bold red] {exc}\n"
-            f"Ensure the model server at {provider.base_url} exposes an exact tokenizer "
-            f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry.\n"
-            f"Run `localharness doctor` to diagnose."
-        )
-        raise typer.Exit(1)
-    if token_counter.approximate:
-        from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR
-        console.print(
-            f"[yellow]⚠[/yellow]  {provider.provider_type} serves no tokenize endpoint — "
-            f"token accounting uses a conservative estimate (cl100k × "
-            f"{APPROX_TOKENIZE_SAFETY_FACTOR}): budget gates fire early rather than overflow. "
-            f"For exact counts use vLLM or llama.cpp."
-        )
-
-    # --- 7. Compaction pipeline (soft) ---
-    pipeline: CompactionPipeline | None = None
-    try:
-        compact_md_path = agent_dir / "compact.md"
-
-        from localharness.agent.context import make_compaction_summarize_fn
-        pipeline = CompactionPipeline(
-            token_counter=token_counter,
-            tool_result_cap=agent_config.context.max_tool_output_chars,
-            preserve_first_n=agent_config.context.preserve_first_n_messages,
-            preserve_last_n=agent_config.context.preserve_last_n_messages,
-            llm_summarize_fn=make_compaction_summarize_fn(llm),  # shared, tuple-unpack tested
-            compact_md_path=compact_md_path,
-        )
-    except Exception as exc:
-        warnings.append(f"compaction: {exc}")
-        pipeline = None
-
-    # --- 8. Context manager (with pipeline) ---
-    ctx_mgr = ContextManager(
-        max_context_tokens=agent_config.context.max_context_tokens,
-        preserve_first_n=agent_config.context.preserve_first_n_messages,
-        preserve_last_n=agent_config.context.preserve_last_n_messages,
-        pipeline=pipeline,
-        eviction_store=eviction_store,
-        tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
-        tool_evict_enabled=agent_config.context.tool_result_eviction,
-        token_counter=token_counter,
-    )
-
-    # --- 9. Orchestrator layer ---
-    from localharness.orchestrator.router import AgentCreationFlow
-    from localharness.orchestrator.cards import AgentCardRegistry
-    card_registry = AgentCardRegistry()
-    for agent_data in agents:
-        try:
-            a_name = agent_data.get("name", "")
-            a_cfg = loader.load_agent(a_name)
-            card_registry.register_from_config(a_cfg)
-        except Exception:
-            pass  # skip agents that fail to load — non-fatal
-    orchestrator = AgentCreationFlow(card_registry=card_registry)
-
-    # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
-    # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
-    # and the AgentTool is registered at GLOBAL scope. The parent loop's agent is the `default`
-    # agent (agent_name_str), and get_tools_for_agent resolves agent-scoped tools by that name —
-    # an agent_id="orchestrator" registration was NEVER offered to `default`, so delegation was
-    # dead. Global scope matches the bench semantics (runner.py registers `agent` globally) and
-    # makes the running parent actually see + use the tool. No global-name collision: the builtins
-    # are read/glob/grep/write/bash_exec. parent_session_id is read at call time via the getter
-    # (agent_loop is constructed just below, before any turn runs / the model can delegate).
-    from localharness.tools.builtin.agent_tool import AgentTool
-    from localharness.agent.subagent import make_explore_agent_runner
-
-    perm_eval = PermissionEvaluator()
-
-    # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
-    # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
-    # is a standalone capability (route a user's "re-check X" straight to it); the web-researcher
-    # nests it only when its task asks for verification (rigor=on-request default) or under
-    # RESEARCH_RIGOR=high (auto-verify material claims).
-    # v0.5.3: every default builtin is quarantined-or-read-only; bash-holding specialist roles
-    # (data-analyst, frontend-designer) ship as opt-in examples/agents/ configs instead.
-    available_agent_names = ["explore", "web-researcher", "cruncher",
-                             "search-verifier"] + [c.name for c in card_registry.all_cards()]
-
-    _run_agent = make_explore_agent_runner(
-        llm=llm,
-        bus=bus,
-        base_registry=tool_registry,
-        permission_evaluator=perm_eval,
-        get_parent_session_id=lambda: agent_loop.current_session_id,
-        # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
-        load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
-        # Children inherit the parent's exact /tokenize counter + resolved window so the
-        # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
-        token_counter=token_counter,
-        max_context_tokens=agent_config.context.max_context_tokens,
-        # Real, config-capped recursion depth: the orchestrator is depth 0; a non-leaf child
-        # (e.g. web-researcher) may nest a grandchild (search-verifier) up to this cap.
-        depth=0,
-        max_subagent_depth=agent_config.max_subagent_depth,
-        available_agents=available_agent_names,
-        # HIER-02: cruncher runs persist their gist tree into the agent's memory graph.
-        memory_store=memory_store,
-        # Grant keystone: the root's ContentStore is the parent store children read through when the
-        # model delegates with grant_handles (it IS `eviction_store` — start_cmd:315/406 — so an
-        # evicted/handle id the model sees in a stub is exactly what it can grant to a cruncher).
-        parent_store=eviction_store,
-        # Cruncher exec policy (agent.cruncher.*): offered to a clean-origin cruncher iff exec_enabled.
-        cruncher_config=agent_config.cruncher,
-    )
-
-    agent_tool = AgentTool(
-        agent_runner=_run_agent,
-        available_agents=available_agent_names,
-    )
-    await tool_registry.register(agent_tool, scope="global")
-
-    # --- 10. Agent loop ---
-    # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
-    # <cfg_path>/KILL — i.e. ~/.localharness/KILL in a default setup). None = kill switch off,
-    # left for AgentLoop's own fallback. Passing it here keeps agent/loop.py config-dir-agnostic.
-    _kill_value = getattr(getattr(agent_config.permissions, "budget", None), "kill_file", None)
-    kill_file_path = resolve_runtime_path(_kill_value, cfg_path) if _kill_value else None
-    agent_loop = AgentLoop(
-        config=agent_config,
-        llm=llm,
-        bus=bus,
-        context_manager=ctx_mgr,
-        tool_registry=tool_registry,
-        permission_evaluator=perm_eval,
-        memory_loader=memory_store,
-        kill_file_path=kill_file_path,
-        compact_md_path=compact_md_path,
-        session_id=sitting_id,  # SESS-01: the whole sitting shares this id
-    )
-    if channel_mode == "discord":
-        from localharness.channels.discord import DiscordChannel, discord_config_from_env
-        channel = DiscordChannel(bus=bus, config=discord_config_from_env())
-        console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
-    else:
-        # #35: REPL history resolves under this config dir too (default ~/.localharness/.repl_history).
-        channel = TerminalChannel(
-            bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", cfg_path))
-        )
-
-    # --- Determine returning user ---
-    is_returning = events_path.exists() and events_path.stat().st_size > 0
-
-    # --- Startup banner ---
-    elapsed = _time.monotonic() - start_time
-    from localharness.cli.ui import startup_banner
-    console.print(startup_banner(model=resolved_model, is_returning=is_returning))
-
-    # --- Startup summary line ---
-    parts = [f"({elapsed:.1f}s startup)"]
-    counts: list[str] = ["1 agent"]
-    if mcp_connected > 0 or mcp_failed > 0:
-        mcp_str = f"{mcp_connected} MCP server{'s' if mcp_connected != 1 else ''}"
-        if mcp_failed > 0:
-            mcp_str += f" ({mcp_failed} failed)"
-        counts.append(mcp_str)
-    if plugins_loaded > 0:
-        counts.append(f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}")
-    summary_line = " -- ".join(parts + [", ".join(counts)])
-    if warnings:
-        summary_line += f" [{'; '.join(warnings)}]"
-    console.print(summary_line)
-
-    # --- Verbose output ---
-    if verbose:
-        if mcp_manager and mcp_manager.connected_servers:
-            for srv in mcp_manager.connected_servers:
-                console.print(f"  MCP: {srv}")
-        if plugins_loaded > 0 and hook_system:
-            for pname in hook_system.loaded_plugin_names:
-                console.print(f"  Plugin: {pname}")
-        tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
-        console.print(f"  Tools: {tool_count} total")
-        if memory_store:
-            console.print(f"  Memory: {agent_dir / 'memory.db'} (WAL)")
-        else:
-            console.print("  Memory: in-memory (no persistence)")
-
-    # --- Run REPL ---
-    from localharness.cli.repl import OrchestratorREPL
-
-    repl = OrchestratorREPL(
-        orchestrator=orchestrator,
-        agent_loop=agent_loop,
-        channel=channel,
-        bus=bus,
-        config_dir=cfg_path,
-        harness_config=harness,
-    )
-
+    mcp_manager = None
+    _session_started = False
     _exit_reason = "complete"
     try:
+        # SESS-02: open the sessions row for this sitting (soft — a session-row failure must
+        # not cost the whole memory subsystem). All three args are already-resolved locals.
+        _session_started = False
+        if memory_store is not None:
+            try:
+                await memory_store.create_session(
+                    sitting_id,
+                    budget=agent_config.permissions.budget.model_dump(),
+                    model=resolved_model,
+                    context_tokens_available=_cfg_window,
+                )
+                _session_started = True
+            except Exception as exc:
+                warnings.append(f"session-start: {exc}")
+
+        # Prediction-error write gate (WRITE-03/06): harness-initiated memory writes from bus
+        # signals. Default-on, config-off (agent.memory.write_gate_enabled) — cruncher-style.
+        write_gate = None
+        if memory_store is not None and getattr(agent_config.memory, "write_gate_enabled", True):
+            try:
+                from localharness.memory.gate import WriteGate
+                write_gate = WriteGate(memory_store, bus, agent_name_str)
+                await write_gate.open()
+            except Exception as exc:
+                warnings.append(f"memory write-gate: {exc}")
+                write_gate = None
+
+        # SESS-02/05: sitting-scoped counters feeding the payload-first close-out summary
+        # (zero model calls — derived from bus signals the gate already composes payload-first).
+        # Same agent_id-filtered bus seam as the write gate; closed before the summary reads.
+        session_acc = None
+        if memory_store is not None:
+            try:
+                from localharness.cli.session_accumulator import SessionAccumulator
+                session_acc = SessionAccumulator(bus, agent_name_str)
+                await session_acc.open()
+            except Exception as exc:
+                warnings.append(f"session-accumulator: {exc}")
+
+        # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
+        # idle timer, cooperatively cancelled by any user turn. Phase 36: the LLM replay seam is
+        # now ON in production — the real LLMClient is bridged through LLMTextAdapter (36-03, the
+        # SINGLE cancellable + char-bounded idle path) and passed as llm=, so the pass can write
+        # chapters, reconcile the correction queue, and mine transcripts. Each of those is gated
+        # per-step by an agent.memory.consolidation.* axis (schema_writer/reconcile/mining_enabled)
+        # AND early-returns when llm is None, so the deterministic core stays byte-unchanged. The
+        # try/except soft-degrades a wiring fault back to the deterministic pass (warnings.append).
+        # on_promotion_sample=None DEFERRED (CONS-06): the SEMA-05 report already surfaces generated
+        # chapters to the owner; wiring the Discord sample hook needs channel-construction reordering
+        # (§10), out of scope here. Named seam, same contract as llm.
+        consolidation_scheduler = None
+        _cons_cfg = getattr(agent_config.memory, "consolidation", None)
+        if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
+            try:
+                from localharness.memory.consolidation import ConsolidationScheduler
+                from localharness.memory.idle_llm import LLMTextAdapter
+                consolidation_scheduler = ConsolidationScheduler(
+                    memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm)
+                )
+                await consolidation_scheduler.start()
+            except Exception as exc:
+                warnings.append(f"memory consolidation: {exc}")
+                consolidation_scheduler = None
+
+        # Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
+        # score every outcome; user-signal triggers log labeled prediction errors. Score
+        # everything, gate nothing — pure measurement feeding Phase 35's thresholds. Additive
+        # bus subscribers only (WriteGate shape); zero loop changes, zero model calls.
+        predictive_gate = None
+        user_signal_detector = None
+        _pg_cfg = getattr(agent_config.memory, "predictive_gate", None)
+        if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled:
+            try:
+                from localharness.memory.predictive_gate import PredictiveGate
+                predictive_gate = PredictiveGate(memory_store, bus, agent_name_str, _pg_cfg)
+                await predictive_gate.open()
+            except Exception as exc:
+                warnings.append(f"predictive-gate: {exc}")
+                predictive_gate = None
+            try:
+                from localharness.memory.user_signals import UserSignalDetector
+                user_signal_detector = UserSignalDetector(memory_store, bus, agent_name_str, _pg_cfg)
+                await user_signal_detector.open()
+            except Exception as exc:
+                warnings.append(f"user-signals: {exc}")
+                user_signal_detector = None
+
+        # PredictiveWriteGate (Phase 35, PGATE-01/02/03): the LIVE write decision — turns 34's
+        # already-published SurpriseScored + correction-worded UserMessage into gated sub-0.7 fact
+        # writes. Sibling subscriber (WriteGate shape), reusing the same _pg_cfg; gated on write_live
+        # (the pre-committed KILL-revert lever) AND enabled. Its OWN try/except so a wiring fault
+        # soft-degrades to motif-only capture and never crashes start.
+        predictive_write_gate = None
+        if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled and getattr(_pg_cfg, "write_live", True):
+            try:
+                from localharness.memory.predictive_write_gate import PredictiveWriteGate
+                predictive_write_gate = PredictiveWriteGate(memory_store, bus, agent_name_str, _pg_cfg)
+                await predictive_write_gate.open()
+            except Exception as exc:
+                warnings.append(f"predictive-write-gate: {exc}")
+                predictive_write_gate = None
+
+        # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
+        # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
+        # the ContextManager below so eviction-writes and restore-reads hit the same map.
+        from localharness.agent.context import ContentStore
+        eviction_store = ContentStore()
+        try:
+            if memory_store is not None:
+                # ALL memory tools register whenever a store exists (critic M5): the
+                # inject_into_context flag gates INJECTION, not tool availability —
+                # otherwise injection-off produces write-only memory (remember succeeds,
+                # nothing can ever read it back).
+                from localharness.tools.builtin.memory_tools import (
+                    MemoryGetTool,
+                    MemoryRememberTool,
+                    MemorySearchTool,
+                )
+                await tool_registry.register(MemorySearchTool(memory_store), scope="global")
+                await tool_registry.register(MemoryGetTool(memory_store), scope="global")
+                await tool_registry.register(MemoryRememberTool(memory_store), scope="global")
+            if agent_config.context.tool_result_eviction:
+                from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+                await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
+        except Exception as exc:
+            warnings.append(f"queryable-handle tools: {exc}")
+
+        # Bind the root agent's store-backed verb tools (web_fetch / web_page_query / tool_result_get)
+        # to the root ContentStore, so the root has ONE per-agent store (web pages + evicted bodies) and
+        # children — which rebind to their OWN store in dispatch — are isolated from it.
+        from localharness.tools.builtin import bind_agent_store_tools
+        bind_agent_store_tools(tool_registry, eviction_store)
+
+        # --- 5. Plugin loader (soft) ---
+        plugin_loader: PluginLoader | None = None
+        try:
+            if hook_system is not None:
+                plugin_loader = PluginLoader(tool_registry, hook_system)
+                loaded_names = await plugin_loader.discover_all()
+                plugins_loaded = len(loaded_names)
+        except Exception as exc:
+            warnings.append(f"plugins: {exc}")
+
+        # --- 6. MCP client manager (soft) ---
+        mcp_manager: MCPClientManager | None = None
+        try:
+            mcp_configs = agent_config.tools.mcp_servers
+            if mcp_configs:
+                mcp_manager = MCPClientManager(tool_registry)
+                results = await mcp_manager.startup(mcp_configs)
+                mcp_connected = sum(1 for v in results.values() if v > 0)
+                mcp_failed = sum(1 for v in results.values() if v == 0)
+        except Exception as exc:
+            warnings.append(f"mcp: {exc}")
+
+        # --- 6b. Model-aware token counter (one instance, injected everywhere) ---
+        # Counts via the served model's exact tokenizer so budget gates fire at the real fraction.
+        # Provider-aware (#8): vLLM ({model,prompt}->{count}) and llama.cpp ({content}->{tokens})
+        # both count EXACTLY; a KNOWN exact runtime whose /tokenize is unreachable hard-fails here
+        # (doctor's check 5c reports the same) rather than silently mis-metering — an approximate
+        # meter is what hid the context overflows (400s). Ollama / LM Studio serve no tokenize
+        # endpoint, so they run in EXPLICIT approximate mode (cl100k x safety factor, over-counting)
+        # surfaced by the warning below. This except also trips if NO tokenizer exists (tiktoken
+        # missing) — a genuinely unusable environment.
+        try:
+            token_counter = TokenCounter(
+                base_url=provider.base_url,
+                model=resolved_model,
+                provider_type=provider.provider_type,
+            )
+        except RuntimeError as exc:
+            # #44 defense-in-depth: the probe above already hard-fails an unreachable/unserved model,
+            # so reaching here means the model IS served but its /tokenize is unavailable (or tiktoken
+            # is missing) — the tokenizer message is now accurate. Still point at doctor for the rare
+            # case where /tokenize is a separate seam from the chat endpoint the probe reached.
+            err_console.print(
+                f"[bold red]Error:[/bold red] {exc}\n"
+                f"Ensure the model server at {provider.base_url} exposes an exact tokenizer "
+                f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry.\n"
+                f"Run `localharness doctor` to diagnose."
+            )
+            raise typer.Exit(1)
+        if token_counter.approximate:
+            from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR
+            console.print(
+                f"[yellow]⚠[/yellow]  {provider.provider_type} serves no tokenize endpoint — "
+                f"token accounting uses a conservative estimate (cl100k × "
+                f"{APPROX_TOKENIZE_SAFETY_FACTOR}): budget gates fire early rather than overflow. "
+                f"For exact counts use vLLM or llama.cpp."
+            )
+
+        # --- 7. Compaction pipeline (soft) ---
+        pipeline: CompactionPipeline | None = None
+        try:
+            compact_md_path = agent_dir / "compact.md"
+
+            from localharness.agent.context import make_compaction_summarize_fn
+            pipeline = CompactionPipeline(
+                token_counter=token_counter,
+                tool_result_cap=agent_config.context.max_tool_output_chars,
+                preserve_first_n=agent_config.context.preserve_first_n_messages,
+                preserve_last_n=agent_config.context.preserve_last_n_messages,
+                llm_summarize_fn=make_compaction_summarize_fn(llm),  # shared, tuple-unpack tested
+                compact_md_path=compact_md_path,
+            )
+        except Exception as exc:
+            warnings.append(f"compaction: {exc}")
+            pipeline = None
+
+        # --- 8. Context manager (with pipeline) ---
+        ctx_mgr = ContextManager(
+            max_context_tokens=agent_config.context.max_context_tokens,
+            preserve_first_n=agent_config.context.preserve_first_n_messages,
+            preserve_last_n=agent_config.context.preserve_last_n_messages,
+            pipeline=pipeline,
+            eviction_store=eviction_store,
+            tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
+            tool_evict_enabled=agent_config.context.tool_result_eviction,
+            token_counter=token_counter,
+        )
+
+        # --- 9. Orchestrator layer ---
+        from localharness.orchestrator.router import AgentCreationFlow
+        from localharness.orchestrator.cards import AgentCardRegistry
+        card_registry = AgentCardRegistry()
+        for agent_data in agents:
+            try:
+                a_name = agent_data.get("name", "")
+                a_cfg = loader.load_agent(a_name)
+                card_registry.register_from_config(a_cfg)
+            except Exception:
+                pass  # skip agents that fail to load — non-fatal
+        orchestrator = AgentCreationFlow(card_registry=card_registry)
+
+        # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
+        # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
+        # and the AgentTool is registered at GLOBAL scope. The parent loop's agent is the `default`
+        # agent (agent_name_str), and get_tools_for_agent resolves agent-scoped tools by that name —
+        # an agent_id="orchestrator" registration was NEVER offered to `default`, so delegation was
+        # dead. Global scope matches the bench semantics (runner.py registers `agent` globally) and
+        # makes the running parent actually see + use the tool. No global-name collision: the builtins
+        # are read/glob/grep/write/bash_exec. parent_session_id is read at call time via the getter
+        # (agent_loop is constructed just below, before any turn runs / the model can delegate).
+        from localharness.tools.builtin.agent_tool import AgentTool
+        from localharness.agent.subagent import make_explore_agent_runner
+
+        perm_eval = PermissionEvaluator()
+
+        # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
+        # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
+        # is a standalone capability (route a user's "re-check X" straight to it); the web-researcher
+        # nests it only when its task asks for verification (rigor=on-request default) or under
+        # RESEARCH_RIGOR=high (auto-verify material claims).
+        # v0.5.3: every default builtin is quarantined-or-read-only; bash-holding specialist roles
+        # (data-analyst, frontend-designer) ship as opt-in examples/agents/ configs instead.
+        available_agent_names = ["explore", "web-researcher", "cruncher",
+                                 "search-verifier"] + [c.name for c in card_registry.all_cards()]
+
+        _run_agent = make_explore_agent_runner(
+            llm=llm,
+            bus=bus,
+            base_registry=tool_registry,
+            permission_evaluator=perm_eval,
+            get_parent_session_id=lambda: agent_loop.current_session_id,
+            # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
+            load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
+            # Children inherit the parent's exact /tokenize counter + resolved window so the
+            # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
+            token_counter=token_counter,
+            max_context_tokens=agent_config.context.max_context_tokens,
+            # Real, config-capped recursion depth: the orchestrator is depth 0; a non-leaf child
+            # (e.g. web-researcher) may nest a grandchild (search-verifier) up to this cap.
+            depth=0,
+            max_subagent_depth=agent_config.max_subagent_depth,
+            available_agents=available_agent_names,
+            # HIER-02: cruncher runs persist their gist tree into the agent's memory graph.
+            memory_store=memory_store,
+            # Grant keystone: the root's ContentStore is the parent store children read through when the
+            # model delegates with grant_handles (it IS `eviction_store` — start_cmd:315/406 — so an
+            # evicted/handle id the model sees in a stub is exactly what it can grant to a cruncher).
+            parent_store=eviction_store,
+            # Cruncher exec policy (agent.cruncher.*): offered to a clean-origin cruncher iff exec_enabled.
+            cruncher_config=agent_config.cruncher,
+        )
+
+        agent_tool = AgentTool(
+            agent_runner=_run_agent,
+            available_agents=available_agent_names,
+        )
+        await tool_registry.register(agent_tool, scope="global")
+
+        # --- 10. Agent loop ---
+        # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
+        # <cfg_path>/KILL — i.e. ~/.localharness/KILL in a default setup). None = kill switch off,
+        # left for AgentLoop's own fallback. Passing it here keeps agent/loop.py config-dir-agnostic.
+        _kill_value = getattr(getattr(agent_config.permissions, "budget", None), "kill_file", None)
+        kill_file_path = resolve_runtime_path(_kill_value, cfg_path) if _kill_value else None
+        agent_loop = AgentLoop(
+            config=agent_config,
+            llm=llm,
+            bus=bus,
+            context_manager=ctx_mgr,
+            tool_registry=tool_registry,
+            permission_evaluator=perm_eval,
+            memory_loader=memory_store,
+            kill_file_path=kill_file_path,
+            compact_md_path=compact_md_path,
+            session_id=sitting_id,  # SESS-01: the whole sitting shares this id
+        )
+        if channel_mode == "discord":
+            from localharness.channels.discord import DiscordChannel, discord_config_from_env
+            channel = DiscordChannel(bus=bus, config=discord_config_from_env())
+            console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
+        else:
+            # #35: REPL history resolves under this config dir too (default ~/.localharness/.repl_history).
+            channel = TerminalChannel(
+                bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", cfg_path))
+            )
+
+        # --- Determine returning user ---
+        is_returning = events_path.exists() and events_path.stat().st_size > 0
+
+        # --- Startup banner ---
+        elapsed = _time.monotonic() - start_time
+        from localharness.cli.ui import startup_banner
+        console.print(startup_banner(model=resolved_model, is_returning=is_returning))
+
+        # --- Startup summary line ---
+        parts = [f"({elapsed:.1f}s startup)"]
+        counts: list[str] = ["1 agent"]
+        if mcp_connected > 0 or mcp_failed > 0:
+            mcp_str = f"{mcp_connected} MCP server{'s' if mcp_connected != 1 else ''}"
+            if mcp_failed > 0:
+                mcp_str += f" ({mcp_failed} failed)"
+            counts.append(mcp_str)
+        if plugins_loaded > 0:
+            counts.append(f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}")
+        summary_line = " -- ".join(parts + [", ".join(counts)])
+        if warnings:
+            summary_line += f" [{'; '.join(warnings)}]"
+        console.print(summary_line)
+
+        # --- Verbose output ---
+        if verbose:
+            if mcp_manager and mcp_manager.connected_servers:
+                for srv in mcp_manager.connected_servers:
+                    console.print(f"  MCP: {srv}")
+            if plugins_loaded > 0 and hook_system:
+                for pname in hook_system.loaded_plugin_names:
+                    console.print(f"  Plugin: {pname}")
+            tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
+            console.print(f"  Tools: {tool_count} total")
+            if memory_store:
+                console.print(f"  Memory: {agent_dir / 'memory.db'} (WAL)")
+            else:
+                console.print("  Memory: in-memory (no persistence)")
+
+        # --- Run REPL ---
+        from localharness.cli.repl import OrchestratorREPL
+
+        repl = OrchestratorREPL(
+            orchestrator=orchestrator,
+            agent_loop=agent_loop,
+            channel=channel,
+            bus=bus,
+            config_dir=cfg_path,
+            harness_config=harness,
+        )
+
         await repl.run()
     except KeyboardInterrupt:
         _exit_reason = "interrupt"
