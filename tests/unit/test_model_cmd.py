@@ -210,6 +210,32 @@ def test_model_switch_audit_failure_still_persists_exit_zero(components_home, mo
     assert "audit" in result.output.lower()
 
 
+def test_pinned_agents_includes_division_pin(tmp_path):
+    """#36: a division-pinned model traps an inheriting agent too — start resolves
+    agent->division->org, so a persisted org/provider switch never reaches it. pinned_agents
+    must list it (annotated 'via division <name>') alongside agent-level pins; a full inheritor
+    (agent + division both inherit) is NOT listed."""
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "divisions").mkdir()
+    (tmp_path / "divisions" / "research.yaml").write_text(
+        "name: research\nmodel: division-pinned-model\n", encoding="utf-8"
+    )
+    (tmp_path / "agents" / "writer.yaml").write_text(  # inherits at agent level, division pins
+        "name: writer\nrole: x\ndivision: research\n", encoding="utf-8"
+    )
+    (tmp_path / "agents" / "pinned.yaml").write_text(  # agent-level pin
+        "name: pinned-agent\nrole: x\nmodel: agent-pinned-model\n", encoding="utf-8"
+    )
+    (tmp_path / "agents" / "plain.yaml").write_text(  # inherits all the way to org
+        "name: plain\nrole: x\nmodel: inherit\n", encoding="utf-8"
+    )
+
+    result = dict(model_ops.pinned_agents(tmp_path))
+    assert result["pinned-agent"] == "agent-pinned-model"  # agent-level pin still listed
+    assert result["writer (via division research)"] == "division-pinned-model"  # division pin
+    assert not any("plain" in name for name in result)  # a full inheritor is never listed
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,
