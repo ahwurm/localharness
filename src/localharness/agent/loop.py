@@ -1173,13 +1173,18 @@ class AgentLoop:
                     stuck_signature=repeated_sig,
                     iteration_at_escalation=session.iteration,
                 ))
-                self._conversation = list(session.messages)
                 log.warning(
                     "Agent %s stuck after %d iterations, escalating",
                     self._config.name,
                     session.iteration,
                 )
-                return _format_stuck_summary(session)
+                # #83: return the model's partial work, not a dead notice. Telemetry
+                # (terminated_reason, Escalation, TurnFailed) stays unchanged above.
+                summary = await self._final_summary_on_stuck(
+                    session, session.iteration, on_token
+                )
+                self._conversation = list(session.messages)
+                return summary
 
     async def _final_summary_on_budget(
         self, session: Session, violation: BudgetViolation, on_token: Callable | None,
@@ -1219,6 +1224,47 @@ class AgentLoop:
         except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
             log.warning("final-summary-on-budget failed (%s); returning plain notice", exc)
             return _format_budget_summary(session, violation)
+
+    async def _final_summary_on_stuck(
+        self, session: Session, iterations: int, on_token: Callable | None,
+    ) -> str:
+        """One forced no-tools generation so a stuck-escalated agent returns its PARTIAL
+        WORK instead of a dead '[Agent stuck: …]' notice (#83). Mirrors
+        _final_summary_on_budget; falls back to the plain stuck notice on any provider
+        error or empty text. Telemetry (terminated_reason, Escalation, TurnFailed) is
+        unchanged — only the returned content improves."""
+        instruction = (
+            "[You have been stopped: you repeated the same tool call multiple times with "
+            "identical arguments. Do NOT call any tools.] In ONE reply, wrap up honestly "
+            "for the user: (1) what you completed so far, with concrete file paths or "
+            "results; (2) what remains undone; (3) the single next step you would take. "
+            "Partial work is valuable — report it plainly."
+        )
+        try:
+            request_messages, _ = await self._ctx.build_messages(
+                session.messages + [{"role": "user", "content": instruction}], None
+            )
+            response_message, usage = await self._llm.stream_complete(
+                request_messages, tools=None, on_token=on_token,
+            )
+            if usage is not None:
+                session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+            from localharness.provider.fn_call import strip_thinking_tags
+            text = strip_thinking_tags(getattr(response_message, "content", None) or "").strip()
+            if not text:
+                return _format_stuck_summary(session)
+            session.push({"role": "user", "content": instruction})
+            session.push({"role": "assistant", "content": text})
+            return (
+                f"{_clean_summary(text)}\n\n"
+                f"[Agent stuck: repeated identical tool calls detected after {iterations} "
+                f"iterations; stopped after recovery warnings failed. The summary above "
+                f"reflects partial completion.]"
+            )
+        except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
+            log.warning("final-summary-on-stuck failed (%s); returning plain notice", exc)
+            return _format_stuck_summary(session)
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
         """Single iteration for testing/debugging."""
