@@ -27,7 +27,10 @@ def validate(
     ] = "~/.localharness",
     strict: Annotated[
         bool,
-        typer.Option("--strict", help="Treat warnings as errors."),
+        typer.Option(
+            "--strict",
+            help="Reserved. No warning-level checks exist yet; currently identical to the default.",
+        ),
     ] = False,
 ) -> None:
     """Validate agent YAML configuration files.
@@ -35,6 +38,14 @@ def validate(
     Reports parse errors, field validation failures with line numbers.
     Exit code 0 if all valid, 1 if any invalid, 2 if no config files found.
     """
+    # #54: --strict is reserved — no warning-level checks exist yet, so it is a no-op today.
+    # Don't silently accept it: disclose that this run is identical to the default.
+    if strict:
+        console.print(
+            "[dim]Note: --strict is reserved — no warning-level checks exist yet, so this "
+            "run is identical to the default.[/dim]"
+        )
+
     cfg_path = Path(config_dir).expanduser()
     loader = ConfigLoader(config_dir=cfg_path)
 
