@@ -86,15 +86,16 @@ def _make_loop(llm, bus) -> AgentLoop:
 
 @pytest.mark.asyncio
 async def test_loop_system_prompt_unchanged_for_default_sections(faithful_fake_llm, bus):
-    """Test D: a default-sections AgentLoop run yields messages[0]['content'] == cfg.role + the
-    date line exactly.
+    """Test D: a default-sections AgentLoop run yields messages[0]['content'] == cfg.role plus
+    exactly the always-on deterministic-fact injections (date, working directory, narration nudge).
 
     Native tool_call_mode (no non-native suffix) + memory_loader=None (no Phase-24 block) means the
     only contributions to the system message are the assembled role (byte-identical to cfg.role —
-    the role_sections inertness invariant) and the always-on date injection. Asserting the full
-    string still catches any other perturbation of the baseline prompt.
+    the role_sections inertness invariant) and the always-on injections. Asserting the full string
+    still catches any other perturbation of the baseline prompt.
     """
     from datetime import datetime
+    from pathlib import Path
 
     loop = _make_loop(faithful_fake_llm(tool_plan=[]), bus)  # final-answer fake -> natural completion
     session = Session(agent_id="rolesec-agent", session_id="s-rolesec", messages=[])
@@ -103,5 +104,14 @@ async def test_loop_system_prompt_unchanged_for_default_sections(faithful_fake_l
 
     now = datetime.now().astimezone()
     date_line = f"\n\nToday's date: {now.strftime('%A, %Y-%m-%d')} ({now.tzname()})"
+    cwd_block = (
+        f"\n\nWorking directory: {Path.cwd()}"
+        "\nUnless the user names another location, create any files or folders you make "
+        "under this working directory."
+    )
+    nudge_block = (
+        "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
+        'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
+    )
     assert session.messages[0]["role"] == "system"
-    assert session.messages[0]["content"] == loop._config.role + date_line
+    assert session.messages[0]["content"] == loop._config.role + date_line + cwd_block + nudge_block

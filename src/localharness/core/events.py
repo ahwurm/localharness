@@ -149,6 +149,12 @@ class Action(BaseEvent):
     session_id: SessionID
     action_type: str
     content: Optional[str] = None
+    # True when this iteration's llm_response ALSO emitted tool calls — the content is
+    # interstitial narration (tools follow), not the final answer. Additive/default-False so
+    # every existing construction + old JSONL line stays valid. The terminal renders narration
+    # only for these; a tool-less llm_response is the final answer (rendered via TaskComplete)
+    # and must never be echoed as narration (double-print).
+    has_tool_calls: bool = False
     tool_call_id: Optional[ToolCallID] = None
     tool_name: Optional[str] = None
     tool_params: Optional[dict[str, Any]] = None
