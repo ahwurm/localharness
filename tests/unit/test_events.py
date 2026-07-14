@@ -167,6 +167,30 @@ def test_deserialize_event():
     assert restored_obs.output == "world"
 
 
+def test_action_has_tool_calls_field():
+    """Action carries has_tool_calls (additive, default False): True marks an interstitial
+    llm_response whose content is narration (tool calls follow); False marks a final answer.
+    Default False keeps every existing Action construction + old JSONL line valid."""
+    default = Action(agent_id=AgentID("a"), session_id=SessionID("s"), action_type="tool_call")
+    assert default.has_tool_calls is False  # additive default — old constructions unaffected
+
+    narration = Action(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        action_type="llm_response", content="Pulling the data…", has_tool_calls=True,
+    )
+    assert narration.has_tool_calls is True
+    # survives the bus-ledger roundtrip (bus-events.jsonl deserialize path)
+    restored = deserialize_event(narration.model_dump_json())
+    assert isinstance(restored, Action)
+    assert restored.has_tool_calls is True
+    assert restored.content == "Pulling the data…"
+
+    # old JSONL lines predate the field — deserialize must fall back to False, not error
+    line = default.model_dump_json().replace(', "has_tool_calls":false', "")
+    legacy = deserialize_event(line)
+    assert legacy.has_tool_calls is False
+
+
 def test_budget_spec_frozen():
     """BudgetSpec(max_actions=50) is immutable (raises on field assignment)."""
     spec = BudgetSpec(max_actions=50)

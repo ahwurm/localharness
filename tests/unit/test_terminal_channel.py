@@ -773,3 +773,176 @@ class TestAgentDelegationReceipt:
         rendered = out.getvalue()
         assert "— completed" in rendered
         assert "FAILED" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# In-turn narration: an interstitial llm_response (content alongside tool calls)
+# carries the model's progress narration ("pulling the data…"). The terminal
+# renders it as one dim line opening the coming chunk of tool activity — cropped,
+# capped, and paced so it never walls the turn or double-prints the final answer.
+# Driven through the real on_action/on_observation dispatch seam (base.py).
+# ---------------------------------------------------------------------------
+
+
+def _narration_action(content, has_tool_calls=True):
+    from localharness.core.events import Action
+    return Action(
+        agent_id="orchestrator", session_id="s1", action_type="llm_response",
+        content=content, has_tool_calls=has_tool_calls,
+    )
+
+
+def _burst_call(tool_name="tool_result_get", tc_id="t1"):
+    from localharness.core.events import Action
+    return Action(
+        agent_id="orchestrator", session_id="s1", action_type="tool_call",
+        tool_call_id=tc_id, tool_name=tool_name, tool_params={},
+    )
+
+
+def _burst_result(tool_name="tool_result_get", tc_id="t1", output="data"):
+    from localharness.core.events import Observation
+    return Observation(
+        agent_id="orchestrator", session_id="s1", observation_type="tool_result",
+        tool_call_id=tc_id, tool_name=tool_name, output=output,
+    )
+
+
+class TestNarrationLineHelper:
+    """_narration_line: first non-empty line, hard-capped, ellipsized; '' when empty."""
+
+    def test_first_nonempty_line_only(self):
+        from localharness.channels.terminal import _narration_line
+        assert _narration_line("Pulling the data…\nnow building the model") == "Pulling the data…"
+
+    def test_leading_blank_lines_skipped(self):
+        from localharness.channels.terminal import _narration_line
+        assert _narration_line("\n\n   \nreal content here") == "real content here"
+
+    def test_hard_cap_160_with_ellipsis(self):
+        from localharness.channels.terminal import _narration_line
+        out = _narration_line("x" * 500)
+        assert len(out) == 160
+        assert out.endswith("…")
+        assert out[:159] == "x" * 159
+
+    def test_short_line_unchanged(self):
+        from localharness.channels.terminal import _narration_line
+        assert _narration_line("brief") == "brief"
+
+    def test_empty_and_whitespace_return_empty(self):
+        from localharness.channels.terminal import _narration_line
+        assert _narration_line("") == ""
+        assert _narration_line(None) == ""
+        assert _narration_line("   \n\t  ") == ""
+
+
+class TestTurnNarration:
+    def _pipe(self, force_terminal=False):
+        out = StringIO()
+        return make_terminal_channel(out=out, force_terminal=force_terminal), out
+
+    @pytest.mark.asyncio
+    async def test_interstitial_narration_renders_dim_line(self):
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("Pulling the data…", has_tool_calls=True))
+        rendered = out.getvalue()
+        assert "· Pulling the data…" in rendered  # · <content>
+
+    @pytest.mark.asyncio
+    async def test_final_answer_never_rendered_as_narration(self):
+        # THE regression that matters: a tool-less llm_response IS the final answer
+        # (rendered by the TaskComplete panel). It must NEVER also print here.
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("Here is the final answer.", has_tool_calls=False))
+        assert "Here is the final answer." not in out.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_empty_content_skipped(self):
+        # Reasoning-parser turns legitimately return content="" — nothing to narrate.
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("", has_tool_calls=True))
+        await ch.on_action(_narration_action("   \n  ", has_tool_calls=True))
+        assert out.getvalue().strip() == ""
+
+    @pytest.mark.asyncio
+    async def test_long_content_cropped_in_render(self):
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("A" * 400, has_tool_calls=True))
+        rendered = out.getvalue()
+        assert "…" in rendered              # ellipsis present
+        assert "A" * 400 not in rendered         # never the full wall of text
+
+    @pytest.mark.asyncio
+    async def test_multiline_shows_first_line_only(self):
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("first phase line\nsecond hidden line", has_tool_calls=True))
+        rendered = out.getvalue()
+        assert "first phase line" in rendered
+        assert "second hidden line" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_no_two_narration_lines_in_a_row(self):
+        # Cadence: at most ONE narration line per tool chunk. With no tool result
+        # between them, the second narration is suppressed (never two dim lines in a row).
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("first phase", has_tool_calls=True))
+        await ch.on_action(_narration_action("second phase", has_tool_calls=True))
+        rendered = out.getvalue()
+        assert "first phase" in rendered
+        assert "second phase" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_tool_result_reopens_narration(self):
+        # Once a tool result has rendered since the last narration, the next narration prints.
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("first phase", has_tool_calls=True))
+        await ch.on_observation(_burst_result())
+        await ch.on_action(_narration_action("second phase", has_tool_calls=True))
+        rendered = out.getvalue()
+        assert "first phase" in rendered
+        assert "second phase" in rendered
+
+    @pytest.mark.asyncio
+    async def test_burst_interleaving_order(self):
+        # Cadence reads: dim narration → ◆ burst counter → dim narration. The narration
+        # opening chunk 2 first freezes chunk 1's open burst counter into scrollback.
+        ch, out = self._pipe()
+        await ch.on_action(_narration_action("first phase", has_tool_calls=True))
+        await ch.on_action(_burst_call())            # opens a burst (silent until close, non-TTY)
+        await ch.on_observation(_burst_result())     # ticks the counter + re-opens narration
+        await ch.on_action(_narration_action("second phase", has_tool_calls=True))
+        rendered = out.getvalue()
+        i_n1 = rendered.index("first phase")
+        i_burst = rendered.index("tool_result_get")
+        i_n2 = rendered.index("second phase")
+        assert i_n1 < i_burst < i_n2                 # narration · tools · narration
+
+    @pytest.mark.asyncio
+    async def test_narration_is_dim_styled_on_tty(self):
+        ch, out = self._pipe(force_terminal=True)
+        await ch.on_action(_narration_action("Pulling the data…", has_tool_calls=True))
+        assert "\x1b[2m" in out.getvalue()  # muted == dim
+
+
+@pytest.mark.asyncio
+async def test_discord_renders_nothing_for_narration():
+    """Non-terminal channels stay silent on interstitial narration: Discord inherits the
+    base on_action (tool_call only) — an llm_response reaches NO send path there."""
+    from localharness.channels.discord import DiscordChannel
+    from localharness.core.bus import EventBus
+
+    ch = DiscordChannel(EventBus(), {})
+    calls: list = []
+
+    async def _spy(*a, **k):
+        calls.append((a, k))
+
+    ch.send_tool_call = _spy
+    ch.send_tool_result = _spy
+    ch.send_message = _spy
+    ch._send = _spy
+
+    await ch.on_action(_narration_action("Pulling the data…", has_tool_calls=True))
+    await ch.on_action(_narration_action("final answer", has_tool_calls=False))
+    assert calls == []

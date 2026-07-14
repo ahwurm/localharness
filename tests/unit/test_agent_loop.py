@@ -551,6 +551,76 @@ async def test_execute_loop_publishes_tool_call_action(mock_llm_client, bus):
 
 
 @pytest.mark.asyncio
+async def test_llm_response_action_flags_has_tool_calls(mock_llm_client, bus):
+    """Each llm_response Action records whether THIS iteration also made tool calls —
+    the terminal's discriminator between interstitial narration (True) and the final
+    answer (False, rendered via TaskComplete — must never double-print as narration)."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+
+    class FakeRegistry:
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {}
+        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+            from localharness.tools.base import ToolResult
+            return ToolResult(output="ok", success=True)
+
+    tc = ToolCallObj(id="tc-1", name="glob_files", arguments={"pattern": "*.py"})
+    responses = [
+        Response(content="Pulling the data…", tool_calls=[tc]),  # interstitial: narration
+        Response(content="Here is the answer."),                 # final: no tool calls
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
+    await loop.run_turn("task")
+
+    llm_actions = [
+        e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"
+    ]
+    assert len(llm_actions) == 2
+    assert llm_actions[0].has_tool_calls is True   # tool-call iteration → narration
+    assert llm_actions[0].content == "Pulling the data…"
+    assert llm_actions[1].has_tool_calls is False  # final iteration → the answer, not narration
+
+
+async def _capture_system_prompt(mock_llm_client, bus) -> str:
+    """Run one trivial turn and return the built leading system message content."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="done")], bus)
+    captured: list = []
+    original = loop._llm.stream_complete
+
+    async def capturing(messages=None, tools=None, on_token=None):
+        captured.extend(messages or [])
+        return await original(messages=messages, tools=tools, on_token=on_token)
+
+    loop._llm.stream_complete = capturing
+    await loop.run_turn("task")
+    sys_msgs = [m for m in captured if m.get("role") == "system"]
+    assert sys_msgs
+    return sys_msgs[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_injects_working_directory(mock_llm_client, bus):
+    """#75: the prompt states the cwd + a placement rule, next to the date line — so the
+    model puts files under the launched project dir, not an invented path under $HOME."""
+    from pathlib import Path
+    sys_content = await _capture_system_prompt(mock_llm_client, bus)
+    assert f"Working directory: {Path.cwd()}" in sys_content
+    assert "under" in sys_content and "unless the user names another location" in sys_content.lower()
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_has_narration_nudge(mock_llm_client, bus):
+    """Belt-and-suspenders nudge: one sentence encouraging a short one-line stage
+    announcement when starting a distinct phase of a multi-step task."""
+    sys_content = await _capture_system_prompt(mock_llm_client, bus)
+    low = sys_content.lower()
+    assert "distinct phase" in low
+    assert "multi-step task" in low
+
+
+@pytest.mark.asyncio
 async def test_execute_loop_publishes_task_complete(mock_llm_client, bus):
     """AgentLoop publishes TaskComplete(success=True) on natural completion."""
     Response = mock_llm_client.Response
