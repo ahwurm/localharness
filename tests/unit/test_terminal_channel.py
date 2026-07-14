@@ -468,7 +468,7 @@ class TestBurstConsolidation:
     call 2026-07-02 "consolidate — keep true behavior"). Per-call truth stays on
     the bus ledger (bus-events.jsonl); the channel change is display-only."""
 
-    WEB_FROZEN = "◆ web_search · web_fetch — the open web, a fresh window each · 3/3"
+    WEB_FROZEN = "◆ web_search · web_fetch · 3/3"
 
     @staticmethod
     def _pipe_channel():
@@ -513,7 +513,7 @@ class TestBurstConsolidation:
             )
         await ch.send_message("done")
         rendered = out.getvalue()
-        assert "◆ web_fetch — the open web, a fresh window each · 3/3 · 1 error" in rendered
+        assert "◆ web_fetch · 3/3 · 1 error" in rendered
         assert "✗" not in rendered      # no red per-call line mid-burst
         assert "429" not in rendered    # detail lives in the bus ledger, not scrollback
 
@@ -525,7 +525,7 @@ class TestBurstConsolidation:
             await ch.send_tool_result("tool_result_get", "section text", is_error=False)
         await ch.send_message("combined")
         rendered = out.getvalue()
-        assert "◆ tool_result_get — section reads, a fresh window each · 2/2" in rendered
+        assert "◆ tool_result_get · 2/2" in rendered
         assert "UNTRUSTED" not in rendered
 
     @pytest.mark.asyncio
@@ -541,8 +541,8 @@ class TestBurstConsolidation:
         await ch.send_tool_result("web_fetch", "ok", is_error=False)
         await ch.send_message("verdict")
         rendered = out.getvalue()
-        assert "◆ web_search — the open web, a fresh window each · 2/2" in rendered
-        assert "◆ web_fetch — the open web, a fresh window each · 1/1" in rendered
+        assert "◆ web_search · 2/2" in rendered
+        assert "◆ web_fetch · 1/1" in rendered
         assert "◆ agent search-verifier" in rendered
 
     @pytest.mark.asyncio
@@ -568,7 +568,7 @@ class TestBurstConsolidation:
         ch, out = self._pipe_channel()
         await ch.send_tool_call("web_search", {"query": "q"})
         await ch.stop()
-        assert "◆ web_search — the open web, a fresh window each · 0/1" in out.getvalue()
+        assert "◆ web_search · 0/1" in out.getvalue()
         assert ch._burst is None
 
     @pytest.mark.asyncio
