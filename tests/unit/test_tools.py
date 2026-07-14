@@ -346,6 +346,85 @@ async def test_glob_tool_nonexistent_dir():
 
 
 @pytest.mark.asyncio
+async def test_glob_tool_trailing_double_star_finds_nested_files(tmp_path: Path):
+    """#74 exact live miss: pathlib's Path.glob() yields DIRECTORIES ONLY for a trailing
+    bare '**' — '<agents>/**' listed the subdir but never the .yaml files under it."""
+    from localharness.tools.builtin.glob_tool import GlobTool
+
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "coder.yaml").write_text("name: coder")
+    (agents / "planner.yaml").write_text("name: planner")
+    tool = GlobTool()
+    result = await tool.run(pattern="agents/**", base_dir=str(tmp_path))
+    assert result.success is True
+    assert "coder.yaml" in result.output
+    assert "planner.yaml" in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_bare_double_star_finds_files(tmp_path: Path):
+    """#74: a bare '**' rooted at base_dir must include files at every depth, not just dirs."""
+    from localharness.tools.builtin.glob_tool import GlobTool
+
+    (tmp_path / "top.txt").write_text("x")
+    nested = tmp_path / "d"
+    nested.mkdir()
+    (nested / "deep.txt").write_text("x")
+    tool = GlobTool()
+    result = await tool.run(pattern="**", base_dir=str(tmp_path))
+    assert result.success is True
+    assert "top.txt" in result.output
+    assert "deep.txt" in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_absolute_trailing_double_star_finds_files(tmp_path: Path):
+    """#74: an absolute '/…/**' pattern (base_dir ignored) also matches files at depth >=1."""
+    from localharness.tools.builtin.glob_tool import GlobTool
+
+    sub = tmp_path / "nest"
+    sub.mkdir()
+    (sub / "found.md").write_text("x")
+    tool = GlobTool()
+    result = await tool.run(pattern=f"{tmp_path}/**")
+    assert result.success is True
+    assert "found.md" in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_tilde_trailing_double_star_finds_files(tmp_path, monkeypatch):
+    """#74: a '~/…/**' pattern expands home AND matches files at depth >=1 (the live shape)."""
+    import os  # noqa: F401
+    monkeypatch.setenv("HOME", str(tmp_path))
+    agents = tmp_path / ".localharness" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "mine.yaml").write_text("name: mine")
+
+    from localharness.tools.builtin.glob_tool import GlobTool
+
+    result = await GlobTool().run(pattern="~/.localharness/agents/**")
+    assert result.success is True
+    assert "mine.yaml" in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_single_level_pattern_unchanged(tmp_path: Path):
+    """#74 guard: normalization must NOT touch ordinary patterns — '*.py' stays depth-0 only."""
+    from localharness.tools.builtin.glob_tool import GlobTool
+
+    (tmp_path / "top.py").write_text("x")
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "deep.py").write_text("x")
+    tool = GlobTool()
+    result = await tool.run(pattern="*.py", base_dir=str(tmp_path))
+    assert result.success is True
+    assert "top.py" in result.output
+    assert "deep.py" not in result.output  # single-level '*' must not recurse
+
+
+@pytest.mark.asyncio
 async def test_grep_tool_finds_matching_lines(tmp_path: Path):
     from localharness.tools.builtin.grep_tool import GrepTool
 
