@@ -1231,3 +1231,35 @@ async def test_writer_skips_a_shared_claimed_refresh_key(store):
     assert len(result) == 1
     assert result[0].key != kc.key                                # claimed key NOT re-adopted
     assert (await store.get_fact(kc.key)).value == "the vetted heal content under K"  # heal preserved
+
+
+# ---------------------------------------------------------------------------
+# #72 — a stale chapter's redraft must deref its members ONCE (corpus threaded through)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recheck_derefs_members_once_not_twice(store):
+    """#72: on the recheck->write path the member dereference happens ONCE — _recheck_one's deref
+    corpus is threaded into _write_one instead of re-derived (each deref is a full history read).
+    Count _dereference invocations across the heal: exactly one."""
+    import localharness.memory.chapter_writer as cw
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+    ch, m1, m2, m3 = await _seed_taper_chapter(store)
+    await _erode(store, m3, "the coach revised the plan and dropped the extra week entirely")  # -> stale redraft
+
+    calls = {"n": 0}
+    orig = cw._dereference
+
+    async def _counting(store_, rows):
+        calls["n"] += 1
+        return await orig(store_, rows)
+
+    cw._dereference = _counting
+    try:
+        counts: dict = {}
+        await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), counts=counts)
+    finally:
+        cw._dereference = orig
+
+    assert counts.get("redrafted", 0) == 1                     # the heal ran (both deref sites reachable)
+    assert calls["n"] == 1, f"members dereferenced {calls['n']}x on the recheck->write path (#72)"
