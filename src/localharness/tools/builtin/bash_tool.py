@@ -1,5 +1,6 @@
 """BashExecTool: Execute bash commands."""
 import asyncio
+import shutil
 from pathlib import Path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
@@ -68,6 +69,10 @@ class BashExecTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                # create_subprocess_shell defaults to /bin/sh (dash on Ubuntu), which lacks
+                # brace expansion, `[[ ]]`, arrays, etc. — a "bash_exec" tool must actually
+                # run bash so the model's bashisms behave as written.
+                executable=shutil.which("bash") or "/bin/bash",
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
