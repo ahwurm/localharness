@@ -712,6 +712,23 @@ async def test_bash_exec_tool_captures_stderr():
 
 
 @pytest.mark.asyncio
+async def test_bash_exec_runs_under_bash_not_dash(tmp_path: Path):
+    """#79: bash_exec must launch bash, not the platform /bin/sh (dash on Ubuntu).
+    `mkdir -p {a,b}` is a bash brace expansion — under dash it makes ONE literal
+    directory named '{a,b}' instead of 'a' and 'b'. Fails on any dash host until the
+    subprocess passes executable=bash."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    tool = BashExecTool()
+    result = await tool.run(command=f"mkdir -p {tmp_path}/{{a,b}}")
+    assert result.success is True
+    assert (tmp_path / "a").is_dir()
+    assert (tmp_path / "b").is_dir()
+    # dash leaves a literal brace directory ('{a,b}'); bash expands it away.
+    assert not any("{" in p.name for p in tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_register_builtin_tools_registers_all():
     from localharness.tools.builtin import register_builtin_tools
 
