@@ -4,6 +4,90 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.3] — 2026-07-14
+
+A hardening release: 28 bugs found by a systematic post-ship audit — adversarial code
+verification plus scripted "live user journey" testing against a real server — each filed
+as a GitHub issue before its fix (#27–#54), fixed test-first, and closed by the fixing
+commit. No new features beyond a `--version` flag and honest new warnings.
+
+### Added
+- `localharness --version`: prints the installed version.
+- `localharness model` now **warns when your configured default model is not among the
+  models the server is actually serving (or you have downloaded)** (#50) — previously the
+  list simply showed no `[active]` marker and said nothing, so a default that had drifted
+  from reality was invisible until `start` failed.
+- `localharness model --config-dir` for parity with every other command (#35).
+
+### Fixed
+- **Conversational agent creation is now honest, and the schema gap behind most of its
+  failures is fixed** (#33, #27, #29, #28): the YAML-generation prompt now states the real
+  config contract — required fields, allowed keys, and the nested `tools`/`permissions`
+  shapes, all derived from the Pydantic models so prompt and schema cannot drift. Failures
+  are truthful ("Agent was NOT created …") instead of the previous unconditional "Agent
+  created." after a failed deploy; a provider error during generation no longer kills the
+  whole session; a nameless config fails explicitly instead of deploying as a silent
+  "new-agent" placeholder that overwrote its predecessor. Live-tested against a real model:
+  the truthful-failure fixes held on every attempt; the schema fix turned a reproducible
+  0-of-4 deploy failure into a working generation — but generation is still sampling-based,
+  so a model can occasionally emit invalid YAML on a given attempt (you now get the truth
+  when it does).
+- **`localharness start` no longer hangs forever on a startup failure** (#43): any hard
+  failure after the memory store opened (e.g. the configured model isn't served) used to
+  leave a non-daemon database worker thread alive, hanging process exit indefinitely. The
+  whole startup window is now covered by ordered teardown — the same scenario exits
+  non-zero in seconds.
+- **Startup actually checks whether your model is reachable** (#44): the capability probe's
+  failure result was computed and then ignored, so the "Cannot reach model" guard could
+  never fire and the eventual error blamed the tokenizer. Startup now fails fast, names the
+  real cause (model not served vs endpoint unreachable), and points at `localharness doctor`
+  / `localharness model`.
+- **A `/model` switch is durable and honest** (#30, #31, #32, #34): a failed tokenizer
+  rebind restores the previous binding and tells you in-channel (previously it reported
+  success and every later turn errored until restart); the context-window budget is re-read
+  from the server per switch (a 128K→32K hot-swap no longer keeps the old ceiling and 400s
+  mid-session); the probe runs off the event loop (no more multi-second UI freezes); and a
+  managed-server switch persists the server's launch model, so the next cold start boots
+  what you switched to.
+- **`--config-dir` now truly isolates an instance** (#35): the user overlay, kill-file,
+  audit log, and REPL history all previously resolved to hardcoded `~/.localharness` paths
+  regardless of `--config-dir`, so two instances silently shared (and clobbered) state. One
+  resolution rule now applies everywhere (explicit flag → `LOCALHARNESS_DIR` →
+  `LOCALHARNESS_HOME` (legacy) → `~/.localharness`); defaults are unchanged for
+  single-instance setups. Also: the model-switch pin warning now catches division-level
+  pins (#36), an audit-log write failure is no longer misreported as a failed persist
+  (#37), a reachable-but-malformed server response is no longer diagnosed as "Is it
+  running?" (#38), and `localharness model ""` is rejected instead of silently persisting
+  an empty default (#39).
+- **Correcting one memory can no longer corrupt a different one** (#45): a user correction
+  used to dispute whichever fact was most recently *retrieved*, with no check that it was
+  related — silently downgrading an unrelated fact below the injection threshold. A
+  correction now only disputes a content-related staged fact, and quarantines otherwise.
+  **Reconciliation — the only repair path for disputed facts — now runs before the heavy
+  cancellable steps** (#46), so ordinary typing no longer starves it forever.
+- **Ctrl+C during generation cancels the turn, not the session** (#47) — previously the
+  safe case (idle) was absorbed while the case you actually reach for (mid-generation)
+  killed the whole session. A second Ctrl+C while cancelling still hard-exits.
+- **Unknown slash commands are rejected instantly and deterministically** (#48) — `/typo`
+  no longer gets sent to the model as chat to improvise an answer.
+- **The first-run hint actually reaches interactive terminals** (#49): "Describe a task,
+  or /help for commands." now renders inside the managed input box (it was fragile
+  scrollback the box repainted over — visible in piped mode, missing in a real TTY, i.e.
+  for every actual human). Returning sessions get a short `/help` reminder.
+- **Internal eval-harness honesty** (#40, #41, #42 — dev-only scripts, not shipped in the
+  package): the memory-quality grader could certify a run as passing even when one of its
+  required checks had failed (its pass/fail gate and its failure reporting had drifted
+  apart); its regression comparator could flag a false regression on a run the grader had
+  already excused for a known, disclosed reason; and its dead-server detector could misfire
+  on ordinary reply text containing words like "refused" — it now matches connection-level
+  failure signatures only.
+- **Docs and messages that lied** (#51, #52, #53, #54): the first-run pointer no longer
+  links a 404 page; `init --help` documents the real probe order (`:8000` — vLLM's default
+  — was omitted); `doctor`'s missing-agents-directory remedy now works (`init` creates the
+  directory); `validate --strict` discloses that it is reserved instead of silently doing
+  nothing. Plus: `model` fat-finger help (case-insensitive "did you mean", numeric-range
+  hints) and a README row for `model`.
+
 ## [0.9.2] — 2026-07-12
 
 ### Added
