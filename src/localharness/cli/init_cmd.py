@@ -29,6 +29,14 @@ from localharness.provider.refarch import REF_ARCHS
 console = Console()
 err_console = Console(stderr=True)
 
+# Port -> backend label. Single source for BOTH the --help probe-order line (derived below)
+# and the "no server detected" printout — so the documented order can never drift from the
+# detector's DEFAULT_PORTS (#52: :8000, vLLM's stock port, was silently missing from --help).
+_PORT_LABELS: dict[int, str] = {
+    8081: "vLLM", 8000: "vLLM", 11434: "Ollama", 1234: "LM Studio", 8080: "llama.cpp"
+}
+_PROBE_ORDER = ", ".join(f"{_PORT_LABELS.get(p, 'unknown')} (:{p})" for p in DEFAULT_PORTS)
+
 
 def _build_base_url_for_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/")
@@ -127,9 +135,8 @@ def init_app(
 ) -> None:
     """Auto-detect local LLM and write initial configuration.
 
-    Probes known ports in order: vLLM (:8081), Ollama (:11434),
-    LM Studio (:1234), llama.cpp (:8080). Writes config to
-    <config-dir>/config.yaml on success.
+    Writes config to <config-dir>/config.yaml on success. The --help probe-order
+    line is derived from detector.DEFAULT_PORTS (see the __doc__ assignment below).
     """
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
@@ -168,11 +175,10 @@ def init_app(
         server_config = None
 
         if not result.found:
-            port_names = {8081: "vLLM", 8000: "vLLM", 11434: "Ollama", 1234: "LM Studio", 8080: "llama.cpp"}
             console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
             console.print("Checked:")
             for port in DEFAULT_PORTS:
-                name = port_names.get(port, "unknown")
+                name = _PORT_LABELS.get(port, "unknown")
                 console.print(f"  http://localhost:{port}  ({name})  — connection refused")
             guided = _guided_setup(config_path)
             if guided is None:
@@ -410,3 +416,14 @@ def _get_ollama_hot_model(base_url: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+# #52: derive the documented probe order from the detector's port list so `init --help` can
+# never drift from what detect_provider() actually probes (it silently dropped :8000, vLLM's
+# stock port). Typer resolves a command's help from its callback __doc__ at CLI-build time, so
+# assigning it here (module load) is picked up.
+init_app.__doc__ = (
+    "Auto-detect local LLM and write initial configuration.\n\n"
+    f"Probes known ports in order: {_PROBE_ORDER}. "
+    "Writes config to <config-dir>/config.yaml on success."
+)
