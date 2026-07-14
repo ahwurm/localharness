@@ -78,6 +78,51 @@ async def test_stream_captures_final_usage_chunk():
     assert usage.completion_tokens == 5
 
 
+def _chunk_fr(content=None, tool_calls=None, finish_reason=None):
+    """Like _chunk but carries choices[0].finish_reason (the field OpenAI-style streams set
+    on the final content chunk: 'stop' | 'length' | 'tool_calls')."""
+    delta = NS(content=content, tool_calls=tool_calls)
+    return NS(usage=None, choices=[NS(delta=delta, finish_reason=finish_reason)])
+
+
+@pytest.mark.asyncio
+async def test_stream_captures_finish_reason_length_midtoolcall():
+    """#77: a completion cut at the output-token ceiling mid-tool-call carries
+    finish_reason='length' on its final chunk. The assembled message MUST surface it so the
+    loop can refuse to execute the truncated call. Native + xml share this one consumer, so
+    capturing here covers both modes."""
+    from localharness.provider.client import LLMClient
+
+    chunks = [
+        _chunk_fr(tool_calls=[NS(index=0, id="tc-a", function=NS(name="write", arguments='{"pa'))]),
+        _chunk_fr(finish_reason="length"),
+    ]
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None)
+    assert msg.finish_reason == "length"
+    assert msg.tool_calls is not None  # a (truncated) call was still assembled
+
+
+@pytest.mark.asyncio
+async def test_stream_captures_finish_reason_stop():
+    """A clean completion surfaces finish_reason='stop' (guard must NOT fire)."""
+    from localharness.provider.client import LLMClient
+
+    chunks = [_chunk_fr(content="done"), _chunk_fr(finish_reason="stop")]
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None)
+    assert msg.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_stream_finish_reason_absent_is_none():
+    """Providers that never emit finish_reason (older/partial mocks) yield None, not an
+    error — the guard simply stays dormant."""
+    from localharness.provider.client import LLMClient
+
+    chunks = [_chunk(content="hi")]  # legacy chunk, no finish_reason attribute
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None)
+    assert msg.finish_reason is None
+
+
 # ---------------------------------------------------------------------------
 # #18 — XML tool-call mode must stream at the transport level. `_complete_xml` /
 # `_complete_xml_fallback` accepted a `stream` parameter and IGNORED it, so any

@@ -147,6 +147,10 @@ class FakeLLMResponse:
     content: str | None = None
     tool_calls: list[Any] = field(default_factory=list)
     usage: "FakeCompletionUsage | None" = None
+    # Completion stop reason (#77): "length" == cut off at the output-token ceiling.
+    # Defaults to "stop" so every existing scripted response is a clean completion and
+    # the loop's truncation guard stays dormant unless a test opts into "length".
+    finish_reason: str | None = "stop"
 
 
 class MockLLMClient:

@@ -1722,3 +1722,117 @@ async def test_no_memory_no_crash(mock_llm_client, bus):
     )
     summary = await loop.run_turn("first", initial_messages=_big_msgs())
     assert "all done" in summary  # reached natural completion, no exception path
+
+
+# ---------------------------------------------------------------------------
+# #77 — Output-token-ceiling truncation guard. A completion cut off at max_tokens
+# mid-tool-call (finish_reason="length") must NOT execute the truncated call: the
+# loop feeds a deterministic tool-role remedy, counts it, and continues so the model
+# retries informed (no blind identical retries, no silently-truncated file).
+# ---------------------------------------------------------------------------
+
+class _RecordingRegistry:
+    """Tool registry that records every dispatch so a test can prove a call did/didn't run."""
+    def __init__(self, dispatched: list):
+        self._dispatched = dispatched
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolResult
+        self._dispatched.append((name, arguments))
+        return ToolResult(output="ok", success=True)
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_call_not_executed_native(mock_llm_client, bus):
+    """finish_reason='length' + tool calls (native) → suppress execution, push a tool-role
+    remedy naming cause + fix, continue to a clean retry."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    dispatched: list = []
+    tc = ToolCallObj(id="tc-1", name="write", arguments={"path": "/tmp/x"})
+    responses = [
+        Response(content=None, tool_calls=[tc], finish_reason="length"),
+        Response(content="Recovered with a smaller write.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus,
+                            tool_registry=_RecordingRegistry(dispatched))
+    summary = await loop.run_turn("write a big file")
+
+    assert dispatched == []                                   # truncated call NOT executed
+    assert "Recovered with a smaller write." in summary       # loop continued to completion
+    remedy = [m for m in loop._conversation
+              if m.get("role") == "tool" and m.get("tool_call_id") == "tc-1"]
+    assert len(remedy) == 1                                    # the call's id was answered
+    assert "cut off" in remedy[0]["content"]
+    assert "smaller pieces" in remedy[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_finish_stop_with_tool_calls_executes_unchanged(mock_llm_client, bus):
+    """Guard is scoped strictly to finish_reason='length': a normal completion carrying tool
+    calls (finish_reason='stop') dispatches exactly as before."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    dispatched: list = []
+    tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc], finish_reason="stop"),
+        Response(content="Finished after tool.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus,
+                            tool_registry=_RecordingRegistry(dispatched))
+    summary = await loop.run_turn("task")
+
+    assert dispatched == [("bash", {"cmd": "ls"})]            # executed unchanged
+    assert "Finished after tool." in summary
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_call_not_executed_xml(mock_llm_client, bus):
+    """xml mode: truncation cuts the embedded <tool_call> text, but finish_reason='length'
+    rides the same stream chunk, so the same guard suppresses execution. The xml back-fill
+    populates the assistant tool_calls, so the tool-role remedy still pairs cleanly."""
+    Response = mock_llm_client.Response
+    dispatched: list = []
+    xml = ('<tool_call>\n{"name": "write", "arguments": {"path": "/tmp/x", "content": "y"}}\n'
+           '</tool_call>')
+    responses = [
+        Response(content=xml, tool_calls=[], finish_reason="length"),
+        Response(content="Recovered.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus,
+                            tool_registry=_RecordingRegistry(dispatched))
+    loop._llm.config.tool_call_mode = "xml"
+    summary = await loop.run_turn("task")
+
+    assert dispatched == []                                   # truncated xml call NOT executed
+    assert "Recovered." in summary
+    assert any(m.get("role") == "tool" and "cut off" in (m.get("content") or "")
+               for m in loop._conversation)
+
+
+@pytest.mark.asyncio
+async def test_step_truncated_tool_call_counts_and_skips(mock_llm_client, bus):
+    """step() (the single-iteration twin) has the same seam: a length-truncated tool call is
+    not executed, is counted in session stats, and pushes the remedy."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    dispatched: list = []
+    tc = ToolCallObj(id="tc-1", name="write", arguments={"path": "/tmp/x"})
+    loop = _make_agent_loop(
+        mock_llm_client,
+        [Response(content=None, tool_calls=[tc], finish_reason="length")],
+        bus, tool_registry=_RecordingRegistry(dispatched),
+    )
+    session = Session(agent_id="test-agent", session_id="s1",
+                      messages=[{"role": "user", "content": "go"}])
+    result = await loop.step(session)
+
+    assert dispatched == []                                   # not executed
+    assert session.truncated_tool_calls == 1                  # counted in session stats
+    assert result.action != "tool_calls"                     # did not report an execution
+    assert any(m.get("role") == "tool" and "cut off" in (m.get("content") or "")
+               for m in session.messages)
