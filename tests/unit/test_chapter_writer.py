@@ -1163,3 +1163,49 @@ async def test_healthy_revalidation_rotates_recheck_window(store):
         assert (await _status(store, ch.id))[0] == "superseded"          # the stale pair was finally reached
     for ch in healthy:
         assert (await _status(store, ch.id))[0] == "active"              # healthy pair untouched by pass 2
+
+
+# ---------------------------------------------------------------------------
+# #70 — recheck must re-read status: an earlier heal can kill a later snapshot item mid-pass
+# ---------------------------------------------------------------------------
+
+class _CountingCorpusLLM:
+    """_CorpusEchoLLM that COUNTS 'Write ONE' generations — proves how many redrafts actually ran."""
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(self, prompt: str) -> str:
+        self.calls += 1
+        corpus = prompt.split("\n\n")[-1]
+        lines = [ln for ln in corpus.splitlines() if ln.strip()]
+        return " ".join(lines[0].split()[:12]) if lines else "chapter"
+
+
+@pytest.mark.asyncio
+async def test_recheck_skips_item_superseded_mid_pass(store):
+    """#70: the recheck snapshot is fetched once; an earlier item's redraft can supersede a LATER item
+    via the containment guard. The now-dead chapter must be SKIPPED (status re-read) — no wasted LLM
+    call, no resurrection. O1's redraft (survivors {M1,M2,a3}) strictly contains O2 ({M1,M2}) and
+    supersedes it mid-pass; O2, processed next, is skipped."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+    m1 = await _seed_sem(store, _TAPER_M1, "s1", topic="fit", child_tag=None)
+    m2 = await _seed_sem(store, _TAPER_M2, "s2", topic="fit", child_tag=None)
+    a3 = await _seed_sem(store, "the runner does hill repeats on the steep northern route", "s1",
+                         topic="fit", child_tag=None)
+    a4 = await _seed_sem(store, _TAPER_M3, "s1", topic="fit", child_tag=None)   # the "7" bearer
+    o1 = await _seed_chapter(store, "snapO1", [m1, m2, a3, a4], body=_TAPER_BODY)  # grounds M1/M2/a3, carries 7
+    o2 = await _seed_chapter(store, "snapO2", [m1, m2],
+                             body="The runner trains tuesdays saturdays preparing the marathon with 9 sessions")
+    await _set_updated_at(store, o1.id, 1000)     # O1 processed first
+    await _set_updated_at(store, o2.id, 1001)
+    await _erode_member(store, a4, "the coach revised the plan and dropped the extra week")  # orphan O1's 7
+
+    llm = _CountingCorpusLLM()
+    counts: dict = {}
+    await recheck_stale_chapters(store, llm, asyncio.Event(), counts=counts)
+
+    assert counts.get("redrafted", 0) == 1                    # O1 healed
+    assert counts.get("skipped_superseded", 0) == 1          # O2 was killed mid-pass by O1 -> skipped
+    assert llm.calls == 1                                     # only O1's redraft generated — O2 spent none
+    assert (await _status(store, o2.id))[0] == "superseded"  # O2 stays dead (no resurrection)
+    assert len(await _active_chapters(store)) == 1           # just the healed O1
