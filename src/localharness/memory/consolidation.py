@@ -131,6 +131,9 @@ class ConsolidationPass:
         # this very pass just promoted (fresh records have zero access history — the
         # lowest slow-score in any mature store, i.e. first trim victims).
         self._promoted_ids_this_run: set[int] = set()
+        # #69: ONE claimed-refresh-key set for the whole pass, shared by the recheck step AND the writer
+        # step — so a chapter key the recheck heals onto cannot be re-adopted (and clobbered) by the writer.
+        self._claimed_refresh_keys: set[str] = set()
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -354,6 +357,7 @@ class ConsolidationPass:
             containment_counts=containment_counts,
             attempts_log=report.schema_attempts,  # §7: staleness re-drafts/retires observable
             counts=counts,
+            claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the writer step
         )
         report.chapters_revalidated += counts["revalidated"]
         report.chapters_redrafted_stale += counts["redrafted"]
@@ -381,6 +385,7 @@ class ConsolidationPass:
             containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
             containment_counts=containment_counts,
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
+            claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the recheck step
         )
         report.schemas_written = len(written)
         # += (not =): the staleness re-check step may have folded/superseded during a re-draft; both
