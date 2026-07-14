@@ -4,6 +4,48 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.6] — 2026-07-14
+
+Shaped by a maintainer live-dogfooding session: four bugs found in real use (#75–#78,
+including two mined from the session's own event ledger) plus the first slice of the
+during-turn UX work. All receipted and test-first as before.
+
+### Added
+- **In-turn progress narration** (terminal): during a long multi-stage task, the model's
+  short stage statements now render as dim lines opening each chunk of tool activity —
+  "· Pulling the data… ◆ read … · Now building the model…" — at most one per chunk, first
+  line only, 160-char cap, with the final answer still rendered exactly once in its panel.
+  A one-line prompt nudge encourages the model to announce stage transitions; the render
+  is the mechanism, the nudge only shapes wording.
+
+### Fixed
+- **Truncated tool calls are never executed** (#77): when a completion hits the
+  output-token ceiling mid-tool-call, the loop previously executed the mangled call —
+  yielding either a confusing validation error retried blind, or a "successful" silently
+  truncated file, at ~a minute of dead air and a full context resend per retry (a real
+  session burned ~2M tokens in one such turn). The finish reason is now captured (it was
+  read nowhere) in both tool-call modes; a length-truncated response's calls are
+  suppressed and the model is told exactly what happened and to write in smaller pieces.
+  The write tool's description now steers large files toward `mode=append` chunks.
+- **Memory consolidation defers while a turn is in flight** (#78): "activity" previously
+  meant new user messages only, so a long agent turn could have the background pass (and
+  its embedder) running concurrently with live inference on the same GPU — observed for a
+  full 194 seconds inside an active turn. Turn start now defers/cancels the pass exactly
+  like typing does, and idleness is measured from turn END (it was measured from the
+  user's message, i.e. turn start).
+- **The agent knows its working directory** (#75): the system prompt stated the date but
+  never the location, so "make a folder for yourself" landed in `$HOME` instead of the
+  project directory the session was launched from. The prompt now states the launch
+  directory with guidance to create files under it unless told otherwise.
+- **The embedding model loads once and silently** (#76): the tag-discovery embedder was
+  reconstructed — weights reloaded — on every idle pass, and its loader chatter
+  (HuggingFace/torch/tqdm write directly to the terminal, bypassing logging) printed over
+  the interactive input box. It now loads once per process inside an output-suppression
+  guard; the quiet "· dreaming…" status is the only visible sign of background memory work.
+- **Cleaner tool counter lines**: the burst counters dropped their decorative description
+  suffix (`◆ web_search · web_fetch · 23/23`); the separate untrusted-web-results security
+  note is unchanged.
+
 ## [0.9.5] — 2026-07-14
 
 The third audit wave: 13 fixes (#62–#74) closing out every verified finding from the
