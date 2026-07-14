@@ -646,6 +646,60 @@ async def test_write_tool_blocks_env_files(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_write_tool_created_message_for_new_file(tmp_path: Path):
+    """#80: overwrite of a brand-new path reports 'Created … (N bytes)'."""
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    out = tmp_path / "new.txt"
+    result = await tool.run(path=str(out), content="hello")
+    assert result.success is True
+    p = result.metadata["path"]
+    assert result.output == f"Created {p} (5 bytes)"
+    assert result.metadata["bytes_written"] == 5
+    assert result.metadata.get("unchanged") is not True
+
+
+@pytest.mark.asyncio
+async def test_write_tool_overwrote_message_for_changed_content(tmp_path: Path):
+    """#80: overwrite with DIFFERENT content reports the old→new byte delta."""
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    out = tmp_path / "f.txt"
+    await tool.run(path=str(out), content="aaaa")          # 4 bytes
+    result = await tool.run(path=str(out), content="bbbbbb")  # 6 bytes
+    assert result.success is True
+    p = result.metadata["path"]
+    assert result.output == f"Overwrote {p} (was 4 bytes, now 6 bytes)"
+    assert result.metadata["bytes_written"] == 6
+    assert result.metadata.get("unchanged") is not True
+    assert out.read_text() == "bbbbbb"
+
+
+@pytest.mark.asyncio
+async def test_write_tool_no_change_when_identical(tmp_path: Path):
+    """#80: overwrite with byte-identical content is a no-op STOP signal (unchanged=True),
+    not another 'success' line the model reacts to by rewriting the file again."""
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    out = tmp_path / "f.txt"
+    await tool.run(path=str(out), content="same content")
+    result = await tool.run(path=str(out), content="same content")
+    assert result.success is True
+    p = result.metadata["path"]
+    n = len("same content".encode())
+    assert result.output == (
+        f"No change: {p} already contains exactly this content ({n} bytes). "
+        "The file is already written — do not rewrite it; take the next step."
+    )
+    assert result.metadata["unchanged"] is True
+    assert result.metadata["bytes_written"] == n
+    assert result.metadata["path"] == p
+
+
+@pytest.mark.asyncio
 async def test_bash_exec_tool_runs_command():
     from localharness.tools.builtin.bash_tool import BashExecTool
 
