@@ -1472,6 +1472,21 @@ class ProviderConfig(BaseModel):
             "which the previous 300s default killed mid-generation."
         ),
     )
+    inference_queue_wait_seconds: Optional[float] = Field(
+        default=600.0,
+        ge=0.0,
+        description=(
+            "#62: ceiling (seconds) on time a request spends WAITING for the local inference gate "
+            "— the in-process semaphore and cross-process flock that serialize the shared GPU — "
+            "NEVER the generation itself. On a multi-session single-GPU box, waiting behind another "
+            "session's in-flight generation is LEGITIMATE, so the default is GENEROUS (600s): this "
+            "is a backstop against a wedged/stuck slot, not a scheduler. On breach the request fails "
+            "with a clear 'gave up waiting for a model slot' error naming the wait. 0 or null "
+            "disables the bound (wait indefinitely). A dead endpoint is handled separately by a "
+            "fail-fast TCP probe before the queue, so this ceiling only ever trims a genuinely "
+            "stuck wait, never a healthy one."
+        ),
+    )
 
 
 class ProposerConfig(BaseModel):

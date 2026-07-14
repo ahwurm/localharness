@@ -33,6 +33,22 @@ def _isolate_memory_logger():
         lg.propagate = saved[2]
 
 
+@pytest.fixture(autouse=True)
+def _disable_inference_probe():
+    """#62: the inference gate runs a real TCP reachability probe before entering the queue.
+    Unit/integration tests mock the HTTP layer against dead/unserved ports (127.0.0.1:9, :59999),
+    so the probe — correctly — would fail them; it is a real-network feature with no applicable
+    endpoint under mocks. Disable it suite-wide; the probe's own behaviour is covered by dedicated
+    tests in test_inference_queue.py that re-enable it and drive real sockets."""
+    from localharness.provider import client as _client
+    saved = _client._INFERENCE_PROBE_ENABLED
+    _client._INFERENCE_PROBE_ENABLED = False
+    try:
+        yield
+    finally:
+        _client._INFERENCE_PROBE_ENABLED = saved
+
+
 @pytest.fixture
 def minimal_agent_config() -> AgentConfig:
     return AgentConfig(name="test-agent", role="Test agent for unit tests.")

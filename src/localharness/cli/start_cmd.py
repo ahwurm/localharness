@@ -404,6 +404,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         model=resolved_model,
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
+        queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
     )
     _probe_client = LLMClient(_initial_cfg)
 
@@ -474,6 +475,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         tool_call_mode=probed_mode or "native",
+        queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
     )
     llm = LLMClient(llm_cfg)
 

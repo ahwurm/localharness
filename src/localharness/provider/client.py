@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import openai
 from openai import AsyncOpenAI
@@ -31,6 +32,13 @@ log = logging.getLogger(__name__)
 # Configuration dataclass
 # ---------------------------------------------------------------------------
 
+# #62: default ceiling (seconds) on time WAITING for the local inference gate. GENEROUS by
+# design — multi-session single-GPU contention is legitimate (a long generation in another
+# session is a healthy wait, not a stall), so the ceiling is a backstop against a wedged slot,
+# not a scheduler. Shared by LLMConfig's field default and the gate's config read so they cannot
+# drift; kept in sync with ProviderConfig.inference_queue_wait_seconds.
+_DEFAULT_QUEUE_WAIT_SECONDS = 600.0
+
 
 @dataclass
 class LLMConfig:
@@ -42,6 +50,10 @@ class LLMConfig:
     # ProviderConfig.timeout_seconds and defaults.DEFAULT_TIMEOUT_SECONDS.
     timeout_seconds: float = 600.0
     connect_timeout_seconds: float = 5.0
+    # #62: ceiling on time spent WAITING for the inference gate (semaphore/flock), NEVER the
+    # generation itself. None or 0 disables the bound. Threaded from
+    # ProviderConfig.inference_queue_wait_seconds by `start`.
+    queue_wait_seconds: float | None = _DEFAULT_QUEUE_WAIT_SECONDS
     temperature: float = 0.6
     max_tokens: int = 4096
     tool_call_mode: Literal["native", "xml", "text"] = "native"
@@ -146,20 +158,134 @@ _MAX_CONCURRENT_INFERENCE = max(1, int(os.environ.get("LOCALHARNESS_MAX_CONCURRE
 _inference_sem = asyncio.Semaphore(_MAX_CONCURRENT_INFERENCE)
 _INFERENCE_LOCK_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_LOCK", "1") != "0"
 
+# #62 (a) FAIL-FAST reachability probe. A cheap TCP connect+close (NO HTTP route → zero server
+# load) run BEFORE the queue: a dead endpoint raises immediately instead of consuming a gate slot
+# and then a doomed wait. Default on; LOCALHARNESS_INFERENCE_PROBE=0 disables (escape hatch).
+_INFERENCE_PROBE_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_PROBE", "1") != "0"
+_PROBE_TIMEOUT_SECONDS = 0.2   # ~200ms connect budget — a healthy local connect is sub-ms
+_PROBE_CACHE_TTL_SECONDS = 3.0  # trust a recent SUCCESS this long so the healthy hot path pays once
+_probe_cache: dict[tuple[str, int], float] = {}  # (host, port) -> monotonic ts of last OK connect
+# #62 (b) surface a queue wait once it passes this threshold (one honest INFO, not per poll).
+_QUEUE_VISIBILITY_SECONDS = 2.0
+
 
 def _inference_lock_path(base_url: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9.]+", "-", base_url.split("://", 1)[-1]).strip("-")
     return os.path.join(tempfile.gettempdir(), f"localharness-inference-{safe}.lock")
 
 
+def _endpoint_host_port(base_url: str) -> tuple[str, int]:
+    """(host, port) for a base_url, defaulting the port by scheme (http 80 / https 443)."""
+    parts = urlsplit(base_url)
+    host = parts.hostname or "localhost"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return host, port
+
+
+async def _probe_reachable(host: str, port: int) -> bool:
+    """Cheap TCP connect+close reachability probe — NO HTTP route is hit (connect only, zero
+    server-side load). A successful result is cached for _PROBE_CACHE_TTL_SECONDS so a burst of
+    requests to a healthy endpoint probes ~once, not per call. Failures are never cached (the
+    server may be coming up)."""
+    now = time.monotonic()
+    last_ok = _probe_cache.get((host, port))
+    if last_ok is not None and (now - last_ok) < _PROBE_CACHE_TTL_SECONDS:
+        return True
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), _PROBE_TIMEOUT_SECONDS
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:  # closing a just-opened probe socket must never surface as a failure
+        pass
+    _probe_cache[(host, port)] = now
+    return True
+
+
+def _queue_wait_ceiling_error(ceiling: float) -> "ProviderTimeoutError":
+    return ProviderTimeoutError(
+        f"gave up waiting for a model slot after {ceiling:g}s (inference_queue_wait_seconds) — "
+        "another request may be stuck; retry, or restart the harness"
+    )
+
+
+class _QueueWaitState:
+    """Shared bookkeeping for one gate acquisition so the semaphore wait and the flock wait honor
+    ONE ceiling and emit ONE visibility signal between them."""
+
+    def __init__(self, ceiling: float | None):
+        self._t0 = time.monotonic()
+        self._ceiling = ceiling if ceiling and ceiling > 0 else None  # None/0/neg => disabled
+        self._notified = False
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._t0
+
+    def remaining(self) -> float | None:
+        return None if self._ceiling is None else self._ceiling - self.elapsed()
+
+    def check_ceiling(self) -> None:
+        """(c) Raise once the TOTAL gate wait has passed the ceiling (no-op when disabled)."""
+        if self._ceiling is not None and self.elapsed() >= self._ceiling:
+            raise _queue_wait_ceiling_error(self._ceiling)
+
+    def maybe_notify(self) -> None:
+        """(b) Emit ONE honest INFO once the wait passes the visibility threshold."""
+        if not self._notified and self.elapsed() >= _QUEUE_VISIBILITY_SECONDS:
+            self._notified = True
+            log.info("waiting for a model slot (another request is in flight)… %.0fs elapsed",
+                     self.elapsed())
+
+    def summarize(self) -> None:
+        if self.elapsed() > 5:
+            log.info("inference gate: waited %.1fs for another slot", self.elapsed())
+
+
+async def _acquire_sem_bounded(state: _QueueWaitState) -> None:
+    """Acquire the in-process inference semaphore, bounded by the shared gate-wait ceiling and
+    surfacing the wait past the visibility threshold. Holds one permit on return; raises the
+    ceiling error (holding nothing) if the total wait exceeds the ceiling. Uncontended acquire is
+    instant. On Python 3.12 a cancelled `wait_for(sem.acquire())` re-releases any granted permit,
+    so the slice loop never leaks a permit."""
+    while True:
+        state.check_ceiling()          # raise if we already blew the ceiling (also guards step>0)
+        remaining = state.remaining()  # None => unbounded
+        step = _QUEUE_VISIBILITY_SECONDS if remaining is None else min(_QUEUE_VISIBILITY_SECONDS, remaining)
+        try:
+            await asyncio.wait_for(_inference_sem.acquire(), step)
+            return
+        except asyncio.TimeoutError:
+            state.maybe_notify()       # one-time INFO; loop re-checks the ceiling at the top
+
+
 @asynccontextmanager
 async def _inference_gate(config: LLMConfig):
     """Hold for the FULL request including stream consumption — the GPU is occupied
-    until the last token, not until the HTTP call returns."""
+    until the last token, not until the HTTP call returns.
+
+    #62: before entering the queue a cheap TCP probe fails fast on a dead endpoint (never
+    consuming a slot); the wait for the semaphore AND the flock is bounded by
+    config.queue_wait_seconds (the gate wait only, never the generation) and surfaced once past a
+    short threshold."""
     if not config.is_local:
         yield
         return
-    async with _inference_sem:
+    # (a) FAIL-FAST: a dead endpoint raises BEFORE we take a slot or wait — a doomed request must
+    # never queue behind healthy in-flight work. TCP connect only; no HTTP route, no server load.
+    if _INFERENCE_PROBE_ENABLED:
+        host, port = _endpoint_host_port(config.base_url)
+        if not await _probe_reachable(host, port):
+            raise ProviderConnectionError(
+                f"inference endpoint {host}:{port} unreachable (TCP connect failed) — not queueing "
+                f"a request that cannot succeed (is the model server up at {config.base_url}?)"
+            )
+    state = _QueueWaitState(getattr(config, "queue_wait_seconds", _DEFAULT_QUEUE_WAIT_SECONDS))
+    await _acquire_sem_bounded(state)  # (b)+(c) on the in-process semaphore; holds one permit
+    try:
         if not _INFERENCE_LOCK_ENABLED or fcntl is None:
             yield
             return
@@ -173,7 +299,6 @@ async def _inference_gate(config: LLMConfig):
                 log.warning("inference lock unavailable (%s) — cross-process gating disabled", exc)
                 yield
                 return
-            t0 = time.monotonic()
             # Cancellation-safe acquire (v2.0 Phase-31 critic, BLOCKER 1). The old
             # `await asyncio.to_thread(fcntl.flock, fd, LOCK_EX)` parked a REAL OS
             # thread on the fd; cancelling the awaiting task (e.g. a consolidation
@@ -191,14 +316,16 @@ async def _inference_gate(config: LLMConfig):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except OSError:
+                    state.check_ceiling()  # (c) bound the flock wait too (raises past ceiling)
+                    state.maybe_notify()    # (b) surface it once past the threshold
                     await asyncio.sleep(0.05)
-            waited = time.monotonic() - t0
-            if waited > 5:
-                log.info("inference gate: waited %.1fs for another process's generation", waited)
+            state.summarize()
             yield
         finally:
             if fd is not None:
                 os.close(fd)  # releases the flock; kernel also releases on process death
+    finally:
+        _inference_sem.release()
 
 
 def _tools_to_api_format(tools: list[ToolSchema]) -> list[dict]:
@@ -563,6 +690,11 @@ class LLMClient:
 
     def _wrap_error(self, exc: Exception) -> ProviderError:
         """Map openai SDK exceptions to LocalHarness provider error types."""
+        if isinstance(exc, ProviderError):
+            # Already one of ours — e.g. the inference gate's #62 fail-fast (ProviderConnectionError)
+            # or queue-wait ceiling (ProviderTimeoutError). Pass it through so the loop's specific
+            # handlers still fire; re-wrapping would downgrade it to a base ProviderError.
+            return exc
         if isinstance(exc, openai.APIConnectionError):
             return ProviderConnectionError(str(exc), cause=exc)
         if isinstance(exc, openai.APITimeoutError):
