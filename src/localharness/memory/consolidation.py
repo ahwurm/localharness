@@ -435,7 +435,10 @@ class ConsolidationPass:
         embedder = self._embedder
         if embedder is None:
             from localharness.memory.embeddings import default_embedder
-            embedder = default_embedder()
+            # #76: cache on self — MiniLM was reloading its weights EVERY pass (and
+            # spilling loader output over the input box). One load per process; the
+            # promote step's embedding leg reads self._embedder and benefits too.
+            embedder = self._embedder = default_embedder()
         report.embedder_used = type(embedder).__name__
         r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder)
         report.tags_proposed = len(r.proposed)

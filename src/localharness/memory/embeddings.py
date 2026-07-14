@@ -8,12 +8,30 @@ are not comparable. Tests inject their own fake — the INTERFACE is the point, 
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
+import os
 import re
 from typing import Protocol, runtime_checkable
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+@contextlib.contextmanager
+def _quiet_ml_output():
+    """Silence third-party ML loader chatter around embedder load/encode (#76).
+
+    HF/torch/tqdm write progress ("loading weights…", bars) DIRECTLY to stdout/stderr —
+    bypassing the logging system that the #20 fix routes to memory.log — and in an
+    interactive session that lands on top of the input box. Env flags turn off what
+    honors them; the redirect catches the rest. Errors still surface: exceptions
+    propagate unchanged, only stream writes are swallowed."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    with open(os.devnull, "w") as devnull, \
+            contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+        yield
 
 
 @runtime_checkable
@@ -49,13 +67,16 @@ class SentenceTransformerEmbedder:
     dep at construction (raises if the extra is not installed), so importing this module is free."""
 
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
-        from sentence_transformers import SentenceTransformer  # optional extra: [embeddings]
+        with _quiet_ml_output():
+            from sentence_transformers import SentenceTransformer  # optional extra: [embeddings]
 
-        self._model = SentenceTransformer(model_name)
+            self._model = SentenceTransformer(model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [list(map(float, v)) for v in
-                self._model.encode(texts, normalize_embeddings=True)]
+        with _quiet_ml_output():
+            return [list(map(float, v)) for v in
+                    self._model.encode(texts, normalize_embeddings=True,
+                                       show_progress_bar=False)]
 
 
 def default_embedder(model_name: str | None = None) -> Embedder:
