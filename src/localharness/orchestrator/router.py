@@ -24,11 +24,12 @@ class AgentCreationFlow:
 
     @staticmethod
     def no_config_message() -> str:
+        # #51: localharness.dev/resources is a 404 — point at the live site root, which exists.
         return (
             "Welcome to LocalHarness.\n\n"
             "To configure, run: localharness init\n\n"
             "For model and inference provider recommendations for your hardware,\n"
-            "see: localharness.dev/resources"
+            "see: https://localharness.dev"
         )
 
     def begin_agent_creation(self, config_dir: Path | None = None) -> "AgentCreationWorkflow":
