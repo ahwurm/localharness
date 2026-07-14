@@ -16,6 +16,13 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def _first_prompt_hint(is_returning: bool) -> str:
+    """The guidance shown in the first interactive input bubble (#49). First-run gets the
+    full 'describe a task' hint; a returning session still gets a short '/help' reminder
+    (the returning banner previously reinforced nothing)."""
+    return "/help for commands." if is_returning else "Describe a task, or /help for commands."
+
+
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
     """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
     the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
@@ -863,9 +870,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         is_returning = events_path.exists() and events_path.stat().st_size > 0
 
         # --- Startup banner ---
+        # #49: in an interactive TTY the first-run hint is fragile scrollback the prompt_toolkit
+        # box repaints over, so relocate it INTO the first input bubble (show_hint=False here,
+        # channel.first_prompt_hint below). Piped/non-interactive sessions keep the banner hint.
+        interactive = console.is_terminal
         elapsed = _time.monotonic() - start_time
         from localharness.cli.ui import startup_banner
-        console.print(startup_banner(model=resolved_model, is_returning=is_returning))
+        console.print(startup_banner(
+            model=resolved_model, is_returning=is_returning, show_hint=not interactive,
+        ))
+        if interactive and isinstance(channel, TerminalChannel):
+            channel.first_prompt_hint = _first_prompt_hint(is_returning)
 
         # --- Startup summary line ---
         parts = [f"({elapsed:.1f}s startup)"]

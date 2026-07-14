@@ -288,6 +288,9 @@ class TerminalChannel(ChannelAdapter):
         self._live: Live | None = None
         self._state: str = "IDLE"
         self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
+        # #49: hint drawn INSIDE the first input bubble (immune to the box repaint that drops
+        # a banner hint in a real TTY). start_cmd sets it for interactive sessions; shown once.
+        self.first_prompt_hint: str = ""
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
@@ -492,8 +495,11 @@ class TerminalChannel(ChannelAdapter):
             self._stop_thinking()
             self._close_burst()  # freeze any open counter before the input bubble draws
         self._state = "WAITING_INPUT"
+        # #49: the first prompt carries the guidance hint in the bubble's bottom border;
+        # consume it so later prompts don't repeat it.
+        hint, self.first_prompt_hint = self.first_prompt_hint, ""
         app = _build_input_app(
-            self._history, prompt, hint="", context_pct=self._context_pct,
+            self._history, prompt, hint=hint, context_pct=self._context_pct,
         )
         try:
             line = await app.run_async()
