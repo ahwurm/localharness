@@ -737,8 +737,6 @@ class AgentLoop:
         if hasattr(self._ctx, "reset_compaction_guard"):
             self._ctx.reset_compaction_guard()
 
-        recovery_injection: str | None = None
-
         while True:
             session.iteration += 1
             # FIX 4: wire the real per-turn iteration into the ContextManager so the emergency-floor
@@ -817,12 +815,10 @@ class AgentLoop:
                 last_tool=None,
             ))
 
-            # 4. Inject recovery if set (use "user" role — vLLM rejects mid-conversation system messages)
-            if recovery_injection is not None:
-                request_messages.append({"role": "user", "content": recovery_injection})
-                recovery_injection = None
-
             # 5. LLM call with error handling
+            # (The stuck-recovery nudge is no longer injected here transiently — it is pushed
+            # straight into session.messages at RECOVERING time [#82], so it is durable history
+            # and every subsequent build_messages replays it, not just the next one.)
             tool_call_mode = getattr(
                 getattr(self._llm, "config", None), "tool_call_mode", "native"
             )
@@ -1156,8 +1152,12 @@ class AgentLoop:
                     iteration=session.iteration,
                     stuck_signature=repeated_sig or "",
                 ))
-                # Phase 14 REG-04: recovery wording is now a mutable config component
-                recovery_injection = self._config.recovery_injection.message
+                # Phase 14 REG-04: recovery wording is a mutable config component.
+                # #82: push it into durable session history (right here, after this
+                # iteration's tool results — the correct position) rather than a transient
+                # request-only append, so it survives every later build_messages and the
+                # history never shows the model replying to a message that isn't there.
+                session.push({"role": "user", "content": self._config.recovery_injection.message})
                 log.info(
                     "Stuck recovery triggered for %s at iteration %d",
                     self._config.name,
