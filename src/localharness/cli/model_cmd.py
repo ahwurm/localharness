@@ -90,6 +90,13 @@ def model(
         return
 
     # --- Switch: resolve the target --- #
+    # #39: reject an empty/whitespace name FIRST — before any resolution. Otherwise "" falls
+    # through isdigit/exact/checkpoint (note Path("").expanduser().exists() == cwd) into the
+    # unreachable-degrade branch and persists "" as the default.
+    if not name.strip():
+        err_console.print("[bold red]Error:[/bold red] model name cannot be empty.")
+        raise typer.Exit(2)
+
     target: Optional[str] = None
     if name.isdigit() and 1 <= int(name) <= len(choices):
         target = choices[int(name) - 1]
