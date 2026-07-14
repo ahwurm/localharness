@@ -1180,9 +1180,18 @@ def _attribute_topic_v2(
 # ---------------------------------------------------------------------------
 _PROBE_MARKERS = ("curl", "http://", "https://", "localhost")
 _PROBE_ERROR_MARKERS = (
+    # FIX 3 (#42): connection-level signatures ONLY. Bare generics ("not found", "refused",
+    # "timeout", bare "timed out") collided with ordinary app text and HTTP error BODIES —
+    # {"detail":"Not Found"} proves the port IS listening, the opposite of a dead probe — so a
+    # false "dead" could excuse a real B4 regression. These phrases can never appear in a body a
+    # LIVE port serves. "expecting value" = JSON-decode on an empty body (`curl -s <dead> |
+    # json.tool` — the REAL run3 dead-port signature); "[denied]" = the harness's own permission
+    # marker (agent/loop.py -> output="[DENIED]"). No real dead-port TIMEOUT phrasing appears in
+    # the run data (run3 used curl -s -> "expecting value"); the curl (28) transport-timeout forms
+    # below are added defensively and each carries a network-qualifying word so it can't collide.
     "expecting value", "connection refused", "could not connect", "couldn't connect",
     "failed to connect", "no route to host", "connection reset", "empty reply",
-    "not found", "refused", "timed out", "timeout", "[denied]",
+    "connection timed out", "operation timed out", "timed out after", "[denied]",
 )
 
 
