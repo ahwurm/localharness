@@ -81,8 +81,11 @@ def compare(candidate: dict, baseline: dict) -> tuple[bool, list[str]]:
     if noise != 0:
         notes.append(f"b3_distractors: {noise} != 0")
 
-    if not sb.get("b4_ok"):
-        notes.append("b4_ok: false")
+    # FIX (#41): the grader folds b4_effective = b4_ok or b4_excused into its HOLDS verdict, so the
+    # comparator must gate on the SAME effective value — reading raw b4_ok alone contradicted the
+    # grader on excused runs. Absent b4_excused (older verdicts) falls back to raw b4_ok exactly.
+    if not (sb.get("b4_ok") or sb.get("b4_excused")):
+        notes.append("b4 effective: false (raw false, not excused)")
 
     return (len(notes) > 0, notes)
 
