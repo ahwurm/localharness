@@ -60,7 +60,10 @@ class HistoryWriter:
         if not self._path.exists():
             return []
         try:
-            text = self._path.read_text(encoding="utf-8")
+            # #72: async file IO (anyio, like append) — a full-file read_text() here blocked the event
+            # loop thread on every history dereference. read contract (identical parse below) unchanged.
+            async with await anyio.open_file(str(self._path), "r", encoding="utf-8") as f:
+                text = await f.read()
         except OSError as exc:
             from localharness.memory.errors import MemoryReadError
             raise MemoryReadError(str(self._path), exc) from exc
