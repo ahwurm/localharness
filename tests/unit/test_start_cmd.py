@@ -759,8 +759,8 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
 
     async def fake_probe(llm, max_retries=3, delay=2.0):
         # served window comfortably above the default 131072 cfg + 4096 reserve so
-        # the fit-check (start_cmd:248) does not abort the drive
-        return (True, "native", 262_144)
+        # the fit-check (start_cmd:248) does not abort the drive; 4th slot = probe_error (#44)
+        return (True, "native", 262_144, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", fake_probe)
 
     class _StubTokenCounter:
