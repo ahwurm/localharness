@@ -931,3 +931,101 @@ async def test_recheck_cap_bounds_work_per_pass(store):
     assert counts.get("retired", 0) == 2                          # exactly cap processed, all stale
     active = await _active_chapters(store)
     assert len(active) == 1 and chapters[-1].id in active         # the newest chapter is left for later
+
+
+# ---------------------------------------------------------------------------
+# SHARED ACTIVE-PRIMARY MEMBER MAP — #66 (status filter) + #67 (aux-free adoption) + #71 (build-once)
+# ---------------------------------------------------------------------------
+# The containment guard and refresh adoption must compare the SAME member sets on both sides: ACTIVE
+# members (superseded members excluded — #66) with aux tier:surprising_failure rows excluded (#67).
+# Before the fix, adoption scored overlap from RAW member_of (dead members + aux inflating the min()
+# denominator), deflating a legitimate refresh below threshold -> a duplicate sibling minted beside the
+# still-active original. And the guard re-derived every chapter's member set per _write_one call (#71).
+
+async def _erode_member(store, member, new_value="wholly unrelated content one two three four five"):
+    """Supersede a member on its own key (status flips away from active) — the real erosion mechanism."""
+    await store.store_fact(key=member.key, value=new_value, tags=["sem", "pending_consolidation"],
+                           confidence=0.65, source="transcript_mining", provenance="sx", node_kind="fact")
+
+
+@pytest.mark.asyncio
+async def test_adoption_ignores_aux_rows_no_duplicate_sibling(store):
+    """#67: a chapter with ONE primary member + aux surprising_failure rows; a grown cluster (that
+    primary + a new atom) must REFRESH it (adopt its key), not mint a duplicate sibling. RAW member_of
+    (primary+aux) inflates the overlap min() denominator so the score falls below threshold; the
+    primary-only map clears it. Load-bearing: exactly ONE active chapter after the write."""
+    a1 = await _seed_sem(store, "a subagent build setting alpha governs the harness order", "s0",
+                         topic="subagents", child_tag=None)
+    a2 = await _seed_sem(store, "a subagent build setting bravo governs the harness order", "s1",
+                         topic="subagents", child_tag=None)
+    f1 = await _seed_failure(store, "bash_exec", day="20260701", value="a subagent bash failure one")
+    f2 = await _seed_failure(store, "docker", day="20260702", value="a subagent docker failure two")
+    x = await _seed_chapter(store, "auxchap1", [a1], aux=(f1, f2))    # 1 primary + 2 aux
+
+    cluster = Cluster(members=[a1, a2], sessions=frozenset({"s0", "s1"}), depth=0)  # grew by a2
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000)
+
+    assert schema is not None
+    active = await _active_chapters(store)
+    assert len(active) == 1, f"aux-deflated overlap minted a duplicate sibling: {active}"
+    assert x.key in active.values()                  # the original's identity was refreshed, not siblinged
+
+
+@pytest.mark.asyncio
+async def test_eroded_chapter_refreshed_not_siblinged(store):
+    """#66: a chapter whose members are partly DEAD (superseded) must be compared by its ACTIVE members
+    on both sides. A grown cluster over its ONE surviving member + a new atom refreshes it (adopt key),
+    not mint a sibling beside the eroded original. Dead members inflate the raw set so the raw overlap
+    deflates below threshold; the active-only map clears it. (The containment FOLD direction is proven
+    status-invariant for active drafts — draft ⊆ raw ⟺ draft ⊆ active — so the demonstrable effect of
+    the status filter is exactly here, on adoption/supersede overlap.)"""
+    a1 = await _seed_sem(store, "a subagent build setting alpha governs the harness order", "s0",
+                         topic="subagents", child_tag=None)
+    a2 = await _seed_sem(store, "a subagent build setting bravo governs the harness order", "s1",
+                         topic="subagents", child_tag=None)
+    a3 = await _seed_sem(store, "a subagent build setting charlie governs the harness order", "s0",
+                         topic="subagents", child_tag=None)
+    x = await _seed_chapter(store, "erochap1", [a1, a2, a3])   # 3 primary members
+    await _erode_member(store, a2)     # a2, a3 superseded -> X_active shrinks to {a1}
+    await _erode_member(store, a3)
+    b1 = await _seed_sem(store, "a subagent build setting delta governs the harness order", "s1",
+                         topic="subagents", child_tag=None)
+
+    cluster = Cluster(members=[a1, b1], sessions=frozenset({"s0", "s1"}), depth=0)  # {a1} survivor + b1
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000)
+
+    assert schema is not None
+    active = await _active_chapters(store)
+    assert len(active) == 1, f"eroded chapter left a live duplicate sibling: {active}"
+    assert x.key in active.values()
+
+
+@pytest.mark.asyncio
+async def test_member_map_derived_once_per_pass(store):
+    """#71: the active-primary member map is built ONCE per write_cluster_schemas pass and threaded into
+    every _write_one (guard + adoption) — not re-derived per write. Patch the builder to count
+    invocations; with existing chapters + three writable clusters it must be called exactly once."""
+    import localharness.memory.chapter_writer as cw
+    for i in range(3):                                            # existing chapters (per-write rebuild = costly)
+        m = await _seed_sem(store, f"an existing note about topic {i} kept for the harness record",
+                            f"e{i}", topic=f"exist{i}", child_tag=None)
+        await _seed_chapter(store, f"exist{i}ch", [m])
+    for stem in ("pp", "qq", "rr"):                              # three independent writable clusters
+        await _seed_sem(store, f"{stem}zzzalpha {stem}zzzbravo {stem}zzzcharlie", f"{stem}0", topic=f"t{stem}")
+        await _seed_sem(store, f"{stem}zzzalpha {stem}zzzbravo {stem}zzzdelta", f"{stem}1", topic=f"t{stem}")
+
+    calls = {"n": 0}
+    orig = cw._active_chapter_primary_members
+
+    async def _counting(s):
+        calls["n"] += 1
+        return await orig(s)
+
+    cw._active_chapter_primary_members = _counting
+    try:
+        result = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(), write_budget=3)
+    finally:
+        cw._active_chapter_primary_members = orig
+
+    assert len(result) == 3                                      # three clusters written
+    assert calls["n"] == 1, f"member map re-derived {calls['n']}x (must be once per pass, #71)"
