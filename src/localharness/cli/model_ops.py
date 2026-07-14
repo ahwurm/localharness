@@ -13,8 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from localharness.config.models import HarnessConfig
 from localharness.config.overlay import (
     _resolve_user_overlay_path,
@@ -143,27 +141,49 @@ async def persist_default_model(
 
 
 def pinned_agents(config_dir: Path | None) -> list[tuple[str, str]]:
-    """Agents whose per-agent yaml pins a concrete ``model:`` (not ``"inherit"``).
+    """Agents a persisted org/provider ``default_model`` switch will NOT reach on the next
+    ``start`` — because a concrete ``model:`` pins them ABOVE the org default in the resolution
+    chain ``agent -> division -> org`` (``start_cmd`` resolves that chain).
 
-    A persisted org/provider ``default_model`` switch will NOT reach these on the next
-    ``start`` — ``start_cmd`` resolves the per-agent pin first. That precedence is BY DESIGN
-    (a deliberate override lever, e.g. the owner's orchestrator.yaml), so this only WARNS; it
-    changes no behavior. Read the RAW yaml ``model`` field, NOT ``load_agent().model``: the
-    loader RESOLVES ``inherit`` to the org default (a concrete string), which would make every
-    inheriting agent look pinned. Returns ``[(agent_name, pinned_model), ...]``.
+    Two pin sources, both reported (#36 — the division source was previously missed, so a
+    division-pinned agent silently ignored a switch with no warning):
+      - the agent's own raw ``model:`` (an agent-level override lever) -> ``(name, model)``;
+      - else, its division's ``model:`` (a division-wide pin) -> ``(name (via division X), model)``.
+    An agent that inherits all the way to org is NOT listed — the switch DOES reach it.
+
+    Reads RAW yaml via the loader's own reader (NOT ``load_agent().model``, which RESOLVES
+    ``inherit`` to a concrete org default and would make every inheritor look pinned). Returns
+    ``[(agent_label, pinned_model), ...]``.
     """
     out: list[tuple[str, str]] = []
     if config_dir is None:
         return out
-    agents_dir = Path(config_dir) / "agents"
-    if not agents_dir.is_dir():
-        return out
-    for yml in sorted(agents_dir.glob("*.yaml")):
+    from localharness.config.loader import ConfigLoader, _load_yaml_file
+
+    loader = ConfigLoader(config_dir=Path(config_dir))
+    for stem in loader.list_agents():
+        path = loader._find_file("agents", stem)
+        if path is None:
+            continue
         try:
-            raw = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+            raw = _load_yaml_file(path)  # the loader's own yaml reader (shared parse/error path)
         except Exception:
             continue
-        m = raw.get("model") if isinstance(raw, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        label = raw.get("name") or stem
+        m = raw.get("model")
         if isinstance(m, str) and m and m != "inherit":
-            out.append((raw.get("name") or yml.stem, m))
+            out.append((label, m))  # agent-level pin
+            continue
+        # Agent inherits at its own level — a division-level pin still traps it.
+        div_name = raw.get("division")
+        if not div_name:
+            continue
+        try:
+            division = loader.load_division(div_name)
+        except Exception:
+            continue
+        if division.model and division.model != "inherit":
+            out.append((f"{label} (via division {div_name})", division.model))
     return out
