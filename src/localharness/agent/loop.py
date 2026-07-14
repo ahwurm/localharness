@@ -43,6 +43,7 @@ class Session:
     output_tokens: int = 0
     tokens_estimated: bool = False
     act_nudge_used: bool = False
+    truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -378,6 +379,17 @@ def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
             return converter.extract_tool_calls(content)
         except Exception:
             return []
+
+
+# #77: fed back (tool-role) when a completion is cut at the output-token ceiling
+# mid-tool-call. Names the cause AND the remedy so the model retries INFORMED instead of
+# re-emitting the identical truncated call (the live 2M-token turn: same write retried 4×,
+# stuck detector firing on the symptom).
+_TRUNCATED_TOOL_CALL_FEEDBACK = (
+    "Your last response was cut off by the output-token limit mid-tool-call; nothing was "
+    "executed. Produce the file in smaller pieces (multiple write/edit calls) or shorten "
+    "the arguments."
+)
 
 
 def _assemble_role(cfg) -> str:
@@ -846,6 +858,9 @@ class AgentLoop:
             # 6. Strip thinking tags and push assistant response to session
             from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
             raw_content = getattr(response_message, "content", None)
+            # "length" == the completion hit the output-token ceiling (#77); any tool call
+            # parsed below is truncated and must not execute (guard at step 8c).
+            finish_reason = getattr(response_message, "finish_reason", None)
             # Reasoning-parser tool turns (--reasoning-parser) legitimately return
             # content=None — every token went to reasoning + tool_calls. None must never
             # enter history: each later request replays the entry and vLLM's request
@@ -894,6 +909,32 @@ class AgentLoop:
                     if session.messages[i].get("role") == "assistant":
                         session.messages[i]["tool_calls"] = tc_dicts
                         break
+
+            # 8c. Output-ceiling truncation guard (#77). A completion cut at the token limit
+            # (finish_reason="length") mid-tool-call yields a call that MUST NOT run: arg-repair
+            # (_sanitize_raw_tool_calls) can forge plausible-but-wrong JSON — a silently
+            # truncated `write` (a README that ends mid-table while the turn reports "done") —
+            # or drop a required field, giving "path: Field required" that the model then
+            # retries byte-identically (the live 2M-token turn: 4 blind retries, ~60-70s dead
+            # air + full context resend each). Suppress execution, answer each parsed call with
+            # a tool-role remedy (naming cause + fix — keeps native tool_call/result pairing
+            # valid, and the xml back-fill above gave xml calls matching ids), count it, and
+            # continue so the model retries INFORMED. Same guard for both modes: xml truncates
+            # the embedded call text, but finish_reason rides the same stream chunk.
+            if finish_reason == "length" and tool_calls:
+                session.truncated_tool_calls += 1
+                log.warning(
+                    "Output-token-ceiling truncation mid-tool-call for %s — suppressed %d "
+                    "call(s), feeding remedy",
+                    self._config.name, len(tool_calls),
+                )
+                for tool_call in tool_calls:
+                    session.push({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": _TRUNCATED_TOOL_CALL_FEEDBACK,
+                    })
+                continue
 
             # 9. No tool calls — check if parse failed on an attempted tool call
             if not tool_calls:
@@ -1209,6 +1250,7 @@ class AgentLoop:
             session.tokens_estimated = True
 
         content = getattr(response_message, "content", None)
+        finish_reason = getattr(response_message, "finish_reason", None)
         raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
         try:
             response_message.tool_calls = raw_tool_calls  # extraction must match history
@@ -1236,6 +1278,21 @@ class AgentLoop:
                 if session.messages[i].get("role") == "assistant":
                     session.messages[i]["tool_calls"] = tc_dicts
                     break
+
+        # Output-ceiling truncation guard (#77) — same seam as _execute_loop's step 8c.
+        if finish_reason == "length" and tool_calls:
+            session.truncated_tool_calls += 1
+            for tool_call in tool_calls:
+                session.push({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": _TRUNCATED_TOOL_CALL_FEEDBACK,
+                })
+            return StepResult(
+                action="error",
+                error="output-token-ceiling truncation mid-tool-call; not executed",
+                llm_response_preview=(content or "")[:200],
+            )
 
         if not tool_calls:
             session.terminated_reason = "complete"
