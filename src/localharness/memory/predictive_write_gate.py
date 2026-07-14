@@ -19,10 +19,11 @@ Three requirements land here as tested behavior:
   importance prior (sqlite `_IMPORTANCE_PRIORS`, added in Task 1).
 - PGATE-02: `unsurprising_failure` (the priors predicted the failure) writes NOTHING —
   satisfied by construction, it is simply not the write quadrant.
-- PGATE-03: a `negation`/`correction_phrase` correction supersedes a staged suspect fact
-  (reversible, key-based) or, with no suspect, writes a standalone quarantine fact keyed
-  to the correction. `reask` and `frustration` are out of scope (measured 0/18 and
-  no-data respectively).
+- PGATE-03: a `correction_phrase` correction supersedes the staged suspect fact it is
+  content-RELATED to (>=1 shared salient token — BUG #45; reversible, key-based) or, with no
+  related suspect, writes a standalone quarantine fact keyed to the correction. A bare
+  `negation` is quarantine-only, and `reask`/`frustration` are out of scope (measured 0/18
+  and no-data respectively).
 
 Every write stays confidence < 0.7 so it lives in the store but never enters the injected
 ambient block (sqlite injection gate: confidence >= 0.7 AND retrieval_strength >= 0.2)
@@ -118,6 +119,36 @@ def _h8(*parts: str) -> str:
 def _preview(text: str | None, n: int = 180) -> str:
     one = " ".join((text or "").split())
     return one[: n - 1] + "…" if len(one) > n else one
+
+
+# BUG #45 relatedness floor: a correction may only dispute a STAGED fact it is actually ABOUT —
+# not merely whichever fact was retrieved most recently. Reuses mining._salient_words, the
+# B4-defense precedent's single salient-token rule (>=4-char, stopword-filtered [a-z0-9]+ tokens;
+# a short/generic shared token can never authorize a dispute), so both correction defenses key on
+# the same measured salience floor.
+_SUSPECT_SCAN_DEPTH = 5  # scan the few most-recent staged suspects, not just the single most recent
+
+
+def _best_related_suspect(
+    text: str, suspects: list[tuple[int, str, str]]
+) -> tuple[int, str, str] | None:
+    """The staged suspect (id, key, value) sharing the MOST salient tokens with the correction
+    `text`, among the `_SUSPECT_SCAN_DEPTH` most-recently-staged — or None if none shares >=1 (the
+    relatedness floor). `suspects` arrive most-recent-first, so equal-overlap ties resolve to the
+    more recent. Lazy import mirrors consolidation.py's own mining import: it keeps this hot-path
+    subscriber module-level-decoupled from the mining module while reusing its salient-token rule."""
+    from localharness.memory.mining import _salient_words
+
+    probe = _salient_words(text)
+    if not probe:
+        return None
+    best: tuple[int, str, str] | None = None
+    best_overlap = 0
+    for suspect in suspects[:_SUSPECT_SCAN_DEPTH]:
+        overlap = len(probe & _salient_words(suspect[2]))
+        if overlap > best_overlap:
+            best_overlap, best = overlap, suspect
+    return best
 
 
 class PredictiveWriteGate:
@@ -220,12 +251,18 @@ class PredictiveWriteGate:
                 if match[1] == "correction_phrase"
                 else []
             )
-            if suspects:
-                # BLOCKER 1(b): supersede the SINGLE most-recently-staged suspect only
-                # (staged_suspect_facts is ordered most-recent-first), never the whole staged
-                # sitting. REVERSIBLE (store_fact keeps the old row queryable via history) and
-                # BLOCKER 1(c): the marker prefixes the FULL original value — no truncation.
-                _fid, key, value = suspects[0]
+            # BUG #45: dispute the staged suspect the correction is actually ABOUT, not merely the
+            # most recent. Scan the few most-recent suspects and pick the BEST content-related one
+            # (>=1 shared salient token); if NONE is related — or there is no suspect at all — fall
+            # through to the additive quarantine so an unrelated correction can never silently
+            # supersede a just-retrieved fact (reconciliation / the model's own remember-correction
+            # path still act on the captured quarantine).
+            target = _best_related_suspect(text, suspects)
+            if target is not None:
+                # Supersede the RELATED suspect only. REVERSIBLE (store_fact keeps the old row
+                # queryable via history) and BLOCKER 1(c): the marker prefixes the FULL original
+                # value — no truncation.
+                _fid, key, value = target
                 await self._store.store_fact(
                     key=key,
                     value=f"{_DISPUTE_MARKER} {value}",
@@ -235,10 +272,15 @@ class PredictiveWriteGate:
                     provenance=event.id,  # pointer to the trigger record (== user_signals.event_id)
                 )
             else:
-                # The common case (only 7 retrievals in the whole 34 trace) — the no-suspect
-                # shape (and every in-scope negation): no fact to supersede, so quarantine the
-                # user's own words, keyed so a repeat corroborates rather than duplicating.
-                # Payload-first.
+                if suspects:  # BUG #45: staged suspects existed but none was content-related
+                    log.debug(
+                        "predictive-write-gate: correction shares no salient token with any of the "
+                        "%d most-recent staged suspects — disputing nothing, quarantining instead",
+                        min(len(suspects), _SUSPECT_SCAN_DEPTH),
+                    )
+                # The no-related-suspect / no-suspect shape (and every in-scope negation): no fact
+                # to supersede, so quarantine the user's own words, keyed so a repeat corroborates
+                # rather than duplicating. Payload-first.
                 await self._store.store_fact(
                     key=f"correction/quarantine/{_h8(event.session_id or '', match[2], text)}",
                     value=f"user correction (pending reconciliation): {_preview(text)}",
