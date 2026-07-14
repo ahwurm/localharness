@@ -110,7 +110,8 @@ def _attempt_entry(cluster, new_depth) -> dict:
 
 
 async def _adopt_refresh_key(store, members, fresh_key: str, *,
-                             refresh_overlap: float, claimed: set[str]) -> str:
+                             refresh_overlap: float, claimed: set[str],
+                             chapters: dict[int, tuple[str, frozenset[int]]] | None = None) -> str:
     """CHAPTER REFRESH (run-14 fix): chapter identity must survive membership drift. The fresh
     key is h8(exact member set), so a cluster that gained/lost ANY member (a rescued residue
     atom, a correction row entering the pool, a foldout) would mint a near-identical SIBLING
@@ -119,23 +120,19 @@ async def _adopt_refresh_key(store, members, fresh_key: str, *,
     |new|) — clears `refresh_overlap`, ADOPT that chapter's key: store_fact then supersedes on
     the old key (one active chapter, history preserved), the supersede-never-duplicate law one
     level up. At most one adoption per key per pass (`claimed`): a facet SPLIT of an old chapter
-    keeps both facets — the second claimant falls back to its fresh key."""
+    keeps both facets — the second claimant falls back to its fresh key.
+
+    Overlap is scored on the SHARED active-primary member map (`chapters`, threaded from the pass;
+    built here if absent), the SAME sets the containment guard compares — NOT raw member_of. Before
+    #67 the old side counted raw member_of (dead members + aux tier:surprising_failure rows) while the
+    candidate side counted primary-only, so aux inflated the min() denominator and a legitimate refresh
+    scored below threshold -> a duplicate sibling minted beside the still-active original."""
     new_ids = {m.id for m in members}
-    assert store._db is not None
+    if chapters is None:
+        chapters = await _active_chapter_primary_members(store)
     best_key, best_ov = None, 0.0
-    async with store._db.execute(
-        "SELECT id, key FROM facts WHERE agent_id = ? AND status = 'active' "
-        "AND node_kind = 'schema'", (store._agent_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-    for sid, skey in rows:
-        if skey in claimed:
-            continue
-        async with store._db.execute(
-            "SELECT dst_id FROM edges WHERE kind = 'member_of' AND src_id = ?", (sid,),
-        ) as cur:
-            mem = {r[0] for r in await cur.fetchall()}
-        if not mem:
+    for _sid, (skey, mem) in chapters.items():
+        if skey in claimed or not mem:
             continue
         ov = len(mem & new_ids) / min(len(mem), len(new_ids))
         if ov > best_ov:
@@ -150,8 +147,10 @@ async def _adopt_refresh_key(store, members, fresh_key: str, *,
 
 
 async def _active_chapter_primary_members(store) -> dict[int, tuple[str, frozenset[int]]]:
-    """Every ACTIVE chapter for this agent -> (key, its PRIMARY member-id set). PRIMARY = member_of
-    dsts MINUS aux tier:surprising_failure rows: those failure-telemetry rows are attached
+    """Every ACTIVE chapter for this agent -> (key, its ACTIVE-PRIMARY member-id set). Built ONCE per
+    pass and threaded into BOTH the containment guard and refresh adoption (#71) so every comparison
+    uses the SAME member sets. PRIMARY = member_of dsts that are still ACTIVE (#66 — a superseded member
+    is dead, never counted) MINUS aux tier:surprising_failure rows: those failure-telemetry rows are attached
     OPPORTUNISTICALLY by _consume_aux (a failure adjacent to no chapter one pass lands under a
     different chapter the next), so they are non-deterministic noise a set-containment test must
     exclude — the LIVE root cause was exactly this (a chapter's 6 primary members were a strict
@@ -170,8 +169,9 @@ async def _active_chapter_primary_members(store) -> dict[int, tuple[str, frozens
         async with store._db.execute(
             "SELECT e.dst_id FROM edges e JOIN facts f ON f.id = e.dst_id "
             "WHERE e.kind = 'member_of' AND e.src_id = ? "
-            f"AND f.tags NOT LIKE '%\"{_FAILURE_TIER}\"%'",
-            (sid,),
+            "AND f.status = 'active' "                        # #66: superseded members are DEAD, never counted —
+            f"AND f.tags NOT LIKE '%\"{_FAILURE_TIER}\"%'",   # a chapter that lost members must compare by its
+            (sid,),                                           # LIVE set (both fold+supersede AND adoption overlap).
         ) as c2:
             out[sid] = (skey, frozenset(r[0] for r in await c2.fetchall()))
     return out
@@ -218,7 +218,8 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
                      attempts_log: list | None = None, *,
                      refresh_overlap: float = 0.7, claimed_keys: set[str] | None = None,
                      containment_guard: bool = True, containment_counts: dict | None = None,
-                     exclude_chapter_ids: frozenset[int] = frozenset()):
+                     exclude_chapter_ids: frozenset[int] = frozenset(),
+                     member_map: dict[int, tuple[str, frozenset[int]]] | None = None):
     """Build a grounded, char-bounded corpus, generate ONE cancellable chapter, apply the
     grounding + numeric KILL, and (on pass) write the schema fact + member_of edges. Returns the
     schema Fact, or None (cancelled / ungrounded / unverified-figure) — the None cases ARE the
@@ -268,6 +269,14 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
 
     fresh_key = f"{SCHEMA_KEY_PREFIX}{_h8(*sorted(m.key for m in members))}"
 
+    # SHARED active-primary member map (#66/#67/#71): built ONCE per pass and threaded in; derived here
+    # only for a direct call (member_map=None). The SAME map feeds the containment guard AND adoption so
+    # every set-comparison uses identical semantics (active-only, aux-excluded). It is a per-pass SNAPSHOT:
+    # on the write path clusters are disjoint components (a stale entry is disjoint from any later candidate
+    # -> inert); on the recheck path the healed chapter keeps its key (adoption re-keys it) and #70 re-reads
+    # status, so staleness never mis-routes an identity.
+    chapters = member_map if member_map is not None else await _active_chapter_primary_members(store)
+
     # CHAPTER CONTAINMENT GUARD — the write-time sibling of clustering's (component-time) incest
     # guard. Compare this candidate's PRIMARY member set (aux-excluded, like-for-like) against every
     # OTHER active chapter's. A chapter whose key == fresh_key is THIS candidate's own identity (an
@@ -276,7 +285,6 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
     contained_ids: list[int] = []
     if containment_guard:
         member_ids = frozenset(m.id for m in members)
-        chapters = await _active_chapter_primary_members(store)
         for eid, (ekey, existing) in chapters.items():
             # STALENESS RE-DRAFT (exclude-self): the chapter being refreshed is EXCLUDED from the
             # containment comparison. Its surviving primary members equal the re-draft's members, so
@@ -305,7 +313,8 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
     attempt.update(written=True, reason="written")
     key = await _adopt_refresh_key(store, members, fresh_key,
                                    refresh_overlap=refresh_overlap,
-                                   claimed=claimed_keys if claimed_keys is not None else set())
+                                   claimed=claimed_keys if claimed_keys is not None else set(),
+                                   chapters=chapters)
     schema = await store.store_fact(
         key=key,
         value=text,
@@ -441,6 +450,9 @@ async def write_cluster_schemas(
     schemas: list["Fact"] = []
     claimed: set[int] = set()
     claimed_refresh_keys: set[str] = set()  # one identity adoption per key per pass (facet split safe)
+    # #71: derive the active-primary member map ONCE and thread it into every _write_one (guard +
+    # adoption) instead of re-deriving all chapters' member sets per write (~O(chapters × writes)).
+    member_map = await _active_chapter_primary_members(store)
     for cluster in clusters[:write_budget]:
         if cancel_event.is_set():
             break
@@ -457,7 +469,8 @@ async def write_cluster_schemas(
                                       refresh_overlap=refresh_overlap,
                                       claimed_keys=claimed_refresh_keys,
                                       containment_guard=containment_guard,
-                                      containment_counts=containment_counts)
+                                      containment_counts=containment_counts,
+                                      member_map=member_map)
         except Exception:
             log.exception("chapter-writer: cluster write failed (non-fatal)")
             if attempts_log is not None and attempts_log and attempts_log[-1].get("reason") is None:
@@ -538,7 +551,8 @@ def _stale_attempt(chapter, n_members: int, *, reason: str) -> dict:
 
 
 async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, refresh_overlap,
-                       containment_guard, containment_counts, attempts_log, counts, claimed_keys):
+                       containment_guard, containment_counts, attempts_log, counts, claimed_keys,
+                       member_map=None):
     """Re-validate ONE active chapter against its current active members; heal or retire on a fail."""
     members = await _active_members(store, chapter.id)
     bodies = [m.value for m in members]
@@ -574,7 +588,7 @@ async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, re
         store, llm, cancel_event, cluster, orig_depth, corpus_char_cap,
         attempts_log=attempts_log, refresh_overlap=refresh_overlap, claimed_keys=claimed_keys,
         containment_guard=containment_guard, containment_counts=containment_counts,
-        exclude_chapter_ids=frozenset({chapter.id}),
+        exclude_chapter_ids=frozenset({chapter.id}), member_map=member_map,
     )
     if attempts_log:  # label the re-draft attempt _write_one just appended as re-check activity
         attempts_log[-1]["staleness_recheck_of"] = chapter.key
@@ -617,6 +631,9 @@ async def recheck_stale_chapters(
         chapters = [_row_to_fact(r) for r in await cur.fetchall()]
 
     claimed_keys: set[str] = set()  # one identity adoption per key per pass (facet-split safe)
+    # #71: one active-primary member map for the whole re-check pass, threaded into each heal's guard
+    # + adoption (a per-pass snapshot; #70 re-reads each item's status so a mid-pass supersede is skipped).
+    member_map = await _active_chapter_primary_members(store)
     for chapter in chapters:
         if cancel_event.is_set():
             return
@@ -625,6 +642,7 @@ async def recheck_stale_chapters(
                 store, llm, cancel_event, chapter,
                 corpus_char_cap=corpus_char_cap, refresh_overlap=refresh_overlap,
                 containment_guard=containment_guard, containment_counts=containment_counts,
-                attempts_log=attempts_log, counts=counts, claimed_keys=claimed_keys)
+                attempts_log=attempts_log, counts=counts, claimed_keys=claimed_keys,
+                member_map=member_map)
         except Exception:
             log.exception("chapter staleness re-check failed for %s (non-fatal)", chapter.key)

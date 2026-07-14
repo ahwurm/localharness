@@ -712,39 +712,43 @@ async def test_containment_guard_off_preserves_twin_writing(store):
 @pytest.mark.asyncio
 async def test_containment_and_incest_guards_converge_no_churn(store):
     """COMPOSITION (--idle-passes style, full write_cluster_schemas so clustering's incest guard is
-    live): the containment guard and the incest guard converge to ONE stable chapter across repeated
-    idle passes with NO churn. Pass 1 supersedes a stranded strict-subset chapter; every later pass
-    changes nothing — the guard never re-supersedes and never fights the incest guard's eviction of
-    the survivor from its own cluster. The stranded chapter carries aux surprising_failure members
-    that dilute its FULL-set overlap below chapter_refresh_overlap (so _adopt_refresh_key leaves it —
-    exactly the live stranding), while its PRIMARY member set is a strict subset the guard catches."""
+    live): the write-time guards converge to ONE stable chapter across repeated idle passes with NO
+    churn. INVERTED for #67: the stranded chapter's PRIMARY member is a strict subset of the 3-atom
+    cluster; before the fix its aux surprising_failure rows diluted the adoption FULL-set overlap below
+    threshold, so adoption LEFT it and the CONTAINMENT guard superseded it (counts.superseded==1, a
+    fresh chapter minted beside it, its identity lost). With the aux-excluded primary-member map,
+    adoption's overlap is 1.0 and pass 1 REFRESHES it (adopt its key — identity continuity, history
+    preserved); the containment guard is inert here (adoption handled it — its multi-contained role is
+    covered by test_containment_supersedes_multiple_contained). Every later pass changes nothing
+    (store_fact corroborates on the shared key)."""
     atoms = [await _seed_sem(store, f"subagent convergence item {i} for the harness build order",
                              f"s{i % 2}", topic="subagents") for i in range(3)]   # default child tag -> they cluster
     stranded = await _seed_chapter(
         store, "stranded1", atoms[:1],
         aux=(await _seed_failure(store, "bash_exec", day="20260701"),
-             await _seed_failure(store, "docker", day="20260702")))               # dilutes full-set overlap to 1/3
+             await _seed_failure(store, "docker", day="20260702")))               # once diluted overlap; now inert (#67)
 
-    # Pass 1: the 3-atom cluster subsumes the stranded 1-primary-member chapter -> one active chapter.
+    # Pass 1: the 3-atom cluster REFRESHES the stranded 1-primary-member chapter (adoption, primary
+    # overlap 1.0) -> one active chapter under the SAME key, its history preserved.
     counts1: dict = {}
     r1 = await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(), containment_counts=counts1)
     assert len(r1) == 1
     active1 = await _active_chapters(store)
-    assert len(active1) == 1, f"stranded chapter survived pass 1: {active1}"
-    assert (await _status(store, stranded.id))[0] == "superseded"
-    assert counts1.get("superseded", 0) == 1
-    survivor_id = next(iter(active1))
+    assert len(active1) == 1, f"stranded chapter siblinged or survived pass 1: {active1}"
+    assert (await _status(store, stranded.id))[0] == "superseded"       # old stranded row folded away
+    assert active1[r1[0].id] == stranded.key                            # identity ADOPTED, not re-derived
+    assert len(await store.get_fact_history(stranded.key)) == 2         # supersede chain, history kept
+    assert counts1.get("superseded", 0) == 0 and counts1.get("folded", 0) == 0  # adoption, not the guard
 
-    # Passes 2 & 3: stable. The atoms re-cluster, the incest guard evicts the survivor from its own
-    # component, its fresh_key equals the survivor's key -> the guard is INERT (no fold, no supersede)
-    # and store_fact corroborates on the shared key (no new row).
+    # Passes 2 & 3: stable. The survivor now holds the adopted (sticky) key while the re-formed cluster
+    # equals its members, so the guard FOLDS it (a harmless corroborate touch — one stable chapter, no
+    # mint, no new row). The no-churn invariant is on STATE: the active set and history never change.
     for _ in range(2):
         counts: dict = {}
         await write_cluster_schemas(store, _CorpusEchoLLM(), asyncio.Event(), containment_counts=counts)
         assert await _active_chapters(store) == active1, "a later pass churned the chapter set"
-        assert counts.get("superseded", 0) == 0, "guard re-superseded on a no-op pass"
-        assert counts.get("folded", 0) == 0, "guard fought the incest guard on a no-op pass"
-        assert len(await store.get_fact_history(active1[survivor_id])) == 1  # never superseded itself
+        assert counts.get("superseded", 0) == 0, "supersede on a stable pass would be churn"
+        assert len(await store.get_fact_history(stranded.key)) == 2  # no new supersede row — touch only
 
 
 # ---------------------------------------------------------------------------------------
