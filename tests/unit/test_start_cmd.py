@@ -1874,3 +1874,24 @@ def test_hard_fail_in_resource_window_process_exits_not_hangs(tmp_path):
 
     assert proc.returncode != 0, f"a hard startup failure must exit non-zero (stderr: {proc.stderr})"
     assert marker.exists(), "the store must be closed during the failing shutdown (#43 finally coverage)"
+
+
+# ---------------------------------------------------------------------------
+# #58: post-deploy live registration — the AgentTool advertisement invariant
+# ---------------------------------------------------------------------------
+
+def test_agent_tool_advertises_shared_list_mutations():
+    """#58 invariant the start_cmd post-deploy callback (_register_deployed_agent) relies on:
+    AgentTool advertises the SAME list object it was constructed with, so appending a
+    just-deployed agent name to `available_agent_names` updates what info() advertises — no
+    rebuild, so the model sees the new agent as a delegation target in the same session."""
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    async def _noop(*a, **k):
+        return ""
+
+    names = ["explore", "web-researcher"]
+    tool = AgentTool(agent_runner=_noop, available_agents=names)
+    assert "hn-monitor" not in tool.info().description
+    names.append("hn-monitor")  # what _register_deployed_agent does on deploy
+    assert "hn-monitor" in tool.info().description

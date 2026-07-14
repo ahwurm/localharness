@@ -183,6 +183,53 @@ def test_generation_prompt_demonstrates_nested_tool_permission_shapes():
     ), "the tools: block must demonstrate an indented deny: child"
 
 
+def test_deployed_agent_visible_and_advertised_same_session(components_home, mock_llm_client):
+    """#58: a deployed agent was invisible (/agents) and unadvertised until restart — the
+    card registry + AgentTool list were frozen at startup. With the post-deploy callback
+    (the real start_cmd wiring: load the yaml, register its card, append to the shared list
+    the AgentTool advertises), /agents lists it AND the agent tool advertises it — no restart.
+    """
+    from localharness.config.loader import ConfigLoader
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    home = components_home
+    registry = AgentCardRegistry()
+    available = ["explore", "web-researcher"]              # the list AgentTool advertises
+    agent_tool = AgentTool(agent_runner=AsyncMock(), available_agents=available)
+    loader = ConfigLoader(config_dir=home)
+
+    def on_deployed(name: str) -> None:  # mirrors start_cmd._register_deployed_agent
+        cfg = loader.load_agent(name, bypass_cache=True)
+        registry.register_from_config(cfg)
+        if name not in available:
+            available.append(name)
+
+    gen = f"name: hn-monitor\nrole: {ROLE}"
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes", "/agents"])
+    llm = mock_llm_client([mock_llm_client.Response(content=gen)])
+    orch = AgentCreationFlow(registry)
+    agent = MagicMock()
+    agent._config.name = "orchestrator"
+    agent.current_session_id = "sess-1"
+    agent._llm = llm
+    agent.run_turn = AsyncMock()
+    repl = OrchestratorREPL(
+        orchestrator=orch, agent_loop=agent, channel=channel, bus=AsyncMock(),
+        config_dir=home, on_agent_deployed=on_deployed,
+    )
+
+    asyncio.run(repl.run())
+
+    assert (home / "agents" / "hn-monitor.yaml").exists()  # actually deployed
+    # /agents (issued AFTER deploy) lists the new agent — live, no restart.
+    agents_msg = next((m for m in channel.sent if "Configured agents" in m), None)
+    assert agents_msg is not None and "hn-monitor" in agents_msg
+    # The card registry the REPL reads now holds it.
+    assert any(c.name == "hn-monitor" for c in registry.all_cards())
+    # The agent tool advertises it, so the model knows it can delegate to it.
+    assert "hn-monitor" in agent_tool.info().description
+
+
 def test_intent_and_confirm_prompts_advertise_cancel(tmp_path, mock_llm_client):
     """#59(b): the escape word was 4 undocumented exact-matches. Advertise it — the
     ask-description (intent) prompt AND the confirm prompt must mention 'cancel'."""
