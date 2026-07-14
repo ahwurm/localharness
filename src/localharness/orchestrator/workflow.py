@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 
+# A description shorter than this can't advance DISCUSS -> CONFIGURE. It is also the
+# boundary #56 uses to decide replace-vs-append: at/below it the stored description is a
+# too-short stub to be REPLACED; above it, a valid description a 'change' follow-up APPENDS to.
+_MIN_DESCRIPTION_LEN = 10
+
+
 class WorkflowState(str, Enum):
     DISCUSS = "discuss"
     CONFIGURE = "configure"
@@ -64,8 +70,22 @@ class AgentCreationWorkflow:
         return self._state
 
     def _handle_discuss(self, user_input: str) -> WorkflowState:
-        if "description" not in self._gathered:
-            self._gathered["description"] = user_input
+        # #56: the description must stay MUTABLE across DISCUSS turns. The old code stored
+        # it once (`if "description" not in gathered`), so (a) a 'change' at confirm sent
+        # the flow back here but the follow-up never replaced the description — regeneration
+        # ran on the stale original (identical config); and (b) a too-short first reply set
+        # a description that could never be replaced — a permanent DISCUSS wedge.
+        text = user_input.strip()
+        existing = self._gathered.get("description", "")
+        if len(existing) <= _MIN_DESCRIPTION_LEN:
+            # No usable description yet (empty, or a too-short stub that never advanced):
+            # (re)place it — kills the short-then-long wedge.
+            self._gathered["description"] = text
+        else:
+            # A valid description already advanced once and the user returned via 'change':
+            # APPEND the correction so the original intent AND the correction both reach the
+            # generator (regeneration reruns on the combined text, not the stale original).
+            self._gathered["description"] = f"{existing}\n{text}"
         if self._has_minimum_fields():
             self._state = WorkflowState.CONFIGURE
         return self._state
@@ -94,7 +114,7 @@ class AgentCreationWorkflow:
         return self._state
 
     def _has_minimum_fields(self) -> bool:
-        return "description" in self._gathered and len(self._gathered["description"]) > 10
+        return "description" in self._gathered and len(self._gathered["description"]) > _MIN_DESCRIPTION_LEN
 
     def set_gathered(self, key: str, value: Any) -> None:
         """Set a gathered field (used by orchestrator after LLM extraction)."""
