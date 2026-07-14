@@ -28,9 +28,19 @@ def model(
         help="Model name/number to switch to (or a checkpoint path for a managed server). "
         "Omit to list available models.",
     ),
+    config_dir: Optional[str] = typer.Option(
+        None,
+        "--config-dir",
+        envvar="LOCALHARNESS_DIR",
+        help="Config directory (default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, "
+        "else ~/.localharness). Parity with `start`/`doctor`/`validate`; the persisted "
+        "overlay is written HERE.",
+    ),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
-    loader = ConfigLoader()
+    # config_dir=None routes through the resolver's env/default chain (#35); an explicit flag or
+    # LOCALHARNESS_DIR isolates the overlay to that dir.
+    loader = ConfigLoader(config_dir=config_dir)
     try:
         harness = loader.load_harness()
     except Exception as exc:
@@ -102,7 +112,9 @@ def model(
         return
 
     try:
-        asyncio.run(model_ops.persist_default_model(harness, target))
+        asyncio.run(
+            model_ops.persist_default_model(harness, target, config_dir=loader._config_dir)
+        )
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] failed to persist {target!r}: {exc}")
         raise typer.Exit(2)

@@ -14,7 +14,6 @@ from localharness.config.models import (
     ProviderConfig,
 )
 from localharness.config.overlay import (
-    _resolve_user_overlay_path,
     atomic_write_overlay,
     load_overlay,
 )
@@ -91,7 +90,8 @@ async def test_model_hotswap_updates_client_and_persists(tmp_path):
     assert agent._llm.config.model == "model-b"
     # Persistence now goes to the atomic USER OVERLAY, not a config.yaml rewrite (issue #22).
     assert not (tmp_path / "config.yaml").exists()
-    overlay = load_overlay(_resolve_user_overlay_path())
+    # #35: the overlay lands under the REPL's config_dir (tmp_path), not LOCALHARNESS_HOME.
+    overlay = load_overlay(tmp_path / "overrides.yaml")
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
     assert "Switched to model-b" in channel.messages[-1]
@@ -136,7 +136,7 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     assert agent._llm.config.model == "cached-b"
     assert harness.server.model == "cached-b"
     assert not (tmp_path / "config.yaml").exists()
-    overlay = load_overlay(_resolve_user_overlay_path())
+    overlay = load_overlay(tmp_path / "overrides.yaml")  # #35: under config_dir, not LOCALHARNESS_HOME
     assert overlay["provider"]["default_model"] == "cached-b"
 
 
@@ -235,9 +235,10 @@ async def test_model_swap_persists_via_atomic_overlay_with_audit(tmp_path, compo
 
     await repl._handle_slash("/model model-b")
 
-    # Overlay is the write target (atomic); config.yaml is never rewritten.
+    # Overlay is the write target (atomic); config.yaml is never rewritten. #35: it lands under
+    # the REPL's config_dir (tmp_path), not LOCALHARNESS_HOME (components_home).
     assert not (tmp_path / "config.yaml").exists()
-    overlay = load_overlay(components_home / "overrides.yaml")
+    overlay = load_overlay(tmp_path / "overrides.yaml")
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
     # available_models UNION-merges rather than clobbering (overlay deep_merge replaces lists).
@@ -256,7 +257,8 @@ async def test_model_swap_persists_via_atomic_overlay_with_audit(tmp_path, compo
 async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_home):
     """A model switch must not clobber pre-existing overlay keys — notably the agent-scope
     slice (where the tag_grouping_enabled kill lever lives) and unrelated harness keys."""
-    overlay_path = components_home / "overrides.yaml"
+    # #35: the REPL persists under its config_dir (tmp_path); pre-seed the overlay THERE.
+    overlay_path = tmp_path / "overrides.yaml"
     atomic_write_overlay(
         overlay_path,
         {

@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json as _json
-import os
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from localharness.autoresearch.proposer import ProposerError
+from localharness.config.paths import config_dir_env_override
 from localharness.autoresearch.proposer import propose as propose_pipeline
 
 console = Console()
@@ -35,9 +35,10 @@ err_console = Console(stderr=True)
 
 
 def _archive_db_path() -> Path:
-    """Resolve .localharness/archive.db, honoring LOCALHARNESS_HOME (mirrors _build_loader)."""
-    home = os.environ.get("LOCALHARNESS_HOME")
-    base = Path(home) if home else Path.cwd() / ".localharness"
+    """Resolve .localharness/archive.db, honoring the config-dir env chain (LOCALHARNESS_DIR >
+    LOCALHARNESS_HOME); CWD/.localharness when neither is set (#35)."""
+    override = config_dir_env_override()
+    base = Path(override).expanduser() if override else Path.cwd() / ".localharness"
     return base / "archive.db"
 
 

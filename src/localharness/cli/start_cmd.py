@@ -239,6 +239,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.init_cmd import init_app
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
+    from localharness.config.paths import resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
     from localharness.plugins.loader import PluginLoader
@@ -761,6 +762,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     await tool_registry.register(agent_tool, scope="global")
 
     # --- 10. Agent loop ---
+    # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
+    # <cfg_path>/KILL — i.e. ~/.localharness/KILL in a default setup). None = kill switch off,
+    # left for AgentLoop's own fallback. Passing it here keeps agent/loop.py config-dir-agnostic.
+    _kill_value = getattr(getattr(agent_config.permissions, "budget", None), "kill_file", None)
+    kill_file_path = resolve_runtime_path(_kill_value, cfg_path) if _kill_value else None
     agent_loop = AgentLoop(
         config=agent_config,
         llm=llm,
@@ -769,6 +775,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         tool_registry=tool_registry,
         permission_evaluator=perm_eval,
         memory_loader=memory_store,
+        kill_file_path=kill_file_path,
         compact_md_path=compact_md_path,
         session_id=sitting_id,  # SESS-01: the whole sitting shares this id
     )
@@ -777,7 +784,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         channel = DiscordChannel(bus=bus, config=discord_config_from_env())
         console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
     else:
-        channel = TerminalChannel(bus=bus, config={})
+        # #35: REPL history resolves under this config dir too (default ~/.localharness/.repl_history).
+        channel = TerminalChannel(
+            bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", cfg_path))
+        )
 
     # --- Determine returning user ---
     is_returning = events_path.exists() and events_path.stat().st_size > 0

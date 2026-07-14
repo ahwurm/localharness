@@ -11,19 +11,22 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Any  # noqa: F401  (kept for downstream typing imports)
+from typing import Any, Optional  # noqa: F401  (Any kept for downstream typing imports)
 
 import yaml
 
+from localharness.config.paths import resolve_overlay_path
 
-def _resolve_user_overlay_path() -> Path:
-    """Honor LOCALHARNESS_HOME env var (set by tests/conftest.py `components_home`).
-    Production default: ~/.localharness/overrides.yaml.
+
+def _resolve_user_overlay_path(config_dir: Optional[Path] = None) -> Path:
+    """The user overlay lives at ``<resolved config_dir>/overrides.yaml`` (#35).
+
+    ``config_dir`` precedence (via config/paths): explicit arg > LOCALHARNESS_DIR >
+    LOCALHARNESS_HOME (legacy, set by tests/conftest.py `components_home`) > ~/.localharness.
+    Callers that know their config dir (the loader, model_ops persist) MUST pass it so the
+    overlay actually tracks ``--config-dir``; a None arg falls back to the env/default chain.
     """
-    home_env = os.environ.get("LOCALHARNESS_HOME")
-    if home_env:
-        return Path(home_env) / "overrides.yaml"
-    return Path("~/.localharness/overrides.yaml").expanduser()
+    return resolve_overlay_path(config_dir)
 
 
 # NOTE: module-level constant captured AT IMPORT TIME. Tests using monkeypatch.setenv

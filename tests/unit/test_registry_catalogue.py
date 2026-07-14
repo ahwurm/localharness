@@ -127,8 +127,9 @@ def test_catalogue_includes_audit_log_path(components_home):
     entries = build_catalogue(cfg, overlays={})
     assert "org.audit_log_path" in entries
     e = entries["org.audit_log_path"]
-    # Default per OrgConfig.audit_log_path
-    assert e.current_value == "~/.localharness/audit.jsonl"
+    # Default per OrgConfig.audit_log_path — now a bare relative name that resolves UNDER the
+    # config dir at use (#35); the default single-instance setup still lands at ~/.localharness.
+    assert e.current_value == "audit.jsonl"
 
 
 def test_catalogue_tool_registry_descriptions(components_home):

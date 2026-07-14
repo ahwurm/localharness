@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
-import os
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -27,6 +26,7 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
+from localharness.config.paths import resolve_runtime_path
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
@@ -52,10 +52,9 @@ err_console = Console(stderr=True)
 
 
 def _build_loader() -> ConfigLoader:
-    """Honor LOCALHARNESS_HOME for hermetic tests (mirrors components_home fixture)."""
-    home = os.environ.get("LOCALHARNESS_HOME")
-    if home:
-        return ConfigLoader(config_dir=Path(home))
+    """ConfigLoader honoring the config-dir env chain (LOCALHARNESS_DIR > LOCALHARNESS_HOME >
+    ~/.localharness). The precedence now lives in config/paths (#35), so no explicit env read
+    here — a bare ConfigLoader() picks up the hermetic-test LOCALHARNESS_HOME just the same."""
     return ConfigLoader()
 
 
@@ -374,11 +373,12 @@ def components_set(
     # 6. Invalidate loader cache so next read sees the new value
     loader.invalidate_cache()
 
-    # 7. Emit ComponentMutated audit event
+    # 7. Emit ComponentMutated audit event. Resolve the audit path against the loader's config
+    # dir (#35 — a bare default 'audit.jsonl' lands under it; absolute/~ values honored as-is).
     audit_path = cfg.org.audit_log_path
-    audit_path_resolved: Optional[Path] = None
-    if audit_path:
-        audit_path_resolved = Path(audit_path).expanduser()
+    audit_path_resolved: Optional[Path] = (
+        resolve_runtime_path(audit_path, loader._config_dir) if audit_path else None
+    )
 
     bus = EventBus(persist_path=audit_path_resolved)
     event = ComponentMutated(
