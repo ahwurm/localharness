@@ -121,6 +121,69 @@ def test_model_config_dir_env_var_honored(tmp_path, monkeypatch):
     assert load_overlay(cfg_dir / "overrides.yaml")["provider"]["default_model"] == "model-b"
 
 
+def test_model_switch_persists_server_model_survives_reload(tmp_path):
+    """#34: a switch on a managed-server harness must persist server.model too — else cold start
+    rebuilds `vllm serve <srv.model>` from the STALE config value and relaunches the old model.
+    Prove it survives a fresh ConfigLoader (the exact cold-start path)."""
+    import asyncio
+
+    from localharness.config.loader import ConfigLoader
+
+    home = tmp_path / ".localharness"
+    home.mkdir()
+    data = {
+        "version": "1",
+        "provider": {
+            "provider_type": "vllm",
+            "base_url": "http://localhost:8081/v1",
+            "default_model": "model-a",
+            "available_models": ["model-a"],
+        },
+        "org": {"default_model": "model-a"},
+        "server": {"runtime": "vllm", "launch": "binary", "binary": "/x/vllm", "model": "model-a"},
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    harness = ConfigLoader(config_dir=home).load_harness()
+    assert harness.server.model == "model-a"
+
+    asyncio.run(model_ops.persist_default_model(harness, "model-b", config_dir=home))
+
+    fresh = ConfigLoader(config_dir=home).load_harness()
+    assert fresh.provider.default_model == "model-b"
+    assert fresh.server.model == "model-b"  # THE gap: server.model persisted + survives reload
+    assert load_overlay(home / "overrides.yaml")["server"]["model"] == "model-b"
+
+
+def test_model_switch_no_server_never_invents_server_key(tmp_path):
+    """#34 invariant: with NO managed server configured, persist must never write a server.* key
+    (a bare server:{model} would fail ManagedServerConfig validation — binary/launch required)."""
+    import asyncio
+
+    from localharness.config.loader import ConfigLoader
+
+    home = tmp_path / ".localharness"
+    home.mkdir()
+    data = {
+        "version": "1",
+        "provider": {
+            "provider_type": "vllm",
+            "base_url": "http://localhost:8081/v1",
+            "default_model": "model-a",
+            "available_models": ["model-a"],
+        },
+        "org": {"default_model": "model-a"},
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    harness = ConfigLoader(config_dir=home).load_harness()
+    assert harness.server is None
+
+    asyncio.run(model_ops.persist_default_model(harness, "model-b", config_dir=home))
+
+    assert "server" not in load_overlay(home / "overrides.yaml")
+    fresh = ConfigLoader(config_dir=home).load_harness()
+    assert fresh.provider.default_model == "model-b" and fresh.server is None
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,
