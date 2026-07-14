@@ -293,6 +293,46 @@ def test_pinned_agents_includes_division_pin(tmp_path):
     assert not any("plain" in name for name in result)  # a full inheritor is never listed
 
 
+def test_model_switch_rejects_empty_name(components_home, monkeypatch):
+    """#39: an empty/whitespace name must be rejected loudly (exit 2), never resolved or
+    persisted. Before the fix "" fell through to the unreachable-degrade branch and persisted ""."""
+    _seed_config(components_home)
+    # Unreachable endpoint = the degrade branch that used to swallow "" as the new default.
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live([], reachable=False), raising=False
+    )
+    for bad in ("", "   "):
+        result = runner.invoke(app, ["model", bad])
+        assert result.exit_code == 2, (bad, result.output)
+        assert not (components_home / "overrides.yaml").exists()  # nothing persisted
+
+
+def test_model_switch_empty_name_rejected_before_checkpoint_branch(components_home, monkeypatch):
+    """#39: Path("").expanduser().exists() is truthy (== cwd), so an empty name could slip
+    through the managed-server checkpoint branch and persist "". The guard must reject FIRST."""
+    data = {
+        "version": "1",
+        "provider": {
+            "provider_type": "vllm",
+            "base_url": "http://localhost:8081/v1",
+            "default_model": "model-a",
+            "available_models": ["model-a"],
+        },
+        "org": {"default_model": "model-a", "audit_log_path": str(components_home / "audit.jsonl")},
+        "server": {"runtime": "vllm", "launch": "binary", "binary": "/x/vllm", "model": "model-a"},
+    }
+    (components_home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live([], reachable=True), raising=False
+    )
+    from localharness.provider import server as managed_server
+
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: [], raising=False)
+    result = runner.invoke(app, ["model", ""])
+    assert result.exit_code == 2, result.output
+    assert not (components_home / "overrides.yaml").exists()
+
+
 def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     _seed_config(
         components_home,
