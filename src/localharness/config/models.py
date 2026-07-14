@@ -335,7 +335,11 @@ class MemoryConsolidationConfig(BaseModel):
         default=True,
         description=(
             "Phase 36 SEMA-02/03: the idle chapter-writer clusters promoted lessons and "
-            "writes one grounded schema per stable cluster (requires an LLM wired)."
+            "writes one grounded schema per stable cluster (requires an LLM wired). MASTER "
+            "kill lever for ALL idle chapter mutation (#65): OFF stops BOTH this writer step "
+            "AND the staleness re-check step, so flipping it off is a real 'off' — no idle "
+            "pass can mint or supersede a chapter. chapter_staleness_recheck_enabled is the "
+            "SUB-switch, effective only while this master is on."
         ),
     )
     reconcile_enabled: bool = Field(
@@ -522,8 +526,10 @@ class MemoryConsolidationConfig(BaseModel):
             "grounded when written, later carrying a figure nothing active supports) is caught HERE "
             "instead of at the eval KILL: a grounded re-draft on the survivors supersedes it on its "
             "own key (history preserved), else it is retired (marked non-active, append-only — never "
-            "deleted; also when < 2 active members remain). Ships True; this flag is the kill lever "
-            "(mutable via `localharness components set "
+            "deleted; also when < 2 active members remain). Ships True. SUB-switch of the "
+            "schema_writer_enabled master (#65): effective only while schema_writer_enabled is on — "
+            "the master OFF stops this re-check regardless of this flag, this flag OFF stops only the "
+            "re-check while the writer keeps running. Mutable via `localharness components set "
             "agent.memory.consolidation.chapter_staleness_recheck_enabled <true|false>`)."
         ),
     )

@@ -328,11 +328,17 @@ class ConsolidationPass:
 
     async def _step_recheck_stale(self, report: ConsolidationReport) -> None:
         """B5 (ANALYSIS §7): re-validate active chapters against their CURRENT active members before
-        the writer runs. Gated on the LLM (a re-draft needs a generation) and its own config axis;
-        llm=None or flag-off -> inert, so the deterministic core is byte-unchanged and a chapter-less
-        store finds nothing. Containment activity during a re-draft ACCUMULATES onto the same report
-        counters the writer step uses (both += so neither clobbers the other)."""
-        if self._llm is None or not getattr(self._cfg, "chapter_staleness_recheck_enabled", True):
+        the writer runs. Gated on the LLM (a re-draft needs a generation) and TWO config axes in a
+        HIERARCHY (#65): `schema_writer_enabled` is the MASTER chapter-writer kill lever — OFF stops
+        this re-check too (an operator flipping the documented kill lever must get a real 'off', not a
+        path that keeps minting/superseding chapters); `chapter_staleness_recheck_enabled` is the
+        SUB-switch, effective only while the master is on. llm=None or either gate off -> inert, so the
+        deterministic core is byte-unchanged and a chapter-less store finds nothing. Containment
+        activity during a re-draft ACCUMULATES onto the same report counters the writer step uses
+        (both += so neither clobbers the other)."""
+        if (self._llm is None
+                or not getattr(self._cfg, "schema_writer_enabled", False)          # master kill (#65)
+                or not getattr(self._cfg, "chapter_staleness_recheck_enabled", True)):  # sub-switch
             return
         from localharness.memory.chapter_writer import recheck_stale_chapters
         counts = {"revalidated": 0, "redrafted": 0, "retired": 0}
