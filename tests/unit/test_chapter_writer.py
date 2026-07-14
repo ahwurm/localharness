@@ -862,14 +862,16 @@ async def test_stale_chapter_retired_when_redraft_refuses(store):
 
 @pytest.mark.asyncio
 async def test_healthy_chapter_idempotent_no_writes(store):
-    """A pass over an already-healthy chapter must write NOTHING and change NOTHING. Two re-check
-    passes: the chapter row (updated_at, status, value) and its history length are byte-identical
-    after both — the re-check touches nothing it revalidates (the idempotency/byte-stability law)."""
+    """A pass over an already-healthy chapter must write no NEW row and change nothing SUBSTANTIVE —
+    same id, status, value, history length (the idempotency/byte-stability law). INVERTED for #68: a
+    healthy revalidation now ADVANCES updated_at (the recheck cursor) so the chapter rotates out of the
+    oldest-first window; the bump is freshness-only (no supersede, value/id/history unchanged)."""
     from localharness.memory.chapter_writer import recheck_stale_chapters
 
     h1 = await _seed_sem(store, _READ_A, "s1", topic="reads", child_tag=None)
     h2 = await _seed_sem(store, _READ_B, "s2", topic="reads", child_tag=None)
     ch = await _seed_chapter(store, "healthy1", [h1, h2], body=_GROUNDED)  # _GROUNDED grounds on _READ_A
+    await _set_updated_at(store, ch.id, 1000)                              # a fixed past cursor
     before = await store.get_fact(ch.key)
 
     for _ in range(2):
@@ -879,7 +881,8 @@ async def test_healthy_chapter_idempotent_no_writes(store):
         assert counts.get("redrafted", 0) == 0 and counts.get("retired", 0) == 0
         after = await store.get_fact(ch.key)
         assert after.id == before.id and after.status == "active"
-        assert after.value == before.value and after.updated_at == before.updated_at  # zero churn
+        assert after.value == before.value                       # content unchanged (no new row)
+        assert after.updated_at > before.updated_at              # #68: cursor advanced (rotates the window)
         assert len(await store.get_fact_history(ch.key)) == 1     # no supersede row minted
     assert len(await _active_chapters(store)) == 1
 
@@ -1112,3 +1115,51 @@ async def test_retire_chapter_records_successor(store):
     ch2 = await _seed_chapter(store, "retire03", [m1])
     assert await _retire_chapter(store, ch2.id)                     # default: plain retire, no successor
     assert await _status(store, ch2.id) == ("superseded", None)
+
+
+# ---------------------------------------------------------------------------
+# #68 — recheck starvation: a HEALTHY revalidation must rotate the oldest-first window
+# ---------------------------------------------------------------------------
+# The re-check selects ORDER BY updated_at ASC LIMIT cap, but a healthy revalidation writes nothing —
+# updated_at untouched — so once cap perpetually-grounded chapters exist they fill EVERY window forever
+# and erosion outside the frozen set is never detected. The fix advances the chapter's updated_at on a
+# healthy revalidation (mirroring _corroborate_chapter) so it rotates to the back.
+
+async def _set_updated_at(store, fact_id, ts):
+    await store._db.execute("UPDATE facts SET updated_at=? WHERE id=?", (ts, fact_id))
+    await store._db.commit()
+
+
+@pytest.mark.asyncio
+async def test_healthy_revalidation_rotates_recheck_window(store):
+    """#68: cap=2 — pass 1 revalidates the two OLDEST (healthy) chapters and must bump them to the back;
+    pass 2 then reaches the two STALE chapters it could not before and retires them. Without the bump the
+    healthy pair stays oldest forever and the stale pair starves (never rechecked)."""
+    from localharness.memory.chapter_writer import recheck_stale_chapters
+    healthy = []
+    for i, suf in enumerate(("winA", "winB")):                   # HEALTHY, oldest by updated_at
+        h1 = await _seed_sem(store, _READ_A, f"h{i}", topic=f"win{i}", child_tag=None)
+        h2 = await _seed_sem(store, _READ_B, f"h{i}b", topic=f"win{i}", child_tag=None)
+        ch = await _seed_chapter(store, suf, [h1, h2], body=_GROUNDED)   # grounds on _READ_A
+        await _set_updated_at(store, ch.id, 1000 + i)
+        healthy.append(ch)
+    stale = []
+    for i, suf in enumerate(("winC", "winD")):                   # STALE 1-member (ungrounded -> retire), newer
+        m = await _seed_sem(store, f"an unrelated cloud note {suf} for the record", f"z{i}",
+                            topic=f"z{i}", child_tag=None)
+        ch = await _seed_chapter(store, suf, [m],
+                                 body="the special reserved allocation totals distinct measurable units")
+        await _set_updated_at(store, ch.id, 1010 + i)
+        stale.append(ch)
+
+    c1: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), cap=2, counts=c1)
+    assert c1.get("revalidated", 0) == 2 and c1.get("retired", 0) == 0   # pass 1 hit the two healthy
+
+    c2: dict = {}
+    await recheck_stale_chapters(store, _CorpusEchoLLM(), asyncio.Event(), cap=2, counts=c2)
+    assert c2.get("retired", 0) == 2, "starvation: pass 2 never reached the stale chapters"
+    for ch in stale:
+        assert (await _status(store, ch.id))[0] == "superseded"          # the stale pair was finally reached
+    for ch in healthy:
+        assert (await _status(store, ch.id))[0] == "active"              # healthy pair untouched by pass 2
