@@ -45,24 +45,56 @@ def _route_memory_logs_to_file(agent_dir: Path) -> Path:
 
 async def _probe_llm(
     llm: Any, max_retries: int = 3, delay: float = 2.0
-) -> tuple[bool, str | None, int | None]:
+) -> tuple[bool, str | None, int | None, str | None]:
     """Probe LLM reachability with retry for cold start.
 
-    Returns (reachable, probed_tool_call_mode, served_context_window). Mode/window are
-    None if the probe fails. The served window is the single source of truth for the
-    effective context budget — callers must use it rather than the config default.
-    Callers must feed the probed mode into LLMConfig rather than using the stored
-    provider.supports_function_calling flag (FIDEL-04).
+    Returns (reachable, probed_tool_call_mode, served_context_window, probe_error). On a clean
+    probe error is None; on failure mode/window are None and probe_error carries the concrete
+    cause (a 404 naming the model, or a connection error) for the caller's message (#44).
+
+    detect_capabilities() NEVER raises — it reports failures via CapabilityResult.probe_error
+    (client.py). We MUST inspect it: a None error is a clean probe; an "HTTP 400" error is the
+    server rejecting the tools param (reachable AND serving the model — carry on in xml); any
+    OTHER probe_error (connection refused, 404 not-served, timeout, auth) is a real reachability
+    failure that must abort startup rather than proceed against a dead endpoint and then
+    misattribute the cause at the TokenCounter step.
+
+    The served window is the single source of truth for the effective context budget — callers
+    must use it rather than the config default. Callers must feed the probed mode into LLMConfig
+    rather than the stored provider.supports_function_calling flag (FIDEL-04).
     """
     import asyncio as _asyncio
+    probe_error: str | None = None
     for attempt in range(max_retries):
         try:
             result = await llm.detect_capabilities()
-            return True, result.tool_call_mode, result.context_window
-        except Exception:
-            if attempt < max_retries - 1:
-                await _asyncio.sleep(delay)
-    return False, None, None
+            if result.probe_error is None or result.probe_error.startswith("HTTP 400"):
+                return True, result.tool_call_mode, result.context_window, None
+            probe_error = result.probe_error
+        except Exception as exc:  # detect_capabilities shouldn't raise, but never wedge on a surprise
+            probe_error = str(exc)
+        if attempt < max_retries - 1:
+            await _asyncio.sleep(delay)
+    return False, None, None, probe_error
+
+
+def _classify_probe_failure(probe_error: str | None) -> str:
+    """Conservatively classify a hard probe failure for the startup message: 'unreachable' (a
+    connection/timeout error — nothing is listening at the endpoint), 'unserved' (a 404 naming a
+    missing model — the port IS listening), or 'unknown' (fall back to the generic message). Parses
+    the openai client's own exception text, not arbitrary model output, so the token set is
+    controlled; a served HTTP error BODY (e.g. a 404 body) proves the port is up, so it reads as
+    'unserved', never 'unreachable'."""
+    e = (probe_error or "").lower()
+    if any(s in e for s in (
+        "connection error", "connection refused", "connection reset", "failed to connect",
+        "could not connect", "cannot connect", "timed out", "timeout", "getaddrinfo",
+        "errno 111", "name or service not known", "max retries",
+    )):
+        return "unreachable"
+    if any(s in e for s in ("404", "not found", "does not exist", "no such model")):
+        return "unserved"
+    return "unknown"
 
 
 def _effective_max_context(
@@ -369,7 +401,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
     # AND the served context window (single source of truth for the budget).
-    probe_ok, probed_mode, served_window = await _probe_llm(_probe_client)
+    probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
     if not probe_ok and harness.server is not None:
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
@@ -381,15 +413,33 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             else:
                 console.print("Managed vLLM is still loading — waiting...")
             await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
-            probe_ok, probed_mode, served_window = await _probe_llm(_probe_client)
+            probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError) as exc:
             err_console.print(f"[bold red]Error:[/bold red] managed vLLM failed to start: {exc}")
     if not probe_ok:
+        # #44: name the concrete cause instead of a generic "Cannot reach model" — an unserved
+        # model and a dead endpoint are different fixes — and point at the diagnostics.
+        kind = _classify_probe_failure(probe_error)
+        if kind == "unserved":
+            avail = list(provider.available_models)
+            avail_hint = f" Configured models: {', '.join(avail)}." if avail else ""
+            err_console.print(
+                f"[bold red]Error:[/bold red] model '{resolved_model}' is not served at "
+                f"{provider.base_url} (probe: {probe_error}).{avail_hint}"
+            )
+        elif kind == "unreachable":
+            err_console.print(
+                f"[bold red]Error:[/bold red] model endpoint unreachable at "
+                f"{provider.base_url} (probe: {probe_error})."
+            )
+        else:
+            err_console.print(
+                f"[bold red]Error:[/bold red] cannot reach model '{resolved_model}' at "
+                f"{provider.base_url} (probe: {probe_error})."
+            )
         err_console.print(
-            f"[bold red]Error:[/bold red] Cannot reach model '{resolved_model}' "
-            f"at {provider.base_url}"
+            "Run `localharness doctor` to diagnose, or `localharness model` to list served models."
         )
-        err_console.print("Check that your LLM backend is running and try again.")
         raise typer.Exit(1)
 
     # config.yaml is the SINGLE SOURCE OF TRUTH for the window (now inheritance-resolved,
@@ -646,10 +696,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             provider_type=provider.provider_type,
         )
     except RuntimeError as exc:
+        # #44 defense-in-depth: the probe above already hard-fails an unreachable/unserved model,
+        # so reaching here means the model IS served but its /tokenize is unavailable (or tiktoken
+        # is missing) — the tokenizer message is now accurate. Still point at doctor for the rare
+        # case where /tokenize is a separate seam from the chat endpoint the probe reached.
         err_console.print(
             f"[bold red]Error:[/bold red] {exc}\n"
             f"Ensure the model server at {provider.base_url} exposes an exact tokenizer "
-            f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry."
+            f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry.\n"
+            f"Run `localharness doctor` to diagnose."
         )
         raise typer.Exit(1)
     if token_counter.approximate:
