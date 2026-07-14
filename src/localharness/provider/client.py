@@ -554,7 +554,16 @@ class LLMClient:
             response = await self._client.chat.completions.create(**kwargs)
             return await self._consume_native_stream(response, on_token)
         response = await self._client.chat.completions.create(**kwargs)
-        return response.choices[0].message, response.usage
+        message = response.choices[0].message
+        # Surface finish_reason on the message so the loop's truncation guard sees it on the
+        # non-streaming path too (#77). Best-effort: the SDK message is a pydantic model that
+        # may reject an unknown attribute — the loop reads it via getattr(..., None), so a
+        # rejection simply leaves the guard dormant here (the live loop uses streaming).
+        try:
+            message.finish_reason = response.choices[0].finish_reason
+        except Exception:
+            pass
+        return message, response.usage
 
     @staticmethod
     async def _consume_native_stream(
@@ -574,12 +583,19 @@ class LLMClient:
         content_parts: list[str] = []
         calls: dict[int, dict] = {}
         usage = None
+        finish_reason = None
         async for chunk in response:
             if getattr(chunk, "usage", None) is not None:
                 usage = chunk.usage
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
+            # finish_reason rides the final content/tool chunk ("stop"|"length"|"tool_calls";
+            # None on earlier chunks). Capturing the last non-None one lets the loop refuse to
+            # execute a tool call assembled from a completion cut at the output ceiling (#77).
+            fr = getattr(choices[0], "finish_reason", None)
+            if fr is not None:
+                finish_reason = fr
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
@@ -605,6 +621,7 @@ class LLMClient:
         message = SimpleNamespace(
             content="".join(content_parts) or None,
             tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
         return message, usage
 

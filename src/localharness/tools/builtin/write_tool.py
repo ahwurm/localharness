@@ -11,7 +11,10 @@ class WriteTool(Tool):
             name="write",
             description=(
                 "Write or overwrite a file. Creates parent directories if needed. "
-                "Returns the absolute path written and byte count."
+                "Returns the absolute path written and byte count. For a large file, write "
+                "it in several smaller calls (first call creates it, then add the rest with "
+                "mode=append) rather than one huge call — an oversized content argument can "
+                "be cut off at the output-token limit and will not be executed."
             ),
             parameters={
                 "type": "object",
