@@ -361,7 +361,7 @@ class OrchestratorREPL:
         is surfaced but never crashes the live session, which has already switched."""
         from localharness.cli import model_ops
         try:
-            await model_ops.persist_default_model(
+            audit_warning = await model_ops.persist_default_model(
                 self._harness, model, config_dir=self._config_dir
             )
         except Exception as exc:  # noqa: BLE001 — the in-session swap already succeeded
@@ -370,6 +370,10 @@ class OrchestratorREPL:
                 metadata={"style": "system.error"},
             )
             return
+        # #37: the overlay write succeeded; a post-write audit-emit failure is a secondary note,
+        # not a persist failure — surface it without contradicting the successful switch.
+        if audit_warning:
+            await self._send_info(audit_warning)
         # Pin trap: name any agent whose yaml pins a concrete model — the persisted default
         # won't reach it next start (per-agent pin wins by design; this only warns).
         pinned = model_ops.pinned_agents(self._config_dir)

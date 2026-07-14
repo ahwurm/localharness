@@ -112,7 +112,7 @@ def model(
         return
 
     try:
-        asyncio.run(
+        audit_warning = asyncio.run(
             model_ops.persist_default_model(harness, target, config_dir=loader._config_dir)
         )
     except Exception as exc:
@@ -120,6 +120,9 @@ def model(
         raise typer.Exit(2)
 
     console.print(f"[green]Default model set to[/green] {target}. `localharness start` will use it.")
+    # #37: the switch is durably persisted; a post-write audit-emit failure is a secondary note.
+    if audit_warning:
+        console.print(f"[yellow]Note:[/yellow] {audit_warning}")
 
     # Pin trap: a persisted default won't reach an agent whose yaml pins a concrete model.
     for aname, pin in model_ops.pinned_agents(loader._config_dir):
