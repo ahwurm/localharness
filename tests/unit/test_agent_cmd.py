@@ -92,6 +92,64 @@ def test_agent_create_global_generates_valid_yaml(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# agent create — #55: refuse to silently overwrite an existing agent
+# ---------------------------------------------------------------------------
+
+def test_agent_create_refuses_overwrite_existing_global(tmp_path):
+    """#55: a second `create <name> --global` must NOT silently clobber the first
+    (a live receipt erased a user's tools.deny under a "✓ created"). It exits 1,
+    names the path, and leaves the existing file BYTE-unchanged."""
+    path = tmp_path / "agents" / "dup-agent.yaml"
+    first = runner.invoke(agent_app, [
+        "create", "dup-agent", "--global", "--role", "The original",
+        "--config-dir", str(tmp_path),
+    ])
+    assert first.exit_code == 0
+    original = path.read_bytes()
+
+    second = runner.invoke(agent_app, [
+        "create", "dup-agent", "--global", "--role", "A DIFFERENT role that would clobber",
+        "--config-dir", str(tmp_path),
+    ])
+    assert second.exit_code == 1
+    assert "exists" in second.output.lower()
+    assert str(path) in second.output.replace("\n", "")  # names the path (Rich wraps it)
+    assert path.read_bytes() == original  # #55: no silent overwrite
+
+
+def test_agent_create_refuses_overwrite_existing_project(tmp_path, monkeypatch):
+    """#55 also holds for --project scope (same invariant, local dir)."""
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / ".localharness" / "agents" / "loc-agent.yaml"
+    runner.invoke(agent_app, [
+        "create", "loc-agent", "--project", "--role", "orig",
+        "--config-dir", str(tmp_path / "global"),
+    ])
+    original = path.read_bytes()
+    second = runner.invoke(agent_app, [
+        "create", "loc-agent", "--project", "--role", "clobber",
+        "--config-dir", str(tmp_path / "global"),
+    ])
+    assert second.exit_code == 1
+    assert path.read_bytes() == original
+
+
+def test_agent_create_force_overwrites(tmp_path):
+    """#55 escape hatch: --force overwrites deliberately (default refuses)."""
+    path = tmp_path / "agents" / "force-agent.yaml"
+    runner.invoke(agent_app, [
+        "create", "force-agent", "--global", "--role", "original",
+        "--config-dir", str(tmp_path),
+    ])
+    result = runner.invoke(agent_app, [
+        "create", "force-agent", "--global", "--role", "replaced", "--force",
+        "--config-dir", str(tmp_path),
+    ])
+    assert result.exit_code == 0
+    assert yaml.safe_load(path.read_text())["role"] == "replaced"
+
+
+# ---------------------------------------------------------------------------
 # agent create — --project flag (no prompt)
 # ---------------------------------------------------------------------------
 

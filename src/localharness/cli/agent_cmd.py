@@ -71,6 +71,7 @@ def agent_create(
     global_scope: Annotated[bool, typer.Option("--global", help="Add agent to global config (~/.localharness/agents/)")] = False,
     project_scope: Annotated[bool, typer.Option("--project", help="Add agent to project config (./.localharness/agents/)")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print YAML without writing")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing agent with the same name (default refuses)")] = False,
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
 ) -> None:
     """Create a new agent YAML config."""
@@ -122,6 +123,15 @@ def agent_create(
 
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{name}.yaml"
+    # #55: never silently overwrite an existing agent — a live receipt erased a user's
+    # tools.deny restriction under a "✓ created". The chat flow already refuses (#28
+    # workflow.deploy_config); enforce the same invariant here. --force is the escape hatch.
+    if target_path.exists() and not force:
+        err_console.print(
+            f"[bold red]Error:[/bold red] Agent '{name}' already exists at {target_path}. "
+            "Choose a different name, edit the file directly, or pass --force to overwrite."
+        )
+        raise typer.Exit(code=1)
     target_path.write_text(yaml_text, encoding="utf-8")
 
     console.print(f"[green]✓[/green] Agent '{name}' created at {target_path}")
