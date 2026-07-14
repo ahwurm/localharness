@@ -146,6 +146,18 @@ class ConsolidationPass:
         steps = (
             self._step_fold,
             self._step_promote_recurring,
+            # BUG #46: reconcile runs BEFORE the heavy idle-LLM steps (mine/discover/write_schemas)
+            # so it gets first crack at the idle window. Reconciliation is the ONLY consumer that
+            # clears tier:correction_pending; its queue is written by the LIVE gate in PRIOR sessions
+            # (no pass step below produces it — zero same-pass dependency), and a real pass is
+            # cancelled ~4s after REPL start. At its old step-8 slot the three heavy steps consumed
+            # the whole window and it NEVER ran, leaving disputed facts corrupted forever. It stays
+            # fully cancellable (per-fact + cancellable look — the box-hang machine-safety invariant),
+            # so the fix is ORDER, not run-to-completion; it drains the small queue over a session or
+            # two. Running before mine also feeds mine's B4 defense THIS pass's freshly-reconciled
+            # values (strictly fresher, never a regression). fold + promote stay first: promote
+            # already ran before reconcile and EXCLUDES correction_pending, so its input is unchanged.
+            self._step_reconcile,       # Phase 36: correction-queue reconciliation (BUG #46: moved early)
             # MOVE 2: mining is the primary semantic feeder and runs BEFORE clustering so the
             # sem/ atoms it writes are available to the SAME pass's chapter-writer (else a
             # freshly-mined atom waits a whole pass to be grouped). The orphaned replay seam
@@ -155,7 +167,6 @@ class ConsolidationPass:
             self._step_discover_tags,   # Tag-graph: discover NEW child tags before clustering reads them
             self._step_recheck_stale,   # B5 (§7): re-validate active chapters BEFORE the writer runs
             self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
-            self._step_reconcile,       # Phase 36: correction-queue reconciliation
             self._step_decay,
             self._step_cap_trim,
             self._step_proxies,
