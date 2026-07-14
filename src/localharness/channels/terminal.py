@@ -276,8 +276,10 @@ class TerminalChannel(ChannelAdapter):
         self,
         bus: EventBus,
         config: dict[str, Any],
-        history_file: str = "~/.localharness/.repl_history",
+        history_file: str = ".repl_history",
     ) -> None:
+        # A bare relative default; start_cmd resolves it UNDER the active config dir (#35, so
+        # --config-dir isolates REPL history). Absolute/~ values are honored as-is at use.
         super().__init__(bus, config)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
         self._err_console = Console(stderr=True, theme=TERMINAL_THEME, highlight=False)

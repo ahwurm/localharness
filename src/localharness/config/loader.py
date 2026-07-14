@@ -1,7 +1,6 @@
 """ConfigLoader: YAML parse, validate, inheritance resolve, write."""
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -16,6 +15,7 @@ from localharness.config.overlay import (
     load_overlay,
     _resolve_user_overlay_path,
 )
+from localharness.config.paths import resolve_config_dir
 
 
 # ------------------------------------------------------------------ #
@@ -180,9 +180,10 @@ class ConfigLoader:
         config_dir: Optional[Path] = None,
         local_config_dir: Optional[Path] = None,
     ) -> None:
-        self._config_dir = Path(
-            config_dir or os.environ.get("LOCALHARNESS_HOME") or "~/.localharness"
-        ).expanduser()
+        # #35: one precedence chain — explicit arg > LOCALHARNESS_DIR (what --config-dir binds)
+        # > LOCALHARNESS_HOME (legacy) > ~/.localharness. The overlay + runtime paths resolve
+        # against THIS dir, so --config-dir now actually isolates.
+        self._config_dir = resolve_config_dir(config_dir)
         self._local_dir = Path(local_config_dir or ".localharness")
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
@@ -229,7 +230,7 @@ class ConfigLoader:
         # Apply user overlay cascade (Phase 14). The `agent:` section is an agent-scope default
         # layer (issue #22) consumed by load_agent — NOT a HarnessConfig field (extra="forbid"),
         # so it must be excluded from the harness merge/validation.
-        overlay_path = _resolve_user_overlay_path()
+        overlay_path = _resolve_user_overlay_path(self._config_dir)
         user_overlay = load_overlay(overlay_path)
         harness_overlay = {k: v for k, v in user_overlay.items() if k != "agent"}
         merged = deep_merge(project_data, harness_overlay) if harness_overlay else project_data
@@ -256,7 +257,7 @@ class ConfigLoader:
         Used by `localharness components set` as the atomic_write_overlay target.
         Always resolved at call time so test monkeypatching takes effect.
         """
-        return _resolve_user_overlay_path()
+        return _resolve_user_overlay_path(self._config_dir)
 
     def invalidate_cache(self) -> None:
         """Drop the cached HarnessConfig so the next load_harness() re-reads disk.
@@ -430,9 +431,9 @@ class ConfigLoader:
         # 5b. Overlay the user layer's `agent:` section as a LOW-priority default (issue #22):
         #     the same layer `localharness components set agent.*` writes and `components get`
         #     reads back. Per-agent yaml (and org/division inheritance) WINS — `merged` is
-        #     layered ON TOP of the overlay. Resolved via LOCALHARNESS_HOME like load_harness
-        #     (env-based, independent of config_dir).
-        overlay_agent = load_overlay(_resolve_user_overlay_path()).get("agent")
+        #     layered ON TOP of the overlay. Resolved through THIS loader's config_dir like
+        #     load_harness (#35 — no longer env-only, so --config-dir isolates the agent overlay).
+        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
         if isinstance(overlay_agent, dict) and overlay_agent:
             merged = deep_merge(overlay_agent, merged)
 

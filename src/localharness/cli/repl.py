@@ -361,7 +361,9 @@ class OrchestratorREPL:
         is surfaced but never crashes the live session, which has already switched."""
         from localharness.cli import model_ops
         try:
-            await model_ops.persist_default_model(self._harness, model)
+            await model_ops.persist_default_model(
+                self._harness, model, config_dir=self._config_dir
+            )
         except Exception as exc:  # noqa: BLE001 — the in-session swap already succeeded
             await self._channel.send_message(
                 f"Switched for this session, but persisting the new default failed: {exc}",

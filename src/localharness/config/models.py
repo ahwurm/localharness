@@ -146,10 +146,12 @@ class BudgetConfig(BaseModel):
     )
 
     kill_file: Optional[str] = Field(
-        default="~/.localharness/KILL",
+        default="KILL",
         description=(
             "Path to the kill switch file. Agent checks for this file before each iteration. "
             "If it exists, the agent stops immediately and the file is removed. "
+            "A bare relative name (the default) resolves UNDER the config dir "
+            "(default ~/.localharness/KILL); an absolute or ~ path is honored as-is. "
             "Set to null to disable the kill switch."
         ),
     )
@@ -1424,10 +1426,12 @@ class OrgConfig(BaseModel):
     )
 
     audit_log_path: Optional[str] = Field(
-        default="~/.localharness/audit.jsonl",
+        default="audit.jsonl",
         description=(
             "Path to the org-level audit log. "
             "All events from all agents are also written here. "
+            "A bare relative name (the default) resolves UNDER the config dir "
+            "(default ~/.localharness/audit.jsonl); an absolute or ~ path is honored as-is. "
             "Set to null to disable org-level audit log."
         ),
     )

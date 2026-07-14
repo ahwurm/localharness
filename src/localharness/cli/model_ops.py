@@ -22,6 +22,7 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
+from localharness.config.paths import resolve_runtime_path
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import set_value_in_dict
@@ -59,7 +60,9 @@ def _merged_available_models(harness: Any, existing_overlay: dict, model: str) -
     return out
 
 
-async def persist_default_model(harness: Any, model: str, *, actor: str = "cli") -> None:
+async def persist_default_model(
+    harness: Any, model: str, *, actor: str = "cli", config_dir: Any = None
+) -> None:
     """Persist ``model`` as the org + provider default via the atomic USER OVERLAY — the same
     crash-safe, audited path ``components set`` uses (issue #22), replacing the prior full,
     non-atomic ``config.yaml`` rewrite.
@@ -70,11 +73,15 @@ async def persist_default_model(harness: Any, model: str, *, actor: str = "cli")
     -> emit one ``ComponentMutated`` per path. Only ``provider.*`` / ``org.*`` are ever touched
     in the overlay, so an ``agent:`` slice (the kill-lever layer) is preserved untouched.
     Also mutates the in-memory ``harness`` so the live session's view stays consistent.
+
+    ``config_dir`` (#35): the SAME resolved dir the harness was loaded from. The overlay write
+    target and the audit-log path resolve against it — so a persist tracks ``--config-dir``
+    instead of leaking to ``~/.localharness``. Callers thread their loader's ``_config_dir``.
     """
     before_provider = harness.provider.default_model
     before_org = harness.org.default_model
 
-    overlay_path = _resolve_user_overlay_path()
+    overlay_path = _resolve_user_overlay_path(config_dir)
     existing = load_overlay(overlay_path)
     merged_avail = _merged_available_models(harness, existing, model)
 
@@ -96,9 +103,12 @@ async def persist_default_model(harness: Any, model: str, *, actor: str = "cli")
     harness.org.default_model = model
     harness.provider.available_models = merged_avail
 
-    # Audit trail (mirrors components_cmd): one ComponentMutated per path written.
+    # Audit trail (mirrors components_cmd): one ComponentMutated per path written. The audit
+    # path resolves against the SAME config_dir (#35 — a bare default 'audit.jsonl' lands under it).
     audit_path = harness.org.audit_log_path
-    bus = EventBus(persist_path=Path(audit_path).expanduser() if audit_path else None)
+    bus = EventBus(
+        persist_path=resolve_runtime_path(audit_path, config_dir) if audit_path else None
+    )
     for path, before in (
         ("provider.default_model", before_provider),
         ("org.default_model", before_org),

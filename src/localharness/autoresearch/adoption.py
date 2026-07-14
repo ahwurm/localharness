@@ -195,10 +195,12 @@ async def _emit_component_mutated(bus, cfg, component, before, after, proposal_i
     target_bus = bus
     if target_bus is None:
         from localharness.core.bus import EventBus
+        from localharness.config.paths import resolve_runtime_path
 
         audit_path = getattr(getattr(cfg, "org", None), "audit_log_path", None)
+        # #35: a bare default 'audit.jsonl' resolves under the config dir (env/~default), not CWD.
         target_bus = EventBus(
-            persist_path=Path(audit_path).expanduser() if audit_path else None
+            persist_path=resolve_runtime_path(audit_path) if audit_path else None
         )
     await target_bus.publish(
         ComponentMutated(

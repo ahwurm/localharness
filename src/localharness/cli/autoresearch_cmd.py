@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json as _json
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,6 +23,7 @@ from rich.table import Table
 
 from localharness.autoresearch.adoption import AdoptionRefused
 from localharness.autoresearch.adoption import adopt as _adopt
+from localharness.config.paths import config_dir_env_override
 from localharness.autoresearch.archive import ArchiveEntry, ArchiveQuery, ArchiveStore
 from localharness.autoresearch.loop import RunSummary, run_loop
 
@@ -49,15 +49,15 @@ err_console = Console(stderr=True)
 
 
 def _archive_db_path() -> Path:
-    """Resolve .localharness/archive.db, honoring LOCALHARNESS_HOME (mirrors _build_loader).
+    """Resolve .localharness/archive.db, honoring the config-dir env chain (#35).
 
-    When LOCALHARNESS_HOME is set (the components_home fixture sets it to a
-    ``.localharness/`` dir), the db sits at ``<home>/archive.db`` — exactly where the
-    test's ArchiveStore writes. When unset, default to ``./.localharness/archive.db``
-    (project-local per CONTEXT).
+    LOCALHARNESS_DIR (canonical) or LOCALHARNESS_HOME (legacy — the components_home fixture
+    sets it to a ``.localharness/`` dir) puts the db at ``<dir>/archive.db``, exactly where the
+    test's ArchiveStore writes. When neither is set, default to ``./.localharness/archive.db``
+    (project-local per CONTEXT — note this differs from the config dir's ~/.localharness default).
     """
-    home = os.environ.get("LOCALHARNESS_HOME")
-    base = Path(home) if home else Path.cwd() / ".localharness"
+    override = config_dir_env_override()
+    base = Path(override).expanduser() if override else Path.cwd() / ".localharness"
     return base / "archive.db"
 
 
