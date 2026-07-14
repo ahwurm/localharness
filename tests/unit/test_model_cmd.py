@@ -132,6 +132,28 @@ def test_model_switch_unknown_hard_errors_naming_available(components_home, monk
     assert "ghost" in result.output and "model-a" in result.output
 
 
+def test_model_switch_case_insensitive_suggestion(components_home, monkeypatch):
+    """Polish: an unknown name that case-insensitively matches a served model suggests it."""
+    _seed_config(components_home)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["Model-A", "model-b"]), raising=False
+    )
+    result = runner.invoke(app, ["model", "model-a"])  # right model, wrong case
+    assert result.exit_code == 2, result.output
+    assert "did you mean" in result.output.lower() and "Model-A" in result.output
+
+
+def test_model_switch_out_of_range_number_reports_count(components_home, monkeypatch):
+    """Polish: a numeric arg out of range says how many models are listed."""
+    _seed_config(components_home)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False
+    )
+    result = runner.invoke(app, ["model", "9"])
+    assert result.exit_code == 2, result.output
+    assert "out of range" in result.output.lower() and "2" in result.output  # names the count
+
+
 def test_model_switch_unreachable_degrades_with_disclosure(components_home, monkeypatch):
     _seed_config(components_home)
     monkeypatch.setattr(model_ops, "list_live_models", _fake_live([], reachable=False), raising=False)

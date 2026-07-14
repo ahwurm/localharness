@@ -103,6 +103,7 @@ share a machine. A laptop can run agents against a model served elsewhere on you
 | `doctor` | Diagnose config/endpoint issues |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
+| `model` | List served/downloaded models, or switch the persisted default |
 | `agent …` | Manage agent definitions |
 | `bench …` | Run the scenario benchmark |
 | `components …` | Autoresearch component registry |

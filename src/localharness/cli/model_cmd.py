@@ -117,9 +117,24 @@ def model(
         if reachable:
             # Reached the runtime and the target isn't served/downloaded → fail loud, name options.
             avail = ", ".join(choices) if choices else "(none served or downloaded)"
-            err_console.print(
-                f"[bold red]Error:[/bold red] unknown model {name!r}. Available: {avail}."
-            )
+            if name.isdigit():
+                # A number that didn't resolve is out of range — say how many are listed.
+                err_console.print(
+                    f"[bold red]Error:[/bold red] {name} is out of range — {len(choices)} "
+                    f"model(s) listed. Run `localharness model` to see them."
+                )
+                raise typer.Exit(2)
+            # Fat-finger hint: a case-insensitive exact match is almost certainly the intent.
+            ci = next((m for m in choices if m.lower() == name.lower()), None)
+            if ci is not None:
+                err_console.print(
+                    f"[bold red]Error:[/bold red] unknown model {name!r} — did you mean {ci!r}? "
+                    f"Available: {avail}."
+                )
+            else:
+                err_console.print(
+                    f"[bold red]Error:[/bold red] unknown model {name!r}. Available: {avail}."
+                )
             raise typer.Exit(2)
         # Runtime unreachable → can't verify. Degrade with an explicit disclosure (mirrors the
         # TokenCounter `.approximate` convention: proceed, but label it clearly).

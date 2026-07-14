@@ -1,4 +1,6 @@
 """LocalHarness CLI entry point."""
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 import typer
 
 from localharness.cli.agent_cmd import agent_app
@@ -37,6 +39,31 @@ app.add_typer(components_app, name="components")
 app.add_typer(config_app, name="config")
 app.add_typer(autoresearch_app, name="autoresearch")
 app.add_typer(experiment_app, name="experiment")
+
+
+def _version_callback(value: bool) -> None:
+    """`localharness --version` — a user's reflexive first command. Reads the installed
+    package version, falling back to 'unknown' when metadata isn't found (raw checkout)."""
+    if value:
+        try:
+            v = _pkg_version("localharness")
+        except PackageNotFoundError:
+            v = "unknown"
+        typer.echo(f"localharness {v}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the version and exit.",
+    ),
+) -> None:
+    """Model-agnostic hierarchical agent harness for local LLMs."""
 
 
 def main() -> None:
