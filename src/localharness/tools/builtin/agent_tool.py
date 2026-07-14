@@ -53,7 +53,17 @@ class AgentTool(Tool):
                     },
                     "task": {
                         "type": "string",
-                        "description": "The task description to give the agent.",
+                        "description": (
+                            "A SELF-CONTAINED instruction the subagent can act on with no other "
+                            "context — distill the user's request into one concrete directive. "
+                            "NEVER paste the user's verbatim sentence: the subagent can't see this "
+                            "conversation and doesn't know who the user is, so a relayed 'ask X "
+                            "for Y' makes it go hunting for X instead of doing Y. "
+                            "GOOD: 'Write three puns about databases.' "
+                            "BAD: 'ask the joke-writer for a database pun'. "
+                            "GOOD: 'Summarize the retry logic in src/agent/loop.py in 5 bullets.' "
+                            "BAD: 'look into that loop thing I mentioned'."
+                        ),
                     },
                     "grant_handles": {
                         "type": "array",

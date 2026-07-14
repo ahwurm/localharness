@@ -295,6 +295,8 @@ class TerminalChannel(ChannelAdapter):
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
         self._burst: _Burst | None = None  # open family-burst consolidation (display-only)
+        self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
+        # call, consumed by its completion receipt (the success result carries only the summary)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         self._action_handle = None
         self._observation_handle = None
@@ -420,6 +422,11 @@ class TerminalChannel(ChannelAdapter):
             group = next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
             if group is None:
                 self._close_burst()
+                if tool_name == "agent":
+                    # Stash the delegate for the completion receipt (send_tool_result): a
+                    # SUCCESS Observation carries only the summary, not who ran it (#73).
+                    d = arguments.get("agent_id")
+                    self._last_agent_delegate = d if isinstance(d, str) else None
                 summary = _tool_call_summary(tool_name, arguments)
                 # no_wrap + ellipsis: a long preview stays ONE physical line (cropped to
                 # the terminal), never wrapping the view open (FIX B).
@@ -461,6 +468,19 @@ class TerminalChannel(ChannelAdapter):
                 self._burst_refresh(burst)
                 return
             self._close_burst()
+            # #73: delegation-outcome receipt. Every `agent` completion prints a truthful,
+            # system-style line whose status is taken from the TOOL RESULT (is_error), not the
+            # model's later narration, and whose name is the delegate stashed from this call —
+            # so a failed delegation can't be re-narrated as the subagent's own answer.
+            if tool_name == "agent":
+                delegate, self._last_agent_delegate = self._last_agent_delegate, None
+                who = f" {escape(delegate)}" if delegate else ""
+                if is_error:
+                    detail = escape(lines[0].removeprefix("[tool error] ")[:120]) if lines else ""
+                    self._console.print(f"  [tool.error]{_DIAMOND} agent{who} — FAILED: {detail}[/tool.error]")
+                else:
+                    self._console.print(f"  [tool.call]{_DIAMOND} agent{who} — completed[/tool.call]")
+                return
             name = escape(tool_name)
             if is_error:
                 first = escape(lines[0][:120]) if lines else ""
