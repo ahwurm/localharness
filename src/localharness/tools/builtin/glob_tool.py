@@ -10,7 +10,11 @@ class GlobTool(Tool):
             name="glob",
             description=(
                 "Find files matching a glob pattern. Returns newline-separated "
-                "absolute paths. Use ** for recursive matching."
+                "absolute paths. Use ** for recursive matching (a trailing bare "
+                "'**' matches files too, not only directories). '~' is expanded "
+                "automatically; a relative pattern roots at the process's current "
+                "working directory — pass base_dir or an absolute/'~' pattern to "
+                "search elsewhere."
             ),
             parameters={
                 "type": "object",
@@ -49,6 +53,13 @@ class GlobTool(Tool):
             base = Path(base_dir).expanduser().resolve()
         if not base.exists():
             return self.err(f"base_dir does not exist: {base}")
+        # pathlib's Path.glob() yields DIRECTORIES ONLY for a trailing bare '**' (issue #74:
+        # '~/.localharness/agents/**' returned the agents dir but never its .yaml files).
+        # Rewrite a trailing '**' to '**/*' so files at any depth match. Permission deny
+        # matching runs pre-expansion on the raw string, so a glob deny rule wants an
+        # unanchored leading '*' to catch every shape (see config/models.py deny_patterns).
+        if pattern == "**" or pattern.endswith("/**"):
+            pattern = pattern + "/*"
         matches = sorted(base.glob(pattern))[:limit]
         if not matches:
             return self.ok("(no matches)")
