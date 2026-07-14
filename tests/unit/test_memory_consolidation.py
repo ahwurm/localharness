@@ -334,6 +334,106 @@ async def test_disabled_scheduler_is_inert(store: MemoryStore):
 
 
 # ---------------------------------------------------------------------------
+# #78: turn-in-flight awareness. The idle clock previously only reset on UserMessage
+# (which fires at turn START), so a long turn let idle_minutes elapse and a pass launched
+# ON TOP of the still-running turn — both contending for the one serial inference gate.
+# The scheduler now tracks the guaranteed TurnStarted -> TurnCompleted|TurnFailed bracket.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_turn_in_flight_defers_launch(store: MemoryStore):
+    """A pass must NOT start while an agent turn is in flight; once the turn ends, it can."""
+    from localharness.core.bus import EventBus
+
+    await _seed_candidate(store, "bash_exec", "s1", "e1")
+    sched = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg())
+
+    await sched._on_turn_started(None)   # what the TurnStarted subscription does
+    sched.launch()
+    assert sched._run_task is None       # deferred — nothing launched
+    assert sched.last_report is None
+
+    await sched._on_turn_ended(None)     # TurnCompleted/TurnFailed
+    sched.launch()
+    assert sched._run_task is not None    # now it launches
+    await asyncio.wait_for(sched._run_task, timeout=5.0)
+    assert sched.last_report is not None
+
+
+@pytest.mark.asyncio
+async def test_turn_start_cancels_running_pass(store: MemoryStore):
+    """A pass caught running when a turn starts is cancelled — identical cooperative yield to
+    user activity — so it releases the inference gate for the turn."""
+    from localharness.core.bus import EventBus
+
+    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "assistant_message",
+                                "id": "1", "session_id": "s", "ts": 1, "content": "SOMETOKEN here"})
+    sched = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg(), llm=_SlowLLM(10.0))
+    sched.launch()
+    await asyncio.sleep(0.1)
+    await sched._on_turn_started(None)   # a turn began mid-pass
+    await asyncio.wait_for(sched._run_task, timeout=3.0)
+    assert sched.last_report is not None and sched.last_report.cancelled
+
+
+@pytest.mark.asyncio
+async def test_turn_ended_clears_flag_and_resets_idle_clock(store: MemoryStore):
+    """Turn END (not START) resets the idle clock — the core of the fix: idle_minutes is now
+    counted from when the agent stops working, so a long turn can't trigger a mid-turn pass."""
+    from localharness.core.bus import EventBus
+
+    sched = ConsolidationScheduler(store, EventBus(), "cons-agent", _cfg())
+    sched._turn_in_flight = True
+    sched._last_activity = time.monotonic() - 1000.0  # pretend a long turn elapsed
+
+    await sched._on_turn_ended(None)
+    assert sched._turn_in_flight is False
+    assert sched._last_activity > time.monotonic() - 5.0  # idle clock reset to ~now
+
+
+@pytest.mark.asyncio
+async def test_start_wires_turn_events_and_filters_by_agent_id(store: MemoryStore):
+    """End-to-end bus wiring: start() subscribes the turn events, filtered to THIS agent_id.
+    A subagent's turn (different agent_id, already nested inside the root turn's bracket) must
+    not toggle the flag; the root agent's turn must."""
+    from localharness.core.bus import EventBus
+    from localharness.core.events import BudgetSpec, TurnStarted, TurnCompleted
+
+    bus = EventBus()
+    sched = ConsolidationScheduler(store, bus, "cons-agent", _cfg())
+    await sched.start()
+    try:
+        # A subagent turn on the SAME bus but a different agent_id — must be ignored.
+        await bus.publish(TurnStarted(agent_id="explore", session_id="c1",
+                                      task_summary="sub", budget=BudgetSpec()))
+        assert sched._turn_in_flight is False
+
+        # The root agent's turn — must set the flag.
+        await bus.publish(TurnStarted(agent_id="cons-agent", session_id="r1",
+                                      task_summary="root", budget=BudgetSpec()))
+        assert sched._turn_in_flight is True
+
+        # Root turn ends — flag clears.
+        await bus.publish(TurnCompleted(agent_id="cons-agent", session_id="r1", iterations=1,
+                                        duration_seconds=0.0, elapsed_tokens=0, summary="done"))
+        assert sched._turn_in_flight is False
+    finally:
+        await sched.stop()
+
+
+@pytest.mark.asyncio
+async def test_bench_style_direct_pass_unaffected_by_turn_machinery(store: MemoryStore):
+    """Bench/eval call ConsolidationPass(...).run() DIRECTLY — no scheduler, no bus, no turn
+    events. That path must run to completion regardless of any turn concept (the turn logic
+    lives only in ConsolidationScheduler)."""
+    await store.store_fact("k", "v")
+    await store.touch_staged(["k"])
+    report = await ConsolidationPass(store, _cfg()).run()   # exactly the bench/eval call shape
+    assert report is not None and not report.cancelled
+    assert report.folded == 1
+
+
+# ---------------------------------------------------------------------------
 # Whole-milestone critic B1: the COMPOSED gate→consolidation path (real WriteGate
 # keys, not fixture keys) — recurrence semantics must hold in both directions.
 # ---------------------------------------------------------------------------
