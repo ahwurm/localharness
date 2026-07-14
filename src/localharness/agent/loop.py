@@ -71,11 +71,17 @@ class StuckDetector:
         window_size: int = 5,
         recovery_threshold: int = 2,
         escalation_threshold: int = 3,
+        max_nudges_per_turn: int = 3,
     ) -> None:
         self.window_size = window_size
         self.recovery_threshold = recovery_threshold
         self.escalation_threshold = escalation_threshold
+        self.max_nudges_per_turn = max_nudges_per_turn
         self._window: deque[str] = deque(maxlen=window_size)
+        # Per-turn ladder state (the detector is constructed fresh per turn): which
+        # signatures we have already warned about, and how many warnings we have spent.
+        self._warned: dict[str, int] = {}
+        self._total_warnings = 0
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
         canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
@@ -94,6 +100,32 @@ class StuckDetector:
         if max_count >= self.recovery_threshold:
             return StuckState.RECOVERING
         return StuckState.CLEAR
+
+    def classify(self) -> tuple[StuckState, str]:
+        """Deterministic per-turn stuck ladder. Returns (action, most_repeated_signature).
+
+        Wraps the raw window read (check) with clean-slate-after-warning bookkeeping:
+        - fresh RECOVERING (a not-yet-warned signature under the nudge cap): warn once,
+          CLEAR the window, and record the warning → returns RECOVERING;
+        - a repeat of an ALREADY-warned signature (the model re-hit 2 identical even after
+          the clean slate — the warning demonstrably failed) → ESCALATE;
+        - RECOVERING once max_nudges_per_turn warnings are spent (varied flailing) → ESCALATE;
+        - a raw in-window ESCALATE (non-default thresholds) passes straight through;
+        - CLEAR passes through.
+
+        One call == one decision (it mutates on a warn), so the loop calls it exactly once
+        per iteration after recording that iteration's tool calls.
+        """
+        raw = self.check()
+        sig = self.most_repeated_signature()
+        if raw != StuckState.RECOVERING:
+            return raw, sig
+        if sig in self._warned or self._total_warnings >= self.max_nudges_per_turn:
+            return StuckState.ESCALATE, sig
+        self._warned[sig] = self._warned.get(sig, 0) + 1
+        self._total_warnings += 1
+        self._window.clear()
+        return StuckState.RECOVERING, sig
 
     def most_repeated_signature(self) -> str:
         if not self._window:
@@ -613,6 +645,7 @@ class AgentLoop:
             window_size=sd_cfg.window_size,
             recovery_threshold=sd_cfg.recovery_threshold,
             escalation_threshold=sd_cfg.escalation_threshold,
+            max_nudges_per_turn=sd_cfg.max_nudges_per_turn,
         )
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
@@ -1113,10 +1146,10 @@ class AgentLoop:
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
 
-            # 12. Check stuck state
-            stuck_state = stuck_detector.check()
+            # 12. Check stuck state (deterministic per-turn ladder: clean slate after a
+            # warning, escalate only on fresh evidence — #81)
+            stuck_state, repeated_sig = stuck_detector.classify()
             if stuck_state == StuckState.RECOVERING:
-                repeated_sig = stuck_detector.most_repeated_signature()
                 await self._bus.publish(StuckRecovered(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -1137,7 +1170,7 @@ class AgentLoop:
                     session_id=session.session_id,
                     reason="stuck_detected",
                     detail=f"Repeated identical tool calls at iteration {session.iteration}",
-                    stuck_signature=stuck_detector.most_repeated_signature(),
+                    stuck_signature=repeated_sig,
                     iteration_at_escalation=session.iteration,
                 ))
                 self._conversation = list(session.messages)

@@ -970,6 +970,17 @@ class StuckDetectorConfig(BaseModel):
             "(terminates the turn with stuck reason)."
         ),
     )
+    max_nudges_per_turn: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Per-turn cap on stuck-recovery warnings before escalating regardless of "
+            "signature. After a warning the window is cleared for a clean slate, so a "
+            "compliant model is never re-nudged on stale counts; a model that keeps "
+            "flailing with varied calls still escalates once it has burned this many nudges."
+        ),
+    )
 
 
 class RecoveryInjectionConfig(BaseModel):
