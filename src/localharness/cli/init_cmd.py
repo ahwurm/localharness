@@ -270,6 +270,10 @@ def init_app(
         server=server_config,
     )
     config_file.write_text(to_yaml_str(harness), encoding="utf-8")
+    # #53: create the agents directory alongside the config. doctor names `init` as the remedy
+    # for a missing agents dir, so init must actually create it (previously only `start` and
+    # `doctor --fix` did, which left that remedy non-functional).
+    (config_path / "agents").mkdir(parents=True, exist_ok=True)
     console.print(f"\n[green]✓[/green] LocalHarness configured at {config_file}.")
     console.print("  Run 'localharness start' to begin.")
     console.print(

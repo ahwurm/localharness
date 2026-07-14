@@ -42,7 +42,10 @@ def doctor(
     ] = "~/.localharness",
     fix: Annotated[
         bool,
-        typer.Option("--fix", help="Attempt to auto-fix detected issues."),
+        typer.Option(
+            "--fix",
+            help="Create a missing agents directory (doctor's only auto-fix today).",
+        ),
     ] = False,
 ) -> None:
     """Run prerequisite checks and report system health.
