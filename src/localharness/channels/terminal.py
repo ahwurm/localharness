@@ -51,16 +51,14 @@ _CROSS = "\u2717"     # ✗  tool result error
 _DREAMING_LABEL = "· dreaming…"   # · dreaming…
 
 # Burst consolidation: consecutive calls from one tool family collapse into a single
-# live counter line (`◆ web_search · web_fetch — the open web, a fresh window each · 30/30`)
-# instead of a line per call — a 30-hit research burst is one scrollback line, not 60.
-# Per-call truth (args, errors, timings) stays on the bus ledger (bus-events.jsonl);
-# this is display-only. Family membership reuses the capability metadata; labels are
-# the localharness.dev demo copy (owner call 2026-07-02: "consolidate — keep true
-# behavior" — the demos consolidated by hand, this emits the line for real).
-_BURST_GROUPS: tuple[tuple[frozenset[str], str, str | None], ...] = (
-    (UNTRUSTED_INGEST, "the open web, a fresh window each",
-     "web results — UNTRUSTED, treated as data only"),
-    (frozenset({"tool_result_get"}), "section reads, a fresh window each", None),
+# live counter line (`◆ web_search · web_fetch · 30/30`) instead of a line per call —
+# a 30-hit research burst is one scrollback line, not 60. Per-call truth (args, errors,
+# timings) stays on the bus ledger (bus-events.jsonl); this is display-only. Family
+# membership reuses the capability metadata. (Descriptive labels dropped 2026-07-14 —
+# owner: cleaner without; the close_note security disclosure stays.)
+_BURST_GROUPS: tuple[tuple[frozenset[str], str | None], ...] = (
+    (UNTRUSTED_INGEST, "web results — UNTRUSTED, treated as data only"),
+    (frozenset({"tool_result_get"}), None),
 )
 
 
@@ -68,7 +66,6 @@ _BURST_GROUPS: tuple[tuple[frozenset[str], str, str | None], ...] = (
 class _Burst:
     """Consolidation state for one open family burst (display-only)."""
     family: frozenset[str]
-    label: str
     close_note: str | None       # ✓ line printed once on close (None = no note)
     tools: list[str] = field(default_factory=list)  # first-use order, deduped
     calls: int = 0
@@ -435,10 +432,10 @@ class TerminalChannel(ChannelAdapter):
                     no_wrap=True, overflow="ellipsis",
                 )
                 return
-            family, label, note = group
+            family, note = group
             if self._burst is None or self._burst.family is not family:
                 self._close_burst()
-                self._burst = _Burst(family=family, label=label, close_note=note)
+                self._burst = _Burst(family=family, close_note=note)
             burst = self._burst
             if tool_name not in burst.tools:
                 burst.tools.append(tool_name)
@@ -540,8 +537,8 @@ class TerminalChannel(ChannelAdapter):
             self._err_console.print("[warning]Warning: output during streaming state[/warning]")
 
     def _burst_text(self, burst: _Burst, final: bool) -> str:
-        """Render the burst counter line: ◆ tools — label · done/calls [· N errors]."""
-        head = f"{_DIAMOND} {escape(' · '.join(burst.tools))} — {burst.label}"
+        """Render the burst counter line: ◆ tools · done/calls [· N errors]."""
+        head = f"{_DIAMOND} {escape(' · '.join(burst.tools))}"
         line = f"  [tool.call]{head}[/tool.call] [muted]· {burst.done}/{burst.calls}[/muted]"
         if final and burst.errors:
             plural = "s" if burst.errors > 1 else ""
