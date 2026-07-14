@@ -723,6 +723,112 @@ async def test_phase36_deterministic_pass_unchanged_without_llm(store: MemorySto
     assert await store.query_facts(FactQuery(tags=["mined"])) == []     # nothing mined
 
 
+# ---------------------------------------------------------------------------
+# BUG #46: reconciliation — the ONLY consumer that clears tier:correction_pending — was step 8
+# of the pass, AFTER the three heavy idle-LLM steps (mine/discover/write_schemas). A real pass is
+# cancelled ~4s after REPL start, so those steps consumed the whole window and reconcile NEVER ran,
+# leaving disputed facts corrupted forever. The fix runs reconcile BEFORE the heavy steps; it stays
+# fully cancellable (box-hang machine-safety), so the fix is ORDER, not run-to-completion. Its queue
+# is written by the LIVE gate in prior sessions -> zero same-pass dependency on any step below it.
+# ---------------------------------------------------------------------------
+
+_MINEABLE = "i got super duper sunburnt today at the beach"  # a mineable user_message span
+
+
+async def _seed_pending_quarantine(store, key: str, value: str) -> None:
+    """A shape-(b) tier:correction_pending row exactly as the live gate writes it."""
+    await store.store_fact(
+        key=key, value=f"user correction (pending reconciliation): {value}",
+        tags=["correction", "tier:correction_pending", "pending_consolidation"], confidence=0.65,
+    )
+
+
+async def _seed_mineable(store, hid: str) -> None:
+    await store.append_history({"v": 1, "agent_id": "cons-agent", "type": "user_message",
+                                "id": hid, "session_id": "mine-sess", "ts": 1_000_000,
+                                "content": _MINEABLE})
+
+
+class _OrderRecordingLLM:
+    """Records the ORDER in which the idle steps issue their model-looks (dispatch by prompt). The
+    reconcile look answers REVERT so a shape-(b) row is CLEARED (retagged out) rather than confirmed
+    — that leaves no tier:reconcile_confirmed row, so mining's B4 sweep sees no new pair to react to."""
+    def __init__(self):
+        self.order: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        if "Idle memory review" in prompt:            # reconcile look (either shape)
+            self.order.append("reconcile")
+            return "REVERT"
+        if "USER'S WORLD" in prompt:                  # transcript mining
+            self.order.append("mine")
+            return "health | got a bad sunburn today | super duper sunburnt today at the beach"
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_reconcile_look_precedes_mining_look(store: MemoryStore):
+    # BUG #46 ordering: reconcile must be scheduled BEFORE the heavy idle-LLM steps. With BOTH a
+    # pending correction and a mineable span present, the reconcile look is issued before mining's,
+    # and (no cancel) both steps still run to completion — same final state, order-only change.
+    await _seed_pending_quarantine(store, "correction/quarantine/cafe0001", "the deploy region is us-west-2")
+    await _seed_mineable(store, "hm-order")
+    llm = _OrderRecordingLLM()
+    report = await ConsolidationPass(
+        store, _cfg(reconcile_enabled=True, mining_enabled=True, schema_writer_enabled=False), llm=llm
+    ).run()
+    assert "reconcile" in llm.order and "mine" in llm.order
+    assert llm.order.index("reconcile") < llm.order.index("mine")
+    assert report.reconciled >= 1 and report.mined >= 1
+    assert not report.cancelled
+
+
+class _CancelDuringReconcileLLM:
+    """Cancels the pass the instant it answers the reconcile look — the live '~4s after REPL start'
+    shape. Records whether the (heavy) mining look was ever reached."""
+    def __init__(self):
+        self.cancel_event = None
+        self.saw_mining = False
+
+    async def complete(self, prompt: str) -> str:
+        if "Idle memory review" in prompt:            # reconcile look
+            if self.cancel_event is not None:
+                self.cancel_event.set()
+            return "CONFIRM"                          # settle the quarantined statement (shape b)
+        if "USER'S WORLD" in prompt:                  # mining — must NOT be reached under the cancel
+            self.saw_mining = True
+            return "x | y | z"
+        return ""
+
+
+@pytest.mark.asyncio
+async def test_reconcile_runs_even_when_pass_cancelled_before_heavy_steps(store: MemoryStore):
+    # BUG #46 core: a pass cancelled right after start STILL repairs a pending correction, because
+    # reconcile now runs before the heavy steps. The pending row settles (drains out of the queue)
+    # while mining is skipped by the cancel that fired during the reconcile look.
+    qkey = "correction/quarantine/beadfeed"
+    await _seed_pending_quarantine(store, qkey, "the api base url is https://example.test")
+    await _seed_mineable(store, "hm-cancel")   # present so "mining was skipped" is a real assertion
+    llm = _CancelDuringReconcileLLM()
+    cons = ConsolidationPass(
+        store, _cfg(reconcile_enabled=True, mining_enabled=True, schema_writer_enabled=False), llm=llm
+    )
+    llm.cancel_event = cons._cancel
+    report = await cons.run()
+
+    # reconcile RAN: the quarantined correction settled and left the pending queue (prefix stripped).
+    assert report.reconciled >= 1
+    settled = await store.get_fact(qkey)
+    assert settled is not None
+    assert "tier:correction_pending" not in settled.tags
+    assert not settled.value.startswith("user correction (pending reconciliation):")
+    # the heavy mining step was SKIPPED by the cancel that fired during reconcile.
+    assert report.cancelled is True
+    assert llm.saw_mining is False
+    assert report.mined == 0
+    assert await store.query_facts(FactQuery(tags=["sem"])) == []
+
+
 async def _seed_chapter(store, suffix, member_ids):
     ch = await store.store_fact(
         key=f"schema/cluster/{suffix}", value=f"chapter {suffix} body",
