@@ -14,6 +14,7 @@ from rich.table import Table
 
 console = Console()
 err_console = Console(stderr=True)
+log = logging.getLogger(__name__)
 
 
 def _first_prompt_hint(is_returning: bool) -> str:
@@ -915,6 +916,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # --- Run REPL ---
         from localharness.cli.repl import OrchestratorREPL
 
+        def _register_deployed_agent(name: str) -> None:
+            """#58: make a just-deployed agent reachable in THIS session — no restart. Load its
+            freshly-written yaml (bypass_cache, exactly like the dispatch path at :815), register
+            its card so /agents lists it, and append it to `available_agent_names` — which IS the
+            list `agent_tool` advertises (AgentTool stores the same list object), so the model sees
+            it as a delegation target. Delegation itself already resolved fresh yamls by name via
+            the bypass_cache loader; this closes the visibility/advertisement gap so same-session
+            delegation genuinely works."""
+            try:
+                a_cfg = loader.load_agent(name, bypass_cache=True)
+            except Exception as exc:  # noqa: BLE001 — never turn a successful deploy into a failure
+                log.warning("post-deploy live registration failed for %s: %s", name, exc)
+                return
+            card_registry.register_from_config(a_cfg)
+            if name not in available_agent_names:
+                available_agent_names.append(name)
+
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -922,6 +940,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             bus=bus,
             config_dir=cfg_path,
             harness_config=harness,
+            on_agent_deployed=_register_deployed_agent,
         )
 
         await repl.run()

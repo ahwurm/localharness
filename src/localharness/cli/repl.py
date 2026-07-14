@@ -103,6 +103,7 @@ class OrchestratorREPL:
         bus: Any,
         config_dir: Path | None = None,
         harness_config: Any = None,
+        on_agent_deployed: Any = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
@@ -110,6 +111,11 @@ class OrchestratorREPL:
         self._bus = bus
         self._config_dir = config_dir
         self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
+        # #58: called with the deployed agent's name after a successful in-session creation,
+        # to register it into the LIVE session (card registry + AgentTool advertisement) so
+        # /agents lists it and the model can delegate to it without a restart. None in tests
+        # / non-interactive paths that don't wire it.
+        self._on_agent_deployed = on_agent_deployed
 
     async def run(self) -> None:
         """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
@@ -621,6 +627,15 @@ class OrchestratorREPL:
             # Per user decision: after creation, back to prompt (no auto-handoff)
             workflow.transition("done")
             self._orchestrator._active_workflow = None
+            # #58: register the new agent into the LIVE session so /agents lists it and the
+            # model can delegate to it without a restart. config_path.stem is the deployed
+            # name (deploy_config honors the confirmed YAML's own name). Best-effort: a
+            # registration hiccup must not turn a successful deploy into a failure.
+            if self._on_agent_deployed is not None:
+                try:
+                    self._on_agent_deployed(config_path.stem)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("post-deploy live registration failed for %s: %s", config_path.stem, exc)
             await self._channel.send_message(
                 f"Agent deployed to {config_path}",
                 metadata={"style": "system.info"},
