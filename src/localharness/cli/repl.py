@@ -1,7 +1,10 @@
 """OrchestratorREPL -- interactive prompt_toolkit loop for LocalHarness."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -146,11 +149,9 @@ class OrchestratorREPL:
                     )
                     # v1: the single agent loop handles every turn directly. Multi-agent
                     # routing (AgentCardRegistry.route) will be wired in for dispatch in
-                    # MULTI-02 (v2).
-                    await self._agent.run_turn(
-                        task=user_input,
-                        on_token=None,
-                    )
+                    # MULTI-02 (v2). Run it as a cancellable task so a mid-turn Ctrl+C
+                    # cancels the TURN, not the session (#47).
+                    await self._run_turn_interruptible(user_input)
                     # NOTE: Do NOT send_message here. The TaskComplete event handler
                     # in TerminalChannel.on_task_complete() handles output.
                     # Sending here would produce duplicate output.
@@ -158,6 +159,73 @@ class OrchestratorREPL:
                     break
         finally:
             await self._channel.stop()
+
+    async def _run_turn_interruptible(self, user_input: str) -> None:
+        """Run ONE agent turn as a cancellable task so a mid-turn Ctrl+C cancels the turn,
+        not the session (#47).
+
+        While a turn is in flight the prompt_toolkit input app is NOT holding the terminal
+        (it released raw mode when read_input returned), so Ctrl+C arrives as a real SIGINT.
+        The default handler raises KeyboardInterrupt out of the event loop, tearing the whole
+        session down ('Goodbye.') — the exact inversion users hit. We install a loop-level
+        SIGINT handler for the turn's duration that CANCELS the turn task instead. Cancelling
+        propagates asyncio.CancelledError through the loop (never caught by run_turn's
+        `except Exception`) and closes the in-flight streaming HTTP call, so vLLM aborts
+        generation engine-side (the #18 disconnect behavior) — no ghost request.
+
+        Idle Ctrl+C is unchanged: at the prompt the input app's own c-c key binding
+        (TerminalChannel.read_input) absorbs it. A second Ctrl+C while a turn is already
+        cancelling restores the default SIGINT handler, so a further Ctrl+C hard-exits
+        (escape hatch)."""
+        turn_task = asyncio.ensure_future(
+            self._agent.run_turn(task=user_input, on_token=None)
+        )
+        loop = asyncio.get_running_loop()
+        interrupts = 0
+        cancelled_by_user = False
+
+        def _on_sigint() -> None:
+            nonlocal interrupts, cancelled_by_user
+            interrupts += 1
+            if interrupts == 1:
+                cancelled_by_user = True
+                turn_task.cancel()
+            else:
+                # Escape hatch: restore the default SIGINT so a further Ctrl+C hard-exits.
+                try:
+                    loop.remove_signal_handler(signal.SIGINT)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
+
+        handler_installed = False
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+            handler_installed = True
+        except (NotImplementedError, RuntimeError, ValueError):
+            # No loop signal support (non-main thread / some event loops): run the turn
+            # anyway; Ctrl+C keeps its prior whole-loop behavior. Never block the turn.
+            pass
+
+        try:
+            await turn_task
+        except asyncio.CancelledError:
+            if cancelled_by_user:
+                # The turn was cancelled by Ctrl+C — the SESSION survives. Truthful line;
+                # send_message stops the thinking spinner / any burst first, so the prompt
+                # returns with sane state (no half-rendered spinner).
+                await self._channel.send_message(
+                    "Turn cancelled.", metadata={"style": "system.info"}
+                )
+            else:
+                # The REPL task itself was cancelled (e.g. shutdown): don't leak the turn.
+                turn_task.cancel()
+                raise
+        finally:
+            if handler_installed:
+                try:
+                    loop.remove_signal_handler(signal.SIGINT)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
 
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
@@ -196,7 +264,20 @@ class OrchestratorREPL:
                 )
             return True
 
-        # Unknown slash command — pass through to orchestrator
+        # #48: a single-token "/word" is the COMMAND namespace — reject unknown ones
+        # deterministically (no LLM turn) instead of letting them fall through to the
+        # orchestrator as chat. Rule: ^/[a-zA-Z0-9_-]+$ — a lone leading-slash token and
+        # nothing else. A bare "/", a path ("/tmp/foo", extra slashes), or "/word ..."
+        # with more text is NOT claimed and falls through to the agent exactly as before.
+        stripped = cmd.strip()
+        if re.fullmatch(r"/[a-zA-Z0-9_-]+", stripped):
+            await self._channel.send_message(
+                f"Unknown command: {stripped} — /help lists commands.",
+                metadata={"style": "system.error"},
+            )
+            return True
+
+        # Not a command — pass through to the orchestrator (natural language / paths).
         return False
 
     # ------------------------------------------------------------------ #
