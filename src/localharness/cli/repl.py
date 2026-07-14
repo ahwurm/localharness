@@ -213,7 +213,16 @@ class OrchestratorREPL:
             return
 
         current = llm.config.model
-        live = await self._live_models(llm.config.base_url)
+        from localharness.cli import model_ops
+        try:
+            live, reachable = await self._live_models(llm.config.base_url)
+        except model_ops.MalformedModelListError:
+            # #38: reached but the reply isn't a model list — its OWN message, not "no models".
+            await self._send_info(
+                f"The server at {llm.config.base_url} responded, but the response wasn't "
+                "understood — is base_url pointing at an OpenAI-compatible API?"
+            )
+            return
         managed = self._harness.server
         downloaded: list[str] = []
         if managed is not None:
@@ -223,7 +232,15 @@ class OrchestratorREPL:
 
         if not arg:
             if not choices:
-                await self._send_info("No models visible at the endpoint or in the local download cache.")
+                # #38: distinguish an unreachable runtime from a reached-but-empty one.
+                if not reachable:
+                    await self._send_info(
+                        f"Could not reach the model server at {llm.config.base_url}. Is it running?"
+                    )
+                else:
+                    await self._send_info(
+                        "No models visible at the endpoint or in the local download cache."
+                    )
                 return
             lines = ["Models:"]
             for i, m in enumerate(live, start=1):
@@ -345,14 +362,15 @@ class OrchestratorREPL:
                 )
         return (" " + " ".join(notes)) if notes else ""
 
-    async def _live_models(self, base_url: str) -> list[str]:
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0)
-                return [m["id"] for m in resp.json().get("data", [])]
-        except Exception:
-            return []
+    async def _live_models(self, base_url: str) -> tuple[list[str], bool]:
+        """Delegate to the shared probe so the REPL and the `localharness model` CLI share ONE
+        failure taxonomy (#38 — this kills the diverged duplicate that had no reachable flag).
+        Returns ``(model_ids, reachable)``; raises MalformedModelListError on a reached-but-wrong
+        body. Off the event loop: the probe blocks (httpx.get, up to ~3s)."""
+        import asyncio
+
+        from localharness.cli import model_ops
+        return await asyncio.to_thread(model_ops.list_live_models, base_url)
 
     async def _persist_default_model(self, model: str) -> None:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
