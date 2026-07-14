@@ -230,6 +230,32 @@ def test_deployed_agent_visible_and_advertised_same_session(components_home, moc
     assert "hn-monitor" in agent_tool.info().description
 
 
+def test_slash_quit_mid_wizard_cancels_creation_not_session(tmp_path, mock_llm_client):
+    """#60: /quit and /exit during an active creation hard-exited the whole session silently
+    (slash handled before the workflow check), while bare 'quit' only cancels the wizard. The
+    slash must first CANCEL the wizard (session alive) and require a SECOND /quit to exit."""
+    channel = ScriptedChannel(["create an agent", "/quit", "/help", "/quit"])
+    repl, orch, agent, bus = _repl(channel, mock_llm_client([]), config_dir=tmp_path)
+
+    asyncio.run(repl.run())  # returns via the SECOND /quit, not the first
+
+    assert any("Agent creation cancelled. /quit again to exit." in m for m in channel.sent)
+    assert orch.active_workflow is None  # wizard cancelled
+    assert any("Available commands" in m for m in channel.sent)  # /help worked -> session was alive
+    agent.run_turn.assert_not_called()
+
+
+def test_slash_exit_mid_wizard_also_cancels(tmp_path, mock_llm_client):
+    """#60: /exit behaves like /quit mid-wizard (cancel first, don't hard-exit)."""
+    channel = ScriptedChannel(["create an agent", "/exit"])
+    repl, orch, agent, bus = _repl(channel, mock_llm_client([]), config_dir=tmp_path)
+
+    asyncio.run(repl.run())  # EOF after /exit cancels + loop reads to exhaustion
+
+    assert any("Agent creation cancelled" in m for m in channel.sent)
+    assert orch.active_workflow is None
+
+
 def test_intent_and_confirm_prompts_advertise_cancel(tmp_path, mock_llm_client):
     """#59(b): the escape word was 4 undocumented exact-matches. Advertise it — the
     ask-description (intent) prompt AND the confirm prompt must mention 'cancel'."""

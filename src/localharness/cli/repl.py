@@ -256,6 +256,17 @@ class OrchestratorREPL:
         cmd_lower = cmd.lower().strip()
 
         if cmd_lower in ("/quit", "/exit"):
+            # #60: mid-wizard, /quit and /exit are handled BEFORE the run-loop's workflow
+            # branch, so they used to hard-exit the whole SESSION silently (while bare 'quit'
+            # only cancels the wizard). Cancel the CREATION first and stay alive; a repeat
+            # /quit (no active workflow now) exits normally.
+            if self._orchestrator.active_workflow is not None:
+                self._orchestrator._active_workflow = None
+                await self._channel.send_message(
+                    "Agent creation cancelled. /quit again to exit.",
+                    metadata={"style": "system.info"},
+                )
+                return True
             raise EOFError()
 
         if cmd_lower == "/help":
