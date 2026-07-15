@@ -1,6 +1,7 @@
 """EditTool: surgical in-place string replacement (avoids full-file rewrites)."""
 import asyncio
-from pathlib import Path
+
+from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
@@ -39,7 +40,7 @@ class EditTool(Tool):
 
     async def _execute(self, path: str, old_string: str, new_string: str,
                        replace_all: bool = False) -> ToolResult:
-        target = Path(path).expanduser().resolve()
+        target = resolve_user_path(path)
 
         forbidden_suffixes = {".env", ".secret", ".token", ".pem", ".key"}
         if target.suffix in forbidden_suffixes or target.name.startswith(".env"):

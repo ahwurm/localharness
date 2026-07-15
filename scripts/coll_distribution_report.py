@@ -667,7 +667,7 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     results = Path(args.results).expanduser().resolve()
     # GUARD (before any output is written): never contaminate the shared bench results dir.
-    if "bench/results" in str(results):
+    if "bench/results" in str(results).replace("\\", "/"):
         print("REFUSED: --results points inside bench/results. The shared bench results dir "
               "is contaminated (project hard rule) — use an isolated dir "
               "(e.g. ~/.localharness/coll-reports/...).", file=sys.stderr)

@@ -522,10 +522,11 @@ def _render_prompt(prompt: str) -> str:
     """Substitute scenario-prompt placeholders. `{FIXTURES}` -> absolute path of bench/fixtures, so a
     scenario can hand load_document a real absolute path to a committed over-window fixture (the tool
     requires an absolute path). bench/ is resolved relative to the repo-root cwd — the same assumption
-    the categories loader already makes (schema.py). No-op when the token is absent."""
+    the categories loader already makes (schema.py). as_posix() form: this text is model-visible, and
+    tools accept forward slashes on Windows too, so the path stays separator-stable cross-platform.
+    No-op when the token is absent."""
     if "{FIXTURES}" in prompt:
-        import os
-        return prompt.replace("{FIXTURES}", os.path.abspath("bench/fixtures"))
+        return prompt.replace("{FIXTURES}", Path("bench/fixtures").resolve().as_posix())
     return prompt
 
 

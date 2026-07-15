@@ -94,7 +94,7 @@ async def detect_provider(
 
 def _build_base_url(port: int) -> str:
     """Return OpenAI-compatible base URL for a port. Always includes /v1."""
-    return f"http://localhost:{port}/v1"
+    return f"http://127.0.0.1:{port}/v1"
 
 
 async def _probe_port(
@@ -104,9 +104,9 @@ async def _probe_port(
 ) -> DetectorResult | None:
     """Attempt a single port probe. Returns None on any failure."""
     if port == 11434:
-        url = f"http://localhost:{port}/api/tags"
+        url = f"http://127.0.0.1:{port}/api/tags"
     else:
-        url = f"http://localhost:{port}/v1/models"
+        url = f"http://127.0.0.1:{port}/v1/models"
 
     try:
         response = await client.get(url, timeout=timeout)

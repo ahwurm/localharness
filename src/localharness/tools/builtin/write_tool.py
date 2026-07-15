@@ -1,6 +1,7 @@
 """WriteTool: Write or overwrite a file."""
 import asyncio
-from pathlib import Path
+
+from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
@@ -41,7 +42,7 @@ class WriteTool(Tool):
         )
 
     async def _execute(self, path: str, content: str, mode: str = "overwrite") -> ToolResult:
-        target = Path(path).expanduser().resolve()
+        target = resolve_user_path(path)
 
         forbidden_suffixes = {".env", ".secret", ".token", ".pem", ".key"}
         if target.suffix in forbidden_suffixes or target.name.startswith(".env"):

@@ -1925,7 +1925,7 @@ async def _run_designed_month(args: argparse.Namespace, results: Path, store_dir
 async def run(args: argparse.Namespace) -> int:
     results = Path(args.results).expanduser().resolve()
     # GUARD (before any output): never contaminate the shared bench results dir.
-    if "bench/results" in str(results):
+    if "bench/results" in str(results).replace("\\", "/"):
         print(
             "REFUSED: --results points inside bench/results (contaminated shared dir). Use an "
             "isolated dir (e.g. ~/.localharness/sema05-reports/...).",
@@ -1933,7 +1933,7 @@ async def run(args: argparse.Namespace) -> int:
         )
         return 2
     # GUARD (minor 9): outputs must never land inside a live agent store either.
-    if "/.localharness/agents/" in str(results):
+    if "/.localharness/agents/" in str(results).replace("\\", "/"):
         print(
             "REFUSED: --results points inside ~/.localharness/agents/ (a live agent store). "
             "Use an isolated dir (e.g. ~/.localharness/sema05-reports/...).",
@@ -1942,7 +1942,7 @@ async def run(args: argparse.Namespace) -> int:
         return 2
     store_dir = Path(args.store).expanduser().resolve()
     # GUARD: the provable MUST use an isolated store — never the live agent store.
-    if "/.localharness/agents/" in str(store_dir):
+    if "/.localharness/agents/" in str(store_dir).replace("\\", "/"):
         print(
             "REFUSED: --store points at a live agent store. The provable runs against an ISOLATED "
             "fresh store; the real trace is copied read-only.",
@@ -1969,7 +1969,7 @@ async def run(args: argparse.Namespace) -> int:
         history_path = Path(args.history).expanduser().resolve()
         # GUARD (minor 9): never point the runner AT the live store's own files — a COPY is
         # required (read-only intent is not enough protection against future edits).
-        if "/.localharness/agents/" in str(history_path):
+        if "/.localharness/agents/" in str(history_path).replace("\\", "/"):
             print(
                 "REFUSED: --history points at a live agent store file. Copy it to a scratch dir "
                 "first (cp ~/.localharness/agents/<agent>/history.jsonl <scratch>/).",
@@ -1983,7 +1983,7 @@ async def run(args: argparse.Namespace) -> int:
             return 1
     else:
         tp = Path(args.trace).expanduser().resolve()
-        if "/.localharness/agents/" in str(tp):  # minor 9: same copy-required rule for traces
+        if "/.localharness/agents/" in str(tp).replace("\\", "/"):  # minor 9: same copy-required rule for traces
             print(
                 "REFUSED: --trace points at a live agent store path. Copy the trace to a scratch "
                 "dir first.",

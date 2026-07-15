@@ -88,7 +88,12 @@ async def test_spine_write_execute_real_file(tool_scenario_corpus, faithful_fake
     token in prose. A model that SAYS HELLO_BENCH_OK with zero tools is the false-positive the
     brief calls out; the on-disk file is not foolable."""
     # 1. Pre-clean the real target so a stale file can't mask a non-dispatching spine.
-    target = pathlib.Path(tool_scenario_corpus["write_target"])  # /tmp/bench_fixtures/hello_bench.py
+    # tmp_path, not tool_scenario_corpus["write_target"]'s fixed "/tmp/bench_fixtures/..." literal:
+    # this test's fake LLM has a SCRIPTED tool_plan (the prompt text never drives path resolution),
+    # and on Windows a driveless "/tmp/..." resolves differently per tool — native Python (write)
+    # anchors it at the CWD drive root, while git-bash (bash_exec) mounts "/tmp" under %TEMP% — so
+    # the write step and the bash_exec step would target two different files.
+    target = tmp_path / "hello_bench.py"
     target.unlink(missing_ok=True)
 
     try:
@@ -100,7 +105,9 @@ async def test_spine_write_execute_real_file(tool_scenario_corpus, faithful_fake
         fake = faithful_fake_llm(
             tool_plan=[
                 ("write", {"path": str(target), "content": "print('HELLO_BENCH_OK')"}),
-                ("bash_exec", {"command": f"python3 {target}"}),
+                # as_posix(): bash treats a raw Windows backslash path as escape chars and mangles
+                # it (unlike the Python file tools, which parse '\' natively via pathlib).
+                ("bash_exec", {"command": f"python3 {target.as_posix()}"}),
             ]
         )
 

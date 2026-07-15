@@ -24,7 +24,7 @@ except ImportError:  # non-POSIX: no cross-process lock, in-process semaphore st
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, ToolCall, ToolSchema
 from localharness.provider.detector import LOCAL_INFERENCE_TIMEOUT_MIN
-from localharness.provider.fn_call import FnCallConverter
+from localharness.provider.fn_call import _TOOL_INJECTION_MARKER, FnCallConverter
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +162,10 @@ _INFERENCE_LOCK_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_LOCK", "1") != 
 # load) run BEFORE the queue: a dead endpoint raises immediately instead of consuming a gate slot
 # and then a doomed wait. Default on; LOCALHARNESS_INFERENCE_PROBE=0 disables (escape hatch).
 _INFERENCE_PROBE_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_PROBE", "1") != "0"
-_PROBE_TIMEOUT_SECONDS = 0.2   # ~200ms connect budget — a healthy local connect is sub-ms
+_PROBE_TIMEOUT_SECONDS = 0.5   # connect budget — a healthy local connect is sub-ms. 0.5s (not
+                                # 0.2s) so a Windows dual-stack "localhost" (getaddrinfo returns
+                                # ::1 before 127.0.0.1) has room for happy-eyeballs to fall through
+                                # to v4 instead of the whole budget being burned on a slow/blocked ::1
 _PROBE_CACHE_TTL_SECONDS = 3.0  # trust a recent SUCCESS this long so the healthy hot path pays once
 _probe_cache: dict[tuple[str, int], float] = {}  # (host, port) -> monotonic ts of last OK connect
 # #62 (b) surface a queue wait once it passes this threshold (one honest INFO, not per poll).
@@ -192,8 +195,12 @@ async def _probe_reachable(host: str, port: int) -> bool:
     if last_ok is not None and (now - last_ok) < _PROBE_CACHE_TTL_SECONDS:
         return True
     try:
+        # happy_eyeballs_delay races v6/v4 per RFC 6555 instead of trying them serially — without
+        # it, a multi-address host (Windows' getaddrinfo('localhost') = ['::1', '127.0.0.1']) can
+        # spend the entire _PROBE_TIMEOUT_SECONDS stuck on a slow/blocked ::1 before ever trying
+        # 127.0.0.1. Never forces AF_INET — remote IPv6-only endpoints still connect over v6.
         _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), _PROBE_TIMEOUT_SECONDS
+            asyncio.open_connection(host, port, happy_eyeballs_delay=0.1), _PROBE_TIMEOUT_SECONDS
         )
     except (OSError, asyncio.TimeoutError):
         return False
@@ -632,16 +639,24 @@ class LLMClient:
         stream: bool,
         disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
-        """Send tools via API for chat-template injection, parse tool calls from text.
+        """Send tools via API for chat-template injection AND fold the XML tool syntax into the
+        system prompt, then parse tool calls from text.
 
-        vLLM injects tools via the model's chat template (e.g. Qwen's native format),
-        producing much better compliance than custom system-prompt injection.
-        Falls back to system-prompt injection if the API rejects the tools param.
+        vLLM injects tools via the model's chat template (e.g. Qwen's native format) when the
+        template supports it, so kwargs["tools"] is kept — harmless when unsupported. But
+        llama.cpp+Gemma-class servers return HTTP 200 while silently dropping an unsupported
+        `tools` param, so relying on kwargs["tools"] alone never told those models a tool exists
+        (the old code only injected the system-prompt syntax on the BadRequestError fallback
+        below, which a silent-drop never triggers). The injection therefore always runs here.
+        Falls back to a `tools`-less request if the API rejects the `tools` param outright.
         Returns (message, usage).
         """
+        injected_messages = self._fold_tool_injection(
+            self._downgrade_history_for_xml(messages), tools
+        )
         kwargs: dict[str, Any] = {
             "model": self.config.model,
-            "messages": list(messages),
+            "messages": injected_messages,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
@@ -659,9 +674,13 @@ class LLMClient:
             async with _inference_gate(self.config):
                 return await self._create_and_consume(kwargs, stream)
         except openai.BadRequestError:
-            # Server rejected the request (e.g. tools param) — fall back to system prompt injection
+            # Server rejected the request (e.g. tools param) — retry without it. injected_messages
+            # already carries the system-prompt injection folded in above, so the fallback's own
+            # injection is a no-op (marker-guarded in _fold_tool_injection — never double-injects).
             log.warning("Server rejected request, falling back to system prompt injection")
-            return await self._complete_xml_fallback(messages, tools, stream, disable_thinking=disable_thinking)
+            return await self._complete_xml_fallback(
+                injected_messages, tools, stream, disable_thinking=disable_thinking
+            )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -672,17 +691,13 @@ class LLMClient:
         stream: bool,
         disable_thinking: bool = False,
     ) -> tuple[Any, Any]:
-        """Legacy fallback: inject tool schemas into system prompt as XML text.
+        """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
+        system-prompt XML injection (a no-op if `messages` already carries it — see
+        _fold_tool_injection).
 
         Returns (message, usage).
         """
-        msgs = list(messages)
-        if tools and self._fn_converter:
-            injection = self._fn_converter.build_system_injection(tools)
-            if injection and msgs and msgs[0].get("role") == "system":
-                msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\n\n" + injection}
-            elif injection:
-                msgs = [{"role": "system", "content": injection}] + msgs
+        msgs = self._fold_tool_injection(self._downgrade_history_for_xml(messages), tools)
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": msgs,
@@ -698,6 +713,71 @@ class LLMClient:
                 return await self._create_and_consume(kwargs, stream)  # #18: honor stream here too
         except Exception as exc:
             raise self._wrap_error(exc) from exc
+
+    def _fold_tool_injection(
+        self, messages: list[Message], tools: list[ToolSchema] | None
+    ) -> list[Message]:
+        """Fold the XML tool-call syntax into the system message: append to its content with a
+        blank line, or insert a new system message if none exists. Always returns a shallow copy
+        (matching kwargs["messages"]'s prior defensive-copy contract), even as a no-op — which
+        happens when there are no tools, no converter, or the marker shows the injection is
+        already present (the guard that keeps _complete_xml -> _complete_xml_fallback from
+        injecting the block twice).
+        """
+        msgs = list(messages)
+        if not tools or not self._fn_converter:
+            return msgs
+        injection = self._fn_converter.build_system_injection(tools)
+        if not injection:
+            return msgs
+        if msgs and msgs[0].get("role") == "system":
+            if _TOOL_INJECTION_MARKER in (msgs[0].get("content") or ""):
+                return msgs
+            msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\n\n" + injection}
+        else:
+            msgs = [{"role": "system", "content": injection}] + msgs
+        return msgs
+
+    def _downgrade_history_for_xml(self, messages: list[Message]) -> list[Message]:
+        """Re-serialize native tool-call history as template-safe text for xml mode.
+
+        The loop records history in native OpenAI form (assistant `tool_calls` fields,
+        `role:"tool"` result messages). Chat templates without tool support (Gemma 3 et al.)
+        hard-reject that shape — llama.cpp 400s with "Conversation roles must alternate" the
+        moment iteration 2 replays the history, and retrying without the `tools` param can't
+        fix a role sequence the template itself refuses to render. So: strip `tool_calls`
+        fields (re-rendering them as the taught XML when the assistant content would otherwise
+        be empty), rewrite tool results as `<tool_response>` text in user role, and merge
+        consecutive same-role turns that a strict-alternation template would reject.
+        Idempotent — a second pass finds nothing to rewrite.
+        """
+        out: list[Message] = []
+        for m in messages:
+            role = m.get("role")
+            if role == "tool":
+                m = {
+                    "role": "user",
+                    "content": f"<tool_response>\n{m.get('content') or ''}\n</tool_response>",
+                }
+            elif role == "assistant" and m.get("tool_calls"):
+                stripped = {k: v for k, v in m.items() if k != "tool_calls"}
+                if not (stripped.get("content") or "").strip():
+                    rendered = "\n".join(
+                        "<tool_call>\n<name>{}</name>\n<parameters>{}</parameters>\n</tool_call>".format(
+                            (c.get("function") or {}).get("name", ""),
+                            (c.get("function") or {}).get("arguments", "{}"),
+                        )
+                        for c in (m.get("tool_calls") or [])
+                        if isinstance(c, dict)
+                    )
+                    stripped["content"] = rendered
+                m = stripped
+            if out and m.get("role") in ("user", "assistant") and out[-1].get("role") == m.get("role"):
+                merged = ((out[-1].get("content") or "") + "\n\n" + (m.get("content") or "")).strip()
+                out[-1] = {**out[-1], "content": merged}
+            else:
+                out.append(dict(m))
+        return out
 
     def _build_xml_system_injection(self, tools: list[ToolSchema]) -> str:
         """Serialize tools as XML schema block."""

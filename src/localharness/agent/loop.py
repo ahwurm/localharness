@@ -885,7 +885,11 @@ class AgentLoop:
                 session.tokens_estimated = True
 
             # 6. Strip thinking tags and push assistant response to session
-            from localharness.provider.fn_call import strip_thinking_tags, has_tool_call_attempt
+            from localharness.provider.fn_call import (
+                strip_thinking_tags,
+                has_tool_call_attempt,
+                truncate_after_last_tool_call,
+            )
             raw_content = getattr(response_message, "content", None)
             # "length" == the completion hit the output-token ceiling (#77); any tool call
             # parsed below is truncated and must not execute (guard at step 8c).
@@ -937,6 +941,15 @@ class AgentLoop:
                 for i in range(len(session.messages) - 1, -1, -1):
                     if session.messages[i].get("role") == "assistant":
                         session.messages[i]["tool_calls"] = tc_dicts
+                        # Cut prose trailing the last call block from the HISTORY copy only
+                        # (the Action event above already carries the full text). Anything the
+                        # model wrote after the call is pre-result speculation; replaying it
+                        # lets the model trust its own fabrication over the real tool result
+                        # next turn (observed live with Gemma-3-4B: invented file contents
+                        # outweighed the actual read result in half of bench runs).
+                        session.messages[i]["content"] = truncate_after_last_tool_call(
+                            session.messages[i].get("content") or ""
+                        )
                         break
 
             # 8c. Output-ceiling truncation guard (#77). A completion cut at the token limit
@@ -985,7 +998,11 @@ class AgentLoop:
                         "role": "user",
                         "content": (
                             "Your tool call could not be parsed. Please use the correct format "
-                            "and try again with your intended tool call."
+                            "and try again with your intended tool call:\n"
+                            "<tool_call>\n"
+                            "<name>tool_name</name>\n"
+                            '<parameters>{"param_name": "value"}</parameters>\n'
+                            "</tool_call>"
                         ),
                     })
                     continue

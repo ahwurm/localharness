@@ -2,9 +2,25 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Recursively replace non-finite floats (inf/-inf/nan — e.g. wilson_ci_95's half_width_pct
+    at p=0) with None. Bare Infinity/NaN are valid Python float literals but NOT valid JSON;
+    json.dumps emits them anyway by default, producing files a strict JSON parser rejects. Used
+    together with json.dumps(..., allow_nan=False), which turns any value this sanitizer missed
+    into a loud ValueError instead of a silent malformed write."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    return value
 
 
 def render_markdown_table(rows: list[dict[str, Any]], headers: list[str]) -> str:
@@ -58,7 +74,9 @@ def write_summary_json(
     }
     summary_path = Path(summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    summary_path.write_text(
+        json.dumps(_sanitize_for_json(payload), indent=2, sort_keys=True, allow_nan=False)
+    )
 
 
 def write_summary_md(

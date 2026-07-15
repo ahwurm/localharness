@@ -1,6 +1,7 @@
 """Managed vLLM server: refarch profiles, config schema, lifecycle, /model plumbing."""
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -97,6 +98,10 @@ def test_serve_command_docker():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
+)
 def test_start_stop_lifecycle(tmp_path):
     cmd = [sys.executable, "-c", "import time; print('up', flush=True); time.sleep(60)"]
     pid = server.start_server(tmp_path, cmd)
@@ -113,6 +118,10 @@ def test_start_stop_lifecycle(tmp_path):
     assert "launch:" in server.log_tail(tmp_path)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
+)
 def test_server_pid_stale_file_cleared(tmp_path):
     server.server_dir(tmp_path).mkdir(parents=True)
     server.pid_path(tmp_path).write_text("999999999")

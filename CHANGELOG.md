@@ -4,6 +4,102 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.8] — 2026-07-15
+
+First live validation of llama.cpp as a provider — Gemma 3 4B QAT Q4_0 on stock
+`ggml-org/llama.cpp` b10025, run on a 4 GB RTX 3050 Ti / 14 GiB RAM Windows 11 laptop.
+The OpenAI-compat transport needed nothing: detection mapped :8080 → llamacpp, `init`
+auto-fitted context from `/props`, and the zero-tool scenario converged 19/19 first try.
+The road from there to a green *tool-using* scenario surfaced one silent failure class
+and a series of Windows onboarding breaks. Headline: in XML fallback mode the model was
+never told its tools exist, and the harness's own metrics could not see that —
+`tool_call_count=0.0`, `parse_failures=0.0`, every tool scenario 0/n, each turn ending as
+a clean "natural completion." Found by one bench run on one machine (n=1); the fixes are
+deterministic mechanisms, no broader reliability claim. First release with the full test
+suite green on Windows (1956 passed, 0 failed).
+
+### Fixed
+- **XML-mode tool schemas no longer depend on the server's chat template**: `_complete_xml`
+  sent tools only via the OpenAI `tools=` param and injected the XML syntax block into the
+  system prompt only after a `BadRequestError`. llama.cpp answers 200 and silently drops
+  `tools=` when the template has no tool block (Gemma 3), so the model free-associated its
+  pretrained ```` ```tool_code ```` convention or fabricated results (observed live:
+  `HELLO_BENCH_OK` "produced" with zero tool calls). The syntax block now folds into the
+  system prompt unconditionally in xml mode, marker-guarded against double-injection;
+  `tools=` is still sent for templates that do support it.
+- **Foreign tool-call attempts now register as parse failures**: `has_tool_call_attempt()`
+  only matched the harness's own taught tags, so an untaught model's genuine attempt
+  (```` ```tool_code ```` fences, bare `{"name": …, "arguments": …}` JSON) read as "no tool
+  calls" and the act-guard accepted the second tool-less reply as natural completion —
+  mechanically `iterations=2.0` on every failing run. Fences and JSON-call shapes now count
+  as attempts, and the ParseFailed nudge includes the concrete expected syntax.
+- **All-failure bench runs no longer "converge"**: `should_stop` blanket-passed
+  `successes==0`, and the Wilson relative half-width at p=0 is Infinity — 0-success
+  scenarios stopped early with `succ=inf%` in the stop reason and bare `Infinity` (invalid
+  JSON) in summary.json. All-failure now samples to max_runs (`— all failures`), non-finite
+  widths render `n/a`, and both summary writers sanitize non-finite floats and dump with
+  `allow_nan=False`.
+- **Endpoint preflight is dual-stack-safe**: Windows resolves `localhost` to
+  `['::1', '127.0.0.1']` and llama.cpp binds IPv4 only; the 200 ms TCP probe could burn its
+  whole budget on ::1 — `doctor` said reachable (httpx fell back to v4) while `bench`
+  refused to queue, same URL. The probe now races address families
+  (`happy_eyeballs_delay=0.1`) inside a 500 ms budget, and detection/bench defaults write
+  `127.0.0.1` instead of `localhost`.
+- **CLI survives non-UTF-8 Windows consoles**: `init`/`doctor` crashed with
+  `UnicodeEncodeError` printing ✓/⚠ under cp1252; stdout/stderr now reconfigure to UTF-8
+  (`errors="replace"`) at entry.
+- **`bash_exec` launches bash on Windows**: shell-mode spawning re-parses the interpreter
+  path, so git-bash under `C:\Program Files\…` split at the space and every command died
+  before bash started; exec-form spawning (`bash -c <command>` as argv) is quote-safe
+  everywhere and semantically identical on POSIX.
+- **Glob tool accepts absolute and `~` patterns**: pathlib rejects non-relative patterns;
+  absolute patterns now split into anchor + relative remainder and glob from the anchor,
+  on any platform and separator style.
+- **doctor's tokenizer check names the real cause**: a 200 response with an unexpected body
+  shape no longer prints "returned 200" as its own failure reason (llama.cpp `/tokenize`
+  and vLLM `/tokenize` branches both).
+- **XML-mode history replay no longer 400s on template-less servers**: the loop records
+  native `role:"tool"` turns and assistant `tool_calls` fields; Gemma-class templates
+  hard-reject that shape ("Conversation roles must alternate"), killing every iteration
+  after the first tool call — and retrying without the `tools` param can't fix a role
+  sequence the template refuses to render. xml mode now downgrades outgoing history: tool
+  results as `<tool_response>` user turns, `tool_calls` stripped (re-rendered as the taught
+  XML when content would be empty), consecutive same-role turns merged. Live rerun:
+  zero server-side 400s.
+- **Post-tool-call fabrication no longer poisons history**: models trail prose after a
+  `<tool_call>` block — invented results written before any result existed — and replaying
+  that lets the model trust its own confabulation over the real tool response (observed:
+  half of single_read runs answered from imaginary file contents). The history copy of an
+  assistant turn is now truncated at its last tool-call block; events keep the full text.
+  Live effect: 20/20 grounded "Apricot." finals, up from ~50%.
+- **Rubric `contains:` matching is case-insensitive**: `contains:apricot` scored a correct
+  "Apricot." as failure. Natural-language containment must not fail on capitalization;
+  case-exact checks remain available via `regex:`.
+- **Native file tools and bash_exec agree where `/tmp` is on Windows**: pathlib anchors
+  `/tmp/...` at `C:\tmp` while git-bash mounts `/tmp` at `%TEMP%`, so `write` and
+  `python3 /tmp/...` operated on two different trees — observed as three identical failing
+  write/exec retry cycles per run while the scenario stayed green (event counts don't check
+  outcomes; caught only by transcript + filesystem forensics). All builtin file tools now
+  map `/tmp/...` to `tempfile.gettempdir()` on Windows; write_execute verified end-to-end
+  with real `HELLO_BENCH_OK` output from a really-executed file.
+
+### Changed
+- **`bench` synthesizes its matrix entry from the live config on provider mismatch**:
+  previously `matrix[0]` ran blindly, so benching a llama.cpp backend meant hand-editing
+  `bench/bench.yaml` and knowing to add `base_url`. When `matrix[0]`'s provider doesn't
+  match the active backend, the entry now comes from `~/.localharness/config.yaml`;
+  `--model` and `--matrix` behavior unchanged.
+- **Bench fixtures auto-stage**: `bench run` stages `tests/fixtures/bench/` to the
+  scenario-visible `/tmp/bench_fixtures` itself — on Windows to both the native `\tmp`
+  resolution and git-bash's `%TEMP%` mount, so Python file tools and `bash_exec` see the
+  same files. The manual-copy instruction is gone from README/CONTRIBUTING.
+
+### Known gaps
+- Managed server lifecycle (`localharness start` spawning/killing the model server) uses
+  POSIX process groups; on Windows it degrades to a clear error instead of a traceback and
+  its tests are skipped. Launching `llama-server` manually is the supported Windows path
+  this release.
+
 ## [0.9.7] — 2026-07-14
 
 Five bugs (#79–#83) found by forensic analysis of a failed live replay session — two of

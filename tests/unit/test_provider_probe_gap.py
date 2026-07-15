@@ -396,3 +396,91 @@ def test_llmconfig_default_mode_is_native():
     from localharness.provider.client import LLMConfig
 
     assert LLMConfig(base_url="x", model="y").tool_call_mode == "native"
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_matrix: synthesize from the ACTIVE config on a provider mismatch. A stale/hand-edited
+# bench.yaml (matrix[0] pins one provider) must not silently bench a provider the harness isn't
+# even running — the same "wrong model/mode" class of bug this file is otherwise about.
+#
+# Relies on the autouse _isolate_localharness_home fixture (conftest.py): every test gets a real,
+# hermetic config.yaml (provider_type=vllm, default_model=test-model) at LOCALHARNESS_HOME, so
+# ConfigLoader() resolves it with no extra mocking.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_matrix_synthesizes_on_provider_mismatch():
+    """matrix[0].provider ('ollama') != the active config's provider (hermetic default: 'vllm')
+    -> _resolve_matrix returns [_synthesize_default_entry()], not the stale matrix[0]."""
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import BenchConfig, MatrixEntry
+
+    config = BenchConfig(
+        corpus_path="bench/scenarios",
+        results_path="bench/results",
+        matrix=[
+            MatrixEntry(
+                name="stale-ollama", provider="ollama", model_id="stale-model",
+                base_url="http://127.0.0.1:11434/v1",
+            )
+        ],
+    )
+
+    result = orch._resolve_matrix(config, matrix=False, models=None)
+
+    assert len(result) == 1
+    assert result[0].provider == "vllm"           # the hermetic ACTIVE config's provider
+    assert result[0].model_id == "test-model"      # the hermetic ACTIVE config's default_model
+    assert result[0].name != "stale-ollama"
+
+
+def test_resolve_matrix_keeps_matrix_entry_when_provider_matches():
+    """matrix[0].provider matches the active provider -> unchanged behavior: the matrix's OWN
+    entry is returned (NOT a re-synthesized one — proves this isn't an unconditional synthesize)."""
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import BenchConfig, MatrixEntry
+
+    entry = MatrixEntry(
+        name="matches-vllm", provider="vllm", model_id="pinned-model",
+        base_url="http://127.0.0.1:8000/v1",
+    )
+    config = BenchConfig(corpus_path="bench/scenarios", results_path="bench/results", matrix=[entry])
+
+    result = orch._resolve_matrix(config, matrix=False, models=None)
+
+    assert result == [entry]
+
+
+def test_resolve_matrix_keeps_entries_when_active_config_unavailable(tmp_path, monkeypatch):
+    """No usable active config (no config.yaml at the resolved home) -> keep current behavior
+    (entries[:1]) rather than crash trying to compare against an unresolvable provider."""
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import BenchConfig, MatrixEntry
+
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(tmp_path))  # empty dir — no config.yaml
+
+    entry = MatrixEntry(
+        name="whatever", provider="vllm", model_id="m", base_url="http://127.0.0.1:8000/v1",
+    )
+    config = BenchConfig(corpus_path="bench/scenarios", results_path="bench/results", matrix=[entry])
+
+    result = orch._resolve_matrix(config, matrix=False, models=None)
+
+    assert result == [entry]
+
+
+def test_resolve_matrix_model_filter_unaffected_by_provider_check():
+    """`--model` name filtering (models= subset) short-circuits before the provider-mismatch
+    check entirely — unchanged behavior, still returns by-name matches regardless of provider."""
+    import localharness.bench.orchestrator as orch
+    from localharness.bench.config import BenchConfig, MatrixEntry
+
+    entries = [
+        MatrixEntry(name="a", provider="ollama", model_id="a-model"),
+        MatrixEntry(name="b", provider="vllm", model_id="b-model", base_url="http://127.0.0.1:8000/v1"),
+    ]
+    config = BenchConfig(corpus_path="bench/scenarios", results_path="bench/results", matrix=entries)
+
+    result = orch._resolve_matrix(config, matrix=False, models=["a"])
+
+    assert result == [entries[0]]

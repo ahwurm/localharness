@@ -124,8 +124,12 @@ def test_success_criteria_evaluate_rubric():
     from localharness.bench.schema import SuccessCriteria
     sc = SuccessCriteria(rubric=["contains:hello", "regex:[Ww]orld"])
     assert sc.evaluate("hello world") is True
-    assert sc.evaluate("HELLO World") is False   # contains: is case-sensitive
+    # contains: is case-INSENSITIVE — a natural-language check must not fail on
+    # capitalization (live: `contains:apricot` scored a correct "Apricot." as failure).
+    # Case-exact matching remains available via regex:.
+    assert sc.evaluate("HELLO World") is True
     assert sc.evaluate("hello") is False           # missing world
+    assert sc.evaluate("hello WORLD") is False     # regex: stays case-sensitive as written
 
 
 def test_success_criteria_evaluate_both_anded():
