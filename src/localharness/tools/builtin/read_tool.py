@@ -1,6 +1,7 @@
 """ReadTool: Read file contents with line numbers."""
 import asyncio
-from pathlib import Path
+
+from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
@@ -41,7 +42,7 @@ class ReadTool(Tool):
         )
 
     async def _execute(self, path: str, offset: int = 1, limit: int = 2000) -> ToolResult:
-        target = Path(path).expanduser().resolve()
+        target = resolve_user_path(path)
         if not target.exists():
             return self.err(f"File not found: {target}", error_type="not_found")
         if target.is_dir():

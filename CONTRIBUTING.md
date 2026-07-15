@@ -11,8 +11,9 @@ uv run localharness validate examples/agents/hn-monitor.yaml   # validates an ag
 ```
 
 The test suite is hermetic and needs no model server. A few bench scenarios read
-fixtures from `/tmp/bench_fixtures/`; pytest stages these automatically from
-`tests/fixtures/bench/`. Live-model tests are opt-in:
+fixtures from `/tmp/bench_fixtures/`; both pytest and `localharness bench run` stage
+these automatically from `tests/fixtures/bench/` — no manual copy needed. Live-model
+tests are opt-in:
 
 ```sh
 LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # needs a local OpenAI-compatible endpoint

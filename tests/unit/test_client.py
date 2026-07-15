@@ -1,4 +1,5 @@
 """Tests for LLMClient (client.py)."""
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -292,3 +293,158 @@ def test_provider_api_error():
 def test_malformed_response_error():
     err = MalformedResponseError("bad response", raw="garbage")
     assert err.raw == "garbage"
+
+
+# ---------------------------------------------------------------------------
+# _complete_xml always folds the tool-call syntax into the system prompt (not only on the
+# BadRequestError fallback) — llama.cpp+Gemma returns HTTP 200 while silently dropping an
+# unsupported `tools` param, so waiting for a 400 never injects for that server.
+# ---------------------------------------------------------------------------
+
+_PROBE_TOOL = {
+    "name": "list_files",
+    "description": "List directory contents",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+
+def _xml_client() -> LLMClient:
+    config = LLMConfig(
+        base_url="http://127.0.0.1:0/v1",
+        model="m",
+        is_local=True,
+        timeout_seconds=300.0,
+        tool_call_mode="xml",
+    )
+    with patch("localharness.provider.client.AsyncOpenAI"):
+        return LLMClient(config)
+
+
+def _ok_response(**_kwargs):
+    msg = SimpleNamespace(content="ok", tool_calls=None)
+    return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_always_injects_tool_syntax_on_200():
+    """A 200 response (tools silently dropped, e.g. llama.cpp+Gemma) must still see the taught
+    XML syntax — injection must not depend on a BadRequestError to fire."""
+    client = _xml_client()
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    await client._complete_xml(
+        messages=[{"role": "system", "content": "sys"}], tools=[_PROBE_TOOL], stream=False
+    )
+
+    sys_msg = captured["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "<tool_call>" in sys_msg["content"]
+    assert "list_files" in sys_msg["content"]
+    assert captured.get("tools")  # kwargs["tools"] is still kept (harmless if supported)
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_inserts_system_message_when_absent():
+    """No system message in the conversation -> one is inserted carrying the injection, rather
+    than silently sending tools with no XML-mode instructions at all."""
+    client = _xml_client()
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    await client._complete_xml(
+        messages=[{"role": "user", "content": "hi"}], tools=[_PROBE_TOOL], stream=False
+    )
+
+    assert captured["messages"][0]["role"] == "system"
+    assert "<tool_call>" in captured["messages"][0]["content"]
+    assert captured["messages"][1] == {"role": "user", "content": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_fallback_does_not_double_inject_after_400():
+    """If the primary XML-mode attempt 400s, the fallback reuses the ALREADY-injected messages —
+    the marker guard in _fold_tool_injection must stop it from appending the block twice."""
+    import openai
+
+    client = _xml_client()
+    calls: list[dict] = []
+
+    async def _spy_create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise openai.BadRequestError(
+                message="tools not supported",
+                response=MagicMock(status_code=400, headers={}),
+                body=None,
+            )
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    await client._complete_xml(
+        messages=[{"role": "system", "content": "sys"}], tools=[_PROBE_TOOL], stream=False
+    )
+
+    assert len(calls) == 2
+    final_sys_content = calls[1]["messages"][0]["content"]
+    assert final_sys_content.count("You have access to the following tools") == 1
+    # The 2nd (fallback) attempt must not resend a `tools` param it already 400'd on.
+    assert "tools" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_downgrades_native_tool_history():
+    """Iteration 2 in xml mode replays history holding native `role:"tool"` messages and
+    assistant `tool_calls` fields. Templates without tool support (Gemma 3) hard-reject that
+    shape ("Conversation roles must alternate"), so the outgoing request must carry text-only
+    alternating roles: tool results as <tool_response> user turns, tool_calls stripped,
+    consecutive same-role turns merged."""
+    client = _xml_client()
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    await client._complete_xml(
+        messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "read the file"},
+            {
+                "role": "assistant",
+                "content": '<tool_call>\n<name>read</name>\n<parameters>{"path": "x"}</parameters>\n</tool_call>',
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path": "x"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "1", "content": "file says apricot"},
+        ],
+        tools=[_PROBE_TOOL],
+        stream=False,
+    )
+
+    roles = [m["role"] for m in captured["messages"]]
+    assert "tool" not in roles
+    assert all("tool_calls" not in m for m in captured["messages"])
+    tool_turn = captured["messages"][-1]
+    assert tool_turn["role"] == "user"
+    assert "<tool_response>" in tool_turn["content"] and "apricot" in tool_turn["content"]
+    body = roles[1:]
+    assert all(a != b for a, b in zip(body, body[1:]))

@@ -397,6 +397,7 @@ async def test_glob_tool_tilde_trailing_double_star_finds_files(tmp_path, monkey
     """#74: a '~/…/**' pattern expands home AND matches files at depth >=1 (the live shape)."""
     import os  # noqa: F401
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' Path.expanduser() prefers this over HOME
     agents = tmp_path / ".localharness" / "agents"
     agents.mkdir(parents=True)
     (agents / "mine.yaml").write_text("name: mine")
@@ -774,7 +775,10 @@ async def test_bash_exec_runs_under_bash_not_dash(tmp_path: Path):
     from localharness.tools.builtin.bash_tool import BashExecTool
 
     tool = BashExecTool()
-    result = await tool.run(command=f"mkdir -p {tmp_path}/{{a,b}}")
+    # as_posix(): a raw Windows str(tmp_path) embeds backslashes that bash strips as escapes,
+    # mangling the target dir; the forward-slash form is what git-bash/MSYS expects and is
+    # identical to str() on POSIX.
+    result = await tool.run(command=f"mkdir -p {tmp_path.as_posix()}/{{a,b}}")
     assert result.success is True
     assert (tmp_path / "a").is_dir()
     assert (tmp_path / "b").is_dir()
@@ -885,6 +889,7 @@ async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
     """Models routinely pass ~ paths (observed live: read + glob both failed on them)."""
     import os
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' Path.expanduser() prefers this over HOME
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "a.txt").write_text("tilde works")
 
@@ -905,3 +910,21 @@ def test_write_tool_description_steers_large_files_to_smaller_writes():
     desc = WriteTool().info().description.lower()
     assert "append" in desc
     assert "output-token" in desc or "cut off" in desc
+
+
+def test_resolve_user_path_maps_posix_tmp_to_os_tempdir():
+    """Windows: `/tmp/...` must land where git-bash mounts /tmp (%TEMP%), not `<drive>\tmp` —
+    otherwise the write tool and bash_exec operate on two different trees (live: write landed
+    C:\tmp, `python3 /tmp/...` under bash couldn't find it, 3 identical retry cycles)."""
+    import os
+    import tempfile
+    from localharness.tools.builtin.paths import resolve_user_path
+
+    if os.name != "nt":
+        import pytest as _pytest
+        _pytest.skip("Windows-only remap; POSIX resolution is pass-through")
+    tmp = Path(tempfile.gettempdir()).resolve()
+    assert resolve_user_path("/tmp/x/y.txt") == tmp / "x" / "y.txt"
+    assert resolve_user_path("/tmp") == tmp
+    assert resolve_user_path("C:/Windows") == Path("C:/Windows").resolve()
+    assert resolve_user_path("some/rel/dir").is_absolute()

@@ -51,15 +51,19 @@ def _load_allowed_categories() -> frozenset[str]:
 # -------------------------------------------------------------------------
 
 def _match_rubric(assertion: str, text: str) -> bool:
-    """Evaluate one rubric assertion against a text. Case-sensitive 'contains' and full regex."""
+    """Evaluate one rubric assertion against a text. Case-insensitive 'contains' (a natural-
+    language check must not fail on capitalization: observed live, `contains:apricot` scoring
+    a correct "Apricot." as failure). Regex stays as written — add (?i) in the pattern for
+    insensitivity there.
+    """
     if assertion.startswith("contains:"):
         needle = assertion[len("contains:"):]
-        return needle in text
+        return needle.lower() in text.lower()
     if assertion.startswith("regex:"):
         pattern = assertion[len("regex:"):]
         return re.search(pattern, text) is not None
-    # Bare strings treated as case-sensitive substring
-    return assertion in text
+    # Bare strings: case-insensitive substring, same rationale as 'contains'
+    return assertion.lower() in text.lower()
 
 
 # -------------------------------------------------------------------------

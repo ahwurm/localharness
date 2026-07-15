@@ -17,8 +17,15 @@ This is the shipped-DEFAULT surface. It is DISTINCT from the sema05 EVAL policy 
 appends its own broader `*docker*`/`*vllm*` denies) covered by
 tests/unit/test_sema05_designed_budget.py::test_root_agent_config_denies_subject_ops_commands.
 """
+import os
+
 import pytest
 from pathlib import Path
+
+# git-bash's `pwd` prints the MSYS mount form (/tmp/...), which never string-matches a
+# Windows Path; `pwd -W` prints the real Windows path with forward slashes, which Path()
+# normalizes. POSIX bash keeps plain `pwd`.
+_PWD = "pwd -W" if os.name == "nt" else "pwd"
 
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, PermissionConfig
@@ -175,9 +182,9 @@ async def test_confined_bash_default_working_dir_is_workspace_root(tmp_path: Pat
     root = tmp_path / "ws"
     root.mkdir()
     tool = BashExecTool(workspace_root=str(root))
-    result = await tool.run(command="pwd", **call_kwargs)
+    result = await tool.run(command=_PWD, **call_kwargs)
     assert result.success is True, f"default working_dir must run confined, got: {result.error}"
-    assert result.output.strip() == str(root.resolve())
+    assert Path(result.output.strip()) == root.resolve()
 
 
 @pytest.mark.asyncio
@@ -189,9 +196,9 @@ async def test_confined_bash_relative_working_dir_anchors_at_root(tmp_path: Path
     root = tmp_path / "ws"
     (root / "sub").mkdir(parents=True)
     tool = BashExecTool(workspace_root=str(root))
-    result = await tool.run(command="pwd", working_dir="sub")
+    result = await tool.run(command=_PWD, working_dir="sub")
     assert result.success is True, f"relative working_dir must anchor at root, got: {result.error}"
-    assert result.output.strip() == str((root / "sub").resolve())
+    assert Path(result.output.strip()) == (root / "sub").resolve()
 
 
 @pytest.mark.asyncio
@@ -217,7 +224,10 @@ async def test_symlink_escape_is_blocked(tmp_path: Path):
     root.mkdir()
     secret = tmp_path / "secret"
     secret.mkdir()
-    (root / "link").symlink_to(secret)  # ws/link -> ../secret
+    try:
+        (root / "link").symlink_to(secret)  # ws/link -> ../secret
+    except OSError as exc:  # Windows: symlink creation needs elevation or Developer Mode
+        pytest.skip(f"cannot create symlinks in this environment: {exc}")
     tool = WriteTool(workspace_root=str(root))
     result = await tool.run(path=str(root / "link" / "escaped.txt"), content="x")
     assert result.success is False

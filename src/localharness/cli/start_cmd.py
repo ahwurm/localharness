@@ -423,7 +423,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 console.print("Managed vLLM is still loading — waiting...")
             await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
             probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
-        except (RuntimeError, TimeoutError) as exc:
+        except (RuntimeError, TimeoutError, OSError) as exc:
+            # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
+            # on Windows a stale pidfile raises a plain OSError instead of ProcessLookupError.
+            # Managed-server lifecycle is POSIX-only for now; degrade to a message, not a traceback.
             err_console.print(f"[bold red]Error:[/bold red] managed vLLM failed to start: {exc}")
     if not probe_ok:
         # #44: name the concrete cause instead of a generic "Cannot reach model" — an unserved

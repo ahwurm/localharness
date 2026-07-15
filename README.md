@@ -119,7 +119,7 @@ uv run pytest                                          # hermetic — no model s
 LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # opt-in tests against a live endpoint
 ```
 
-Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. pytest stages these automatically from `tests/fixtures/bench/`; before standalone `bench run` invocations, run the test suite once or copy that directory there yourself.
+Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytest` and `localharness bench run` stage these automatically from `tests/fixtures/bench/`, so no manual copy step is needed from a repo checkout.
 
 ## Reference architectures
 

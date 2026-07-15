@@ -202,6 +202,36 @@ def test_has_tool_call_attempt():
     assert has_tool_call_attempt("") is False
 
 
+def test_has_tool_call_attempt_fenced_tool_code():
+    """Gemma-style ```tool_code fence (Python-call syntax, never taught to the model) must still
+    register as an attempted call, not silently read as 'no tool call intended'."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = '```tool_code\nlist_files(path="/tmp")\n```'
+    assert has_tool_call_attempt(text) is True
+
+
+def test_has_tool_call_attempt_bare_json_name_arguments():
+    """Bare inline JSON shaped like a call (no fence, no <tool_call> wrapper) must register."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = 'Sure: {"name": "get_weather", "arguments": {"city": "SF"}}'
+    assert has_tool_call_attempt(text) is True
+
+
+def test_has_tool_call_attempt_fenced_json_call_shape():
+    """A ```json fence whose body looks like a call (name + parameters) counts too."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = '```json\n{"name": "grep", "parameters": {"pattern": "x"}}\n```'
+    assert has_tool_call_attempt(text) is True
+
+
+def test_has_tool_call_attempt_plain_json_fence_not_flagged():
+    """A ```json fence with no call shape (e.g. a final JSON answer) must NOT be flagged — only
+    fences that look like a call attempt count, keeping this heuristic from over-firing."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = '```json\n{"summary": "done", "count": 3}\n```'
+    assert has_tool_call_attempt(text) is False
+
+
 # ---------------------------------------------------------------------------
 # Permissive XML parsing
 # ---------------------------------------------------------------------------
@@ -485,3 +515,34 @@ def test_prepass_noop_on_balanced_multi_call(converter: FnCallConverter):
     )
     assert _drop_spurious_toolcall_closers(text) == text
     assert len(converter.extract_tool_calls(text)) == 2
+
+
+def test_truncate_after_last_tool_call_drops_trailing_prose():
+    text = (
+        "Pulling the data…\n<tool_call>\n<name>read</name>\n"
+        '<parameters>{"path": "x"}</parameters>\n</tool_call>\n'
+        "The file contains apples and bananas."  # pre-result fabrication
+    )
+    from localharness.provider.fn_call import truncate_after_last_tool_call
+    out = truncate_after_last_tool_call(text)
+    assert out.endswith("</tool_call>")
+    assert "apples" not in out
+    assert "<name>read</name>" in out
+
+
+def test_truncate_after_last_tool_call_keeps_multi_call_blocks():
+    from localharness.provider.fn_call import truncate_after_last_tool_call
+    text = (
+        "<tool_call>\n<name>a</name>\n<parameters>{}</parameters>\n</tool_call>\n"
+        "between\n"
+        "<tool_call>\n<name>b</name>\n<parameters>{}</parameters>\n</tool_call>\ntail"
+    )
+    out = truncate_after_last_tool_call(text)
+    assert out.count("<tool_call>") == 2
+    assert "between" in out and not out.endswith("tail")
+
+
+def test_truncate_after_last_tool_call_no_block_is_noop():
+    from localharness.provider.fn_call import truncate_after_last_tool_call
+    assert truncate_after_last_tool_call("plain answer") == "plain answer"
+    assert truncate_after_last_tool_call("") == ""

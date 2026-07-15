@@ -219,16 +219,23 @@ def doctor(
             elif provider_type == "llamacpp":
                 try:
                     tk = httpx.post(f"{root}/tokenize", json={"content": "token"}, timeout=5.0)
-                    if tk.status_code == 200 and isinstance(tk.json().get("tokens"), list):
-                        console.print(
-                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts (llama.cpp)"
-                        )
-                    else:
+                    if tk.status_code != 200:
                         console.print(
                             f"{_FAIL} llama.cpp /tokenize returned {tk.status_code} — token "
                             f"accounting falls back to tiktoken cl100k (approximate)."
                         )
                         failures.append("tokenize-unreachable")
+                    elif not isinstance(tk.json().get("tokens"), list):
+                        console.print(
+                            f"{_FAIL} llama.cpp /tokenize returned 200 but no 'tokens' list in "
+                            f"body — unexpected response shape; token accounting falls back to "
+                            f"tiktoken cl100k."
+                        )
+                        failures.append("tokenize-unreachable")
+                    else:
+                        console.print(
+                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts (llama.cpp)"
+                        )
                 except Exception:
                     console.print(
                         f"{_FAIL} llama.cpp /tokenize unreachable at {root}/tokenize — token "
@@ -242,14 +249,20 @@ def doctor(
                         json={"model": default_model, "prompt": "token"},
                         timeout=5.0,
                     )
-                    if tk.status_code == 200 and "count" in tk.json():
-                        console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
-                    else:
+                    if tk.status_code != 200:
                         console.print(
                             f"{_FAIL} /tokenize returned {tk.status_code} — token accounting "
                             f"falls back to tiktoken cl100k (inaccurate for non-cl100k models)."
                         )
                         failures.append("tokenize-unreachable")
+                    elif "count" not in tk.json():
+                        console.print(
+                            f"{_FAIL} /tokenize returned 200 but no 'count' in body — unexpected "
+                            f"response shape; token accounting falls back to tiktoken cl100k."
+                        )
+                        failures.append("tokenize-unreachable")
+                    else:
+                        console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
                 except Exception:
                     console.print(
                         f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "

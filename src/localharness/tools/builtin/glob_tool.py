@@ -1,6 +1,8 @@
 """GlobTool: Find files matching a glob pattern."""
 from pathlib import Path
 
+from localharness.tools.builtin.paths import resolve_user_path
+
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 
@@ -46,11 +48,17 @@ class GlobTool(Tool):
         # Models routinely pass ~ or absolute patterns (observed live) — normalize both.
         if pattern.startswith("~"):
             pattern = str(Path(pattern).expanduser())
-        if pattern.startswith("/"):
-            base = Path("/")
-            pattern = pattern.lstrip("/")
+        anchor = Path(pattern).anchor
+        if anchor:
+            # pathlib's Path.glob() rejects non-relative patterns outright ("Non-relative
+            # patterns are unsupported"), so split off the absolute anchor (POSIX '/', or a
+            # Windows drive like 'C:\\') and glob the remainder relative to it. Path(...).parts
+            # normalizes '\\' vs '/' for us, so this covers POSIX '/…', Windows 'C:\\…', and
+            # even mixed separators (e.g. an f-string gluing a WindowsPath to a literal '/**').
+            base = Path(anchor)
+            pattern = "/".join(Path(pattern).parts[1:])
         else:
-            base = Path(base_dir).expanduser().resolve()
+            base = resolve_user_path(base_dir)
         if not base.exists():
             return self.err(f"base_dir does not exist: {base}")
         # pathlib's Path.glob() yields DIRECTORIES ONLY for a trailing bare '**' (issue #74:

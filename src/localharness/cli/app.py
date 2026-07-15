@@ -1,4 +1,5 @@
 """LocalHarness CLI entry point."""
+import sys
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 import typer
@@ -68,4 +69,13 @@ def _root(
 
 def main() -> None:
     """Entry point registered in pyproject.toml."""
+    # Windows consoles commonly default to a legacy codepage even though our output (doctor's
+    # checkmarks, rich's box-drawing) is UTF-8 — reconfigure so it doesn't UnicodeEncodeError.
+    # Best-effort: some stream wrappers (pytest capture, certain redirects) lack reconfigure.
+    try:
+        for s in (sys.stdout, sys.stderr):
+            if hasattr(s, "reconfigure"):
+                s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     app()

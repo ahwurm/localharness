@@ -29,7 +29,7 @@ from localharness.bench.config import (
     SamplingConfig,
     load_bench_config,
 )
-from localharness.bench.report import write_summary_json, write_summary_md
+from localharness.bench.report import _sanitize_for_json, write_summary_json, write_summary_md
 from localharness.bench.runner import accumulate_runs
 from localharness.bench.schema import ScenarioSpec, load_scenario
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
@@ -78,8 +78,8 @@ def _filter_scenarios_by_slice(scenarios: list[ScenarioSpec], slice_: str) -> li
 # a different model family is a config change, not a code change.
 _DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://127.0.0.1:11434/v1",
-    "vllm": "http://localhost:8000/v1",
-    "llamacpp": "http://localhost:8080/v1",
+    "vllm": "http://127.0.0.1:8000/v1",
+    "llamacpp": "http://127.0.0.1:8080/v1",
 }
 
 
@@ -213,7 +213,9 @@ async def _run_one_model(
             },
         }
         model_summary_json.parent.mkdir(parents=True, exist_ok=True)
-        model_summary_json.write_text(_json.dumps(rollup, indent=2, sort_keys=True))
+        model_summary_json.write_text(
+            _json.dumps(_sanitize_for_json(rollup), indent=2, sort_keys=True, allow_nan=False)
+        )
 
     return runs_executed
 
@@ -258,6 +260,22 @@ def _resolve_matrix(
         entries = [m for m in entries if m.name in models]
         return entries
     if not matrix:
+        # Default single-backend mode: entries[0] is SUPPOSED to be the current backend, but a
+        # stale/hand-edited bench.yaml can drift from it (e.g. matrix[0] pins vllm while the
+        # active config now points at ollama). Compare against the ACTUAL active provider — the
+        # same HarnessConfig source _synthesize_default_entry() reads — and synthesize from it
+        # instead of silently benching a model/provider the harness isn't even running.
+        try:
+            from localharness.config.loader import ConfigLoader
+            active_provider = ConfigLoader().load_harness().provider.provider_type
+        except Exception:
+            active_provider = None  # active config unavailable — keep current behavior below
+        if active_provider is not None and entries[0].provider != active_provider:
+            log.info(
+                "matrix_entry_provider_mismatch configured=%s active=%s — synthesizing from active config",
+                entries[0].provider, active_provider,
+            )
+            return [_synthesize_default_entry()]
         return entries[:1]
     return entries
 

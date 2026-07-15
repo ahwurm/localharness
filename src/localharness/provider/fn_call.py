@@ -28,11 +28,61 @@ def strip_thinking_tags(text: str) -> str:
     return text.lstrip()
 
 
+def truncate_after_last_tool_call(text: str) -> str:
+    """Drop prose trailing the last tool-call block.
+
+    Text a model writes AFTER a tool call is speculation by construction — no result existed
+    yet (observed live: a 4B model narrating invented file contents after its <tool_call>,
+    then trusting that narration over the real tool result on the next turn). Intended for the
+    HISTORY copy of an assistant turn only; the event stream keeps the full text. Returns the
+    text unchanged when no closing tag is present.
+    """
+    if not text:
+        return text
+    end = -1
+    for marker in ("</tool_call>", "</function>"):
+        idx = text.rfind(marker)
+        if idx != -1:
+            end = max(end, idx + len(marker))
+    return text[:end] if end != -1 else text
+
+
+# Untaught tool-call conventions a model may reach for despite never being taught the harness's
+# XML syntax (Gemma's ```tool_code fences are the observed case on llama.cpp) — recognized so a
+# parse failure is nudged with the correct format instead of silently reading as "no tool call
+# intended" (which leaves parse_failures at 0 and hides the miss).
+_FENCED_BLOCK_PATTERN = re.compile(
+    r"```(?:tool_code|tool_call|json)\b(.*?)(?:```|\Z)", re.DOTALL | re.IGNORECASE,
+)
+# Cheap "looks like a call" body check for a fenced block above: a bareword call (Gemma's
+# tool_code fence is Python-call-style, e.g. list_files(path="/tmp")) or a JSON "name" key. No
+# specific verb/tool name required — the fence tag itself is already the strong signal.
+_FENCED_CALL_BODY_PATTERN = re.compile(r'\b[a-zA-Z_]\w*\s*\(|"name"\s*:')
+# Bare inline JSON call shape (no fence needed): "name" co-occurring with "arguments"/"parameters"
+# within 200 chars of each other, either key order.
+_JSON_CALL_SHAPE_PATTERN = re.compile(
+    r'"name"\s*:\s*"[^"]*".{0,200}?"(?:arguments|parameters)"\s*:'
+    r'|"(?:arguments|parameters)"\s*:.{0,200}?"name"\s*:\s*"[^"]*"',
+    re.DOTALL,
+)
+
+
 def has_tool_call_attempt(text: str) -> bool:
-    """Check if text contains what looks like an attempted tool call."""
+    """Check if text contains what looks like an attempted tool call.
+
+    Recognizes the harness's taught XML syntax (<tool_call>, <function=...><parameter=...>) AND
+    untaught-but-plausible conventions a model may reach for anyway: a fenced ```tool_code/
+    ```tool_call/```json block whose body looks like a call, or bare inline JSON shaped like
+    {"name": ..., "arguments"/"parameters": ...}.
+    """
     if not text:
         return False
-    return "<tool_call" in text or ("<function=" in text and "<parameter=" in text)
+    if "<tool_call" in text or ("<function=" in text and "<parameter=" in text):
+        return True
+    for body in _FENCED_BLOCK_PATTERN.findall(text):
+        if _FENCED_CALL_BODY_PATTERN.search(body):
+            return True
+    return bool(_JSON_CALL_SHAPE_PATTERN.search(text))
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +168,12 @@ def _drop_spurious_toolcall_closers(text: str) -> str:
 # tool call parser per family instead of the current try-all-formats chain.
 # This would eliminate wasted regex passes and allow family-specific prompt
 # injection (e.g. Hermes JSON for Qwen 3 base, XML params for Qwen 3.6 Coder).
+
+
+# Stable prefix of build_system_injection's output — client.py's XML-mode injection fold checks
+# for this marker to detect "already injected" and avoid appending the tool-syntax block twice
+# when _complete_xml's BadRequestError fallback reuses already-injected messages.
+_TOOL_INJECTION_MARKER = "You have access to the following tools. To call a tool, output a tool_call XML block"
 
 
 class FnCallConverter:
@@ -228,7 +284,7 @@ class FnCallConverter:
 
         tool_xml = "\n".join(self.schema_to_xml_tool(t) for t in tools)
         return (
-            "You have access to the following tools. To call a tool, output a tool_call XML block\n"
+            f"{_TOOL_INJECTION_MARKER}\n"
             "exactly as shown. Only output tool_call blocks — do not describe tool calls in prose.\n\n"
             f"<tools>\n{tool_xml}\n</tools>\n\n"
             "To call a tool:\n"

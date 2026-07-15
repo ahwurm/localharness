@@ -3,6 +3,8 @@ import asyncio
 import shutil
 from pathlib import Path
 
+from localharness.tools.builtin.paths import resolve_user_path
+
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 
@@ -56,7 +58,7 @@ class BashExecTool(Tool):
         if self.workspace_root is not None and not Path(working_dir).is_absolute():
             cwd = (Path(self.workspace_root).expanduser().resolve() / working_dir).resolve()
         else:
-            cwd = Path(working_dir).resolve()
+            cwd = resolve_user_path(working_dir)
         if (denied := self._outside_workspace(cwd)) is not None:
             return denied
         if not cwd.exists():
@@ -64,15 +66,19 @@ class BashExecTool(Tool):
 
         timeout = min(timeout_s, 300.0)
         try:
-            proc = await asyncio.create_subprocess_shell(
+            # exec form, not create_subprocess_shell: shell mode defaults to /bin/sh (dash on
+            # Ubuntu), which lacks brace expansion, `[[ ]]`, arrays, etc. — a "bash_exec" tool
+            # must actually run bash so the model's bashisms behave as written. And on Windows,
+            # shell mode re-parses the interpreter path, so a git-bash install under
+            # "C:\Program Files\..." splits at the space and never launches; exec + explicit
+            # `-c` passes the path as one argv entry on every platform.
+            proc = await asyncio.create_subprocess_exec(
+                shutil.which("bash") or "/bin/bash",
+                "-c",
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                # create_subprocess_shell defaults to /bin/sh (dash on Ubuntu), which lacks
-                # brace expansion, `[[ ]]`, arrays, etc. — a "bash_exec" tool must actually
-                # run bash so the model's bashisms behave as written.
-                executable=shutil.which("bash") or "/bin/bash",
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

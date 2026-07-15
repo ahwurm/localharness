@@ -27,6 +27,43 @@ bench_app = typer.Typer(
 log = logging.getLogger(__name__)
 
 
+def _locate_fixture_source() -> Optional[Path]:
+    """Resolve tests/fixtures/bench relative to a repo checkout — the source `bench run`
+    auto-stages from. Tries importlib.resources first (covers an editable/dev install, where the
+    installed package IS the repo's src/localharness) then falls back to a path relative to this
+    file. Returns None for a plain installed package — that source tree isn't shipped in the wheel.
+    """
+    candidates: list[Path] = []
+    try:
+        import importlib.resources as _resources
+        pkg_root = Path(str(_resources.files("localharness"))).resolve()
+        candidates.append(pkg_root.parents[1] / "tests" / "fixtures" / "bench")
+    except Exception:
+        pass
+    candidates.append(Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "bench")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _auto_stage_bench_fixtures() -> None:
+    """Best-effort: stage tests/fixtures/bench/* into /tmp/bench_fixtures (+ %TEMP%/bench_fixtures
+    on Windows) before a bench run, so scenarios that hardcode that path (e.g.
+    02_single_read.yaml) find their data without running the test suite first. Never blocks the
+    bench run — a missing source (installed-package case) or any staging failure only warns.
+    """
+    source = _locate_fixture_source()
+    if source is None:
+        log.warning("bench fixture source (tests/fixtures/bench) not found — skipping auto-stage")
+        return
+    try:
+        from localharness.bench.fixtures import stage_bench_fixtures
+        stage_bench_fixtures(source)
+    except Exception:
+        log.warning("bench fixture auto-stage failed", exc_info=True)
+
+
 @bench_app.callback(invoke_without_command=True)
 def bench_default(
     ctx: typer.Context,
@@ -113,6 +150,10 @@ def bench_default(
         else:
             typer.echo(msg, err=True)
         raise typer.Exit(code=2)
+
+    # Scenario prompts hardcode /tmp/bench_fixtures/... (that text must stay literal), so a
+    # standalone `bench run` needs the same staging pytest does before those scenarios can pass.
+    _auto_stage_bench_fixtures()
 
     exit_code = asyncio.run(
         run_bench(

@@ -439,8 +439,9 @@ def test_render_prompt_substitutes_fixtures_token():
 
     rendered = bench_runner._render_prompt("load {FIXTURES}/over_window_federalist.txt now")
     assert "{FIXTURES}" not in rendered
-    assert os.path.isabs(rendered.split("load ", 1)[1].split("/over_window")[0])
-    assert rendered.endswith("bench/fixtures/over_window_federalist.txt now")
+    normalized = rendered.replace("\\", "/")  # separator-agnostic regardless of platform path form
+    assert os.path.isabs(normalized.split("load ", 1)[1].split("/over_window")[0])
+    assert normalized.endswith("bench/fixtures/over_window_federalist.txt now")
     assert bench_runner._render_prompt("no token here") == "no token here"
 
 

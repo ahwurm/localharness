@@ -345,8 +345,10 @@ async def test_parallel_probing():
 def test_all_base_urls_include_v1():
     """All providers use /v1 suffix for OpenAI-compat API."""
     from localharness.provider.detector import _build_base_url
-    assert _build_base_url(11434) == "http://localhost:11434/v1"
-    assert _build_base_url(8000) == "http://localhost:8000/v1"
+    # 127.0.0.1, not 'localhost': Windows' dual-stack getaddrinfo('localhost') can resolve ::1
+    # first, and a synthesized base_url must not depend on IPv6 happy-eyeballs to connect fast.
+    assert _build_base_url(11434) == "http://127.0.0.1:11434/v1"
+    assert _build_base_url(8000) == "http://127.0.0.1:8000/v1"
 
 
 def test_default_ports_constant():

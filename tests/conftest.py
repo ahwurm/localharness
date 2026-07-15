@@ -1,6 +1,5 @@
 import logging
 import os
-import shutil
 import pytest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,29 +242,18 @@ _BENCH_FIXTURE_STAGED = Path("/tmp/bench_fixtures")
 
 @pytest.fixture(scope="session", autouse=True)
 def bench_fixtures_staged():
-    """Stage non-YAML fixture data from tests/fixtures/bench/ to /tmp/bench_fixtures/.
+    """Stage non-YAML fixture data from tests/fixtures/bench/ to /tmp/bench_fixtures/ (and, on
+    Windows, also under %TEMP%/bench_fixtures for git-bash-driven scenario steps) via the shared
+    stage_bench_fixtures helper — the SAME staging `localharness bench run` performs (bench_cmd.py),
+    so scenario-authored /tmp/bench_fixtures/<file> paths behave identically under pytest and a
+    standalone bench invocation.
 
-    Used by bench/scenarios/02_single_read.yaml, 05_file_exploration.yaml (and
-    future fixtures) which reference an absolute /tmp/bench_fixtures/<file>
-    path so the agent loop's tools can find them at scenario-run time without
-    dynamic-path injection.
-
-    Recursively copies subdirectories (e.g. exploration_root/) so multi-file
-    fixture trees stage cleanly. memory_seed.db and other binary data files
-    are copied as-is by the non-yaml suffix filter.
+    Used by bench/scenarios/02_single_read.yaml, 05_file_exploration.yaml (and future fixtures)
+    which reference that absolute path so the agent loop's tools can find them at scenario-run
+    time without dynamic-path injection.
     """
-    _BENCH_FIXTURE_STAGED.mkdir(parents=True, exist_ok=True)
-    if _BENCH_FIXTURE_SOURCE.exists():
-        for src in _BENCH_FIXTURE_SOURCE.iterdir():
-            if src.suffix == ".yaml":
-                continue
-            dst = _BENCH_FIXTURE_STAGED / src.name
-            if src.is_dir():
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            elif src.is_file():
-                shutil.copy2(src, dst)
+    from localharness.bench.fixtures import stage_bench_fixtures
+    stage_bench_fixtures(_BENCH_FIXTURE_SOURCE)
     yield _BENCH_FIXTURE_STAGED
     # No teardown — /tmp is volatile; leaving the file present lets manual
     # bench runs after the test suite still find it.

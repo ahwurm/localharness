@@ -185,6 +185,13 @@ def metrics_summary(samples: list[Any]) -> dict[str, dict]:
 # should_stop — sequential adaptive sampling stopping rule
 # -------------------------------------------------------------------------
 
+def _fmt_pct(value: float) -> str:
+    """Render a CI half-width percentage for a stop-reason string. half_width_pct is inf at the
+    Wilson/Student's-t degenerate cases (p=0 or n<2) — 'n/a' reads honestly there; a bare 'inf%'
+    does not."""
+    return f"{value:.1f}%" if math.isfinite(value) else "n/a"
+
+
 def should_stop(samples: list[Any], tolerance: float, min_runs: int, max_runs: int) -> tuple[bool, str]:
     """Decide whether to stop sampling.
 
@@ -200,20 +207,21 @@ def should_stop(samples: list[Any], tolerance: float, min_runs: int, max_runs: i
     n = len(samples)
     if n < min_runs:
         return (False, f"need_min_runs ({n}/{min_runs})")
-    if n >= max_runs:
-        return (True, f"max_runs_hit ({n})")
-    lat_ci = continuous_ci_95([float(_field(s, "latency_total")) for s in samples])
     successes = sum(1 for s in samples if bool(_field(s, "success")))
+    if n >= max_runs:
+        suffix = " — all failures" if successes == 0 else ""
+        return (True, f"max_runs_hit ({n}){suffix}")
+    lat_ci = continuous_ci_95([float(_field(s, "latency_total")) for s in samples])
     succ_ci = wilson_ci_95(successes, n)
     tol_pct = tolerance * 100.0
     lat_ok = lat_ci.half_width_pct <= tol_pct
-    # Extreme proportions (all-success or all-failure) have unbounded relative half-width
-    # on the Wilson interval but a structurally unambiguous estimate at n >= min_runs.
-    # Treat them as converged on the success_rate axis once we cleared the min_runs floor.
-    if successes == 0 or successes == n:
-        succ_ok = True
-    else:
-        succ_ok = succ_ci.half_width_pct <= tol_pct
+    # Unanimous SUCCESS has unbounded relative half-width on the Wilson interval but a
+    # structurally unambiguous estimate at n >= min_runs — treat it as converged on the
+    # success_rate axis. Unanimous FAILURE must NOT auto-converge: a 0% success rate is exactly
+    # the signal sequential sampling exists to catch, and wilson_ci_95(0, n)'s half_width_pct is
+    # always inf (p=0), so succ_ok naturally stays False here and sampling continues to max_runs
+    # (see the "— all failures" suffix above) instead of stopping the moment min_runs clears.
+    succ_ok = True if successes == n else succ_ci.half_width_pct <= tol_pct
     if lat_ok and succ_ok:
-        return (True, f"converged (n={n}, lat={lat_ci.half_width_pct:.1f}%, succ={succ_ci.half_width_pct:.1f}%)")
-    return (False, f"not_converged (lat={lat_ci.half_width_pct:.1f}%, succ={succ_ci.half_width_pct:.1f}%, target={tol_pct:.1f}%)")
+        return (True, f"converged (n={n}, lat={_fmt_pct(lat_ci.half_width_pct)}, succ={_fmt_pct(succ_ci.half_width_pct)})")
+    return (False, f"not_converged (lat={_fmt_pct(lat_ci.half_width_pct)}, succ={_fmt_pct(succ_ci.half_width_pct)}, target={tol_pct:.1f}%)")
