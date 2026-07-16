@@ -362,10 +362,15 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             role=f"Bench harness execution for scenario {scenario.name}",
             permissions=PermissionConfig(
                 budget=BudgetConfig(
-                    # max_tool_calls (limits) acts as a ceiling on dispatch; take the
-                    # tighter of the two caps so both budget.max_actions and
-                    # limits.max_tool_calls are enforced by the real loop.
-                    max_actions=max(1, min(scenario.budget.max_actions, scenario.limits.max_tool_calls)),
+                    # max_actions is ONLY the iteration floor (BudgetConfig.max_actions is
+                    # ge=1 — the loop must always get its first LLM round-trip). The real
+                    # tool-DISPATCH ceiling is max_tool_calls below, which — unlike
+                    # max_actions — may legitimately be 0 (FIX 3: previously the two were
+                    # conflated via max(1, min(...)), silently upgrading an explicit
+                    # limits.max_tool_calls=0 to 1, so the model got one tool call it was
+                    # never allowed and then died budget_exceeded before it could answer).
+                    max_actions=max(1, scenario.budget.max_actions),
+                    max_tool_calls=scenario.limits.max_tool_calls,
                     max_duration_minutes=scenario.budget.max_duration_minutes,
                 ),
             ),
@@ -402,11 +407,32 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         llm_summarize_fn=make_compaction_summarize_fn(llm_client),  # shared, tuple-unpack tested
         compact_md_path=None,
     )
+    # FIX 2: clamp the scenario's aspirational context budget to the machine's REAL served
+    # window. scenario.budget.max_context_tokens is an authoring-time number (e.g. 32000); the
+    # live ceiling is org.context.max_context_tokens in ~/.localharness/config.yaml (e.g. 8192
+    # on a small local box). Observed live: an over-ceiling prompt passed the compaction
+    # pre-flight (which only ever saw the scenario's number) and then 400'd at the server
+    # ("exceeds the available context size"), with zero CompactionTriggered events. Same
+    # best-effort config-loading idiom as orchestrator.py's _synthesize_default_entry: keep the
+    # scenario value unclamped if no config is loadable (e.g. under test).
+    effective_max_context_tokens = scenario.budget.max_context_tokens
+    try:
+        from localharness.config.loader import ConfigLoader
+        org_ceiling = ConfigLoader().load_harness().org.context.max_context_tokens
+    except Exception:
+        org_ceiling = None
+    if org_ceiling is not None and org_ceiling < effective_max_context_tokens:
+        log.info(
+            "context_ceiling_clamped scenario=%s scenario_value=%d org_value=%d",
+            scenario.name, effective_max_context_tokens, org_ceiling,
+        )
+        effective_max_context_tokens = org_ceiling
+
     # eviction_store only when the scenario can RESTORE an evicted stub (has tool_result_get) — a
     # context that cannot re-pull must not stub bodies it could never recover (context.py:687-690).
     can_restore = "tool_result_get" in (scenario.tools_allowed or [])
     ctx_manager = ContextManager(
-        max_context_tokens=scenario.budget.max_context_tokens,
+        max_context_tokens=effective_max_context_tokens,
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
         pipeline=bench_pipeline,
@@ -460,10 +486,11 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             # session_id is fixed for a bench run (no per-turn re-keying), so a constant getter matches
             # the live path's late-read lambda without a not-yet-built loop reference.
             get_parent_session_id=lambda: session_id,
-            # Children inherit the bench's exact /tokenize counter + the scenario's declared window so
-            # the cruncher's chunk sizing (_cruncher_chunk_chars) tracks the scenario, not bare defaults.
+            # Children inherit the bench's exact /tokenize counter + the scenario's declared window
+            # (FIX 2: already clamped to the org ceiling above) so the cruncher's chunk sizing
+            # (_cruncher_chunk_chars) tracks the REAL served window, not an aspirational one.
             token_counter=token_counter,
-            max_context_tokens=scenario.budget.max_context_tokens,
+            max_context_tokens=effective_max_context_tokens,
             depth=0,
             available_agents=_bench_agents,
             parent_store=bench_store,
@@ -484,17 +511,24 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         memory_loader = await _seed_memory_store(agent_config.name, seeds)
 
     if memory_loader is not None:
-        # SESS-06 parity (v2.0 audit): production registers all three memory tools
-        # whenever a store exists (start_cmd critic M5); bench agents previously got
-        # memory INJECTION but no memory tools — write-only memory in scored runs.
-        # Registration rides with the store (AFTER from_allowed), NOT with
-        # scenario.tools_allowed (which whitelists capabilities under test).
+        # SESS-06 parity (v2.0 audit): production registers all three memory tools whenever a
+        # store exists (start_cmd critic M5). FIX 4: registration used to ride with the store
+        # alone (AFTER from_allowed), deliberately bypassing scenario.tools_allowed — but []
+        # means "pure-LLM, no tools" (bench/schema.py ScenarioSpec.tools_allowed docstring),
+        # and memory_recall/stateful_behavior_* declare exactly that to test PURE
+        # system-prompt recall, yet got live tools anyway. Gate each tool on its OWN name
+        # being explicitly allowed; the seeded store itself (above) is untouched — load_context()
+        # still injects the seeded facts into the system prompt regardless of tool registration.
         from localharness.tools.builtin.memory_tools import (
             MemoryGetTool, MemoryRememberTool, MemorySearchTool,
         )
-        await tool_registry.register(MemorySearchTool(memory_loader), scope="global")
-        await tool_registry.register(MemoryGetTool(memory_loader), scope="global")
-        await tool_registry.register(MemoryRememberTool(memory_loader), scope="global")
+        allowed = scenario.tools_allowed or []
+        if "memory_search" in allowed:
+            await tool_registry.register(MemorySearchTool(memory_loader), scope="global")
+        if "memory_get" in allowed:
+            await tool_registry.register(MemoryGetTool(memory_loader), scope="global")
+        if "remember" in allowed:
+            await tool_registry.register(MemoryRememberTool(memory_loader), scope="global")
 
     try:
         return AgentLoop(

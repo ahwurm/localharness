@@ -138,6 +138,19 @@ class BudgetConfig(BaseModel):
         description="Maximum number of tool calls in one session.",
     )
 
+    max_tool_calls: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Hard ceiling on DISPATCHED tool calls, distinct from max_actions (which is "
+            "ge=1 so the loop always gets its first LLM round-trip). None (default): no "
+            "separate cap, max_actions alone governs — every existing caller is unaffected. "
+            "Unlike max_actions, 0 here is a real zero: no tool call is ever dispatched, and "
+            "a refused call does not end the turn. Set by the bench runner from "
+            "scenario.limits.max_tool_calls."
+        ),
+    )
+
     max_duration_minutes: float = Field(
         default=30.0,
         ge=0.1,

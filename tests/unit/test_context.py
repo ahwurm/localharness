@@ -602,7 +602,12 @@ def test_load_compact_md_returns_none_when_empty(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compaction_publishes_event():
-    """When pipeline modifies messages, CompactionTriggered is published once."""
+    """When pipeline modifies messages, CompactionTriggered is published once.
+
+    The stub shrinks to a tiny message (not just messages[:1], which at "x"*5000 is still
+    hugely over the 100-token budget) so the emergency floor does NOT also fire afterward and
+    publish a second event — this test isolates the LLM-stage publish path specifically. The
+    emergency-floor-on-top-of-an-unmodified-pipeline case is its own test below."""
     from localharness.agent.context import ContextManager
     from localharness.core.events import CompactionTriggered
 
@@ -615,11 +620,11 @@ async def test_compaction_publishes_event():
     # Stub pipeline that always reports modified=True on the LLM stage (FIX 2 split interface)
     class StubPipeline:
         async def run(self, messages, budget):
-            return messages[:1], True   # truncate to first message; any_modified=True
+            return [{"role": "user", "content": "y"}], True
         async def run_deterministic(self, messages, budget):
             return messages, False
         async def run_llm(self, messages, budget):
-            return messages[:1], True
+            return [{"role": "user", "content": "y"}], True   # shrinks well under budget
 
     # Use a tiny budget so needs_summary_compact triggers
     cm = ContextManager(
@@ -647,8 +652,54 @@ async def test_compaction_publishes_event():
 
 @pytest.mark.asyncio
 async def test_compaction_no_publish_when_unchanged():
-    """When pipeline reports any_modified=False, no event is published."""
+    """When pipeline reports any_modified=False AND the (unmodified) content already fits under
+    budget, no event is published. Sized (dynamically, via the same TokenCounter the manager
+    uses) to land inside needs_summary_compact (>=80% usage) but under the emergency floor's
+    hard limit — isolating the LLM-stage-only path. A genuinely oversized-and-unmodified case IS
+    expected to publish now, via the emergency floor — see the next test."""
+    from localharness.agent.context import ContextManager, TokenCounter
+
+    published: list = []
+
+    class FakeBus:
+        async def publish(self, event):
+            published.append(event)
+
+    class NoOpPipeline:
+        async def run(self, messages, budget):
+            return messages, False
+        async def run_deterministic(self, messages, budget):
+            return messages, False
+        async def run_llm(self, messages, budget):
+            return messages, False
+
+    tc = TokenCounter()
+    messages = [{"role": "user", "content": "word " * 40}]
+    usage = tc.count_messages(messages)
+    max_ctx = max(10, int(usage / 0.85))  # usage_fraction ~0.85: >= needs_summary_compact(0.80),
+                                           # still < the emergency floor's effective_limit (== max_ctx here)
+    cm = ContextManager(
+        max_context_tokens=max_ctx,
+        pipeline=NoOpPipeline(),
+        bus=FakeBus(),
+        agent_id="a",
+        session_id="s",
+        token_counter=tc,
+    )
+    await cm.build_messages(list(messages), tool_schemas=None)
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_emergency_floor_publishes_when_pipeline_leaves_it_unchanged():
+    """Regression: when the LLM pipeline reports any_modified=False but the content is still
+    genuinely oversized (e.g. a single first-turn message gives SummaryCompactionStage no safe
+    'middle' to summarize — see near_compaction), the emergency floor is the only thing that
+    shrinks the request. It must publish CompactionTriggered too — a silent cut is exactly what
+    the event exists to record (this is the exact fixture test_compaction_no_publish_when_unchanged
+    used before it was narrowed to isolate the LLM-only path above)."""
     from localharness.agent.context import ContextManager
+    from localharness.core.events import CompactionTriggered
 
     published: list = []
 
@@ -673,7 +724,11 @@ async def test_compaction_no_publish_when_unchanged():
     )
     big = [{"role": "user", "content": "x" * 5000}] * 5
     await cm.build_messages(big, tool_schemas=None)
-    assert published == []
+    assert len(published) == 1
+    assert isinstance(published[0], CompactionTriggered)
+    assert published[0].agent_id == "a"
+    assert published[0].session_id == "s"
+    assert published[0].stages_modified == []
 
 
 @pytest.mark.asyncio

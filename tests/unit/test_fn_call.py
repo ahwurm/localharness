@@ -249,6 +249,30 @@ def test_extract_name_equals_syntax(converter: FnCallConverter):
     assert calls[0].arguments == {"pattern": "morning"}
 
 
+def test_extract_legacy_mcp_namespaced_name(converter: FnCallConverter):
+    """FIX 1: the name class must accept ':' — mcp:fetch is exactly the namespaced form the
+    system-prompt injection teaches (bench/schema.py parse_tool_name); a bare [\\w\\-]+ class
+    silently produced zero matches instead of parsing it."""
+    text = "<tool_call><name>mcp:fetch</name><parameters>{}</parameters></tool_call>"
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "mcp:fetch"
+    assert calls[0].arguments == {}
+
+
+def test_extract_qwen_native_plugin_namespaced_name(converter: FnCallConverter):
+    """FIX 1: the name class must also accept '.' — plugin:PLUGIN.TOOL is the other
+    namespaced form parse_tool_name teaches the model to emit."""
+    text = (
+        "<tool_call>\n<function=plugin:research_tools.exa_search>\n"
+        "<parameter=query>weather</parameter>\n</function>\n</tool_call>"
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "plugin:research_tools.exa_search"
+    assert calls[0].arguments == {"query": "weather"}
+
+
 def test_extract_singular_parameter_tag(converter: FnCallConverter):
     """Some models emit <parameter> instead of <parameters>."""
     text = """<tool_call>

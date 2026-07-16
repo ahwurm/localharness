@@ -292,6 +292,105 @@ async def test_build_agent_loop_wires_compaction_pipeline():
 
 
 @pytest.mark.asyncio
+async def test_context_ceiling_clamped_to_org_config(monkeypatch):
+    """FIX 2: the scenario's aspirational max_context_tokens is clamped to the machine's real
+    served window (org.context.max_context_tokens) when that config is loadable. Regression for
+    the live bug: a 32000-token scenario budget on an 8192-window box passed the compaction
+    pre-flight (which only ever saw the scenario's number) and then 400'd at the server."""
+    from types import SimpleNamespace
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+    from localharness.config import loader as loader_mod
+
+    fake_harness = SimpleNamespace(
+        org=SimpleNamespace(context=SimpleNamespace(max_context_tokens=8192))
+    )
+    monkeypatch.setattr(loader_mod.ConfigLoader, "load_harness", lambda self: fake_harness)
+
+    scen = ScenarioSpec(
+        name="clamp-me", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(max_context_tokens=32000), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._ctx.max_context_tokens == 8192
+
+
+@pytest.mark.asyncio
+async def test_context_ceiling_not_clamped_when_scenario_already_smaller(monkeypatch):
+    """No clamping (and no spurious lowering) when the scenario's budget is already <= the org
+    ceiling — the clamp is a MIN, not an override."""
+    from types import SimpleNamespace
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+    from localharness.config import loader as loader_mod
+
+    fake_harness = SimpleNamespace(
+        org=SimpleNamespace(context=SimpleNamespace(max_context_tokens=131072))
+    )
+    monkeypatch.setattr(loader_mod.ConfigLoader, "load_harness", lambda self: fake_harness)
+
+    scen = ScenarioSpec(
+        name="no-clamp", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(max_context_tokens=16000), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._ctx.max_context_tokens == 16000
+
+
+@pytest.mark.asyncio
+async def test_context_ceiling_unclamped_when_config_unloadable(monkeypatch):
+    """No config loadable (e.g. no ~/.localharness/config.yaml) -> keep current behavior:
+    the scenario's value passes through unclamped, not an error."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+    from localharness.config import loader as loader_mod
+
+    def _raise(self):
+        raise loader_mod.ConfigNotFoundError("config.yaml", ["/nonexistent"])
+
+    monkeypatch.setattr(loader_mod.ConfigLoader, "load_harness", _raise)
+
+    scen = ScenarioSpec(
+        name="no-config", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(max_context_tokens=32000), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._ctx.max_context_tokens == 32000
+
+
+@pytest.mark.asyncio
+async def test_zero_max_tool_calls_decoupled_from_iteration_floor():
+    """FIX 3: an explicit scenario limits.max_tool_calls=0 must reach the loop's AgentConfig as
+    a real 0 (the tool-DISPATCH cap), while max_actions (the iteration floor, ge=1 at the
+    pydantic level) stays >=1 so the turn always gets its first LLM round-trip. Previously both
+    were derived from the SAME max(1, min(...)) expression, silently upgrading an explicit
+    max_tool_calls=0 to 1."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    scen = ScenarioSpec(
+        name="zero-tool-cap", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(max_actions=0),
+        limits=LimitsSpec(max_tool_calls=0),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    assert loop._config.permissions.budget.max_tool_calls == 0
+    assert loop._config.permissions.budget.max_actions >= 1
+
+
+@pytest.mark.asyncio
 async def test_build_agent_loop_routes_cruncher_and_resolves_grant(monkeypatch, tmp_path):
     """J3 keystone guard: the bench must (1) route agent('cruncher') to the CRUNCHER, not Explore, and
     (2) resolve a load_document handle to the cruncher through bench_store on grant. Before the runner
@@ -372,8 +471,10 @@ async def test_build_agent_loop_routes_cruncher_and_resolves_grant(monkeypatch, 
 @pytest.mark.asyncio
 async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
     """SESS-06 parity: a seeded bench scenario registers the SAME three memory tools
-    production registers whenever a store exists (start_cmd critic M5). Bench agents
-    previously got memory INJECTION but no memory tools — write-only memory in scored runs.
+    production registers whenever a store exists (start_cmd critic M5), PROVIDED the
+    scenario's tools_allowed explicitly names them (FIX 4 — registration is gated on
+    tools_allowed, not just on the store existing; see
+    test_bench_memory_tools_withheld_when_tools_allowed_empty for the [] case).
     """
     from localharness.bench import runner as bench_runner
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
@@ -392,7 +493,8 @@ async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
         name="memory_recall", prompt="x",
         success_criteria=SuccessCriteria(rubric=["contains:OK"]),
         budget=BudgetSpec(), limits=LimitsSpec(),
-        tools_allowed=[], slice="train", category="tool_basics",
+        tools_allowed=["memory_search", "memory_get", "remember"],
+        slice="train", category="tool_basics",
     )
     await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     assert captured["memory_loader"] is not None, "seeded scenario must hydrate a MemoryStore"
@@ -400,6 +502,74 @@ async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
     # the write verb registers as "remember" (not "memory_remember"), same as production
     for name in ("memory_search", "memory_get", "remember"):
         assert name in tools, f"seeded bench agent missing {name} (production registers all three)"
+
+
+@pytest.mark.asyncio
+async def test_bench_memory_tools_withheld_when_tools_allowed_empty(monkeypatch):
+    """FIX 4: tools_allowed=[] means pure-LLM/no-tools (bench/schema.py ScenarioSpec.tools_allowed
+    docstring). memory_recall/stateful_behavior_* declare exactly that to test PURE
+    system-prompt recall — they must NOT get live memory tools just because a seeded store
+    exists. The seed itself must still be effective: memory_loader stays non-None and its
+    load_context() still carries the seeded fact, so system-prompt injection is unaffected.
+    """
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    scen = ScenarioSpec(
+        name="memory_recall", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    store = captured["memory_loader"]
+    assert store is not None, "seed must still hydrate — tools_allowed governs TOOLS, not the seed"
+    ctx = await store.load_context()
+    assert "STARFRUIT_42" in ctx.agent_memory_md, "seeded fact must still reach system-prompt injection"
+    await store.close()
+
+    tools = captured["tool_registry"]._tools["global"]
+    for name in ("memory_search", "memory_get", "remember"):
+        assert name not in tools, f"tools_allowed=[] must withhold {name} (pure-LLM scenario)"
+
+
+@pytest.mark.asyncio
+async def test_bench_memory_tools_partial_allowlist_registers_only_named(monkeypatch):
+    """FIX 4: 'register only those named' — a scenario allowing just memory_get must NOT also
+    get memory_search/remember, even though the store exists and would previously register
+    all three unconditionally."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+
+    scen = ScenarioSpec(
+        name="memory_recall", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=["memory_get"], slice="train", category="tool_basics",
+    )
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    tools = captured["tool_registry"]._tools["global"]
+    assert "memory_get" in tools
+    assert "memory_search" not in tools
+    assert "remember" not in tools
 
 
 @pytest.mark.asyncio
@@ -774,3 +944,54 @@ async def test_compaction_event_counter(monkeypatch, tmp_path):
     )
     out = await bench_runner.execute_one_run(scen, "m", tmp_path / "run.jsonl", llm_client=None)
     assert out.success is True
+
+
+@pytest.mark.asyncio
+async def test_emergency_floor_publishes_compaction_triggered_on_runner_built_path(tmp_path):
+    """Regression for near_compaction/loop_resilience_compaction_partial scoring 0 despite the
+    turn succeeding: a single oversized first-turn message (system + one huge user message, no
+    tool history) gives SummaryCompactionStage/FullAutoCompactStage no safe 'middle' to summarize
+    — the LLM stages always report any_modified=False and never publish CompactionTriggered. Only
+    the emergency floor (_hard_truncate_to_budget + _shrink_content_to_budget) actually shrinks
+    the request in that case, and it used to do so silently. Exercises the REAL runner-built
+    ContextManager end to end (via _build_agent_loop, small clamped window) — not a stub bus."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.bus import EventBus
+    from localharness.core.events import BudgetSpec, CompactionTriggered
+
+    scen = ScenarioSpec(
+        name="emergency-floor-regression",
+        prompt="x",
+        success_criteria=SuccessCriteria(event_counts={"compaction_triggered": {"min": 1}}),
+        budget=BudgetSpec(max_context_tokens=200),  # small "clamped" window, like the org ceiling
+        limits=LimitsSpec(max_tool_calls=0),
+        tools_allowed=[],
+        slice="train",
+        category="loop_resilience",
+    )
+    bus = EventBus(persist_path=tmp_path / "run.jsonl")
+    acc = bench_runner.MetricAccumulator()
+
+    async def _h(ev):
+        acc.on_compaction_triggered(ev)
+
+    bus.subscribe(CompactionTriggered, _h)
+
+    loop = await bench_runner._build_agent_loop(bus=bus, llm_client=None, scenario=scen)
+    # No tool_calls, no history — mirrors 12_near_compaction.yaml / 20_loop_resilience_compaction_partial.yaml:
+    # one giant first-turn user message with nothing else around it.
+    huge_prompt = " ".join(f"word{i}" for i in range(20_000))
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": huge_prompt},
+    ]
+    loop._ctx.set_iteration(1)
+    _out, budget = await loop._ctx.build_messages(messages, tool_schemas=None)
+    assert budget.current_usage + budget.tool_schema_tokens <= scen.budget.max_context_tokens, (
+        "emergency floor must still shrink the request to fit — this proves the turn CAN succeed"
+    )
+    assert acc.compaction_triggered >= 1, (
+        "emergency floor shrank the request but did not publish CompactionTriggered — a silent "
+        "cut, exactly what the event exists to record"
+    )
