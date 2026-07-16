@@ -55,16 +55,21 @@ EXPLORE_ROLE = (
 # summary so raw pages never enter the parent's context window. web_page_query (P4) lets it
 # ground a claim in the FULL retained page, not just the clipped inline preview.
 WEB_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
-WEB_MAX_ACTIONS = 28
-WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 29 — kept above the budget so max_actions binds
-WEB_MAX_DURATION_MINUTES = 14.0
+# Owner ruling 2026-07-15 (option B): the 28-cap era tripped 21% of the time with completions
+# clustering at 20-27 tool calls, so the built-in default is raised to 56 actions / 20 min to
+# give real headroom. This is the SHIPPED default; a user can tune it per-run via an optional
+# agents/web-researcher.yaml overlay (see ConfigLoader.overlay_builtin_config) — a real config knob.
+WEB_MAX_ACTIONS = 56
+WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 57 — kept above the budget so max_actions binds
+WEB_MAX_DURATION_MINUTES = 20.0
 
-# Shared research discipline (ported from the localshift forked runner, tuned for ~28 calls).
+# Shared research discipline (ported from the localshift forked runner, tuned for ~56 calls so the
+# model's self-pacing tracks the raised budget instead of stopping early at the old 28-cap targets).
 WEB_RESEARCHER_ROLE_BASE = (
     "You are a web-research subagent. Use web_search to find sources, web_fetch to read them, and "
     "web_page_query(fetch_id, pattern) to search the FULL text of a fetched page (not just the clipped "
-    "inline preview). BUDGET DISCIPLINE — you have ~28 tool calls; cap yourself at ~4 searches total, "
-    "then FETCH the best results immediately — do NOT keep hunting. By roughly your 22nd call you MUST "
+    "inline preview). BUDGET DISCIPLINE — you have ~56 tool calls; cap yourself at ~6 searches total, "
+    "then FETCH the best results immediately — do NOT keep hunting. By roughly your 46th call you MUST "
     "emit your final summary with whatever real facts you have gathered. Don't re-fetch a page you "
     "already read. You cannot write or execute. When done, stop and reply with a CONCISE, well-organized "
     "summary of your findings WITH the source URLs you used — the key facts, figures, and citations the "
