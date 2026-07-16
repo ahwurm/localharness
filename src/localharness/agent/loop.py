@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
@@ -227,6 +228,54 @@ def _format_completion_summary(session: Session, content: str | None) -> str:
     if _is_confirmation(content):
         content = None  # sentinel: surface the answer it confirmed, not the sentinel
     return content or _last_assistant_content(session.messages) or "Task complete."
+
+
+# --- Baton gate (issue #84): a tool-less reply whose CLOSING move announces further work -----
+# The final answer at the acceptance seam is taken verbatim; the only guard, the act-guard, arms
+# ONLY at zero actions. So a turn that DID work and then ends with "Now let me read X…" drops the
+# baton — an intention shipped as the result. This detector flags exactly that closing move so the
+# gate can nudge once. HIGH PRECISION: it looks at the FINAL sentence only and start-anchors an
+# announce opener, so a false positive (a wasted round-trip on a good turn) stays rare.
+_BATON_ANNOUNCE_RE = re.compile(
+    r"(?:"
+    r"now\s*,?\s+let\s+me"          # now let me / now, let me
+    r"|let\s+me\s+now"              # let me now
+    r"|now\s+i\s*['’]?ll"           # now I'll
+    r"|now\s+i\s+will"              # now I will
+    r"|i\s*['’]?ll\s+now"           # I'll now
+    r"|i\s+will\s+now"              # I will now
+    r"|next\s*,?\s+i\s*['’]?ll"     # next I'll / next, I'll
+    r"|next\s*,?\s+i\s+will"        # next I will / next, I will
+    r")\b",
+    re.IGNORECASE,
+)
+_BATON_SENTENCE_SPLIT_RE = re.compile(r"[.!?\n]+")
+
+_BATON_NUDGE_MESSAGE = (
+    "Your reply ends by announcing further work instead of completing it. "
+    "Do that work now, or state your final answer."
+)
+
+
+def detect_dropped_baton(content: str) -> bool:
+    """True when a tool-less reply's CLOSING move is a first-person announced next-step
+    ("Now let me read X", "Next I'll check Y") rather than the work itself or a final answer —
+    the 'dropped baton' (issue #84).
+
+    High-precision by design: evaluates only the FINAL sentence, start-anchored to an announce
+    opener. So a mid-reply announce followed by real content, a closing courtesy ('let me know
+    if…'), a handback question ('Should I proceed?'), and 'I now understand…' (not an announce)
+    all return False — a false positive costs a wasted round-trip on an otherwise good turn.
+    Pure text, no I/O. Only meaningful on the no-tool-calls branch (its only caller)."""
+    text = (content or "").strip()
+    if not text or text.endswith("?"):
+        return False  # empty, or ends by asking the user (a legitimate handback)
+    # Closing move = the last non-empty sentence/line; strip any leading bullet/quote chars.
+    segments = [s.strip() for s in _BATON_SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    if not segments:
+        return False
+    closing = re.sub(r"^\W+", "", segments[-1])
+    return bool(_BATON_ANNOUNCE_RE.match(closing))
 
 
 def _format_budget_summary(session: Session, violation: BudgetViolation) -> str:
