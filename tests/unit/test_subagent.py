@@ -256,7 +256,10 @@ async def test_web_child_registry_is_web_only():
 def test_web_researcher_config_has_distinct_budget():
     cfg = build_web_researcher_config("web-researcher")
     assert cfg.name == "web-researcher"
-    assert cfg.permissions.budget.max_actions == 28  # aligned to the forked runner (P3)
+    # Owner ruling 2026-07-15 (option B): 28-cap era tripped 21% with completions clustering
+    # 20-27, so the default was raised to 56 actions / 20 min headroom (real config knob below).
+    assert cfg.permissions.budget.max_actions == 56
+    assert cfg.permissions.budget.max_duration_minutes == 20.0
 
 
 def test_web_researcher_role_rigor_gating(monkeypatch):
