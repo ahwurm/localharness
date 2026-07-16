@@ -1572,12 +1572,40 @@ class ManagedServerConfig(BaseModel):
         return self
 
 
+class TerminalConfig(BaseModel):
+    """Interactive terminal-REPL behavior (type-anytime input box). Nested on HarnessConfig
+    as `terminal`; both switches default ON."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    inputbox_enabled: bool = Field(
+        default=True,
+        description=(
+            "Persistent type-anytime input box: keep an input box live during a turn so you can "
+            "queue messages / nudge the running turn. Off reverts to the classic read_input "
+            "sequencing (one prompt between turns). "
+            "Mutable via `localharness components set terminal.inputbox_enabled <true|false>`."
+        ),
+    )
+    input_router_tier2_enabled: bool = Field(
+        default=True,
+        description=(
+            "Allow the input router's tier-2 LLM classifier (one bounded call) when the tier-1 "
+            "lexical rules abstain. Off falls back to tier-1 + queue-by-default (no model call). "
+            "Mutable via `localharness components set terminal.input_router_tier2_enabled <true|false>`."
+        ),
+    )
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
+    terminal: TerminalConfig = Field(
+        default_factory=TerminalConfig,
+        description="Interactive terminal-REPL behavior (type-anytime input box switches).",
+    )
     org: OrgConfig = Field(default_factory=OrgConfig)
     server: Optional[ManagedServerConfig] = Field(
         default=None,
