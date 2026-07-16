@@ -5,10 +5,12 @@ import asyncio
 import logging
 import re
 import signal
+from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from localharness.core.events import UserMessage
+from localharness.channels import input_router
+from localharness.core.events import InputRouted, UserMessage
 
 log = logging.getLogger(__name__)
 
@@ -116,8 +118,38 @@ class OrchestratorREPL:
         # /agents lists it and the model can delegate to it without a restart. None in tests
         # / non-interactive paths that don't wire it.
         self._on_agent_deployed = on_agent_deployed
+        # --- Type-anytime input box (box mode); inert on the classic path ---
+        self._turn_task: Optional[asyncio.Task] = None      # the in-flight turn, or None (idle)
+        self._current_task: str = ""                          # its originating request (tier-2 context)
+        self._fifo: deque[str] = deque()                      # queued messages → future turns (FIFO)
+        self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
+        self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
+        self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
 
     async def run(self) -> None:
+        """Entry point. Route to the persistent-input-box loop on a real interactive terminal
+        (kill-switch: terminal.inputbox_enabled), else today's classic read_input sequencing."""
+        if self._use_input_box():
+            await self._run_with_box()
+        else:
+            await self._run_classic()
+
+    def _use_input_box(self) -> bool:
+        """Box mode only for the real TerminalChannel on an interactive TTY, with the config
+        kill-switch on. Mock/scripted channels and non-TTY (pipes, CI) → classic path."""
+        from localharness.channels.terminal import TerminalChannel
+
+        if not isinstance(self._channel, TerminalChannel):
+            return False
+        try:
+            if not self._channel.can_run_input_box():
+                return False
+        except Exception:
+            return False
+        term = getattr(self._harness, "terminal", None)
+        return bool(getattr(term, "inputbox_enabled", True))
+
+    async def _run_classic(self) -> None:
         """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
         await self._channel.start()
         try:
@@ -130,52 +162,13 @@ class OrchestratorREPL:
                     continue
 
                 try:
-                    # Slash commands — deterministic, no LLM
-                    if user_input.startswith("/"):
-                        if await self._handle_slash(user_input):
-                            continue
-
-                    # If a creation workflow is active, drive it
-                    if self._orchestrator.active_workflow is not None:
-                        await self._handle_creation_workflow(user_input)
-                        continue
-
-                    # Check for creation intent in natural language
-                    if self._detect_creation_intent(user_input):
-                        self._orchestrator.begin_agent_creation(
-                            config_dir=self._config_dir,
-                        )
-                        # #19: do NOT transition with the trigger message. The workflow
-                        # already starts in DISCUSS; feeding the trigger here consumed
-                        # it as the agent DESCRIPTION and silently advanced to CONFIGURE
-                        # (returned state discarded), skipping the CONFIGURE branch in
-                        # _handle_creation_workflow — the only place YAML generation
-                        # runs. The user's NEXT message is the description.
-                        await self._channel.send_message(
-                            "I'd like to help you create an agent. "
-                            "Tell me more about what you need it to do "
-                            "(or say 'cancel' to stop).",  # #59: advertise the escape
-                            metadata={"style": "system.info"},
-                        )
-                        continue
-
-                    # Publish user message for memory pipeline. channel_id is the
-                    # adapter's class attribute ("terminal", "discord", ...) — history
-                    # rows must carry the REAL channel, not a hardcoded "terminal".
-                    ch_id = getattr(self._channel, "channel_id", None)
-                    await self._bus.publish(
-                        UserMessage(
-                            agent_id=self._agent._config.name,
-                            session_id=self._agent.current_session_id,
-                            content=user_input,
-                            channel=ch_id if isinstance(ch_id, str) else "terminal",
-                        )
-                    )
+                    task = await self._dispatch_input(user_input)
                     # v1: the single agent loop handles every turn directly. Multi-agent
                     # routing (AgentCardRegistry.route) will be wired in for dispatch in
                     # MULTI-02 (v2). Run it as a cancellable task so a mid-turn Ctrl+C
                     # cancels the TURN, not the session (#47).
-                    await self._run_turn_interruptible(user_input)
+                    if task is not None:
+                        await self._await_turn_with_sigint(task)
                     # NOTE: Do NOT send_message here. The TaskComplete event handler
                     # in TerminalChannel.on_task_complete() handles output.
                     # Sending here would produce duplicate output.
@@ -184,9 +177,219 @@ class OrchestratorREPL:
         finally:
             await self._channel.stop()
 
-    async def _run_turn_interruptible(self, user_input: str) -> None:
-        """Run ONE agent turn as a cancellable task so a mid-turn Ctrl+C cancels the turn,
-        not the session (#47).
+    async def _dispatch_input(self, user_input: str) -> Optional[asyncio.Task]:
+        """Handle ONE line of user input: slash command, active creation workflow, or creation
+        intent — OR publish a UserMessage and START a turn task. Returns the started turn task,
+        or None when the line was fully handled without a turn. Shared by classic + box paths;
+        may raise EOFError (e.g. /quit) which the caller treats as 'exit the REPL'."""
+        # Slash commands — deterministic, no LLM
+        if user_input.startswith("/"):
+            if await self._handle_slash(user_input):
+                return None
+
+        # If a creation workflow is active, drive it
+        if self._orchestrator.active_workflow is not None:
+            await self._handle_creation_workflow(user_input)
+            return None
+
+        # Check for creation intent in natural language
+        if self._detect_creation_intent(user_input):
+            self._orchestrator.begin_agent_creation(config_dir=self._config_dir)
+            # #19: do NOT transition with the trigger message. The workflow already starts in
+            # DISCUSS; feeding the trigger here consumed it as the agent DESCRIPTION and silently
+            # advanced to CONFIGURE, skipping the CONFIGURE branch — the user's NEXT message is
+            # the description.
+            await self._channel.send_message(
+                "I'd like to help you create an agent. "
+                "Tell me more about what you need it to do "
+                "(or say 'cancel' to stop).",  # #59: advertise the escape
+                metadata={"style": "system.info"},
+            )
+            return None
+
+        # Publish user message for memory pipeline. channel_id is the adapter's class
+        # attribute ("terminal", "discord", ...) — history rows carry the REAL channel.
+        ch_id = getattr(self._channel, "channel_id", None)
+        await self._bus.publish(
+            UserMessage(
+                agent_id=self._agent._config.name,
+                session_id=self._agent.current_session_id,
+                content=user_input,
+                channel=ch_id if isinstance(ch_id, str) else "terminal",
+            )
+        )
+        return asyncio.ensure_future(self._agent.run_turn(task=user_input, on_token=None))
+
+    # ------------------------------------------------------------------ #
+    # Persistent type-anytime input box coordinator (box mode)
+    # ------------------------------------------------------------------ #
+
+    async def _run_with_box(self) -> None:
+        """Box-mode main loop. The persistent input box runs as a sibling task feeding a control
+        queue; a single serialized event loop here owns all policy — start turns, route mid-turn
+        submissions (nudge now / queue for later), play the FIFO after each turn, handle Ctrl+C
+        (cancel the turn) and Ctrl+D (exit). Turn completion posts a 'turn_done' event via the
+        task's done-callback, so everything funnels through one queue — no races."""
+        await self._channel.start()
+        self._box_ctrl_q = asyncio.Queue()
+        self._turn_task = None
+        self._fifo.clear()
+        self._sigint_armed = False
+        try:
+            await self._channel.start_input_box(self._box_ctrl_q, self._on_box_interrupt)
+            while True:
+                kind, payload = await self._box_ctrl_q.get()
+                if not await self._handle_box_event(kind, payload):
+                    break
+        finally:
+            if self._turn_task is not None and not self._turn_task.done():
+                self._turn_task.cancel()
+            await self._channel.stop_input_box()
+            await self._channel.stop()
+
+    def _on_box_interrupt(self) -> None:
+        """Ctrl+C on an empty buffer (called synchronously from the box keybinding). During a
+        turn → cancel it instantly (never queued behind routing latency); when idle → hand an
+        'interrupt' event to the loop for arm-then-exit."""
+        if self._turn_task is not None and not self._turn_task.done():
+            self._cancelled_by_user = True
+            self._turn_task.cancel()
+        elif self._box_ctrl_q is not None:
+            self._box_ctrl_q.put_nowait(("interrupt", None))
+
+    async def _handle_box_event(self, kind: str, payload: Any) -> bool:
+        """Apply one control event. Returns False to end the REPL."""
+        try:
+            if kind == "eof":
+                return False
+            if kind == "interrupt":
+                # idle Ctrl+C: arm once, exit on the second (mirrors the classic prompt).
+                if self._sigint_armed:
+                    return False
+                self._sigint_armed = True
+                await self._channel.send_message(
+                    "(Press Ctrl+C again to exit)", metadata={"style": "system.info"}
+                )
+                return True
+            if kind == "turn_done":
+                await self._finish_turn(payload)
+                self._turn_task = None
+                self._channel.box_notify_working(False)
+                await self._play_next_from_fifo()
+                return True
+            if kind == "submit":
+                self._sigint_armed = False
+                clean, forced = input_router.strip_force(payload)
+                if not clean:
+                    return True
+                if self._turn_task is not None and not self._turn_task.done():
+                    await self._route_during_turn(clean, forced)
+                else:
+                    task = await self._dispatch_input(clean)
+                    if task is not None:
+                        self._start_turn_task(task, clean)
+                return True
+        except EOFError:
+            return False  # /quit (or a queued /quit) ends the REPL
+        return True
+
+    async def _route_during_turn(self, clean: str, forced: bool) -> None:
+        """Decide nudge vs queue for a message typed while a turn runs, deliver it, and reflect
+        the decision in the box frame + the InputRouted ledger event."""
+        # Slash commands mid-turn are session-level actions — queue them deterministically
+        # (run between turns), never spend an LLM classification call on a command.
+        if not forced and clean.startswith("/"):
+            decision = input_router.Decision(input_router.Route.QUEUE, "tier1", "slash-command")
+        else:
+            decision = await input_router.route(
+                clean, forced,
+                context=self._turn_context(),
+                complete_fn=self._tier2_complete_fn(),
+                tier2_enabled=self._tier2_enabled(),
+            )
+        await self._bus.publish(InputRouted(
+            agent_id=self._agent._config.name,
+            session_id=self._agent.current_session_id,
+            decision=decision.route.value, tier=decision.tier,
+            rule_or_reason=decision.reason, text_preview=clean[:80],
+        ))
+        if decision.route is input_router.Route.NUDGE:
+            self._agent.push_user_nudge(clean)
+            self._channel.box_flash_decision("→ nudging current turn")
+        else:
+            self._fifo.append(clean)
+            self._channel.box_set_queued(len(self._fifo))
+            self._channel.box_flash_decision(f"queued ({len(self._fifo)})")
+
+    async def _play_next_from_fifo(self) -> None:
+        """After a turn ends, start the next queued message as a turn. Commands/workflow lines
+        are handled inline (no turn) and we keep draining until a real turn starts or the FIFO
+        empties."""
+        while self._fifo:
+            text = self._fifo.popleft()
+            self._channel.box_set_queued(len(self._fifo))
+            task = await self._dispatch_input(text)
+            if task is not None:
+                self._start_turn_task(task, text)
+                return
+
+    def _start_turn_task(self, task: asyncio.Task, text: str) -> None:
+        """Adopt a started turn task in box mode: track it, arm the working glyph, and route its
+        completion back through the control queue. No loop SIGINT handler here — the box owns raw
+        mode, so Ctrl+C arrives via the pt keybinding (_on_box_interrupt), not a signal."""
+        self._turn_task = task
+        self._current_task = text
+        self._cancelled_by_user = False
+        self._channel.box_notify_working(True)
+        q = self._box_ctrl_q
+        task.add_done_callback(lambda t: q.put_nowait(("turn_done", t)) if q is not None else None)
+
+    async def _finish_turn(self, task: asyncio.Task) -> None:
+        """Reap a finished turn: surface a user-cancel truthfully; a normal finish already
+        rendered via the TaskComplete handler (never re-print here)."""
+        try:
+            await task
+        except asyncio.CancelledError:
+            if self._cancelled_by_user:
+                await self._channel.send_message(
+                    "Turn cancelled.", metadata={"style": "system.info"}
+                )
+        except Exception:  # noqa: BLE001 — run_turn owns its errors (TurnFailed → channel);
+            log.warning("box turn task raised", exc_info=True)  # a stray one must not kill the REPL
+        finally:
+            self._cancelled_by_user = False
+
+    def _turn_context(self) -> str:
+        """Compact running-turn summary for tier-2: current request + latest step/tool."""
+        parts = []
+        if self._current_task:
+            parts.append(f"request: {self._current_task[:200]}")
+        last = getattr(self._channel, "last_activity_summary", "")
+        if last:
+            parts.append(f"latest step: {last[:120]}")
+        return " | ".join(parts)
+
+    def _tier2_enabled(self) -> bool:
+        term = getattr(self._harness, "terminal", None)
+        return bool(getattr(term, "input_router_tier2_enabled", True))
+
+    def _tier2_complete_fn(self):
+        """Bounded one-shot classifier seam over the harness's configured LLM, or None when
+        unavailable (tier-1 + queue-default then). Reuses the shared client — a fresh local
+        client can't take a 5s timeout (300s floor); input_router bounds the call itself."""
+        llm = getattr(self._agent, "_llm", None)
+        if llm is None or not hasattr(llm, "complete"):
+            return None
+
+        async def _complete(messages: list[dict]) -> str:
+            msg, _usage = await llm.complete(messages, tools=None, stream=False)
+            return getattr(msg, "content", None) or ""
+
+        return _complete
+
+    async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
+        """Await ONE agent turn (classic path) as a cancellable task so a mid-turn Ctrl+C cancels
+        the turn, not the session (#47).
 
         While a turn is in flight the prompt_toolkit input app is NOT holding the terminal
         (it released raw mode when read_input returned), so Ctrl+C arrives as a real SIGINT.
@@ -200,10 +403,7 @@ class OrchestratorREPL:
         Idle Ctrl+C is unchanged: at the prompt the input app's own c-c key binding
         (TerminalChannel.read_input) absorbs it. A second Ctrl+C while a turn is already
         cancelling restores the default SIGINT handler, so a further Ctrl+C hard-exits
-        (escape hatch)."""
-        turn_task = asyncio.ensure_future(
-            self._agent.run_turn(task=user_input, on_token=None)
-        )
+        (escape hatch). `turn_task` is the already-started turn (from _dispatch_input)."""
         loop = asyncio.get_running_loop()
         interrupts = 0
         cancelled_by_user = False

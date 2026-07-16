@@ -436,6 +436,7 @@ class TerminalChannel(ChannelAdapter):
         self._decision_flash: str = ""           # transient routing-decision line in the box frame
         self._decision_flash_task: asyncio.Task | None = None
         self._first_box_hint: str = ""           # #49 guidance hint, shown in the box until first use
+        self.last_activity_summary: str = ""     # latest tool line — tier-2 routing context (box mode)
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
@@ -559,6 +560,7 @@ class TerminalChannel(ChannelAdapter):
         consolidated burst counter that freezes to one line when the burst ends."""
         async with self._output_lock:
             self._stop_thinking()
+            self.last_activity_summary = _tool_call_summary(tool_name, arguments)  # tier-2 context
             group = next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
             if group is None:
                 self._close_burst()
