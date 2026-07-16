@@ -928,3 +928,38 @@ def test_resolve_user_path_maps_posix_tmp_to_os_tempdir():
     assert resolve_user_path("/tmp") == tmp
     assert resolve_user_path("C:/Windows") == Path("C:/Windows").resolve()
     assert resolve_user_path("some/rel/dir").is_absolute()
+
+
+def test_find_bash_rejects_wsl_stub(monkeypatch):
+    """PowerShell PATH order resolves `bash` to the System32 WSL stub, which prints a
+    UTF-16LE error without a distro (observed live: mojibake observations, stuck loop).
+    _find_bash must skip it and search git-bash locations instead."""
+    import os as _os
+    from localharness.tools.builtin import bash_tool
+
+    if _os.name != "nt":
+        import pytest as _pytest
+        _pytest.skip("Windows-only resolution rules")
+    monkeypatch.delenv("LOCALHARNESS_BASH", raising=False)
+    monkeypatch.setattr(bash_tool.shutil, "which", lambda _: r"C:\Windows\System32\bash.exe")
+    monkeypatch.setattr(bash_tool.os.path, "isfile", lambda p: False)
+    assert bash_tool._find_bash() is None  # stub rejected, no git-bash found -> clear error path
+
+    monkeypatch.setattr(
+        bash_tool.os.path, "isfile", lambda p: p.endswith(r"Git\usr\bin\bash.exe")
+    )
+    found = bash_tool._find_bash()
+    assert found and found.endswith(r"Git\usr\bin\bash.exe")
+
+    monkeypatch.setenv("LOCALHARNESS_BASH", r"D:\custom\bash.exe")
+    assert bash_tool._find_bash() == r"D:\custom\bash.exe"
+
+
+def test_decode_output_handles_utf16le():
+    from localharness.tools.builtin.bash_tool import _decode_output
+
+    utf16 = "Windows Subsystem for Linux has no installed distributions.".encode("utf-16-le")
+    out = _decode_output(utf16)
+    assert "\x00" not in out
+    assert "no installed distributions" in out
+    assert _decode_output("plain utf-8 ✓".encode("utf-8")) == "plain utf-8 ✓"

@@ -1,11 +1,61 @@
 """BashExecTool: Execute bash commands."""
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
 from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+
+
+def _find_bash() -> str | None:
+    """Locate a real bash, never the WSL stub.
+
+    On Windows, PowerShell's PATH order typically resolves `bash` to
+    C:\\Windows\\System32\\bash.exe — the WSL launcher. Without a WSL distro it prints a
+    UTF-16LE error and exits (observed live: NUL-riddled mojibake observations that
+    stuck-looped an agent), and WITH one it would run commands in a different filesystem
+    view than the native file tools. Neither is ever what bash_exec means by "bash", so
+    the stub is rejected outright and git-bash is searched explicitly.
+    LOCALHARNESS_BASH overrides everything. Returns None when nothing usable exists.
+    """
+    override = os.environ.get("LOCALHARNESS_BASH")
+    if override:
+        return override
+    which = shutil.which("bash")
+    if os.name != "nt":
+        return which or "/bin/bash"
+    candidates = []
+    if which and "system32" not in which.lower():
+        candidates.append(which)
+    for base in (
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+        os.path.join(os.environ.get("LocalAppData", ""), "Programs"),
+    ):
+        if base:
+            candidates.append(os.path.join(base, "Git", "usr", "bin", "bash.exe"))
+            candidates.append(os.path.join(base, "Git", "bin", "bash.exe"))
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def _decode_output(raw: bytes) -> str:
+    """Decode subprocess output: UTF-8 first, UTF-16 when the bytes say so.
+
+    Windows System32 tools emit UTF-16LE; naive utf-8 decoding renders it as
+    \\x00-interleaved mojibake the model cannot read (and will loop on).
+    """
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:64]:
+        for enc in ("utf-16", "utf-16-le"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+    return raw.decode("utf-8", errors="replace")
 
 
 class BashExecTool(Tool):
@@ -66,6 +116,13 @@ class BashExecTool(Tool):
 
         timeout = min(timeout_s, 300.0)
         try:
+            bash = _find_bash()
+            if not bash:
+                return self.err(
+                    "bash not found — install Git for Windows (git-bash) or point "
+                    "LOCALHARNESS_BASH at a bash executable",
+                    error_type="execution_error",
+                )
             # exec form, not create_subprocess_shell: shell mode defaults to /bin/sh (dash on
             # Ubuntu), which lacks brace expansion, `[[ ]]`, arrays, etc. — a "bash_exec" tool
             # must actually run bash so the model's bashisms behave as written. And on Windows,
@@ -73,7 +130,7 @@ class BashExecTool(Tool):
             # "C:\Program Files\..." splits at the space and never launches; exec + explicit
             # `-c` passes the path as one argv entry on every platform.
             proc = await asyncio.create_subprocess_exec(
-                shutil.which("bash") or "/bin/bash",
+                bash,
                 "-c",
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -94,7 +151,7 @@ class BashExecTool(Tool):
         except OSError as exc:
             return self.err(str(exc))
 
-        output = stdout.decode("utf-8", errors="replace")
+        output = _decode_output(stdout)
         return self.ok(
             output or "(no output)",
             exit_code=proc.returncode,
