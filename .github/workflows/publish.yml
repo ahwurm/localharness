@@ -1,0 +1,47 @@
+name: Publish to PyPI
+
+# Publishes on every GitHub Release via PyPI Trusted Publishing (OIDC) — no API tokens
+# stored anywhere. One-time setup on pypi.org: Account → Publishing → add pending
+# publisher (project: localharness, owner: ahwurm, repo: localharness,
+# workflow: publish.yml, environment: pypi).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Smoke-test the wheel from a clean environment
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          cd /tmp && /tmp/smoke/bin/localharness --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/localharness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: astral-sh/setup-uv@v5
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish --trusted-publishing always
