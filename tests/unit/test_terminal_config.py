@@ -8,7 +8,7 @@ from localharness.config.models import HarnessConfig, ProviderConfig, TerminalCo
 
 
 def _harness(**terminal_kwargs):
-    kw = {"provider": ProviderConfig(base_url="http://x/v1", default_model="m")}
+    kw = {"provider": ProviderConfig(provider_type="vllm", base_url="http://x/v1", default_model="m")}
     if terminal_kwargs:
         kw["terminal"] = TerminalConfig(**terminal_kwargs)
     return HarnessConfig(**kw)
