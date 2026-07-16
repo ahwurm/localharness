@@ -1,4 +1,4 @@
-"""All 28 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 29 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -299,6 +299,20 @@ class StuckRecovered(BaseEvent):
     stuck_signature: str  # from stuck_detector.most_repeated_signature()
 
 
+class InputRouted(BaseEvent):
+    """Published for every type-anytime input-box routing decision (nudge vs queue).
+
+    Lands in the session ledger (audit.jsonl / bus-events.jsonl) as dogfood tuning data:
+    which tier decided (force | tier1 | tier2), the rule name or reason, and a short preview
+    of the typed message. Display-only telemetry — the decision itself is acted on inline."""
+
+    event_type: str = "InputRouted"
+    decision: Literal["nudge", "queue"]
+    tier: Literal["force", "tier1", "tier2"]
+    rule_or_reason: str
+    text_preview: str = ""
+
+
 class ComponentMutated(BaseEvent):
     """Published by `localharness components set`, the Phase 17 experiment runner,
     and the Phase 18 autoresearch adoption write.
@@ -466,6 +480,7 @@ AnyEvent = Union[
     ScenarioCompleted,
     ParseFailed,
     StuckRecovered,
+    InputRouted,
     ComponentMutated,
     MutationArchived,
     SentinelAlert,
@@ -497,6 +512,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ScenarioCompleted": ScenarioCompleted,
     "ParseFailed": ParseFailed,
     "StuckRecovered": StuckRecovered,
+    "InputRouted": InputRouted,
     "ComponentMutated": ComponentMutated,
     "MutationArchived": MutationArchived,
     "SentinelAlert": SentinelAlert,
