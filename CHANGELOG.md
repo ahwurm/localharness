@@ -4,6 +4,45 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.11] — 2026-07-16
+
+Two owner-ruled changes from live dogfood feedback: the web-researcher's budget was
+starving real research (21% of assignments still hit the ceiling after the last raise),
+and a turn could end by *announcing* its next step instead of doing it — accepted
+verbatim as the final answer (the "dropped baton", #84).
+
+### Added
+- **Built-in subagent configs are now user-overridable**: an `agents/<name>.yaml`
+  overlay applies on top of the built-in base config for `explore`, `web-researcher`,
+  and `search-verifier` (previously such files were silently ignored for built-ins) —
+  budgets and other AgentConfig fields become a config edit instead of a code change.
+  Bad values fail loudly (`ConfigValidationError`); the built-in toolset itself stays
+  fixed by the dispatcher, so an overlay cannot grant new tools.
+- **Baton gate** (`agent.baton_gate.enabled`, default on): at the tool-less acceptance
+  seam, a deterministic detector flags a reply whose closing move is an announced
+  next step ("Now let me read X…", "Next I'll…") and pushes back once — do the work
+  now, or state the final answer — bounded to one retry per turn, session-persisted
+  like the v0.9.7 recovery nudges. Precision-first: final sentence only,
+  start-anchored openers; question-ending handbacks, closing courtesies, and
+  mid-reply announces never fire. Live receipt: a turn did 13 successful reads, then
+  shipped "Now let me read the notebooks…" as its final answer (2026-07-15).
+  Fixes #84 (live since 2026-05-24).
+
+### Changed
+- **Web-researcher budget raised**: 28 → 56 tool calls, 14 → 20 minutes. Owner-ledger
+  data behind the numbers: 69% of research assignments tripped the old 12-call cap,
+  21% still tripped 28, and completions clustered just under the wire. The
+  researcher's role-prompt discipline numbers scale to match, and the parent
+  agent-tool timeout rises 30 → 40 min to keep its 2× headroom invariant. One
+  observed trip class — token-heavy reading blowing the TIME cap at only 20 calls —
+  is not addressed by a call-cap raise and stays on the watch list.
+
+Honest limits: neither change was live-dogfooded against a real model before release
+(both are exercised through the real loop/runner/dispatch seams in tests); the baton
+detector intentionally misses compound closings ("…and now let me check X") and
+question-phrased announces — precision over recall, a false positive costs a wasted
+round-trip on a good turn.
+
 ## [0.9.10] — 2026-07-16
 
 The terminal REPL gets a type-anytime input box. Previously the input prompt only
