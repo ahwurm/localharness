@@ -1,4 +1,4 @@
-"""All 12 Pydantic config models for LocalHarness."""
+"""All Pydantic config models for LocalHarness."""
 from __future__ import annotations
 
 import re
@@ -1035,6 +1035,28 @@ class SelfCheckConfig(BaseModel):
     )
 
 
+class BatonGateConfig(BaseModel):
+    """Deterministic baton gate at the loop's tool-less acceptance seam (issue #84).
+
+    When enabled (default), a tool-less reply whose CLOSING move announces further work
+    ("Now let me read X…") instead of doing it or stating a final answer gets ONE bounded
+    nudge before the reply is accepted — the model announced a next step and the turn was
+    about to end as if done (the 'dropped baton'). Bounded once per turn: a second announced
+    intention is accepted (no loop). A loop-structure mechanism (adds a control-flow branch +
+    at most one extra LLM round-trip), not a prompt edit. Addressable as `agent.baton_gate.enabled`.
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Nudge once when a tool-less reply's closing move announces further work instead of "
+            "completing it (issue #84), then accept. Set False to restore verbatim acceptance. "
+            "Mutable via `localharness components set agent.baton_gate.enabled <true|false>`."
+        ),
+    )
+
+
 class RoleSectionsConfig(BaseModel):
     """Orthogonal, individually-addressable sections of the agent system prompt (MODP-01/02).
 
@@ -1247,6 +1269,14 @@ class AgentConfig(BaseModel):
         description=(
             "Optional self-review step (loop-structure mechanism, MECH-01). "
             "Addressable via `agent.self_check.{enabled,max_passes}`."
+        ),
+    )
+
+    baton_gate: BatonGateConfig = Field(
+        default_factory=BatonGateConfig,
+        description=(
+            "Deterministic baton gate at the tool-less acceptance seam (issue #84). Default ON. "
+            "Addressable via `agent.baton_gate.enabled`."
         ),
     )
 

@@ -210,6 +210,9 @@ def test_self_check_leaves_enumerate(components_home):
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
+    # #84: the deterministic baton-gate kill-switch auto-enumerates as a bool leaf too.
+    assert "agent.baton_gate.enabled" in entries
+    assert entries["agent.baton_gate.enabled"].annotation is bool
     # New context-efficiency leaves: memory.{index_mode,max_session_history_entries} +
     # context.{tool_result_eviction,tool_result_evict_threshold_chars}. The two context.*
     # leaves enumerate under BOTH agent.context.* and org.context.* (shared ContextConfig),
@@ -263,9 +266,11 @@ def test_self_check_leaves_enumerate(components_home):
     # type-anytime input box: harness-level terminal switches are registry-addressable.
     assert "terminal.inputbox_enabled" in entries
     assert "terminal.input_router_tier2_enabled" in entries
-    assert len(entries) == 157, (
-        f"catalogue should be 157 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x2 [type-anytime input box]), got {len(entries)}"
+    # #84 baton gate: the kill-switch is registry-addressable.
+    assert "agent.baton_gate.enabled" in entries
+    assert len(entries) == 158, (
+        f"catalogue should be 158 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x2 [type-anytime input box] + agent.baton_gate.enabled x1 [#84 baton gate kill-switch]), got {len(entries)}"
     )
 
 
@@ -334,9 +339,11 @@ def test_role_sections_leaves_enumerate(components_home):
     # type-anytime input box: harness-level terminal switches are registry-addressable.
     assert "terminal.inputbox_enabled" in entries
     assert "terminal.input_router_tier2_enabled" in entries
-    assert len(entries) == 157, (
-        f"catalogue should be 157 entries (93 after RLM removal + agent.cruncher.* x3 + "
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x2 [type-anytime input box]), got {len(entries)}"
+    # #84 baton gate: the kill-switch is registry-addressable.
+    assert "agent.baton_gate.enabled" in entries
+    assert len(entries) == 158, (
+        f"catalogue should be 158 entries (93 after RLM removal + agent.cruncher.* x3 + "
+        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.consolidation.* x30 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + chapter staleness re-check x2] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x8 [managed vLLM — init guided setup] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x2 [type-anytime input box] + agent.baton_gate.enabled x1 [#84 baton gate kill-switch]), got {len(entries)}"
     )
 
 

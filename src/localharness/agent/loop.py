@@ -44,6 +44,7 @@ class Session:
     output_tokens: int = 0
     tokens_estimated: bool = False
     act_nudge_used: bool = False
+    baton_nudge_used: bool = False  # #84: one baton-gate nudge per turn (announced-next-step reply)
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
 
     def push(self, message: Message) -> None:
@@ -712,6 +713,7 @@ class AgentLoop:
         )
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
+        bg_cfg = self._config.baton_gate
 
         # Build system prompt
         tool_call_mode = getattr(
@@ -1105,6 +1107,20 @@ class AgentLoop:
 
                 # Natural completion — reset parse retries
                 session.parse_retries = 0
+
+                # Baton gate (#84): a tool-less reply whose CLOSING move announces further work
+                # ("Now let me read X…") instead of doing it would otherwise be accepted verbatim
+                # as the final answer — the act-guard only arms at zero actions, so an
+                # announce-AFTER-work reply slips through. Nudge ONCE (persisted into history the
+                # same way the stuck-recovery/self-check nudges are, so the model sees it), then
+                # continue. Bounded once per turn: a second announced intention is accepted (no
+                # loop). Runs BEFORE self_check so a genuinely-final reply still gets its review.
+                if (bg_cfg.enabled and not session.baton_nudge_used
+                        and detect_dropped_baton(content)):
+                    session.baton_nudge_used = True
+                    log.info("Baton gate: reply announces further work — nudging once")
+                    session.push({"role": "user", "content": _BATON_NUDGE_MESSAGE})
+                    continue
 
                 # Self-check (MECH-01): one bounded review pass before finalizing.
                 # A loop-structure mechanism — re-enters the while-loop for one more
