@@ -1,6 +1,6 @@
 [project]
 name = "localharness"
-version = "0.9.9"
+version = "0.9.10"
 description = "Model-agnostic hierarchical agent harness for local LLMs"
 requires-python = ">=3.12"
 license = { text = "MIT" }
