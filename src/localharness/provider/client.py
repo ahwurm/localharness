@@ -335,13 +335,36 @@ async def _inference_gate(config: LLMConfig):
         _inference_sem.release()
 
 
-def _tools_to_api_format(tools: list[ToolSchema]) -> list[dict]:
-    """Serialize ToolSchema list to OpenAI tools API format."""
-    result = []
+_TOOL_NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _tools_to_api_format(tools: list[ToolSchema]) -> tuple[list[dict], dict[str, str]]:
+    """Serialize ToolSchema list to OpenAI tools API format, sanitizing names for the wire.
+
+    Registry names like `mcp:fetch` / `plugin:research_tools.exa_search` violate the OpenAI
+    function-name grammar (^[a-zA-Z0-9_-]{1,64}$); llama.cpp rejects the WHOLE request with
+    HTTP 400, silently knocking every MCP/plugin scenario off the native tool path (observed
+    live: 44x 400 in one bench run, each retried into the XML fallback plus 3 parse-fail
+    nudges per sample). Names are sanitized for the wire; the returned unmap
+    (sanitized -> original) restores registry names on parsed responses so dispatch still
+    finds the real tool. Models sometimes echo the ORIGINAL name from replayed history —
+    unmap.get(name, name) passes those through untouched, so both forms dispatch.
+    """
+    result: list[dict] = []
+    unmap: dict[str, str] = {}
     for t in tools:
         fn = t.model_dump() if hasattr(t, "model_dump") else dict(t)
+        original = fn.get("name", "")
+        safe = base = _TOOL_NAME_UNSAFE.sub("_", original)[:64] or "tool"
+        n = 2
+        while safe in unmap and unmap[safe] != original:
+            safe = f"{base[:60]}_{n}"
+            n += 1
+        if safe != original:
+            fn["name"] = safe
+        unmap[safe] = original
         result.append({"type": "function", "function": fn})
-    return result
+    return result, unmap
 
 
 class LLMClient:
@@ -356,6 +379,10 @@ class LLMClient:
             )
 
         self.config = config
+        # Sticky per-client memory that the server rejected the `tools` param outright
+        # (BadRequestError in xml mode) — without it every later iteration re-sends
+        # `tools=`, eats another 400 round-trip, and falls back again.
+        self._tools_param_rejected = False
         self._client = AsyncOpenAI(
             base_url=config.base_url,
             api_key=config.api_key,
@@ -525,8 +552,9 @@ class LLMClient:
                 "temperature": self.config.temperature,
                 "max_tokens": self.config.max_tokens,
             }
+            name_unmap: dict[str, str] | None = None
             if tools:
-                kwargs["tools"] = _tools_to_api_format(tools)
+                kwargs["tools"], name_unmap = _tools_to_api_format(tools)
             if self.config.stop_sequences:
                 kwargs["stop"] = self.config.stop_sequences
             # Thinking is deliberately left ON for local subjects (#11): reasoning
@@ -539,7 +567,9 @@ class LLMClient:
             if disable_thinking:
                 kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             async with _inference_gate(self.config):
-                return await self._create_and_consume(kwargs, stream, on_token)
+                return await self._create_and_consume(
+                    kwargs, stream, on_token, name_unmap=name_unmap
+                )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -548,6 +578,7 @@ class LLMClient:
         kwargs: dict[str, Any],
         stream: bool,
         on_token: Callable[[str], Awaitable[None]] | None = None,
+        name_unmap: dict[str, str] | None = None,
     ) -> tuple[Any, Any]:
         """Issue the completion request and normalize to (message, usage). stream=True uses
         TRUE HTTP streaming — the read-timeout applies BETWEEN chunks and a client disconnect
@@ -559,18 +590,43 @@ class LLMClient:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
             response = await self._client.chat.completions.create(**kwargs)
-            return await self._consume_native_stream(response, on_token)
-        response = await self._client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
-        # Surface finish_reason on the message so the loop's truncation guard sees it on the
-        # non-streaming path too (#77). Best-effort: the SDK message is a pydantic model that
-        # may reject an unknown attribute — the loop reads it via getattr(..., None), so a
-        # rejection simply leaves the guard dormant here (the live loop uses streaming).
-        try:
-            message.finish_reason = response.choices[0].finish_reason
-        except Exception:
-            pass
-        return message, response.usage
+            message, usage = await self._consume_native_stream(response, on_token)
+        else:
+            response = await self._client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+            # Surface finish_reason on the message so the loop's truncation guard sees it on the
+            # non-streaming path too (#77). Best-effort: the SDK message is a pydantic model that
+            # may reject an unknown attribute — the loop reads it via getattr(..., None), so a
+            # rejection simply leaves the guard dormant here (the live loop uses streaming).
+            try:
+                message.finish_reason = response.choices[0].finish_reason
+            except Exception:
+                pass
+            usage = response.usage
+        self._unmap_tool_call_names(message, name_unmap)
+        return message, usage
+
+    @staticmethod
+    def _unmap_tool_call_names(message: Any, unmap: dict[str, str] | None) -> None:
+        """Restore registry tool names (sanitized -> original) on a parsed response, in place.
+
+        Handles both response shapes: streaming (plain dicts from _consume_native_stream)
+        and non-streaming (SDK pydantic objects). Names not in the map — including a model
+        echoing the original registry name from history — pass through unchanged.
+        """
+        if not unmap:
+            return
+        for tc in getattr(message, "tool_calls", None) or []:
+            try:
+                if isinstance(tc, dict):
+                    fn = tc.get("function") or {}
+                    name = fn.get("name", "")
+                    fn["name"] = unmap.get(name, name)
+                else:
+                    name = tc.function.name
+                    tc.function.name = unmap.get(name, name)
+            except Exception:
+                continue
 
     @staticmethod
     async def _consume_native_stream(
@@ -660,8 +716,9 @@ class LLMClient:
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
-        if tools:
-            kwargs["tools"] = _tools_to_api_format(tools)
+        name_unmap: dict[str, str] | None = None
+        if tools and not self._tools_param_rejected:
+            kwargs["tools"], name_unmap = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
         if disable_thinking:  # internal-call opt-in — see complete()
@@ -672,11 +729,13 @@ class LLMClient:
             # BadRequestError the except runs AFTER __aexit__ releases this gate, so
             # _complete_xml_fallback safely takes its own turn (no re-entrant deadlock).
             async with _inference_gate(self.config):
-                return await self._create_and_consume(kwargs, stream)
+                return await self._create_and_consume(kwargs, stream, name_unmap=name_unmap)
         except openai.BadRequestError:
             # Server rejected the request (e.g. tools param) — retry without it. injected_messages
             # already carries the system-prompt injection folded in above, so the fallback's own
             # injection is a no-op (marker-guarded in _fold_tool_injection — never double-injects).
+            # Remember the rejection: re-sending `tools=` next iteration just buys another 400.
+            self._tools_param_rejected = True
             log.warning("Server rejected request, falling back to system prompt injection")
             return await self._complete_xml_fallback(
                 injected_messages, tools, stream, disable_thinking=disable_thinking

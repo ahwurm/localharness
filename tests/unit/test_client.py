@@ -448,3 +448,76 @@ async def test_complete_xml_downgrades_native_tool_history():
     assert "<tool_response>" in tool_turn["content"] and "apricot" in tool_turn["content"]
     body = roles[1:]
     assert all(a != b for a, b in zip(body, body[1:]))
+
+
+def test_tools_to_api_format_sanitizes_registry_names():
+    """`mcp:fetch`-style names violate the OpenAI function-name grammar and make llama.cpp
+    400 the whole request, knocking MCP/plugin scenarios off the native path. Wire names
+    are sanitized; the unmap restores originals."""
+    from localharness.provider.client import _tools_to_api_format
+
+    tools = [
+        {"name": "mcp:fetch", "description": "d", "parameters": {}},
+        {"name": "plugin:research_tools.exa_search", "description": "d", "parameters": {}},
+        {"name": "read", "description": "d", "parameters": {}},
+    ]
+    payload, unmap = _tools_to_api_format(tools)
+    names = [p["function"]["name"] for p in payload]
+    assert names == ["mcp_fetch", "plugin_research_tools_exa_search", "read"]
+    assert unmap["mcp_fetch"] == "mcp:fetch"
+    assert unmap["plugin_research_tools_exa_search"] == "plugin:research_tools.exa_search"
+    assert unmap["read"] == "read"
+    # collision: two originals sanitizing to the same wire name stay distinct
+    payload2, unmap2 = _tools_to_api_format(
+        [
+            {"name": "a:b", "description": "d", "parameters": {}},
+            {"name": "a.b", "description": "d", "parameters": {}},
+        ]
+    )
+    n2 = [p["function"]["name"] for p in payload2]
+    assert len(set(n2)) == 2
+    assert {unmap2[n] for n in n2} == {"a:b", "a.b"}
+
+
+def test_unmap_tool_call_names_restores_originals():
+    from types import SimpleNamespace
+    from localharness.provider.client import LLMClient
+
+    msg = SimpleNamespace(
+        content=None,
+        tool_calls=[
+            {"id": "1", "type": "function", "function": {"name": "mcp_fetch", "arguments": "{}"}},
+            # model echoed the original registry name from history — must pass through
+            {"id": "2", "type": "function", "function": {"name": "mcp:fetch", "arguments": "{}"}},
+        ],
+    )
+    LLMClient._unmap_tool_call_names(msg, {"mcp_fetch": "mcp:fetch"})
+    assert msg.tool_calls[0]["function"]["name"] == "mcp:fetch"
+    assert msg.tool_calls[1]["function"]["name"] == "mcp:fetch"
+
+
+@pytest.mark.asyncio
+async def test_complete_xml_tools_rejection_is_sticky():
+    """After one BadRequestError on `tools=`, later xml-mode requests must not re-send it —
+    observed live as 44 x HTTP 400 in a single bench run, one per iteration."""
+    import openai
+
+    client = _xml_client()
+    calls: list[dict] = []
+
+    async def _spy_create(**kwargs):
+        calls.append(kwargs)
+        if "tools" in kwargs:
+            raise openai.BadRequestError(
+                message="invalid tools", response=MagicMock(status_code=400, headers={}), body=None
+            )
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    msgs = [{"role": "system", "content": "sys"}]
+    await client._complete_xml(messages=msgs, tools=[_PROBE_TOOL], stream=False)
+    assert "tools" in calls[0] and "tools" not in calls[1]  # first try + fallback retry
+    await client._complete_xml(messages=msgs, tools=[_PROBE_TOOL], stream=False)
+    assert "tools" not in calls[2]  # sticky: no third 400
+    assert len(calls) == 3
