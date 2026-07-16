@@ -467,6 +467,11 @@ class AgentLoop:
         self._permissions = permission_evaluator
         self._memory = memory_loader
         self._compact_md_path = compact_md_path
+        # Type-anytime input box: user-typed nudges routed to the CURRENT turn land here and
+        # are drained into durable session history at the next step boundary (same #82 seam as
+        # the stuck-recovery nudge). A one-loop, cooperative-async inbox — the REPL coroutine
+        # appends, the turn coroutine drains; no lock needed. Distinct from the stuck detector.
+        self._user_nudge_inbox: list[str] = []
         # Prior-session context (compact.md) is FOLDED into the single leading system message,
         # never appended as a second system message — strict chat templates reject a non-leading
         # system role (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0).
@@ -496,6 +501,15 @@ class AgentLoop:
     def current_session_id(self) -> str | None:
         """Return the session_id from the most recent run_turn() call."""
         return self._current_session_id
+
+    def push_user_nudge(self, text: str) -> None:
+        """Queue a user-typed nudge for delivery to the running turn at its next step
+        boundary (type-anytime input box). Session-persisted via the same seam as the #82
+        stuck-recovery nudge, but a DISTINCT source: it never touches the stuck detector or
+        its max_nudges_per_turn accounting. Multiple nudges stack (FIFO). No-op on blank."""
+        text = (text or "").strip()
+        if text:
+            self._user_nudge_inbox.append(text)
 
     async def run_turn(
         self,
@@ -750,6 +764,17 @@ class AgentLoop:
                 session.actions_taken,
                 session.elapsed_seconds(),
             )
+
+            # 0. Type-anytime user nudges: drain the inbox at this step boundary into durable
+            # session history (#82 seam), so this iteration's build_messages replays them. A
+            # distinct source from the stuck detector — deliberately outside its accounting.
+            while self._user_nudge_inbox:
+                nudge = self._user_nudge_inbox.pop(0)
+                session.push({"role": "user", "content": nudge})
+                log.info(
+                    "User nudge delivered to %s at iteration %d",
+                    self._config.name, session.iteration,
+                )
 
             # 1. Kill check
             if self._kill.is_killed():
