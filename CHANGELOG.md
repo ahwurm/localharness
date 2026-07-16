@@ -4,6 +4,64 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.10] — 2026-07-16
+
+The terminal REPL gets a type-anytime input box. Previously the input prompt only
+existed between turns — while the agent worked, the terminal was read-only. The box
+now stays live during turns: messages typed mid-turn are routed either INTO the
+running turn (a "nudge", delivered at the agent's next step boundary through the same
+session-persisted seam as the v0.9.7 stuck-recovery warnings) or into an ordered
+queue that plays back as normal turns afterwards. Also ships two fixes that landed
+directly on main after v0.9.9.
+
+### Added
+- **Persistent input box during turns** (`terminal.inputbox_enabled`, default on,
+  TTY-only): the prompt_toolkit input application runs alongside streaming output
+  under `patch_stdout(raw=True)`; the frame shows a working glyph, the queue count,
+  and each routing decision the moment it's made. Disabling the flag restores the
+  previous between-turns-only prompt exactly; non-TTY sessions always use it.
+- **Two-tier nudge/queue routing** (`channels/input_router.py`): tier 1 is a small
+  deterministic rule table (correction shapes → nudge; future-framed / new-task
+  shapes → queue); only the ambiguous middle goes to tier 2 — a single bounded (5s)
+  two-way classification call to the configured model, validated in code. Any tier-2
+  timeout/error/invalid output → queue (a late message is harmless; a false nudge
+  pollutes a running turn). A leading `!` force-nudges. Every decision emits an
+  `InputRouted` event with `{decision, tier, rule_or_reason}` so the rules can be
+  tuned from real usage. Tier 2 has its own off-switch
+  (`terminal.input_router_tier2_enabled`).
+- **User-nudge inbox on the agent loop** (`push_user_nudge`): drained into durable
+  session history at step boundaries; deliberately outside the stuck detector's
+  warning accounting.
+- Slash commands typed mid-turn queue deterministically (never classified).
+
+### Changed
+- While the box is active, the tool-burst counter and thinking indicator render
+  inside the box frame instead of as rich `Status` spinners: the two renderers
+  running concurrently could reproducibly freeze the screen when Ctrl+C landed
+  mid-burst (verified by a targeted repro before and after the fix). The background
+  "dreaming" indicator is not animated in box mode (v1 cosmetic regression).
+- With box mode on, Ctrl+C during a turn routes through the box's key binding
+  (buffer empty → cancel turn) rather than a signal handler.
+
+### Fixed
+- **MCP/plugin tools stay on the native tool path**: registry names like
+  `mcp:fetch` violate the OpenAI function-name grammar, so llama.cpp rejected the
+  whole `tools=` request (HTTP 400) and every MCP/plugin scenario silently fell to
+  XML fallback. Wire names are now sanitized with an unmap at the response choke
+  point, and xml mode remembers a `tools=` rejection per client instead of re-buying
+  the 400 each iteration.
+- **`bash_exec` never launches the Windows WSL stub**: PowerShell PATH order
+  resolves `bash` to the System32 WSL launcher, whose distro-less UTF-16LE error
+  decoded as NUL-riddled mojibake the model stuck-looped on. Bash discovery rejects
+  the stub, searches git-bash locations, honors `LOCALHARNESS_BASH`, and errs
+  clearly; tool output decoding sniffs UTF-16 BOMs/NULs before falling back to
+  utf-8.
+
+Known limits at release: the tier-2 live path was not exercised end-to-end in the
+release proof (its contract is unit-tested; its failure mode is the safe default,
+queue); the queue does not persist across REPL restarts; interrupt-and-restart is
+out of scope.
+
 ## [0.9.9] — 2026-07-16
 
 Packaging release — localharness is now installable from PyPI (`pip install localharness`,
