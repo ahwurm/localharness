@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import structlog
 from prompt_toolkit.application import Application
@@ -58,6 +59,12 @@ _DREAMING_LABEL = "· dreaming…"   # · dreaming…
 # llm_response IS the final answer (rendered by the TaskComplete panel) — never here.
 _NARRATE = "·"        # ·  narration line indicator
 _MAX_NARRATION = 160       # hard char cap before the ellipsis
+
+# Braille spinner frames for the IN-FRAME working glyph. While the persistent input box is
+# live, the thinking/burst indicator advances inside the box's bottom border (a
+# FormattedTextControl fragment refreshed by app.invalidate) instead of a rich Status/Live —
+# rich spinners under patch_stdout glue lines and, worse, FREEZE on Ctrl+C-during-burst.
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Burst consolidation: consecutive calls from one tool family collapse into a single
 # live counter line (`◆ web_search · web_fetch · 30/30`) instead of a line per call —
@@ -181,6 +188,101 @@ def _build_input_app(
         style=INPUT_STYLE,
         mouse_support=False,
     )
+
+
+def _build_persistent_input_app(
+    history: FileHistory,
+    prompt: str,
+    *,
+    on_submit: Callable[[str], None],
+    on_interrupt: Callable[[], None],
+    on_eof: Callable[[], None],
+    hint_fn: Callable[[], list[tuple[str, str]]],
+    pct_fn: Callable[[], float | None],
+) -> Application:
+    """Long-lived input box that stays usable while turn output streams above it.
+
+    Differs from _build_input_app in three ways, all load-bearing for the type-anytime box:
+      1. Enter SUBMITS without exiting — it hands the line to on_submit and resets the buffer,
+         so the same Application services every submission for the whole session (run once via
+         asyncio.create_task(app.run_async()) alongside the turn, under patch_stdout(raw=True)).
+      2. The bottom-border hint + context meter are DYNAMIC FormattedTextControl callables
+         (hint_fn / pct_fn) refreshed by app.invalidate() — the seam the in-frame working glyph,
+         `queued (N)`, and the routing-decision flash all render through.
+      3. Ctrl+C (empty buffer) / Ctrl+D (empty buffer) call back into REPL policy (on_interrupt
+         / on_eof) rather than raising out of run_async — the box owns raw mode for the whole
+         session, so these are the only path a signal-suppressed terminal has to interrupt/exit.
+    """
+    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
+    control = BufferControl(
+        buffer=buf,
+        input_processors=[
+            BeforeInput([("class:caret", f" {prompt} ")]),
+            AppendAutoSuggestion(),
+        ],
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event) -> None:
+        text = buf.text
+        if text.strip():
+            buf.append_to_history()
+            on_submit(text)
+        buf.reset()  # ready for the next line; the app stays alive
+
+    @kb.add("c-c")
+    def _interrupt(event) -> None:
+        if buf.text:
+            buf.reset()  # first Ctrl+C clears the line (Claude Code / shell idiom)
+        else:
+            on_interrupt()  # empty buffer → REPL cancels the turn, or arms/exits when idle
+
+    @kb.add("c-d")
+    def _eof(event) -> None:
+        if not buf.text:
+            on_eof()
+
+    def _wall(char: str) -> Window:
+        return Window(width=1, char=char)
+
+    def _meter_frags() -> list[tuple[str, str]]:
+        pct = pct_fn()
+        if pct is None:
+            return []
+        frags, _ = _ctx_segments(pct)
+        return frags
+
+    def _meter_width() -> int:
+        pct = pct_fn()
+        if pct is None:
+            return 0
+        _, w = _ctx_segments(pct)
+        return w
+
+    bottom = [
+        _wall("╰"),
+        Window(char="─", height=1, width=1),
+        Window(FormattedTextControl(hint_fn), height=1),
+        Window(char="─", height=1),  # stretchy filler right-aligns the meter
+        Window(FormattedTextControl(_meter_frags), width=_meter_width, height=1),
+        Window(char="─", height=1, width=1),
+        _wall("╯"),
+    ]
+    body = HSplit([
+        VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
+        VSplit(bottom),
+    ], style="class:frame")
+
+    return Application(
+        layout=Layout(body, focused_element=control),
+        key_bindings=kb,
+        style=INPUT_STYLE,
+        mouse_support=False,
+    )
+
 
 TERMINAL_THEME = Theme({
     "agent.name":   "bold cyan",
@@ -323,6 +425,17 @@ class TerminalChannel(ChannelAdapter):
         self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
         # call, consumed by its completion receipt (the success result carries only the summary)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
+        # --- Persistent type-anytime input box (start_input_box); all inert until then ---
+        self._box_active: bool = False           # True while the long-lived box owns the terminal
+        self._box_app: Application | None = None
+        self._box_task: asyncio.Task | None = None
+        self._box_patch = None                   # patch_stdout(raw=True) ctx, held for the box's life
+        self._box_ticker: asyncio.Task | None = None
+        self._box_working: bool = False          # in-frame spinner glyph on (thinking/streaming/burst)
+        self._queued_count: int = 0              # `queued (N)` shown in the box frame
+        self._decision_flash: str = ""           # transient routing-decision line in the box frame
+        self._decision_flash_task: asyncio.Task | None = None
+        self._first_box_hint: str = ""           # #49 guidance hint, shown in the box until first use
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
@@ -354,6 +467,7 @@ class TerminalChannel(ChannelAdapter):
 
     async def stop(self) -> None:
         """Unsubscribe from bus, stop any active Live context, flush console."""
+        await self.stop_input_box()  # tear the persistent box down first (idempotent)
         for handle in (
             self._action_handle,
             self._observation_handle,
@@ -561,6 +675,145 @@ class TerminalChannel(ChannelAdapter):
         finally:
             self._state = "IDLE"
 
+    # ------------------------------------------------------------------ #
+    # Persistent type-anytime input box
+    # ------------------------------------------------------------------ #
+
+    def can_run_input_box(self) -> bool:
+        """The persistent box needs a real interactive TTY. Non-TTY (pipes, CI, capture)
+        falls back to the classic read_input sequencing."""
+        return bool(self._console.is_terminal)
+
+    async def start_input_box(
+        self, ctrl_queue: asyncio.Queue, on_interrupt: Callable[[], None]
+    ) -> None:
+        """Launch the long-lived input box as a sibling task, under patch_stdout(raw=True) so
+        all turn output streams ABOVE it. Enter enqueues ('submit', text) onto ctrl_queue;
+        Ctrl+D (empty) enqueues ('eof', None); Ctrl+C (empty) calls on_interrupt() — the REPL
+        owns those policies. raw=True is load-bearing (rich ANSI is interpreted, not escaped)."""
+        if self._history is None:
+            raise ChannelStartError("TerminalChannel.start() must be called before start_input_box()")
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        # #49: the first prompt carries the guidance hint inside the box; consume it once.
+        self._first_box_hint, self.first_prompt_hint = self.first_prompt_hint, ""
+        self._box_active = True
+
+        def _on_submit(text: str) -> None:
+            ctrl_queue.put_nowait(("submit", text))
+
+        def _on_eof() -> None:
+            ctrl_queue.put_nowait(("eof", None))
+
+        self._box_app = _build_persistent_input_app(
+            self._history, ">",
+            on_submit=_on_submit, on_interrupt=on_interrupt, on_eof=_on_eof,
+            hint_fn=self._box_hint_frags, pct_fn=lambda: self._context_pct,
+        )
+        self._box_patch = patch_stdout(raw=True)
+        self._box_patch.__enter__()
+        self._box_task = asyncio.create_task(self._box_app.run_async())
+        self._box_ticker = asyncio.create_task(self._box_tick())
+
+    async def stop_input_box(self) -> None:
+        """Tear the box down: stop the ticker, exit the app, release patch_stdout. Idempotent."""
+        self._box_active = False
+        for task_attr in ("_box_ticker", "_decision_flash_task"):
+            task = getattr(self, task_attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                setattr(self, task_attr, None)
+        if self._box_app is not None:
+            try:
+                if self._box_app.is_running:
+                    self._box_app.exit()
+            except Exception:
+                pass
+        if self._box_task is not None:
+            try:
+                await self._box_task
+            except (asyncio.CancelledError, EOFError, KeyboardInterrupt, Exception):
+                pass
+            self._box_task = None
+        if self._box_patch is not None:
+            try:
+                self._box_patch.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._box_patch = None
+        self._box_app = None
+
+    def _box_hint_frags(self) -> list[tuple[str, str]]:
+        """Dynamic bottom-border content: an animated working glyph, the transient routing
+        decision, the persistent `queued (N)`, or the first-run guidance hint."""
+        parts: list[tuple[str, str]] = []
+        if self._box_working:
+            glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
+            parts.append(("class:hint", f" {glyph} working "))
+        if self._decision_flash:
+            parts.append(("class:caret", f" {self._decision_flash} "))
+        elif self._queued_count:
+            parts.append(("class:hint", f" queued ({self._queued_count}) "))
+        elif not self._box_working and self._first_box_hint:
+            parts.append(("class:hint", f" {self._first_box_hint} "))
+        if not parts:
+            parts.append(("class:hint", "  "))
+        return parts
+
+    def _invalidate_box(self) -> None:
+        if self._box_app is not None and self._box_active:
+            try:
+                self._box_app.invalidate()
+            except Exception:
+                pass
+
+    def box_set_queued(self, n: int) -> None:
+        """Persistent `queued (N)` count shown in the box frame."""
+        self._queued_count = max(0, n)
+        self._invalidate_box()
+
+    def box_flash_decision(self, text: str, seconds: float = 2.0) -> None:
+        """Show a transient routing-decision line ('→ nudging current turn' / 'queued (N)')
+        the instant Enter is routed; it clears itself after `seconds`."""
+        self._decision_flash = text
+        self._invalidate_box()
+        if self._decision_flash_task is not None:
+            self._decision_flash_task.cancel()
+        try:
+            self._decision_flash_task = asyncio.get_running_loop().create_task(
+                self._clear_flash_after(seconds, text)
+            )
+        except RuntimeError:
+            self._decision_flash_task = None  # no loop (unit context): flash persists till next change
+
+    async def _clear_flash_after(self, seconds: float, text: str) -> None:
+        try:
+            await asyncio.sleep(seconds)
+            if self._decision_flash == text:  # not superseded by a newer decision
+                self._decision_flash = ""
+                self._invalidate_box()
+        except asyncio.CancelledError:
+            pass
+
+    def box_notify_working(self, working: bool) -> None:
+        """Toggle the in-frame working glyph (thinking/streaming/burst active)."""
+        self._box_working = working
+        self._invalidate_box()
+
+    async def _box_tick(self) -> None:
+        """Animate the in-frame working glyph while the box is live (no rich Live anywhere)."""
+        try:
+            while self._box_active:
+                if self._box_working:
+                    self._invalidate_box()
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            pass
+
     def _ensure_idle(self) -> None:
         """Log a warning if called while STREAMING (concurrent write detected)."""
         if self._state == "STREAMING":
@@ -578,6 +831,12 @@ class TerminalChannel(ChannelAdapter):
     def _burst_refresh(self, burst: _Burst) -> None:
         """Tick the live counter. TTY-only spinner; non-TTY counts silently and
         prints just the frozen line on close (captures stay one line per burst)."""
+        if self._box_active:
+            # Box mode: NO rich Status (it glues lines / freezes on Ctrl+C-during-burst under
+            # patch_stdout). The count accumulates in the _Burst and its frozen line prints on
+            # close; the live indicator is the in-frame working glyph.
+            self.box_notify_working(True)
+            return
         text = self._burst_text(burst, final=False)
         if burst.status is not None:
             burst.status.update(text)
@@ -608,6 +867,10 @@ class TerminalChannel(ChannelAdapter):
         IDLE-only: never over the input bubble, a streaming panel, an open burst
         counter (the burst spinner is already the live indicator), or the dreaming
         status (rich allows one live display \u2014 a turn beginning stops it first)."""
+        if self._box_active:
+            # Box mode: in-frame glyph, never a rich Status (freeze-safe under patch_stdout).
+            self.box_notify_working(True)
+            return
         if (self._thinking is None and self._dreaming is None
                 and self._burst is None and self._state == "IDLE"):
             try:
@@ -623,6 +886,8 @@ class TerminalChannel(ChannelAdapter):
         pass runs (#20). Extends _start_thinking: same console.status, IDLE-only \u2014 so it can
         never draw over the input bubble (WAITING_INPUT) or a stream, and never opens a second
         live display alongside the thinking spinner or a burst counter."""
+        if self._box_active:
+            return  # box mode: no rich Status; background dreaming isn't animated in-frame (v1)
         if (self._dreaming is None and self._thinking is None
                 and self._burst is None and self._state == "IDLE"):
             try:
@@ -641,6 +906,8 @@ class TerminalChannel(ChannelAdapter):
                 self._dreaming = None
 
     def _stop_thinking(self) -> None:
+        if self._box_active:
+            self.box_notify_working(False)  # box mode: drop the in-frame glyph
         if self._thinking is not None:
             try:
                 self._thinking.stop()
