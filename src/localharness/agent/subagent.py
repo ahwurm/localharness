@@ -423,6 +423,7 @@ async def dispatch_explore_subagent(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,
+    config_override: AgentConfig | None = None,
 ) -> str:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -453,7 +454,9 @@ async def dispatch_explore_subagent(
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
-    child_config = build_explore_config(agent_name)
+    # config_override (when present) is the built-in base with an agents/explore.yaml overlay
+    # already applied by the runner; the structural read-only toolset stays EXPLORE_TOOLS.
+    child_config = config_override or build_explore_config(agent_name)
 
     # Read-only registry: builtins {read, glob, grep} only — no write/bash/spawn.
     child_registry = ToolRegistry.from_allowed(EXPLORE_TOOLS, base_registry=base_registry)
@@ -495,6 +498,7 @@ async def dispatch_web_subagent(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,
+    config_override: AgentConfig | None = None,
 ) -> str:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -513,7 +517,10 @@ async def dispatch_web_subagent(
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
-    child_config = build_web_researcher_config(agent_name)
+    # config_override (when present) is the built-in base with an agents/web-researcher.yaml
+    # overlay already applied by the runner (the real budget knob); the structural web toolset
+    # stays WEB_TOOLS regardless — the overlay tunes AgentConfig fields (budget/role/…), not tools.
+    child_config = config_override or build_web_researcher_config(agent_name)
 
     # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
     child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
@@ -645,6 +652,7 @@ async def dispatch_search_verifier_subagent(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,  # accepted for a uniform dispatch signature; verifier is ALWAYS a leaf
+    config_override: AgentConfig | None = None,
 ) -> str:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -661,7 +669,9 @@ async def dispatch_search_verifier_subagent(
     from localharness.agent.loop import AgentLoop
     from localharness.tools.registry import ToolRegistry
 
-    child_config = build_search_verifier_config(agent_name)
+    # config_override (when present) is the built-in base with an agents/search-verifier.yaml
+    # overlay already applied by the runner; the structural read-only web subset stays fixed.
+    child_config = config_override or build_search_verifier_config(agent_name)
     # Read-only web subset — no write/bash/spawn, and (by contract) no `agent` tool: leaf.
     child_registry = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
@@ -1047,6 +1057,7 @@ def make_explore_agent_runner(
     permission_evaluator: Any,
     get_parent_session_id: Callable[[], str | None],
     load_agent: Callable[[str], Any] | None = None,
+    load_builtin_override: Callable[[str, AgentConfig], AgentConfig] | None = None,
     token_counter: Any = None,
     max_context_tokens: int | None = None,
     depth: int = 0,
@@ -1116,6 +1127,7 @@ def make_explore_agent_runner(
             permission_evaluator=permission_evaluator,
             get_parent_session_id=get_parent_session_id,
             load_agent=load_agent,
+            load_builtin_override=load_builtin_override,
             token_counter=token_counter,
             max_context_tokens=max_context_tokens,
             depth=child_depth,
@@ -1153,11 +1165,11 @@ def make_explore_agent_runner(
                 cruncher_config=cruncher_config, memory_store=memory_store,
             )
         if name == "explore":
-            dispatch = dispatch_explore_subagent
+            dispatch, base_builder = dispatch_explore_subagent, build_explore_config
         elif name == "web-researcher":
-            dispatch = dispatch_web_subagent
+            dispatch, base_builder = dispatch_web_subagent, build_web_researcher_config
         elif name == "search-verifier":
-            dispatch = dispatch_search_verifier_subagent
+            dispatch, base_builder = dispatch_search_verifier_subagent, build_search_verifier_config
         else:
             cfg = None
             # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
@@ -1185,6 +1197,16 @@ def make_explore_agent_runner(
                 depth=depth,
                 max_subagent_depth=max_subagent_depth,
             )
+        # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
+        # budget knob): base = the code-defined default config, overlaid per-field by the yaml
+        # when one exists (absent = pure defaults / no behavior change; malformed = explicit
+        # error surfaced to the model, never a silent fallback). No override hook wired (e.g.
+        # the bench runner) => None => the dispatch builds its own default, unchanged. The
+        # structural toolset stays fixed by the dispatcher — the overlay tunes AgentConfig fields.
+        config_override = (
+            load_builtin_override(name, base_builder(name))
+            if load_builtin_override is not None else None
+        )
         return await dispatch(
             task,
             llm=llm,
@@ -1196,6 +1218,7 @@ def make_explore_agent_runner(
             depth=depth,
             max_subagent_depth=max_subagent_depth,
             child_agent_tool=child_agent_tool,
+            config_override=config_override,
         )
 
     return _run_agent

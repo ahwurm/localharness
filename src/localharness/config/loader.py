@@ -448,6 +448,33 @@ class ConfigLoader:
         self._agent_cache[name] = result
         return result
 
+    def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
+        """Overlay an optional agents/<name>.yaml onto a BUILT-IN subagent's base config.
+
+        Built-in subagents (explore, web-researcher, search-verifier) ship a code-defined base
+        config — role + budget + toolset. This lets a user TUNE that base (e.g. a bigger
+        web-researcher budget) without restating it: the fields present in agents/<name>.yaml
+        deep-merge ON TOP of `base` (base name/role/budget are the defaults; the yaml wins
+        per-field), then the result is re-validated as a full AgentConfig.
+
+        Returns `base` UNCHANGED when no agents/<name>.yaml exists — absence is a pure no-op
+        (built-in defaults, no behavior change). When one exists it is applied and validated:
+        malformed YAML raises ConfigParseError and a value that fails AgentConfig validation
+        raises ConfigValidationError — NEVER a silent fallback to the base (explicit-failure rule).
+
+        Read fresh each call (not cached) so a yaml the model just wrote is picked up in the same
+        turn, mirroring the dispatch seam's load_agent(bypass_cache=True). The built-in TOOLSET is
+        structural (fixed by the dispatcher) and is NOT taken from this overlay — only AgentConfig
+        fields (budget, role, temperature, timeout, ...) apply.
+        """
+        path = self._find_file("agents", name)
+        if path is None:
+            return base
+        text = path.read_text(encoding="utf-8")
+        raw = _load_yaml_file(path)  # raises ConfigParseError on malformed YAML
+        merged = deep_merge(base.model_dump(), raw)  # base = the defaults; yaml fields win
+        return self._validate_dict(AgentConfig, merged, str(path), text)
+
     def list_agents(self) -> list[str]:
         names: set[str] = set()
         for base in (self._local_dir, self._config_dir):

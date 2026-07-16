@@ -819,6 +819,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             get_parent_session_id=lambda: agent_loop.current_session_id,
             # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
             load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
+            # Built-in subagents (explore/web-researcher/search-verifier) are TUNABLE: an optional
+            # agents/<name>.yaml overlays the code-defined base (e.g. a bigger web-researcher
+            # budget) — absent file = built-in defaults, malformed = explicit error, never silent.
+            load_builtin_override=lambda n, base: loader.overlay_builtin_config(n, base),
             # Children inherit the parent's exact /tokenize counter + resolved window so the
             # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
             token_counter=token_counter,
