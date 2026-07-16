@@ -4,6 +4,21 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.9] — 2026-07-16
+
+Packaging release — localharness is now installable from PyPI (`pip install localharness`,
+`uv tool install localharness`, `uvx localharness`), so the CLI works from any directory
+instead of only inside a repo checkout via `uv run`. No harness behavior changes; v0.9.8
+runtime is identical.
+
+### Added
+- PyPI publishing via GitHub Actions Trusted Publishing (OIDC, no stored tokens):
+  `.github/workflows/publish.yml` builds, smoke-tests the wheel from a clean environment
+  and a foreign working directory, and publishes on every GitHub Release.
+- sdist build config — source tarballs ship `src/` + docs metadata instead of the whole
+  repo (bench corpus, tests, assets were all being packed in).
+- Python 3.13 trove classifier.
+
 ## [0.9.8] — 2026-07-15
 
 First live validation of llama.cpp as a provider — Gemma 3 4B QAT Q4_0 on stock
