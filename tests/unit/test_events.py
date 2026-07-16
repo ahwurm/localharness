@@ -137,8 +137,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 28 event types."""
-    assert len(EVENT_TYPE_MAP) == 28
+    """EVENT_TYPE_MAP has entries for all 29 event types."""
+    assert len(EVENT_TYPE_MAP) == 29
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -146,9 +146,28 @@ def test_event_type_map_complete():
         "CompactionTriggered", "ScenarioCompleted", "ParseFailed", "StuckRecovered",
         "ComponentMutated", "MutationArchived", "SentinelAlert", "MemoryGateFired",
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
-        "ConsolidationStarted", "ConsolidationFinished",
+        "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
+
+
+def test_input_routed_event():
+    """InputRouted records every type-anytime input-box routing decision (nudge|queue),
+    which tier decided, the rule/reason, and a short preview — dogfood tuning data on the
+    session ledger. Survives the bus-ledger JSONL roundtrip."""
+    from localharness.core.events import InputRouted
+
+    ev = InputRouted(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        decision="nudge", tier="tier1", rule_or_reason="nudge-initial:stop",
+        text_preview="stop, wrong file",
+    )
+    assert ev.event_type == "InputRouted"
+    assert ev.decision == "nudge" and ev.tier == "tier1"
+    assert EVENT_TYPE_MAP["InputRouted"] is InputRouted
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, InputRouted)
+    assert restored.decision == "nudge" and restored.rule_or_reason == "nudge-initial:stop"
 
 
 def test_deserialize_event():
@@ -205,9 +224,11 @@ def test_any_event_union():
     import typing
     # Import-inside-body (the file's 19-02 idiom) so the module still collects before the
     # #20 consolidation-status events land — the assertions below fail RED until then.
-    from localharness.core.events import ConsolidationFinished, ConsolidationStarted
+    from localharness.core.events import (
+        ConsolidationFinished, ConsolidationStarted, InputRouted,
+    )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 28
+    assert len(args) == 29
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -215,7 +236,7 @@ def test_any_event_union():
         CompactionTriggered, ScenarioCompleted, ParseFailed, StuckRecovered,
         ComponentMutated, MutationArchived, SentinelAlert, MemoryGateFired,
         ExpectationAttached, OutcomeObserved, SurpriseScored,
-        ConsolidationStarted, ConsolidationFinished,
+        ConsolidationStarted, ConsolidationFinished, InputRouted,
     }
     assert set(args) == expected
 
