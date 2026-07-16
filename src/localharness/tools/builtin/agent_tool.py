@@ -17,8 +17,10 @@ class AgentTool(Tool):
     # Must exceed the child's time budget PLUS a worst-case final-summary generation
     # on a slow local model (observed: 600s cancelled children 7 min into generating
     # their summary, returning "" with no terminal event). The parent's own turn
-    # budget is the real backstop.
-    timeout_s: float | None = 1800.0
+    # budget is the real backstop. Kept at >= 2x the web-researcher's max duration
+    # (now 20 min → 2400s) so the parent never times out before the child's own budget
+    # binds (invariant guarded by test_agent_tool_timeout_exceeds_child_budget_and_summary_headroom).
+    timeout_s: float | None = 2400.0
 
     def __init__(
         self,
