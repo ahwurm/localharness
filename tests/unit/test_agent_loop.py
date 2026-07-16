@@ -253,6 +253,34 @@ def test_budget_time_exceeded():
     assert v.reason == "time"
 
 
+def test_budget_tracker_zero_max_tool_calls_blocks_dispatch_not_iteration():
+    """FIX 3: max_tool_calls=0 must refuse every dispatch via tool_call_allowed(), independent
+    of check() — the turn still gets its first iteration (check() only gates on max_actions,
+    which the runner floors at >=1; here actions_taken=0 so check() is unaffected either way)."""
+    s = Session(agent_id="a", session_id="s", messages=[])
+    tracker = BudgetTracker(max_actions=1, max_duration_minutes=30.0, max_tool_calls=0)
+    assert tracker.check(s) is None  # iteration 1 still allowed
+    assert tracker.tool_call_allowed(s) is False  # but no dispatch permitted
+
+
+def test_budget_tracker_max_tool_calls_none_is_unrestricted():
+    """max_tool_calls defaults to None — no separate dispatch cap, so every existing caller
+    (production agent configs, tests that never set this field) is unaffected."""
+    s = Session(agent_id="a", session_id="s", messages=[])
+    tracker = BudgetTracker(max_actions=5, max_duration_minutes=30.0)
+    assert tracker.tool_call_allowed(s) is True
+
+
+def test_budget_tracker_max_tool_calls_one_allows_exactly_one():
+    """max_tool_calls=1 allows the first dispatch (actions_taken=0) but refuses the second
+    (actions_taken=1) — same ceiling semantics as before, just decoupled from max_actions."""
+    s = Session(agent_id="a", session_id="s", messages=[])
+    tracker = BudgetTracker(max_actions=100, max_duration_minutes=30.0, max_tool_calls=1)
+    assert tracker.tool_call_allowed(s) is True
+    s.actions_taken = 1
+    assert tracker.tool_call_allowed(s) is False
+
+
 # ---------------------------------------------------------------------------
 # KillWatcher tests
 # ---------------------------------------------------------------------------

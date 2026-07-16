@@ -159,6 +159,11 @@ class BudgetViolation:
 class BudgetTracker:
     max_actions: int
     max_duration_minutes: float
+    # Dispatch-time tool-call ceiling, DISTINCT from max_actions (BudgetConfig.max_actions is
+    # ge=1 so the loop always gets its first LLM round-trip). None (default): no separate cap,
+    # every existing caller is unaffected — only the bench runner sets this, from
+    # scenario.limits.max_tool_calls, which — unlike max_actions — may legitimately be 0.
+    max_tool_calls: int | None = None
 
     def check(self, session: Session) -> BudgetViolation | None:
         if self.max_actions > 0 and session.actions_taken >= self.max_actions:
@@ -182,6 +187,18 @@ class BudgetTracker:
                 ),
             )
         return None
+
+    def tool_call_allowed(self, session: Session) -> bool:
+        """Whether one more tool call may be DISPATCHED right now.
+
+        Independent of check()'s max_actions gate (which only stops the NEXT iteration from
+        starting): max_tool_calls=0 must refuse every dispatch while the turn keeps running,
+        so the model still converges to a normal answer instead of dying budget_exceeded
+        before it can use — or do without — a tool result.
+        """
+        if self.max_tool_calls is None:
+            return True
+        return session.actions_taken < self.max_tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +720,7 @@ class AgentLoop:
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
             max_duration_minutes=self._config.permissions.budget.max_duration_minutes,
+            max_tool_calls=self._config.permissions.budget.max_tool_calls,
         )
         sd_cfg = self._config.stuck_detector
         stuck_detector = StuckDetector(
@@ -1167,6 +1185,24 @@ class AgentLoop:
 
             # 11. Execute each tool call
             for tool_call in tool_calls:
+                # Dispatch cap (FIX 3): checked BEFORE actions_taken increments or an Action
+                # publishes, so a refusal is invisible to actions_taken/tool_call_count — it
+                # must not trip max_actions and kill the turn, and metrics should reflect real
+                # dispatches only. stuck_detector still sees it, so a model that keeps retrying
+                # the same disallowed call is still caught by the stuck ladder.
+                if not budget.tool_call_allowed(session):
+                    session.push({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": (
+                            f"Tool call not executed: this task's tool-call budget "
+                            f"({budget.max_tool_calls} allowed) has been reached. Answer "
+                            f"directly without calling any more tools."
+                        ),
+                    })
+                    stuck_detector.record(tool_call.name, tool_call.arguments)
+                    continue
+
                 session.actions_taken += 1
 
                 # Publish tool_call action for terminal display

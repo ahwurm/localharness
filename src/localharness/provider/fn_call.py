@@ -90,8 +90,11 @@ def has_tool_call_attempt(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # Qwen 3 native format: <function=NAME><parameter=PARAM>value</parameter></function>
+# Name class includes ':' and '.' — the system-prompt injection teaches namespaced registry
+# names (mcp:fetch, plugin:research_tools.exa_search; bench/schema.py parse_tool_name), which
+# a bare [\w\-]+ class silently fails to match (no match at all, not a partial one).
 _QWEN_TOOL_PATTERN = re.compile(
-    r"<tool_call>\s*<function=([\w\-]+)>(.*?)</function>\s*</tool_call>",
+    r"<tool_call>\s*<function=([\w\-:.]+)>(.*?)</function>\s*</tool_call>",
     re.DOTALL | re.IGNORECASE,
 )
 _QWEN_PARAM_PATTERN = re.compile(
@@ -107,12 +110,13 @@ _HERMES_TOOL_PATTERN = re.compile(
 )
 
 # Legacy OpenHands format: <name>X</name><parameters>{JSON}</parameters>
+# Name class widened the same way as _QWEN_TOOL_PATTERN above (':' and '.' for namespaced names).
 _LEGACY_TOOL_PATTERN = re.compile(
-    r"<tool_call>\s*<name[>=]([\w\-]+)</name>\s*<parameters?>(.*?)</parameters?>\s*</tool_call>",
+    r"<tool_call>\s*<name[>=]([\w\-:.]+)</name>\s*<parameters?>(.*?)</parameters?>\s*</tool_call>",
     re.DOTALL | re.IGNORECASE,
 )
 _LEGACY_PARTIAL = re.compile(
-    r"<tool_call>\s*<name[>=]([\w\-]+)</name>\s*<parameters?>([^<]*)",
+    r"<tool_call>\s*<name[>=]([\w\-:.]+)</name>\s*<parameters?>([^<]*)",
     re.DOTALL | re.IGNORECASE,
 )
 

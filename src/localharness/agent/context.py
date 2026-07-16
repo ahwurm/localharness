@@ -1133,8 +1133,16 @@ class ContextManager:
         reserve = RESPONSE_RESERVE_TOKENS if self.max_context_tokens > RESPONSE_RESERVE_TOKENS else 0
         effective_limit = self.max_context_tokens - reserve
         floor_usage = self._token_counter.count_messages(repaired)
+        # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
+        # user turn, no history) gives SummaryCompactionStage no safe "middle" to summarize — the
+        # LLM stages above always return any_modified=False and never publish CompactionTriggered.
+        # The emergency floor below is then the ONLY thing that shrinks the request, so track
+        # whether IT modified anything and publish the event after budget is (re)computed.
+        emergency_modified = False
+        emergency_pre_frac = 0.0
         if self.max_context_tokens > 0 and floor_usage + tool_tokens > effective_limit:
             over_frac = (floor_usage + tool_tokens) / self.max_context_tokens
+            emergency_pre_frac = over_frac
             repaired, n_dropped = _hard_truncate_to_budget(
                 repaired, effective_limit - tool_tokens, self._token_counter,
             )
@@ -1147,6 +1155,7 @@ class ContextManager:
             # FIX 3 (root cause C): dropping whole exchanges cannot help when the un-droppable
             # remnant (system + the final message) itself exceeds budget. Shrink their CONTENT as
             # the true last resort so the request actually fits — a distinct, louder failure mode.
+            shrunk = False
             if self._token_counter.count_messages(repaired) + tool_tokens > effective_limit:
                 repaired, shrunk = _shrink_content_to_budget(
                     repaired, effective_limit - tool_tokens, self._token_counter,
@@ -1158,6 +1167,7 @@ class ContextManager:
                         "(agent=%s session=%s iter=%d)",
                         self._agent_id, self._session_id, self._iteration,
                     )
+            emergency_modified = n_dropped > 0 or shrunk
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.count_messages(repaired)
@@ -1166,4 +1176,17 @@ class ContextManager:
             current_usage=post_usage,
             tool_schema_tokens=tool_tokens,
         )
+        # A silent cut is exactly what CompactionTriggered exists to record — publish it here too,
+        # not just from the LLM summary stages above, so the emergency floor never hides mechanism
+        # from the ledger (repo philosophy).
+        if emergency_modified and self._bus is not None:
+            from localharness.core.events import CompactionTriggered
+            await self._bus.publish(CompactionTriggered(
+                agent_id=self._agent_id,
+                session_id=self._session_id,
+                iteration=self._iteration,
+                pre_usage_fraction=emergency_pre_frac,
+                post_usage_fraction=budget.usage_fraction,
+                stages_modified=[],
+            ))
         return repaired, budget
