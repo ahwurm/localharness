@@ -4,6 +4,44 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.12] — 2026-07-16
+
+Bench scoring integrity batch. A full train-slice run against a live llama.cpp /
+Gemma-4-E2B backend (Windows, 8k-token served window) scored 8 scenarios at 0/20;
+transcript forensics traced five of them to harness mechanisms rather than the model —
+including turns that produced CORRECT answers and were then scored dead. All five fixed
+test-first and re-verified live on the merged tree (v0.9.11 baton gate active).
+
+### Fixed
+- **xml-fallback name regexes rejected namespaced registry names** (`mcp:fetch`,
+  `plugin:research_tools.exa_search`) that the system-prompt injection itself teaches —
+  the `[\w\-]` name class silently produced no match at all; widened to allow `:`/`.`.
+- **bench built its ContextManager from the scenario's aspirational window** (e.g. 32k)
+  instead of clamping to the machine's real ceiling — a 26,667-token prompt sailed past
+  the "overflow must be IMPOSSIBLE" pre-flight into a server 400 with zero compaction
+  events. The effective ceiling now clamps to the org config's window.
+- **an explicit `limits.max_tool_calls: 0` was silently floored to 1** by the
+  `max(1, min(...))` iteration-floor formula; pure-recall scenarios' models answered
+  correctly, then died `budget_exceeded` and the right answer was discarded. New
+  `BudgetConfig.max_tool_calls` (None = uncapped) decouples the dispatch cap from the
+  ≥1-iteration floor; a refused dispatch feeds a tool-role explanation and the turn
+  runs on to a normal completion.
+- **memory tools were force-registered against `tools_allowed: []`** in pure-recall
+  scenarios; registration is now gated per-tool on the allowlist (seeded stores still
+  feed system-prompt recall unchanged).
+- **the emergency context floor head+tail-shrank oversized prompts without publishing
+  `CompactionTriggered`** — a silent context cut is exactly what the event exists to
+  record; it publishes now.
+
+Live receipts (merged tree): near_compaction 0/20 → 8/8, loop_resilience_compaction_partial
+0/20 → 20/20, stateful_behavior_two_facts 0/20 → 10/10, stateful_behavior_overwrite_recall
+0/20 → 20/20, memory_recall 1/20 → 19/20.
+
+Honest remainder: `extension_systems_*` and `plugin_mcp_tool` stay 0 on an unconfigured
+machine — bench does not yet wire MCP servers/plugins into its tool registry at all (only
+the live REPL path does); that port is the known follow-up. `file_exploration`'s 0/20 is a
+genuine model loss (flat, non-recursive glob), left standing.
+
 ## [0.9.11] — 2026-07-16
 
 Two owner-ruled changes from live dogfood feedback: the web-researcher's budget was
