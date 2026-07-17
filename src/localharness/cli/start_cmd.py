@@ -666,6 +666,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # inject_into_context flag gates INJECTION, not tool availability —
                 # otherwise injection-off produces write-only memory (remember succeeds,
                 # nothing can ever read it back).
+                from localharness.memory.idle_llm import LLMTextAdapter
                 from localharness.tools.builtin.memory_tools import (
                     MemoryGetTool,
                     MemoryRememberTool,
@@ -673,7 +674,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 )
                 await tool_registry.register(MemorySearchTool(memory_store), scope="global")
                 await tool_registry.register(MemoryGetTool(memory_store), scope="global")
-                await tool_registry.register(MemoryRememberTool(memory_store), scope="global")
+                # #87: wire the bridged LLM so remember() files its atom (bucket + child) at save
+                # time through the same cancellable, char-bounded idle path as mint-time tagging.
+                await tool_registry.register(
+                    MemoryRememberTool(memory_store, llm=LLMTextAdapter(llm) if llm is not None else None),
+                    scope="global",
+                )
             if agent_config.context.tool_result_eviction:
                 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
                 await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
