@@ -86,8 +86,8 @@ WEB_RESEARCHER_VERIFY_ADDENDUM = (
     "to the search-verifier: agent(agent_id='search-verifier', task='claim: <the claim>\\nentity: "
     "<the entity it is about>\\nsource_url: <the page you got it from>'). The verifier independently "
     "re-checks entity + recency + support and returns a verdict. If the verdict is NOT SUPPORTED, KEEP "
-    "the claim in your summary but TAG it (e.g. '[DISPUTED: source is about SPCX, not QNT]') — never "
-    "silently drop it. Verify only MATERIAL claims; skip background/color."
+    "the claim in your summary but TAG it (e.g. '[DISPUTED: source is about <other entity>, not "
+    "<claimed entity>]') — never silently drop it. Verify only MATERIAL claims; skip background/color."
 )
 
 # On-request addendum (DEFAULT since 2026-07-09, owner latency ruling): the verifier stays
@@ -101,7 +101,7 @@ WEB_RESEARCHER_VERIFY_ON_REQUEST_ADDENDUM = (
     "search-verifier: agent(agent_id='search-verifier', task='claim: <the claim>\\nentity: "
     "<the entity it is about>\\nsource_url: <the page you got it from>'). If its verdict is "
     "NOT SUPPORTED, KEEP the claim in your summary but TAG it (e.g. '[DISPUTED: source is "
-    "about SPCX, not QNT]') — never silently drop it."
+    "about <other entity>, not <claimed entity>]') — never silently drop it."
 )
 
 # Back-compat alias (the unverified / fast-path role). build_web_researcher_config assembles the
@@ -121,7 +121,7 @@ SEARCH_VERIFIER_ROLE = (
     "design). Verify for yourself: (1) web_fetch the source_url, then use web_page_query(fetch_id, "
     "pattern) to locate the claim's subject in the FULL page text and confirm the claim is actually "
     "about the STATED entity — a claim like 'added to the S&P 500' that the page attributes to a "
-    "DIFFERENT ticker (e.g. SPCX) is NOT support for the stated entity (e.g. QNT). (2) Run ONE fresh "
+    "DIFFERENT entity is NOT support for the stated one. (2) Run ONE fresh "
     "web_search to check recency / supersession. (3) Reply with STRICT JSON ONLY — no prose before or "
     "after:\n"
     '{"verdict":"SUPPORTED|WRONG_ENTITY|UNSUPPORTED|STALE|CONFLICTING|UNVERIFIABLE",'

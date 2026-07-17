@@ -55,13 +55,44 @@ async def test_agent_tool_delegates_to_runner():
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_unknown_agent_returns_not_found():
-    runner = AsyncMock(side_effect=ValueError("not found"))
+async def test_agent_tool_unknown_agent_passes_runner_message_through():
+    """The runner's ValueError is actionable by design (it names what IS dispatchable and
+    says a yaml can be created) — surface it verbatim. Rebuilding a generic not-found from
+    the advertised list self-contradicts when that list drifts from the dispatchable set
+    (qwen3-4b kospi receipts 2026-07-17: \"'data-analyst' not found. Available: ...
+    data-analyst ...\")."""
+    runner = AsyncMock(side_effect=ValueError(
+        "Agent 'unknown' dispatch not wired (available: explore, web-researcher, "
+        "search-verifier, cruncher, or any agents/<name>.yaml definition)"))
     tool = AgentTool(agent_runner=runner, available_agents=["coder"])
     result = await tool._execute(agent_id="unknown", task="anything")
     assert result.success is False
     assert result.error_type == "not_found"
+    assert "dispatch not wired" in result.error
     assert "unknown" in result.error
+    assert "coder" not in result.error  # the advertised list is NOT substituted
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_keyerror_falls_back_to_advertised_list():
+    """KeyError's str() is just the quoted key — useless as a message — so the generic
+    not-found built from the advertised list is the right fallback there."""
+    runner = AsyncMock(side_effect=KeyError("unknown"))
+    tool = AgentTool(agent_runner=runner, available_agents=["coder"])
+    result = await tool._execute(agent_id="unknown", task="anything")
+    assert result.success is False
+    assert result.error_type == "not_found"
+    assert "Agent 'unknown' not found" in result.error
+    assert "coder" in result.error
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_empty_valueerror_falls_back_to_advertised_list():
+    runner = AsyncMock(side_effect=ValueError())
+    tool = AgentTool(agent_runner=runner, available_agents=["coder"])
+    result = await tool._execute(agent_id="ghost", task="anything")
+    assert result.error_type == "not_found"
+    assert "Agent 'ghost' not found" in result.error
 
 
 @pytest.mark.asyncio

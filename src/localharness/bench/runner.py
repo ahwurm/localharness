@@ -476,8 +476,10 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         from localharness.agent.subagent import make_explore_agent_runner
         from localharness.tools.builtin.agent_tool import AgentTool
 
-        _bench_agents = ["explore", "web-researcher", "data-analyst",
-                         "frontend-designer", "cruncher", "search-verifier"]
+        # Advertise ONLY what this runner can dispatch: the four built-ins. No load_agent is
+        # wired here, so yaml-defined specialists never resolve — advertising extras made the
+        # model delegate to names that then errored (qwen3-4b kospi receipts, 2026-07-17).
+        _bench_agents = ["explore", "web-researcher", "cruncher", "search-verifier"]
         _agent_runner = make_explore_agent_runner(
             llm=llm_client,
             bus=bus,

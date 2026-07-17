@@ -504,3 +504,20 @@ def test_builtin_roster_has_no_host_dangerous_agents():
 
     for name, tools in subagent._BUILTIN_TOOLSETS.items():
         assert not (set(tools) & HOST_DANGEROUS), f"default builtin '{name}' holds host-dangerous tools"
+
+
+def test_role_prompt_examples_use_placeholders_not_concrete_tickers():
+    """Small models parrot concrete examples verbatim (qwen3-4b kospi receipts 2026-07-17:
+    '[DISPUTED: source is about SPCX, not QNT]' surfaced in 3/20 live researcher ANSWERs —
+    tickers that exist nowhere in the task). Worked examples in role prompts must use
+    <angle-bracket> placeholders, the idiom the same models demonstrably fill rather than
+    copy (they filled '<the claim>' / '<the entity it is about>' correctly in those runs)."""
+    from localharness.agent import subagent as s
+
+    for prompt in (
+        s.WEB_RESEARCHER_VERIFY_ADDENDUM,
+        s.WEB_RESEARCHER_VERIFY_ON_REQUEST_ADDENDUM,
+        s.SEARCH_VERIFIER_ROLE,
+    ):
+        assert "SPCX" not in prompt
+        assert "QNT" not in prompt
