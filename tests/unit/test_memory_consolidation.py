@@ -812,6 +812,28 @@ async def test_discovery_step_reports_embedder_class(store: MemoryStore):
 
 
 @pytest.mark.asyncio
+async def test_discover_step_threads_injection_weight_from_config(store: MemoryStore, monkeypatch):
+    """The discount is config-driven, not hard-coded: the discover step feeds
+    agent.memory.consolidation.trace_injection_weight into discovery."""
+    import localharness.memory.discovery as discovery_mod
+    from localharness.memory.consolidation import ConsolidationReport
+
+    captured = {}
+
+    async def fake_discover(store_, llm_, cancel_, *, embedder, injection_weight=1.0, now=None):
+        captured["weight"] = injection_weight
+        return discovery_mod.DiscoveryReport()
+
+    monkeypatch.setattr(discovery_mod, "discover_tags", fake_discover)
+    cons = ConsolidationPass(
+        store, _cfg(tag_discovery_enabled=True, trace_injection_weight=0.3),
+        llm=_DispatchLLM(), embedder=_FakeEmbedder(),
+    )
+    await cons._step_discover_tags(ConsolidationReport())
+    assert captured["weight"] == 0.3
+
+
+@pytest.mark.asyncio
 async def test_discovery_fallback_embedder_constructed_once_across_passes(
     store: MemoryStore, monkeypatch,
 ):
