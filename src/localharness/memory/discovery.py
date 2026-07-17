@@ -277,6 +277,9 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
                     report.proposed.append(cand.name)
                     existing.append(cand)
                     members_of[cand.id] = set()
+                # #94: capture the candidate's STORED membership BEFORE this group's union — the
+                # delta is what tells "did this cluster actually grow" from "still weakly matching".
+                stored_members = set(members_of[cand.id])
                 for m in group:
                     if m.id not in members_of[cand.id]:
                         await store.add_atom_tag(m.id, cand.id, "discovery")
@@ -286,8 +289,15 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
                 prior = await store.get_tag_by_id(cand.id)
                 new_reuse = _decay(prior.reuse_count, prior.last_accrual_ts, now) + this_reuse
                 distinct_sittings = len(sittings)
-                await store.bump_tag_evidence(cand.id, distinct_sittings=distinct_sittings,
-                                              reuse_count=int(round(new_reuse)), last_accrual_ts=now)
+                # #94: accrue evidence (and refresh the recency anchor) ONLY on real growth — the
+                # matched cluster added >= 1 genuinely new member atom, or a new distinct sitting vs
+                # the candidate's stored evidence. An unchanged cluster that keeps re-matching no
+                # longer resets last_accrual_ts, so the 21d staleness prune becomes reachable (it
+                # was previously immortal — the live 41-zombie store). Floors/score UNCHANGED.
+                grew = bool(mids - stored_members) or distinct_sittings > prior.distinct_sittings
+                if grew:
+                    await store.bump_tag_evidence(cand.id, distinct_sittings=distinct_sittings,
+                                                  reuse_count=int(round(new_reuse)), last_accrual_ts=now)
                 score = distinct_sittings + new_reuse
                 if (len(mids) >= _FLOOR_MEMBERS and distinct_sittings >= _FLOOR_SITTINGS
                         and score >= _INCORPORATE_SCORE):
