@@ -144,12 +144,18 @@ class WriteGate:
                 )
             elif event.tool_name not in self._seen_tools:
                 self._seen_tools.add(event.tool_name)
-                # Value is deliberately STABLE (no output preview — critic m5): the
-                # store-level corroboration touch makes restart re-fires a no-op
-                # instead of supersede churn. Novelty is TELEMETRY + candidate only —
-                # by design it never promotes (single unhashed key ⇒ one provenance;
-                # Phase-31 critic M1 disposition): "the agent used a tool once" is not
-                # a durable lesson; salient/recurring signals are.
+                # #89: the in-process set resets every restart, so an already-recorded tool used to
+                # re-fire on the next process — re-narrating "first successful use" AND silently
+                # bumping updated_at (the recency spine) via store_fact's corroboration touch (the
+                # audit: gate/novelty/agent re-fired 14x in 9 days). Consult the DURABLE store
+                # (any status) before minting: if the fact exists, this is NOT first use — no
+                # re-fire, no narration, no touch. The genuine first-use path below is unchanged.
+                if await self._store.fact_key_exists(f"gate/novelty/{event.tool_name}"):
+                    return
+                # Value is deliberately STABLE (no output preview — critic m5). Novelty is
+                # TELEMETRY + candidate only — by design it never promotes (single unhashed key ⇒
+                # one provenance; Phase-31 critic M1 disposition): "the agent used a tool once" is
+                # not a durable lesson; salient/recurring signals are.
                 await self._capture(
                     tier="novelty",
                     session_id=event.session_id,

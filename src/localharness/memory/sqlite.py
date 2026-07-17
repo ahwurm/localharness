@@ -1226,6 +1226,18 @@ class MemoryStore:
             await self._db.commit()
         return healed
 
+    async def fact_key_exists(self, key: str) -> bool:
+        """True iff ANY row exists for `key` in ANY status (active|superseded|…) regardless of
+        expiry. Unlike get_fact (active + unexpired only) this is the durability check the novelty
+        gate needs (#89): an already-recorded first-use may have been consolidated/superseded or
+        expired, but its prior existence still means "not first use" — so it must never re-fire."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT 1 FROM facts WHERE agent_id = ? AND key = ? LIMIT 1",
+            (self._agent_id, key),
+        ) as cur:
+            return await cur.fetchone() is not None
+
     async def remove_atom_tags_for_tag(self, tag_id: int) -> None:
         """Detach a tag from every atom (a pruned discovery candidate's members return to the
         bucket-only pool so a later cycle can re-discover them)."""
