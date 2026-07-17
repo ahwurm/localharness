@@ -1259,7 +1259,7 @@ async def test_residue_ledger_schema_v7_idempotent_enqueue(store: MemoryStore):
     """Schema v7 carries the ledger; enqueue is keyed on (agent, record) — a re-enqueue of the
     same record is a no-op that PRESERVES its attempt count (re-surfacing never resets the K clock)."""
     async with store._db.execute("PRAGMA user_version") as cur:
-        assert (await cur.fetchone())[0] == 7
+        assert (await cur.fetchone())[0] >= 7  # v7 is where the ledger lands (>= tolerates later bumps)
     e = {"id": "hx", "session_id": "s1", "ts": 5, "chars": 30, "content_h8": "aabbccdd"}
     assert await store.residue_enqueue([e]) == 1
     assert await store.residue_enqueue([e]) == 0
