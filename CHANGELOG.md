@@ -4,6 +4,36 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.16] — 2026-07-17
+
+### Added
+- **Ambient-injection activation traces** (an owner-ruled reversal of the original
+  trace design's exclusion): the every-turn injected memory shelf is now recorded as
+  a co-firing event — one best-effort, per-turn-deduped row at the single injection
+  choke point, `source='injection'` so it stays distinguishable from model-initiated
+  retrieval (search/get trace rows unchanged). Discovery's trace co-fire factor
+  discounts injection-source strength via
+  `agent.memory.consolidation.trace_injection_weight` (default 0.3) — the raw log
+  keeps full fidelity; the discount lives in consumers. Kill-switch
+  `agent.memory.trace_ambient_injection` (default on; off = exactly the previous
+  behavior). Migration v7→v8 adds a partial unique index for the per-turn dedupe.
+  Why: production stores held zero trace rows ever — stock local models answer from
+  the injected index and never call the retrieval tools, so the co-activation
+  substrate the pattern-completion design rests on was never accruing; ambient
+  injection is the only co-firing signal such models reliably emit.
+- **Subagent result interface hardening** (landed on main from live agentic-search
+  forensics): subagent results open with an explicit completion header ("SUBAGENT
+  RUN COMPLETE… No further results will arrive"), the web-researcher gains an
+  ANSWER-first output contract ("ANSWER: …" / "ANSWER: NOT FOUND — why"), a child
+  final that only announces further work is labeled "NO RESULT" instead of passing
+  as findings, and the baton gate gains a `max_nudges` knob (default 1 = previous
+  behavior).
+
+Honest limits: injection traces are recorded at write time but no retrieval-time
+consumer exists yet (the pattern-completion hop remains deliberately unbuilt);
+per-turn dedupe keys on the user-message hash, so two identical messages in one
+sitting collapse to one row (disclosed fidelity loss, not correctness).
+
 ## [0.9.15] — 2026-07-17
 
 Tagging-reliability batch from the 2026-07-17 live store audit (#87–#90): the tag
