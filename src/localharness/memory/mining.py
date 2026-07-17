@@ -730,7 +730,13 @@ async def mine_transcript(
                 if file_tags:
                     if tag_grouping:
                         if bucket_tag is not None:
-                            await store.add_atom_tag(fact.id, bucket_tag.id, "mint")
+                            # #88 root cause: store_fact corroboration on a re-mined claim returns
+                            # the PRE-EXISTING atom id, and this write re-fired with a freshly (and
+                            # nondeterministically) re-picked bucket — the generic add_atom_tag deduped
+                            # only on (atom_id, tag_id), so a DIFFERENT bucket landed as a second row
+                            # (the audit's personal+project atom, ~1s apart). add_bucket_tag keeps the
+                            # first bucket and refuses the conflict.
+                            await store.add_bucket_tag(fact.id, bucket_tag.id, "mint")
                         if child_tag is not None:
                             await store.add_atom_tag(fact.id, child_tag.id, "mint")
                     else:

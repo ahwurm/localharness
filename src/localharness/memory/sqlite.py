@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -24,6 +25,8 @@ from localharness.memory.markdown import MarkdownMemory
 if TYPE_CHECKING:
     from localharness.core.bus import EventBus, SubscriptionHandle
     from localharness.core.events import Action, Observation, UserMessage
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -1154,6 +1157,74 @@ class MemoryStore:
             (atom_id, tag_id, provenance, int(time.time())),
         )
         await self._db.commit()
+
+    async def add_bucket_tag(self, atom_id: int, bucket_tag_id: int, provenance: str = "mint") -> bool:
+        """Attach an L1 BUCKET tag (parent_id IS NULL) to an atom under the exactly-one-bucket
+        invariant (#88). If the atom already carries a DIFFERENT bucket, KEEP the existing one, log
+        the conflict, and write NOTHING — an atom NEVER holds two buckets. Idempotent on the same
+        bucket. Returns True iff a fresh bucket row was written (False = already had it, or a
+        conflicting bucket was kept). Child tags do NOT route here — they use add_atom_tag; only
+        this method (called by the classify/mining/remember filing seams) guards the bucket layer,
+        so the generic writer stays a cheap upsert for the far-more-frequent child/discovery edges."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT t.id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            "WHERE a.atom_id = ? AND t.agent_id = ? AND t.parent_id IS NULL",
+            (atom_id, self._agent_id),
+        ) as cur:
+            existing = [r[0] for r in await cur.fetchall()]
+        if bucket_tag_id in existing:
+            return False  # already filed under this exact bucket — idempotent no-op
+        if existing:
+            # Root cause of the double-fire (#88): a corroboration re-mint re-classified to a
+            # different bucket and the generic add_atom_tag wrote it as a second row. Keep the
+            # first bucket; the resolution is auditable via the micro-pass heal event.
+            log.warning("bucket invariant (#88): atom %d already filed under bucket %d; "
+                        "refusing conflicting bucket %d (kept existing)",
+                        atom_id, existing[0], bucket_tag_id)
+            return False
+        await self._db.execute(
+            "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(atom_id, tag_id) DO NOTHING",
+            (atom_id, bucket_tag_id, provenance, int(time.time())),
+        )
+        await self._db.commit()
+        return True
+
+    async def heal_bucket_conflicts(self, *, limit: int | None = None) -> list[tuple[int, int, list[int]]]:
+        """#88 heal: collapse any atom carrying >1 L1 bucket tag to exactly one — KEEP the earliest
+        (min ts, then min tag_id) bucket and DELETE the rest. Deterministic, pure SQL, no model
+        calls. Returns [(atom_id, kept_tag_id, [dropped_tag_id...])] for the caller (the turn-end
+        micro-pass) to count/event. Heals legacy violations written before add_bucket_tag existed,
+        the moment the micro-pass next touches the store — no manual data surgery."""
+        assert self._db is not None
+        limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
+        async with self._db.execute(
+            "SELECT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            "WHERE t.agent_id = ? AND t.parent_id IS NULL "
+            "GROUP BY a.atom_id HAVING COUNT(*) > 1 ORDER BY a.atom_id" + limit_sql,
+            (self._agent_id,),
+        ) as cur:
+            atom_ids = [r[0] for r in await cur.fetchall()]
+        healed: list[tuple[int, int, list[int]]] = []
+        for aid in atom_ids:
+            async with self._db.execute(
+                "SELECT a.tag_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+                "WHERE a.atom_id = ? AND t.agent_id = ? AND t.parent_id IS NULL "
+                "ORDER BY a.ts ASC, a.tag_id ASC",
+                (aid, self._agent_id),
+            ) as cur:
+                rows = [r[0] for r in await cur.fetchall()]
+            kept, dropped = rows[0], rows[1:]
+            for d in dropped:
+                await self._db.execute(
+                    "DELETE FROM atom_tags WHERE atom_id = ? AND tag_id = ?", (aid, d))
+            log.warning("bucket invariant heal (#88): atom %d had buckets %s; kept %d, dropped %s",
+                        aid, rows, kept, dropped)
+            healed.append((aid, kept, dropped))
+        if healed:
+            await self._db.commit()
+        return healed
 
     async def remove_atom_tags_for_tag(self, tag_id: int) -> None:
         """Detach a tag from every atom (a pruned discovery candidate's members return to the

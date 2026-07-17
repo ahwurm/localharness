@@ -94,7 +94,9 @@ async def file_atom_tags(
     observability. Signature + return UNCHANGED (F4 caller depends on it). Never raises."""
     bucket, child = await classify_atom_tags(store, llm, cancel_event, topic=topic, claim=claim)
     if bucket is not None:
-        await store.add_atom_tag(atom_id, bucket.id, provenance)
+        # #88: the bucket (L1) write goes through the exactly-one-bucket guard — a re-file of an
+        # already-bucketed atom (corroboration re-mint) keeps the first bucket, never a second.
+        await store.add_bucket_tag(atom_id, bucket.id, provenance)
     if child is not None:
         await store.add_atom_tag(atom_id, child.id, provenance)
     return (bucket.name if bucket else None, child.name if child else None)
