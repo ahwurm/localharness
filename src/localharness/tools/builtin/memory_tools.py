@@ -3,6 +3,7 @@
 These serve the full persistent-fact bodies on demand so the system prompt can inline only a
 small INDEX (fact names + one-line descriptions) instead of the entire MEMORY.md every turn.
 """
+import asyncio
 import logging
 from datetime import datetime, time as _dtime, timedelta
 from typing import Any
@@ -10,6 +11,13 @@ from typing import Any
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 log = logging.getLogger(__name__)
+
+# Bounded wall-clock for remember()'s save-time tag filing (#87). Save-time filing is best-effort:
+# it runs the same two-pick classifier as mining, but must NEVER hold up a live turn — at this
+# budget the in-flight generation is cancelled (releasing the inference gate) and the fact is left
+# untagged for the turn-end micro-pass (#90). Two tiny closed-set calls; the cap is the slow-path
+# safety, not the expected latency.
+_REMEMBER_FILE_BUDGET_S = 6.0
 
 
 def resolve_time_expr(expr: str, *, end: bool = False) -> int:
@@ -185,8 +193,12 @@ class MemoryRememberTool(Tool):
     supersede-not-overwrite + read-back-verified; a conflicting name supersedes the old
     version (history kept, retrievable via get_fact_history)."""
 
-    def __init__(self, memory_store: Any) -> None:
+    def __init__(self, memory_store: Any, llm: Any = None) -> None:
         self._mem = memory_store
+        # #87: an optional text-completion LLM (LLMTextAdapter in prod) enables save-time tag
+        # filing. None (tests / no model) keeps the byte-identical untagged save — the micro-pass
+        # files it later.
+        self._llm = llm
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -239,10 +251,33 @@ class MemoryRememberTool(Tool):
             )
         except Exception as exc:
             return self.err(f"Remember failed: {exc}")
+        # #87: file the atom (bucket + child) at save time via the SAME two-pick seam mining uses.
+        # The save above is already durable; this is strictly best-effort and NEVER blocks/fails it.
+        if self._llm is not None:
+            await self._file_tags_best_effort(fact.id, clean_name, clean_content)
         return self.ok(
             f"Remembered '{fact.key}' (read-back verified).",
             fact_key=fact.key,
         )
+
+    async def _file_tags_best_effort(self, atom_id: int, topic: str, claim: str) -> None:
+        """Run the mint-time two-pick classifier (file_atom_tags) on the just-saved atom, bounded by
+        a wall-clock budget. HARD RULE (#87): a classify failure or timeout leaves the fact saved-
+        but-untagged and returns cleanly — it can never raise into (or stall) the remember tool. On
+        budget expiry the cancel event fires, which cancels the in-flight generation (releasing the
+        serial inference gate) exactly as the idle path does."""
+        from localharness.memory.tag_classify import file_atom_tags
+
+        cancel = asyncio.Event()
+        loop = asyncio.get_event_loop()
+        timer = loop.call_later(_REMEMBER_FILE_BUDGET_S, cancel.set)
+        try:
+            await file_atom_tags(self._mem, self._llm, cancel,
+                                 atom_id=atom_id, topic=topic, claim=claim, provenance="remember")
+        except Exception:
+            log.debug("remember save-time tag filing failed (non-fatal) for %r", topic, exc_info=True)
+        finally:
+            timer.cancel()
 
 
 class MemoryGetTool(Tool):
