@@ -200,3 +200,91 @@ async def test_stale_unmatched_candidate_pruned(store):
     assert "cand-old" in report.pruned
     assert (await store.get_tag("cand-old")).status == "retired"
     assert {t.name for t in await store.tags_for_atom(a.id)} == {"project"}  # detached -> bucket-only
+
+
+# ---------------------------------------------------------------------------
+# Injection-source co-fire discount (owner reversal 2026-07-17): the every-turn ambient
+# shelf fires similar sets — real co-fire signal, but our guess, discounted vs the model's
+# own retrieval. The discount lives ONLY in the derived co-fire weight (log = ground truth).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cofire_pairs_discounts_injection_source(store):
+    """A retrieval-source co-fire weighs 1.0; an injection-source co-fire weighs the configured
+    discount — the pair-weight is the materialized view over the fidelity-preserving log."""
+    from localharness.memory.discovery import _cofire_pairs
+
+    await store.record_activation_trace(stimulus="q", fired_ids=[1, 2], injected_ids=[1, 2],
+                                        source="memory_search")            # retrieval co-fire (1,2)
+    await store.record_injection_trace(stimulus="turn", injected_ids=[3, 4], session_id="s1")  # inj (3,4)
+    pairs = await _cofire_pairs(store, {1, 2, 3, 4}, injection_weight=0.3)
+    assert pairs[(1, 2)] == 1.0
+    assert pairs[(3, 4)] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_cofire_pairs_retrieval_dominates_injection(store):
+    """A pair co-firing under BOTH sources takes the max — a genuine retrieval upgrades an
+    injection-only pair to full weight (retrieval is the model's own choice)."""
+    from localharness.memory.discovery import _cofire_pairs
+
+    await store.record_injection_trace(stimulus="turn", injected_ids=[1, 2], session_id="s1")
+    await store.record_activation_trace(stimulus="q", fired_ids=[1, 2], injected_ids=[1, 2],
+                                        source="memory_get")
+    pairs = await _cofire_pairs(store, {1, 2}, injection_weight=0.3)
+    assert pairs[(1, 2)] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_cofire_pairs_no_injection_reduces_to_todays_count(store):
+    """Byte-identity: with zero injection rows every weight is 1.0, so the weighted co-fire
+    strength reduces to today's plain distinct-pair count."""
+    from localharness.memory.discovery import _cofire_pairs
+
+    await store.record_activation_trace(stimulus="q", fired_ids=[1, 2, 3], injected_ids=[1, 2, 3],
+                                        source="memory_search")
+    pairs = await _cofire_pairs(store, {1, 2, 3})  # default injection_weight (no discount applied)
+    assert pairs == {(1, 2): 1.0, (1, 3): 1.0, (2, 3): 1.0}
+
+
+@pytest.mark.asyncio
+async def test_cofire_pairs_injection_fanout_cap(store):
+    """The hub guard applies to injection rows too: a mega shelf (> _TRACE_FANOUT_CAP atoms) is a
+    generic probe and contributes NO pairs — no novel suppression, the existing cap carries."""
+    from localharness.memory.discovery import _TRACE_FANOUT_CAP, _cofire_pairs
+
+    big = list(range(1, _TRACE_FANOUT_CAP + 3))
+    await store.record_injection_trace(stimulus="turn", injected_ids=big, session_id="s1")
+    pairs = await _cofire_pairs(store, set(big), injection_weight=0.3)
+    assert pairs == {}
+
+
+async def _reuse_after_injection_cofire(base_dir, weight):
+    """Build a fresh store, seed a 3-atom group that co-fires ONLY via ONE injection trace (plus
+    embedding agreement), run discovery, and return the incorporated tag's accrued reuse_count."""
+    s = MemoryStore(agent_id="w", division_id="", org_id="", base_dir=str(base_dir))
+    await s.open()
+    try:
+        a = await _seed_bucket_atom(s, "clusterw alpha", "d1")
+        b = await _seed_bucket_atom(s, "clusterw bravo", "d2")
+        c = await _seed_bucket_atom(s, "clusterw gamma", "d3")
+        await s.record_injection_trace(stimulus="turn", injected_ids=[a.id, b.id, c.id],
+                                       session_id="s1")
+        report = await discover_tags(s, _NamerLLM("clusterwtag"), asyncio.Event(),
+                                     embedder=_OneHotEmbedder(["clusterw"]), injection_weight=weight)
+        assert "clusterwtag" in report.incorporated
+        return (await s.get_tag("clusterwtag")).reuse_count
+    finally:
+        await s.close()
+
+
+@pytest.mark.asyncio
+async def test_injection_cofire_discounts_reuse_evidence(tmp_path):
+    """0.3 vs 1.0, config-driven end-to-end: the SAME injection co-firing group (3 pairs) accrues
+    discounted reuse at weight 0.3 (round(3*0.3)=1) vs full weight 1.0 (round(3*1.0)=3) — the
+    discount threads discover_tags -> _cofire_pairs into the evidence ladder."""
+    full = await _reuse_after_injection_cofire(tmp_path / "full", 1.0)
+    disc = await _reuse_after_injection_cofire(tmp_path / "disc", 0.3)
+    assert full == 3
+    assert disc == 1
+    assert disc < full  # the discount is real and observable in the accrued evidence
