@@ -4,6 +4,31 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.13] — 2026-07-17
+
+Two UX corrections to the type-anytime input box from its first live dogfood session.
+
+### Fixed
+- **Typed messages persist in the transcript** (#85): every box submission now leaves
+  a permanent `❯ <text>` line in the scrollback the moment it's submitted — plain for
+  a turn-starting prompt, annotated for mid-turn routing (`· queued (2)`, `· → nudge`),
+  and re-echoed when a queued message starts its turn so the transcript reads
+  chronologically. Same patch_stdout-safe output path as the tool/agent lines.
+- **Working indicator moved out of the input box border** (#86): the spinner now
+  renders as its own status row at the bottom of the log area, directly above the
+  box — showing thinking / tool-burst progress and, between turns, the background
+  `· dreaming…` consolidation pass (closing a v0.9.10 cosmetic gap). The row collapses
+  to zero height when idle; the box border now carries input metadata only (queued
+  count, decision flash, hints, context meter). Still rendered by the prompt_toolkit
+  layout — the v0.9.10 single-renderer freeze fix is preserved and its tests stay
+  green.
+
+Honest limits: the nudge-annotation echo, the burst-counter text in the status row,
+and the dreaming display are unit-tested but were not exercised in the live release
+proof (live captures cover idle echo, queued echo, playback re-echo, and the working
+row above a glyph-free border); terminal-resize behavior is by-design safe (no fixed
+dimensions) but was not explicitly resize-tested.
+
 ## [0.9.12] — 2026-07-16
 
 Bench scoring integrity batch. A full train-slice run against a live llama.cpp /
