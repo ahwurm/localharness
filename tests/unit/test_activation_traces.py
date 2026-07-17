@@ -276,3 +276,175 @@ async def test_migration_v5_idempotent_reopen(tmp_path: Path):
         assert len(traces) == 1 and traces[0].stimulus_text == "persist me"
     finally:
         await store2.close()
+
+
+# ---------------------------------------------------------------------------
+# Ambient-injection traces (owner reversal 2026-07-17 of the P0 exclusion): the
+# every-turn memory shelf is a co-firing event too — recorded source='injection',
+# per-turn-deduped, best-effort. The raw log keeps full fidelity; the discount that
+# distinguishes it from model-initiated retrieval lives downstream (discovery).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_injection_trace_records_source_tagged_row(tmp_path: Path):
+    """record_injection_trace writes ONE row tagged source='injection', fired == injected ==
+    the rendered atom ids, stimulus == the turn's user message."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        rid = await store.record_injection_trace(
+            stimulus="where do api keys live?", injected_ids=[7, 9], session_id="sit-1",
+        )
+        assert rid  # a real rowid
+        traces = await store.recent_activation_traces()
+        assert len(traces) == 1
+        t = traces[0]
+        assert t.source == "injection"
+        assert t.fired_ids == [7, 9]
+        assert t.injected_ids == [7, 9]        # shelf renders exactly what it selects
+        assert t.stimulus_text == "where do api keys live?"
+        assert t.stimulus_hash                  # digest present
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_injection_trace_per_turn_dedupe(tmp_path: Path):
+    """One firing per turn assembly: a second assembly of the SAME turn (same session +
+    stimulus) collapses to the existing row; a new stimulus (next turn) or a new session
+    (sitting) is a distinct row."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.record_injection_trace(stimulus="turn one", injected_ids=[1, 2], session_id="s1")
+        await store.record_injection_trace(stimulus="turn one", injected_ids=[1, 2], session_id="s1")  # re-assembly
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 1  # deduped — not two rows for one turn
+
+        await store.record_injection_trace(stimulus="turn two", injected_ids=[1, 3], session_id="s1")
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 2  # a different stimulus is a distinct turn
+
+        await store.record_injection_trace(stimulus="turn one", injected_ids=[1, 2], session_id="s2")
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 3  # same stimulus, different sitting -> distinct
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_retrieval_traces_not_deduped_by_injection_index(tmp_path: Path):
+    """The dedup index is PARTIAL (WHERE source='injection') — retrieval-source rows
+    (memory_search / memory_get) stay append-only exactly as before, even when identical."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.record_activation_trace(stimulus="q", fired_ids=[1], injected_ids=[1], source="memory_search")
+        await store.record_activation_trace(stimulus="q", fired_ids=[1], injected_ids=[1], source="memory_search")
+        retrieval = [t for t in await store.recent_activation_traces() if t.source == "memory_search"]
+        assert len(retrieval) == 2  # unchanged — no dedup on the retrieval path
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_load_context_exposes_injected_ids_without_changing_render(tmp_path: Path):
+    """load_context exposes the atom ids it rendered into the shelf (the injected set) while the
+    rendered markdown stays byte-identical to _render_memory_index (the string contract is the
+    thin wrapper's; the ids are captured alongside, not by re-querying)."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("deploy_note", "deploy requires the vpn", confidence=0.9)
+        await store.store_fact("api_key_loc", "api keys live in the vault", confidence=0.9)
+        ids = {(await store.get_fact("deploy_note")).id, (await store.get_fact("api_key_loc")).id}
+
+        ctx = await store.load_context()
+        assert set(ctx.injected_fact_ids) == ids
+        # byte-identity: the wrapper returns exactly _render_memory_index's string.
+        assert ctx.agent_memory_md == await store._render_memory_index(8)
+    finally:
+        await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Schema migration v7 -> v8: additive partial-unique injection dedup index
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_migration_v7_to_v8_adds_injection_dedup_index(tmp_path: Path):
+    """A hand-built v7 store opens at v8 with the partial-unique injection index present and a
+    pre-existing NON-injection trace row byte-unchanged (additive: the index only covers
+    source='injection')."""
+    import aiosqlite
+
+    from localharness.memory.sqlite import (
+        MIGRATION_V2_TO_V3_SQL,
+        MIGRATION_V3_TO_V4_SQL,
+        MIGRATION_V4_TO_V5_SQL,
+        MIGRATION_V5_TO_V6_SQL,
+        MIGRATION_V6_TO_V7_SQL,
+        SCHEMA_V2_SQL,
+    )
+
+    agent_dir = tmp_path / "agents" / "test-agent"
+    agent_dir.mkdir(parents=True)
+    conn = await aiosqlite.connect(str(agent_dir / "memory.db"))
+    try:
+        for sql in (SCHEMA_V2_SQL, MIGRATION_V2_TO_V3_SQL, MIGRATION_V3_TO_V4_SQL,
+                    MIGRATION_V4_TO_V5_SQL, MIGRATION_V5_TO_V6_SQL, MIGRATION_V6_TO_V7_SQL):
+            await conn.executescript(sql)
+        await conn.execute(
+            "INSERT INTO activation_traces (agent_id, session_id, turn, stimulus_hash, "
+            "stimulus_text, fired_ids, injected_ids, source, ts) "
+            "VALUES (?, '', NULL, 'h0', 'q', '[1]', '[1]', 'memory_search', 100)",
+            ("test-agent",),
+        )
+        await conn.commit()
+        async with conn.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == 7  # the fixture really is a v7 DB
+    finally:
+        await conn.close()
+
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        async with store._db.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == CURRENT_SCHEMA_VERSION  # ladder carried v7 -> v8
+        async with store._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name = 'ux_activation_traces_injection'"
+        ) as cur:
+            assert (await cur.fetchone()) is not None  # the partial-unique index exists
+        rows = await store.recent_activation_traces()
+        assert len(rows) == 1 and rows[0].source == "memory_search"  # pre-existing row survived
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_v8_idempotent_reopen(tmp_path: Path):
+    """Open + close + reopen stays at v8 with exactly one injection index, and dedup still holds
+    across the reopen (re-recording the same turn is a no-op)."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.record_injection_trace(stimulus="m", injected_ids=[1, 2], session_id="s")
+    finally:
+        await store.close()
+
+    store2 = make_store(tmp_path)
+    await store2.open()
+    try:
+        async with store2._db.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == CURRENT_SCHEMA_VERSION
+        async with store2._db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+            "AND name = 'ux_activation_traces_injection'"
+        ) as cur:
+            assert (await cur.fetchone())[0] == 1  # reopen did not re-create
+        await store2.record_injection_trace(stimulus="m", injected_ids=[1, 2], session_id="s")
+        injection = [t for t in await store2.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 1  # dedup survives the reopen
+    finally:
+        await store2.close()
