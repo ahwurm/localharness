@@ -585,6 +585,20 @@ class MemoryConsolidationConfig(BaseModel):
             "at threshold. Requires the LLM; degrades to 2-factor when no embedder is available."
         ),
     )
+    trace_injection_weight: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description=(
+            "Discovery co-fire discount for injection-source activation traces (owner reversal "
+            "2026-07-17). The ambient shelf fires a similar set every turn — real co-fire signal, "
+            "but our guess, weaker than the model's own retrieval — so an injection-source co-fire "
+            "contributes THIS weight to a pair's co-fire strength while a retrieval-source co-fire "
+            "contributes 1.0. The raw trace log keeps full fidelity; the discount is a "
+            "materialized-view weight applied ONLY here (log = ground truth). 0.0 ignores injection "
+            "co-fire entirely; 1.0 = no discount. The discount plus the existing reuse recency decay "
+            "are the loop mitigation for the every-turn repetition — no novel suppression. Mutable "
+            "via `localharness components set agent.memory.consolidation.trace_injection_weight <0.0-1.0>`."
+        ),
+    )
     turn_end_micro_pass_enabled: bool = Field(
         default=True,
         description=(
@@ -805,6 +819,20 @@ class MemoryConfig(BaseModel):
             "written BELOW the injection confidence threshold until consolidation promotes "
             "them. Set False to disable all harness-initiated memory writes (the `remember` "
             "tool is unaffected)."
+        ),
+    )
+
+    trace_ambient_injection: bool = Field(
+        default=True,
+        description=(
+            "Record an activation trace for the every-turn ambient memory shelf (owner reversal "
+            "2026-07-17 of the P0 exclusion). Each turn's injected fact set is a co-firing event: "
+            "one best-effort, per-turn-deduped row tagged source='injection' — DISTINGUISHABLE from "
+            "model-initiated retrieval (memory_search / memory_get), which downstream consumers "
+            "discount (see agent.memory.consolidation.trace_injection_weight). A trace-write failure "
+            "never disturbs the turn. False restores the pre-reversal behavior: no injection-trace "
+            "rows, the injected block byte-identical. Mutable via `localharness components set "
+            "agent.memory.trace_ambient_injection <true|false>`."
         ),
     )
 
