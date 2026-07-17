@@ -1764,7 +1764,8 @@ class MemoryStore:
         the text truncated to _STIMULUS_TEXT_CAP. source='injection' keeps it DISTINGUISHABLE
         from model-initiated retrieval (memory_search/memory_get), which downstream discounts —
         the raw log keeps full fidelity. Best-effort at the call site; ONE INSERT, no reads.
-        Returns the rowid (the existing row's, or 0, on ignore)."""
+        Returns the inserted rowid; on the dedupe (IGNORE) path nothing is inserted and the
+        return is not meaningful — the caller (a best-effort loop hook) ignores it."""
         assert self._db is not None
         text = stimulus or ""
         stim_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
