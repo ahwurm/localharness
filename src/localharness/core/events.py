@@ -1,4 +1,4 @@
-"""All 29 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 30 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -460,6 +460,23 @@ class ConsolidationFinished(BaseEvent):
     event_type: str = "ConsolidationFinished"
 
 
+class TurnEndMicroPassCompleted(BaseEvent):
+    """Published by ConsolidationScheduler after each turn-end micro-pass firing (#90) — the bounded
+    tail-work drain (backfill-classify, discovery-candidate naming, promotion/prune, #88 bucket-
+    conflict heals). An auditable ledger record of what each firing did and whether the next user
+    turn cut it short. Fire-and-forget; a delivery fault never blocks the pass."""
+
+    event_type: str = "TurnEndMicroPassCompleted"
+    classified: int = 0
+    named: int = 0
+    promoted: int = 0
+    pruned: int = 0
+    bucket_conflicts_healed: int = 0
+    units: int = 0
+    budget_spent_s: float = 0.0
+    cancelled: bool = False
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -490,6 +507,7 @@ AnyEvent = Union[
     SurpriseScored,
     ConsolidationStarted,
     ConsolidationFinished,
+    TurnEndMicroPassCompleted,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -522,6 +540,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "SurpriseScored": SurpriseScored,
     "ConsolidationStarted": ConsolidationStarted,
     "ConsolidationFinished": ConsolidationFinished,
+    "TurnEndMicroPassCompleted": TurnEndMicroPassCompleted,
 }
 
 

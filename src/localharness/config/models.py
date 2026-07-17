@@ -585,6 +585,28 @@ class MemoryConsolidationConfig(BaseModel):
             "at threshold. Requires the LLM; degrades to 2-factor when no embedder is available."
         ),
     )
+    turn_end_micro_pass_enabled: bool = Field(
+        default=True,
+        description=(
+            "#90: after a turn's answer is delivered, run a bounded micro-pass that drains the "
+            "tail work the big idle pass rarely reaches before cancellation — backfill-classify a "
+            "few untagged atoms (drains remember-legacy + heals #88 bucket conflicts), NAME up to "
+            "two proposed discovery candidates (the model-names-the-cluster step), and run "
+            "promotion/prune (pure SQL). Bounded + cancelled by the next user turn, so it is "
+            "invisible at typical turn durations. False = only the big idle pass runs (today's "
+            "behavior). Mutable via `localharness components set "
+            "agent.memory.consolidation.turn_end_micro_pass_enabled <true|false>`."
+        ),
+    )
+    turn_end_micro_pass_budget_seconds: float = Field(
+        default=8.0, ge=0.5, le=60.0,
+        description=(
+            "#90: hard wall-clock budget per turn-end micro-pass firing. Work runs in atomic units "
+            "(one small model call + its writes) and stops cleanly once this elapses; the next "
+            "firing resumes oldest-first. Mutable via `localharness components set "
+            "agent.memory.consolidation.turn_end_micro_pass_budget_seconds <seconds>`."
+        ),
+    )
 
 
 class TriggerLexiconConfig(BaseModel):
