@@ -89,7 +89,19 @@ class AgentTool(Tool):
         try:
             summary = await self._agent_runner(agent_id, task, grant_handles)
             return self.ok(summary, delegated_to=agent_id)
-        except (KeyError, ValueError):
+        except ValueError as exc:
+            # The runner's ValueErrors are actionable by design ("dispatch not wired
+            # (available: ...) — you can CREATE one..."); rebuilding a generic not-found from
+            # self._available_agents self-contradicts whenever the advertised list drifts from
+            # what the runner can dispatch (live receipt 2026-07-17: "'data-analyst' not
+            # found. Available: ... data-analyst ...").
+            return self.err(
+                str(exc)
+                or f"Agent '{agent_id}' not found. "
+                   f"Available: {', '.join(self._available_agents) or 'none'}",
+                error_type="not_found",
+            )
+        except KeyError:
             return self.err(
                 f"Agent '{agent_id}' not found. "
                 f"Available: {', '.join(self._available_agents) or 'none'}",
