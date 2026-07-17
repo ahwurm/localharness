@@ -486,16 +486,30 @@ class LLMClient:
             probe_error=probe_error,
         )
 
+    @staticmethod
+    async def _consume_bounded(coro: Awaitable[Any], gen_timeout: float | None) -> tuple[Any, Any]:
+        """Await the (create+consume) coroutine, bounding ONLY generation (#92). This runs INSIDE
+        the inference gate — i.e. after the permit is held — so gen_timeout caps generation time,
+        never the wait for a slot. None = unbounded (today's behavior for every non-tier-2 call)."""
+        if gen_timeout is None:
+            return await coro
+        return await asyncio.wait_for(coro, gen_timeout)
+
     async def complete(
         self,
         messages: list[Message],
         tools: list[ToolSchema] | None = None,
         stream: bool = False,
         disable_thinking: bool = False,
+        gen_timeout: float | None = None,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
         Returns (message, usage) — usage is openai.types.CompletionUsage or None.
+
+        gen_timeout: per-call bound on GENERATION only (applied after the inference permit is
+        acquired). Used by the tier-2 input classifier so its 5s clock is a generation clock, not
+        one that a permit-wait can consume (#92). None = unbounded.
 
         disable_thinking: per-call opt-in for INTERNAL harness calls (idle mining/
         consolidation via LLMTextAdapter, compaction summarizer): sends
@@ -506,8 +520,10 @@ class LLMClient:
         documented no-op for chat templates without the flag — model-agnostic.
         """
         if self.config.tool_call_mode == "native":
-            return await self._complete_native(messages, tools, stream, disable_thinking=disable_thinking)
-        return await self._complete_xml(messages, tools, stream, disable_thinking=disable_thinking)
+            return await self._complete_native(messages, tools, stream,
+                                               disable_thinking=disable_thinking, gen_timeout=gen_timeout)
+        return await self._complete_xml(messages, tools, stream,
+                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout)
 
     async def stream_complete(
         self,
@@ -515,17 +531,19 @@ class LLMClient:
         tools: list[ToolSchema] | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         disable_thinking: bool = False,
+        gen_timeout: float | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage).
 
-        disable_thinking threads through for INTERNAL harness calls (idle mining/
-        consolidation via LLMTextAdapter, compaction summarizer) exactly as complete()
-        documents it — never set on subject/user-facing turns (#11)."""
+        disable_thinking / gen_timeout thread through for INTERNAL harness calls exactly as
+        complete() documents them — never set on subject/user-facing turns (#11)."""
         if self.config.tool_call_mode == "native":
             return await self._complete_native(
-                messages, tools, stream=True, on_token=on_token, disable_thinking=disable_thinking
+                messages, tools, stream=True, on_token=on_token,
+                disable_thinking=disable_thinking, gen_timeout=gen_timeout,
             )
-        return await self._complete_xml(messages, tools, stream=True, disable_thinking=disable_thinking)
+        return await self._complete_xml(messages, tools, stream=True,
+                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout)
 
     async def _complete_native(
         self,
@@ -534,6 +552,7 @@ class LLMClient:
         stream: bool,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         disable_thinking: bool = False,
+        gen_timeout: float | None = None,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -567,8 +586,9 @@ class LLMClient:
             if disable_thinking:
                 kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             async with _inference_gate(self.config):
-                return await self._create_and_consume(
-                    kwargs, stream, on_token, name_unmap=name_unmap
+                return await self._consume_bounded(
+                    self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                    gen_timeout,
                 )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -694,6 +714,7 @@ class LLMClient:
         tools: list[ToolSchema] | None,
         stream: bool,
         disable_thinking: bool = False,
+        gen_timeout: float | None = None,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection AND fold the XML tool syntax into the
         system prompt, then parse tool calls from text.
@@ -729,7 +750,9 @@ class LLMClient:
             # BadRequestError the except runs AFTER __aexit__ releases this gate, so
             # _complete_xml_fallback safely takes its own turn (no re-entrant deadlock).
             async with _inference_gate(self.config):
-                return await self._create_and_consume(kwargs, stream, name_unmap=name_unmap)
+                return await self._consume_bounded(
+                    self._create_and_consume(kwargs, stream, name_unmap=name_unmap), gen_timeout,
+                )
         except openai.BadRequestError:
             # Server rejected the request (e.g. tools param) — retry without it. injected_messages
             # already carries the system-prompt injection folded in above, so the fallback's own
@@ -738,7 +761,8 @@ class LLMClient:
             self._tools_param_rejected = True
             log.warning("Server rejected request, falling back to system prompt injection")
             return await self._complete_xml_fallback(
-                injected_messages, tools, stream, disable_thinking=disable_thinking
+                injected_messages, tools, stream,
+                disable_thinking=disable_thinking, gen_timeout=gen_timeout,
             )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -749,6 +773,7 @@ class LLMClient:
         tools: list[ToolSchema] | None,
         stream: bool,
         disable_thinking: bool = False,
+        gen_timeout: float | None = None,
     ) -> tuple[Any, Any]:
         """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
         system-prompt XML injection (a no-op if `messages` already carries it — see
@@ -768,8 +793,8 @@ class LLMClient:
         if disable_thinking:  # internal-call opt-in — see complete()
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         try:
-            async with _inference_gate(self.config):
-                return await self._create_and_consume(kwargs, stream)  # #18: honor stream here too
+            async with _inference_gate(self.config):  # #18: honor stream here too
+                return await self._consume_bounded(self._create_and_consume(kwargs, stream), gen_timeout)
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
