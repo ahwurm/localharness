@@ -44,8 +44,16 @@ class Session:
     output_tokens: int = 0
     tokens_estimated: bool = False
     act_nudge_used: bool = False
-    baton_nudge_used: bool = False  # #84: one baton-gate nudge per turn (announced-next-step reply)
+    # #84/FIX-4: baton-gate nudges spent this turn (announced-next-step reply), bounded by
+    # config.baton_gate.max_nudges. Was a bool (one nudge, hardcoded); now a counter so the
+    # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
+    baton_nudges_used: int = 0
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
+
+    @property
+    def baton_nudge_used(self) -> bool:
+        """Back-compat read-only alias: True once at least one baton-gate nudge has fired."""
+        return self.baton_nudges_used > 0
 
     def push(self, message: Message) -> None:
         self.messages.append(message)
@@ -1142,14 +1150,19 @@ class AgentLoop:
                 # Baton gate (#84): a tool-less reply whose CLOSING move announces further work
                 # ("Now let me read X…") instead of doing it would otherwise be accepted verbatim
                 # as the final answer — the act-guard only arms at zero actions, so an
-                # announce-AFTER-work reply slips through. Nudge ONCE (persisted into history the
-                # same way the stuck-recovery/self-check nudges are, so the model sees it), then
-                # continue. Bounded once per turn: a second announced intention is accepted (no
-                # loop). Runs BEFORE self_check so a genuinely-final reply still gets its review.
-                if (bg_cfg.enabled and not session.baton_nudge_used
+                # announce-AFTER-work reply slips through. Nudge (persisted into history the same
+                # way the stuck-recovery/self-check nudges are, so the model sees it), then
+                # continue. Bounded by baton_gate.max_nudges per turn (default 1, i.e. the
+                # original #84 behavior): once every nudge is spent, a further announced
+                # intention is accepted (no loop). Runs BEFORE self_check so a genuinely-final
+                # reply still gets its review.
+                if (bg_cfg.enabled and session.baton_nudges_used < bg_cfg.max_nudges
                         and detect_dropped_baton(content)):
-                    session.baton_nudge_used = True
-                    log.info("Baton gate: reply announces further work — nudging once")
+                    session.baton_nudges_used += 1
+                    log.info(
+                        "Baton gate: reply announces further work — nudging (%d/%d)",
+                        session.baton_nudges_used, bg_cfg.max_nudges,
+                    )
                     session.push({"role": "user", "content": _BATON_NUDGE_MESSAGE})
                     continue
 
