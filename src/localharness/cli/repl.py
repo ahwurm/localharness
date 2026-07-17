@@ -285,6 +285,9 @@ class OrchestratorREPL:
                 if self._turn_task is not None and not self._turn_task.done():
                     await self._route_during_turn(clean, forced)
                 else:
+                    # FIX 1: persist the prompt in the scrollback the moment it's submitted,
+                    # so the turn (rendered above the box) opens with the user's line visible.
+                    await self._channel.box_echo_prompt(clean)
                     task = await self._dispatch_input(clean)
                     if task is not None:
                         self._start_turn_task(task, clean)
@@ -313,12 +316,17 @@ class OrchestratorREPL:
             decision=decision.route.value, tier=decision.tier,
             rule_or_reason=decision.reason, text_preview=clean[:80],
         ))
+        # FIX 1: a mid-turn message is echoed into the scrollback the instant it's routed,
+        # with a dim annotation of the decision — the transient border flash is the ephemeral
+        # confirmation at the input locus; this echo is the permanent transcript record.
         if decision.route is input_router.Route.NUDGE:
             self._agent.push_user_nudge(clean)
+            await self._channel.box_echo_prompt(clean, annotation="→ nudge")
             self._channel.box_flash_decision("→ nudging current turn")
         else:
             self._fifo.append(clean)
             self._channel.box_set_queued(len(self._fifo))
+            await self._channel.box_echo_prompt(clean, annotation=f"queued ({len(self._fifo)})")
             self._channel.box_flash_decision(f"queued ({len(self._fifo)})")
 
     async def _play_next_from_fifo(self) -> None:
@@ -328,6 +336,9 @@ class OrchestratorREPL:
         while self._fifo:
             text = self._fifo.popleft()
             self._channel.box_set_queued(len(self._fifo))
+            # FIX 1: re-echo the queued prompt (plain) as its own turn begins, so the transcript
+            # reads chronologically — [queued echo] … [turn starts here with the prompt again].
+            await self._channel.box_echo_prompt(text)
             task = await self._dispatch_input(text)
             if task is not None:
                 self._start_turn_task(task, text)

@@ -48,6 +48,13 @@ _DIAMOND = "\u25c6"   # ◆  tool call indicator
 _CHECK = "\u2713"     # ✓  tool result success
 _CROSS = "\u2717"     # ✗  tool result error
 
+# Echo glyph for a type-anytime box submission printed into the scrollback (FIX 1). The
+# persistent box resets its buffer on submit, so without a permanent echo the user's own
+# prompt would vanish from the transcript. Rendered at column 0 (vs the 2-space tool indent)
+# in the user.input style — green-user / cyan-agent gives the scrolled-back log a color
+# language, so a conversation still shows what the user said and when.
+_PROMPT_GLYPH = "❯"  # ❯
+
 # Official label for the background-memory ("dreaming") status (#20): middle-dot + ellipsis.
 _DREAMING_LABEL = "· dreaming…"   # · dreaming…
 
@@ -801,8 +808,25 @@ class TerminalChannel(ChannelAdapter):
         except asyncio.CancelledError:
             pass
 
+    async def box_echo_prompt(self, text: str, annotation: str = "") -> None:
+        """FIX 1: print one permanent scrollback line for a box submission — ❯ <text> [· note].
+
+        Goes through the SAME patch_stdout-safe console + _output_lock the tool/agent lines use
+        (never a rich Live/Status), so a message typed into the persistent box survives its
+        buffer reset and stays in the transcript for scroll-back. `annotation` is a short dim
+        suffix set at routing time (`queued (N)` / `→ nudge`); omitted for a plain turn-start
+        echo. User text is markup-escaped; in box mode the burst counter accumulates silently
+        (no live region), so interleaving a mid-turn echo can't corrupt anything."""
+        line = f"[user.input]{_PROMPT_GLYPH}[/user.input] {escape(text)}"
+        if annotation:
+            line += f"  [muted]{_NARRATE} {escape(annotation)}[/muted]"
+        async with self._output_lock:
+            self._console.print(line)
+
     def box_notify_working(self, working: bool) -> None:
-        """Toggle the in-frame working glyph (thinking/streaming/burst active)."""
+        """Toggle the working state that drives the status row above the box (FIX 2):
+        thinking/streaming/burst active. The glyph itself now renders in the status row
+        (see _box_status_frags), no longer in the box's bottom border."""
         self._box_working = working
         self._invalidate_box()
 
