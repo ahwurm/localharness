@@ -125,6 +125,9 @@ class OrchestratorREPL:
         self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
         self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
         self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
+        # #93: bounded grace on exit for an in-flight turn to reach its own finalization
+        # (TurnCompleted publish + ledger flush) before it is cancelled — never hangs exit.
+        self._exit_grace_seconds: float = 2.0
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
@@ -242,10 +245,30 @@ class OrchestratorREPL:
                 if not await self._handle_box_event(kind, payload):
                     break
         finally:
-            if self._turn_task is not None and not self._turn_task.done():
-                self._turn_task.cancel()
+            await self._drain_turn_on_exit()
             await self._channel.stop_input_box()
             await self._channel.stop()
+
+    async def _drain_turn_on_exit(self) -> None:
+        """#93: on REPL exit (Ctrl+D / double-Ctrl+C), give an in-flight turn a BOUNDED grace to
+        reach its OWN finalization before cancelling it.
+
+        An exit typed right after the answer otherwise cancels run_turn in the window between its
+        TaskComplete render and its TurnCompleted publish — the turn then has heartbeats but no
+        completion in the ledger (#93). run_turn's TurnCompleted publish also writes the durable
+        JSONL ledger row at publish-start (before subscribers), so reaching that publish is what
+        flushes the turn record. The turn-end micro-pass (a TurnCompleted subscriber) may be cut
+        by the grace — acceptable on exit. A user-cancelled turn (_cancelled_by_user) is already
+        being torn down; the same bounded await reaps it. Never hangs: past the grace, cancel."""
+        task = self._turn_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=self._exit_grace_seconds)
+        except asyncio.TimeoutError:
+            task.cancel()  # grace elapsed — stop it (shield kept wait_for from cancelling)
+        except (asyncio.CancelledError, Exception):
+            pass  # run_turn owns its errors; an already-cancelled turn resolves here too
 
     def _on_box_interrupt(self) -> None:
         """Ctrl+C on an empty buffer (called synchronously from the box keybinding). During a
