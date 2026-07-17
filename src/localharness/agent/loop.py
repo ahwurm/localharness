@@ -801,6 +801,21 @@ class AgentLoop:
                 if ctx.agent_memory_md:
                     parts.append("## Agent Memory\n" + ctx.agent_memory_md)
                 system_prompt = "\n\n".join(parts)
+                # Ambient-injection activation trace (owner reversal 2026-07-17): the every-turn
+                # shelf is a co-firing event too — record it source-tagged + per-turn-deduped so
+                # it is distinguishable from model-initiated retrieval (discounted downstream).
+                # Own try/except: best-effort, and a trace failure must not be mislabeled as a
+                # memory-injection failure (memory WAS injected). Kill-switch default on ->
+                # OFF = today's behavior (no injection rows). Empty shelf -> no event, no row.
+                _inj_ids = getattr(ctx, "injected_fact_ids", None)
+                _rec = getattr(self._memory, "record_injection_trace", None)
+                if getattr(_mem_cfg, "trace_ambient_injection", True) and _inj_ids and _rec is not None:
+                    try:
+                        await _rec(stimulus=task, injected_ids=_inj_ids,
+                                   session_id=session.session_id)
+                    except Exception:
+                        log.warning("activation-trace write failed (ambient injection)",
+                                    exc_info=True)
             except Exception:
                 # Non-fatal by design, but never silent (live test 2026-07-03: a
                 # swallowed failure here means the agent runs amnesiac all session
