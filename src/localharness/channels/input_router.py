@@ -23,10 +23,13 @@ calls it and owns delivery.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional
+
+log = logging.getLogger(__name__)
 
 CompleteFn = Callable[[list[dict]], Awaitable[str]]
 
@@ -174,9 +177,18 @@ async def classify_tier2(
     context: str,
     complete_fn: CompleteFn,
     timeout: float = 5.0,
+    permit_wait: float = 30.0,
 ) -> Decision:
     """ONE bounded classification call. `context` is a compact running-turn summary
-    (current request + latest step/tool). ANY timeout / error / invalid output → QUEUE."""
+    (current request + latest step/tool). ANY timeout / error / invalid output → QUEUE.
+
+    #92: the total budget is `permit_wait + timeout`, NOT a single `timeout`. The subject shares
+    a capacity-1 inference gate, so a classify issued while the agent's own turn holds the permit
+    spends real time WAITING for a slot before any token is generated. Bounding the whole call at
+    `timeout` (5s) meant that permit-wait consumed the entire budget and tier-2 always timed out →
+    always QUEUE (tier-2 effectively dead). `permit_wait` (~30s) covers the wait for a slot; the
+    injected complete_fn separately bounds GENERATION (the harness passes gen_timeout=`timeout`),
+    so a slow generation once the permit is held is still cut. Uncertain/late still → QUEUE."""
     user = (
         f"Running task: {context}\n\n"
         f"Typed message: {text}\n\n"
@@ -187,10 +199,13 @@ async def classify_tier2(
         {"role": "user", "content": user},
     ]
     try:
-        raw = await asyncio.wait_for(complete_fn(messages), timeout=timeout)
-    except Exception:
+        raw = await asyncio.wait_for(complete_fn(messages), timeout=permit_wait + timeout)
+    except Exception as exc:
         # timeout, provider error, cancellation of the call — never let a routing call
-        # break input; a queued message is the harmless default.
+        # break input; a queued message is the harmless default. Log it (#92): a silent QUEUE
+        # here previously hid a permanently-timing-out tier-2 with zero signal.
+        log.warning("tier-2 classify failed (%s: %s) — defaulting to QUEUE",
+                    type(exc).__name__, exc)
         return Decision(Route.QUEUE, "tier2", "tier2-error-default-queue")
     verdict = _parse_verdict(raw)
     if verdict is None:
@@ -206,16 +221,20 @@ async def route(
     complete_fn: Optional[CompleteFn],
     tier2_enabled: bool,
     timeout: float = 5.0,
+    permit_wait: float = 30.0,
 ) -> Decision:
     """Full decision for a message typed during a running turn (text already `!`-stripped).
 
     force → NUDGE; else Tier 1; else (Tier 1 abstained) ONE Tier-2 call when enabled and a
-    client is available; else QUEUE by default."""
+    client is available; else QUEUE by default. NOTE: the box REPL drives tier-1 and the
+    (possibly slow, permit-contended) tier-2 call separately so tier-2 runs off the coordinator
+    (#92c); this all-in-one helper is retained for non-interactive callers/tests."""
     if forced:
         return Decision(Route.NUDGE, "force", "force-bang")
     t1 = classify_tier1(clean_text)
     if t1 is not None:
         return t1
     if tier2_enabled and complete_fn is not None:
-        return await classify_tier2(clean_text, context, complete_fn, timeout=timeout)
+        return await classify_tier2(clean_text, context, complete_fn,
+                                    timeout=timeout, permit_wait=permit_wait)
     return Decision(Route.QUEUE, "tier1", "abstain-default-queue")

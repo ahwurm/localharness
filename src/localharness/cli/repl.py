@@ -300,6 +300,12 @@ class OrchestratorREPL:
                 self._channel.box_notify_working(False)
                 await self._play_next_from_fifo()
                 return True
+            if kind == "tier2_result":
+                # #92c: a background tier-2 verdict landed — apply the late upgrade (or let the
+                # optimistic queue stand). Serialized here in the one coordinator loop → race-free.
+                clean, decision = payload
+                await self._apply_tier2_result(clean, decision)
+                return True
             if kind == "submit":
                 self._sigint_armed = False
                 clean, forced = input_router.strip_force(payload)
@@ -321,36 +327,95 @@ class OrchestratorREPL:
 
     async def _route_during_turn(self, clean: str, forced: bool) -> None:
         """Decide nudge vs queue for a message typed while a turn runs, deliver it, and reflect
-        the decision in the box frame + the InputRouted ledger event."""
+        the decision in the box frame + the InputRouted ledger event.
+
+        #92c: the fast, deterministic decisions (force / slash / tier-1) resolve INLINE. A
+        tier-1-abstaining message needs the tier-2 LLM classify, which shares the capacity-1
+        inference gate and may wait ~30s for a slot — so it must NOT block this single-threaded
+        coordinator. It is optimistically QUEUED at once (owner: uncertain/late → queue) and
+        classified in the BACKGROUND; the verdict funnels back through the one control queue and
+        may upgrade the message to a live nudge iff it is still queued (see _apply_tier2_result)."""
         # Slash commands mid-turn are session-level actions — queue them deterministically
         # (run between turns), never spend an LLM classification call on a command.
         if not forced and clean.startswith("/"):
-            decision = input_router.Decision(input_router.Route.QUEUE, "tier1", "slash-command")
-        else:
-            decision = await input_router.route(
-                clean, forced,
-                context=self._turn_context(),
-                complete_fn=self._tier2_complete_fn(),
-                tier2_enabled=self._tier2_enabled(),
-            )
+            await self._deliver_route(
+                clean, input_router.Decision(input_router.Route.QUEUE, "tier1", "slash-command"))
+            return
+        if forced:
+            await self._deliver_route(
+                clean, input_router.Decision(input_router.Route.NUDGE, "force", "force-bang"))
+            return
+        t1 = input_router.classify_tier1(clean)
+        if t1 is not None:
+            await self._deliver_route(clean, t1)
+            return
+        complete_fn = self._tier2_complete_fn()
+        if not (self._tier2_enabled() and complete_fn is not None):
+            await self._deliver_route(
+                clean, input_router.Decision(input_router.Route.QUEUE, "tier1", "abstain-default-queue"))
+            return
+        # Optimistic queue NOW; the resolved tier-2 verdict is published by _apply_tier2_result.
+        await self._queue_message(clean, publish=False)
+        asyncio.ensure_future(self._tier2_classify_bg(clean, complete_fn))
+
+    async def _deliver_route(self, clean: str, decision) -> None:
+        """Publish a routing decision to the ledger and apply it: NUDGE steers the running turn;
+        QUEUE appends to the FIFO. Shared by the inline decisions and the background tier-2 late
+        upgrade. FIX 1: the echo into the scrollback is the permanent transcript record; the
+        transient border flash is the ephemeral confirmation at the input locus."""
         await self._bus.publish(InputRouted(
             agent_id=self._agent._config.name,
             session_id=self._agent.current_session_id,
             decision=decision.route.value, tier=decision.tier,
             rule_or_reason=decision.reason, text_preview=clean[:80],
         ))
-        # FIX 1: a mid-turn message is echoed into the scrollback the instant it's routed,
-        # with a dim annotation of the decision — the transient border flash is the ephemeral
-        # confirmation at the input locus; this echo is the permanent transcript record.
         if decision.route is input_router.Route.NUDGE:
             self._agent.push_user_nudge(clean)
             await self._channel.box_echo_prompt(clean, annotation="→ nudge")
             self._channel.box_flash_decision("→ nudging current turn")
         else:
-            self._fifo.append(clean)
+            await self._queue_message(clean, publish=False)
+
+    async def _queue_message(self, clean: str, *, publish: bool) -> None:
+        """Append a message to the FIFO and reflect it in the box frame (queued count + echo)."""
+        self._fifo.append(clean)
+        self._channel.box_set_queued(len(self._fifo))
+        await self._channel.box_echo_prompt(clean, annotation=f"queued ({len(self._fifo)})")
+        self._channel.box_flash_decision(f"queued ({len(self._fifo)})")
+
+    async def _tier2_classify_bg(self, clean: str, complete_fn) -> None:
+        """#92c: run the tier-2 classify OFF the coordinator, then post the verdict back through
+        the one control queue so the late upgrade is applied race-free (single-serialized loop)."""
+        try:
+            decision = await input_router.classify_tier2(clean, self._turn_context(), complete_fn)
+        except Exception:  # classify_tier2 already defaults to QUEUE on error — belt-and-suspenders
+            decision = input_router.Decision(input_router.Route.QUEUE, "tier2", "tier2-bg-error-queue")
+        q = self._box_ctrl_q
+        if q is not None:
+            q.put_nowait(("tier2_result", (clean, decision)))
+
+    async def _apply_tier2_result(self, clean: str, decision) -> None:
+        """#92c: apply a background tier-2 verdict. A NUDGE upgrades the message to a live nudge
+        ONLY if it is still queued AND a turn is running (not yet dispatched); otherwise the
+        optimistic queue / dispatch stands (owner: uncertain/late → queue). Either way the
+        resolved verdict is recorded to the InputRouted ledger exactly once."""
+        upgradable = (
+            decision.route is input_router.Route.NUDGE
+            and clean in self._fifo
+            and self._turn_task is not None
+            and not self._turn_task.done()
+        )
+        if upgradable:
+            self._fifo.remove(clean)
             self._channel.box_set_queued(len(self._fifo))
-            await self._channel.box_echo_prompt(clean, annotation=f"queued ({len(self._fifo)})")
-            self._channel.box_flash_decision(f"queued ({len(self._fifo)})")
+            await self._deliver_route(clean, decision)  # publishes NUDGE + steers the running turn
+        else:
+            await self._bus.publish(InputRouted(
+                agent_id=self._agent._config.name,
+                session_id=self._agent.current_session_id,
+                decision=decision.route.value, tier=decision.tier,
+                rule_or_reason=decision.reason, text_preview=clean[:80],
+            ))
 
     async def _play_next_from_fifo(self) -> None:
         """After a turn ends, start the next queued message as a turn. Commands/workflow lines
@@ -416,7 +481,12 @@ class OrchestratorREPL:
             return None
 
         async def _complete(messages: list[dict]) -> str:
-            msg, _usage = await llm.complete(messages, tools=None, stream=False)
+            # #92: an INTERNAL classification call — disable_thinking (its bounded budget must not
+            # be spent on hidden CoT under a reasoning parser) and gen_timeout=5s bounds GENERATION
+            # only (the permit-wait is bounded separately by classify_tier2).
+            msg, _usage = await llm.complete(
+                messages, tools=None, stream=False, disable_thinking=True, gen_timeout=5.0,
+            )
             return getattr(msg, "content", None) or ""
 
         return _complete

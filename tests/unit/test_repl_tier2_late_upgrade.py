@@ -74,6 +74,8 @@ async def test_tier2_abstain_optimistically_queues_immediately():
         assert list(repl._fifo) == ["index the tests directory"]  # optimistic queue, right now
         agent.push_user_nudge.assert_not_called()
         assert ch.queued == 1
+        # drain the background classify so no task is left pending at loop close
+        await asyncio.wait_for(repl._box_ctrl_q.get(), timeout=2.0)
     finally:
         repl._turn_task.cancel()
 
