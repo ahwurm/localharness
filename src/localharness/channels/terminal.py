@@ -11,9 +11,10 @@ import structlog
 from prompt_toolkit.application import Application
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
 from prompt_toolkit.styles import Style
@@ -206,17 +207,21 @@ def _build_persistent_input_app(
     on_eof: Callable[[], None],
     hint_fn: Callable[[], list[tuple[str, str]]],
     pct_fn: Callable[[], float | None],
+    status_fn: Callable[[], list[tuple[str, str]]],
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
-    Differs from _build_input_app in three ways, all load-bearing for the type-anytime box:
+    Differs from _build_input_app in four ways, all load-bearing for the type-anytime box:
       1. Enter SUBMITS without exiting — it hands the line to on_submit and resets the buffer,
          so the same Application services every submission for the whole session (run once via
          asyncio.create_task(app.run_async()) alongside the turn, under patch_stdout(raw=True)).
       2. The bottom-border hint + context meter are DYNAMIC FormattedTextControl callables
-         (hint_fn / pct_fn) refreshed by app.invalidate() — the seam the in-frame working glyph,
-         `queued (N)`, and the routing-decision flash all render through.
-      3. Ctrl+C (empty buffer) / Ctrl+D (empty buffer) call back into REPL policy (on_interrupt
+         (hint_fn / pct_fn) refreshed by app.invalidate() — the seam `queued (N)` and the
+         routing-decision flash render through (the working glyph moved to the status row).
+      3. A one-line working/activity STATUS ROW sits ABOVE the frame (status_fn), so it reads
+         as the last line of the log area, not a glyph in the box border (FIX 2). A
+         ConditionalContainer collapses it to zero height when status_fn returns [] (idle).
+      4. Ctrl+C (empty buffer) / Ctrl+D (empty buffer) call back into REPL policy (on_interrupt
          / on_eof) rather than raising out of run_async — the box owns raw mode for the whole
          session, so these are the only path a signal-suppressed terminal has to interrupt/exit.
     """
@@ -277,11 +282,22 @@ def _build_persistent_input_app(
         Window(char="─", height=1, width=1),
         _wall("╯"),
     ]
-    body = HSplit([
+    frame = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
         VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
         VSplit(bottom),
     ], style="class:frame")
+    # FIX 2: working/activity status row, ABOVE the frame, so it reads as the last line of the
+    # log area (where the tool/agent lines land) rather than a glyph crammed into the box
+    # border. The ConditionalContainer collapses it to zero height when status_fn returns []
+    # (idle) — no blank line wasted above the box. Still a FormattedTextControl refreshed by
+    # app.invalidate() (the _box_tick ticker); NO rich Status/Live near the live box, which is
+    # what could freeze the screen on Ctrl+C-during-burst (v0.9.10).
+    status_row = ConditionalContainer(
+        Window(FormattedTextControl(status_fn), height=1, dont_extend_height=True),
+        filter=Condition(lambda: bool(status_fn())),
+    )
+    body = HSplit([status_row, frame])
 
     return Application(
         layout=Layout(body, focused_element=control),
@@ -438,7 +454,8 @@ class TerminalChannel(ChannelAdapter):
         self._box_task: asyncio.Task | None = None
         self._box_patch = None                   # patch_stdout(raw=True) ctx, held for the box's life
         self._box_ticker: asyncio.Task | None = None
-        self._box_working: bool = False          # in-frame spinner glyph on (thinking/streaming/burst)
+        self._box_working: bool = False          # working state → status row above the box (thinking/streaming/burst)
+        self._box_dreaming: bool = False         # background consolidation ("dreaming") pass → status row (#20)
         self._queued_count: int = 0              # `queued (N)` shown in the box frame
         self._decision_flash: str = ""           # transient routing-decision line in the box frame
         self._decision_flash_task: asyncio.Task | None = None
@@ -718,6 +735,7 @@ class TerminalChannel(ChannelAdapter):
             self._history, ">",
             on_submit=_on_submit, on_interrupt=on_interrupt, on_eof=_on_eof,
             hint_fn=self._box_hint_frags, pct_fn=lambda: self._context_pct,
+            status_fn=self._box_status_frags,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
@@ -757,21 +775,37 @@ class TerminalChannel(ChannelAdapter):
         self._box_app = None
 
     def _box_hint_frags(self) -> list[tuple[str, str]]:
-        """Dynamic bottom-border content: an animated working glyph, the transient routing
-        decision, the persistent `queued (N)`, or the first-run guidance hint."""
+        """Dynamic bottom-border content — INPUT metadata only now (the working glyph moved to
+        the status row, FIX 2): the transient routing-decision flash, the persistent
+        `queued (N)`, or the first-run guidance hint."""
         parts: list[tuple[str, str]] = []
-        if self._box_working:
-            glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
-            parts.append(("class:hint", f" {glyph} working "))
         if self._decision_flash:
             parts.append(("class:caret", f" {self._decision_flash} "))
         elif self._queued_count:
             parts.append(("class:hint", f" queued ({self._queued_count}) "))
-        elif not self._box_working and self._first_box_hint:
+        elif self._first_box_hint:
             parts.append(("class:hint", f" {self._first_box_hint} "))
         if not parts:
             parts.append(("class:hint", "  "))
         return parts
+
+    def _box_status_frags(self) -> list[tuple[str, str]]:
+        """FIX 2: content of the one-line status row rendered ABOVE the box (so it reads as the
+        log area's last line). The working glyph + the live activity the box already tracks —
+        an open tool-burst counter (`tools · done/calls`, in the same column its frozen line
+        lands), the between-turns '· dreaming…' consolidation pass, or a plain 'working' while
+        the model generates. Returns [] when idle so the ConditionalContainer collapses the row
+        to zero height. Refreshed by app.invalidate() from _box_tick — never a rich Status."""
+        if not (self._box_working or self._box_dreaming):
+            return []
+        glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
+        if self._burst is not None:
+            activity = f"{' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
+        elif self._box_dreaming and not self._box_working:
+            activity = _DREAMING_LABEL   # · dreaming…
+        else:
+            activity = "working"
+        return [("class:hint", f"  {glyph} {activity} ")]
 
     def _invalidate_box(self) -> None:
         if self._box_app is not None and self._box_active:
@@ -831,10 +865,12 @@ class TerminalChannel(ChannelAdapter):
         self._invalidate_box()
 
     async def _box_tick(self) -> None:
-        """Animate the in-frame working glyph while the box is live (no rich Live anywhere)."""
+        """Animate the status-row spinner while the box is live and there's activity — a turn
+        working, or a background 'dreaming' pass. No rich Live anywhere: invalidate() +
+        FormattedTextControl is the freeze-safe path under patch_stdout."""
         try:
             while self._box_active:
-                if self._box_working:
+                if self._box_working or self._box_dreaming:
                     self._invalidate_box()
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
@@ -913,7 +949,11 @@ class TerminalChannel(ChannelAdapter):
         never draw over the input bubble (WAITING_INPUT) or a stream, and never opens a second
         live display alongside the thinking spinner or a burst counter."""
         if self._box_active:
-            return  # box mode: no rich Status; background dreaming isn't animated in-frame (v1)
+            # box mode: no rich Status (freeze-safe). Animate it in the status row above the
+            # box instead — closes the v0.9.10 v1 gap where dreaming had no box-mode indicator.
+            self._box_dreaming = True
+            self._invalidate_box()
+            return
         if (self._dreaming is None and self._thinking is None
                 and self._burst is None and self._state == "IDLE"):
             try:
@@ -925,6 +965,9 @@ class TerminalChannel(ChannelAdapter):
                 self._dreaming = None  # a broken spinner must never break output
 
     def _stop_dreaming(self) -> None:
+        if self._box_dreaming:
+            self._box_dreaming = False  # box mode: clear the status-row dreaming indicator
+            self._invalidate_box()
         if self._dreaming is not None:
             try:
                 self._dreaming.stop()

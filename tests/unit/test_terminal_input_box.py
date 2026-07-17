@@ -201,6 +201,7 @@ class TestPersistentAppKeybindings:
                     InMemoryHistory(), ">",
                     on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
                     hint_fn=lambda: [("class:hint", " ")], pct_fn=lambda: None,
+                    status_fn=lambda: [],
                 )
                 holder["app"] = app
                 inp.send_text(feed)
