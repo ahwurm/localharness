@@ -128,6 +128,31 @@ def test_memory_config_defaults():
     assert cfg.inject_into_context is True
 
 
+def test_trace_ambient_injection_default_on():
+    """Owner reversal 2026-07-17: the every-turn ambient shelf IS an activation event and is
+    traced (source='injection') by default. The kill-switch defaults ON; setting it False
+    restores the pre-reversal behavior (no injection-trace rows, today's exact bytes)."""
+    from localharness.config.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.trace_ambient_injection is True
+
+
+def test_trace_injection_weight_default_and_bounds():
+    """Consumer-side discount for injection-source co-fire (retrieval-source is implicitly 1.0).
+    Default 0.3 — a materialized-view weight in [0,1]; the raw trace log keeps full fidelity, the
+    discount lives ONLY in derived computations (discovery's co-fire strength)."""
+    import pydantic
+
+    from localharness.config.models import MemoryConsolidationConfig
+
+    cfg = MemoryConsolidationConfig()
+    assert cfg.trace_injection_weight == 0.3
+    # bounded [0.0, 1.0]: 0.0 = ignore injection co-fire entirely, 1.0 = no discount.
+    for bad in (-0.1, 1.1):
+        with pytest.raises(pydantic.ValidationError):
+            MemoryConsolidationConfig(trace_injection_weight=bad)
+
+
 def test_context_config_defaults():
     from localharness.config.models import ContextConfig
     from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
