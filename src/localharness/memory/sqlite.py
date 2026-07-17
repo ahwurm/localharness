@@ -1128,12 +1128,16 @@ class MemoryStore:
         return tag
 
     async def set_tag_status(self, tag_id: int, status: str, *, name: str | None = None,
-                             merged_into: int | None = None) -> None:
+                             merged_into: int | None = None, definition: str | None = None) -> None:
+        # #90: `definition` (optional) lets the naming step replace the "discovery candidate
+        # (unincorporated)" placeholder with a real one-liner when it incorporates a candidate —
+        # COALESCE keeps every existing caller (definition=None) byte-behavior-identical.
         assert self._db is not None
         await self._db.execute(
             "UPDATE tags SET status = ?, merged_into = COALESCE(?, merged_into), "
-            "name = COALESCE(?, name), updated_at = ? WHERE agent_id = ? AND id = ?",
-            (status, merged_into, name, int(time.time()), self._agent_id, tag_id),
+            "name = COALESCE(?, name), definition = COALESCE(?, definition), "
+            "updated_at = ? WHERE agent_id = ? AND id = ?",
+            (status, merged_into, name, definition, int(time.time()), self._agent_id, tag_id),
         )
         await self._db.commit()
 

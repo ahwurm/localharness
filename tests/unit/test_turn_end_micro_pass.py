@@ -39,7 +39,7 @@ async def store(tmp_path):
 
 def _cfg(**over) -> MemoryConsolidationConfig:
     base = dict(enabled=True, idle_minutes=0.5, tag_discovery_enabled=False,
-                turn_end_micro_pass_enabled=True, turn_end_micro_pass_budget_seconds=1000.0)
+                turn_end_micro_pass_enabled=True, turn_end_micro_pass_budget_seconds=60.0)
     base.update(over)
     return MemoryConsolidationConfig(**base)
 
@@ -126,8 +126,10 @@ async def test_backfill_classifies_untagged_and_caps_at_5(store):
     report = await TurnEndMicroPass(store, _cfg(), llm=_FakeLLM()).run()
     assert report.classified == 5                                # cap 5
     # oldest-first: the 5 lowest-id atoms got a bucket; the 2 newest stayed untagged.
-    assert all(await _bucket_names(store, a) == {"project"} for a in ids[:5])
-    assert all(await _bucket_names(store, a) == set() for a in ids[5:])
+    for a in ids[:5]:
+        assert await _bucket_names(store, a) == {"project"}
+    for a in ids[5:]:
+        assert await _bucket_names(store, a) == set()
 
 
 @pytest.mark.asyncio
@@ -250,7 +252,8 @@ async def test_cancel_between_units_commits_only_finished_work(store):
     assert report.cancelled is True
     assert report.classified == 1                                # exactly the finished atom
     assert await _bucket_names(store, ids[0]) == {"project"}     # fully filed, not half
-    assert all(await _bucket_names(store, a) == set() for a in ids[1:])   # rest untouched
+    for a in ids[1:]:
+        assert await _bucket_names(store, a) == set()            # rest untouched
     assert report.named == 0 and report.promoted == 0            # later units skipped by the cancel
 
 

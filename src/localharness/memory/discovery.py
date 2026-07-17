@@ -83,6 +83,26 @@ def _decay(reuse: float, last_ts: int | None, now: int) -> float:
     return reuse * (0.5 ** ((now - last_ts) / _DECAY_HALF_LIFE_S))
 
 
+def _is_prunable(tag: Any, now: int) -> bool:
+    """Synaptic-pruning predicate: a candidate that stopped accruing (stale past _PRUNE_AGE_S) AND
+    whose decayed reuse fell below _PRUNE_REUSE_FLOOR is retired. Shared by the idle discovery pass
+    and the turn-end micro-pass (#90) so both prune on the SAME rule (a candidate that would still
+    match a live cluster is re-accrued within the stale window, resetting last_accrual_ts)."""
+    decayed = _decay(tag.reuse_count, tag.last_accrual_ts, now)
+    stale = tag.last_accrual_ts is not None and (now - tag.last_accrual_ts) > _PRUNE_AGE_S
+    return stale and decayed < _PRUNE_REUSE_FLOOR
+
+
+def _incorporation_eligible(tag: Any, member_count: int, now: int) -> bool:
+    """The evidence-ladder gate discover_tags applies before it NAMEs a candidate, evaluated from a
+    candidate's STORED evidence (#90): >= _FLOOR_MEMBERS members across >= _FLOOR_SITTINGS sittings
+    AND (distinct_sittings + decayed reuse) >= _INCORPORATE_SCORE. Evidence rules UNCHANGED — the
+    micro-pass only runs the NAME step that cancellation starves, never lowers the bar."""
+    score = tag.distinct_sittings + _decay(tag.reuse_count, tag.last_accrual_ts, now)
+    return (member_count >= _FLOOR_MEMBERS and tag.distinct_sittings >= _FLOOR_SITTINGS
+            and score >= _INCORPORATE_SCORE)
+
+
 def _clean_name(raw: str) -> str:
     """A NAME answer is one short tag — first non-empty line, 1-2 lowercase alnum/hyphen tokens."""
     for line in (raw or "").strip().splitlines():
@@ -163,7 +183,11 @@ async def _incorporate(store, llm, cancel_event, cand, group, bucket, report) ->
         return
     if await store.get_tag(name) is not None:
         return  # name taken by a NON-sibling (other bucket) -> avoid a unique-name collision; wait
-    await store.set_tag_status(cand.id, "active", name=name)  # rename the candidate in place
+    # Rename the candidate in place AND replace the "discovery candidate (unincorporated)"
+    # placeholder definition (#90) — an incorporated tag joins the classify menu, so it needs a
+    # real one-liner, not the placeholder that misled mint-time filing.
+    await store.set_tag_status(cand.id, "active", name=name,
+                               definition=f"discovered {bucket.name} tag: memories about {name}")
     report.incorporated.append(name)
 
 
@@ -257,12 +281,78 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
                 fresh = await store.get_tag_by_id(t.id)
                 if fresh is None or fresh.status != "proposed":
                     continue
-                decayed = _decay(fresh.reuse_count, fresh.last_accrual_ts, now)
-                stale = fresh.last_accrual_ts is not None and (now - fresh.last_accrual_ts) > _PRUNE_AGE_S
-                if stale and decayed < _PRUNE_REUSE_FLOOR:
+                if _is_prunable(fresh, now):
                     await store.set_tag_status(t.id, "retired")
                     await store.remove_atom_tags_for_tag(t.id)
                     report.pruned.append(t.name)
     except Exception:
         log.exception("tag discovery failed (non-fatal)")
     return report
+
+
+async def _proposed_discovered(store: Any) -> list[Any]:
+    """Proposed, discovery-origin candidates oldest-first (by tag id — monotonic creation order)."""
+    cands = [t for t in await store.list_tags(status="proposed") if t.origin == "discovered"]
+    cands.sort(key=lambda t: t.id)
+    return cands
+
+
+async def name_eligible_candidates(
+    store: Any, llm: Any, cancel_event: Any, *, limit: int = 2,
+    stop: Any = None, now: int | None = None,
+) -> int:
+    """Turn-end micro-pass unit (#90): NAME up to `limit` ALREADY-eligible proposed discovery
+    candidates, oldest-first — the model-names-the-cluster step (`_incorporate`) that idle discovery
+    accrues candidates toward but rarely reaches live (cancelled first; the audit's 35 candidates
+    stuck at 'proposed' with the placeholder definition). ONE small model call per candidate, the
+    evidence gate UNCHANGED (read from stored evidence). `stop()` (budget/cancel) is polled between
+    candidates — a cancel between units loses nothing (a half-classified candidate stays proposed).
+    Returns the count incorporated/folded. Never raises into the caller."""
+    if now is None:
+        now = int(time.time())
+    report = DiscoveryReport()
+    named = attempts = 0
+    try:
+        for cand in await _proposed_discovered(store):
+            if attempts >= limit:
+                break
+            if (stop is not None and stop()) or getattr(cancel_event, "is_set", lambda: False)():
+                break
+            if cand.parent_id is None:
+                continue
+            bucket = await store.get_tag_by_id(cand.parent_id)
+            if bucket is None:
+                continue
+            members = await store.atoms_for_tag(cand.id)
+            if not _incorporation_eligible(cand, len(members), now):
+                continue  # not yet warranted — idle discovery keeps accruing it (bar unchanged)
+            attempts += 1  # a model call is spent on this candidate
+            before = len(report.incorporated)
+            await _incorporate(store, llm, cancel_event, cand, members, bucket, report)
+            if len(report.incorporated) > before:
+                named += 1
+    except Exception:
+        log.exception("micro-pass candidate naming failed (non-fatal)")
+    return named
+
+
+async def prune_stale_candidates(
+    store: Any, *, now: int | None = None, limit: int | None = None,
+) -> int:
+    """Turn-end micro-pass unit (#90): retire stale, unincorporated discovery candidates — pure SQL,
+    no model calls, the SAME `_is_prunable` rule discovery applies inline. Returns the count pruned.
+    Never raises into the caller."""
+    if now is None:
+        now = int(time.time())
+    pruned = 0
+    try:
+        for t in await _proposed_discovered(store):
+            if limit is not None and pruned >= limit:
+                break
+            if _is_prunable(t, now):
+                await store.set_tag_status(t.id, "retired")
+                await store.remove_atom_tags_for_tag(t.id)
+                pruned += 1
+    except Exception:
+        log.exception("micro-pass candidate prune failed (non-fatal)")
+    return pruned

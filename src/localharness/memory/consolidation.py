@@ -54,6 +54,8 @@ _WATERMARK_KEY = "consolidation/last_run"
 _DEMOTED_RS = 0.15   # below the 0.2 index gate: out of the injected block, still searchable
 _PROMOTED_CONFIDENCE = 0.8  # above the 0.7 injection threshold: promoted facts surface
 _CLASSIFY_BACKFILL_CAP = 10  # tag-graph F4: max untagged pool atoms bucket-filed per idle cycle
+_MICRO_CLASSIFY_CAP = 5   # #90: untagged atoms backfill-classified per turn-end micro-pass firing
+_MICRO_NAME_CAP = 2       # #90: proposed discovery candidates NAMEd per turn-end micro-pass firing
 
 
 @dataclass
@@ -594,6 +596,136 @@ class ConsolidationPass:
         await _set_meta(self._store, _WATERMARK_KEY, str(ts))
 
 
+@dataclass
+class MicroPassReport:
+    classified: int = 0              # untagged atoms bucket-filed (unit 1)
+    bucket_conflicts_healed: int = 0  # legacy #88 double-bucket atoms collapsed (unit 1)
+    named: int = 0                   # proposed discovery candidates named/folded (unit 2)
+    promoted: int = 0                # recurrence promotions (unit 3, pure SQL)
+    pruned: int = 0                  # stale candidates retired (unit 3, pure SQL)
+    units: int = 0                   # atomic units executed this firing
+    budget_spent_s: float = 0.0
+    cancelled: bool = False
+
+
+class TurnEndMicroPass:
+    """The bounded tail-work drain that fires after a turn's answer is delivered (#90).
+
+    The big idle pass runs everything (mining, chapters, discovery, promotion) but is cancelled
+    ~seconds after it starts, so its TAIL steps — naming discovery candidates, backfilling untagged
+    atoms (remember-legacy), promotion/prune — rarely run live (the audit: 35 candidates stuck at
+    'proposed', remember rows never filed). This micro-pass drains ONLY that tail, in ATOMIC UNITS
+    (at most one small model call + its writes each) oldest-first, under a hard wall-clock budget,
+    reusing the SAME primitives as the idle pass (file_atom_tags, _incorporate, _step_promote_
+    recurring) — never a fork. A new user turn cancels it between units via the same cancel-on-
+    activity machinery the idle pass uses, so nothing is ever left half-done and frequency (every
+    turn end) is what guarantees the drain. The big idle pass is UNCHANGED."""
+
+    def __init__(self, store: "MemoryStore", cfg: "MemoryConsolidationConfig", *,
+                 llm: Any = None, clock: Callable[[], float] | None = None) -> None:
+        self._store = store
+        self._cfg = cfg
+        self._llm = llm
+        self._clock = clock or time.monotonic   # injectable for budget tests
+        self._cancel = asyncio.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    async def run(self) -> MicroPassReport:
+        report = MicroPassReport()
+        if not getattr(self._cfg, "turn_end_micro_pass_enabled", True):
+            return report  # master switch off — inert, today's behavior
+        budget = float(getattr(self._cfg, "turn_end_micro_pass_budget_seconds", 8.0))
+        t0 = self._clock()
+
+        def stop() -> bool:
+            return self._cancel.is_set() or (self._clock() - t0) >= budget
+
+        try:
+            await self._unit_heal_and_classify(report, stop)   # unit group 1
+            await self._unit_name_candidates(report, stop)     # unit group 2
+            await self._unit_promote_and_prune(report, stop)   # unit group 3 (pure SQL)
+        except Exception:
+            log.exception("turn-end micro-pass failed (non-fatal)")
+        report.cancelled = self._cancel.is_set()
+        report.budget_spent_s = self._clock() - t0
+        return report
+
+    def _tag_capable(self) -> bool:
+        """The classify/name units reuse the mint-time tagging machinery, so they honor the same
+        master lever the idle backfill does (mint_tagging_enabled) AND require the model."""
+        return self._llm is not None and getattr(self._cfg, "mint_tagging_enabled", False)
+
+    async def _unit_heal_and_classify(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
+        # (a) heal legacy #88 bucket conflicts — deterministic, no model call.
+        if stop():
+            return
+        healed = await self._store.heal_bucket_conflicts(limit=_MICRO_CLASSIFY_CAP)
+        report.bucket_conflicts_healed += len(healed)
+        report.units += 1
+        # (b) backfill-classify untagged fileable atoms (the _step_classify_untagged target set:
+        # the semantic pool minus already-bucketed atoms — includes remember-sourced facts),
+        # oldest-first, cap 5. Reuses file_atom_tags — the SAME two-pick classifier, not a fork.
+        if not self._tag_capable():
+            return
+        from localharness.memory.clustering import _load_pool
+        from localharness.memory.tag_classify import file_atom_tags
+        bucketed = await self._bucketed_atom_ids()
+        todo = sorted((f for f in await _load_pool(self._store)
+                       if f.node_kind != "schema" and f.id not in bucketed),
+                      key=lambda f: f.id)[:_MICRO_CLASSIFY_CAP]
+        for f in todo:
+            if stop():
+                return
+            topic = f.key.split("/")[1] if f.key.startswith("sem/") else f.key
+            bucket, _child = await file_atom_tags(
+                self._store, self._llm, self._cancel,
+                atom_id=f.id, topic=topic, claim=f.value, provenance="backfill")
+            if bucket is not None:
+                report.classified += 1
+            report.units += 1
+
+    async def _bucketed_atom_ids(self) -> set[int]:
+        """Atom ids already carrying an L1 bucket tag (mirrors _step_classify_untagged's exclusion)."""
+        assert self._store._db is not None
+        async with self._store._db.execute(
+            "SELECT DISTINCT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
+            "WHERE t.agent_id = ? AND t.parent_id IS NULL", (self._store._agent_id,),
+        ) as cur:
+            return {r[0] for r in await cur.fetchall()}
+
+    async def _unit_name_candidates(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
+        if stop() or not self._tag_capable():
+            return
+        from localharness.memory.discovery import name_eligible_candidates
+        report.named += await name_eligible_candidates(
+            self._store, self._llm, self._cancel, limit=_MICRO_NAME_CAP, stop=stop)
+        report.units += 1
+
+    async def _unit_promote_and_prune(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
+        # Pure SQL, no model calls — runs even without an LLM.
+        if stop():
+            return
+        # Promotion: reuse the idle pass's recurrence promotion verbatim (share the cancel event so a
+        # user turn cuts it between groups). A throwaway ConsolidationPass carries the exact logic.
+        cp = ConsolidationPass(self._store, self._cfg, llm=None)
+        cp._cancel = self._cancel
+        cp_report = ConsolidationReport()
+        await cp._step_promote_recurring(cp_report)
+        report.promoted += cp_report.promoted
+        report.units += 1
+        if stop():
+            return
+        from localharness.memory.discovery import prune_stale_candidates
+        report.pruned += await prune_stale_candidates(self._store)
+        report.units += 1
+
+
 class ConsolidationScheduler:
     """CONS-01/02: the trigger + cancellation owner. No daemon exists on this box —
     the scheduler lives inside the harness process: a staleness check at session start
@@ -625,6 +757,10 @@ class ConsolidationScheduler:
         self._last_activity = time.monotonic()
         self._turn_in_flight = False  # #78: an agent turn is mid-flight (defers/cancels passes)
         self.last_report: Optional[ConsolidationReport] = None
+        # #90: the turn-end micro-pass (bounded tail-work drain), tracked alongside the full pass so
+        # the two never double-run and a new user turn cancels whichever is live.
+        self._micro: Optional[TurnEndMicroPass] = None
+        self._micro_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         if not self._cfg.enabled:
@@ -660,13 +796,14 @@ class ConsolidationScheduler:
             self._timer_task.cancel()
             self._timer_task = None
         self.cancel_running()
-        if self._run_task is not None:
-            try:
-                # Bounded (critic minor 3): a pathologically slow step must not stall
-                # process shutdown; the cancel above makes steps exit at their next check.
-                await asyncio.wait_for(self._run_task, timeout=15.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                self._run_task.cancel()
+        for task in (self._run_task, self._micro_task):
+            if task is not None:
+                try:
+                    # Bounded (critic minor 3): a pathologically slow step must not stall
+                    # process shutdown; the cancel above makes steps exit at their next check.
+                    await asyncio.wait_for(task, timeout=15.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    task.cancel()
 
     async def _on_user_activity(self, event: Any) -> None:
         """A user turn arrived: the box is NOT idle. Cancel any in-flight pass (it will
@@ -683,28 +820,49 @@ class ConsolidationScheduler:
         self.cancel_running()
 
     async def _on_turn_ended(self, event: Any) -> None:
-        """Turn finished (TurnCompleted or TurnFailed): clear the in-flight gate and reset the
-        idle clock so idle_minutes is counted from turn END — the actual fix for #78."""
+        """Turn finished (TurnCompleted or TurnFailed): clear the in-flight gate, reset the idle
+        clock so idle_minutes is counted from turn END (#78), and — the answer now delivered —
+        fire the bounded turn-end micro-pass to drain the tagging/naming tail (#90)."""
         self._turn_in_flight = False
         self._last_activity = time.monotonic()
+        self.launch_micro()
 
     def cancel_running(self) -> None:
         if self._running is not None:
             self._running.cancel()
+        if self._micro is not None:   # #90: a new turn/user message cuts the micro-pass short too
+            self._micro.cancel()
 
     def launch(self) -> None:
         """Fire a pass as a background task (idempotent while one is running; deferred while an
-        agent turn is in flight — #78). Bench/eval never call this (they run ConsolidationPass
-        directly), so their path is unaffected by the turn guard."""
+        agent turn is in flight — #78, or while the turn-end micro-pass is running — #90). Bench/
+        eval never call this (they run ConsolidationPass directly), so their path is unaffected."""
         if self._turn_in_flight:
             return
         if self._run_task is not None and not self._run_task.done():
             return
+        if self._micro_task is not None and not self._micro_task.done():
+            return  # #90: don't run the full pass on top of a micro-pass (one inference gate)
         self._running = ConsolidationPass(
             self._store, self._cfg, llm=self._llm, embedder=self._embedder,
             on_promotion_sample=self._on_promotion_sample,
         )
         self._run_task = asyncio.create_task(self._run_and_record())
+
+    def launch_micro(self) -> None:
+        """#90: fire the turn-end micro-pass as a background task. Skips when disabled, when a turn
+        is back in flight, or when EITHER pass is already running (no double-run on the one serial
+        inference gate). Idempotent while one is running."""
+        if not getattr(self._cfg, "turn_end_micro_pass_enabled", True):
+            return
+        if self._turn_in_flight:
+            return
+        if self._run_task is not None and not self._run_task.done():
+            return
+        if self._micro_task is not None and not self._micro_task.done():
+            return
+        self._micro = TurnEndMicroPass(self._store, self._cfg, llm=self._llm)
+        self._micro_task = asyncio.create_task(self._run_micro_and_record())
 
     async def _emit_status(self, *, started: bool) -> None:
         """Fire-and-forget dreaming-dot signal for the interactive REPL (#20). The terminal
@@ -737,6 +895,35 @@ class ConsolidationScheduler:
         finally:
             self._running = None
             await self._emit_status(started=False)
+
+    async def _run_micro_and_record(self) -> None:
+        """#90: run one turn-end micro-pass and publish a TurnEndMicroPassCompleted ledger record of
+        what it drained (classify/name/promote/prune/heal counts, budget spent, whether cancelled).
+        Never breaks the loop — a crash or emit fault is swallowed."""
+        try:
+            assert self._micro is not None
+            report = await self._micro.run()
+            from localharness.core.events import TurnEndMicroPassCompleted
+            try:
+                await self._bus.publish(TurnEndMicroPassCompleted(
+                    agent_id=self._agent_id, classified=report.classified, named=report.named,
+                    promoted=report.promoted, pruned=report.pruned,
+                    bucket_conflicts_healed=report.bucket_conflicts_healed,
+                    units=report.units, budget_spent_s=report.budget_spent_s,
+                    cancelled=report.cancelled))
+            except Exception:
+                log.debug("micro-pass event emit failed (non-fatal)", exc_info=True)
+            if (report.classified or report.named or report.promoted or report.pruned
+                    or report.bucket_conflicts_healed):
+                log.info("turn-end micro-pass: classified=%d named=%d promoted=%d pruned=%d "
+                         "healed=%d units=%d %.2fs%s", report.classified, report.named,
+                         report.promoted, report.pruned, report.bucket_conflicts_healed,
+                         report.units, report.budget_spent_s,
+                         " (cancelled)" if report.cancelled else "")
+        except Exception:
+            log.exception("turn-end micro-pass crashed (non-fatal)")
+        finally:
+            self._micro = None
 
     async def should_run(self) -> bool:
         """Session-start staleness: run when the watermark is old AND there is work

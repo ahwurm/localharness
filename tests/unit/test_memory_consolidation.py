@@ -30,7 +30,11 @@ def _cfg(**over) -> MemoryConsolidationConfig:
                 # Hermetic default: a unit-test pass must never lazily construct the REAL default
                 # embedder (once the optional sentence-transformers extra is installed that means
                 # a model load). Discovery tests opt in explicitly with an injected fake.
-                tag_discovery_enabled=False)
+                tag_discovery_enabled=False,
+                # #90: these tests exercise the FULL idle pass + the #78 turn defer in isolation;
+                # the turn-end micro-pass (a separate default-on feature) has its own test file
+                # (test_turn_end_micro_pass.py). Off here so _on_turn_ended stays the pure #78 reset.
+                turn_end_micro_pass_enabled=False)
     base.update(over)
     return MemoryConsolidationConfig(**base)
 
