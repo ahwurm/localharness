@@ -4,6 +4,50 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.15] — 2026-07-17
+
+Tagging-reliability batch from the 2026-07-17 live store audit (#87–#90): the tag
+classifier only ever ran on the mining stream, so explicitly saved memories went in
+untagged; and the consolidation tail (candidate naming, promotion, backfill) sat
+behind an idle pass that user activity routinely cancels — 35 discovered tag
+candidates had waited unnamed for a week.
+
+### Added
+- **Turn-end micro-pass** (#90,
+  `agent.memory.consolidation.turn_end_micro_pass_enabled`, default on): a bounded
+  slice of consolidation tail-work now runs right after each turn's final answer is
+  delivered — up to 5 untagged atoms backfill-classified, up to 2 discovery
+  candidates named (the model-names-the-cluster step that had never run live; naming
+  now writes a real definition, also fixing a latent path where idle-incorporated
+  tags kept their placeholder), and all pure-SQL promotion/prune checks — in atomic
+  oldest-first units under a hard wall-clock budget (config knob). A new user message
+  cancels it between units, exactly like the idle pass; running at every turn end is
+  what guarantees the tail drains anyway. Heavy stages (mining, chapters) stay in the
+  idle pass; the micro-pass and full pass never run concurrently. Every firing emits
+  a `TurnEndMicroPassCompleted` event with unit counts and budget spent.
+
+### Fixed
+- **Explicit `remember` saves are classified at save time** (#87): the same two-pick
+  bucket/child classification the miner uses now files user-saved memories the
+  moment they're written (bounded; classification failure or timeout never blocks
+  the save — the atom lands untagged and the micro-pass catches it later).
+- **Exactly one bucket per memory** (#88): mining re-classified corroborated
+  re-mints and could attach a second, contradictory L1 bucket (observed live, two
+  buckets ~1s apart). All bucket writes now route through a chokepoint that keeps
+  the first bucket and refuses a different one (logged); the micro-pass heals legacy
+  double-bucket rows by the same keep-earliest rule. Known residue: the redundant
+  re-classify model call on a corroboration re-mint still happens (bounded,
+  wasteful, not incorrect).
+- **Tool-novelty capture is store-checked** (#89): "first successful use of tool X"
+  now consults the durable store before claiming a first — one observed fact had
+  re-fired 14 times across 9 days, silently bumping its timestamp each time.
+  Genuine first-use behavior unchanged.
+
+Honest limits: not driven against a live model before release (the classifier call
+is mock-tested; the wiring paths are unit-exercised end-to-end); the micro-pass
+backfill scans the semantic pool each firing before slicing to its cap (O(pool) —
+fine at current store sizes, a LIMIT query is the flagged optimization).
+
 ## [0.9.14] — 2026-07-17
 
 First live REPL dogfood on the 4GB-laptop setup (Gemma 4 E2B on llama.cpp, 32k window):
