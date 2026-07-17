@@ -442,7 +442,8 @@ class ConsolidationPass:
             # promote step's embedding leg reads self._embedder and benefits too.
             embedder = self._embedder = default_embedder()
         report.embedder_used = type(embedder).__name__
-        r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder)
+        r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder,
+                                injection_weight=self._cfg.trace_injection_weight)
         report.tags_proposed = len(r.proposed)
         report.tags_incorporated = len(r.incorporated)
         report.tags_pruned = len(r.pruned)

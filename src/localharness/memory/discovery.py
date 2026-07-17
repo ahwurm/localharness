@@ -124,18 +124,30 @@ async def _sitting_rank(store: Any) -> dict[str, int]:
         return {r[0]: i for i, r in enumerate(await cur.fetchall())}
 
 
-async def _cofire_pairs(store: Any, atom_ids: set[int]) -> set[tuple[int, int]]:
-    """Unordered atom-id pairs that co-fired in >= 1 activation trace (both in fired_ids). Rows
-    over _TRACE_FANOUT_CAP are skipped (F5): a stimulus that fired half the store is a generic
-    probe whose pairwise co-fire carries no discriminative signal."""
-    pairs: set[tuple[int, int]] = set()
+async def _cofire_pairs(
+    store: Any, atom_ids: set[int], *, injection_weight: float = 1.0
+) -> dict[tuple[int, int], float]:
+    """Unordered atom-id pairs that co-fired in >= 1 activation trace (both in fired_ids), mapped
+    to a co-fire WEIGHT — a materialized-view discount over the fidelity-preserving log (owner
+    reversal 2026-07-17). A retrieval-source co-fire (the model's own memory_search / memory_get)
+    weighs 1.0; an ambient-INJECTION co-fire weighs `injection_weight` (our every-turn guess, a
+    weaker signal). A pair co-firing under BOTH takes the MAX (retrieval dominates) — so with zero
+    injection rows every weight is 1.0 and a weighted sum reduces to today's plain distinct-pair
+    count (byte-identical). Rows over _TRACE_FANOUT_CAP are skipped (F5, the hub guard) — for
+    injection rows too: a mega shelf is a generic probe, not pair evidence. Presence in the dict
+    is still binary co-fire (weight > 0), so the multi-factor TRACE leg is unchanged; the discount
+    lands on co-fire STRENGTH downstream. injection_weight=0.0 drops injection-only pairs entirely."""
+    pairs: dict[tuple[int, int], float] = {}
     for tr in await store.recent_activation_traces(limit=500):
         if len(tr.fired_ids) > _TRACE_FANOUT_CAP:
             continue  # hub-stimulus guard: a mega-row must not clique-link the pool
+        w = injection_weight if tr.source == "injection" else 1.0
         fired = [i for i in tr.fired_ids if i in atom_ids]
         for i in range(len(fired)):
             for j in range(i + 1, len(fired)):
-                pairs.add((min(fired[i], fired[j]), max(fired[i], fired[j])))
+                key = (min(fired[i], fired[j]), max(fired[i], fired[j]))
+                if w > pairs.get(key, 0.0):  # max-source: retrieval (1.0) dominates injection
+                    pairs[key] = w
     return pairs
 
 
@@ -192,9 +204,13 @@ async def _incorporate(store, llm, cancel_event, cand, group, bucket, report) ->
 
 
 async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: Any,
+                        injection_weight: float = 1.0,
                         now: int | None = None) -> DiscoveryReport:
     """One discovery pass over every bucket's bucket-only atoms. Returns a DiscoveryReport. Never
-    raises into the idle loop. `embedder` may be None (stricter 2-factor temporal+trace degrade)."""
+    raises into the idle loop. `embedder` may be None (stricter 2-factor temporal+trace degrade).
+    `injection_weight` discounts ambient-injection co-fire vs model-initiated retrieval (owner
+    reversal 2026-07-17) — the production seam passes agent.memory.consolidation.trace_injection_
+    weight; the default 1.0 is the no-discount identity for un-threaded callers."""
     report = DiscoveryReport()
     if now is None:
         now = int(time.time())
@@ -210,7 +226,7 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
             pool = await store.atoms_without_child_tag(bucket_id=bucket.id)
             by_id = {f.id: f for f in pool}
             ids = list(by_id)
-            cofire = await _cofire_pairs(store, set(ids))
+            cofire = await _cofire_pairs(store, set(ids), injection_weight=injection_weight)
             vecs: dict[int, list[float]] = {}
             if embedder is not None and ids:
                 vecs = dict(zip(ids, embedder.embed([by_id[i].value for i in ids])))
@@ -245,7 +261,10 @@ async def discover_tags(store: Any, llm: Any, cancel_event: Any, *, embedder: An
             for group in groups:
                 mids = {m.id for m in group}
                 sittings = {m.provenance for m in group if _is_sitting(m.provenance)}
-                this_reuse = sum(1 for (p, q) in cofire if p in mids and q in mids)
+                # Weighted co-fire STRENGTH: injection-source pairs contribute their discount,
+                # retrieval-source their full 1.0 (the materialized-view weight; the log stays
+                # ground truth). With no injection rows this is the old distinct-pair count.
+                this_reuse = sum(w for (p, q), w in cofire.items() if p in mids and q in mids)
                 cand = next((t for t in existing
                              if (mids & members_of[t.id])
                              and len(mids & members_of[t.id]) / len(mids | members_of[t.id])
