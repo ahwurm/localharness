@@ -278,3 +278,53 @@ def test_doctor_non_2xx_probe_fails_model_check(mock_httpx, tmp_path):
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert "✓ Model available" not in result.output, result.output
     assert result.exit_code == 1, result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_warns_on_parallel_slot_split(mock_httpx, tmp_path):
+    """llama-server defaults to multiple parallel slots and divides --ctx-size among them
+    (observed live: a 32k launch served 8k/request via 4 slots). The harness is
+    single-stream, so doctor surfaces the split with the --parallel 1 remedy — advisory
+    only, exit stays 0 (a shared server may be deliberate)."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+
+    def _get(url, *args, **kwargs):
+        if str(url).endswith("/props"):
+            return _models_resp(
+                {"total_slots": 4, "default_generation_settings": {"n_ctx": 8192}}
+            )
+        return _models_resp({"data": [{"id": "m"}]})
+
+    mock_httpx.get.side_effect = _get
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1, 2]}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "--parallel 1" in result.output
+    assert "4 parallel slots" in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_single_slot_stays_silent(mock_httpx, tmp_path):
+    """total_slots == 1 (or /props absent) must not emit the slot-split advisory."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+
+    def _get(url, *args, **kwargs):
+        if str(url).endswith("/props"):
+            return _models_resp(
+                {"total_slots": 1, "default_generation_settings": {"n_ctx": 32768}}
+            )
+        return _models_resp({"data": [{"id": "m"}]})
+
+    mock_httpx.get.side_effect = _get
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1, 2]}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "--parallel 1" not in result.output
