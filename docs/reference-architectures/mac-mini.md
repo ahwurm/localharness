@@ -73,8 +73,13 @@ across both architectures except for the context/timeout profile below.
 
 - **Ollama** (`:11434`): pull the qwen3.5 9B library model; MLX backend on Apple
   Silicon since v0.19.
-- **llama.cpp** (`:8080`): `llama-server --model Qwen3.5-9B-Q4_K_M.gguf --ctx-size 65536 --jinja`
+- **llama.cpp** (`:8080`): `llama-server --model Qwen3.5-9B-Q4_K_M.gguf --ctx-size 65536 --parallel 1 --jinja`
   (GGUF is text-only; the vision mmproj file is separate and not needed for the harness).
+  `--parallel 1` is load-bearing: recent llama-server builds default to multiple slots and
+  silently divide `--ctx-size` among them (e.g. 32k across 4 slots = an 8k window per
+  request); the harness is single-stream, so one slot should own the whole window. `init`
+  probes the per-slot figure from `/props` — if `doctor` shows a smaller context than you
+  launched with, check the slot count first.
 
 Qwen-recommended sampling everywhere: `temperature 0.6, top_p 0.95, top_k 20`.
 
