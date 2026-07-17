@@ -44,6 +44,13 @@ class Session:
     output_tokens: int = 0
     tokens_estimated: bool = False
     act_nudge_used: bool = False
+    # #91: index into messages where THIS turn's assistant replies begin (set right after the
+    # turn's user task is pushed). The CONFIRMED-sentinel summary fallback searches ONLY
+    # messages[turn_start_idx:], so it can never splice a PRIOR turn's reply as this turn's answer.
+    turn_start_idx: int = 0
+    # #91: one bounded re-prompt spent this turn when a completion is a bare sentinel with nothing
+    # in-turn to confirm (flag-guarded like act_nudge_used) — provably terminates.
+    sentinel_reprompt_used: bool = False
     # #84/FIX-4: baton-gate nudges spent this turn (announced-next-step reply), bounded by
     # config.baton_gate.max_nudges. Was a bool (one nudge, hardcoded); now a counter so the
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
@@ -253,7 +260,42 @@ def _last_assistant_content(messages: list[Message]) -> str:
 def _format_completion_summary(session: Session, content: str | None) -> str:
     if _is_confirmation(content):
         content = None  # sentinel: surface the answer it confirmed, not the sentinel
-    return content or _last_assistant_content(session.messages) or "Task complete."
+    if content:
+        return content
+    # #91: TURN-SCOPED fallback. Resolve the answer the sentinel confirmed from THIS turn only
+    # (messages[turn_start_idx:]) — never walk the full multi-turn history, which spliced a prior
+    # turn's reply as this turn's summary (the live receipt). No in-turn answer -> honest notice.
+    turn_start = getattr(session, "turn_start_idx", 0)
+    return (
+        _last_assistant_content(session.messages[turn_start:])
+        or "No answer was produced this turn."
+    )
+
+
+def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
+    """#91b: return a copy of `messages` with each deterministic nudge -> bare-CONFIRMED pair
+    removed, for persistence into the cross-turn conversation.
+
+    The act-guard / self-check / #91 sentinel re-prompt each end with a 'reply CONFIRMED'
+    instruction; persisting that user+CONFIRMED pair verbatim is an imitable precedent that
+    teaches a small local model to emit a spontaneous CONFIRMED next turn (the #91 splice
+    trigger). Same spirit as the xml trailing-prose truncation (~loop.py:1071-1083): sanitize
+    the HISTORY copy, never the live decision (the summary was already surfaced from this turn's
+    real answer BEFORE this runs). The real answer the sentinel confirmed stays; only the
+    imitable user-nudge + sentinel pair is dropped. The input list is not mutated."""
+    out: list[Message] = []
+    for m in messages:
+        if (
+            m.get("role") == "assistant"
+            and _is_confirmation(m.get("content"))
+            and not m.get("tool_calls")
+            and out
+            and out[-1].get("role") == "user"
+        ):
+            out.pop()      # drop the inducing nudge …
+            continue       # … and the bare-sentinel reply
+        out.append(m)
+    return out
 
 
 # --- Baton gate (issue #84): a tool-less reply whose CLOSING move announces further work -----
@@ -850,6 +892,9 @@ class AgentLoop:
             # First turn — insert the single leading system message at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
         session.push({"role": "user", "content": task})
+        # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel
+        # summary fallback is turn-scoped and can never splice a prior turn's reply.
+        session.turn_start_idx = len(session.messages)
 
         # MOVE 0c: a fresh turn earns fresh compaction attempts — re-arm the per-turn fire cap
         # so a prior turn's cap never suppresses this turn's compaction.
@@ -884,7 +929,7 @@ class AgentLoop:
             # 1. Kill check
             if self._kill.is_killed():
                 session.terminated_reason = "kill_file"
-                self._conversation = list(session.messages)
+                self._conversation = _strip_sentinel_exchanges(session.messages)
                 log.warning(
                     "KILL file detected, stopping agent %s after %d iterations",
                     self._config.name,
@@ -904,7 +949,7 @@ class AgentLoop:
                     violation.current,
                 )
                 summary = await self._final_summary_on_budget(session, violation, on_token)
-                self._conversation = list(session.messages)
+                self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
 
             # 3. Build request messages first (runs compaction if needed)
@@ -1197,6 +1242,22 @@ class AgentLoop:
                     )})
                     continue
 
+                # #91: a completion that is empty or a bare sentinel with NO real assistant
+                # content anywhere in THIS turn has nothing to surface (the model confirmed a
+                # non-existent answer, or spontaneously emitted CONFIRMED — small local model,
+                # temp 0.6). Re-prompt ONCE for the actual answer, then accept the honest notice;
+                # never splice a prior turn (issue #91). Bounded by sentinel_reprompt_used.
+                content_is_answer = bool(content) and not _is_confirmation(content)
+                if (not content_is_answer and not session.sentinel_reprompt_used
+                        and not _last_assistant_content(session.messages[session.turn_start_idx:])):
+                    session.sentinel_reprompt_used = True
+                    log.info("Sentinel completion with no in-turn answer — re-prompting once (#91)")
+                    session.push({"role": "user", "content": (
+                        "Your last reply was only a confirmation, but there is nothing in this "
+                        "turn to confirm. Provide your full answer to the task now."
+                    )})
+                    continue
+
                 summary = _clean_summary(
                     _format_completion_summary(session, content)
                 )
@@ -1209,7 +1270,7 @@ class AgentLoop:
                     iterations=session.iteration,
                 ))
                 session.terminated_reason = "complete"
-                self._conversation = list(session.messages)
+                self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
 
             # 10. Deduplicate identical tool calls in same response
@@ -1367,7 +1428,7 @@ class AgentLoop:
                 summary = await self._final_summary_on_stuck(
                     session, session.iteration, on_token
                 )
-                self._conversation = list(session.messages)
+                self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
 
     async def _final_summary_on_budget(
