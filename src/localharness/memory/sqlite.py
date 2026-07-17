@@ -95,6 +95,11 @@ class MemoryContext:
     guardrails_md: str
     fact_count: int
     token_estimate: int
+    # The atom ids rendered into the ambient shelf this load (schema chapters + persistent
+    # facts) — the "injected set" for the ambient-injection activation trace (owner reversal
+    # 2026-07-17). Empty in the legacy whole-MEMORY.md render path. Captured alongside the
+    # rendered text; recording the trace is the loop's best-effort job, gated by the kill-switch.
+    injected_fact_ids: list[int] = field(default_factory=list)
 
 
 # Stimulus-text cap for activation traces (design: the digest is the sha256 of the FULL
@@ -233,7 +238,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -622,6 +627,27 @@ PRAGMA user_version = 7;
 COMMIT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v8 — per-turn idempotency for ambient-injection traces (owner reversal 2026-07-17 of
+# the P0 exclusion: the every-turn memory shelf is now recorded source='injection'). ADDITIVE
+# ONLY: one PARTIAL unique index scoped to injection rows — a second assembly of the SAME turn
+# (session_id + stimulus_hash) collapses to the one row via INSERT OR IGNORE. The `source`
+# discriminator column already exists (v5), so NO column is added; the injection kind REUSES it.
+# The index is PARTIAL (WHERE source='injection') so pre-existing retrieval rows (memory_search /
+# memory_get, and any historical source) are OUTSIDE it — untouched, still append-only, byte-
+# stable. Zero injection rows have ever existed (the model never called the trace tools), so the
+# index materialises empty. ONE BEGIN IMMEDIATE ... PRAGMA user_version = 8; COMMIT (crash ->
+# rollback to v7). Idempotent via IF NOT EXISTS.
+# ---------------------------------------------------------------------------
+
+MIGRATION_V7_TO_V8_SQL = """
+BEGIN IMMEDIATE;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_activation_traces_injection
+    ON activation_traces(agent_id, session_id, stimulus_hash) WHERE source = 'injection';
+PRAGMA user_version = 8;
+COMMIT;
+"""
+
 # Seeded spine (Amendment 4): TWO buckets, THREE children each, filed by what a memory SERVES
 # (a functional decision rule with an inline example — NEVER a bare "useful"). Every seed has
 # both real run-5 atom evidence AND prior-art convergence (survey §2.3). Idempotent per agent.
@@ -799,6 +825,9 @@ class MemoryStore:
             v = await _version()
         if v == 6:
             await self._db.executescript(MIGRATION_V6_TO_V7_SQL)
+            v = await _version()
+        if v == 7:
+            await self._db.executescript(MIGRATION_V7_TO_V8_SQL)
             v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
@@ -1723,6 +1752,34 @@ class MemoryStore:
         await self._db.commit()
         return cur.lastrowid
 
+    async def record_injection_trace(
+        self, *, stimulus: str, injected_ids: list[int], session_id: str | None = None,
+    ) -> int:
+        """Append the every-turn ambient-shelf co-firing event (owner reversal 2026-07-17 of the
+        P0 exclusion), source='injection'. The shelf renders exactly what it selects, so
+        fired == injected. INSERT OR IGNORE keyed on the partial unique index
+        (agent_id, session_id, stimulus_hash) WHERE source='injection' — a second assembly of
+        the SAME turn (a retry re-render) collapses to the one existing row (per-turn dedupe).
+        `stimulus` is the turn's user message; the digest stores sha256 of the FULL text plus
+        the text truncated to _STIMULUS_TEXT_CAP. source='injection' keeps it DISTINGUISHABLE
+        from model-initiated retrieval (memory_search/memory_get), which downstream discounts —
+        the raw log keeps full fidelity. Best-effort at the call site; ONE INSERT, no reads.
+        Returns the rowid (the existing row's, or 0, on ignore)."""
+        assert self._db is not None
+        text = stimulus or ""
+        stim_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        sess = session_id if session_id is not None else (self._current_session_id or "")
+        ids_json = json.dumps(injected_ids)
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO activation_traces "
+            "(agent_id, session_id, turn, stimulus_hash, stimulus_text, fired_ids, "
+            "injected_ids, source, ts) VALUES (?, ?, NULL, ?, ?, ?, ?, 'injection', ?)",
+            (self._agent_id, sess, stim_hash, text[:_STIMULUS_TEXT_CAP],
+             ids_json, ids_json, int(time.time())),
+        )
+        await self._db.commit()
+        return cur.lastrowid
+
     _TRACE_COLS = (
         "id, agent_id, session_id, turn, stimulus_hash, stimulus_text, "
         "fired_ids, injected_ids, source, ts"
@@ -1888,9 +1945,9 @@ class MemoryStore:
         assert self._db is not None
 
         if index_mode:
-            agent_md = await self._render_memory_index(max_session_history)
+            agent_md, injected_fact_ids = await self._render_memory_index_with_ids(max_session_history)
         else:
-            agent_md = self._markdown_memory.read()
+            agent_md, injected_fact_ids = self._markdown_memory.read(), []
 
         division_md = ""
         if self._division_md_path.exists():
@@ -1913,13 +1970,30 @@ class MemoryStore:
             guardrails_md=guardrails_md,
             fact_count=fact_count,
             token_estimate=token_estimate,
+            injected_fact_ids=injected_fact_ids,
         )
 
     async def _render_memory_index(self, max_session_history: int) -> str:
+        """Render the agent-memory INDEX string (the byte-stability-critical injected surface).
+        Thin wrapper over `_render_memory_index_with_ids` — returns ONLY the string, preserving
+        the exact public contract every byte-identity test asserts against; the rendered atom
+        ids (for the ambient-injection trace) ride out separately via load_context."""
+        text, _ids = await self._render_memory_index_with_ids(max_session_history)
+        return text
+
+    async def _render_memory_index_with_ids(
+        self, max_session_history: int
+    ) -> tuple[str, list[int]]:
         """Render the agent-memory INDEX: fact names + one-line descriptions (not full
         bodies) and the most recent session-history entries — the latter from the sessions
         TABLE with relative-time labels, hard-capped at `_SESSION_SHELF_HARD_CAP` (TIME-03).
-        The model is told it can call memory_get(name) / memory_search(query) for detail."""
+        The model is told it can call memory_get(name) / memory_search(query) for detail.
+
+        Also returns the atom ids rendered into the shelf (schema chapters + persistent facts,
+        in render order) — the "injected set" for the ambient-injection activation trace. `id`
+        is appended to the two facts SELECTs so the rendered line (r[0]=key, r[1]=value) stays
+        BYTE-IDENTICAL; the id is captured, never rendered. Session-history entries are not
+        atoms, so they contribute no ids."""
         assert self._db is not None
         now = int(time.time())
         # Injected-block ordering (RANK-02/04): importance + ACT-R base-level activation
@@ -1946,7 +2020,7 @@ class MemoryStore:
         # + INDEXED BY + day-quantized lh_slow_score ORDER BY as the facts query below
         # (byte-stability: folded columns only).
         async with self._db.execute(
-            "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
+            "SELECT key, value, id FROM facts INDEXED BY idx_facts_active_recency "
             "WHERE agent_id = ? AND status = 'active' AND node_kind = 'schema' "
             "AND confidence >= 0.7 AND retrieval_strength >= 0.2 "
             "AND (expires_at IS NULL OR expires_at > ?) "
@@ -1965,7 +2039,7 @@ class MemoryStore:
         )
 
         async with self._db.execute(
-            "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
+            "SELECT key, value, id FROM facts INDEXED BY idx_facts_active_recency "
             "WHERE agent_id = ? AND status = 'active' AND node_kind != 'schema' "
             "AND confidence >= 0.7 "
             "AND retrieval_strength >= 0.2 "
@@ -2022,13 +2096,17 @@ class MemoryStore:
             else ""
         )
 
-        return (
+        # Injected set (co-firing atoms) = schema chapters + persistent facts, in render order.
+        # r[2] is the appended id column; session-history rows are not atoms and add none.
+        injected_ids = [r[2] for r in schema_rows] + [r[2] for r in rows]
+        text = (
             "This is an INDEX, not the full memory. Each line below is one persistent fact "
             "(name: short description). Call `memory_get(name)` for a fact's full body, or "
             "`memory_search(query)` to search fact contents.\n\n"
             f"{schema_section}### Persistent Facts ({len(fact_lines)})\n{facts_block}"
             f"{history_section}"
         )
+        return text, injected_ids
 
     # ------------------------------------------------------------------
     # Session lifecycle
