@@ -1055,6 +1055,95 @@ async def test_memory_loader_failure_nonfatal():
 
 
 # ---------------------------------------------------------------------------
+# Ambient-injection activation trace (owner reversal 2026-07-17): the every-turn
+# memory shelf is a co-firing event and is recorded at the injection seam. These
+# drive a REAL MemoryStore through run_turn — proving the hook is wired, not a
+# green test on code nothing calls.
+# ---------------------------------------------------------------------------
+
+
+async def _memory_store(tmp_path):
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="test-agent", division_id="", org_id="default",
+                        base_dir=str(tmp_path))
+    await store.open()
+    await store.store_fact("deploy_note", "deploy requires the vpn", confidence=0.9)
+    await store.store_fact("api_key_loc", "api keys live in the vault", confidence=0.9)
+    return store
+
+
+def _memory_loop_with_cfg(memory_loader, *, trace_ambient_injection=True):
+    from localharness.config.models import AgentConfig
+    from tests.conftest import FakeLLMResponse, MockLLMClient
+
+    cfg = AgentConfig(name="test-agent", role="You are a test assistant.",
+                      memory={"trace_ambient_injection": trace_ambient_injection})
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    return AgentLoop(
+        config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
+        tool_registry=None, permission_evaluator=PermissionEvaluator(),
+        memory_loader=memory_loader,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ambient_injection_records_trace_on_turn(tmp_path):
+    """End-to-end: a turn whose ambient shelf renders facts records exactly ONE injection-source
+    trace whose injected_ids are those facts' ids and whose stimulus is the user message."""
+    store = await _memory_store(tmp_path)
+    try:
+        ids = {(await store.get_fact("deploy_note")).id, (await store.get_fact("api_key_loc")).id}
+        loop = _memory_loop_with_cfg(store)
+        await loop.run_turn("where do api keys live?")
+
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 1
+        t = injection[0]
+        assert set(t.injected_ids) == ids
+        assert t.fired_ids == t.injected_ids           # shelf renders exactly what it selects
+        assert t.stimulus_text == "where do api keys live?"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ambient_injection_kill_switch_off_records_no_trace(tmp_path):
+    """trace_ambient_injection=False restores the pre-reversal behavior: the shelf still injects
+    (## Agent Memory present) but NO injection-trace row is written."""
+    store = await _memory_store(tmp_path)
+    try:
+        loop = _memory_loop_with_cfg(store, trace_ambient_injection=False)
+        await loop.run_turn("where do api keys live?")
+
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert injection == []  # kill-switch off -> no injection trace
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ambient_injection_trace_failure_does_not_break_turn(tmp_path, monkeypatch):
+    """A trace-write failure at the injection seam never disturbs the turn: run_turn completes
+    and the answer is returned (best-effort, wrapped + warned)."""
+    store = await _memory_store(tmp_path)
+    try:
+        called = {"n": 0}
+
+        async def boom(**kwargs):
+            called["n"] += 1
+            raise RuntimeError("trace store down")
+
+        monkeypatch.setattr(store, "record_injection_trace", boom)
+        loop = _memory_loop_with_cfg(store)
+        result = await loop.run_turn("hi")
+        assert isinstance(result, str)     # the turn survived the trace failure
+        assert called["n"] == 1            # the hook fired (its failure was swallowed)
+    finally:
+        await store.close()
+
+
+# ---------------------------------------------------------------------------
 # Task: compact_md_path parameter tests (08-01)
 # ---------------------------------------------------------------------------
 
