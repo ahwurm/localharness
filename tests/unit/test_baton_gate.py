@@ -25,6 +25,15 @@ _POSITIVES = [
     "Now I'll dig into the configuration.",
     "Here is the plan:\n\nNow let me start reading the first file.",   # multi-line, closing announces
     "- Now let me read the config file.",             # leading bullet on the closing line
+    # Live receipts (Gemma-4-E2B REPL, 2026-07-16): six turns shipped announces the now/next
+    # anchors missed — bare future-intent and present-progressive shapes, and polite-wait.
+    "I will search for Korean market holidays or trading closures for tonight.",
+    "I am searching for Korean market holiday schedules that affect KOSPI trading for tonight.",
+    "I am checking for any scheduled Korean holidays. Please wait a moment for the search results.",
+    "I am about to search for the official Korea Exchange (KRX) trading schedule.",
+    "I apologize for the confusion. I am executing the search now.",
+    "I am pulling the data to find the official trading hours for the KRX.",
+    "One moment please, gathering the schedule data.",
 ]
 
 
@@ -41,6 +50,15 @@ _NEGATIVES = [
     "",
     "   ",
     "Let me check the logs.",                        # bare 'let me X' is not a target shape
+    # Precision guards for the widened families — idioms and user-directed instructions
+    # that share surface forms with announces MUST stay accepted:
+    "I am running out of options.",                   # idiom, not an announced run
+    "I am running low on context.",                   # idiom
+    "I am finding this approach problematic.",        # 'finding' deliberately unmatched
+    "I am working on the assumption that the cache is cold.",  # 'working on' deliberately unmatched
+    "Run the build, then please wait for it to finish.",        # instruction to the USER
+    "I am done with the analysis: the cause is the stale lock.",
+    "I am confident the answer is 42.",
 ]
 
 

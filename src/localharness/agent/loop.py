@@ -264,6 +264,19 @@ _BATON_ANNOUNCE_RE = re.compile(
     r"|i\s+will\s+now"              # I will now
     r"|next\s*,?\s+i\s*['’]?ll"     # next I'll / next, I'll
     r"|next\s*,?\s+i\s+will"        # next I will / next, I will
+    # Live-observed drops the now/next anchors missed (Gemma-4-E2B REPL, 2026-07-16: six
+    # accepted finals like "I will search for Korean market holidays…", "I am executing the
+    # new, specific search now.", "Please wait a moment for the search results."). Same
+    # precision contract as the anchors above: final sentence, start-anchored, and a TIGHT
+    # action-verb whitelist so statements of fact ("I am done", "I am confident…") and
+    # idioms stay out. Deliberate misses, precision over recall: "finding" (…this confusing),
+    # "working on" (…the assumption that), bare "please wait for" (instructions to the USER
+    # legitimately say that); "running" carries a lookahead for out/low/late/behind.
+    r"|i\s+(?:will|am\s+going\s+to)\s+(?:search|check|look|read|fetch|find|pull|execute|run|query|verify|investigate|retrieve)\b"
+    r"|i\s+am\s+(?:now\s+)?(?:searching|checking|looking|reading|fetching|pulling|executing|querying|verifying|investigating|retrieving|about\s+to)\b"
+    r"|i\s+am\s+(?:now\s+)?running(?!\s+(?:out|low|late|behind)\b)"
+    r"|please\s+wait\s+(?:a\s+moment|while\s+i)\b"
+    r"|one\s+moment\s+(?:please|while\s+i)\b"
     r")\b",
     re.IGNORECASE,
 )
