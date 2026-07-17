@@ -26,6 +26,7 @@ from localharness.channels.terminal import (
     _build_persistent_input_app,
 )
 from localharness.core.bus import EventBus
+from localharness.core.events import ConsolidationFinished, ConsolidationStarted
 
 
 def _channel(force_terminal: bool = True) -> TerminalChannel:
@@ -79,9 +80,11 @@ class TestHintFrame:
         ch.box_set_queued(2)
         assert "queued (2)" in self._text(ch._box_hint_frags())
 
+        # FIX 2: the working glyph moved OUT of the bottom border into the status row above
+        # the box. The border keeps input-metadata (queued / decision flash / hint) only.
         ch.box_notify_working(True)
-        frags = ch._box_hint_frags()
-        assert "working" in self._text(frags)
+        assert "working" not in self._text(ch._box_hint_frags()), "border no longer carries it"
+        assert "working" in self._text(ch._box_status_frags()), "status row does"
 
     def test_decision_flash_shows_then_can_clear(self):
         ch = _channel()
@@ -90,6 +93,49 @@ class TestHintFrame:
         assert "nudging" in self._text(ch._box_hint_frags())
         ch._decision_flash = ""  # simulate the timed clear
         assert "nudging" not in self._text(ch._box_hint_frags())
+
+
+class TestStatusRow:
+    """FIX 2: the working/activity indicator renders in a one-line status row ABOVE the box
+    (so it reads as the last line of the log area), not crammed into the box's bottom border.
+    Empty (→ zero height) when idle; shows the live tool-burst counter; animates the between-
+    turns 'dreaming' consolidation pass."""
+
+    def _text(self, frags) -> str:
+        return "".join(t for _s, t in frags)
+
+    def test_idle_status_row_is_empty(self):
+        ch = _channel()
+        ch._box_active = True
+        # nothing happening → empty fragments so the ConditionalContainer collapses to 0 rows
+        # (no blank line wasted above the box).
+        assert ch._box_status_frags() == []
+
+    def test_working_shows_spinner_and_working(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_notify_working(True)
+        text = self._text(ch._box_status_frags())
+        assert "working" in text
+        assert any(frame in text for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"), "an animated braille frame"
+
+    async def test_open_burst_shows_live_counter(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.send_tool_call("web_search", {"query": "x"})
+        await ch.send_tool_call("web_search", {"query": "y"})
+        text = self._text(ch._box_status_frags())
+        assert "web_search" in text, "the burst's tool family is named in the status row"
+        assert "0/2" in text, "…with its live done/calls counter, not just 'working'"
+        await ch.stop()
+
+    async def test_dreaming_animates_in_status_row_in_box_mode(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.on_consolidation_started(ConsolidationStarted())
+        assert "dreaming" in self._text(ch._box_status_frags())
+        await ch.on_consolidation_finished(ConsolidationFinished())
+        assert ch._box_status_frags() == [], "the pass ended → row collapses again"
 
 
 class TestPromptEcho:
