@@ -204,3 +204,35 @@ async def test_baton_gate_fires_after_a_real_action(mock_llm_client, bus, tmp_pa
 def test_baton_gate_config_default_on():
     a = AgentConfig(name="x", role="y")
     assert a.baton_gate.enabled is True
+    # FIX 4: default max_nudges=1 preserves the original #84 behavior byte-for-byte (bounded
+    # once) — raising it is an opt-in tuning knob, not a new out-of-the-box default.
+    assert a.baton_gate.max_nudges == 1
+
+
+def test_baton_gate_max_nudges_bounds():
+    import pydantic
+    from localharness.config.models import BatonGateConfig
+
+    BatonGateConfig(max_nudges=1)
+    BatonGateConfig(max_nudges=3)
+    for bad in (0, 4):
+        with pytest.raises(pydantic.ValidationError):
+            BatonGateConfig(max_nudges=bad)
+
+
+@pytest.mark.asyncio
+async def test_baton_gate_max_nudges_2_announces_nudge_nudge_then_accepts(bus):
+    """FIX 4(b): with max_nudges=2 configured, a THIRD consecutive announce (after two nudges
+    are spent) is finally accepted — announce -> nudge -> announce -> nudge -> announce -> accept."""
+    llm = _ScriptedNoToolLLM([
+        "Now let me read the notebooks.",
+        "Now let me also read the configs.",
+        "Now let me check one more thing.",
+    ])
+    loop = _make_loop(llm, bus, baton_gate={"max_nudges": 2})
+    session = Session(agent_id="baton-agent", session_id="s-max2", messages=[])
+    summary = await loop._execute_loop(session, "analyze", None)
+    assert session.baton_nudges_used == 2
+    assert len(_baton_nudges(session)) == 2      # exactly two nudges, then accept (no loop)
+    assert session.iteration == 3
+    assert summary == "Now let me check one more thing."  # 3rd announce accepted verbatim

@@ -19,13 +19,16 @@ from localharness.agent.subagent import (
     EXPLORE_MAX_ACTIONS,
     EXPLORE_MAX_DURATION_MINUTES,
     EXPLORE_MAX_TOOL_CALLS,
+    EXPLORE_ROLE,
     EXPLORE_TOOLS,
     MAX_DEPTH,
+    SEARCH_VERIFIER_ROLE,
     WEB_TOOLS,
     build_explore_config,
     build_web_researcher_config,
     dispatch_explore_subagent,
     dispatch_web_subagent,
+    format_child_findings,
     format_findings,
     format_web_findings,
 )
@@ -205,10 +208,11 @@ async def test_child_events_carry_parent_id_and_tool_calls_counted(mock_llm_clie
 def test_format_findings_is_structured_summary():
     out = format_findings("find the config loader", "It lives in config/loader.py.", 2)
     lines = out.splitlines()
-    # Short header with task + tool-call count, then the child summary.
-    assert lines[0].startswith("[explore findings]")
-    assert "find the config loader" in lines[0]
-    assert "tool calls: 2" in lines[0]
+    # FIX 1: the FIRST line states completion unambiguously (no more "task: ... | tool calls: N"
+    # header that reads as a pending-status echo of the child's own narration).
+    assert lines[0].startswith("SUBAGENT RUN COMPLETE (agent_id=explore, tool calls: 2)")
+    assert "No further results will arrive" in lines[0]
+    assert "find the config loader" in out
     assert "It lives in config/loader.py." in out
 
 
@@ -230,7 +234,7 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
     )
 
     # Concise findings header + summary; NOT the raw transcript / event dump.
-    assert result.startswith("[explore findings]")
+    assert result.startswith("SUBAGENT RUN COMPLETE (agent_id=explore")
     assert "tool calls:" in result.splitlines()[0]
     assert "The file defines a greeting constant." in result
     # Transcript/event-log artifacts must not leak into the returned string.
@@ -284,12 +288,58 @@ def test_web_researcher_role_rigor_gating(monkeypatch):
     assert "DISPUTED" in default.role  # verdict-tagging discipline kept for requested checks
 
 
+def test_web_researcher_role_has_answer_first_output_contract():
+    """FIX 2: the web-researcher's final reply must lead with a direct 'ANSWER:' line so a weak
+    parent model can extract the finding without hunting mid-paragraph (scope: web-researcher
+    only — explore/search-verifier final-report contracts are untouched)."""
+    cfg = build_web_researcher_config("web-researcher")
+    assert "ANSWER: <one-sentence direct answer" in cfg.role
+    assert "ANSWER: NOT FOUND" in cfg.role
+    # Untouched by design (scope: web-researcher only).
+    assert "ANSWER:" not in EXPLORE_ROLE
+    assert "ANSWER:" not in SEARCH_VERIFIER_ROLE
+
+
 def test_format_web_findings_is_structured_summary():
     out = format_web_findings("anthropic june 15 pricing", "It splits headless billing.", 3)
     lines = out.splitlines()
-    assert lines[0].startswith("[web research]")
-    assert "tool calls: 3" in lines[0]
+    assert lines[0].startswith("SUBAGENT RUN COMPLETE (agent_id=web-researcher, tool calls: 3)")
     assert "It splits headless billing." in out
+
+
+def test_format_child_findings_uses_dynamic_agent_id():
+    """Config-defined children keep their identifying info (the dynamic agent name), just
+    reframed through the same FIX 1 completion-line wrapper as the built-ins."""
+    out = format_child_findings("yt-summarizer", "summarize video X", "Video covers topic Y.", 4)
+    assert out.startswith("SUBAGENT RUN COMPLETE (agent_id=yt-summarizer, tool calls: 4)")
+    assert "summarize video X" in out
+    assert "Video covers topic Y." in out
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — no-conclusion labeling: an announce-shaped child final must not be silently
+# inherited as a finding by the parent.
+# ---------------------------------------------------------------------------
+
+def test_findings_label_announce_shaped_final_as_no_result():
+    announce = "I am going to search for the reason now."
+    out = format_web_findings("why is the KOSPI closed today", announce, 5)
+    assert "NOTE: the subagent ended without a conclusion" in out
+    assert "Treat this as NO RESULT" in out
+    assert f"Last message: {announce}" in out
+
+
+def test_findings_no_note_when_final_is_conclusive():
+    conclusion = "KOSPI is closed today for a scheduled national holiday."
+    out = format_web_findings("why is the KOSPI closed today", conclusion, 5)
+    assert "NOTE: the subagent ended without a conclusion" not in out
+    assert conclusion in out
+
+
+def test_findings_no_note_on_empty_summary():
+    out = format_findings("find X", "", 1)
+    assert "NOTE: the subagent ended without a conclusion" not in out
+    assert "(no findings)" in out
 
 
 @pytest.mark.asyncio

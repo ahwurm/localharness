@@ -1074,20 +1074,36 @@ class BatonGateConfig(BaseModel):
     """Deterministic baton gate at the loop's tool-less acceptance seam (issue #84).
 
     When enabled (default), a tool-less reply whose CLOSING move announces further work
-    ("Now let me read X…") instead of doing it or stating a final answer gets ONE bounded
-    nudge before the reply is accepted — the model announced a next step and the turn was
-    about to end as if done (the 'dropped baton'). Bounded once per turn: a second announced
-    intention is accepted (no loop). A loop-structure mechanism (adds a control-flow branch +
-    at most one extra LLM round-trip), not a prompt edit. Addressable as `agent.baton_gate.enabled`.
+    ("Now let me read X…") instead of doing it or stating a final answer gets a bounded
+    nudge (up to `max_nudges` times) before the reply is accepted — the model announced a
+    next step and the turn was about to end as if done (the 'dropped baton'). Bounded per
+    turn: once every nudge is spent, a further announced intention is accepted (no loop). A
+    loop-structure mechanism (adds a control-flow branch + up to `max_nudges` extra LLM
+    round-trips), not a prompt edit. Addressable as `agent.baton_gate.{enabled,max_nudges}`.
     """
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     enabled: bool = Field(
         default=True,
         description=(
-            "Nudge once when a tool-less reply's closing move announces further work instead of "
-            "completing it (issue #84), then accept. Set False to restore verbatim acceptance. "
+            "Nudge (up to max_nudges times) when a tool-less reply's closing move announces "
+            "further work instead of completing it (issue #84), then accept. Set False to "
+            "restore verbatim acceptance. "
             "Mutable via `localharness components set agent.baton_gate.enabled <true|false>`."
+        ),
+    )
+
+    max_nudges: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        description=(
+            "How many bounded nudges the gate spends on an announce-shaped tool-less reply "
+            "before accepting it verbatim, per turn. Default 1 preserves the original #84 "
+            "behavior (bounded once) unchanged; raise for experiments where a model tends to "
+            "re-announce past a single nudge. A repeat announcement after every nudge is spent "
+            "is still accepted (no infinite loop). "
+            "Mutable via `localharness components set agent.baton_gate.max_nudges <int>`."
         ),
     )
 

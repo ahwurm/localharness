@@ -73,7 +73,10 @@ WEB_RESEARCHER_ROLE_BASE = (
     "emit your final summary with whatever real facts you have gathered. Don't re-fetch a page you "
     "already read. You cannot write or execute. When done, stop and reply with a CONCISE, well-organized "
     "summary of your findings WITH the source URLs you used — the key facts, figures, and citations the "
-    "parent needs. This summary is the ONLY thing the parent agent sees; never paste raw page text."
+    "parent needs. This summary is the ONLY thing the parent agent sees; never paste raw page text. "
+    "OUTPUT CONTRACT: your final reply MUST begin with a line 'ANSWER: <one-sentence direct answer "
+    "to the task>' (or 'ANSWER: NOT FOUND — <one-sentence why>' if you genuinely could not find it) "
+    "— then, on the following lines, the supporting evidence and source URLs."
 )
 
 # Rigor=high addendum: nest a blind search-verifier for each material claim (JTBD #1, #5).
@@ -251,18 +254,51 @@ class _ParentIdBus:
         return getattr(self._inner, item)
 
 
-def format_findings(task: str, summary: str, tool_calls_used: int) -> str:
-    """Structured findings return (SUBAGENT-04): short header + child summary, NOT the transcript."""
-    header = f"[explore findings] task: {task} | tool calls: {tool_calls_used}"
+def _no_conclusion_note(child_final: str) -> str:
+    """FIX 3 (kospi-live evidence, 2026-07-17): when the child's raw final reply is itself
+    announce-shaped (detect_dropped_baton — the SHIPPED detector, unwidened), the parent must
+    not silently inherit that announcement as a finding. Returns a NO-RESULT note embedding the
+    child's literal last message, or "" when the final is conclusive (or empty)."""
+    from localharness.agent.loop import detect_dropped_baton
+    text = (child_final or "").strip()
+    if not text or not detect_dropped_baton(text):
+        return ""
+    return (
+        "NOTE: the subagent ended without a conclusion (its last message only announced "
+        "further work). Treat this as NO RESULT; re-delegate with a more specific task if "
+        f"needed. Last message: {text}"
+    )
+
+
+def _format_subagent_result(agent_id: str, task: str, summary: str, tool_calls_used: int) -> str:
+    """Shared findings wrapper (FIX 1 + FIX 3): the FIRST line states completion unambiguously —
+    previously the header opened with the CHILD's own narration-shaped summary right after a
+    "task: ... | tool calls: N" prefix, so a weak parent read it as a PENDING status update
+    ("I am waiting for the web-researcher…") rather than a finished result. Identifying info
+    (agent_id, task, tool-call count) is kept, just reframed. FIX 3: an announce-shaped child
+    final is labeled NO RESULT (see _no_conclusion_note) instead of being inherited as a finding.
+    """
+    header = (
+        f"SUBAGENT RUN COMPLETE (agent_id={agent_id}, tool calls: {tool_calls_used}). "
+        "No further results will arrive; everything below is the finished output."
+    )
     body = (summary or "").strip() or "(no findings)"
-    return f"{header}\n\n{body}"
+    note = _no_conclusion_note(summary)
+    if note:
+        body = f"{note}\n\n{body}"
+    return f"{header}\ntask: {task}\n\n{body}"
+
+
+def format_findings(task: str, summary: str, tool_calls_used: int) -> str:
+    """Structured findings return (SUBAGENT-04): unambiguous completion line + child summary,
+    NOT the transcript. See _format_subagent_result for the FIX 1 / FIX 3 framing."""
+    return _format_subagent_result("explore", task, summary, tool_calls_used)
 
 
 def format_web_findings(task: str, summary: str, tool_calls_used: int) -> str:
-    """Structured web-research findings return: short header + child summary, NOT the transcript."""
-    header = f"[web research] task: {task} | tool calls: {tool_calls_used}"
-    body = (summary or "").strip() or "(no findings)"
-    return f"{header}\n\n{body}"
+    """Structured web-research findings return: unambiguous completion line + child summary, NOT
+    the transcript. See _format_subagent_result for the FIX 1 / FIX 3 framing."""
+    return _format_subagent_result("web-researcher", task, summary, tool_calls_used)
 
 
 # --- Cruncher (J3): faithful over-window reduce via harness-orchestrated map + model reduce -------
@@ -351,10 +387,9 @@ def prepend_toolset(task: str, allowed: list[str]) -> str:
 
 
 def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_used: int) -> str:
-    """Generic findings return for config-defined children: header + summary, NOT the transcript."""
-    header = f"[{agent_name}] task: {task} | tool calls: {tool_calls_used}"
-    body = (summary or "").strip() or "(no findings)"
-    return f"{header}\n\n{body}"
+    """Generic findings return for config-defined children: unambiguous completion line +
+    summary, NOT the transcript. See _format_subagent_result for the FIX 1 / FIX 3 framing."""
+    return _format_subagent_result(agent_name, task, summary, tool_calls_used)
 
 
 async def dispatch_config_subagent(
