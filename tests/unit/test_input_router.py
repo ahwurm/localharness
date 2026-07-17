@@ -140,7 +140,9 @@ class TestTier2:
             await asyncio.sleep(1.0)
             return "NUDGE"
 
-        d = await classify_tier2("x", "ctx", slow, timeout=0.05)
+        # #92: the classify budget is now permit_wait + timeout (permit-wait no longer eats the
+        # generation clock); a call slower than the TOTAL budget still defaults to QUEUE.
+        d = await classify_tier2("x", "ctx", slow, timeout=0.03, permit_wait=0.02)
         assert d.route is Route.QUEUE and "default-queue" in d.reason
 
     async def test_error_defaults_queue(self):
