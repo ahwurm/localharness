@@ -242,6 +242,25 @@ def doctor(
                         f"accounting falls back to tiktoken cl100k (approximate)."
                     )
                     failures.append("tokenize-unreachable")
+                # Slot-split check: llama-server defaults to multiple parallel slots and divides
+                # --ctx-size among them (4 slots turn a 32k launch into an 8k window per request).
+                # The harness is single-stream by design (inference gate serializes; subagent
+                # calls block their parent), so slots >1 quietly quarter the usable context and
+                # fragment the prefix cache. Warn, never fail — a shared server may be deliberate.
+                try:
+                    props = httpx.get(f"{root}/props", timeout=5.0).json()
+                    n_slots = int(props.get("total_slots") or 1)
+                    if n_slots > 1:
+                        slot_ctx = props.get("default_generation_settings", {}).get("n_ctx")
+                        console.print(
+                            f"{_INFO}  llama.cpp is running {n_slots} parallel slots — each "
+                            f"request gets only ~1/{n_slots} of --ctx-size "
+                            f"({slot_ctx} tokens/slot). LocalHarness is single-stream: relaunch "
+                            f"llama-server with --parallel 1 so one slot owns the full window, "
+                            f"then re-run 'localharness init --force'."
+                        )
+                except Exception:
+                    pass  # /props absent on older builds — the check is advisory only
             else:  # vllm (and unknown): the exact /tokenize {count} contract is expected here
                 try:
                     tk = httpx.post(
