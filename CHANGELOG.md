@@ -4,6 +4,35 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.14] — 2026-07-17
+
+First live REPL dogfood on the 4GB-laptop setup (Gemma 4 E2B on llama.cpp, 32k window):
+one user question ("what Korean holiday is closing Kospi tonight"), full event-chain
+forensics, three failure classes. Two are fixed here; the third — the orchestrator held
+the retrieved answer (Constitution Day, 9 ledger mentions, all inside web-researcher
+events) and never relayed it — is a model-behavior class the existing default-off
+`agent.self_check.enabled` review pass targets, left as a config flip.
+
+### Fixed
+- **Baton gate catches bare future-intent, present-progressive, and polite-wait
+  announces** (#84): six live turns shipped announces the now/next-anchored patterns
+  missed — "I will search for…", "I am executing the search now.", "Please wait a
+  moment for the search results." — at both the orchestrator and web-researcher seams
+  (same loop, same gate; chain verified: enabled, no overrides, pure pattern gap).
+  Widened under the same precision contract: final sentence, start-anchored, tight
+  action-verb whitelist, idiom lookaheads ("running out/low/late/behind"); deliberate
+  misses documented in-pattern ("finding this confusing", "working on the assumption",
+  user-directed "please wait for"). Seven live positives + seven idiom/instruction
+  negatives added as regression cases.
+
+### Added
+- **doctor: parallel-slot context-split advisory**: llama-server defaults to multiple
+  slots and divides `--ctx-size` among them — a 32k launch silently served 8k per
+  request, and `init` then clamped the whole pipeline to the quartered window. doctor
+  now reads `/props` `total_slots` and, when >1, prints the `--parallel 1` remedy with
+  the per-slot math. Advisory only; silent on single-slot or `/props`-less builds. The
+  reference-architecture docs now carry the same note on every llama-server launch line.
+
 ## [0.9.13] — 2026-07-17
 
 Two UX corrections to the type-anytime input box from its first live dogfood session.
