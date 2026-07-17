@@ -92,6 +92,46 @@ class TestHintFrame:
         assert "nudging" not in self._text(ch._box_hint_frags())
 
 
+class TestPromptEcho:
+    """FIX 1: every box submission leaves a permanent line in the scrollback (❯ <text>),
+    through the same patch_stdout-safe console the tool/agent lines use — the box resets
+    its buffer on submit, so without this echo the typed prompt vanishes from the transcript."""
+
+    def _out(self, ch) -> str:
+        return ch._console.file.getvalue()
+
+    async def test_echo_prints_prompt_line_to_scrollback(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("index the repo")
+        out = self._out(ch)
+        assert "index the repo" in out
+        assert "❯" in out  # ❯ prompt glyph, so a scrolled-back prompt is recognizable
+
+    async def test_echo_with_queued_annotation(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("also update the changelog", annotation="queued (2)")
+        out = self._out(ch)
+        assert "also update the changelog" in out
+        assert "queued (2)" in out
+
+    async def test_echo_with_nudge_annotation(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("stop, wrong file", annotation="→ nudge")
+        out = self._out(ch)
+        assert "stop, wrong file" in out
+        assert "→ nudge" in out
+
+    async def test_echo_escapes_user_markup(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("[bold]not markup[/bold]")
+        # rich markup in the user's text must render literally, never be interpreted.
+        assert "[bold]not markup[/bold]" in self._out(ch)
+
+
 class TestPersistentAppKeybindings:
     async def _drive(self, feed: str):
         subs: list[str] = []

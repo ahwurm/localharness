@@ -27,6 +27,7 @@ class FakeBoxChannel:
         self.on_interrupt = None
         self.queued: int | None = None
         self.flashes: list[str] = []
+        self.echoes: list[tuple[str, str]] = []
         self.working: list[bool] = []
         self.box_started = False
         self.box_stopped = False
@@ -54,6 +55,9 @@ class FakeBoxChannel:
 
     def box_flash_decision(self, text: str, seconds: float = 2.0) -> None:
         self.flashes.append(text)
+
+    async def box_echo_prompt(self, text: str, annotation: str = "") -> None:
+        self.echoes.append((text, annotation))
 
     def box_notify_working(self, working: bool) -> None:
         self.working.append(working)
@@ -135,6 +139,57 @@ class TestSubmitPolicy:
             assert list(repl._fifo) == ["/help"]
         finally:
             repl._turn_task.cancel()
+
+
+class TestPromptEcho:
+    """FIX 1: the coordinator echoes every submission into the scrollback the moment it is
+    routed — plain at turn start, annotated (queued (N) / → nudge) mid-turn — so the typed
+    prompt persists in the transcript instead of vanishing when the box resets its buffer."""
+
+    async def test_idle_submit_echoes_plain_prompt(self):
+        repl, ch, agent = _repl()
+        await repl._handle_box_event("submit", "index the repo")
+        assert ("index the repo", "") in ch.echoes
+        repl._turn_task.cancel()
+
+    async def test_mid_turn_queue_echoes_with_queued_annotation(self):
+        repl, ch, agent = _repl()
+        await _pending_turn(repl)
+        try:
+            await repl._handle_box_event("submit", "also update the changelog")
+            assert ("also update the changelog", "queued (1)") in ch.echoes
+        finally:
+            repl._turn_task.cancel()
+
+    async def test_mid_turn_nudge_echoes_with_nudge_annotation(self):
+        repl, ch, agent = _repl()
+        await _pending_turn(repl)
+        try:
+            await repl._handle_box_event("submit", "stop, wrong file")
+            assert ("stop, wrong file", "→ nudge") in ch.echoes
+        finally:
+            repl._turn_task.cancel()
+
+    async def test_force_bang_echoes_clean_text_not_the_bang(self):
+        repl, ch, agent = _repl()
+        await _pending_turn(repl)
+        try:
+            await repl._handle_box_event("submit", "!keep going anyway")
+            assert ("keep going anyway", "→ nudge") in ch.echoes
+        finally:
+            repl._turn_task.cancel()
+
+    async def test_queue_playback_re_echoes_prompt_at_turn_start(self):
+        repl, ch, agent = _repl()
+        repl._turn_task = None
+        repl._fifo.extend(["first queued"])
+        done = asyncio.ensure_future(asyncio.sleep(0))
+        await done
+        await repl._handle_box_event("turn_done", done)
+        # the queued message re-appears (plain) as its own turn begins → chronological transcript
+        assert ("first queued", "") in ch.echoes
+        assert repl._turn_task is not None
+        repl._turn_task.cancel()
 
 
 class TestQueuePlayback:
