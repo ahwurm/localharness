@@ -208,6 +208,61 @@ def _salient_words(v: str) -> set[str]:
             if len(t) >= 4 and t not in _STOP_WORDS}
 
 
+def _config_value_tokens(v: str) -> set[str]:
+    """CONFIG-like value tokens (#95): a fact's MUTABLE value slot — a port ('8000'), a size, or a
+    dotted version ('1.2.3', 'v2.1'). A BARE single-digit ordinal ('meeting room 3') is an
+    IDENTIFIER, not a config value, and is deliberately NOT a value token — mirrors the novelty
+    gate's number-distinguished-facts convention (room 3 vs room 7 are DISTINCT facts, never a
+    contradiction). Eligible: a token bearing >= 2 consecutive digits OR a dotted digit-run."""
+    out: set[str] = set()
+    for t in re.findall(r"[a-z0-9][a-z0-9.]*", v.lower()):
+        if re.search(r"\d\d", t) or ("." in t and any(c.isdigit() for c in t)):
+            out.add(t)
+    return out
+
+
+async def _supersede_contradicted_atoms(store: Any, fact: Any, claim: str,
+                                        cands: list[tuple[str, str]]) -> int:
+    """#95: at mint time, supersede OLDER active atoms that assert a DIFFERENT value in the SAME
+    slot as this fresh atom — a value-slot contradiction ("port 8000" vs "port 8081"). Unique
+    keys never collide, so store_fact's same-key supersede never fires and both stay active
+    forever. Newest wins: the older atom is superseded_by THIS atom (cross-key raw UPDATE with the
+    superseded_by chain + retrieval demote, mirroring chapter_writer._supersede_chapter; history
+    stays queryable). Narrow + deterministic — fires only when ALL hold:
+      - same SUBJECT: the candidate is in `cands`, the atom's child-tag set (else its topic slug) —
+        the SAME axis the novelty fold groups on, so a different subject is never in scope;
+      - >= 2 shared salient tokens (a shared subject, not one generic word like 'port'); AND
+      - both carry CONFIG value tokens (>=2-digit / dotted) that DIFFER.
+    Corroboration (equal values), non-config values (bare ordinals), and non-numeric texts never
+    fire. `cands` is bounded to the subject namespace (tag/slug), never the whole store."""
+    probe = _salient_words(claim)
+    new_vals = _config_value_tokens(claim)
+    if len(probe) < 2 or not new_vals:
+        return 0
+    superseded = 0
+    now = int(time.time())
+    for k, v in cands:
+        if k == fact.key:
+            continue                                       # the atom just minted — never self-supersede
+        old_vals = _config_value_tokens(v)
+        if not old_vals or old_vals == new_vals:
+            continue                                       # no config value, or SAME value (corroboration)
+        if len(probe & _salient_words(v)) < 2:
+            continue                                       # different subject — only a generic token shared
+        cur = await store._db.execute(
+            "UPDATE facts SET status = 'superseded', updated_at = ?, superseded_by = ?, "
+            "retrieval_strength = MIN(retrieval_strength, 0.1) "
+            "WHERE agent_id = ? AND key = ? AND status = 'active'",
+            (now, fact.id, store._agent_id, k),
+        )
+        await store._db.commit()
+        if cur.rowcount > 0:
+            superseded += 1
+            log.info("mining #95: superseded contradicted atom %s %s -> %s %s (newest wins)",
+                     k, sorted(old_vals), fact.key, sorted(new_vals))
+    return superseded
+
+
 async def _active_slug_atoms(store: Any, slug: str) -> list[tuple[str, str]]:
     """ALL active fact atoms in one `sem/{slug}/` namespace — the novelty gate's comparison set.
     Unlike the capped known window, this is the WHOLE active slug (correctness must not depend
@@ -336,6 +391,9 @@ class MineReport:
     # NOVELTY GATE (precision): fresh mints folded into an existing same-slug atom as
     # corroboration because they paraphrase it (salient-token Jaccard >= threshold).
     folded: int = 0
+    # #95: OLDER atoms superseded by a fresh atom that contradicts their config value slot
+    # (port 8000 -> 8081) — newest wins, no same-key collision required.
+    superseded_contradictions: int = 0
 
 
 async def mine_transcript(
@@ -742,6 +800,18 @@ async def mine_transcript(
                     else:
                         await file_atom_tags(store, llm, cancel_event,
                                              atom_id=fact.id, topic=topic, claim=claim)
+                # #95: value-slot contradiction — supersede OLDER active atoms of the SAME subject
+                # asserting a different CONFIG value (port 8000 -> 8081). Same candidate axis as the
+                # novelty fold (child tag when tagged, else the topic slug + this pass's mints) so a
+                # different subject is never in scope; the fresh atom (just committed) is excluded by key.
+                if tag_grouping and child_tag is not None:
+                    contra_cands = [(f.key, f.value) for f in await store.atoms_for_tag(child_tag.id)]
+                else:
+                    contra_cands = await _active_slug_atoms(store, slug)
+                    contra_cands += [(k, v) for k, v in minted_pass.items()
+                                     if k.startswith(f"sem/{slug}/")]
+                report.superseded_contradictions += await _supersede_contradicted_atoms(
+                    store, fact, claim, contra_cands)
             return cited_chunk, False
 
         i = 0
