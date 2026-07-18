@@ -2152,3 +2152,26 @@ async def test_step_truncated_tool_call_counts_and_skips(mock_llm_client, bus):
     assert result.action != "tool_calls"                     # did not report an execution
     assert any(m.get("role") == "tool" and "cut off" in (m.get("content") or "")
                for m in session.messages)
+
+
+@pytest.mark.asyncio
+async def test_ambient_injection_records_trace_on_empty_shelf(tmp_path):
+    """#96: a turn whose ambient shelf is EMPTY still records exactly ONE injection-source trace with
+    an empty injected set. The write gate previously skipped empty shelves (`... and _inj_ids and ...`),
+    so those turns left NO row and per-turn coverage accounting undercounted. An empty-fired row is
+    zero-signal downstream (the co-fire reader yields no pairs) but must still exist."""
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="test-agent", division_id="", org_id="default", base_dir=str(tmp_path))
+    await store.open()
+    try:
+        loop = _memory_loop_with_cfg(store)                       # empty store -> empty shelf
+        await loop.run_turn("a question with no memory to inject")
+
+        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+        assert len(injection) == 1                                # the empty turn IS recorded
+        assert injection[0].injected_ids == []
+        assert injection[0].fired_ids == []
+        assert injection[0].stimulus_text == "a question with no memory to inject"
+    finally:
+        await store.close()
