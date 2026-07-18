@@ -1,11 +1,12 @@
 """CLI presentation — startup banner: the local_harness wordmark."""
 from __future__ import annotations
 
-from importlib import metadata
 from pathlib import Path
 
 from rich.console import Group, RenderableType
 from rich.text import Text
+
+from localharness import resolved_version
 
 # Accent = site token oklch(80% 0.17 152). Wordmark is figlet "ANSI Shadow" for
 # "local_" / "harness", hardcoded so the banner needs no figlet dep at runtime.
@@ -20,10 +21,7 @@ def startup_banner(model: str, is_returning: bool, show_hint: bool = True) -> Re
     show_hint=False and render the hint inside the input bubble instead (#49) — a banner
     hint is fragile scrollback the prompt_toolkit box repaints over. Piped/non-interactive
     sessions keep it in the banner (show_hint default True), unchanged."""
-    try:
-        version = metadata.version("localharness")
-    except metadata.PackageNotFoundError:
-        version = "dev"
+    version = resolved_version()
     cwd = str(Path.cwd())
     home = str(Path.home())
     if cwd.startswith(home):
