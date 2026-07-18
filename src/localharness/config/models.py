@@ -529,6 +529,40 @@ class MemoryConsolidationConfig(BaseModel):
             "agent.memory.consolidation.chapter_containment_guard_enabled <true|false>`)."
         ),
     )
+    absorption_guard_enabled: bool = Field(
+        default=True,
+        description=(
+            "ABSORPTION GUARD (d1v2 gpu_ops-into-subagents weld): at the chapter FOLD/supersede "
+            "decision, a LOPSIDED absorption — a much-smaller chapter merged into a dominant host — "
+            "must clear a stronger overlap-QUALITY bar than raw member subset or it is REFUSED (both "
+            "chapters kept independent, logged + counted). The measured weld welded a small gpu_ops "
+            "chapter (its whole identity the single child tag `ops`) INTO the 48-member subagents "
+            "chapter through that ONE bridge tag, as a full member subset — the containment rule "
+            "alone allowed it. The guard requires >= 2 distinct shared child tags between the absorbed "
+            "side and the host, which separates a cross-topic bridge (1 shared) from genuine "
+            "same-topic containment (many shared); it defers (existing containment behaviour) when "
+            "the absorbed side carries no child tags. Ships True; kill lever (mutable via `localharness "
+            "components set agent.memory.consolidation.absorption_guard_enabled <true|false>`)."
+        ),
+    )
+    absorption_guard_size_ratio: float = Field(
+        default=0.34, gt=0.0, le=1.0,
+        description=(
+            "ABSORPTION GUARD trigger: the guard only assesses a fold when the absorbed side is at "
+            "most this fraction of the host (|absorbed| <= ratio * |host|) — a LOPSIDED absorption. "
+            "Default ~1/3 (the measured weld was 0.21/0.26). Above it the two chapters are comparable "
+            "and the existing containment rule governs untouched. Hyperparameter — sweep on the eval."
+        ),
+    )
+    absorption_guard_min_overlap: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description=(
+            "ABSORPTION GUARD floor: the member overlap of the SMALL side (|absorbed ∩ host| / "
+            "|absorbed|) must clear this for the guard to engage — a real absorption of that side "
+            "(1.0 for the pure-subset containment arms). Guards a future partial-fold path from "
+            "refusing on a trivial 1-2 atom brush. Hyperparameter — sweep on the eval."
+        ),
+    )
     chapter_staleness_recheck_enabled: bool = Field(
         default=True,
         description=(

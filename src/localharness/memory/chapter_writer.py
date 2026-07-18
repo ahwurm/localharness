@@ -51,6 +51,14 @@ _PENDING_TAG = "pending_consolidation"
 _CONSUMED_TAG = "tier:consumed"          # the queue-drain marker: folded under (or aged out beneath) a chapter
 _FAILURE_TIER = "tier:surprising_failure"
 
+# ABSORPTION GUARD (d1v2 gpu_ops-into-subagents weld): a lopsided fold — a much-smaller chapter
+# absorbed into a dominant host — must clear a stronger OVERLAP-QUALITY bar than raw member
+# subset, or it is refused (both chapters kept independent). The discriminator is the shared
+# CHILD-TAG count: the observed weld joined a gpu_ops chapter (its entire identity the single tag
+# `ops`) to a subagents host through that ONE bridge tag, so requiring >= 2 distinct shared child
+# tags separates a cross-topic bridge (1 shared) from genuine same-topic containment (many shared).
+_ABSORPTION_MIN_SHARED_TAGS = 2
+
 
 def _h8(*parts: str) -> str:
     """Stable cluster identity over sorted member keys (mirrors predictive_write_gate._h8 /
@@ -233,10 +241,55 @@ async def _corroborate_chapter(store, chapter_id: int) -> None:
         log.debug("chapter containment: corroboration touch failed (non-fatal)", exc_info=True)
 
 
+async def _absorption_guard_refuses(store, absorbed_ids, host_ids, *,
+                                    size_ratio: float, min_overlap: float) -> bool:
+    """ABSORPTION GUARD (owner-ruled, d1v2). Return True iff folding the (small) `absorbed` member
+    set into the (large) `host` member set is a THIN-BRIDGE weld the guard must REFUSE — keeping
+    both chapters independent. This is the write-time overlap-QUALITY sibling of the containment
+    guard's set-subset test: a candidate fold where the absorbed side is MUCH smaller than the host
+    must be joined by more than one shared child tag.
+
+    Fires only when ALL hold:
+      - lopsided: |absorbed| <= size_ratio * |host| (the small side is a fraction of the host), AND
+      - real absorption of the small side: |absorbed ∩ host| / |absorbed| >= min_overlap
+        (1.0 for the pure-subset containment arms; the floor guards a future partial-fold path), AND
+      - WEAK bridge: the absorbed side and the host's OTHER members share FEWER than
+        _ABSORPTION_MIN_SHARED_TAGS distinct child tags.
+    DEFERS (returns False — existing containment behaviour) when the absorbed side carries NO child
+    tags at all: there is no tag bridge to assess, so a purely structural subset stays governed by
+    the existing containment rule (this is why every pre-guard, child_tag=None containment test stays
+    green). child_tags_for_atoms(edge_eligible=True) already excludes generic BUCKET tags (the
+    mega-blob 'project'/'personal' navigation tags), so the count is over specific child tags only.
+
+    The observed weld: absorbed = a gpu_ops chapter whose whole identity is the single tag `ops`,
+    host = the subagents chapter sharing only that one `ops` bridge tag -> 1 < 2 -> refused."""
+    absorbed = frozenset(absorbed_ids)
+    host = frozenset(host_ids)
+    if not absorbed or not host:
+        return False
+    if len(absorbed) > size_ratio * len(host):
+        return False                                      # not a lopsided absorption
+    if len(absorbed & host) / len(absorbed) < min_overlap:
+        return False                                      # not a real absorption of the small side
+    host_only = host - absorbed
+    tags = await store.child_tags_for_atoms(list(absorbed | host_only), edge_eligible=True)
+    absorbed_tags: set[int] = set()
+    for a in absorbed:
+        absorbed_tags |= tags.get(a, set())
+    if not absorbed_tags:
+        return False                                      # no child-tag bridge -> defer to containment
+    host_tags: set[int] = set()
+    for h in host_only:
+        host_tags |= tags.get(h, set())
+    return len(absorbed_tags & host_tags) < _ABSORPTION_MIN_SHARED_TAGS
+
+
 async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_cap,
                      attempts_log: list | None = None, *,
                      refresh_overlap: float = 0.7, claimed_keys: set[str] | None = None,
                      containment_guard: bool = True, containment_counts: dict | None = None,
+                     absorption_guard: bool = True, absorption_size_ratio: float = 0.34,
+                     absorption_min_overlap: float = 0.5, absorption_counts: dict | None = None,
                      exclude_chapter_ids: frozenset[int] = frozenset(),
                      member_map: dict[int, tuple[str, frozenset[int]]] | None = None,
                      prefer_key: str | None = None, derefs: list[str] | None = None):
@@ -319,6 +372,17 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
             if ekey == fresh_key:
                 continue
             if member_ids and member_ids <= existing:
+                # ABSORPTION GUARD (d1v2): a much-smaller candidate joined to this host by only a
+                # thin child-tag bridge is a distinct topic being welded away — REFUSE the fold, let
+                # the candidate mint its own chapter (both stay independent). Skip THIS host only.
+                if absorption_guard and await _absorption_guard_refuses(
+                        store, member_ids, existing,
+                        size_ratio=absorption_size_ratio, min_overlap=absorption_min_overlap):
+                    if absorption_counts is not None:
+                        absorption_counts["refused"] = absorption_counts.get("refused", 0) + 1
+                    log.info("absorption guard: candidate (%d) NOT folded into chapter %s (%d) — "
+                             "thin tag bridge, kept independent", len(member_ids), ekey, len(existing))
+                    continue
                 # candidate ⊆ existing (incl. equality): a nested-duplicate VIEW — do NOT mint a
                 # twin. Freshen the richer survivor (the mint we skip would have refreshed it).
                 await _corroborate_chapter(store, eid)
@@ -328,10 +392,22 @@ async def _write_one(store, llm, cancel_event, cluster, new_depth, corpus_char_c
                          ekey, len(member_ids), len(existing))
                 attempt.update(written=False, reason="folded_containment")
                 return None
-        # E ⊊ M: existing chapters strictly inside the candidate — supersede each after the mint.
-        contained_ids = [eid for eid, (ekey, existing) in chapters.items()
-                         if eid not in exclude_chapter_ids
-                         and ekey != fresh_key and existing and existing < member_ids]
+        # E ⊊ M: existing chapters strictly inside the candidate — supersede each after the mint,
+        # UNLESS the absorption guard refuses a lopsided thin-bridge weld (both stay independent).
+        for eid, (ekey, existing) in chapters.items():
+            if eid in exclude_chapter_ids or ekey == fresh_key:
+                continue
+            if not (existing and existing < member_ids):
+                continue
+            if absorption_guard and await _absorption_guard_refuses(
+                    store, existing, member_ids,
+                    size_ratio=absorption_size_ratio, min_overlap=absorption_min_overlap):
+                if absorption_counts is not None:
+                    absorption_counts["refused"] = absorption_counts.get("refused", 0) + 1
+                log.info("absorption guard: chapter %s (%d) NOT superseded into candidate (%d) — "
+                         "thin tag bridge, kept independent", ekey, len(existing), len(member_ids))
+                continue
+            contained_ids.append(eid)
 
     attempt.update(written=True, reason="written")
     key = await _adopt_refresh_key(store, members, fresh_key,
@@ -454,6 +530,8 @@ async def write_cluster_schemas(
     depth_cap: int = 2, corpus_char_cap: int = 6000, stale_looks: int = 5,
     embedder=None, embed_sim: float = 0.55, refresh_overlap: float = 0.7,
     containment_guard: bool = True, containment_counts: dict | None = None,
+    absorption_guard: bool = True, absorption_size_ratio: float = 0.34,
+    absorption_min_overlap: float = 0.5, absorption_counts: dict | None = None,
     attempts_log: list | None = None, claimed_refresh_keys: set[str] | None = None,
 ) -> list["Fact"]:
     """Turn stable lesson clusters into grounded chapter schema nodes — the SEMA-02/03 write half.
@@ -497,6 +575,10 @@ async def write_cluster_schemas(
                                       claimed_keys=claimed_refresh_keys,
                                       containment_guard=containment_guard,
                                       containment_counts=containment_counts,
+                                      absorption_guard=absorption_guard,
+                                      absorption_size_ratio=absorption_size_ratio,
+                                      absorption_min_overlap=absorption_min_overlap,
+                                      absorption_counts=absorption_counts,
                                       member_map=member_map)
         except Exception:
             log.exception("chapter-writer: cluster write failed (non-fatal)")
@@ -580,7 +662,8 @@ def _stale_attempt(chapter, n_members: int, *, reason: str) -> dict:
 
 async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, refresh_overlap,
                        containment_guard, containment_counts, attempts_log, counts, claimed_keys,
-                       member_map=None):
+                       absorption_guard=True, absorption_size_ratio=0.34, absorption_min_overlap=0.5,
+                       absorption_counts=None, member_map=None):
     """Re-validate ONE active chapter against its current active members; heal or retire on a fail."""
     members = await _active_members(store, chapter.id)
     bodies = [m.value for m in members]
@@ -622,6 +705,8 @@ async def _recheck_one(store, llm, cancel_event, chapter, *, corpus_char_cap, re
         store, llm, cancel_event, cluster, orig_depth, corpus_char_cap,
         attempts_log=attempts_log, refresh_overlap=refresh_overlap, claimed_keys=claimed_keys,
         containment_guard=containment_guard, containment_counts=containment_counts,
+        absorption_guard=absorption_guard, absorption_size_ratio=absorption_size_ratio,
+        absorption_min_overlap=absorption_min_overlap, absorption_counts=absorption_counts,
         exclude_chapter_ids=frozenset({chapter.id}), member_map=member_map,
         prefer_key=chapter.key,   # #64: adoption HARD-PREFERS the chapter being healed on an overlap tie
         derefs=derefs,            # #72: reuse the corpus already dereferenced above — no second history read
@@ -648,6 +733,8 @@ async def recheck_stale_chapters(
     store, llm, cancel_event, *,
     cap: int = 10, corpus_char_cap: int = 6000, refresh_overlap: float = 0.7,
     containment_guard: bool = True, containment_counts: dict | None = None,
+    absorption_guard: bool = True, absorption_size_ratio: float = 0.34,
+    absorption_min_overlap: float = 0.5, absorption_counts: dict | None = None,
     attempts_log: list | None = None, counts: dict | None = None,
     claimed_refresh_keys: set[str] | None = None,
 ) -> None:
@@ -694,6 +781,8 @@ async def recheck_stale_chapters(
                 store, llm, cancel_event, chapter,
                 corpus_char_cap=corpus_char_cap, refresh_overlap=refresh_overlap,
                 containment_guard=containment_guard, containment_counts=containment_counts,
+                absorption_guard=absorption_guard, absorption_size_ratio=absorption_size_ratio,
+                absorption_min_overlap=absorption_min_overlap, absorption_counts=absorption_counts,
                 attempts_log=attempts_log, counts=counts, claimed_keys=claimed_keys,
                 member_map=member_map)
         except Exception:
