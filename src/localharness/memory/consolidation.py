@@ -70,6 +70,9 @@ class ConsolidationReport:
     # superseded (append-only). Closes the multi-contained gap chapter_refresh_overlap left.
     chapters_folded: int = 0
     chapters_superseded_by_containment: int = 0
+    # Absorption guard (d1v2): lopsided thin-bridge folds/supersedes REFUSED — a much-smaller
+    # distinct-topic chapter kept independent of a dominant host instead of being welded away.
+    chapters_absorption_refused: int = 0
     # Chapter staleness re-check (B5, ANALYSIS §7): active chapters re-validated against their current
     # active members BEFORE the writer runs — grounded ones revalidated, eroded ones re-drafted on the
     # survivors or retired. Closes the "chapter's evidentiary base shrank and nothing noticed" gap.
@@ -351,12 +354,17 @@ class ConsolidationPass:
         from localharness.memory.chapter_writer import recheck_stale_chapters
         counts = {"revalidated": 0, "redrafted": 0, "retired": 0, "skipped_superseded": 0}
         containment_counts = {"folded": 0, "superseded": 0}
+        absorption_counts = {"refused": 0}
         await recheck_stale_chapters(
             self._store, self._llm, self._cancel,
             cap=getattr(self._cfg, "chapter_staleness_recheck_cap", 10),
             refresh_overlap=self._cfg.chapter_refresh_overlap,
             containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
             containment_counts=containment_counts,
+            absorption_guard=getattr(self._cfg, "absorption_guard_enabled", True),
+            absorption_size_ratio=getattr(self._cfg, "absorption_guard_size_ratio", 0.34),
+            absorption_min_overlap=getattr(self._cfg, "absorption_guard_min_overlap", 0.5),
+            absorption_counts=absorption_counts,
             attempts_log=report.schema_attempts,  # §7: staleness re-drafts/retires observable
             counts=counts,
             claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the writer step
@@ -367,12 +375,14 @@ class ConsolidationPass:
         report.chapters_skipped_stale += counts["skipped_superseded"]
         report.chapters_folded += containment_counts["folded"]
         report.chapters_superseded_by_containment += containment_counts["superseded"]
+        report.chapters_absorption_refused += absorption_counts["refused"]
 
     async def _step_write_schemas(self, report: ConsolidationReport) -> None:
         if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):
             return
         from localharness.memory.chapter_writer import write_cluster_schemas
         containment_counts = {"folded": 0, "superseded": 0}
+        absorption_counts = {"refused": 0}
         written = await write_cluster_schemas(
             self._store, self._llm, self._cancel,
             min_sessions=self._cfg.cluster_min_sessions,
@@ -386,6 +396,11 @@ class ConsolidationPass:
             # containment guard: fold set-contained duplicates / supersede EACH subsumed chapter
             containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
             containment_counts=containment_counts,
+            # absorption guard (d1v2): refuse lopsided thin-bridge folds — keep distinct topics independent
+            absorption_guard=getattr(self._cfg, "absorption_guard_enabled", True),
+            absorption_size_ratio=getattr(self._cfg, "absorption_guard_size_ratio", 0.34),
+            absorption_min_overlap=getattr(self._cfg, "absorption_guard_min_overlap", 0.5),
+            absorption_counts=absorption_counts,
             attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
             claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the recheck step
         )
@@ -394,6 +409,7 @@ class ConsolidationPass:
         # steps contribute to these counters within one pass.
         report.chapters_folded += containment_counts["folded"]
         report.chapters_superseded_by_containment += containment_counts["superseded"]
+        report.chapters_absorption_refused += absorption_counts["refused"]
 
     async def _step_classify_untagged(self, report: ConsolidationReport) -> None:
         """Tag-graph F4: file pool-visible atoms that LACK a bucket tag through the SAME two-step
