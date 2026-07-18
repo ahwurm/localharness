@@ -4,6 +4,52 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.17] — 2026-07-18
+
+Four defects from live-session forensics (#91–#94) — headlined by a genuinely
+interesting one: a turn whose model output was only the internal confirmation
+sentinel got a **previous turn's reply** served as its answer, byte-identical,
+because the summary fallback walked conversation history with no turn boundary.
+
+### Fixed
+- **Turn summaries can no longer splice in a prior turn's reply** (#91): the
+  confirmation-sentinel fallback now searches only the current turn's messages;
+  a turn with no real in-turn answer gets one bounded "provide the full answer
+  now" re-prompt, and if that still yields nothing, an honest "No answer was
+  produced this turn." — never someone else's answer. Contributing cause also
+  fixed: the act-guard's internal nudge + CONFIRMED exchange is no longer
+  persisted verbatim into conversation history, so small local models stop
+  seeing an imitable precedent that a bare "CONFIRMED" is sometimes the right
+  reply (observed live: the model pattern-completed exactly that, two turns
+  after a legitimate act-guard firing).
+- **Mid-turn tier-2 input classification actually gets model access** (#92):
+  the classify call serialized behind the single-flight inference gate held for
+  a stream's full duration, so its 5s clock could expire before the call even
+  started. The generation timeout now starts after the inference permit is
+  acquired (bounded permit wait), the call runs with thinking disabled (it's an
+  internal routing decision), and its failure path logs the swallowed exception
+  instead of vanishing. A message optimistically queued while classification is
+  pending is upgraded to a live nudge if the verdict arrives before dispatch.
+  `InputRouted` for tier-2 messages now fires at verdict resolution.
+- **Exiting the REPL right after an answer no longer skips turn bookkeeping**
+  (#93): box-mode exit cancelled the in-flight turn task between rendering the
+  answer and publishing its completion; exit now drains finalization under a
+  bounded 2s grace (the turn-end micro-pass may still be cut short on exit —
+  disclosed, acceptable).
+- **Discovery candidates can no longer sit in permanent limbo** (#94): evidence
+  re-accrual fired on every pass for unchanged clusters, keeping candidates
+  perpetually "fresh" for the 21-day staleness prune while adding nothing
+  toward promotion. Accrual now counts only real growth (a new member or a new
+  distinct sitting). Behavior change: single-sitting candidates age out at 21
+  days unless their topic genuinely recurs — by design; promotion floors and
+  scoring untouched.
+- **Role prompts stop teaching parrotable examples** (landed on main from live
+  forensics): concrete example tickers in researcher role prompts are replaced
+  with placeholders — small models parroted them verbatim into real answers.
+  Also: the agent tool passes through the runner's actionable error instead of
+  a self-contradictory not-found message, and the bench runner advertises only
+  dispatchable built-ins.
+
 ## [0.9.16] — 2026-07-17
 
 ### Added
