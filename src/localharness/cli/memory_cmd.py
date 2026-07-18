@@ -26,6 +26,10 @@ import time
 from datetime import datetime
 from typing import Any
 
+from rich.console import Group
+from rich.text import Text
+from rich.tree import Tree
+
 from localharness.memory.sqlite import (
     AMBIENT_INJECTION_FLOOR,
     USER_FORGET_PROVENANCE_PREFIX,
@@ -33,9 +37,10 @@ from localharness.memory.sqlite import (
 )
 
 _PAGE = 20        # listing rows per page
-_RECENT = 8       # overview "most recent" feed size
 _SEARCH = 10      # search hits
 _CLIP = 72        # value clip width in list/search rows
+_LEAVES = 5       # overview: most-recent memories shown per child, as tree leaves
+_CHAIN_CLIP = 56  # value clip width in supersede-chain nodes
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -61,32 +66,40 @@ async def dispatch(store: Any, arg: str) -> str:
 
 
 # --------------------------------------------------------------------------- overview
-async def render_overview(store: Any) -> str:
+async def render_overview(store: Any) -> Any:
+    """The tag hierarchy as a rich Tree: store -> buckets(count) -> children(count) -> the ~5 most
+    recent memories per child as leaves. A dim `proposed` branch carries discovery candidates.
+    Empty branches are shown dim, not hidden. Returns a str only when the store is empty."""
     buckets = await store.buckets()
     if not buckets:
         return "No memory buckets yet — the store is empty."
     proposed_all = [t for t in await store.list_tags(status="proposed") if t.parent_id is not None]
-    lines = ["Memory — tag hierarchy (buckets -> children):", ""]
+    tree = Tree(Text("Memory", style="bold"), guide_style="dim")
     for b in buckets:
-        b_count = len(await store.atoms_for_tag(b.id))
-        lines.append(f"  {b.name}  ({b_count})")
+        b_atoms = await store.atoms_for_tag(b.id)
+        b_node = tree.add(Text.assemble(
+            (f"{b.name}  ", "bold" if b_atoms else "bold dim"), (f"({len(b_atoms)})", "dim")))
         for c in await store.active_children(b.id):
-            c_count = len(await store.atoms_for_tag(c.id))
-            lines.append(f"    {b.name}/{c.name}  ({c_count})")
+            c_atoms = await store.atoms_for_tag(c.id)
+            c_node = b_node.add(Text.assemble(
+                (f"{c.name}  ", "" if c_atoms else "dim"), (f"({len(c_atoms)})", "dim")))
+            c_atoms.sort(key=lambda f: (f.updated_at, f.id), reverse=True)
+            for f in c_atoms[:_LEAVES]:
+                c_node.add(_leaf(f))
         proposed = [t for t in proposed_all if t.parent_id == b.id]
         if proposed:
             names = ", ".join(t.name for t in proposed)
-            lines.append(f"    proposed (discovery candidates): {names}  ({len(proposed)})")
-    recents = await store.recent_facts(_RECENT)
-    lines.append("")
-    lines.append(f"Most recent ({len(recents)}):")
-    for f in recents:
-        path = await _tag_path(store, f)
-        lines.append(f"  #{f.id}  {_clip(f.value, _CLIP)}  [{path}] conf {f.confidence:.2f}")
-    lines.append("")
-    lines.append("Browse: /memory <bucket>[/<child>]   detail: /memory show <id>   "
-                 "find: /memory search <words>")
-    return "\n".join(lines)
+            b_node.add(Text(f"proposed (discovery candidates): {names}  ({len(proposed)})",
+                            style="dim italic"))
+    tree.add(Text("browse: /memory <bucket>[/<child>]   detail: /memory show <id>   "
+                  "find: /memory search <words>", style="dim"))
+    return tree
+
+
+def _leaf(f: Any) -> Text:
+    """A recent-memory leaf: id (cyan) + clipped value + dim confidence."""
+    return Text.assemble(
+        (f"#{f.id}  ", "cyan"), _clip(f.value, _CLIP), (f"  conf {f.confidence:.2f}", "dim"))
 
 
 # --------------------------------------------------------------------------- listing
@@ -123,7 +136,9 @@ async def render_listing(store: Any, arg: str) -> str:
 
 
 # --------------------------------------------------------------------------- show
-async def render_show(store: Any, arg: str) -> str:
+async def render_show(store: Any, arg: str) -> Any:
+    """Full detail for one memory + its supersede chain as a mini-tree. Returns a str only for the
+    usage / not-found errors; otherwise a Group(detail fields, chain mini-tree)."""
     fid = _parse_id(arg)
     if fid is None:
         return f"Usage: /memory show <id>  (an id number, e.g. /memory show 12). Got {arg!r}."
@@ -132,21 +147,22 @@ async def render_show(store: Any, arg: str) -> str:
         return f"No memory with id {fid}. Browse with /memory or find one with /memory search <words>."
     tags = await store.tags_for_atom(fid)
     paths = _paths(tags)
-    lines = [
-        f"Memory #{fact.id}",
-        f"  value:       {fact.value}",
-        f"  key:         {fact.key}",
-        f"  tags:        {', '.join(paths) if paths else '(untagged)'}",
-        f"  confidence:  {fact.confidence:.2f}",
-        f"  status:      {fact.status}",
-        f"  source:      {fact.source or '(unknown)'}",
-        f"  created:     {_stamp(fact.created_at)}",
-        f"  updated:     {_stamp(fact.updated_at)}",
-        f"  provenance:  {fact.provenance or '(none)'}",
-    ]
-    lines.extend(await _chain_lines(store, fact))
-    lines.append(f"  {_ambient_line(fact)}")
-    return "\n".join(lines)
+    detail = Text()
+    detail.append(f"Memory #{fact.id}\n", style="bold")
+    detail.append(f"  value:       {fact.value}\n")
+    detail.append(f"  key:         {fact.key}\n")
+    detail.append(f"  tags:        {', '.join(paths) if paths else '(untagged)'}\n")
+    detail.append(f"  confidence:  {fact.confidence:.2f}\n")
+    detail.append(f"  status:      {fact.status}\n")
+    detail.append(f"  source:      {fact.source or '(unknown)'}\n")
+    detail.append(f"  created:     {_stamp(fact.created_at)}\n")
+    detail.append(f"  updated:     {_stamp(fact.updated_at)}\n")
+    detail.append(f"  provenance:  {fact.provenance or '(none)'}")
+    if fact.status != "active" and fact.provenance.startswith(USER_FORGET_PROVENANCE_PREFIX):
+        detail.append("\n  forgotten:   retired by you (user forget) — kept in history for audit",
+                      style="dim")
+    detail.append(f"\n  {_ambient_line(fact)}", style="dim")
+    return Group(detail, Text(), await _chain_tree(store, fact))
 
 
 def _ambient_line(fact: Any) -> str:
@@ -161,24 +177,26 @@ def _ambient_line(fact: Any) -> str:
             "(searchable, but not auto-injected into prompts)")
 
 
-async def _chain_lines(store: Any, fact: Any) -> list[str]:
-    """Render the supersede chain: what replaced it / what it replaced (with ids), and whether it
-    was retired by a user forget. History is per-key, so it carries both neighbours."""
+async def _chain_tree(store: Any, fact: Any) -> Tree:
+    """The supersede chain as a nested mini-tree: oldest at the top, each newer version nested
+    beneath the one it replaced (ancestors above, descendants below), the current one highlighted.
+    History is per-key. A lone version reads as an untouched original."""
     history = await store.get_fact_history(fact.key)
-    succ = next((h for h in history if fact.superseded_by and h.id == fact.superseded_by), None)
-    preds = [h for h in history if h.superseded_by == fact.id]
-    out: list[str] = []
-    if fact.status != "active" and fact.provenance.startswith(USER_FORGET_PROVENANCE_PREFIX):
-        out.append("  forgotten:   retired by you (user forget) — kept in history for audit")
-    if succ is not None:
-        out.append(f"  replaced-by: #{succ.id}  {_clip(succ.value, 56)}")
-    elif fact.superseded_by:
-        out.append(f"  replaced-by: #{fact.superseded_by}")
-    for p in preds:
-        out.append(f"  replaces:    #{p.id}  {_clip(p.value, 56)}")
-    if not out:
-        out.append("  chain:       original — nothing replaced it, nothing it replaced")
-    return out
+    ordered = sorted(history, key=lambda h: (h.created_at, h.id))
+    root = Tree(Text("supersede chain", style="bold"), guide_style="dim")
+    node = root
+    for h in ordered:
+        if h.id == fact.id:
+            label = Text.assemble(
+                (f"#{h.id}  ", "bold green"),
+                (_clip(h.value, _CHAIN_CLIP), "bold green"),
+                ("   ← current", "bold green"))
+        else:
+            label = Text.assemble((f"#{h.id}  ", "cyan"), (_clip(h.value, _CHAIN_CLIP), "dim"))
+        node = node.add(label)
+    if len(ordered) <= 1:
+        node.add(Text("original — nothing replaced it, nothing it replaced", style="dim italic"))
+    return root
 
 
 # --------------------------------------------------------------------------- forget

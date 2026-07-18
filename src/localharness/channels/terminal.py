@@ -536,6 +536,23 @@ class TerminalChannel(ChannelAdapter):
             else:
                 self._console.print(escape(content))
 
+    async def send_renderable(
+        self,
+        renderable: Any,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Print a pre-built rich renderable (e.g. the /memory tree) directly, bypassing the
+        markup-escaping text path of send_message. Same output-lock + idle preamble, so it composes
+        with streaming/burst and renders correctly above the persistent input box (raw patch_stdout
+        interprets the ANSI). No rich Live/Status here — a static print, safe near the box."""
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()
+            self._ensure_idle()
+            self._tool_result_since_narration = True
+            self._console.print(renderable)
+
     async def send_streaming(
         self,
         token_stream: AsyncIterator[str],
