@@ -848,10 +848,13 @@ class AgentLoop:
                 # it is distinguishable from model-initiated retrieval (discounted downstream).
                 # Own try/except: best-effort, and a trace failure must not be mislabeled as a
                 # memory-injection failure (memory WAS injected). Kill-switch default on ->
-                # OFF = today's behavior (no injection rows). Empty shelf -> no event, no row.
+                # OFF = today's behavior (no injection rows). #96: an EMPTY shelf still records a
+                # row (empty injected set) so per-turn coverage accounting counts the turn — the
+                # empty-fired row is zero-signal downstream (the co-fire reader yields no pairs),
+                # never a missing row. Gate on `is not None` (the row exists) not truthiness.
                 _inj_ids = getattr(ctx, "injected_fact_ids", None)
                 _rec = getattr(self._memory, "record_injection_trace", None)
-                if getattr(_mem_cfg, "trace_ambient_injection", True) and _inj_ids and _rec is not None:
+                if getattr(_mem_cfg, "trace_ambient_injection", True) and _inj_ids is not None and _rec is not None:
                     try:
                         await _rec(stimulus=task, injected_ids=_inj_ids,
                                    session_id=session.session_id)
