@@ -500,21 +500,26 @@ async def test_dedupe_skip_still_applies_parsed_replaces_supersede(store: Memory
     """(i) The run-16 shape end-to-end: the corrected value is ALREADY active on holder X (a distinct
     atom) when a later line asserts that same value with replaces=Y (Y = the STALE sibling, still
     active). The dedupe skips the duplicate mint, but Y MUST still be superseded (history preserved),
-    X stays the sole active holder, and no third atom is minted."""
+    X stays the sole active holder, and no third atom is minted.
+
+    The stale/corrected pair differs in a NON-config slot (primary vs backup host) ON PURPOSE: the
+    #95 value-slot contradiction guard auto-supersedes a differing CONFIG value at mint (port 8000 ->
+    8081, covered separately), which would pre-empt this test's manual-coexistence setup — so this
+    exercises the explicit replaces= path in isolation."""
     from localharness.memory.mining import _h8
 
-    stale = "the vLLM inference server listens on port 8000"
-    corrected = "the vLLM inference server listens on port 8081"
+    stale = "the vLLM inference server runs on the primary host machine"
+    corrected = "the vLLM inference server runs on the backup host machine"
     # Y — the stale atom, minted first and left active (no correction marked yet).
-    await store.append_history(_rec(10, "for reference the vLLM inference server listens on port 8000", sid="d1"))
+    await store.append_history(_rec(10, "for reference the vLLM inference server runs on the primary host machine", sid="d1"))
     assert (await mine_transcript(
-        store, _FakeLLM(f"llm local | {stale} | vLLM inference server listens on port 8000"),
+        store, _FakeLLM(f"llm local | {stale} | vLLM inference server runs on the primary host machine"),
         asyncio.Event(), file_tags=False)).written == 1
     y_key = f"sem/llm-local/{_h8(stale)}"
     # X — the corrected value minted as a SEPARATE active atom (the model didn't mark replaces then).
-    await store.append_history(_rec(20, "update the vLLM inference server listens on port 8081 now", sid="d2"))
+    await store.append_history(_rec(20, "update the vLLM inference server runs on the backup host machine now", sid="d2"))
     assert (await mine_transcript(
-        store, _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081"),
+        store, _FakeLLM(f"llm local | {corrected} | vLLM inference server runs on the backup host machine"),
         asyncio.Event(), file_tags=False)).written == 1
     x_key = f"sem/llm-local/{_h8(corrected)}"
     assert x_key != y_key
@@ -522,17 +527,17 @@ async def test_dedupe_skip_still_applies_parsed_replaces_supersede(store: Memory
     assert (await store.get_fact(x_key)).value == corrected
 
     # The run-16 line: assert the corrected value (already on X) WITH replaces=Y (the stale sibling).
-    await store.append_history(_rec(30, "correction the vLLM inference server listens on port 8081 not 8000", sid="d3"))
+    await store.append_history(_rec(30, "correction the vLLM inference server runs on the backup host machine not primary", sid="d3"))
     r = await mine_transcript(
         store,
-        _FakeLLM(f"llm local | {corrected} | vLLM inference server listens on port 8081 | replaces={y_key}"),
+        _FakeLLM(f"llm local | {corrected} | vLLM inference server runs on the backup host machine | replaces={y_key}"),
         asyncio.Event(), file_tags=False)
 
     assert r.written == 0                                        # duplicate value — no new atom minted
     assert await store.get_fact(y_key) is None                  # Y RETIRED (the bug left it active)
     assert (await store.get_fact(x_key)).value == corrected      # X still the sole active holder
-    port = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if "port" in f.value]
-    assert len(port) == 1 and port[0].key == x_key, f"stale target still active beside holder: {port}"
+    hosts = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if "host machine" in f.value]
+    assert len(hosts) == 1 and hosts[0].key == x_key, f"stale target still active beside holder: {hosts}"
     hist = await store.get_fact_history(y_key)                   # supersede history preserved
     assert any(h.value == stale and h.status == "superseded" for h in hist)
 
@@ -1708,3 +1713,85 @@ async def test_sweep_prefixless_pairs_behaviour_unchanged(store: MemoryStore):
     assert retracted == 1
     assert await store.get_fact("sem/ops/cc") is None       # resurrection retracted
     assert (await store.get_fact("sem/ops/dd")).status == "active"  # unrelated untouched
+
+
+# ---------------------------------------------------------------------------------------
+# #95 — value-slot contradictions supersede the OLDER atom (newest wins, narrow + deterministic)
+# ---------------------------------------------------------------------------------------
+# Observed: active "vLLM server listens on port 8000" and "...port 8081" coexisted because their
+# unique keys never collide, so the same-key supersede never fired. At mint time a value-slot
+# contradiction (same subject, a CONFIG value that differs) now supersedes the older atom. The
+# config-value discriminator (>=2 digits or a dotted version) keeps a bare single-number difference
+# a DISTINCT fact (test_number_distinguished_facts_do_not_fold — room 3 vs room 7 — stays green).
+
+def test_config_value_tokens_discriminates_ports_from_ordinals():
+    """The value-slot heuristic: ports/versions are config values; a single-digit ordinal is an
+    identifier (room 3), never a config value — this is what keeps room-3-vs-room-7 distinct."""
+    from localharness.memory.mining import _config_value_tokens
+
+    assert _config_value_tokens("the vllm server listens on port 8000") == {"8000"}
+    assert _config_value_tokens("upgrade to version 1.2.3 today") == {"1.2.3"}
+    assert _config_value_tokens("meeting in room 3 downstairs") == set()      # ordinal, not config
+    assert _config_value_tokens("the server is fast and reliable") == set()   # non-numeric
+
+
+@pytest.mark.asyncio
+async def test_contradiction_supersedes_older_value_slot(store: MemoryStore):
+    """#95: 'port 8000' then 'port 8081' — the newer atom supersedes the older even with NO replaces=
+    directive from the miner. Newest wins; the older row is superseded_by the newer (chain kept)."""
+    await store.append_history(_rec(1, "the vllm server listens on port 8000 for requests", sid="s1"))
+    r1 = await mine_transcript(store, _FakeLLM(
+        "gpu-ops | vllm server listens on port 8000 | vllm server listens on port 8000"),
+        asyncio.Event(), file_tags=False)
+    assert r1.written == 1
+
+    await store.append_history(_rec(100, "we moved the vllm server: it is configured on port 8081 now", sid="s2"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        "gpu-ops | vllm server is configured on port 8081 | vllm server is configured on port 8081"),
+        asyncio.Event(), file_tags=False)
+    assert r2.written == 1
+    assert r2.superseded_contradictions == 1
+
+    active = [f for f in await store.query_facts(FactQuery(tags=["sem"])) if f.key.startswith("sem/gpu-ops/")]
+    assert len(active) == 1 and "8081" in active[0].value and "8000" not in active[0].value
+
+    async with store._db.execute(
+        "SELECT value, superseded_by FROM facts WHERE key LIKE 'sem/gpu-ops/%' AND status='superseded'"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert len(rows) == 1 and "8000" in rows[0][0] and rows[0][1] == active[0].id   # chained to the winner
+
+
+@pytest.mark.asyncio
+async def test_contradiction_ignores_different_subjects(store: MemoryStore):
+    """#95 negative — different subjects (different topic slugs) sharing a generic token never
+    supersede: 'vllm ... port 8000' vs 'ssh ... port 22' are distinct facts, both survive."""
+    await store.append_history(_rec(1, "the vllm server uses port 8000 for inference requests", sid="s1"))
+    await store.append_history(_rec(2, "the ssh daemon uses port 22 for remote login", sid="s1"))
+
+    class _TwoSubjLLM:
+        async def complete(self, prompt: str) -> str:
+            return ("gpu-ops | vllm server uses port 8000 | vllm server uses port 8000\n"
+                    "networking | ssh daemon uses port 22 | ssh daemon uses port 22")
+
+    r = await mine_transcript(store, _TwoSubjLLM(), asyncio.Event(), file_tags=False)
+    assert r.written == 2 and r.superseded_contradictions == 0
+    assert len([f for f in await store.query_facts(FactQuery(tags=["sem"]))]) == 2
+
+
+@pytest.mark.asyncio
+async def test_contradiction_same_value_is_corroboration_not_supersede(store: MemoryStore):
+    """#95 negative — same subject, SAME config value (reworded): not a contradiction, both survive
+    (the corroboration path is unchanged, no supersede)."""
+    await store.append_history(_rec(1, "the vllm server listens on port 8000 for requests", sid="s1"))
+    await mine_transcript(store, _FakeLLM(
+        "gpu-ops | vllm server listens on port 8000 | vllm server listens on port 8000"),
+        asyncio.Event(), file_tags=False)
+
+    await store.append_history(_rec(100, "reminder the vllm server is bound to port 8000 still", sid="s2"))
+    r2 = await mine_transcript(store, _FakeLLM(
+        "gpu-ops | vllm server is bound to port 8000 | vllm server is bound to port 8000"),
+        asyncio.Event(), file_tags=False)
+    assert r2.superseded_contradictions == 0                       # same value -> no contradiction
+    assert len([f for f in await store.query_facts(FactQuery(tags=["sem"]))
+                if f.key.startswith("sem/gpu-ops/")]) == 2         # both coexist
