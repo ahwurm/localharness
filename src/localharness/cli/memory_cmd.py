@@ -112,7 +112,8 @@ async def render_listing(store: Any, arg: str) -> str:
     if start >= total:
         return f"{full} has {total} memories; page {page} is past the end."
     chunk = facts[start:start + _PAGE]
-    lines = [f"{full}  ({total} memories, page {page}):"]
+    noun = "memory" if total == 1 else "memories"
+    lines = [f"{full}  ({total} {noun}, page {page}):"]
     for f in chunk:
         lines.append(f"  #{f.id}  {_clip(f.value, _CLIP)}  conf {f.confidence:.2f} · {_age(f.updated_at)}")
     shown = start + len(chunk)
