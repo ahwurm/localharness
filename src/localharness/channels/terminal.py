@@ -10,12 +10,14 @@ from typing import Any, AsyncIterator, Callable
 import structlog
 from prompt_toolkit.application import Application
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.buffer import Buffer, CompletionState
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
 from prompt_toolkit.styles import Style
 from rich.console import Console
@@ -135,11 +137,88 @@ def _ctx_segments(pct: float) -> tuple[list[tuple[str, str]], int]:
     return frags, 10 + len(label)
 
 
+class SlashCommandCompleter(Completer):
+    """Complete REPL slash commands when the buffer is a single leading-slash token. Prefix match
+    (case-insensitive) against the SLASH_COMMANDS table — the same table /help renders, so the menu
+    and /help never drift. Only the FIRST token completes: once there's a space we're into a
+    command's own arguments (e.g. `/memory show 12`), which this menu leaves alone."""
+
+    def __init__(self) -> None:
+        from localharness.cli.slash_commands import SLASH_COMMANDS
+        self._commands = SLASH_COMMANDS
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+        for name, desc in self._commands:
+            if name.startswith(text.lower()):
+                yield Completion(name, start_position=-len(text), display=name, display_meta=desc)
+
+
+def _accept_completion(buf: Buffer) -> bool:
+    """Menu-aware Enter helper. If an item is highlighted, apply it and report True (Enter consumed
+    — the command lands in the buffer, nothing is submitted). If the menu is open with nothing
+    highlighted, close it and report False so the caller submits the fully-typed line — matching
+    Claude Code, where Enter on a command you typed out in full runs it. No menu → False."""
+    cs = buf.complete_state
+    if cs is None:
+        return False
+    if cs.current_completion is not None:
+        buf.apply_completion(cs.current_completion)
+        return True
+    buf.complete_state = None
+    return False
+
+
+def _add_menu_keys(kb: KeyBindings) -> None:
+    """Tab and Esc for the completion menu, shared by both input apps. Tab (menu closed) accepts a
+    sole match outright, else opens the menu with the first item highlighted; Tab (menu open)
+    highlights the first item or advances to the next. Esc dismisses. Arrow navigation is
+    prompt_toolkit's built-in behaviour once the menu is open. Tab computes completions
+    synchronously so it engages immediately, not only after complete-while-typing has fired."""
+
+    @kb.add("tab")
+    def _complete(event) -> None:
+        b = event.current_buffer
+        if b.complete_state is not None:
+            if b.complete_state.current_completion is None:
+                b.go_to_completion(0)
+            else:
+                b.complete_next()
+            return
+        if b.completer is None:
+            return
+        comps = list(b.completer.get_completions(b.document, CompleteEvent(completion_requested=True)))
+        if not comps:
+            return
+        if len(comps) == 1:
+            b.apply_completion(comps[0])
+        else:
+            b.complete_state = CompletionState(original_document=b.document, completions=comps)
+            b.go_to_completion(0)
+
+    @kb.add("escape", filter=has_completions)
+    def _dismiss(event) -> None:
+        event.current_buffer.complete_state = None
+
+
+def _menu_float(body) -> FloatContainer:
+    """Host a completion menu as a Float over the input body — part of the pt layout, never a
+    rich Live/Status overlay (which is what could freeze the screen near the box)."""
+    return FloatContainer(
+        content=body,
+        floats=[Float(xcursor=True, ycursor=True,
+                      content=CompletionsMenu(max_height=12, scroll_offset=1))],
+    )
+
+
 def _build_input_app(
     history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
 ) -> Application:
     """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
-    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
+    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
+                 completer=SlashCommandCompleter(), complete_while_typing=True)
     control = BufferControl(
         buffer=buf,
         input_processors=[
@@ -149,9 +228,12 @@ def _build_input_app(
     )
 
     kb = KeyBindings()
+    _add_menu_keys(kb)
 
     @kb.add("enter")
     def _accept(event) -> None:
+        if _accept_completion(buf):
+            return  # a highlighted completion was accepted into the line; don't submit yet
         buf.append_to_history()
         event.app.exit(result=buf.text)
 
@@ -191,7 +273,7 @@ def _build_input_app(
     ], style="class:frame")
 
     return Application(
-        layout=Layout(body, focused_element=control),
+        layout=Layout(_menu_float(body), focused_element=control),
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,
@@ -225,7 +307,8 @@ def _build_persistent_input_app(
          / on_eof) rather than raising out of run_async — the box owns raw mode for the whole
          session, so these are the only path a signal-suppressed terminal has to interrupt/exit.
     """
-    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False)
+    buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
+                 completer=SlashCommandCompleter(), complete_while_typing=True)
     control = BufferControl(
         buffer=buf,
         input_processors=[
@@ -235,9 +318,12 @@ def _build_persistent_input_app(
     )
 
     kb = KeyBindings()
+    _add_menu_keys(kb)
 
     @kb.add("enter")
     def _submit(event) -> None:
+        if _accept_completion(buf):
+            return  # a highlighted completion was accepted into the line; don't submit yet
         text = buf.text
         if text.strip():
             buf.append_to_history()
@@ -300,7 +386,7 @@ def _build_persistent_input_app(
     body = HSplit([status_row, frame])
 
     return Application(
-        layout=Layout(body, focused_element=control),
+        layout=Layout(_menu_float(body), focused_element=control),
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,

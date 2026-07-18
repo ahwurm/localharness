@@ -10,21 +10,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from localharness.channels import input_router
+from localharness.cli.slash_commands import help_text
 from localharness.core.events import InputRouted, UserMessage
 
 log = logging.getLogger(__name__)
 
 
-HELP_TEXT = """\
-Available commands:
-  /help     Show this help message
-  /agents   List configured agents
-  /model    List available models; /model <name|number> to switch
-  /memory   Browse the agent's memory by tag; show/forget/search a memory
-  /quit     Exit LocalHarness
-  /exit     Exit LocalHarness
-
-Everything else is handled by the orchestrator through natural language."""
+# Derived from the single-source SLASH_COMMANDS table (shared with the input completion menu).
+HELP_TEXT = help_text()
 
 
 # Keywords that signal the user wants to create an agent via conversation.
