@@ -4,6 +4,34 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.19] — 2026-07-18
+
+### Added
+- **`/memory` REPL command** — the user-facing window into the agent's memory store,
+  navigated by the tag hierarchy:
+  - `/memory` — overview: buckets and child tags with counts (discovery candidates
+    shown separately), plus the most recent memories.
+  - `/memory <bucket>[/<child>]` — browse what's filed under a tag path (bare child
+    names accepted when unambiguous), newest first, paged.
+  - `/memory show <id>` — full detail: value, tags, confidence, source, provenance,
+    the supersede chain in both directions, and an **ambient-eligibility line** that
+    teaches why a memory does or doesn't ride into prompts (confidence vs the 0.70
+    injection floor, now a named constant).
+  - `/memory forget <id>` — preview, then `/memory forget <id> confirm` retires the
+    memory: never a hard delete — it supersedes with a `user_forget` provenance
+    marker, leaves every active hot path, and stays fully auditable in history.
+    The two-step confirm is deliberate: stateless, and identical across classic,
+    non-TTY, and input-box modes.
+  - `/memory search <words>` — the deterministic search path, rendered with ids so
+    show/forget can follow.
+  - No model calls anywhere in the command; safe to run mid-session against a live
+    store. In box mode it queues like any slash command typed mid-turn.
+
+Known v1 limits (disclosed): tag-path matching is exact-case; a discovered child tag
+literally named `show`/`forget`/`search` would be shadowed by the subcommands; a
+`localharness memory` CLI twin was deliberately skipped (the dispatch is factored as
+a pure function so a future twin is a thin wrapper).
+
 ## [0.9.18] — 2026-07-18
 
 Chapter-reliability batch from the 3-run designed-month replication: the eval's one
