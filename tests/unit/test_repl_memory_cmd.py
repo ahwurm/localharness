@@ -20,6 +20,15 @@ class FakeChannel:
     async def send_message(self, text, agent_id=None, metadata=None):
         self.messages.append(text)
 
+    async def send_renderable(self, renderable, agent_id=None, metadata=None):
+        # Mirror the terminal: render the rich object (overview/show tree) to plain text.
+        import io
+
+        from rich.console import Console
+        console = Console(file=io.StringIO(), width=200)
+        console.print(renderable)
+        self.messages.append(console.file.getvalue())
+
 
 async def _seeded_store(tmp_path: Path) -> MemoryStore:
     store = MemoryStore(agent_id="test-agent", division_id="d", org_id="default",
@@ -57,7 +66,7 @@ async def test_bare_memory_is_claimed_not_rejected_as_unknown(tmp_path):
         handled = await repl._handle_slash("/memory")
         assert handled is True
         out = channel.messages[-1]
-        assert "project/ops" in out           # overview rendered
+        assert "project" in out and "ops" in out  # overview tree rendered (nested branches)
         assert "Unknown command" not in out   # NOT the unknown-slash reject path
         agent.run_turn.assert_not_called()    # deterministic, no LLM turn
         bus.publish.assert_not_called()
