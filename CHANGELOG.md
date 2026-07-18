@@ -4,6 +4,40 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.18] — 2026-07-18
+
+Chapter-reliability batch from the 3-run designed-month replication: the eval's one
+persistently missing chapter (3/3 runs) turned out to be a small topic getting absorbed
+into a dominant neighbor over a single shared child tag — a thin-bridge weld at the
+chapter fold/supersede decision.
+
+### Added
+- **Absorption guard** (`agent.memory.consolidation.absorption_guard_enabled`, default
+  on): a chapter fold/supersede where the absorbed side is much smaller than the host
+  (size-ratio knob) is refused when the two sides share fewer than 2 distinct child
+  tags — the signature of a cross-topic bridge rather than genuine same-topic
+  containment. Refusals are logged and evented; both chapters stay independent. Design
+  note, honestly: the originally sketched "genuine subset containment always folds"
+  exemption was dropped after the forensic data showed the observed weld WAS full
+  subset containment — the shared-tag count is the discriminator that actually
+  separates the two cases. Known scope limit: this fixes the formed-then-absorbed
+  shape (2 of the 3 observed failures); a topic swallowed at initial cluster formation
+  happens upstream of this guard and is expected to persist until measured further.
+
+### Fixed
+- **Contradictory mined facts no longer coexist as both-active** (#95): a newly mined
+  atom that shares its bucket/child tag and ≥2 salient tokens with an active atom
+  while carrying a differing config-value token (multi-digit number or dotted version)
+  now supersedes the older atom — newest wins, chain preserved, evented. Distinct
+  facts sharing only a generic token, and same-value corroboration, are unaffected
+  (tested negatives). Known heuristic bound: multi-digit identifiers (e.g. two model
+  sizes) could in principle false-fire within the same-subject gates; supersede is
+  append-only and recoverable by design.
+- **Empty-shelf turns now record an injection trace** (#96): the trace write was gated
+  on list truthiness, silently skipping turns where nothing was injected; a zero-fired
+  row is now recorded so per-turn coverage accounting holds (consumers verified
+  zero-signal-safe).
+
 ## [0.9.17] — 2026-07-18
 
 Four defects from live-session forensics (#91–#94) — headlined by a genuinely
