@@ -1263,3 +1263,169 @@ async def test_recheck_derefs_members_once_not_twice(store):
 
     assert counts.get("redrafted", 0) == 1                     # the heal ran (both deref sites reachable)
     assert calls["n"] == 1, f"members dereferenced {calls['n']}x on the recheck->write path (#72)"
+
+
+# ---------------------------------------------------------------------------------------
+# ABSORPTION GUARD — a much-smaller distinct-topic chapter welded into a dominant host via a
+# THIN child-tag bridge must NOT be folded/superseded away (d1v2 gpu_ops-into-subagents weld).
+# ---------------------------------------------------------------------------------------
+# Ground truth (3-run d1v2 forensic on v0.9.16): the gpu_ops topic (a small 6-10 member chapter,
+# every member's identity in the single child tag `ops`) was superseded INTO the 48-member
+# subagents chapter via the E ⊊ M containment path — a FULL subset containment, size ratio ~0.21,
+# joined to the host by exactly ONE shared non-generic child tag (`ops`). The guard fires when the
+# absorbed side is <= size_ratio * host AND the two sides share fewer than 2 distinct child tags;
+# it DEFERS (existing containment behaviour) when the absorbed side carries no child tags at all
+# (why every pre-guard containment test above — all child_tag=None — stays green).
+
+async def _add_child_tag(store, fact_id, name):
+    child = await store.get_tag(name)
+    if child is None:
+        child = await store.create_tag(
+            name, f"serves {name}; example {name}",
+            parent_id=(await store.get_tag("project")).id, status="active", origin="discovered")
+    await store.add_atom_tag(fact_id, child.id, "discovery")
+
+
+async def _ops_atoms(store, n):
+    """gpu_ops-shaped atoms: distinct sem atoms whose ENTIRE child-tag identity is `ops`."""
+    return [await _seed_sem(store, f"the vLLM server setting number {i} governs gpu ops memory KV cache",
+                            f"s{i % 2}", topic="gpuops", child_tag="ops") for i in range(n)]
+
+
+async def _conv_atoms(store, n, *, start=0, roadmap=False):
+    """subagents-shaped atoms: child tag `conventions` (+ `roadmap` when asked — a 2nd shared tag)."""
+    out = []
+    for i in range(start, start + n):
+        f = await _seed_sem(store, f"subagent build convention number {i} governs the harness order",
+                            f"s{i % 2}", topic="subagents", child_tag="conventions")
+        if roadmap:
+            await _add_child_tag(store, f.id, "roadmap")
+        out.append(f)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_absorption_guard_refuses_thin_bridge_supersede(store):
+    """THE WELD SHAPE (E ⊊ M supersede). A small gpu_ops chapter (3 atoms, all tag `ops`) is a strict
+    subset of a 15-member subagents candidate joined to it by ONE shared child tag (`ops`, on a lone
+    bridge atom host-side). The absorption guard REFUSES the supersede: the gpu_ops chapter stays
+    active and independent beside the freshly minted candidate. refresh_overlap raised so adoption
+    is inert and the decision is purely the containment/absorption seam."""
+    ops = await _ops_atoms(store, 3)
+    subs = await _conv_atoms(store, 11)
+    bridge = await _seed_sem(store, "the harness start command notes a gpu ops memory reference",
+                             "s0", topic="harness", child_tag="ops")   # host-side `ops` bridge atom
+    gpu_ch = await _seed_chapter(store, "gpuops01", ops, body="the gpu ops vLLM chapter")
+
+    cluster = Cluster(members=ops + subs + [bridge], sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, absorption_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None                                        # candidate still mints
+    assert (await _status(store, gpu_ch.id))[0] == "active"          # gpu_ops chapter NOT absorbed
+    assert len(await _active_chapters(store)) == 2                   # both stay independent
+    assert counts.get("refused", 0) >= 1                            # the guard logged its refusal
+    assert counts.get("superseded", 0) == 0                        # containment supersede was blocked
+
+
+@pytest.mark.asyncio
+async def test_absorption_guard_allows_rich_overlap_supersede(store):
+    """The genuine-same-topic case still folds: a small chapter sharing >=2 distinct child tags
+    (`conventions` + `roadmap`) with the host is real topical containment — the guard does NOT fire
+    and the existing E ⊊ M supersede proceeds (one active chapter, history preserved)."""
+    small = await _conv_atoms(store, 3, roadmap=True)
+    rest = await _conv_atoms(store, 11, start=3, roadmap=True)
+    small_ch = await _seed_chapter(store, "richsub1", small, body="the small conventions chapter")
+
+    cluster = Cluster(members=small + rest, sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, absorption_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None
+    assert await _status(store, small_ch.id) == ("superseded", schema.id)   # folded — rich shared tags
+    assert len(await _active_chapters(store)) == 1
+    assert counts.get("refused", 0) == 0
+    assert counts.get("superseded", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_absorption_guard_refuses_thin_bridge_fold(store):
+    """Reverse order (candidate ⊆ existing, the FOLD arm): a fresh 3-atom gpu_ops candidate is a
+    strict subset of an already-active 15-member subagents host joined by the single `ops` bridge.
+    The guard REFUSES the fold — the candidate mints its OWN chapter instead of being corroborated
+    away, both coexist."""
+    ops = await _ops_atoms(store, 3)
+    subs = await _conv_atoms(store, 11)
+    bridge = await _seed_sem(store, "the harness start command notes a gpu ops memory reference",
+                             "s0", topic="harness", child_tag="ops")
+    host = await _seed_chapter(store, "hostbig1", ops + subs + [bridge], body="the big subagents host chapter")
+
+    cluster = Cluster(members=ops, sessions=frozenset({"s0", "s1"}), depth=0)   # strict subset of host
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, absorption_counts=counts, refresh_overlap=1.01)
+
+    assert schema is not None                                        # candidate minted its own chapter
+    assert (await _status(store, host.id))[0] == "active"            # host preserved
+    assert len(await _active_chapters(store)) == 2                   # both independent
+    assert counts.get("refused", 0) >= 1
+    assert counts.get("folded", 0) == 0                            # fold was blocked
+
+
+@pytest.mark.asyncio
+async def test_absorption_guard_off_restores_containment(store):
+    """Kill lever: absorption_guard=False restores byte-old behaviour — the thin-bridge subset IS
+    superseded into the host (the exact weld the guard exists to stop)."""
+    ops = await _ops_atoms(store, 3)
+    subs = await _conv_atoms(store, 11)
+    bridge = await _seed_sem(store, "the harness start command notes a gpu ops memory reference",
+                             "s0", topic="harness", child_tag="ops")
+    gpu_ch = await _seed_chapter(store, "gpuoff01", ops, body="the gpu ops vLLM chapter")
+
+    cluster = Cluster(members=ops + subs + [bridge], sessions=frozenset({"s0", "s1"}), depth=0)
+    counts: dict = {}
+    schema = await _write_one(store, _CorpusEchoLLM(), asyncio.Event(), cluster, 1, 6000,
+                              containment_counts=counts, absorption_counts=counts,
+                              absorption_guard=False, refresh_overlap=1.01)
+
+    assert schema is not None
+    assert await _status(store, gpu_ch.id) == ("superseded", schema.id)   # absorbed — guard inert
+    assert counts.get("refused", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_absorption_guard_helper_gates(store):
+    """The helper's gates in isolation (the branches the _write_one strict-subset hook can't reach —
+    size-ratio, small-side overlap floor, and the no-child-tag defer)."""
+    from localharness.memory.chapter_writer import _absorption_guard_refuses
+
+    ops = await _ops_atoms(store, 6)
+    subs = await _conv_atoms(store, 11)
+    bridge = await _seed_sem(store, "the harness start command notes a gpu ops memory reference",
+                             "s0", topic="harness", child_tag="ops")
+    ops_ids = {f.id for f in ops}
+    host_ids = {f.id for f in ops[:3]} | {f.id for f in subs} | {bridge.id}   # 3 ops + 11 conv + bridge = 15
+
+    # thin bridge, small ratio, full small-side overlap -> REFUSE
+    assert await _absorption_guard_refuses(
+        store, {f.id for f in ops[:3]}, host_ids, size_ratio=0.34, min_overlap=0.5) is True
+
+    # NOT lopsided (absorbed 6 vs host 8 -> ratio 0.75) -> defer (False) even though the bridge is thin
+    small_host = {f.id for f in ops[:2]} | {f.id for f in subs[:6]}
+    assert await _absorption_guard_refuses(
+        store, ops_ids, small_host | ops_ids, size_ratio=0.34, min_overlap=0.5) is False
+
+    # small-side overlap below floor (only 1 of 6 absorbed atoms is inside the host) -> defer (False)
+    thin_overlap_host = {ops[0].id} | {f.id for f in subs}
+    assert await _absorption_guard_refuses(
+        store, ops_ids, thin_overlap_host, size_ratio=0.34, min_overlap=0.5) is False
+
+    # absorbed side carries NO child tags -> no bridge to assess -> defer (False)
+    tagless = [await _seed_sem(store, f"a tagless subset atom number {i} of the host",
+                               f"s{i % 2}", topic="tagless", child_tag=None) for i in range(3)]
+    tl_ids = {f.id for f in tagless}
+    tl_host = tl_ids | {f.id for f in subs}
+    assert await _absorption_guard_refuses(
+        store, tl_ids, tl_host, size_ratio=0.34, min_overlap=0.5) is False
