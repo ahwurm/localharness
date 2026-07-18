@@ -94,6 +94,22 @@ class ChannelAdapter(ABC):
         """Display an error to the user."""
         ...
 
+    async def send_renderable(
+        self,
+        renderable: Any,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Present a pre-built rich renderable (e.g. the /memory tree). Default: render it to plain
+        text and hand it to send_message, so channels without a rich console (Discord) degrade
+        gracefully. TerminalChannel overrides this to print the renderable directly."""
+        import io
+
+        from rich.console import Console
+        buf = io.StringIO()
+        Console(file=buf, width=100).print(renderable)
+        await self.send_message(buf.getvalue().rstrip("\n"), agent_id=agent_id, metadata=metadata)
+
     @abstractmethod
     async def read_input(self, prompt: str = "> ") -> str:
         """

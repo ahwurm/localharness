@@ -847,11 +847,15 @@ class OrchestratorREPL:
         from localharness.cli import memory_cmd
 
         try:
-            text = await memory_cmd.dispatch(self._store, arg)
+            result = await memory_cmd.dispatch(self._store, arg)
         except Exception as exc:  # noqa: BLE001 — a read/render slip must never kill the session
             log.warning("/memory failed", exc_info=True)
-            text = f"/memory failed: {exc}"
-        await self._send_info(text)
+            result = f"/memory failed: {exc}"
+        # overview + show render as rich trees (renderables); listings/search/forget stay text.
+        if isinstance(result, str):
+            await self._send_info(result)
+        else:
+            await self._channel.send_renderable(result)
 
     def _detect_creation_intent(self, user_input: str) -> bool:
         """Check if user input signals agent creation intent."""
