@@ -956,6 +956,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             config_dir=cfg_path,
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
+            memory_store=memory_store,
         )
 
         await repl.run()

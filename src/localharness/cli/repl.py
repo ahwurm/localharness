@@ -20,6 +20,7 @@ Available commands:
   /help     Show this help message
   /agents   List configured agents
   /model    List available models; /model <name|number> to switch
+  /memory   Browse the agent's memory by tag; show/forget/search a memory
   /quit     Exit LocalHarness
   /exit     Exit LocalHarness
 
@@ -106,6 +107,7 @@ class OrchestratorREPL:
         config_dir: Path | None = None,
         harness_config: Any = None,
         on_agent_deployed: Any = None,
+        memory_store: Any = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
@@ -113,6 +115,9 @@ class OrchestratorREPL:
         self._bus = bus
         self._config_dir = config_dir
         self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
+        # The agent's opened MemoryStore — the /memory window reads/retires through it. None in
+        # tests / in-memory sessions (no persistence) → /memory reports it's unavailable.
+        self._store = memory_store
         # #58: called with the deployed agent's name after a successful in-session creation,
         # to register it into the LIVE session (card registry + AgentTool advertisement) so
         # /agents lists it and the model can delegate to it without a restart. None in tests
@@ -585,6 +590,12 @@ class OrchestratorREPL:
             await self._handle_model_cmd(cmd.strip()[len("/model"):].strip())
             return True
 
+        if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):
+            # Slice the ORIGINAL string — ids and search words are case-sensitive. Claimed here,
+            # BEFORE the unknown-/word reject below, so bare "/memory" isn't refused as unknown.
+            await self._handle_memory_cmd(cmd.strip()[len("/memory"):].strip())
+            return True
+
         if cmd_lower == "/agents":
             cards = self._orchestrator._card_registry.all_cards()
             if not cards:
@@ -822,6 +833,25 @@ class OrchestratorREPL:
 
     async def _send_info(self, text: str) -> None:
         await self._channel.send_message(text, metadata={"style": "system.info"})
+
+    # ------------------------------------------------------------------ #
+    # /memory — the tag-hierarchy window into persistent memory
+    # ------------------------------------------------------------------ #
+
+    async def _handle_memory_cmd(self, arg: str) -> None:
+        """`/memory` — browse/inspect/retire the agent's persistent memory, navigated by the tag
+        hierarchy (overview / list / show / forget / search). Model-free; delegates to
+        cli.memory_cmd.dispatch and prints its plain text. Works unchanged in classic + box mode:
+        a slash command queues mid-turn and runs between turns. Reads are WAL-safe under a live
+        turn's writes; a render slip is contained so it can never tear down the REPL."""
+        from localharness.cli import memory_cmd
+
+        try:
+            text = await memory_cmd.dispatch(self._store, arg)
+        except Exception as exc:  # noqa: BLE001 — a read/render slip must never kill the session
+            log.warning("/memory failed", exc_info=True)
+            text = f"/memory failed: {exc}"
+        await self._send_info(text)
 
     def _detect_creation_intent(self, user_input: str) -> bool:
         """Check if user input signals agent creation intent."""
