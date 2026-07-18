@@ -1,8 +1,9 @@
 """LocalHarness CLI entry point."""
 import sys
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 import typer
+
+from localharness import resolved_version
 
 from localharness.cli.agent_cmd import agent_app
 from localharness.cli.autoresearch_cmd import autoresearch_app
@@ -43,14 +44,10 @@ app.add_typer(experiment_app, name="experiment")
 
 
 def _version_callback(value: bool) -> None:
-    """`localharness --version` — a user's reflexive first command. Reads the installed
-    package version, falling back to 'unknown' when metadata isn't found (raw checkout)."""
+    """`localharness --version` — a user's reflexive first command. Reports the in-source
+    __version__ (source of truth); editable/live installs read stale dist metadata (#97)."""
     if value:
-        try:
-            v = _pkg_version("localharness")
-        except PackageNotFoundError:
-            v = "unknown"
-        typer.echo(f"localharness {v}")
+        typer.echo(f"localharness {resolved_version()}")
         raise typer.Exit()
 
 
