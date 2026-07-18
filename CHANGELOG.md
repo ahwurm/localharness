@@ -4,6 +4,31 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.20] — 2026-07-18
+
+Two REPL UX features from live dogfood feedback, plus a version-truth fix.
+
+### Added
+- **Slash-command menu**: typing `/` pops a scrollable completion menu of all slash
+  commands with descriptions, directly above the input line — arrow keys navigate,
+  Enter/Tab accepts, Esc dismisses, typing filters. Enter still submits a fully-typed
+  command even while the menu is open (accept-only when an item is actively
+  highlighted). Works in both the classic prompt and the persistent input box; the
+  menu is part of the prompt_toolkit layout (no second renderer). The command list
+  and /help now derive from one table, so they cannot drift.
+- **/memory renders as a tree**: the bare overview is now a proper tree — buckets →
+  child tags (with counts) → the most recent memories as leaves, discovery
+  candidates as their own dim branch, empty shelves shown dim rather than hidden.
+  `/memory show <id>` draws the supersede chain as a mini-tree (ancestors above,
+  current highlighted, descendants below). Listings and search keep their paged list
+  form. The interactive Obsidian-style graph remains the deliberately-later item.
+
+### Fixed
+- **The banner and `--version` now report the source version** (#97): both
+  previously read installed distribution metadata, which goes stale on editable
+  installs — observed live as a v0.9.16 banner on v0.9.19 code. They now prefer
+  `localharness.__version__`, with metadata as fallback only.
+
 ## [0.9.19] — 2026-07-18
 
 ### Added
