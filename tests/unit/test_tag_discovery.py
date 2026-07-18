@@ -288,3 +288,21 @@ async def test_injection_cofire_discounts_reuse_evidence(tmp_path):
     assert full == 3
     assert disc == 1
     assert disc < full  # the discount is real and observable in the accrued evidence
+
+
+@pytest.mark.asyncio
+async def test_cofire_pairs_empty_fired_row_is_zero_signal(store):
+    """#96: an empty-shelf injection trace (fired_ids == []) contributes NO co-fire pairs — the row
+    recorded for per-turn coverage accounting is zero-signal, never a spurious edge or a crash."""
+    from localharness.memory.discovery import _cofire_pairs
+
+    a = await _seed_bucket_atom(store, "atom one about the alpha subject", "s1")
+    b = await _seed_bucket_atom(store, "atom two about the beta subject", "s1")
+    await store.record_injection_trace(stimulus="empty turn", injected_ids=[], session_id="s1")
+
+    pairs = await _cofire_pairs(store, {a.id, b.id}, injection_weight=0.3)
+    assert pairs == {}                                            # empty-fired row -> no pairs
+
+    traces = [t for t in await store.recent_activation_traces() if t.source == "injection"]
+    assert len(traces) == 1
+    assert traces[0].fired_ids == [] and traces[0].injected_ids == []   # present, parses to empty
