@@ -163,6 +163,19 @@ SCHEMA_TIER_TAG = "tier:schema"
 SCHEMA_CONFIDENCE = 0.8                          # == consolidation._PROMOTED_CONFIDENCE; >= 0.7 gate
 SCHEMA_DEPTH_TAG_PREFIX = "depth:"              # depth:1 chapter-of-lessons, depth:2 chapter-of-chapters
 
+# The ambient-injection confidence floor. A fact renders into the every-turn memory shelf
+# (_render_memory_index_with_ids) only at confidence >= this value. Named here so the /memory
+# window can TEACH the user why a memory does/doesn't inject, reading the SAME number the render
+# clauses hardcode (the render also requires retrieval_strength >= 0.2, but confidence is the
+# primary, user-facing lever). The render clauses keep their literal 0.7 by design — the ambient
+# block's bytes are stability-critical, so this constant deliberately does not refactor them.
+AMBIENT_INJECTION_FLOOR = 0.7
+
+# Provenance marker stamped by forget_fact on a user-initiated forget. `<prefix><epoch>[;<orig>]`
+# — lets the /memory window detect a retired-by-user row (vs a plain version supersede) and keeps
+# the original provenance after the ';' for audit.
+USER_FORGET_PROVENANCE_PREFIX = "user_forget@"
+
 
 def _schema_depth(tags: list[str]) -> int:
     """Read the depth:N tag (SEMA-03 depth cap). 0 = a plain lesson (no tag)."""
@@ -1043,6 +1056,56 @@ class MemoryStore:
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_fact(r) for r in rows]
+
+    async def get_fact_by_id(self, fact_id: int) -> Fact | None:
+        """Read ONE fact by id in ANY status (active|superseded), no expiry filter — the
+        `/memory show` + `forget` lookup path. Active-only reads (get_fact / get_facts_by_ids)
+        can't reach a superseded row, but the window must show a forgotten/replaced memory too
+        (auditable history). Read-only + WAL-safe: never blocks on a concurrent live-turn write."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts WHERE agent_id = ? AND id = ?",
+            (self._agent_id, fact_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_fact(row) if row else None
+
+    async def recent_facts(self, limit: int = 10) -> list[Fact]:
+        """The most-recently-written/updated ACTIVE facts, newest first — the `/memory` overview
+        feed. ONE indexed query (idx_facts_active_recency), no scoring and no model calls."""
+        assert self._db is not None
+        now = int(time.time())
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts INDEXED BY idx_facts_active_recency "
+            "WHERE agent_id = ? AND status = 'active' AND (expires_at IS NULL OR expires_at > ?) "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (self._agent_id, now, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    async def forget_fact(self, fact_id: int) -> bool:
+        """User-initiated forget (WRITE-02 ethic: retire, NEVER hard-delete). Supersede the ACTIVE
+        fact with a user-forget marker — flip status to 'superseded', drop retrieval_strength to
+        the supersede floor (the exact interference mechanism store_fact's supersede branch uses),
+        and stamp a `user_forget@<ts>` provenance marker (original provenance preserved after ';'
+        for audit). The row stays queryable via get_fact_history / get_fact_by_id (the chain stays
+        auditable) but leaves every active hot path — query_facts, atoms_for_tag, the ambient
+        render. ATOMIC + race-safe: the UPDATE is guarded by status='active', so a fact a live turn
+        just superseded returns False (nothing retired) instead of double-writing. Returns True iff
+        a row was retired."""
+        assert self._db is not None
+        now = int(time.time())
+        async with self._db.execute(
+            "UPDATE facts SET status = 'superseded', "
+            "retrieval_strength = MIN(retrieval_strength, 0.1), "
+            "provenance = ? || ? || CASE WHEN provenance = '' THEN '' ELSE ';' || provenance END, "
+            "updated_at = ? WHERE agent_id = ? AND id = ? AND status = 'active'",
+            (USER_FORGET_PROVENANCE_PREFIX, now, now, self._agent_id, fact_id),
+        ) as cur:
+            retired = cur.rowcount > 0
+        await self._db.commit()
+        return retired
 
     # ------------------------------------------------------------------
     # Tag graph (schema v6): seeded spine + mint-time filing edges + the
