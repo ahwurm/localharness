@@ -245,9 +245,20 @@ class StepResult:
 # ---------------------------------------------------------------------------
 
 def _is_confirmation(text: str | None) -> bool:
-    """Bare self-check sentinel ('CONFIRMED') — means 'answer above stands', never content."""
+    """Sentinel reply ('CONFIRMED') — means 'answer above stands', never content.
+
+    Accepts the bare word and (#98) a literal echo of the nudge's own delivery tail
+    ("CONFIRMED — my previous reply will be delivered to the user unchanged.") — a small
+    local model quotes the instruction back pronoun-flipped, and the strict bare match
+    shipped that echo as the terminal answer. ONLY that tail may follow the word: any
+    other continuation ("Confirmed: your flight is booked") is real content.
+    """
     import re
-    return bool(text) and bool(re.fullmatch(r"confirmed[.!]?", text.strip(), re.IGNORECASE))
+    return bool(text) and bool(re.fullmatch(
+        r"confirmed[.!,]?"
+        r"(?:[\s.—–:-]*(?:my|your) previous reply will(?: then)? be delivered"
+        r"(?: to the user)?(?: unchanged)?[.!]?)?",
+        text.strip(), re.IGNORECASE))
 
 
 def _last_assistant_content(messages: list[Message]) -> str:
@@ -1202,8 +1213,9 @@ class AgentLoop:
                     session.push({"role": "user", "content": (
                         "You ended your reply with stated intentions but took no action. "
                         "Execute your plan NOW: make the tool call in this response. "
-                        "If the task genuinely needs no tools, reply with exactly CONFIRMED — "
-                        "your previous reply will be delivered to the user unchanged."
+                        "If the task genuinely needs no tools, reply with only the single "
+                        "word: CONFIRMED. Your previous reply will then be delivered to "
+                        "the user unchanged."
                     )})
                     continue
 
@@ -1239,7 +1251,7 @@ class AgentLoop:
                     self_check_passes_used += 1
                     session.push({"role": "user", "content": (
                         "Review your answer above for correctness and completeness. "
-                        "If it is correct, reply with exactly CONFIRMED. If not, reply with "
+                        "If it is correct, reply with only the single word: CONFIRMED. If not, reply with "
                         "the corrected complete answer on its own — only your latest reply "
                         "is shown to the user, so never refer back to an earlier reply."
                     )})
