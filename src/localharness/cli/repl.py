@@ -126,14 +126,26 @@ class OrchestratorREPL:
         # #93: bounded grace on exit for an in-flight turn to reach its own finalization
         # (TurnCompleted publish + ledger flush) before it is cancelled — never hangs exit.
         self._exit_grace_seconds: float = 2.0
+        # /model picker (item 9): session cache of the server's live model list, served to the
+        # input-menu completer via the channel hook. Warmed by a best-effort prefetch in run()
+        # and refreshed on every /model; the menu itself NEVER fetches.
+        self._model_cache: list[str] = []
+        self._model_prefetch: Optional[asyncio.Task] = None
+        if hasattr(self._channel, "model_names_fn"):
+            self._channel.model_names_fn = lambda: self._model_cache
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
         (kill-switch: terminal.inputbox_enabled), else today's classic read_input sequencing."""
-        if self._use_input_box():
-            await self._run_with_box()
-        else:
-            await self._run_classic()
+        self._model_prefetch = asyncio.create_task(self._prefetch_model_cache())
+        try:
+            if self._use_input_box():
+                await self._run_with_box()
+            else:
+                await self._run_classic()
+        finally:
+            if self._model_prefetch is not None and not self._model_prefetch.done():
+                self._model_prefetch.cancel()
 
     def _use_input_box(self) -> bool:
         """Box mode only for the real TerminalChannel on an interactive TTY, with the config
@@ -640,6 +652,8 @@ class OrchestratorREPL:
         from localharness.cli import model_ops
         try:
             live, reachable = await self._live_models(llm.config.base_url)
+            if reachable:
+                self._model_cache[:] = live  # keep the picker menu fresh (item 9)
         except model_ops.MalformedModelListError:
             # #38: reached but the reply isn't a model list — its OWN message, not "no models".
             await self._send_info(
@@ -795,6 +809,20 @@ class OrchestratorREPL:
 
         from localharness.cli import model_ops
         return await asyncio.to_thread(model_ops.list_live_models, base_url)
+
+    async def _prefetch_model_cache(self) -> None:
+        """Warm the /model picker menu without ever blocking the UI — best-effort and silent:
+        an unreachable or malformed server leaves the cache empty (no menu), and /model itself
+        still reports those states properly when actually run."""
+        llm = getattr(self._agent, "_llm", None)
+        if llm is None:
+            return
+        try:
+            live, reachable = await self._live_models(llm.config.base_url)
+        except Exception:
+            return
+        if reachable:
+            self._model_cache[:] = live
 
     async def _persist_default_model(self, model: str) -> None:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next

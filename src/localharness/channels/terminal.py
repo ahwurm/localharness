@@ -140,20 +140,32 @@ def _ctx_segments(pct: float) -> tuple[list[tuple[str, str]], int]:
 class SlashCommandCompleter(Completer):
     """Complete REPL slash commands when the buffer is a single leading-slash token. Prefix match
     (case-insensitive) against the SLASH_COMMANDS table — the same table /help renders, so the menu
-    and /help never drift. Only the FIRST token completes: once there's a space we're into a
-    command's own arguments (e.g. `/memory show 12`), which this menu leaves alone."""
+    and /help never drift. Command arguments are left alone (e.g. `/memory show 12`) with ONE
+    exception: `/model <partial>` completes its first argument from `model_names_fn` — the
+    session's cached live-model list. The supplier must never fetch or block (an empty list just
+    means no menu); ids filter case-insensitively but insert case-true (model ids are
+    case-sensitive)."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_names_fn: Callable[[], list[str]] | None = None) -> None:
         from localharness.cli.slash_commands import SLASH_COMMANDS
         self._commands = SLASH_COMMANDS
+        self._model_names_fn = model_names_fn
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        if not text.startswith("/") or " " in text:
+        if not text.startswith("/"):
             return
-        for name, desc in self._commands:
-            if name.startswith(text.lower()):
-                yield Completion(name, start_position=-len(text), display=name, display_meta=desc)
+        head, sep, tail = text.partition(" ")
+        if not sep:
+            for name, desc in self._commands:
+                if name.startswith(text.lower()):
+                    yield Completion(name, start_position=-len(text), display=name, display_meta=desc)
+            return
+        if head.lower() != "/model" or " " in tail or self._model_names_fn is None:
+            return
+        for m in self._model_names_fn() or []:
+            if m.lower().startswith(tail.lower()):
+                yield Completion(m, start_position=-len(tail), display=m, display_meta="model")
 
 
 def _accept_completion(buf: Buffer) -> bool:
@@ -215,10 +227,11 @@ def _menu_float(body) -> FloatContainer:
 
 def _build_input_app(
     history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
+    model_names_fn: Callable[[], list[str]] | None = None,
 ) -> Application:
     """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
-                 completer=SlashCommandCompleter(), complete_while_typing=True)
+                 completer=SlashCommandCompleter(model_names_fn), complete_while_typing=True)
     control = BufferControl(
         buffer=buf,
         input_processors=[
@@ -290,6 +303,7 @@ def _build_persistent_input_app(
     hint_fn: Callable[[], list[tuple[str, str]]],
     pct_fn: Callable[[], float | None],
     status_fn: Callable[[], list[tuple[str, str]]],
+    model_names_fn: Callable[[], list[str]] | None = None,
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
@@ -308,7 +322,7 @@ def _build_persistent_input_app(
          session, so these are the only path a signal-suppressed terminal has to interrupt/exit.
     """
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
-                 completer=SlashCommandCompleter(), complete_while_typing=True)
+                 completer=SlashCommandCompleter(model_names_fn), complete_while_typing=True)
     control = BufferControl(
         buffer=buf,
         input_processors=[
@@ -534,6 +548,10 @@ class TerminalChannel(ChannelAdapter):
         self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
         # call, consumed by its completion receipt (the success result carries only the summary)
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
+        # /model picker: the REPL sets this to its cached live-model-list supplier once it
+        # owns a provider; None (or an empty list) = no argument menu. Read late-bound by
+        # _model_names_for_menu so it works regardless of when the input apps were built.
+        self.model_names_fn: Callable[[], list[str]] | None = None
         # --- Persistent type-anytime input box (start_input_box); all inert until then ---
         self._box_active: bool = False           # True while the long-lived box owns the terminal
         self._box_app: Application | None = None
@@ -777,6 +795,15 @@ class TerminalChannel(ChannelAdapter):
             for line in detail.split("\n"):
                 self._err_console.print(f"  {escape(line)}")
 
+    def _model_names_for_menu(self) -> list[str]:
+        """Late-bound, exception-proof view of model_names_fn for the completion menu — a menu
+        callback must never raise into the key processor, and must never block."""
+        fn = self.model_names_fn
+        try:
+            return fn() if fn is not None else []
+        except Exception:
+            return []
+
     async def read_input(self, prompt: str = ">") -> str:
         """Read a line from the user inside a rounded input bubble. Raises ChannelStartError if not started."""
         if self._history is None:
@@ -790,6 +817,7 @@ class TerminalChannel(ChannelAdapter):
         hint, self.first_prompt_hint = self.first_prompt_hint, ""
         app = _build_input_app(
             self._history, prompt, hint=hint, context_pct=self._context_pct,
+            model_names_fn=self._model_names_for_menu,
         )
         try:
             line = await app.run_async()
@@ -839,6 +867,7 @@ class TerminalChannel(ChannelAdapter):
             on_submit=_on_submit, on_interrupt=on_interrupt, on_eof=_on_eof,
             hint_fn=self._box_hint_frags, pct_fn=lambda: self._context_pct,
             status_fn=self._box_status_frags,
+            model_names_fn=self._model_names_for_menu,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
