@@ -221,3 +221,76 @@ async def test_conversation_persist_strips_confirmed_pair(bus):
     assert not any(
         m["role"] == "user" and "Review your answer" in (m.get("content") or "") for m in conv
     )
+
+
+# ---------------------------------------------------------------------------
+# #98: instruction-echo sentinel — a literal model quotes the nudge's own
+# delivery tail back instead of the bare word; the echo is still the sentinel
+# (live 2026-07-18: the echo shipped as the terminal answer, 2/2 turns)
+# ---------------------------------------------------------------------------
+
+_LIVE_ECHO = "CONFIRMED — my previous reply will be delivered to the user unchanged."
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        _LIVE_ECHO,                                                                 # live trace, verbatim
+        "CONFIRMED — your previous reply will be delivered to the user unchanged",   # pronoun as instructed
+        "confirmed - my previous reply will be delivered to the user unchanged.",    # ascii hyphen, lowercase
+        "CONFIRMED. Your previous reply will then be delivered to the user unchanged.",  # reworded-nudge echo
+    ],
+)
+def test_is_confirmation_tolerates_instruction_echo(echo):
+    assert _is_confirmation(echo)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Confirmed: your flight is booked.",      # real answer that starts with the word
+        "CONFIRMED — I'll now check the file.",   # announced work, not the delivery tail
+        _LIVE_ECHO + " The answer is 42.",        # echo + real content stays content
+    ],
+)
+def test_is_confirmation_rejects_real_content(content):
+    assert not _is_confirmation(content)
+
+
+def test_echoed_sentinel_surfaces_this_turns_real_answer():
+    """#98 live shape: [question, real answer, nudge, echo] — the summary must be the
+    real answer, never the echoed meta-line."""
+    s = Session(
+        agent_id="a",
+        session_id="s",
+        messages=[
+            {"role": "user", "content": "turn question"},
+            {"role": "assistant", "content": "THE REAL ANSWER."},
+            {"role": "user", "content": "You ended your reply with stated intentions..."},
+            {"role": "assistant", "content": _LIVE_ECHO},
+        ],
+    )
+    s.turn_start_idx = 1
+    assert _format_completion_summary(s, _LIVE_ECHO) == "THE REAL ANSWER."
+
+
+@pytest.mark.asyncio
+async def test_persist_strips_echoed_confirmed_pair(bus):
+    """#91b hygiene must cover the echo: after a self-check turn ending in the ECHOED
+    sentinel, the summary is the real answer and the nudge + echo pair is dropped from
+    the persisted conversation."""
+    llm = _ScriptedNoToolLLM(["The answer is 42.", _LIVE_ECHO])
+    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    session = Session(agent_id="sum-agent", session_id="s-persist-echo", messages=[])
+
+    summary = await loop._execute_loop(session, "q", None)
+
+    assert summary == "The answer is 42."
+    conv = loop._conversation
+    assert any(m["role"] == "assistant" and m.get("content") == "The answer is 42." for m in conv)
+    assert not any(
+        m["role"] == "assistant" and "CONFIRMED" in (m.get("content") or "") for m in conv
+    )
+    assert not any(
+        m["role"] == "user" and "Review your answer" in (m.get("content") or "") for m in conv
+    )
