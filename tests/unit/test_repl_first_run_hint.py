@@ -72,7 +72,7 @@ async def test_read_input_renders_first_prompt_hint_in_the_bubble_once(monkeypat
         async def run_async(self):
             return "typed line"
 
-    def _fake_build(history, prompt, hint, context_pct=None):
+    def _fake_build(history, prompt, hint, context_pct=None, model_names_fn=None):
         seen_hints.append(hint)
         return _FakeApp()
 
