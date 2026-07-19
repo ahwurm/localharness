@@ -4,6 +4,24 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.21] — 2026-07-19
+
+Bugfix release from live dogfood: a nudge echo could replace the visible answer.
+
+### Fixed
+- **Sentinel instruction-echo no longer replaces the user-visible answer** (#98): on
+  a turn answered with zero tool calls, the act-guard asks for the bare `CONFIRMED`
+  sentinel; a literal subject model echoes the instruction's own delivery tail back
+  ("CONFIRMED — my previous reply will be delivered to the user unchanged."), and
+  the bare-only matcher shipped that meta-line as the turn summary — which the
+  terminal renders as the entire answer, so the real reply displayed nowhere
+  (observed live, 2/2 turns). The matcher now also accepts exactly the echoed
+  delivery tail (pronoun/dash-flexible, nothing looser — real content starting with
+  "Confirmed" still never matches), the history splice drops echoed pairs the same
+  as bare ones, and the act-guard / self-check nudges ask for "only the single
+  word: CONFIRMED" with a clean sentence boundary so the wording stops inviting
+  the echo. Live since v0.7.0 for any tool-less prompt, subject-model-dependent.
+
 ## [0.9.20] — 2026-07-18
 
 Two REPL UX features from live dogfood feedback, plus a version-truth fix.
