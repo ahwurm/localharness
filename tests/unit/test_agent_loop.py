@@ -1813,6 +1813,59 @@ async def test_act_guard_confirmed_surfaces_prior_reply(bus, tmp_path):
     assert session.terminated_reason == "complete"             # (d) clean finish
 
 
+class _EchoConfirmOnNudgeLLM:
+    """#98: after the act-guard nudge, echoes the nudge's own delivery tail back
+    (pronoun-flipped) instead of the bare sentinel — the live 2026-07-18 failure shape
+    (observed 2/2 turns on a Qwen-class subject)."""
+
+    def __init__(self):
+        self.calls = 0
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        from types import SimpleNamespace as NS
+        self.calls += 1
+        if self.calls == 1:
+            return NS(content="Sounds like a great plan — enjoy the food!", tool_calls=None), None
+        return NS(content="CONFIRMED — my previous reply will be delivered to the user unchanged.",
+                  tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_act_guard_echoed_confirmed_surfaces_prior_reply(bus, tmp_path):
+    """#98: the nudged no-tool turn replies with the ECHOED sentinel — the original reply
+    must still surface as TaskComplete.summary; the meta-line must never be the answer."""
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "act-guard-agent", "role": "Test.",
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    llm = _EchoConfirmOnNudgeLLM()
+    loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
+                     memory_loader=None)
+    session = Session(agent_id="act-guard-agent", session_id="s-ag-echo", messages=[])
+    await loop._execute_loop(session, "thanks!", None)
+
+    completions = bus.history(event_types=[TaskComplete])
+    assert session.act_nudge_used is True                       # (a) the nudge fired
+    assert len(completions) == 1                                # (b) exactly one completion
+    assert completions[0].summary == "Sounds like a great plan — enjoy the food!"
+    assert "CONFIRMED" not in completions[0].summary            # (c) echo never leaks
+    assert session.terminated_reason == "complete"             # (d) clean finish
+
+
 # ---------------------------------------------------------------------------
 # Reasoning-parser tool turns: content=None must never enter history/payloads
 # (C0 sweep: vLLM request validation rejects replayed content:None -> HTTP 400,
@@ -1938,7 +1991,8 @@ async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
     nudges = [m for m in session.messages if m.get("role") == "user"
               and "took no action" in (m.get("content") or "")]
     assert len(nudges) == 1
-    assert "reply with exactly CONFIRMED" in nudges[0]["content"]
+    assert "reply with only the single word: CONFIRMED" in nudges[0]["content"]
+    assert "CONFIRMED — " not in nudges[0]["content"]  # the run-on that invited the echo (#98)
     assert "restate" not in nudges[0]["content"]
 
 
