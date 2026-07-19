@@ -4,6 +4,20 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.22] — 2026-07-19
+
+The /model picker — the last of the three REPL items queued from live dogfood.
+
+### Added
+- **/model picker**: typing `/model ` opens the completion menu with the models your
+  server actually serves — scroll/Tab to pick, Enter to accept, Enter to switch. The
+  menu is fed by a session cache (warmed by a non-blocking prefetch at startup,
+  refreshed on every `/model` run) and never fetches from inside the menu: an
+  unreachable or malformed server simply means no menu, and typing a name or number
+  still works exactly as before. Ids filter case-insensitively but complete
+  case-true, since model ids are case-sensitive. Works in both the persistent input
+  box and the classic prompt.
+
 ## [0.9.21] — 2026-07-19
 
 Bugfix release from live dogfood: a nudge echo could replace the visible answer.
