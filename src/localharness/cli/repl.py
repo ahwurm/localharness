@@ -669,7 +669,8 @@ class OrchestratorREPL:
             downloaded = registry + hf_cached
         choices = live + downloaded
         if reachable:
-            self._model_cache[:] = choices  # picker menu offers swappable models too
+            # picker menu = live + registry with info meta; HF-cache noise stays out of the menu
+            self._model_cache[:] = self._compose_model_menu(live, managed, current)
 
         if not arg:
             if not choices:
@@ -683,14 +684,28 @@ class OrchestratorREPL:
                         "No models visible at the endpoint or in the local download cache."
                     )
                 return
+            def _info_suffix(name: str) -> str:
+                entry = managed.entry_for(name) if managed is not None else None
+                if entry is None:
+                    return ""
+                parts = [p for p in (entry.quant,
+                                     f"~{entry.tps:g} t/s measured" if entry.tps else None) if p]
+                return f"  [{' · '.join(parts)}]" if parts else ""
+
             lines = ["Models:"]
             for i, m in enumerate(live, start=1):
                 mark = "  [active]" if m == current else ""
-                lines.append(f"  {i}. {m}  (serving){mark}")
+                lines.append(f"  {i}. {m}  (serving){mark}{_info_suffix(m)}")
             for i, m in enumerate(downloaded, start=len(live) + 1):
-                lines.append(f"  {i}. {m}  (downloaded — switching restarts the managed server)")
-            lines.append("Switch with /model <name|number>.")
+                lines.append(
+                    f"  {i}. {m}  (downloaded — switching restarts the managed server)"
+                    f"{_info_suffix(m)}"
+                )
+            lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines))
+            open_menu = getattr(self._channel, "box_open_model_menu", None)
+            if open_menu is not None:
+                open_menu()  # one-Enter picker: menu pops with the first model highlighted
             return
 
         # Resolve target: number, exact name, or (managed only) a local checkpoint path.
@@ -823,6 +838,32 @@ class OrchestratorREPL:
         from localharness.cli import model_ops
         return await asyncio.to_thread(model_ops.list_live_models, base_url)
 
+    @staticmethod
+    def _compose_model_menu(live: list, managed, current: str) -> list:
+        """Picker-menu entries: (name, info-meta) tuples, live models first then registry —
+        HF-cache repos stay OUT of the menu (many are not vLLM-servable; the printed listing
+        keeps them). Info shows only what is KNOWN: quant and measured t/s from the registry
+        entry, never estimates."""
+        def info(entry) -> list:
+            if entry is None:
+                return []
+            parts = []
+            if getattr(entry, "quant", None):
+                parts.append(entry.quant)
+            if getattr(entry, "tps", None):
+                parts.append(f"~{entry.tps:g} t/s")
+            return parts
+        entry_for = (lambda n: managed.entry_for(n)) if managed is not None and hasattr(managed, "entry_for") \
+            else (lambda n: next((e for e in getattr(managed, "local_models", []) or [] if e.name == n), None))
+        out = []
+        for name in live:
+            status = "serving now" if name == current else "serving"
+            out.append((name, " · ".join([status] + info(entry_for(name)))))
+        for e in (getattr(managed, "local_models", []) or []) if managed is not None else []:
+            if e.name not in live:
+                out.append((e.name, " · ".join(info(e) + ["swap"])))
+        return out
+
     async def _prefetch_model_cache(self) -> None:
         """Warm the /model picker menu without ever blocking the UI — best-effort and silent:
         an unreachable or malformed server leaves the cache empty (no menu), and /model itself
@@ -835,11 +876,8 @@ class OrchestratorREPL:
         except Exception:
             return
         if reachable:
-            names = list(live)
             managed = getattr(self._harness, "server", None) if self._harness is not None else None
-            if managed is not None:
-                names += [e.name for e in managed.local_models if e.name not in names]
-            self._model_cache[:] = names
+            self._model_cache[:] = self._compose_model_menu(live, managed, llm.config.model)
 
     async def _persist_default_model(self, model: str) -> None:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
