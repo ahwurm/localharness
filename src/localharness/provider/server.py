@@ -239,13 +239,39 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
                 pass
         stopped = True
     if launch == "docker":
-        # Belt and suspenders: the client SIGTERM should have stopped the container.
+        # VERIFIED stop (#100): a vLLM drain can outlast the grace, and the --rm removal
+        # races the next `docker run` into a name conflict — the old container must be
+        # GONE (name free), not merely signalled, before this returns. Longer grace,
+        # poll the daemon, force-remove as fallback, and fail explicit if the name never
+        # frees: returning with the name taken guarantees the swap crash this prevents.
         subprocess.run(
-            ["docker", "stop", "-t", "20", DOCKER_CONTAINER_NAME],
+            ["docker", "stop", "-t", "60", DOCKER_CONTAINER_NAME],
             capture_output=True,
         )
+        if not _wait_name_free(DOCKER_CONTAINER_NAME, attempts=60):
+            subprocess.run(
+                ["docker", "rm", "-f", DOCKER_CONTAINER_NAME],
+                capture_output=True,
+            )
+            if not _wait_name_free(DOCKER_CONTAINER_NAME, attempts=30):
+                raise RuntimeError(
+                    f"container {DOCKER_CONTAINER_NAME} still exists after stop + rm -f — "
+                    "refusing to race a relaunch into the name conflict"
+                )
+        stopped = True
     pid_path(config_dir).unlink(missing_ok=True)
     return stopped
+
+
+def _wait_name_free(name: str, attempts: int, poll_seconds: float = 0.5) -> bool:
+    """Poll `docker inspect` until the container name no longer resolves (removal
+    complete). Attempt-counted so tests stay deterministic with sleep patched out."""
+    for _ in range(max(1, attempts)):
+        rc = subprocess.run(["docker", "inspect", name], capture_output=True).returncode
+        if rc != 0:
+            return True
+        time.sleep(poll_seconds)
+    return False
 
 
 def _alive(pid: int) -> bool:

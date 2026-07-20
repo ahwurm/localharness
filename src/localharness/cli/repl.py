@@ -748,7 +748,11 @@ class OrchestratorREPL:
                 box_note(f"loading {target} · {int(elapsed)}s")
 
         try:
-            managed_server.stop_server(self._config_dir, launch=managed.launch)
+            # The verified stop can block ~90s worst-case (#100) — off the event loop so
+            # heartbeats and the channel stay live while the old server drains.
+            await asyncio.to_thread(
+                managed_server.stop_server, self._config_dir, launch=managed.launch
+            )
             managed.model = target
             managed_server.start_server(self._config_dir, managed_server.serve_command(managed))
             models = await managed_server.wait_ready(
