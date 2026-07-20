@@ -118,3 +118,38 @@ def test_bench_pack_cli(tmp_path):
     assert (out / "manifest.json").exists()
     assert (out / "trajectories.jsonl").exists()
     assert "runs_packed=1" in res.output.replace(" ", "").replace(":", "=") or "1" in res.output
+
+
+def test_bench_shaped_run_reconstructs_prompt_from_turnstarted(tmp_path):
+    """Bench runs have NO UserMessage event — the prompt lives in TurnStarted.task_summary
+    (the REPL publishes UserMessage; the bench drives the loop directly). The pack must
+    reconstruct the user turn, and must NOT double-emit when both events exist (REPL shape)."""
+    root = tmp_path / "results"
+    d = root / "m" / "scen-ts"
+    d.mkdir(parents=True)
+    bench_shaped = [
+        {"event_type": "TurnStarted", "task_summary": "What is 6 multiplied by 7?"},
+        {"event_type": "Action", "action_type": "llm_response", "content": "42",
+         "has_tool_calls": False},
+        {"event_type": "ScenarioCompleted", "scenario_name": "scen-ts", "model": "m",
+         "success": True},
+    ]
+    (d / "a.jsonl").write_text("\n".join(json.dumps(e) for e in bench_shaped) + "\n")
+    repl_shaped = [
+        {"event_type": "UserMessage", "content": "same question"},
+        {"event_type": "TurnStarted", "task_summary": "same question"},
+        {"event_type": "Action", "action_type": "llm_response", "content": "same answer",
+         "has_tool_calls": False},
+        {"event_type": "ScenarioCompleted", "scenario_name": "scen-repl", "model": "m",
+         "success": True},
+    ]
+    (d / "b.jsonl").write_text("\n".join(json.dumps(e) for e in repl_shaped) + "\n")
+
+    build_pack(root, tmp_path / "pack")
+    recs = {json.loads(l)["scenario"]: json.loads(l)
+            for l in (tmp_path / "pack" / "trajectories.jsonl").read_text().splitlines()}
+    assert recs["scen-ts"]["messages"] == [
+        {"role": "user", "content": "What is 6 multiplied by 7?"},
+        {"role": "assistant", "content": "42"},
+    ]
+    assert [m["role"] for m in recs["scen-repl"]["messages"]] == ["user", "assistant"]
