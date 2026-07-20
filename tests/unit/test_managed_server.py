@@ -169,3 +169,100 @@ async def test_wait_ready_fails_fast_when_process_died(tmp_path):
     # No pidfile → managed process is dead → RuntimeError with log tail, no polling.
     with pytest.raises(RuntimeError, match="CUDA out of memory"):
         await server.wait_ready("http://localhost:1/v1", config_dir=tmp_path, timeout_seconds=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Local model registry (in-REPL full swap): named local checkpoints with
+# per-model args, mounted into the docker server; picker offers them by name
+# ---------------------------------------------------------------------------
+
+
+def _registry_srv(**over) -> ManagedServerConfig:
+    kw = dict(
+        launch="docker", docker_image="img:tag", model="qwen3.6-35b-a3b", port=8000,
+        extra_args=["--kv-cache-dtype", "fp8"],
+        local_models=[
+            {"name": "qwen3.6-35b-a3b", "path": "/x/Qwen35",
+             "extra_args": ["--moe-backend", "marlin"]},
+            {"name": "qwen3.6-27b", "path": "/x/Qwen27"},
+        ],
+    )
+    kw.update(over)
+    return ManagedServerConfig(**kw)
+
+
+def test_local_model_registry_roundtrip():
+    srv = _registry_srv()
+    assert srv.entry_for("qwen3.6-27b").path == "/x/Qwen27"
+    assert srv.entry_for("qwen3.6-27b").extra_args == []
+    assert srv.entry_for("nope") is None
+
+
+def test_serve_command_docker_registry_entry_mounts_and_names():
+    srv = _registry_srv()
+    joined = " ".join(server.serve_command(srv))
+    assert "-v /x/Qwen35:/models/serving:ro" in joined      # checkpoint mounted read-only
+    assert "--model /models/serving" in joined               # container path, not host path
+    assert "--served-model-name qwen3.6-35b-a3b" in joined   # picker name == served id
+    assert "--moe-backend marlin" in joined                  # per-model args appended
+    assert "--kv-cache-dtype fp8" in joined                  # shared args retained
+
+    srv.model = "qwen3.6-27b"
+    joined27 = " ".join(server.serve_command(srv))
+    assert "-v /x/Qwen27:/models/serving:ro" in joined27
+    assert "--served-model-name qwen3.6-27b" in joined27
+    assert "--moe-backend" not in joined27                   # MoE flag never leaks to the dense model
+
+
+def test_serve_command_binary_registry_entry():
+    srv = ManagedServerConfig(
+        launch="binary", binary="/usr/bin/vllm", model="m27", port=8001,
+        local_models=[{"name": "m27", "path": "/x/Q27", "extra_args": ["--enforce-eager"]}],
+    )
+    joined = " ".join(server.serve_command(srv))
+    assert "serve /x/Q27" in joined
+    assert "--served-model-name m27" in joined
+    assert "--enforce-eager" in joined
+
+
+class _SlowStubAsyncClient:
+    """Fails twice, then answers — exercises the poll loop and its progress callback."""
+
+    calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, timeout=None):
+        import httpx
+
+        type(self).calls += 1
+        if type(self).calls < 3:
+            raise httpx.ConnectError("not up yet")
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"id": "served-model"}]}
+
+        return _Resp()
+
+
+@pytest.mark.asyncio
+async def test_wait_ready_reports_poll_progress(monkeypatch):
+    import httpx
+
+    _SlowStubAsyncClient.calls = 0
+    monkeypatch.setattr(httpx, "AsyncClient", _SlowStubAsyncClient)
+    seen: list[float] = []
+    models = await server.wait_ready(
+        "http://localhost:8081/v1", timeout_seconds=30.0, poll_seconds=0.01,
+        on_poll=seen.append,
+    )
+    assert models == ["served-model"]
+    assert len(seen) >= 2                      # called on each unready poll
+    assert seen == sorted(seen)                # elapsed seconds are nondecreasing
