@@ -180,12 +180,36 @@ def start_server(config_dir: Path, cmd: list[str]) -> int:
     return proc.pid
 
 
+def _is_zombie(pid: int) -> bool:
+    """Linux: a zombie is DEAD for lifecycle purposes. os.kill(pid, 0) succeeds on one —
+    a crashed `docker run --rm` client sits unreaped under the REPL (nothing wait()s it),
+    which defeated wait_ready's fail-fast until the full timeout (#99). Non-Linux: False
+    (managed-server lifecycle is POSIX-only; /proc is the cheap authoritative check)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            # field 3 (after the parenthesised comm, which may itself contain parens)
+            return fh.read().rsplit(b")", 1)[1].split()[0] == b"Z"
+    except (OSError, IndexError):
+        return False
+
+
 def server_pid(config_dir: Path) -> int | None:
-    """Pid from the pidfile if that process is alive, else None (stale file removed)."""
+    """Pid from the pidfile if that process is alive, else None (stale file removed).
+
+    A zombie counts as dead (#99): reap it opportunistically if it's ours, drop the
+    pidfile, report None — so wait_ready fails fast with the crash log tail instead of
+    polling a corpse for half an hour."""
     path = pid_path(config_dir)
     try:
         pid = int(path.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
+        if _is_zombie(pid):
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            path.unlink(missing_ok=True)
+            return None
         return pid
     except (FileNotFoundError, ValueError, ProcessLookupError):
         path.unlink(missing_ok=True)
@@ -225,6 +249,8 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
 
 
 def _alive(pid: int) -> bool:
+    if _is_zombie(pid):  # #99: a zombie can't be signalled down — don't stall stop on it
+        return False
     try:
         os.kill(pid, 0)
         return True
