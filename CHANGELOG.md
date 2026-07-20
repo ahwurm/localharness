@@ -4,6 +4,23 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.25] — 2026-07-20
+
+The trace pack: bench runs become a versioned, graded dataset artifact.
+
+### Added
+- **`localharness bench pack`**: turns a bench results tree into
+  `{manifest.json, trajectories.jsonl}` — one chat-format record per run, labeled
+  with the pass/fail gate verdict. Graded trajectories: a regression-eval baseline
+  for candidate models today, fine-tune material only if that ever clears the bar.
+  Safety by construction: only ScenarioCompleted-verdicted files pack (live session
+  files are skipped and counted — they contain real user life and never belong in a
+  dataset), and any home-path/key/secret pattern in packed content fails the build
+  outright before anything is written. Prompts reconstruct from
+  `TurnStarted.task_summary` (bench runs publish no UserMessage event). The manifest
+  stamps the harness version and source tree, so packs are regenerated per release
+  and supersede cleanly as functionality evolves.
+
 ## [0.9.24] — 2026-07-20
 
 The picker becomes a true picker: /model, scroll, one Enter.
