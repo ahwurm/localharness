@@ -4,6 +4,24 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.24] — 2026-07-20
+
+The picker becomes a true picker: /model, scroll, one Enter.
+
+### Added
+- **One-Enter model picker**: bare `/model` now pops the completion menu by itself
+  with the first model highlighted — scroll (or type to filter) and a single Enter
+  switches. Picking a model is an action, not text editing; slash-command
+  completions keep their accept-then-Enter contract. Typing `/model <name|number>`
+  still works.
+- **Per-model info in the menu and listing**: registry entries carry `quant` and
+  `tps` (measured tokens/sec on this hardware — set only from real measurements,
+  never estimates), rendered as the menu's right column ("serving now · nvfp4
+  (modelopt) · ~30 t/s") and in the /model listing.
+- **Menu de-noised**: the picker offers only live + registry models. HF-cache
+  repos (many not vLLM-servable) remain in the printed listing but no longer
+  clutter the scroll path.
+
 ## [0.9.23] — 2026-07-20
 
 The full in-REPL model swap: pick a local checkpoint in the /model menu and the
