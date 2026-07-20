@@ -4,6 +4,34 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.23] — 2026-07-20
+
+The full in-REPL model swap: pick a local checkpoint in the /model menu and the
+harness restarts its managed server with it, live loading line included.
+
+### Added
+- **Local-model registry for the managed server** (`server.local_models`): named
+  local checkpoints with per-model `extra_args` (e.g. a MoE-only backend flag that
+  must never reach a dense sibling; quantization flags that differ per checkpoint).
+  The /model listing and the picker menu offer registry names alongside live and
+  HF-cache models; picking one drives the existing stop → relaunch → readiness
+  swap. In docker mode the checkpoint directory is bind-mounted read-only and
+  served under `--served-model-name <name>`, so the picker name is the model id.
+- **Live loading line during a swap**: the readiness poll now reports elapsed time
+  into the input box's status row ("loading qwen3.6-27b · 42s"), cleared on
+  success and failure alike — a minutes-long model load no longer looks frozen.
+  Honest expectation: a 27B/35B-class NVFP4 load on DGX-Spark-class hardware takes
+  5–7 minutes, not seconds.
+
+### Fixed
+- **Zombie docker-run client defeated the managed server's crash fail-fast** (#99):
+  a startup crash left the `docker run --rm` client as an unreaped zombie;
+  `os.kill(pid, 0)` succeeds on zombies, so the readiness poll spun toward its full
+  30-minute timeout instead of surfacing the crash log. Zombies now count as dead:
+  pidfile cleared, opportunistic reap, fail-fast with the serve-log tail (which
+  names the actual error). Found live when a quantization flag mismatched a
+  checkpoint — the crash surfaced only after manual interruption.
+
 ## [0.9.22] — 2026-07-19
 
 The /model picker — the last of the three REPL items queued from live dogfood.
