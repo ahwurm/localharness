@@ -20,12 +20,16 @@ class _Chan:
     def __init__(self):
         self.msgs: list[str] = []
         self.activity: list[str | None] = []
+        self.menu_opened = 0
 
     async def send_message(self, content, **kw):
         self.msgs.append(content)
 
     def box_activity(self, text):
         self.activity.append(text)
+
+    def box_open_model_menu(self):
+        self.menu_opened += 1
 
 
 def _managed() -> ManagedServerConfig:
@@ -34,8 +38,10 @@ def _managed() -> ManagedServerConfig:
         extra_args=["--kv-cache-dtype", "fp8"],
         local_models=[
             {"name": "qwen3.6-35b-a3b", "path": "/x/Qwen35",
-             "extra_args": ["--moe-backend", "marlin"]},
-            {"name": "qwen3.6-27b", "path": "/x/Qwen27"},
+             "extra_args": ["--moe-backend", "marlin"],
+             "quant": "nvfp4 (modelopt)", "tps": 30.0},
+            {"name": "qwen3.6-27b", "path": "/x/Qwen27",
+             "quant": "nvfp4 (compressed-tensors)", "tps": 9.5},
         ],
     )
 
@@ -80,7 +86,15 @@ async def test_listing_names_registry_models_and_feeds_picker_cache(tmp_path, mo
     out = "\n".join(chan.msgs)
     assert "qwen3.6-27b" in out
     assert "restarts the managed server" in out
-    assert r._model_cache == ["qwen3.6-35b-a3b", "qwen3.6-27b"]  # live + registry, deduped
+    assert "nvfp4 (compressed-tensors)" in out         # per-model info in the listing
+    assert "~9.5 t/s" in out                           # measured throughput shown
+    # picker menu = live + registry ONLY (HF-cache noise stays out of the scroll path),
+    # each with its info meta
+    assert r._model_cache == [
+        ("qwen3.6-35b-a3b", "serving now · nvfp4 (modelopt) · ~30 t/s"),
+        ("qwen3.6-27b", "nvfp4 (compressed-tensors) · ~9.5 t/s · swap"),
+    ]
+    assert chan.menu_opened == 1                       # bare /model auto-opens the picker menu
 
 
 async def test_swap_to_registry_model_full_choreography(tmp_path, monkeypatch):

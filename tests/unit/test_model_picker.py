@@ -78,18 +78,30 @@ async def _drive(feed: str, model_names_fn=None):
             )
             holder["app"] = app
             inp.send_text(feed)
-            await app.run_async()
+            import asyncio
+            try:
+                await asyncio.wait_for(app.run_async(), timeout=5)
+            except asyncio.TimeoutError:  # a hung app is a FAILING drive, never a hung suite
+                app.exit()
     return subs
 
 
-async def test_picker_tab_accepts_first_model_then_enter_submits():
-    subs = await _drive("/model \t\r\r\x04", model_names_fn=lambda: ["qwen-a", "qwen-b"])
+async def test_picker_tab_then_single_enter_submits_the_switch():
+    """One-Enter picker: Enter on a HIGHLIGHTED model accepts AND submits in one stroke."""
+    subs = await _drive("/model \t\r\x04", model_names_fn=lambda: ["qwen-a", "qwen-b"])
     assert subs == ["/model qwen-a"]
 
 
-async def test_picker_arrow_navigates_to_second_model():
-    subs = await _drive("/model \t\x1b[B\r\r\x04", model_names_fn=lambda: ["qwen-a", "qwen-b"])
+async def test_picker_arrow_navigates_then_single_enter_submits():
+    subs = await _drive("/model \t\x1b[B\r\x04", model_names_fn=lambda: ["qwen-a", "qwen-b"])
     assert subs == ["/model qwen-b"]
+
+
+async def test_command_menu_enter_stays_accept_only():
+    """The one-Enter rule is MODEL completions only — command completions keep the
+    accept-then-second-Enter contract (Claude Code feel)."""
+    subs = await _drive("/mem\t\r\r\x04", model_names_fn=lambda: ["qwen-a"])
+    assert subs == ["/memory"]
 
 
 # ------------------------------------------------------------------ REPL cache plumbing
@@ -113,7 +125,7 @@ async def test_prefetch_fills_cache_and_channel_hook_serves_it():
     r._live_models = fake_live
     await r._prefetch_model_cache()
     assert chan.model_names_fn is not None
-    assert chan.model_names_fn() == ["a-model", "b-model"]
+    assert chan.model_names_fn() == [("a-model", "serving"), ("b-model", "serving")]
 
 
 async def test_prefetch_swallows_unreachable_server():
@@ -132,7 +144,10 @@ async def test_prefetch_includes_managed_registry_names():
     """Full-swap feature: the picker menu offers the managed server's local checkpoints by
     name alongside whatever is live — live first, registry appended, deduped."""
     llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
-    managed = NS(local_models=[NS(name="live-one"), NS(name="qwen3.6-27b")])
+    managed = NS(local_models=[
+        NS(name="live-one", quant=None, tps=None),
+        NS(name="qwen3.6-27b", quant="nvfp4 (compressed-tensors)", tps=9.5),
+    ])
     r = OrchestratorREPL(
         orchestrator=None, agent_loop=NS(_llm=llm), channel=NS(), bus=None,
         harness_config=NS(server=managed),
@@ -143,4 +158,20 @@ async def test_prefetch_includes_managed_registry_names():
 
     r._live_models = fake_live
     await r._prefetch_model_cache()
-    assert r._model_cache == ["live-one", "qwen3.6-27b"]
+    assert r._model_cache == [
+        ("live-one", "serving"),
+        ("qwen3.6-27b", "nvfp4 (compressed-tensors) · ~9.5 t/s · swap"),
+    ]
+
+
+def test_completer_renders_meta_from_tuples():
+    """Supplier items may be (name, meta) tuples — meta becomes the menu's right column
+    (quant + measured t/s). Plain strings keep the generic 'model' meta."""
+    c = SlashCommandCompleter(model_names_fn=lambda: [
+        ("qwen3.6-35b-a3b", "serving now · nvfp4 (modelopt) · ~30 t/s"),
+        "bare-string-model",
+    ])
+    comps = list(c.get_completions(Document("/model ", len("/model ")), None))
+    assert comps[0].text == "qwen3.6-35b-a3b"
+    assert comps[0].display_meta_text == "serving now · nvfp4 (modelopt) · ~30 t/s"
+    assert comps[1].display_meta_text == "model"
