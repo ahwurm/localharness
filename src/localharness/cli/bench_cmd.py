@@ -224,3 +224,26 @@ def bench_compare(
         verdict_label = {0: "stable", 1: "regressed", 2: "infra_failure", 3: "unstable"}.get(exit_code, "unknown")
         typer.echo(f"Compare verdict: {verdict_label} (exit code {exit_code})")
     raise typer.Exit(code=exit_code)
+
+
+@bench_app.command(name="pack")
+def bench_pack(
+    results: Path = typer.Option(..., "--results", help="Bench results tree to pack (isolated dir — never a live agent's session dir)."),
+    out: Path = typer.Option(..., "--out", help="Output directory for {manifest.json, trajectories.jsonl}."),
+) -> None:
+    """Build a versioned trace pack from bench runs: gate-verdicted trajectories in
+    chat format, leak-scanned, manifest-stamped with the harness version. Regenerate
+    per release — packs supersede as functionality evolves. Files without a
+    ScenarioCompleted verdict (live sessions) are skipped, never packed."""
+    from localharness.bench.pack import PackLeakError, build_pack
+
+    try:
+        manifest = build_pack(results, out)
+    except (PackLeakError, RuntimeError) as exc:
+        typer.echo(f"pack build failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"pack built: runs_packed={manifest['runs_packed']} "
+        f"files_skipped={manifest['files_skipped']} "
+        f"harness_version={manifest['harness_version']} -> {out}"
+    )
