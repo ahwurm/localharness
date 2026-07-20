@@ -288,3 +288,65 @@ def test_server_pid_zombie_is_dead(tmp_path):
             os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# #100: VERIFIED docker stop — the old container must be GONE (name free), not
+# just signalled, before a swap may relaunch; --rm removal races `docker run`
+# ---------------------------------------------------------------------------
+
+
+class _FakeDocker:
+    """Scripted `docker` CLI: inspect returns rc per call from a queue (0 = name in use,
+    1 = gone); every invocation is recorded."""
+
+    def __init__(self, inspect_rcs):
+        self.inspect_rcs = list(inspect_rcs)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        rc = 0
+        if cmd[:2] == ["docker", "inspect"]:
+            rc = self.inspect_rcs.pop(0) if self.inspect_rcs else 0
+
+        class _R:
+            returncode = rc
+            stdout = b""
+            stderr = b""
+        return _R()
+
+
+def _stop_docker(monkeypatch, tmp_path, inspect_rcs):
+    fake = _FakeDocker(inspect_rcs)
+    monkeypatch.setattr(server.subprocess, "run", fake)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    server.stop_server(tmp_path, launch="docker")
+    return fake
+
+
+def test_docker_stop_verifies_name_free(monkeypatch, tmp_path):
+    """Happy path: stop, then poll inspect until the name is gone. No force-remove."""
+    fake = _stop_docker(monkeypatch, tmp_path, inspect_rcs=[0, 0, 1])
+    joined = [" ".join(c) for c in fake.calls]
+    assert any(c.startswith("docker stop") for c in joined)
+    assert sum(c.startswith("docker inspect") for c in joined) == 3
+    assert not any(c.startswith("docker rm") for c in joined)
+
+
+def test_docker_stop_force_removes_when_name_sticks(monkeypatch, tmp_path):
+    """--rm removal wedged: after the poll window, rm -f fires and the name frees."""
+    stuck = [0] * 200 + [1]           # in use through the first window, freed after rm -f
+    fake = _stop_docker(monkeypatch, tmp_path, inspect_rcs=stuck)
+    joined = [" ".join(c) for c in fake.calls]
+    assert any(c.startswith("docker rm -f") for c in joined)
+
+
+def test_docker_stop_raises_when_name_never_frees(monkeypatch, tmp_path):
+    """Fail explicit (#100): never return with the name still taken — a relaunch would
+    race straight into the conflict this exists to prevent."""
+    fake = _FakeDocker([0] * 1000)
+    monkeypatch.setattr(server.subprocess, "run", fake)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="still exists"):
+        server.stop_server(tmp_path, launch="docker")
