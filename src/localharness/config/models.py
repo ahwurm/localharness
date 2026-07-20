@@ -1702,6 +1702,17 @@ class LocalModelEntry(BaseModel):
         default_factory=list,
         description="Per-model `vllm serve` args appended after the server's shared extra_args.",
     )
+    quant: Optional[str] = Field(
+        default=None,
+        description="Quantization format, if known (e.g. 'nvfp4 (modelopt)'). Display-only.",
+    )
+    tps: Optional[float] = Field(
+        default=None,
+        description=(
+            "Measured generation tokens/sec on THIS hardware — set only from a real "
+            "measurement (bench run or live serve logs), never estimated."
+        ),
+    )
 
 
 class ManagedServerConfig(BaseModel):

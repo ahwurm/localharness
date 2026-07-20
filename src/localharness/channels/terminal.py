@@ -163,24 +163,35 @@ class SlashCommandCompleter(Completer):
             return
         if head.lower() != "/model" or " " in tail or self._model_names_fn is None:
             return
-        for m in self._model_names_fn() or []:
-            if m.lower().startswith(tail.lower()):
-                yield Completion(m, start_position=-len(tail), display=m, display_meta="model")
+        for item in self._model_names_fn() or []:
+            name, meta = item if isinstance(item, tuple) else (item, "model")
+            if name.lower().startswith(tail.lower()):
+                # style is the one-Enter marker: Enter on a highlighted MODEL completion
+                # submits the switch in the same stroke (picking a model is an action,
+                # not text editing) — commands keep the accept-then-Enter contract.
+                yield Completion(name, start_position=-len(tail), display=name,
+                                 display_meta=meta, style="class:model-pick")
 
 
-def _accept_completion(buf: Buffer) -> bool:
-    """Menu-aware Enter helper. If an item is highlighted, apply it and report True (Enter consumed
-    — the command lands in the buffer, nothing is submitted). If the menu is open with nothing
-    highlighted, close it and report False so the caller submits the fully-typed line — matching
-    Claude Code, where Enter on a command you typed out in full runs it. No menu → False."""
+def _accept_completion(buf: Buffer) -> "Completion | None":
+    """Menu-aware Enter helper. If an item is highlighted, apply it and return the applied
+    Completion; the caller consumes Enter for COMMAND completions (the command lands in the
+    buffer, nothing submits) but submits in the same stroke for MODEL completions (style
+    'model-pick' — the one-Enter picker). Menu open with nothing highlighted: close it and
+    return None so the caller submits the fully-typed line (Claude Code feel). No menu → None."""
     cs = buf.complete_state
     if cs is None:
-        return False
-    if cs.current_completion is not None:
-        buf.apply_completion(cs.current_completion)
-        return True
+        return None
+    comp = cs.current_completion
+    if comp is not None:
+        buf.apply_completion(comp)
+        return comp
     buf.complete_state = None
-    return False
+    return None
+
+
+def _is_model_pick(comp) -> bool:
+    return comp is not None and "model-pick" in (comp.style or "")
 
 
 def _add_menu_keys(kb: KeyBindings) -> None:
@@ -245,8 +256,10 @@ def _build_input_app(
 
     @kb.add("enter")
     def _accept(event) -> None:
-        if _accept_completion(buf):
-            return  # a highlighted completion was accepted into the line; don't submit yet
+        comp = _accept_completion(buf)
+        if comp is not None and not _is_model_pick(comp):
+            return  # command accepted into the line; don't submit yet
+        # no completion applied, or a model was picked -> submit in this stroke
         buf.append_to_history()
         event.app.exit(result=buf.text)
 
@@ -336,8 +349,10 @@ def _build_persistent_input_app(
 
     @kb.add("enter")
     def _submit(event) -> None:
-        if _accept_completion(buf):
-            return  # a highlighted completion was accepted into the line; don't submit yet
+        comp = _accept_completion(buf)
+        if comp is not None and not _is_model_pick(comp):
+            return  # command accepted into the line; don't submit yet
+        # no completion applied, or a model was picked -> submit in this stroke
         text = buf.text
         if text.strip():
             buf.append_to_history()
@@ -399,12 +414,14 @@ def _build_persistent_input_app(
     )
     body = HSplit([status_row, frame])
 
-    return Application(
+    app = Application(
         layout=Layout(_menu_float(body), focused_element=control),
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,
     )
+    app._lh_input_buffer = buf  # box_open_model_menu pre-fills + pops the picker through this
+    return app
 
 
 TERMINAL_THEME = Theme({
@@ -948,6 +965,18 @@ class TerminalChannel(ChannelAdapter):
                 self._box_app.invalidate()
             except Exception:
                 pass
+
+    def box_open_model_menu(self) -> None:
+        """Bare /model: pre-fill '/model ' and pop the completion menu with the first model
+        highlighted — the one-Enter picker (scroll + Enter switches). No-op without the box."""
+        app = self._box_app
+        buf = getattr(app, "_lh_input_buffer", None) if app is not None else None
+        if buf is None:
+            return
+        buf.text = "/model "
+        buf.cursor_position = len(buf.text)
+        buf.start_completion(select_first=True)
+        self._invalidate_box()
 
     def box_activity(self, text: str | None) -> None:
         """Transient activity note for the status row (e.g. a /model swap's loading line).
