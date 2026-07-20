@@ -126,3 +126,21 @@ async def test_prefetch_swallows_unreachable_server():
     r._live_models = boom
     await r._prefetch_model_cache()  # must not raise
     assert r._model_cache == []
+
+
+async def test_prefetch_includes_managed_registry_names():
+    """Full-swap feature: the picker menu offers the managed server's local checkpoints by
+    name alongside whatever is live — live first, registry appended, deduped."""
+    llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
+    managed = NS(local_models=[NS(name="live-one"), NS(name="qwen3.6-27b")])
+    r = OrchestratorREPL(
+        orchestrator=None, agent_loop=NS(_llm=llm), channel=NS(), bus=None,
+        harness_config=NS(server=managed),
+    )
+
+    async def fake_live(base_url):
+        return (["live-one"], True)
+
+    r._live_models = fake_live
+    await r._prefetch_model_cache()
+    assert r._model_cache == ["live-one", "qwen3.6-27b"]
