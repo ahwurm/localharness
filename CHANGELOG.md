@@ -4,6 +4,22 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.9.26] — 2026-07-20
+
+Swap-reliability fix from the first user-driven swap in live use.
+
+### Fixed
+- **Managed-server swap raced the old container's removal** (#100): `docker stop`'s
+  20s grace could be outlasted by vLLM's connection drain; the daemon then SIGKILLed
+  the container and, with `--rm` removal still in flight, the immediate relaunch hit
+  "container name already in use" and died (surfaced fast by the #99 fail-fast;
+  `localharness start` recovered by relaunching once the name freed). Docker-mode
+  stop is now a **verified stop**: 60s drain grace, then poll the daemon until the
+  name is actually free, `docker rm -f` as fallback, and an explicit error if the
+  name never frees — a relaunch can no longer race removal. The swap runs the stop
+  off the event loop so the session stays responsive through the drain. Verified
+  live with a full 35B → 27B → 35B round trip: zero conflicts.
+
 ## [0.9.25] — 2026-07-20
 
 The trace pack: bench runs become a versioned, graded dataset artifact.
