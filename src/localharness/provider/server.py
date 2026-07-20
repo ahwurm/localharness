@@ -22,6 +22,8 @@ from pathlib import Path
 
 import httpx
 
+from typing import Callable
+
 from localharness.config.models import ManagedServerConfig
 
 DOCKER_CONTAINER_NAME = "localharness-vllm"
@@ -128,18 +130,37 @@ def download_model(repo_id: str) -> str:
 
 
 def serve_command(srv: ManagedServerConfig) -> list[str]:
+    """Build the launch command for srv.model.
+
+    When srv.model names a `local_models` registry entry, the entry's checkpoint dir is
+    served (docker: bind-mounted read-only at /models/serving) under --served-model-name
+    <entry.name>, with the entry's per-model extra_args appended after the shared ones —
+    so a swap changes checkpoint, served id, AND model-specific flags in one place.
+    Otherwise srv.model passes through untouched (HF repo id resolved via the cache)."""
+    entry = srv.entry_for(srv.model)
+    extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
     if srv.launch == "docker":
         hf_cache = str(Path("~/.cache/huggingface").expanduser())
+        model_arg = srv.model
+        mounts = ["-v", f"{hf_cache}:/root/.cache/huggingface"]
+        served: list[str] = []
+        if entry is not None:
+            mounts += ["-v", f"{str(Path(entry.path).expanduser())}:/models/serving:ro"]
+            model_arg = "/models/serving"
+            served = ["--served-model-name", entry.name]
         return [
             "docker", "run", "--rm", "--name", DOCKER_CONTAINER_NAME,
             "--gpus", "all", "--ipc=host",
-            "-v", f"{hf_cache}:/root/.cache/huggingface",
+            *mounts,
             "-p", f"{srv.port}:8000",
             str(srv.docker_image),
-            "--model", srv.model,
-            *srv.extra_args,
+            "--model", model_arg,
+            *served,
+            *extra,
         ]
-    return [str(srv.binary), "serve", srv.model, "--port", str(srv.port), *srv.extra_args]
+    model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
+    served = ["--served-model-name", entry.name] if entry is not None else []
+    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *extra]
 
 
 def start_server(config_dir: Path, cmd: list[str]) -> int:
@@ -218,13 +239,17 @@ async def wait_ready(
     config_dir: Path | None = None,
     timeout_seconds: float = 1800.0,
     poll_seconds: float = 3.0,
+    on_poll: "Callable[[float], None] | None" = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
     Model load can take minutes (weights → GPU), hence the generous default.
     When config_dir is given, a dead managed process fails fast with the log tail.
+    `on_poll(elapsed_seconds)` fires after each unready poll — the REPL renders it as a
+    live loading line so a minutes-long swap never looks frozen. Must never block.
     """
-    deadline = time.monotonic() + timeout_seconds
+    start = time.monotonic()
+    deadline = start + timeout_seconds
     async with httpx.AsyncClient() as client:
         while time.monotonic() < deadline:
             if config_dir is not None and server_pid(config_dir) is None:
@@ -237,6 +262,8 @@ async def wait_ready(
                     return [m["id"] for m in resp.json().get("data", [])]
             except httpx.HTTPError:
                 pass
+            if on_poll is not None:
+                on_poll(time.monotonic() - start)
             await asyncio.sleep(poll_seconds)
     tail = f" Log tail:\n{log_tail(config_dir)}" if config_dir is not None else ""
     raise TimeoutError(f"vLLM not ready after {timeout_seconds:.0f}s.{tail}")

@@ -560,6 +560,7 @@ class TerminalChannel(ChannelAdapter):
         self._box_ticker: asyncio.Task | None = None
         self._box_working: bool = False          # working state → status row above the box (thinking/streaming/burst)
         self._box_dreaming: bool = False         # background consolidation ("dreaming") pass → status row (#20)
+        self._box_activity: str = ""             # transient status-row note (e.g. /model swap loading line)
         self._queued_count: int = 0              # `queued (N)` shown in the box frame
         self._decision_flash: str = ""           # transient routing-decision line in the box frame
         self._decision_flash_task: asyncio.Task | None = None
@@ -928,11 +929,13 @@ class TerminalChannel(ChannelAdapter):
         lands), the between-turns '· dreaming…' consolidation pass, or a plain 'working' while
         the model generates. Returns [] when idle so the ConditionalContainer collapses the row
         to zero height. Refreshed by app.invalidate() from _box_tick — never a rich Status."""
-        if not (self._box_working or self._box_dreaming):
+        if not (self._box_working or self._box_dreaming or self._box_activity):
             return []
         glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
         if self._burst is not None:
             activity = f"{' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
+        elif self._box_activity and not self._box_working:
+            activity = self._box_activity   # e.g. a /model swap's 'loading <model> · 40s'
         elif self._box_dreaming and not self._box_working:
             activity = _DREAMING_LABEL   # · dreaming…
         else:
@@ -945,6 +948,12 @@ class TerminalChannel(ChannelAdapter):
                 self._box_app.invalidate()
             except Exception:
                 pass
+
+    def box_activity(self, text: str | None) -> None:
+        """Transient activity note for the status row (e.g. a /model swap's loading line).
+        None/empty clears it. Safe to call in any mode — a no-op without the box."""
+        self._box_activity = text or ""
+        self._invalidate_box()
 
     def box_set_queued(self, n: int) -> None:
         """Persistent `queued (N)` count shown in the box frame."""
