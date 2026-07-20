@@ -71,7 +71,10 @@ def _mk(tmp_path, managed):
     return r, chan, llm, persisted
 
 
-async def test_listing_names_registry_models_and_feeds_picker_cache(tmp_path):
+async def test_listing_names_registry_models_and_feeds_picker_cache(tmp_path, monkeypatch):
+    from localharness.provider import server as ms
+
+    monkeypatch.setattr(ms, "list_cached_models", lambda: [])  # isolate from the host HF cache
     r, chan, _llm, _p = _mk(tmp_path, _managed())
     await r._handle_model_cmd("")
     out = "\n".join(chan.msgs)

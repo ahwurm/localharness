@@ -652,8 +652,6 @@ class OrchestratorREPL:
         from localharness.cli import model_ops
         try:
             live, reachable = await self._live_models(llm.config.base_url)
-            if reachable:
-                self._model_cache[:] = live  # keep the picker menu fresh (item 9)
         except model_ops.MalformedModelListError:
             # #38: reached but the reply isn't a model list — its OWN message, not "no models".
             await self._send_info(
@@ -665,8 +663,13 @@ class OrchestratorREPL:
         downloaded: list[str] = []
         if managed is not None:
             from localharness.provider import server as managed_server
-            downloaded = [m for m in managed_server.list_cached_models() if m not in live]
+            registry = [e.name for e in managed.local_models if e.name not in live]
+            hf_cached = [m for m in managed_server.list_cached_models()
+                         if m not in live and m not in registry]
+            downloaded = registry + hf_cached
         choices = live + downloaded
+        if reachable:
+            self._model_cache[:] = choices  # picker menu offers swappable models too
 
         if not arg:
             if not choices:
@@ -722,18 +725,28 @@ class OrchestratorREPL:
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
         )
+        box_note = getattr(self._channel, "box_activity", None)
+
+        def _swap_progress(elapsed: float) -> None:
+            # Rendered in the box status row; a minutes-long load must never look frozen.
+            if box_note is not None:
+                box_note(f"loading {target} · {int(elapsed)}s")
+
         try:
             managed_server.stop_server(self._config_dir, launch=managed.launch)
             managed.model = target
             managed_server.start_server(self._config_dir, managed_server.serve_command(managed))
             models = await managed_server.wait_ready(
-                llm.config.base_url, config_dir=self._config_dir
+                llm.config.base_url, config_dir=self._config_dir, on_poll=_swap_progress
             )
         except (RuntimeError, TimeoutError) as exc:
             await self._channel.send_message(
                 f"Model swap failed: {exc}", metadata={"style": "system.error"}
             )
             return
+        finally:
+            if box_note is not None:
+                box_note(None)
         served = models[0] if models else target
         llm.config.model = served
         cap = await llm.detect_capabilities()
@@ -822,7 +835,11 @@ class OrchestratorREPL:
         except Exception:
             return
         if reachable:
-            self._model_cache[:] = live
+            names = list(live)
+            managed = getattr(self._harness, "server", None) if self._harness is not None else None
+            if managed is not None:
+                names += [e.name for e in managed.local_models if e.name not in names]
+            self._model_cache[:] = names
 
     async def _persist_default_model(self, model: str) -> None:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next

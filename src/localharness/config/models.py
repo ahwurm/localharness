@@ -1688,6 +1688,22 @@ class SentinelConfig(BaseModel):
         description="Per-fixture train score counted as 'passing' for saturation (tolerates Wilson noise).")
 
 
+class LocalModelEntry(BaseModel):
+    """A locally-downloaded checkpoint the managed server can serve by name.
+
+    The /model picker offers `name`; a swap mounts/serves `path` with the server's shared
+    extra_args plus this entry's own (e.g. a MoE-only backend flag that must never reach a
+    dense sibling). `name` doubles as the served model id (--served-model-name)."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    name: str = Field(description="Picker + served model id (e.g. qwen3.6-27b).")
+    path: str = Field(description="Host directory of the checkpoint (HF layout).")
+    extra_args: list[str] = Field(
+        default_factory=list,
+        description="Per-model `vllm serve` args appended after the server's shared extra_args.",
+    )
+
+
 class ManagedServerConfig(BaseModel):
     """A model server the harness itself launched (init guided setup) and may
     restart — on `start` after a reboot, or on a REPL /model swap. Absent for
@@ -1705,6 +1721,13 @@ class ManagedServerConfig(BaseModel):
     port: int = Field(default=8081, description="Host port the OpenAI API is served on.")
     extra_args: list[str] = Field(default_factory=list, description="Extra `vllm serve` args (from the reference architecture).")
     refarch: Optional[str] = Field(default=None, description="Reference-architecture key this setup came from.")
+    local_models: list[LocalModelEntry] = Field(
+        default_factory=list,
+        description="Named local checkpoints the /model picker can swap to (restart-on-swap).",
+    )
+
+    def entry_for(self, name: str) -> Optional[LocalModelEntry]:
+        return next((e for e in self.local_models if e.name == name), None)
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
