@@ -336,7 +336,7 @@ def test_docker_stop_verifies_name_free(monkeypatch, tmp_path):
 
 def test_docker_stop_force_removes_when_name_sticks(monkeypatch, tmp_path):
     """--rm removal wedged: after the poll window, rm -f fires and the name frees."""
-    stuck = [0] * 200 + [1]           # in use through the first window, freed after rm -f
+    stuck = [0] * 60 + [1]            # in use through the first poll window, freed after rm -f
     fake = _stop_docker(monkeypatch, tmp_path, inspect_rcs=stuck)
     joined = [" ".join(c) for c in fake.calls]
     assert any(c.startswith("docker rm -f") for c in joined)
