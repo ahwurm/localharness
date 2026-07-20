@@ -266,3 +266,25 @@ async def test_wait_ready_reports_poll_progress(monkeypatch):
     assert models == ["served-model"]
     assert len(seen) >= 2                      # called on each unready poll
     assert seen == sorted(seen)                # elapsed seconds are nondecreasing
+
+
+def test_server_pid_zombie_is_dead(tmp_path):
+    """#99: a crashed `docker run --rm` client sits as a ZOMBIE until the REPL reaps it —
+    os.kill(pid, 0) succeeds on zombies, which defeated wait_ready's fail-fast (observed
+    live: a quantization-mismatch crash left the loading line spinning toward the full
+    1800s timeout instead of surfacing the crash log tail). A zombie is DEAD for
+    lifecycle purposes: server_pid clears the stale pidfile and reports None."""
+    server.server_dir(tmp_path).mkdir(parents=True)
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)                # child dies instantly -> zombie until reaped
+    time.sleep(0.2)
+    server.pid_path(tmp_path).write_text(str(pid))
+    try:
+        assert server.server_pid(tmp_path) is None       # zombie == dead
+        assert not server.pid_path(tmp_path).exists()    # stale pidfile cleared
+    finally:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
