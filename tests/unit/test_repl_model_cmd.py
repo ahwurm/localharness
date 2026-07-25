@@ -28,11 +28,18 @@ class FakeChannel:
 
 
 class FakeLLM:
-    def __init__(self, model="model-a"):
-        self.config = SimpleNamespace(base_url="http://localhost:8081/v1", model=model)
+    def __init__(self, model="model-a", base_url="http://localhost:8081/v1", mode="native"):
+        self.config = SimpleNamespace(base_url=base_url, model=model)
+        self._mode = mode
+        self.rebinds: list = []  # (base_url, api_key, extra_headers) per cross-endpoint rebind
 
     async def detect_capabilities(self):
-        return SimpleNamespace(tool_call_mode="native")
+        return SimpleNamespace(tool_call_mode=self._mode)
+
+    def rebind_endpoint(self, base_url, *, api_key=None, extra_headers=None):
+        # Mirrors LLMClient.rebind_endpoint's observable effect: re-point at the new server.
+        self.rebinds.append((base_url, api_key, extra_headers))
+        self.config.base_url = base_url
 
 
 def _repl(tmp_path, harness, live):
@@ -54,7 +61,7 @@ def _repl(tmp_path, harness, live):
     return repl, channel, agent
 
 
-def _harness(server=None, audit_log_path=None):
+def _harness(server=None, audit_log_path=None, extra_endpoints=None):
     return HarnessConfig(
         provider=ProviderConfig(
             provider_type="vllm",
@@ -64,6 +71,7 @@ def _harness(server=None, audit_log_path=None):
         ),
         org=OrgConfig(default_model="model-a", audit_log_path=audit_log_path),
         server=server,
+        extra_endpoints=extra_endpoints or [],
     )
 
 
@@ -500,3 +508,326 @@ async def test_refresh_token_counter_runs_off_loop(tmp_path, monkeypatch):
     await repl._refresh_token_counter("model-b")
     # Both blocking calls (window probe + counter rebind) went through a worker thread.
     assert len(dispatched) >= 2
+
+
+# --- 0.10.0 model tree: cross-endpoint /model switch (switch to a peer server) --- #
+
+
+def _xrepl(tmp_path, harness, models_by_url):
+    """A REPL whose /model discovery is endpoint-aware: `models_by_url` maps a base_url to either
+    a list of served model ids (reachable) OR the string 'unreachable'/'malformed' to exercise the
+    graceful-skip paths. No real HTTP — the shared list_live_models probe is stubbed per endpoint."""
+    from localharness.cli import model_ops
+
+    channel = FakeChannel()
+    agent = SimpleNamespace(_llm=FakeLLM())
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
+        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=harness,
+    )
+    probed: list[str] = []
+
+    async def _live_models(base_url):
+        probed.append(base_url)
+        v = models_by_url.get(base_url)
+        if v == "unreachable":
+            return [], False
+        if v == "malformed":
+            raise model_ops.MalformedModelListError(f"{base_url} not an OpenAI model list")
+        return list(v or []), True
+
+    repl._live_models = _live_models
+    return repl, channel, agent, probed
+
+
+def _peer(name="ollama-local", base_url="http://localhost:11434/v1", ptype="ollama"):
+    from localharness.config.models import EndpointRef
+    return EndpointRef(name=name, base_url=base_url, provider_type=ptype, api_key="none")
+
+
+@pytest.mark.asyncio
+async def test_model_cross_endpoint_switch_rebinds_refits_persists(tmp_path):
+    """A `/model <name>` whose name is served ONLY on a peer endpoint must: rebind the client at
+    the peer base_url, set config.model, refit the counter with the PEER's provider_type, and
+    persist the peer endpoint (additive active_endpoint), NOT the primary default-model path."""
+    peer = _peer()
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    refresh_calls: list = []
+
+    async def _refresh(model, *, base_url=None, provider_type=None):
+        refresh_calls.append((model, base_url, provider_type))
+        return ""
+
+    repl._refresh_token_counter = _refresh
+
+    persist_calls: list = []
+
+    async def _persist_active(endpoint, model):
+        persist_calls.append((endpoint.base_url, endpoint.provider_type, model))
+
+    repl._persist_active_endpoint = _persist_active
+
+    await repl._handle_slash("/model gpt-oss:20b")
+
+    # rebound at the peer, model + base_url now point at the peer server
+    assert agent._llm.rebinds and agent._llm.rebinds[0][0] == "http://localhost:11434/v1"
+    assert agent._llm.config.model == "gpt-oss:20b"
+    assert agent._llm.config.base_url == "http://localhost:11434/v1"
+    # counter refit used the PEER's provider_type (ollama → labeled approximate), not the old vLLM
+    assert refresh_calls == [("gpt-oss:20b", "http://localhost:11434/v1", "ollama")]
+    # persisted the peer endpoint (active_endpoint), not provider.default_model
+    assert persist_calls == [("http://localhost:11434/v1", "ollama", "gpt-oss:20b")]
+    assert "Switched to gpt-oss:20b on ollama-local" in channel.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_model_same_endpoint_switch_does_not_rebind_regression(tmp_path):
+    """REGRESSION guard: with a peer configured, switching to a model on the CURRENT endpoint
+    still takes the hot-swap path — NO rebind_endpoint, persisted via the primary default path."""
+    peer = _peer()
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a", "model-b"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    await repl._handle_slash("/model model-b")
+
+    assert agent._llm.rebinds == []  # never rebound — same endpoint
+    assert agent._llm.config.model == "model-b"
+    assert agent._llm.config.base_url == "http://localhost:8081/v1"  # unchanged
+    # landed on the primary → today's default-model overlay path
+    overlay = load_overlay(tmp_path / "overrides.yaml")
+    assert overlay["provider"]["default_model"] == "model-b"
+    assert "active_endpoint" not in overlay  # no peer record written for a primary switch
+
+
+@pytest.mark.asyncio
+async def test_model_cross_endpoint_persist_writes_active_endpoint_overlay(tmp_path):
+    """End-to-end persistence (no spy): a peer switch writes an ADDITIVE, atomic active_endpoint
+    overlay and never mutates provider.default_model / server.model — a real, loadable record."""
+    peer = _peer(base_url="http://localhost:11434/v1", ptype="ollama")
+    srv = ManagedServerConfig(binary="/x/vllm", model="model-a")
+    harness = _harness(server=srv, extra_endpoints=[peer])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    await repl._handle_slash("/model gpt-oss:20b")
+
+    overlay = load_overlay(tmp_path / "overrides.yaml")
+    assert overlay["active_endpoint"]["base_url"] == "http://localhost:11434/v1"
+    assert overlay["active_endpoint"]["provider_type"] == "ollama"
+    assert overlay["active_endpoint"]["model"] == "gpt-oss:20b"
+    # primary/server identity untouched (reusing default-model persistence would corrupt these)
+    assert "provider" not in overlay or overlay.get("provider", {}).get("default_model") != "gpt-oss:20b"
+    assert "server" not in overlay or overlay.get("server", {}).get("model") != "gpt-oss:20b"
+    # the written overlay must still LOAD as a valid HarnessConfig (extra='forbid' would reject a
+    # stray key) — proving the field is load-bearing now, before start-side resume is wired.
+    from localharness.config.models import HarnessConfig
+    from localharness.config.overlay import deep_merge
+    HarnessConfig.model_validate(deep_merge(harness.model_dump(mode="python"), overlay))
+
+
+@pytest.mark.asyncio
+async def test_backward_compat_no_extra_endpoints_probes_only_primary(tmp_path):
+    """Backward compat: with extra_endpoints=[], discovery probes ONLY the primary — zero extra
+    I/O, resolution unchanged (single-endpoint users see no behavior change)."""
+    harness = _harness()  # no peers
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness, {"http://localhost:8081/v1": ["model-a", "model-b"]},
+    )
+
+    await repl._handle_slash("/model")  # list
+    assert probed == ["http://localhost:8081/v1"]  # only the primary endpoint was probed
+
+
+@pytest.mark.asyncio
+async def test_unreachable_peer_skipped_with_note_never_raises(tmp_path):
+    """An unreachable peer is SKIPPED with a note (never raises), and a peer-only name a dead peer
+    would have served resolves as Unknown, not a crash."""
+    peer = _peer()
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": "unreachable"},
+    )
+
+    await repl._handle_slash("/model")  # must not raise
+    joined = "\n".join(channel.messages)
+    assert "ollama-local" in joined and "unreachable" in joined
+
+    await repl._handle_slash("/model gpt-oss:20b")  # peer-only name, peer is dead
+    assert "Unknown model" in channel.messages[-1]
+    assert agent._llm.rebinds == []  # never attempted a rebind to a dead peer
+
+
+@pytest.mark.asyncio
+async def test_malformed_peer_skipped_with_note(tmp_path):
+    """A peer that responds but not with an OpenAI model list is skipped with its OWN note (the
+    #38 taxonomy), never a bare 'no models' and never a raise."""
+    peer = _peer(name="lmstudio-local", base_url="http://localhost:1234/v1", ptype="lmstudio")
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:1234/v1": "malformed"},
+    )
+
+    await repl._handle_slash("/model")
+    joined = "\n".join(channel.messages)
+    assert "lmstudio-local" in joined and "not an OpenAI-compatible model list" in joined
+
+
+# --- FIX-PASS: critic FIX-FIRST findings (#1, #2, #6, #7) --- #
+
+
+def test_list_live_models_swallows_invalid_url():
+    """#1: httpx.InvalidURL (a typo'd / non-numeric-port base_url) is NOT an httpx.RequestError, so
+    the shared probe must catch it explicitly and report unreachable ([], False) — never propagate
+    and crash the /model call."""
+    from localharness.cli import model_ops
+    assert model_ops.list_live_models("http://localhost:notaport/v1") == ([], False)
+
+
+@pytest.mark.asyncio
+async def test_malformed_peer_base_url_never_crashes_session(tmp_path, monkeypatch):
+    """#1 end-to-end: a typo'd peer base_url (non-numeric port) makes the REAL probe raise
+    httpx.InvalidURL. `/model` (bare list) AND `/model <primary-live>` must BOTH succeed, the bad
+    peer is skipped with a note, and NOTHING propagates to crash the REPL."""
+    import httpx
+    real_get = httpx.get
+
+    def fake_get(url, *a, **k):
+        if "notaport" in url:
+            return real_get(url, *a, **k)  # let httpx raise the genuine InvalidURL
+
+        class _R:
+            def json(self):
+                return {"data": [{"id": "model-a"}, {"id": "model-b"}]}
+
+        return _R()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    peer = _peer(name="typo-peer", base_url="http://localhost:notaport/v1", ptype="ollama")
+    harness = _harness(extra_endpoints=[peer])
+    # No fake _live_models — exercise the REAL model_ops.list_live_models (the InvalidURL site).
+    channel = FakeChannel()
+    agent = SimpleNamespace(_llm=FakeLLM())
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
+        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=harness,
+    )
+
+    await repl._handle_slash("/model")  # bare list — must NOT raise
+    assert "typo-peer" in "\n".join(channel.messages)  # skipped WITH a note, not a crash
+
+    await repl._handle_slash("/model model-b")  # a primary-served name — must still switch cleanly
+    assert agent._llm.config.model == "model-b"
+    assert agent._llm.rebinds == []  # local hot-swap, never touched the dead peer
+
+
+@pytest.mark.asyncio
+async def test_second_same_peer_hop_refits_with_peer_provider_type(tmp_path, monkeypatch):
+    """#2: after primary→peerA-modelX (cross-endpoint), a SECOND hop peerA-modelX→peerA-modelY takes
+    the same-endpoint hot-swap branch. Its counter refit must resolve the PEER's provider_type
+    (ollama) from the current base_url, NOT the stale primary vllm — else the rebind hard-raises and
+    a clean switch is mislabeled 'couldn't rebind'. Persistence must still record the peer endpoint."""
+    from localharness.config.overlay import load_overlay
+
+    peer = _peer(name="ollama-local", base_url="http://localhost:11434/v1", ptype="ollama")
+    harness = _harness(extra_endpoints=[peer])
+
+    rebind_calls: list = []
+
+    class _RecordingTC:
+        def rebind(self, base_url, model, ptype):
+            rebind_calls.append((base_url, model, ptype))
+
+    ctx = SimpleNamespace(_token_counter=_RecordingTC(), max_context_tokens=131_072)
+    channel = FakeChannel()
+    agent = SimpleNamespace(_llm=FakeLLM(), _ctx=ctx)
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
+        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=harness,
+    )
+
+    async def _live_models(base_url):
+        # after the first switch the client sits on peerA, which lists BOTH peer models as `live`.
+        if base_url == "http://localhost:11434/v1":
+            return ["modelX", "modelY"], True
+        return ["model-a"], True  # primary
+
+    repl._live_models = _live_models
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: None)
+
+    await repl._handle_slash("/model modelX")  # cross-endpoint (peer-only name) → sits on peerA
+    assert agent._llm.config.base_url == "http://localhost:11434/v1"
+    assert rebind_calls[-1] == ("http://localhost:11434/v1", "modelX", "ollama")  # explicit ptype
+
+    await repl._handle_slash("/model modelY")  # same-peer hot-swap → ptype must RESOLVE to ollama
+    assert agent._llm.config.model == "modelY"
+    assert rebind_calls[-1] == ("http://localhost:11434/v1", "modelY", "ollama")  # NOT stale vllm
+    assert "could not rebind" not in "\n".join(channel.messages).lower()  # no spurious failure note
+
+    # persistence on the same-peer hop still records the PEER endpoint (resolved by base_url).
+    overlay = load_overlay(tmp_path / "overrides.yaml")
+    assert overlay["active_endpoint"]["model"] == "modelY"
+    assert overlay["active_endpoint"]["provider_type"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_persist_landed_unknown_base_url_persists_nothing(tmp_path):
+    """#6: an unknown base_url (neither the primary NOR a configured peer) must persist NOTHING —
+    never fall back to persist_default_model, which would rewrite provider/server.model and make the
+    next `start` serve the peer model on the managed GPU."""
+    peer = _peer(name="ollama-local", base_url="http://localhost:11434/v1", ptype="ollama")
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent = _repl(tmp_path, harness, live=["model-a"])
+
+    called = {"default": 0, "active": 0}
+
+    async def _default(model):
+        called["default"] += 1
+
+    async def _active(endpoint, model):
+        called["active"] += 1
+
+    repl._persist_default_model = _default
+    repl._persist_active_endpoint = _active
+
+    await repl._persist_landed("http://localhost:9999/v1", "ghost-model")  # unknown endpoint
+
+    assert called == {"default": 0, "active": 0}  # persisted NOTHING (no dangerous default fallback)
+    assert not (tmp_path / "overrides.yaml").exists()  # nothing written
+
+
+@pytest.mark.asyncio
+async def test_peer_vs_peer_collision_emits_note(tmp_path):
+    """#7: the same model name served on TWO peers — the first-configured peer wins (kept), and the
+    HIDDEN duplicate on the later peer is NOTED so it's discoverable, not silently dropped."""
+    peer_a = _peer(name="peer-a", base_url="http://localhost:11434/v1", ptype="ollama")
+    peer_b = _peer(name="peer-b", base_url="http://localhost:1234/v1", ptype="lmstudio")
+    harness = _harness(extra_endpoints=[peer_a, peer_b])
+    repl, channel, agent, probed = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["shared-model"],
+         "http://localhost:1234/v1": ["shared-model"]},
+    )
+
+    await repl._handle_slash("/model")
+    joined = "\n".join(channel.messages)
+    assert "shared-model" in joined  # first-configured (peer-a) copy is listed
+    assert "peer-b" in joined and "hidden by" in joined and "peer-a" in joined  # duplicate flagged

@@ -37,7 +37,11 @@ from localharness.registry import build_catalogue, coerce_value, set_value_in_di
 # Defense-in-depth: re-assert the gate's anti-reward-hacking seal before committing to LIVE
 # config (mirror experiment.py verbatim — the seal must hold at THIS boundary independently).
 _OFFREGISTRY_PREFIXES = ("bench.", "scenario", "grader", "success_criteria", "holdout", "sentinel",
-                         "org.enforce_capability_floor")
+                         "org.enforce_capability_floor",
+                         # 0.10.0 model tree: session-state that start-resume reads back — a proposal
+                         # must never silently switch the subject's backend mid-experiment. (Kept in
+                         # lockstep with experiment.py — the seal must not drift at this boundary.)
+                         "active_endpoint", "extra_endpoints")
 _MULTI_PATH_PATTERN = re.compile(r"[,\s;]")
 
 # A registry-addressed agent component lives under the `agent.` namespace, which is NOT a key

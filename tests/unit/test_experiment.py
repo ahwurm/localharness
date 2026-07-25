@@ -128,6 +128,33 @@ async def test_refuses_offregistry_component(archive_store, seeded_inflight):
     assert len(fake.calls) == 0  # seal refuses BEFORE running bench (no goalpost-moving)
 
 
+def test_session_endpoint_fields_are_sealed_in_both_boundaries():
+    """#4: `active_endpoint.*` (5 leaves) and `extra_endpoints` auto-enumerate as mutable registry
+    components (a proposal could switch the subject's backend mid-experiment when start-resume reads
+    active_endpoint back). Both the experiment gate AND the adoption boundary must seal them — the
+    duplication is deliberate, so assert on BOTH copies (they must not drift)."""
+    from localharness.autoresearch import adoption as adopt
+
+    for prefixes in (exp._OFFREGISTRY_PREFIXES, adopt._OFFREGISTRY_PREFIXES):
+        assert "active_endpoint" in prefixes
+        assert "extra_endpoints" in prefixes
+    # startswith semantics: every enumerated leaf is covered by the prefix, not just the bare key.
+    for leaf in ("active_endpoint.model", "active_endpoint.base_url", "extra_endpoints"):
+        assert any(leaf.startswith(p) for p in exp._OFFREGISTRY_PREFIXES)
+
+
+async def test_refuses_active_endpoint_component(archive_store, seeded_inflight):
+    """#4: a proposal targeting the (mutable-by-enumeration) `active_endpoint.model` → refused with
+    EXIT_REFUSE_OFFREGISTRY before any bench arm — the seal, not the catalogue, is what stops it."""
+    pid = await seeded_inflight(
+        archive_store, component="active_endpoint.model", before="model-a", after="peer-model"
+    )
+    fake = FakeRunSlice(train_base=_EQUAL_TRAIN, train_head=_EQUAL_TRAIN)
+    code = await exp.run_experiment(pid, store=archive_store, run_slice=fake)
+    assert code == exp.EXIT_REFUSE_OFFREGISTRY
+    assert len(fake.calls) == 0  # never reached bench
+
+
 # ---------------------------------------------------------------------------
 # EXP-03 — two-stage train→holdout flow + Welch direction + per-fixture shape
 # ---------------------------------------------------------------------------

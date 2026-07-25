@@ -331,3 +331,26 @@ def test_mining_novelty_fold_threshold_default_is_sweep_winner():
     from localharness.config.models import MemoryConsolidationConfig
 
     assert MemoryConsolidationConfig().mining_novelty_fold_threshold == 0.70
+
+
+# --- #1: EndpointRef.base_url rejects a genuinely-malformed URL at load (clean config error) --- #
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:11434/v1",
+    "https://api.example.com/v1",
+    "http://127.0.0.1:8000",        # #1 lenient: /v1 suffix NOT required (servers differ)
+    "http://localhost:notaport/v1",  # #1 lenient: a bad port is a runtime skip, not a load error
+])
+def test_endpoint_ref_accepts_wellformed_urls(url):
+    from localharness.config.models import EndpointRef
+    assert EndpointRef(name="peer", base_url=url).base_url == url
+
+
+@pytest.mark.parametrize("url", ["not-a-url", "ftp://x/y", "http://", "", "localhost:8000", "://nope"])
+def test_endpoint_ref_rejects_malformed_base_url(url):
+    """A base_url that is not a well-formed http(s)://host URL is rejected at load — a clean config
+    error instead of a silent runtime skip on every /model."""
+    from localharness.config.models import EndpointRef
+    with pytest.raises(ValidationError):
+        EndpointRef(name="peer", base_url=url)

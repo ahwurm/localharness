@@ -51,8 +51,11 @@ def list_live_models(base_url: str, timeout: float = 3.0) -> tuple[list[str], bo
     import httpx
     try:
         resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
-    except httpx.RequestError:
-        return [], False  # transport failure → genuinely unreachable
+    except (httpx.RequestError, httpx.InvalidURL):
+        # #1: httpx.InvalidURL is a SIBLING of RequestError (both subclass Exception directly), so a
+        # typo'd base_url (non-numeric port, stray ':') would otherwise propagate and crash the whole
+        # /model call. A malformed URL is, for our purposes, just an endpoint we can't reach.
+        return [], False  # transport failure / malformed URL → genuinely unreachable
     try:
         return [m["id"] for m in resp.json()["data"]], True
     except (ValueError, KeyError, TypeError) as exc:
@@ -154,6 +157,55 @@ async def persist_default_model(
             )
     except Exception as exc:  # noqa: BLE001 — the durable overlay write already succeeded
         return f"persisted, but the audit log could not be written: {exc}"
+    return None
+
+
+async def persist_active_endpoint(
+    harness: Any, endpoint: Any, model: str, *, config_dir: Any = None
+) -> str | None:
+    """Persist a CROSS-ENDPOINT switch (to a peer, not the primary provider) into the atomic user
+    overlay as a top-level ``active_endpoint`` record, so it can be resumed without ever corrupting
+    the primary ``provider``/``server`` identity.
+
+    Deliberately NOT ``persist_default_model``: that path rewrites ``provider.default_model``,
+    unions ``provider.available_models``, and — with a managed server — sets ``server.model``,
+    which would make the next ``start`` build a ``vllm serve <peer-model>`` command and try to
+    serve a foreign model on the managed GPU. Here we touch ONLY the additive ``active_endpoint``
+    key; ``provider`` and ``server`` stay pristine.
+
+    Same crash-safe contract as ``persist_default_model``: validate the merged HarnessConfig BEFORE
+    writing (so a bad record can never brick the next config load), then ``atomic_write_overlay``.
+    Also mutates the in-memory ``harness`` so the live session view stays consistent.
+
+    NOTE (follow-up): the ``start`` path does not yet READ ``active_endpoint`` back — a restart
+    currently resumes on the primary provider. Wiring that resume entangles the managed-server
+    fallback in ``start_cmd`` and is a separate step; this write is the durable, reversible half.
+    """
+    from localharness.config.models import ActiveSelection
+
+    overlay_path = _resolve_user_overlay_path(config_dir)
+    existing = load_overlay(overlay_path)
+    new_overlay = dict(existing)
+    set_value_in_dict(new_overlay, "active_endpoint.name", getattr(endpoint, "name", ""))
+    set_value_in_dict(new_overlay, "active_endpoint.base_url", endpoint.base_url)
+    set_value_in_dict(new_overlay, "active_endpoint.provider_type", endpoint.provider_type)
+    set_value_in_dict(new_overlay, "active_endpoint.model", model)
+    set_value_in_dict(new_overlay, "active_endpoint.api_key", getattr(endpoint, "api_key", "none"))
+
+    # Validate the SAME cascade the next `start` sees (current config ⊕ new overlay), excluding the
+    # agent-scope slice — mirrors persist_default_model. Raises ValidationError on a bad result.
+    harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
+    HarnessConfig.model_validate(deep_merge(harness.model_dump(mode="python"), harness_overlay))
+
+    atomic_write_overlay(overlay_path, new_overlay)
+
+    harness.active_endpoint = ActiveSelection(
+        name=getattr(endpoint, "name", ""),
+        base_url=endpoint.base_url,
+        provider_type=endpoint.provider_type,
+        model=model,
+        api_key=getattr(endpoint, "api_key", "none"),
+    )
     return None
 
 

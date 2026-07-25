@@ -1606,6 +1606,62 @@ class OrgConfig(BaseModel):
     )
 
 
+class EndpointRef(BaseModel):
+    """A peer OpenAI-compatible endpoint the `/model` tree can switch to, beyond the primary
+    `provider`. Each is an ALREADY-RUNNING server (attach-only); lifecycle management (start/stop)
+    is out of scope for the cross-endpoint switch — the harness re-points its client at the peer,
+    re-probes capabilities, and refits the token budget, exactly as a same-endpoint hot-swap does.
+    The primary provider is the implicit endpoint[0]; do NOT duplicate it into the peer list."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    name: str = Field(description="Human label for the endpoint, e.g. 'ollama-local'.")
+    base_url: str = Field(description="OpenAI-compatible base URL, with /v1 suffix.")
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+        default="unknown",
+        description="Runtime family — drives the token-counter's tokenize contract (vLLM/llama.cpp "
+        "exact, ollama/lmstudio labeled-approximate).",
+    )
+    api_key: str = Field(default="none", description="API key ('none' for local servers).")
+    extra_headers: dict[str, str] = Field(
+        default_factory=dict, description="Optional per-endpoint HTTP headers."
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v: str) -> str:
+        """#1: reject a genuinely-malformed base_url at LOAD time (a clean config error) rather than
+        letting the common typo become a silent runtime skip on every `/model`. STRUCTURAL only:
+        scheme must be http/https and a host must be present. Deliberately LENIENT beyond that — the
+        `/v1` suffix is NOT required (servers differ; Ollama's native API omits it), and a
+        non-numeric port is left to fail as a graceful probe-time skip (httpx.InvalidURL) instead of
+        blocking config load."""
+        from urllib.parse import urlparse
+        parsed = urlparse(v.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                f"base_url {v!r} is not a valid http(s) URL — expected e.g. "
+                "'http://localhost:11434/v1'."
+            )
+        return v
+
+
+class ActiveSelection(BaseModel):
+    """The endpoint+model the session is currently switched to when it is NOT the primary provider
+    (i.e. after a cross-endpoint `/model` switch). Persisted ADDITIVELY into the user overlay so it
+    never mutates the primary `provider`/`server` identity — reusing the default-model persistence
+    for a peer would rewrite `server.model` and make the next `start` build a `vllm serve <peer>`
+    command. None here = the primary provider is active (today's behavior)."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    name: str = Field(default="", description="Label of the active peer endpoint.")
+    base_url: str = Field(description="Active endpoint base URL.")
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+        default="unknown", description="Active endpoint runtime family."
+    )
+    model: str = Field(description="Active model id served by that endpoint.")
+    api_key: str = Field(default="none", description="Active endpoint API key.")
+
+
 class ProviderConfig(BaseModel):
     """Detected LLM provider configuration. Written by localharness init."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -1779,6 +1835,19 @@ class HarnessConfig(BaseModel):
 
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
+    extra_endpoints: list[EndpointRef] = Field(
+        default_factory=list,
+        description="Peer OpenAI-compatible endpoints the /model tree can switch to, beyond the "
+        "primary provider. Each is an already-running server (attach); lifecycle management is out "
+        "of scope for this step. The primary provider is the implicit endpoint[0] — never "
+        "duplicated here. Empty (the default) = single-endpoint behavior, unchanged.",
+    )
+    active_endpoint: Optional[ActiveSelection] = Field(
+        default=None,
+        description="Set when the session has switched to a NON-primary endpoint+model via /model "
+        "(cross-endpoint). Recorded additively so it never mutates provider/server. None = the "
+        "primary provider is active.",
+    )
     terminal: TerminalConfig = Field(
         default_factory=TerminalConfig,
         description="Interactive terminal-REPL behavior (type-anytime input box switches).",
