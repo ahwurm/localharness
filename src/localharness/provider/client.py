@@ -381,26 +381,82 @@ class LLMClient:
         self.config = config
         # Sticky per-client memory that the server rejected the `tools` param outright
         # (BadRequestError in xml mode) — without it every later iteration re-sends
-        # `tools=`, eats another 400 round-trip, and falls back again.
+        # `tools=`, eats another 400 round-trip, and falls back again. Per-SERVER state:
+        # rebind_endpoint() resets it because a different server may accept `tools`.
         self._tools_param_rejected = False
-        self._client = AsyncOpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key,
-            timeout=openai.Timeout(
-                config.timeout_seconds,
-                connect=config.connect_timeout_seconds,
-                read=config.timeout_seconds,
-                write=config.timeout_seconds,
-            ),
-            default_headers=config.extra_headers,
-            # Local single-tenant GPU: a timed-out generation will time out again on
-            # retry — the SDK's silent default (2 retries) turned one 600s failure
-            # into 30 min of dead air. Fail fast and let the agent loop react.
-            max_retries=0 if config.is_local else 2,
-        )
+        self._client = self._build_client()
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
         )
+
+    def _build_client(self) -> AsyncOpenAI:
+        """Construct the AsyncOpenAI bound to the CURRENT self.config (base_url/api_key/headers/
+        timeout). Factored out of __init__ so rebind_endpoint() re-points at a different server with
+        the SAME timeout + retry policy — the timeout math lives in exactly one place."""
+        c = self.config
+        return AsyncOpenAI(
+            base_url=c.base_url,
+            api_key=c.api_key,
+            timeout=openai.Timeout(
+                c.timeout_seconds,
+                connect=c.connect_timeout_seconds,
+                read=c.timeout_seconds,
+                write=c.timeout_seconds,
+            ),
+            default_headers=c.extra_headers,
+            # Local single-tenant GPU: a timed-out generation will time out again on
+            # retry — the SDK's silent default (2 retries) turned one 600s failure
+            # into 30 min of dead air. Fail fast and let the agent loop react.
+            max_retries=0 if c.is_local else 2,
+        )
+
+    def rebind_endpoint(
+        self,
+        base_url: str,
+        *,
+        api_key: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Re-point this client at a DIFFERENT server (a cross-endpoint /model swap). The
+        AsyncOpenAI bakes base_url in at construction, so re-pointing REBUILDS it, and resets the
+        per-server sticky `_tools_param_rejected` (the new server may accept the `tools` param).
+
+        The caller then sets `config.model` and MUST call `detect_capabilities()` — which
+        re-derives `tool_call_mode` AND refreshes `_fn_converter` (created for xml/text, cleared
+        for native). So this method deliberately does NOT touch `_fn_converter`: the mode isn't
+        known until the post-rebind probe runs, and detect_capabilities() is the single place that
+        keeps mode and converter in lockstep (the same path the same-endpoint hot-swap uses).
+
+        Exception-safe (mirrors TokenCounter.rebind, #30): if the rebuild raises, the prior
+        client + config are restored and the error re-raised, so a failed re-point never strands a
+        half-configured client mid-session."""
+        prev = (
+            self.config.base_url,
+            self.config.api_key,
+            self.config.extra_headers,
+            self._client,
+            self._tools_param_rejected,
+        )
+        self.config.base_url = base_url
+        if api_key is not None:
+            self.config.api_key = api_key
+        if extra_headers is not None:
+            self.config.extra_headers = dict(extra_headers)
+        try:
+            # TODO(follow-up): the previous AsyncOpenAI (prev[3]) is not explicitly aclose()'d here —
+            # closing an async client from this sync method needs care (event-loop ownership).
+            # Acceptable for now (GC + short session lifetimes); revisit if rebinds get frequent.
+            self._client = self._build_client()
+        except Exception:
+            (
+                self.config.base_url,
+                self.config.api_key,
+                self.config.extra_headers,
+                self._client,
+                self._tools_param_rejected,
+            ) = prev
+            raise
+        self._tools_param_rejected = False
 
     async def detect_capabilities(self) -> CapabilityResult:
         """Probe the model to determine tool call mode and context window. Never raises."""

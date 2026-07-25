@@ -667,9 +667,28 @@ class OrchestratorREPL:
             hf_cached = [m for m in managed_server.list_cached_models()
                          if m not in live and m not in registry]
             downloaded = registry + hf_cached
-        choices = live + downloaded
+        # Cross-endpoint discovery (0.10.0 model tree): probe the primary + each configured peer
+        # endpoint, so a target NAME can resolve to a model served on a DIFFERENT server. Backward
+        # compatible — with no `extra_endpoints`, peer_target is empty and every path below behaves
+        # exactly as before (single-endpoint users see zero change).
+        # #5: only probe peers when NEEDED — a bare listing, or an arg that does NOT already resolve
+        # on the current endpoint / managed cache. A routine `/model <local-name|local-number>` pays
+        # zero peer-probe latency.
+        local_choices = live + downloaded
+        need_peers = (not arg) or not (
+            (arg.isdigit() and 1 <= int(arg) <= len(local_choices)) or arg in local_choices
+        )
+        if need_peers:
+            peer_target, disc_notes = await self._discover_peer_models(
+                llm.config.base_url, live, downloaded
+            )
+        else:
+            peer_target, disc_notes = {}, []
+        choices = local_choices + list(peer_target)
         if reachable:
-            # picker menu = live + registry with info meta; HF-cache noise stays out of the menu
+            # picker menu = live + registry with info meta; HF-cache noise stays out of the menu.
+            # The grouped cross-endpoint tree in the picker is a later step — typed /model reaches
+            # peers today.
             self._model_cache[:] = self._compose_model_menu(live, managed, current)
 
         if not arg:
@@ -701,6 +720,11 @@ class OrchestratorREPL:
                     f"  {i}. {m}  (downloaded — switching restarts the managed server)"
                     f"{_info_suffix(m)}"
                 )
+            for i, m in enumerate(peer_target, start=len(live) + len(downloaded) + 1):
+                ep = peer_target[m]
+                lines.append(f"  {i}. {m}  (on {ep.name} — {ep.base_url})")
+            for n in disc_notes:
+                lines.append(f"  · {n}")
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines))
             open_menu = getattr(self._channel, "box_open_model_menu", None)
@@ -726,16 +750,51 @@ class OrchestratorREPL:
             return
 
         if target in live:
+            # Same (current) endpoint → hot-swap, mechanics unchanged.
             llm.config.model = target
             cap = await llm.detect_capabilities()
             note = await self._refresh_token_counter(target)
-            await self._persist_default_model(target)
+            await self._persist_landed(llm.config.base_url, target)
             await self._send_info(
                 f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
             )
             return
 
-        # Downloaded-but-not-served → managed restart
+        if target in peer_target:
+            # Cross-endpoint → re-point the client at the peer, then reuse the SAME re-probe /
+            # refit / counter-rebind machinery as a hot-swap. The token counter is rebound with the
+            # PEER's provider_type, so an Ollama target is labeled approximate, not the old vLLM's
+            # exact /tokenize contract.
+            ep = peer_target[target]
+            # #3: pass ep.extra_headers directly — NOT `ep.extra_headers or None`. `None` means
+            # "leave unchanged" in rebind_endpoint, so an endpoint with the default {} headers would
+            # otherwise silently INHERIT the previous endpoint's headers. An endpoint's identity is
+            # exactly its own headers.
+            llm.rebind_endpoint(
+                ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers
+            )
+            llm.config.model = target
+            cap = await llm.detect_capabilities()
+            note = await self._refresh_token_counter(
+                target, base_url=ep.base_url, provider_type=ep.provider_type
+            )
+            await self._persist_landed(ep.base_url, target)
+            await self._send_info(
+                f"Switched to {target} on {ep.name} — {ep.base_url} "
+                f"(tool calling: {cap.tool_call_mode}).{note}"
+            )
+            return
+
+        # Downloaded-but-not-served → managed restart. The managed vLLM serves at the PRIMARY
+        # provider base_url; if we're currently on a peer (an in-session cross-endpoint switch),
+        # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
+        # the peer. A no-op in the common case (current already == primary).
+        _prim = getattr(self._harness, "provider", None)
+        if _prim is not None and llm.config.base_url != _prim.base_url:
+            # #3: restore the primary identity FULLY — clear any peer extra_headers with {} (not
+            # None, which would leave the peer's headers on the client). ProviderConfig has no
+            # headers field, so the primary's identity carries none.
+            llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={})
         from localharness.provider import server as managed_server
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
@@ -770,12 +829,157 @@ class OrchestratorREPL:
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
-        await self._persist_default_model(served)
+        await self._persist_landed(llm.config.base_url, served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
         )
 
-    async def _refresh_token_counter(self, model: str) -> str:
+    async def _discover_peer_models(
+        self, current_base_url: str, live: list[str], downloaded: list[str]
+    ) -> tuple[dict, list[str]]:
+        """Probe the primary provider + each configured peer endpoint for its served models.
+
+        Returns ``(peer_target, notes)`` where ``peer_target`` maps a model name to the
+        ``EndpointRef`` it lives on, for every model NOT already served on the CURRENT endpoint
+        (``live``) or downloadable via the managed server (``downloaded``). Disambiguation: a name
+        served on the current endpoint stays there (prefer current); among peers the FIRST-configured
+        endpoint wins on a collision (the hidden duplicate is NOTED, #7). Unreachable / malformed /
+        malformed-URL peers are SKIPPED with a note, NEVER raised (#1/#38 — the broad per-peer catch
+        makes that promise true even for httpx.InvalidURL from a typo'd base_url). With no
+        ``extra_endpoints`` this returns ``({}, [])`` and the /model command behaves exactly as before.
+        """
+        from localharness.cli import model_ops
+        from localharness.config.models import EndpointRef
+
+        provider = getattr(self._harness, "provider", None)
+        if provider is None:
+            return {}, []  # no primary provider (e.g. a minimal test harness) → no peer tree
+        endpoints = [
+            EndpointRef(
+                name="primary",
+                base_url=provider.base_url,
+                provider_type=provider.provider_type,
+                api_key=provider.api_key,
+            )
+        ]
+        endpoints += list(getattr(self._harness, "extra_endpoints", None) or [])
+
+        # De-dup by base_url, preserving first-configured ORDER (collision priority), skipping the
+        # CURRENT endpoint (already probed → its models are `live`).
+        to_probe: list = []
+        seen_urls = {current_base_url}
+        for ep in endpoints:
+            if ep.base_url in seen_urls:
+                continue
+            seen_urls.add(ep.base_url)
+            to_probe.append(ep)
+
+        async def _probe(ep):
+            # #1: each probe FULLY contains its own failure — a malformed / unreachable / malformed-
+            # URL peer is REPORTED, never raised (incl. any httpx.InvalidURL that slips past
+            # list_live_models). The docstring's never-raise promise is enforced HERE.
+            try:
+                models, reachable = await self._live_models(ep.base_url)
+                return ep, models, reachable, None
+            except Exception as exc:  # noqa: BLE001 — a bad peer must never crash /model
+                return ep, None, None, exc
+
+        # #5: probe peers CONCURRENTLY (still off-loop — each _live_models runs in a worker thread),
+        # then fold the results IN first-configured order so collision priority stays deterministic.
+        results = await asyncio.gather(*(_probe(ep) for ep in to_probe))
+
+        peer_target: dict = {}
+        notes: list[str] = []
+        for ep, models, reachable, exc in results:
+            if isinstance(exc, model_ops.MalformedModelListError):
+                notes.append(
+                    f"skipped {ep.name} ({ep.base_url}): not an OpenAI-compatible model list"
+                )
+                continue
+            if exc is not None:
+                notes.append(f"skipped {ep.name} ({ep.base_url}): {exc}")
+                continue
+            if not reachable:
+                notes.append(f"skipped {ep.name} ({ep.base_url}): unreachable")
+                continue
+            for m in models:
+                if m in live or m in downloaded:
+                    continue  # prefer the current endpoint / managed download over a peer
+                if m in peer_target:
+                    # #7: a same-named model on a LATER peer is hidden (first-configured wins). Note
+                    # it so the duplicate is discoverable, not silently dropped.
+                    notes.append(
+                        f"{ep.name} ({ep.base_url}) also serves {m!r} — hidden by "
+                        f"{peer_target[m].name} (first configured wins)"
+                    )
+                    continue
+                peer_target[m] = ep
+        return peer_target, notes
+
+    def _peer_by_base_url(self, base_url: str):
+        """The configured peer ``EndpointRef`` serving ``base_url``, or None (e.g. the primary)."""
+        for ep in getattr(self._harness, "extra_endpoints", None) or []:
+            if ep.base_url == base_url:
+                return ep
+        return None
+
+    def _provider_type_for_base_url(self, base_url: str) -> str | None:
+        """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
+        — the primary provider first, then any configured peer. #2: used as the token-counter
+        default so a same-endpoint hot-swap performed while the session SITS ON A PEER refits with
+        the peer's tokenize contract, not the primary's. Trusting ``provider.provider_type`` here
+        stranded a SECOND same-peer hop on the primary's stale ptype (an Ollama peer counted as
+        vLLM → the counter rebind hard-raised, mislabeling a clean switch as 'couldn't rebind' and
+        suggesting a retry that no-ops on the already-active short-circuit)."""
+        provider = getattr(self._harness, "provider", None)
+        if provider is not None and base_url == provider.base_url:
+            return provider.provider_type
+        ep = self._peer_by_base_url(base_url)
+        return ep.provider_type if ep is not None else None
+
+    async def _persist_landed(self, base_url: str, model: str) -> None:
+        """Persist a completed switch by WHERE it landed. The primary provider endpoint keeps
+        today's default-model overlay path (issue #22); a PEER endpoint records an additive
+        active-endpoint selection that never mutates provider/server. (Restart-resume that reads a
+        peer selection back is a scoped follow-up — see model_ops.persist_active_endpoint.)"""
+        provider = getattr(self._harness, "provider", None)
+        if provider is None or base_url == provider.base_url:
+            await self._persist_default_model(model)
+            return
+        ep = self._peer_by_base_url(base_url)
+        if ep is None:
+            # #6: an unknown base_url is NEITHER the primary NOR a configured peer. Persisting it via
+            # persist_default_model is the EXACT corruption persist_active_endpoint exists to prevent
+            # — it would rewrite provider/server.model, so the next `start` builds `vllm serve
+            # <peer-model>` on the managed GPU. Persist NOTHING; log loudly. Currently unreachable
+            # (callers pass the live client base_url, always the primary or a known peer) — this is a
+            # guard against a future caller, not a live path.
+            log.warning(
+                "/model landed on an unrecognized endpoint %r (model %r) — not persisting: it "
+                "matches neither the primary provider nor any configured extra_endpoints.",
+                base_url, model,
+            )
+            return
+        await self._persist_active_endpoint(ep, model)
+
+    async def _persist_active_endpoint(self, endpoint, model: str) -> None:
+        """Persist a cross-endpoint (peer) switch to the atomic user overlay as an additive
+        active_endpoint record — never corrupts the primary provider/server. Best-effort: a failure
+        is surfaced but never crashes the live session, which has already switched."""
+        from localharness.cli import model_ops
+        try:
+            await model_ops.persist_active_endpoint(
+                self._harness, endpoint, model, config_dir=self._config_dir
+            )
+        except Exception as exc:  # noqa: BLE001 — the in-session switch already succeeded
+            await self._channel.send_message(
+                f"Switched for this session, but persisting the active endpoint failed: {exc}",
+                metadata={"style": "system.error"},
+            )
+
+    async def _refresh_token_counter(
+        self, model: str, *, base_url: str | None = None, provider_type: str | None = None
+    ) -> str:
         """After a swap, refit the context-window budget (#31) and rebind the shared TokenCounter
         (#25/#30) to the new served model. The counter is ONE object shared by the context manager,
         compaction pipeline and subagent runner, so an in-place rebind/refit updates them all. Both
@@ -789,8 +993,19 @@ class OrchestratorREPL:
         from localharness.cli.init_cmd import _fit_context_tokens
 
         ctx = getattr(self._agent, "_ctx", None)
-        base_url = self._agent._llm.config.base_url
-        ptype = getattr(getattr(self._harness, "provider", None), "provider_type", None)
+        # Cross-endpoint swap passes the TARGET endpoint's base_url + provider_type so the window
+        # refit and counter rebind use the RIGHT runtime's tokenize contract (an Ollama target must
+        # rebind ptype="ollama" → labeled approximate, not the old vLLM). Default to the current
+        # primary (existing same-endpoint behavior) when a caller omits them.
+        base_url = base_url if base_url is not None else self._agent._llm.config.base_url
+        # #2: default the provider_type by RESOLVING the (possibly-peer) base_url the session is on,
+        # NOT by unconditionally trusting the primary provider — else a same-endpoint hot-swap while
+        # sitting on a peer would rebind the counter with the primary's stale ptype.
+        ptype = (
+            provider_type
+            if provider_type is not None
+            else self._provider_type_for_base_url(base_url)
+        )
         notes: list[str] = []
 
         # #31: refit the budget to the new model's served window, or disclose when unknowable — a
