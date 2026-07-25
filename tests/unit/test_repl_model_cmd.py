@@ -831,3 +831,102 @@ async def test_peer_vs_peer_collision_emits_note(tmp_path):
     joined = "\n".join(channel.messages)
     assert "shared-model" in joined  # first-configured (peer-a) copy is listed
     assert "peer-b" in joined and "hidden by" in joined and "peer-a" in joined  # duplicate flagged
+
+
+# --- Step 2: /model rendered as a grouped-by-endpoint TREE (0.10.0 model tree) --- #
+
+
+@pytest.mark.asyncio
+async def test_model_tree_groups_primary_and_peer_sections(tmp_path):
+    """Bare /model with a peer configured renders a grouped tree: a primary vLLM header carrying
+    its live model (marked active), then an Ollama peer header with the peer-only model indented
+    UNDER it (not under the vLLM header)."""
+    peer = _peer()  # ollama-local @ 11434
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    await repl._handle_slash("/model")
+    out = channel.messages[-1]
+    # primary provider section names its framework + host; its live model is marked active
+    assert "▸ vLLM · localhost:8081" in out
+    assert "model-a" in out and "[active]" in out and "●" in out
+    # peer section names the peer framework + host; the peer-only model is grouped beneath it
+    assert "▸ Ollama · localhost:11434" in out
+    assert "gpt-oss:20b" in out
+    # the peer model sits under the Ollama header, the live model under the vLLM header
+    assert out.index("▸ vLLM") < out.index("model-a") < out.index("▸ Ollama") < out.index("gpt-oss:20b")
+    # the one-Enter trailer + numbering hint is preserved
+    assert "scroll the menu and press Enter" in out
+
+
+@pytest.mark.asyncio
+async def test_model_tree_continuous_numbering_resolves_peer_model(tmp_path):
+    """The tree numbers models in one continuous sequence across groups; the number shown for a
+    peer model resolves THAT model via /model <number> (cross-endpoint switch), proving the
+    displayed numbers match the resolver's choices."""
+    peer = _peer()
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    await repl._handle_slash("/model")
+    assert "2. gpt-oss:20b" in channel.messages[-1]  # live model-a is 1, peer model is 2
+
+    await repl._handle_slash("/model 2")
+    assert agent._llm.config.model == "gpt-oss:20b"
+    assert agent._llm.config.base_url == "http://localhost:11434/v1"  # rebound to the peer endpoint
+
+
+@pytest.mark.asyncio
+async def test_model_tree_feeds_peer_models_into_picker_cache(tmp_path):
+    """After a bare /model the picker cache (Tab menu) also holds the peer's models, each tagged
+    with the peer framework + host — so the menu can switch across endpoints, not just list them."""
+    peer = _peer()
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": ["gpt-oss:20b"]},
+    )
+
+    await repl._handle_slash("/model")
+    assert ("model-a", "serving now") in repl._model_cache
+    assert ("gpt-oss:20b", "Ollama · localhost:11434") in repl._model_cache
+
+
+@pytest.mark.asyncio
+async def test_model_tree_marks_cold_peer_plainly(tmp_path):
+    """A configured-but-unreachable peer is marked plainly beneath the tree (a note naming the
+    endpoint + 'unreachable'); the reachable primary section still renders its model normally."""
+    peer = _peer(name="ollama-local")
+    harness = _harness(extra_endpoints=[peer])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],
+         "http://localhost:11434/v1": "unreachable"},
+    )
+
+    await repl._handle_slash("/model")
+    out = channel.messages[-1]
+    assert "▸ vLLM · localhost:8081" in out and "model-a" in out
+    assert "ollama-local" in out and "unreachable" in out  # cold peer marked plainly
+
+
+@pytest.mark.asyncio
+async def test_model_flat_listing_unchanged_without_peers(tmp_path):
+    """Backward compat: with no extra_endpoints the listing stays the flat single-endpoint style
+    (no ▸ endpoint headers) — existing single-endpoint output/behavior is unchanged."""
+    repl, channel, _ = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+
+    await repl._handle_slash("/model")
+    out = channel.messages[-1]
+    assert "▸" not in out  # no grouped-tree headers
+    assert out.startswith("Models:")
+    assert "1. model-a" in out and "2. model-b" in out

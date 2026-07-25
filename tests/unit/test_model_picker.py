@@ -175,3 +175,39 @@ def test_completer_renders_meta_from_tuples():
     assert comps[0].text == "qwen3.6-35b-a3b"
     assert comps[0].display_meta_text == "serving now · nvfp4 (modelopt) · ~30 t/s"
     assert comps[1].display_meta_text == "model"
+
+
+# ------------------------------------------------------------------ peer models in the menu (tree)
+def test_menu_includes_peer_models_tagged_with_endpoint():
+    """0.10.0 tree: peer-endpoint models join the completion cache after live + registry, each
+    tagged `<framework> · <host:port>` so a user tells a vLLM model from an Ollama one. Registry
+    (managed) and live entries are unchanged."""
+    from localharness.config.models import EndpointRef
+
+    ep = EndpointRef(name="ollama-local", base_url="http://localhost:11434/v1",
+                     provider_type="ollama")
+    menu = OrchestratorREPL._compose_model_menu(
+        ["qwen-live"], None, "qwen-live", {"gpt-oss:20b": ep},
+    )
+    assert menu[0] == ("qwen-live", "serving now")               # live entry unchanged
+    assert menu[-1] == ("gpt-oss:20b", "Ollama · localhost:11434")  # peer tagged with endpoint
+
+
+def test_menu_without_peers_is_unchanged():
+    """No peer_target (the default) leaves the menu exactly live + registry — single-endpoint
+    users see no new entries."""
+    assert OrchestratorREPL._compose_model_menu(["m"], None, "m") == [("m", "serving now")]
+
+
+def test_peer_model_completes_as_model_pick_with_endpoint_meta():
+    """A peer model in the cache is a normal /model completion: model-pick style (one-Enter
+    cross-endpoint switch) with its endpoint tag as the right-column meta."""
+    c = SlashCommandCompleter(model_names_fn=lambda: [
+        ("qwen-live", "serving now"),
+        ("gpt-oss:20b", "Ollama · localhost:11434"),
+    ])
+    comps = list(c.get_completions(Document("/model gpt", len("/model gpt")), None))
+    assert len(comps) == 1
+    assert comps[0].text == "gpt-oss:20b"
+    assert comps[0].display_meta_text == "Ollama · localhost:11434"
+    assert "model-pick" in (comps[0].style or "")
