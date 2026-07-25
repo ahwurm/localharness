@@ -38,6 +38,33 @@ def _literal_values(annotation: Any) -> list[str]:
     return [a for a in args if isinstance(a, str)]
 
 
+# Pretty framework labels for the /model tree headers + picker-menu meta (0.10.0 model tree):
+# an endpoint's provider_type mapped to a human name. Unknown/blank falls back to a neutral label.
+_FRAMEWORK_LABELS = {
+    "vllm": "vLLM",
+    "ollama": "Ollama",
+    "llamacpp": "llama.cpp",
+    "lmstudio": "LM Studio",
+    "unknown": "server",
+}
+
+
+def _framework_label(provider_type: str | None) -> str:
+    """Human framework name for an endpoint's provider_type (tree header + menu meta)."""
+    return _FRAMEWORK_LABELS.get(provider_type or "", provider_type or "server")
+
+
+def _endpoint_host(base_url: str) -> str:
+    """host:port of a base_url for compact headers/meta (strip scheme + /v1 path). Best-effort:
+    a display helper must never raise into the /model listing, so a parse slip falls back raw."""
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(base_url).netloc or base_url
+    except Exception:  # noqa: BLE001 — display-only; never break the listing
+        return base_url
+
+
 def _generation_system_prompt() -> str:
     """System prompt for agent-YAML generation, DERIVED from AgentConfig (#33).
 
@@ -686,10 +713,11 @@ class OrchestratorREPL:
             peer_target, disc_notes = {}, []
         choices = local_choices + list(peer_target)
         if reachable:
-            # picker menu = live + registry with info meta; HF-cache noise stays out of the menu.
-            # The grouped cross-endpoint tree in the picker is a later step — typed /model reaches
-            # peers today.
-            self._model_cache[:] = self._compose_model_menu(live, managed, current)
+            # picker menu = live + registry + peer-endpoint models (each tagged with its
+            # framework · host so a vLLM model reads apart from an Ollama one); HF-cache noise
+            # stays out of the menu. Peers only join when they were probed (a routine local arg
+            # doesn't probe → peer_target is {} → menu is live+registry, unchanged).
+            self._model_cache[:] = self._compose_model_menu(live, managed, current, peer_target)
 
         if not arg:
             if not choices:
@@ -711,20 +739,27 @@ class OrchestratorREPL:
                                      f"~{entry.tps:g} t/s measured" if entry.tps else None) if p]
                 return f"  [{' · '.join(parts)}]" if parts else ""
 
-            lines = ["Models:"]
-            for i, m in enumerate(live, start=1):
-                mark = "  [active]" if m == current else ""
-                lines.append(f"  {i}. {m}  (serving){mark}{_info_suffix(m)}")
-            for i, m in enumerate(downloaded, start=len(live) + 1):
-                lines.append(
-                    f"  {i}. {m}  (downloaded — switching restarts the managed server)"
-                    f"{_info_suffix(m)}"
+            # 0.10.0 model tree: with peer endpoints configured, render a grouped-by-endpoint tree
+            # (primary provider first, then each reachable peer, its models indented under a
+            # `▸ <framework> · <host:port>` header). Numbering stays CONTINUOUS across groups and
+            # matches `choices`, so /model <number> resolves the model shown. With no peers the
+            # flat single-endpoint listing is byte-unchanged (backward compat).
+            if getattr(self._harness, "extra_endpoints", None):
+                lines = self._grouped_model_lines(
+                    live, downloaded, peer_target, disc_notes, current, _info_suffix
                 )
-            for i, m in enumerate(peer_target, start=len(live) + len(downloaded) + 1):
-                ep = peer_target[m]
-                lines.append(f"  {i}. {m}  (on {ep.name} — {ep.base_url})")
-            for n in disc_notes:
-                lines.append(f"  · {n}")
+            else:
+                lines = ["Models:"]
+                for i, m in enumerate(live, start=1):
+                    mark = "  [active]" if m == current else ""
+                    lines.append(f"  {i}. {m}  (serving){mark}{_info_suffix(m)}")
+                for i, m in enumerate(downloaded, start=len(live) + 1):
+                    lines.append(
+                        f"  {i}. {m}  (downloaded — switching restarts the managed server)"
+                        f"{_info_suffix(m)}"
+                    )
+                for n in disc_notes:
+                    lines.append(f"  · {n}")
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines))
             open_menu = getattr(self._channel, "box_open_model_menu", None)
@@ -833,6 +868,54 @@ class OrchestratorREPL:
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
         )
+
+    def _grouped_model_lines(
+        self, live: list, downloaded: list, peer_target: dict, disc_notes: list,
+        current: str, info_suffix,
+    ) -> list[str]:
+        """Bare-/model listing grouped by endpoint/framework (0.10.0 model tree).
+
+        The primary provider is the first section (its live models + managed-downloadable
+        checkpoints), then one section per REACHABLE peer endpoint with its models indented under a
+        `▸ <framework> · <host:port>` header — so a user sees which framework serves each model and
+        can switch across them. Numbering is a single continuous sequence over live + downloaded +
+        peer models, the SAME order as the resolver's `choices`, so `/model <number>` resolves the
+        model actually shown. The active model is marked `● [active]`. Cold / malformed / collision
+        peers stay plain `· <note>` lines (each already names its endpoint and the reason) — that is
+        how an unreachable peer is marked."""
+        provider = getattr(self._harness, "provider", None)
+        lines = ["Models:"]
+        if provider is not None:
+            lines.append(
+                f"▸ {_framework_label(provider.provider_type)} · {_endpoint_host(provider.base_url)}"
+            )
+        n = 0
+        for m in live:
+            n += 1
+            mark = "  ● [active]" if m == current else ""
+            lines.append(f"  {n}. {m}  (serving){mark}{info_suffix(m)}")
+        for m in downloaded:
+            n += 1
+            lines.append(
+                f"  {n}. {m}  (downloaded — switching restarts the managed server){info_suffix(m)}"
+            )
+        # Reachable peers, grouped by endpoint in first-configured order. peer_target is already
+        # endpoint-grouped by insertion (discover probes endpoints in order), so bucketing by
+        # base_url preserves the resolver's `choices` order → the numbers stay in step.
+        groups: dict[str, tuple] = {}
+        for m, ep in peer_target.items():
+            groups.setdefault(ep.base_url, (ep, []))[1].append(m)
+        for ep, names in groups.values():
+            lines.append(
+                f"▸ {_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"
+            )
+            for m in names:
+                n += 1
+                mark = "  ● [active]" if m == current else ""
+                lines.append(f"  {n}. {m}{mark}")
+        for note in disc_notes:
+            lines.append(f"  · {note}")
+        return lines
 
     async def _discover_peer_models(
         self, current_base_url: str, live: list[str], downloaded: list[str]
@@ -1058,11 +1141,13 @@ class OrchestratorREPL:
         return await asyncio.to_thread(model_ops.list_live_models, base_url)
 
     @staticmethod
-    def _compose_model_menu(live: list, managed, current: str) -> list:
-        """Picker-menu entries: (name, info-meta) tuples, live models first then registry —
-        HF-cache repos stay OUT of the menu (many are not vLLM-servable; the printed listing
-        keeps them). Info shows only what is KNOWN: quant and measured t/s from the registry
-        entry, never estimates."""
+    def _compose_model_menu(live: list, managed, current: str, peer_target: dict | None = None) -> list:
+        """Picker-menu entries: (name, info-meta) tuples, live models first then registry, then
+        peer-endpoint models — HF-cache repos stay OUT of the menu (many are not vLLM-servable; the
+        printed listing keeps them). Info shows only what is KNOWN: quant and measured t/s from the
+        registry entry, never estimates. Peer models (0.10.0 tree) carry `<framework> · <host:port>`
+        as their meta so a vLLM model reads apart from an Ollama one; each is a normal /model
+        completion the completer styles model-pick (one-Enter cross-endpoint switch)."""
         def info(entry) -> list:
             if entry is None:
                 return []
@@ -1081,6 +1166,8 @@ class OrchestratorREPL:
         for e in (getattr(managed, "local_models", []) or []) if managed is not None else []:
             if e.name not in live:
                 out.append((e.name, " · ".join(info(e) + ["swap"])))
+        for m, ep in (peer_target or {}).items():
+            out.append((m, f"{_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"))
         return out
 
     async def _prefetch_model_cache(self) -> None:
