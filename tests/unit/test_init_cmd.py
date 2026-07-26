@@ -38,7 +38,12 @@ def test_fit_context_tokens_reserves_output():
     from localharness.cli.init_cmd import _fit_context_tokens
     assert _fit_context_tokens(65_536) == 61_440    # reference 64K window
     assert _fit_context_tokens(131_072) == 126_976  # 128K window
-    assert _fit_context_tokens(8_000) == 8_192      # floor for tiny windows
+    # A budget must NEVER exceed the served window (was: tiny windows floored to 8192, over-running
+    # the cap → silent truncation; Ollama's default num_ctx=4096 hit exactly this).
+    assert _fit_context_tokens(8_000) == 7_000      # clamped below the 8000 window, not 8192
+    assert _fit_context_tokens(4_096) == 3_584      # Ollama default num_ctx: budget < window
+    for w in (1_024, 2_048, 4_096, 8_000, 12_288, 65_536, 131_072):
+        assert _fit_context_tokens(w) <= w          # invariant: never over-run any served window
 
 
 def test_detect_llamacpp_nctx_parses_props(monkeypatch):

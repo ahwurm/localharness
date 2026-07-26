@@ -56,8 +56,14 @@ def _detect_max_model_len(base_url: str) -> int | None:
 
 
 def _fit_context_tokens(max_model_len: int, output_reserve: int = 4_096) -> int:
-    """Context budget that compacts BEFORE the served window's input cap."""
-    return max(8_192, max_model_len - output_reserve)
+    """Context budget that compacts BEFORE the served window's input cap — and NEVER exceeds it.
+    A normal window reserves output room and floors at 8192. A window too small to do both is
+    clamped BELOW the served cap (proportional reserve) rather than over-run: e.g. Ollama's
+    default num_ctx=4096 would otherwise floor to 8192 and drive silent prompt truncation."""
+    ideal = max_model_len - output_reserve
+    if ideal >= 8_192:
+        return ideal
+    return max(1_024, max_model_len - max(256, max_model_len // 8))
 
 
 def _detect_llamacpp_nctx(base_url: str) -> int | None:
