@@ -380,10 +380,13 @@ class LLMClient:
 
         self.config = config
         # Sticky per-client memory that the server rejected the `tools` param outright
-        # (BadRequestError in xml mode) — without it every later iteration re-sends
+        # (BadRequestError in xml OR native mode) — without it every later iteration re-sends
         # `tools=`, eats another 400 round-trip, and falls back again. Per-SERVER state:
         # rebind_endpoint() resets it because a different server may accept `tools`.
         self._tools_param_rejected = False
+        # Native-mode twin (audit Fix E): a server that 400s the disable_thinking
+        # extra_body={"chat_template_kwargs": ...} param. Same sticky/per-server contract.
+        self._extra_body_rejected = False
         self._client = self._build_client()
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
@@ -436,6 +439,7 @@ class LLMClient:
             self.config.extra_headers,
             self._client,
             self._tools_param_rejected,
+            self._extra_body_rejected,
         )
         self.config.base_url = base_url
         if api_key is not None:
@@ -454,9 +458,11 @@ class LLMClient:
                 self.config.extra_headers,
                 self._client,
                 self._tools_param_rejected,
+                self._extra_body_rejected,
             ) = prev
             raise
         self._tools_param_rejected = False
+        self._extra_body_rejected = False
 
     async def detect_capabilities(self) -> CapabilityResult:
         """Probe the model to determine tool call mode and context window. Never raises."""
@@ -510,7 +516,12 @@ class LLMClient:
             tool_call_mode = "xml"
             log.warning("Capability probe failed, defaulting to xml: %s", exc)
 
-        # Context window detection
+        # Context window detection — vLLM/OpenAI-compat /v1/models shape ONLY (context_length|
+        # max_model_len). llama.cpp/Ollama/LM Studio don't report a window here, so this stays the
+        # config default for them. The PROVIDER-AWARE source of truth is context.probe_served_window
+        # (llama.cpp /props, Ollama /api/show, LM Studio /api/v0/models); start/repl use IT for the
+        # window guard + budget refit. Not unified here to keep CapabilityResult.context_window's
+        # contract (and its callers/tests) stable — reconcile if this probe ever needs the peers.
         try:
             models_response = await self._client.models.list()
             for m in models_response.data:
@@ -620,34 +631,79 @@ class LLMClient:
         read-timeout applies BETWEEN chunks, so a healthy generation can run as long
         as the budget allows, and a client disconnect aborts engine-side generation.
         """
+        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking)
         try:
-            kwargs: dict[str, Any] = {
-                "model": self.config.model,
-                "messages": messages,
-                "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
-            }
-            name_unmap: dict[str, str] | None = None
-            if tools:
-                kwargs["tools"], name_unmap = _tools_to_api_format(tools)
-            if self.config.stop_sequences:
-                kwargs["stop"] = self.config.stop_sequences
-            # Thinking is deliberately left ON for local subjects (#11): reasoning
-            # quality wins over latency. Do not re-add enable_thinking:False — the
-            # loop strips <think> blocks before history/parse, and the kwarg was
-            # silently dropped by Ollama and type-checked by llama.cpp anyway.
-            # Sole scoped exception: INTERNAL calls opt in per-request via
-            # disable_thinking (C0 sweep: mining/summarizer budgets starved by
-            # hidden CoT under --reasoning-parser) — never an is_local blanket.
-            if disable_thinking:
-                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
                     self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
                     gen_timeout,
                 )
+        except openai.BadRequestError as exc:
+            # Symmetry with _complete_xml (audit Fix E): the XML path self-heals a rejected `tools`
+            # param; native used to hard-error on the same 400. Scope the retry to the KNOWN optional
+            # params (tools, extra_body/chat_template_kwargs) — a genuinely malformed 400 must still
+            # surface, never a blanket retry. Remember the rejection (sticky, per-server) so we don't
+            # re-eat it every turn, then retry ONCE with the offending param dropped.
+            dropped = self._remember_native_rejection(exc, kwargs)
+            if dropped is None:
+                raise self._wrap_error(exc) from exc
+            log.warning("Server rejected native `%s` param (400) — retrying once without it", dropped)
+            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking)  # sticky → omitted
+            try:
+                async with _inference_gate(self.config):
+                    return await self._consume_bounded(
+                        self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                        gen_timeout,
+                    )
+            except Exception as retry_exc:
+                raise self._wrap_error(retry_exc) from retry_exc
         except Exception as exc:
             raise self._wrap_error(exc) from exc
+
+    def _native_kwargs(
+        self, messages: list[Message], tools: list[ToolSchema] | None, disable_thinking: bool
+    ) -> tuple[dict[str, Any], dict[str, str] | None]:
+        """Build native-mode request kwargs, HONORING the per-server sticky rejections so a param a
+        prior turn 400'd on is never re-sent (mirrors _complete_xml's `not self._tools_param_rejected`
+        guard). Returns (kwargs, name_unmap). name_unmap is None whenever `tools` is omitted.
+
+        Thinking is deliberately left ON for local subjects (#11): reasoning quality wins over
+        latency, the loop strips <think> before history/parse, and the kwarg is silently dropped by
+        Ollama / type-checked by llama.cpp anyway. Sole scoped exception: INTERNAL calls opt in via
+        disable_thinking (mining/summarizer budgets starved by hidden CoT under --reasoning-parser) —
+        never an is_local blanket; a server that 400s it is caught by the _extra_body_rejected flag."""
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        name_unmap: dict[str, str] | None = None
+        if tools and not self._tools_param_rejected:
+            kwargs["tools"], name_unmap = _tools_to_api_format(tools)
+        if self.config.stop_sequences:
+            kwargs["stop"] = self.config.stop_sequences
+        if disable_thinking and not self._extra_body_rejected:
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        return kwargs, name_unmap
+
+    def _remember_native_rejection(
+        self, exc: openai.BadRequestError, sent_kwargs: dict[str, Any]
+    ) -> str | None:
+        """Map a native 400 to a KNOWN rejected optional param, set its per-server sticky flag, and
+        return the param name to drop — or None when the error isn't a recognized param rejection (a
+        genuinely malformed request → surface it, never blanket-retry). Matches only a param we
+        ACTUALLY sent whose name the server's own error text implicates."""
+        text = str(exc).lower()
+        if "extra_body" in sent_kwargs and any(
+            s in text for s in ("chat_template_kwargs", "enable_thinking", "extra_body")
+        ):
+            self._extra_body_rejected = True
+            return "extra_body"
+        if "tools" in sent_kwargs and "tool" in text:
+            self._tools_param_rejected = True
+            return "tools"
+        return None
 
     async def _create_and_consume(
         self,

@@ -458,13 +458,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # which kills the 61,440-in-a-131,072-world bug). We do NOT silently override it — we
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
-    from localharness.agent.context import RESPONSE_RESERVE_TOKENS
+    from localharness.agent.context import RESPONSE_RESERVE_TOKENS, probe_served_window
     _cfg_window = agent_config.context.max_context_tokens
-    if _effective_max_context(served_window, _cfg_window, RESPONSE_RESERVE_TOKENS) != _cfg_window:
-        usable = (served_window or 0) - RESPONSE_RESERVE_TOKENS
+    # PROVIDER-AWARE served-window discovery for the guard. _probe_llm's window comes from
+    # detect_capabilities' vLLM-shape /v1/models probe (max_model_len) — None for llama.cpp/
+    # LM Studio/Ollama, so this fail-loud guard used to silently NO-OP for them (_effective_max_context
+    # returns cfg unchanged on a None window). probe_served_window reads each runtime's real window
+    # (llama.cpp /props, Ollama /api/show, LM Studio /api/v0/models), so the guard FIRES when the
+    # window is discoverable and cleanly discloses (config wins) when it isn't. Blocking httpx → off
+    # the event loop (#32); falls back to the probe's window (vLLM parity / a flaked provider probe).
+    _served = await asyncio.to_thread(
+        probe_served_window, provider.base_url, resolved_model, provider.provider_type
+    ) or served_window
+    if _effective_max_context(_served, _cfg_window, RESPONSE_RESERVE_TOKENS) != _cfg_window:
+        usable = (_served or 0) - RESPONSE_RESERVE_TOKENS
         err_console.print(
             f"[bold red]Error:[/bold red] config max_context_tokens={_cfg_window} exceeds the "
-            f"served model's usable window ({usable} = {served_window}−{RESPONSE_RESERVE_TOKENS} "
+            f"served model's usable window ({usable} = {_served}−{RESPONSE_RESERVE_TOKENS} "
             f"output reserve). It would 400 mid-session. Set max_context_tokens ≤ {usable} in "
             f"your config.yaml, or run `localharness init` to fit it automatically."
         )

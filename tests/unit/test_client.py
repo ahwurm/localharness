@@ -403,6 +403,113 @@ async def test_complete_xml_fallback_does_not_double_inject_after_400():
     assert "tools" not in calls[1]
 
 
+# ---------------------------------------------------------------------------
+# Fix E — native-mode 400 retry symmetry. _complete_xml self-heals a rejected `tools` param;
+# _complete_native used to hard-error on the same 400. Native must now scope-retry the KNOWN
+# optional params (tools, extra_body/chat_template_kwargs), stick the rejection so it isn't
+# re-eaten every turn, and STILL surface a genuinely malformed 400 (no blanket retry).
+# ---------------------------------------------------------------------------
+
+
+def _native_client() -> LLMClient:
+    # is_local=False → _inference_gate yields without a TCP probe (CPU-only, no network).
+    config = LLMConfig(
+        base_url="http://127.0.0.1:0/v1",
+        model="m",
+        is_local=False,
+        timeout_seconds=300.0,
+        tool_call_mode="native",
+    )
+    with patch("localharness.provider.client.AsyncOpenAI"):
+        return LLMClient(config)
+
+
+def _bad_request(message: str):
+    import openai
+    return openai.BadRequestError(
+        message=message, response=MagicMock(status_code=400, headers={}), body=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_native_retries_once_dropping_rejected_tools():
+    """A native 400 that names the `tools` param → drop tools, remember it (sticky), retry ONCE,
+    succeed. The sticky flag then keeps the NEXT turn from re-sending tools (no repeat 400)."""
+    client = _native_client()
+    calls: list[dict] = []
+
+    async def _spy_create(**kwargs):  # the server 400s whenever `tools` is present
+        calls.append(kwargs)
+        if "tools" in kwargs:
+            raise _bad_request('"tools" is not supported by this model')
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    msg, _usage = await client._complete_native(
+        messages=[{"role": "user", "content": "hi"}], tools=[_PROBE_TOOL], stream=False
+    )
+    assert len(calls) == 2
+    assert "tools" in calls[0]                     # first attempt sent tools
+    assert "tools" not in calls[1]                 # retry dropped them
+    assert client._tools_param_rejected is True    # remembered
+    assert msg.content == "ok"
+
+    # Sticky, across turns: the next call must NOT re-send tools (no second 400 round-trip).
+    calls.clear()
+    await client._complete_native(
+        messages=[{"role": "user", "content": "again"}], tools=[_PROBE_TOOL], stream=False
+    )
+    assert len(calls) == 1 and "tools" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_complete_native_retries_dropping_rejected_extra_body():
+    """The other native optional param: a 400 naming chat_template_kwargs/extra_body (sent only on
+    internal disable_thinking calls) → drop extra_body, remember it, retry once, succeed."""
+    client = _native_client()
+    calls: list[dict] = []
+
+    async def _spy_create(**kwargs):  # the server 400s whenever `extra_body` is present
+        calls.append(kwargs)
+        if "extra_body" in kwargs:
+            raise _bad_request("extra_body field 'chat_template_kwargs' is not permitted")
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+
+    msg, _usage = await client._complete_native(
+        messages=[{"role": "user", "content": "hi"}], tools=None, stream=False,
+        disable_thinking=True,
+    )
+    assert len(calls) == 2
+    assert "extra_body" in calls[0]
+    assert "extra_body" not in calls[1]
+    assert client._extra_body_rejected is True
+    assert msg.content == "ok"
+
+
+@pytest.mark.asyncio
+async def test_complete_native_reraises_genuine_malformed_400():
+    """A 400 that is NOT a known rejected-param shape (genuine malformed request) must SURFACE,
+    not be swallowed by a blanket retry — the native path scopes its retry. No retry, no sticky."""
+    client = _native_client()
+    calls: list[dict] = []
+
+    async def _spy_create(**kwargs):
+        calls.append(kwargs)
+        raise _bad_request("messages: roles must alternate user/assistant")
+
+    client._client.chat.completions.create = _spy_create
+
+    with pytest.raises(ProviderAPIError):
+        await client._complete_native(
+            messages=[{"role": "user", "content": "hi"}], tools=[_PROBE_TOOL], stream=False
+        )
+    assert len(calls) == 1                          # surfaced on the first try, never retried
+    assert client._tools_param_rejected is False    # sticky NOT set on a genuine 400
+
+
 @pytest.mark.asyncio
 async def test_complete_xml_downgrades_native_tool_history():
     """Iteration 2 in xml mode replays history holding native `role:"tool"` messages and

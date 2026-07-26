@@ -474,13 +474,17 @@ def probe_served_window(
     means "unknowable — disclose, don't guess". Blocking (httpx); callers run it OFF the event
     loop (#32). vLLM/OpenAI-compat: the /v1/models entry whose id==model, field
     max_model_len|context_length (id-matched, so a multi-model endpoint returns the TARGET
-    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama/LM Studio serve no
-    reliable per-model window here → None. Never raises."""
+    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama: POST /api/show →
+    model_info "<arch>.context_length". LM Studio: GET /api/v0/models loaded_context_length (the
+    LOADED window, NOT max_context_length — over-reporting would let the start guard pass a config
+    that then 400s). Where a runtime genuinely doesn't expose it (not-loaded / older builds) →
+    None (disclose, never fabricate a default). Never raises."""
     if not (base_url and model):
         return None
     import httpx
     root = base_url.rstrip("/")
-    if (provider_type or "").lower() == "llamacpp":
+    ptype = (provider_type or "").lower()
+    if ptype == "llamacpp":
         try:
             native = root.removesuffix("/v1")
             props = httpx.get(f"{native}/props", timeout=3.0).json()
@@ -488,6 +492,38 @@ def probe_served_window(
             return int(val) if val else None
         except Exception:
             return None
+    if ptype == "ollama":
+        # Ollama's SERVED window is num_ctx (default 4096), NOT the model's trained max. /api/ps
+        # reports the LOADED model's context_length = the actual served window (what truncates /
+        # 400s mid-session). /api/show model_info "*.context_length" is the model CEILING — using
+        # it OVER-reports and causes silent prompt truncation (the same unsafe direction we avoid
+        # for LM Studio below). Read the served window only; not-loaded (Ollama lazy-loads on
+        # first request) or older builds → None (disclose, never fabricate).
+        try:
+            native = root.removesuffix("/v1")
+            data = httpx.get(f"{native}/api/ps", timeout=3.0).json()
+            for m in (data.get("models") or []):
+                if model in (m.get("model"), m.get("name")):
+                    val = m.get("context_length")
+                    return int(val) if val else None
+        except Exception:
+            return None
+        return None
+    if ptype == "lmstudio":
+        # LM Studio's native REST list reports loaded_context_length — the window the model was
+        # actually LOADED with (≤ its max_context_length), i.e. what 400s mid-session. Read the
+        # loaded window ONLY (never max_context_length: over-reporting would let the guard PASS a
+        # too-big config). Not-loaded / older builds omit it → None.
+        try:
+            native = root.removesuffix("/v1")
+            data = httpx.get(f"{native}/api/v0/models", timeout=3.0).json()
+            for m in (data.get("data") or []):
+                if m.get("id") == model:
+                    val = m.get("loaded_context_length")
+                    return int(val) if val else None
+        except Exception:
+            return None
+        return None
     try:
         data = httpx.get(f"{root}/models", timeout=3.0).json()
         for m in (data.get("data") or []):
