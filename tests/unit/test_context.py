@@ -1041,3 +1041,66 @@ def test_probe_served_window_never_raises(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", _boom)
     assert ctxmod.probe_served_window("http://localhost:8000/v1", "model-b", "vllm") is None
+
+
+def test_probe_served_window_ollama_api_ps(monkeypatch):
+    """Ollama's SERVED window is the LOADED model's num_ctx from GET /api/ps — NOT the model
+    ceiling from /api/show (which over-reports and would cause silent prompt truncation). Loaded
+    → that served window; not-loaded (lazy-load) / older builds → None (disclose, never the max)."""
+    from localharness.agent import context as ctxmod
+    import httpx
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    got: dict = {}
+
+    def _get(url, timeout=0):
+        got["url"] = url
+        return _Resp({"models": [{"model": "qwen2.5:0.5b", "name": "qwen2.5:0.5b",
+                                  "context_length": 4096}]})
+
+    monkeypatch.setattr(httpx, "get", _get)
+    assert ctxmod.probe_served_window("http://localhost:11434/v1", "qwen2.5:0.5b", "ollama") == 4096
+    assert got["url"] == "http://localhost:11434/api/ps"   # native API, /v1 stripped
+
+    # model not loaded (empty /api/ps) → None — disclose, never fall back to the model ceiling.
+    monkeypatch.setattr(httpx, "get", lambda url, timeout=0: _Resp({"models": []}))
+    assert ctxmod.probe_served_window("http://localhost:11434/v1", "qwen2.5:0.5b", "ollama") is None
+
+
+def test_probe_served_window_lmstudio_loaded_context(monkeypatch):
+    """LM Studio's /api/v0/models reports the LOADED window (loaded_context_length) id-matched.
+    max_context_length is IGNORED — over-reporting would let the start guard pass a too-big cfg."""
+    from localharness.agent import context as ctxmod
+    import httpx
+
+    class _Resp:
+        def json(self):
+            return {"object": "list", "data": [
+                {"id": "other", "state": "loaded", "loaded_context_length": 4096},
+                {"id": "target", "state": "loaded",
+                 "loaded_context_length": 8192, "max_context_length": 32768},
+            ]}
+
+    got: dict = {}
+
+    def _get(url, timeout=0):
+        got["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "get", _get)
+    assert ctxmod.probe_served_window("http://localhost:1234/v1", "target", "lmstudio") == 8192
+    assert got["url"] == "http://localhost:1234/api/v0/models"  # native REST, /v1 stripped
+
+    # A model present but NOT loaded (no loaded_context_length) → None, even if max is known.
+    class _RespNotLoaded:
+        def json(self):
+            return {"data": [{"id": "target", "state": "not-loaded", "max_context_length": 32768}]}
+
+    monkeypatch.setattr(httpx, "get", lambda url, timeout=0: _RespNotLoaded())
+    assert ctxmod.probe_served_window("http://localhost:1234/v1", "target", "lmstudio") is None

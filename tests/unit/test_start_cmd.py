@@ -841,6 +841,39 @@ async def test_session_lifecycle_create_and_end_once(tmp_path, monkeypatch):
     assert yaml.safe_load(root_yaml.read_text(encoding="utf-8"))["name"] == "orchestrator"
 
 
+async def test_start_guard_fires_for_discoverable_nonvllm_window(tmp_path, monkeypatch):
+    """Fix C: for a non-vLLM runtime whose window detect_capabilities can't see (llama.cpp/
+    LM Studio/Ollama → _probe_llm's served_window is None), the fail-loud window guard used to
+    silently NO-OP (_effective_max_context returns cfg unchanged on None). It must now consult the
+    provider-aware probe_served_window and ABORT (typer.Exit) when the discovered window is below
+    the configured budget — instead of passing a config that would 400 mid-session."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    # A non-vLLM provider whose vLLM-shape capability probe finds NO window (the silent-no-op bug).
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+    )
+
+    async def _probe_no_window(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)   # reachable, but window undiscovered by this probe
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe_no_window)
+
+    # The provider-aware probe DOES discover a small served window (8192 « the 131072 default budget).
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 8192,
+    )
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+
 async def test_session_id_threaded_to_agent_loop(tmp_path, monkeypatch):
     """The sitting id minted in start_cmd is the SAME id AgentLoop carries and the
     SAME id the sessions row is keyed by (create == loop == end)."""
