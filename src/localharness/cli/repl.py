@@ -830,7 +830,8 @@ class OrchestratorREPL:
             # None, which would leave the peer's headers on the client). ProviderConfig has no
             # headers field, so the primary's identity carries none.
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={})
-        from localharness.provider import server as managed_server
+        from localharness.provider.lifecycle import strategy_for
+        strategy = strategy_for(managed)
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
         )
@@ -842,16 +843,16 @@ class OrchestratorREPL:
                 box_note(f"loading {target} · {int(elapsed)}s")
 
         try:
-            # The verified stop can block ~90s worst-case (#100) — off the event loop so
-            # heartbeats and the channel stay live while the old server drains.
-            await asyncio.to_thread(
-                managed_server.stop_server, self._config_dir, launch=managed.launch
-            )
+            # The verified stop can block ~90s worst-case (#100) — the strategy runs it OFF the
+            # event loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay
+            # live while the old server drains. The model mutation MUST land strictly BETWEEN stop
+            # and activate: activate's serve_command reads spec.model to build the launch command.
+            await strategy.stop(managed, self._config_dir)
             managed.model = target
-            managed_server.start_server(self._config_dir, managed_server.serve_command(managed))
-            models = await managed_server.wait_ready(
-                llm.config.base_url, config_dir=self._config_dir, on_poll=_swap_progress
+            ep = await strategy.activate(
+                managed, self._config_dir, llm.config.base_url, on_poll=_swap_progress
             )
+            models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
             await self._channel.send_message(
                 f"Model swap failed: {exc}", metadata={"style": "system.error"}
