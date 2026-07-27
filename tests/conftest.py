@@ -818,6 +818,10 @@ LIVE_PROVIDER_GATES: dict[str, str] = {
     "live_ollama": "LOCALHARNESS_LIVE_OLLAMA",
     "live_llamacpp": "LOCALHARNESS_LIVE_LLAMACPP",
     "live_lmstudio": "LOCALHARNESS_LIVE_LMSTUDIO",
+    # 0.11 Phase B: the harness SPAWNS llama.cpp itself (SpawnedProcessStrategy) — distinct from
+    # live_llamacpp (which ATTACHES to an already-running server), so opting into the attach round
+    # trip never also launches a second GPU process. Gated on its own env var.
+    "live_llamacpp_lifecycle": "LOCALHARNESS_LIVE_LLAMACPP_LIFECYCLE",
 }
 
 

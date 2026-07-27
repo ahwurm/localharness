@@ -1777,7 +1777,15 @@ class ManagedServerConfig(BaseModel):
     user-managed servers."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    runtime: Literal["vllm"] = "vllm"
+    runtime: Literal["vllm", "llamacpp"] = Field(
+        default="vllm",
+        description=(
+            "Which server the harness launches. 'vllm' (default) = the existing docker/binary "
+            "vLLM path, unaffected. 'llamacpp' = the harness spawns llama.cpp's `llama-server` "
+            "itself (launch stays 'binary'; `runtime` drives the command builder — 0.11 Phase B). "
+            "ADDITIVE: existing vLLM configs never set this and keep the default."
+        ),
+    )
     launch: Literal["binary", "docker"] = Field(
         default="binary",
         description="binary = a vllm executable (system or harness venv); docker = foreground `docker run` (DGX Spark route).",
@@ -1809,6 +1817,8 @@ class ManagedServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
+        if self.runtime == "llamacpp" and not self.binary:
+            raise ValueError("runtime=llamacpp requires `binary` (path to the llama-server executable)")
         if self.launch == "binary" and not self.binary:
             raise ValueError("launch=binary requires `binary` (path to the vllm executable)")
         if self.launch == "docker" and not self.docker_image:

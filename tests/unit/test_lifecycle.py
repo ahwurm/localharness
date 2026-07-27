@@ -14,6 +14,7 @@ from localharness.provider.lifecycle import (
     LiveEndpoint,
     Liveness,
     ManagedVllmStrategy,
+    SpawnedProcessStrategy,
 )
 
 
@@ -25,6 +26,16 @@ def _docker_srv(**over) -> ManagedServerConfig:
 
 def _binary_srv(**over) -> ManagedServerConfig:
     kw = dict(launch="binary", binary="/usr/bin/vllm", model="m", port=8001)
+    kw.update(over)
+    return ManagedServerConfig(**kw)
+
+
+def _llamacpp_srv(**over) -> ManagedServerConfig:
+    kw = dict(
+        runtime="llamacpp", launch="binary", binary="/x/llama-server",
+        model="/x/model.gguf", port=8080,
+        extra_args=["-c", "32768", "-a", "qwen3.6-35b-a3b"],
+    )
     kw.update(over)
     return ManagedServerConfig(**kw)
 
@@ -146,3 +157,88 @@ def test_liveness_binary_uses_server_pid(tmp_path, monkeypatch):
     assert ManagedVllmStrategy().liveness(_binary_srv(), tmp_path).alive is True
     monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
     assert ManagedVllmStrategy().liveness(_binary_srv(), tmp_path).alive is False
+
+
+# ---------------------------------------------------------------------------
+# SpawnedProcessStrategy (0.11 Phase B): the harness spawns llama.cpp itself.
+# Same server.py delegation chain as ManagedVllmStrategy, but the stop-handle is
+# always the launched PID, stop is always the pid-group teardown (launch="binary"),
+# and liveness is always pid-based (the pidfile pid IS the real llama-server here —
+# never the docker orphan-client-pid case #99/#100). Mocked, launches nothing real.
+# ---------------------------------------------------------------------------
+
+
+def test_spawned_process_strategy_satisfies_protocol():
+    assert isinstance(SpawnedProcessStrategy(), LifecycleStrategy)
+
+
+async def test_spawned_activate_delegates_and_handle_is_pid(tmp_path, monkeypatch):
+    """activate runs serve_command -> start_server -> wait_ready and returns a LiveEndpoint whose
+    handle is the launched PID (a spawned process, never a container name). on_poll + timeout are
+    threaded straight through to wait_ready."""
+    calls: dict = {}
+
+    def fake_serve_command(spec):
+        calls["serve_command"] = spec
+        return ["llama-server", "-m", "x"]
+
+    def fake_start_server(config_dir, cmd):
+        calls["start_server"] = (config_dir, cmd)
+        return 5555
+
+    async def fake_wait_ready(base_url, config_dir=None, timeout_seconds=1800.0, poll_seconds=3.0, on_poll=None):
+        calls["wait_ready"] = (base_url, config_dir, timeout_seconds)
+        if on_poll is not None:
+            on_poll(2.0)
+        return ["qwen3.6-35b-a3b"]
+
+    monkeypatch.setattr(server, "serve_command", fake_serve_command)
+    monkeypatch.setattr(server, "start_server", fake_start_server)
+    monkeypatch.setattr(server, "wait_ready", fake_wait_ready)
+
+    srv = _llamacpp_srv()
+    seen_poll: list[float] = []
+    ep = await SpawnedProcessStrategy().activate(
+        srv, tmp_path, "http://127.0.0.1:8080/v1", timeout_seconds=99.0, on_poll=seen_poll.append,
+    )
+
+    assert isinstance(ep, LiveEndpoint)
+    assert ep.base_url == "http://127.0.0.1:8080/v1"
+    assert ep.served_models == ["qwen3.6-35b-a3b"]
+    assert ep.handle == 5555                                     # spawned stop-handle = the real pid
+    assert calls["serve_command"] is srv
+    assert calls["start_server"] == (tmp_path, ["llama-server", "-m", "x"])
+    assert calls["wait_ready"] == ("http://127.0.0.1:8080/v1", tmp_path, 99.0)
+    assert seen_poll == [2.0]
+
+
+async def test_spawned_stop_uses_binary_verified_stop(tmp_path, monkeypatch):
+    """stop -> server.stop_server(config_dir, launch="binary"): the pid-group teardown, ALWAYS —
+    a spawned server is a single tracked process, never a docker-run client."""
+    seen: dict = {}
+
+    def fake_stop(config_dir, launch="binary", **kw):
+        seen["args"] = (config_dir, launch)
+        return True
+
+    monkeypatch.setattr(server, "stop_server", fake_stop)
+    await SpawnedProcessStrategy().stop(_llamacpp_srv(), tmp_path)
+    assert seen["args"] == (tmp_path, "binary")
+
+
+def test_spawned_liveness_is_pid_based_never_docker(tmp_path, monkeypatch):
+    """spawned liveness = server_pid is not None (the pidfile pid IS the llama-server process);
+    docker_container_running — the docker-only path — must NEVER be consulted here."""
+    def _boom(*a, **k):
+        raise AssertionError("docker_container_running must not be called for a spawned process")
+
+    monkeypatch.setattr(server, "docker_container_running", _boom)
+
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: 5555)
+    live = SpawnedProcessStrategy().liveness(_llamacpp_srv(), tmp_path)
+    assert isinstance(live, Liveness)
+    assert live.alive is True
+    assert "5555" in (live.detail or "")
+
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
+    assert SpawnedProcessStrategy().liveness(_llamacpp_srv(), tmp_path).alive is False

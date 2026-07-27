@@ -6,17 +6,17 @@ it, and takes it down. A `LifecycleStrategy` unifies that so the heavy-to-heavy 
 `/model` swap (stop the incumbent → confirm the GPU is free → launch the target) becomes real
 instead of the manual box-dance.
 
-Phase A (0.11) is ADDITIVE scaffolding: only `ManagedVllmStrategy` exists, and it is a
-thin, ZERO-BEHAVIOR-CHANGE wrapper over `provider/server.py` (both launch modes already flow
-through those functions). Existing callers — repl `/model` swap, init guided setup, `start`
+Phases A–B (0.11) are ADDITIVE scaffolding: `ManagedVllmStrategy` (Phase A) and
+`SpawnedProcessStrategy` (Phase B, llama.cpp) exist, each a thin, ZERO-BEHAVIOR-CHANGE wrapper
+over `provider/server.py` (all launch paths already flow through those functions). Existing
+callers — repl `/model` swap, init guided setup, `start`
 autostart, `model` list — keep calling `provider/server.py` DIRECTLY; rewiring them through a
 strategy is Phase C (a strategy with a bound import would silently break the module-attribute
 monkeypatch the harness's tests rely on). The one behavior change shipped now is the
 liveness-by-name fix, and it lives in `server.py` (`docker_container_running`) so both this
 strategy AND the `start` autostart pre-check use it without going through the strategy.
 
-`SpawnedProcessStrategy` (llama.cpp, Phase B), `DaemonStrategy` (Ollama) and `LmsStrategy`
-(LM Studio, Phase D) implement the same Protocol later.
+`DaemonStrategy` (Ollama) and `LmsStrategy` (LM Studio, Phase D) implement the same Protocol later.
 """
 from __future__ import annotations
 
@@ -111,5 +111,52 @@ class ManagedVllmStrategy:
         if spec.launch == "docker":
             name = server.DOCKER_CONTAINER_NAME
             return Liveness(alive=server.docker_container_running(name), detail=f"container {name}")
+        pid = server.server_pid(config_dir)
+        return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
+
+
+class SpawnedProcessStrategy:
+    """Lifecycle for a harness-SPAWNED OpenAI-compatible server process — llama.cpp's
+    `llama-server` (0.11 Phase B) and, later, any single-process binary that serves the OpenAI
+    wire. The harness launches it ITSELF (the 0.11 goal) through the SAME `provider/server.py`
+    primitives `ManagedVllmStrategy` uses, so the proven detached-launch / pidfile / readiness /
+    verified-stop recipe is REUSED, not reinvented:
+
+    - activate = `serve_command` → `start_server` → `wait_ready` (returns served ids); the stop
+                 handle is the launched PID.
+    - stop     = `stop_server(config_dir, launch="binary")` — SIGTERM the process group, SIGKILL
+                 on timeout. Always the pid-group teardown: a spawned server is a single tracked
+                 process, never a `docker run` client, so `launch` is pinned to "binary" here.
+    - liveness = `server_pid(config_dir) is not None` — CORRECT here (unlike docker): the pidfile
+                 pid IS the real `llama-server` process, so a live pid means it is serving. This is
+                 exactly the case the #99/#100 docker orphan-client-pid bug was NOT.
+
+    Phase B ships the mechanism + a gated live spawn test; rewiring `start` / `/model` swap onto
+    strategies is Phase C (keeps this new spawn path out of the monkeypatch-sensitive rewire).
+    """
+
+    async def activate(
+        self,
+        spec: ManagedServerConfig,
+        config_dir: Path,
+        base_url: str,
+        *,
+        timeout_seconds: float = 1800.0,
+        on_poll: Callable[[float], None] | None = None,
+    ) -> LiveEndpoint:
+        cmd = server.serve_command(spec)
+        pid = server.start_server(config_dir, cmd)
+        served = await server.wait_ready(
+            base_url,
+            config_dir=config_dir,
+            timeout_seconds=timeout_seconds,
+            on_poll=on_poll,
+        )
+        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid)
+
+    async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
+        server.stop_server(config_dir, launch="binary")
+
+    def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
