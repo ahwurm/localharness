@@ -136,7 +136,18 @@ def serve_command(srv: ManagedServerConfig) -> list[str]:
     served (docker: bind-mounted read-only at /models/serving) under --served-model-name
     <entry.name>, with the entry's per-model extra_args appended after the shared ones —
     so a swap changes checkpoint, served id, AND model-specific flags in one place.
-    Otherwise srv.model passes through untouched (HF repo id resolved via the cache)."""
+    Otherwise srv.model passes through untouched (HF repo id resolved via the cache).
+
+    runtime='llamacpp' (0.11 Phase B) is a separate, simpler shape the harness spawns directly:
+    `llama-server -m <gguf> --host 127.0.0.1 --port <port>` with the served-model alias (-a),
+    context (-c) and GPU offload (-ngl) carried in extra_args — a GGUF file IS the model, so
+    there is no docker mount / --served-model-name registry indirection."""
+    if srv.runtime == "llamacpp":
+        return [
+            str(srv.binary), "-m", srv.model,
+            "--host", "127.0.0.1", "--port", str(srv.port),
+            *srv.extra_args,
+        ]
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
     if srv.launch == "docker":

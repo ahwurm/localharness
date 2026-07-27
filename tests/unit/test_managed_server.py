@@ -71,6 +71,17 @@ def test_launch_target_validated():
         ManagedServerConfig(launch="docker", model="m")  # no image
 
 
+def test_llamacpp_requires_binary():
+    """0.11 Phase B: runtime=llamacpp needs a `binary` (the llama-server path) — the validator
+    stays honest for the new runtime. A well-formed llamacpp spec (launch defaults to binary)
+    constructs fine."""
+    with pytest.raises(ValueError, match="llamacpp"):
+        ManagedServerConfig(runtime="llamacpp", model="/x/model.gguf")  # no binary
+    srv = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/model.gguf")
+    assert srv.runtime == "llamacpp"
+    assert srv.launch == "binary"  # unchanged default; runtime drives the command builder
+
+
 # ---------------------------------------------------------------------------
 # Serve command composition
 # ---------------------------------------------------------------------------
@@ -91,6 +102,25 @@ def test_serve_command_docker():
     assert "img:tag" in cmd
     assert f"{8081}:8000" in " ".join(cmd)  # host port maps onto the container's 8000
     assert "--model" in cmd and "org/repo" in cmd
+
+
+def test_serve_command_llamacpp_exact_argv():
+    """0.11 Phase B: runtime=llamacpp emits `llama-server -m <gguf> --host 127.0.0.1 --port <p>`
+    with the alias/context/offload flags appended verbatim from extra_args — no docker mount,
+    no --served-model-name registry indirection (a GGUF file IS the model). EXACT argv, in order."""
+    srv = ManagedServerConfig(
+        runtime="llamacpp",
+        binary="/home/u/llama.cpp/build/bin/llama-server",
+        model="/home/u/models/Qwen3.6-35B-A3B-GGUF/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
+        port=8080,
+        extra_args=["-c", "32768", "--parallel", "1", "-ngl", "99", "--jinja", "-a", "qwen3.6-35b-a3b"],
+    )
+    assert server.serve_command(srv) == [
+        "/home/u/llama.cpp/build/bin/llama-server",
+        "-m", "/home/u/models/Qwen3.6-35B-A3B-GGUF/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
+        "--host", "127.0.0.1", "--port", "8080",
+        "-c", "32768", "--parallel", "1", "-ngl", "99", "--jinja", "-a", "qwen3.6-35b-a3b",
+    ]
 
 
 # ---------------------------------------------------------------------------
