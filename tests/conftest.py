@@ -805,6 +805,29 @@ def _skip_live_vllm(request):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
 
 
+# -----------------------------------------------------------------------------
+# 0.10.0 provider certification: live_ollama / live_llamacpp / live_lmstudio opt-in markers —
+# same contract as live_vllm above, one per non-vLLM provider family. Registered canonically in
+# pyproject.toml (the Phase 23 `markers =` list), NOT re-registered here. All three resolve their
+# actual (model, base_url) target through the SAME live_target() channel live_vllm uses — only
+# one live provider is validated per invocation, so one pinned target is enough. Round-trip
+# bodies live in tests/integration/test_live_providers.py.
+# -----------------------------------------------------------------------------
+
+LIVE_PROVIDER_GATES: dict[str, str] = {
+    "live_ollama": "LOCALHARNESS_LIVE_OLLAMA",
+    "live_llamacpp": "LOCALHARNESS_LIVE_LLAMACPP",
+    "live_lmstudio": "LOCALHARNESS_LIVE_LMSTUDIO",
+}
+
+
+@pytest.fixture(autouse=True)
+def _skip_live_providers(request):
+    for marker, gate in LIVE_PROVIDER_GATES.items():
+        if request.node.get_closest_marker(marker) and not os.environ.get(gate):
+            pytest.skip(f"{marker} opt-in (set {gate}=1 with a live endpoint up)")
+
+
 def live_target() -> tuple[str, str]:
     """Single source of truth for the opted-in live (model_id, base_url) — the LOCALHARNESS_LIVE_*
     env channel. BOTH the preflight fixture (live_endpoint, below) and the tests
@@ -817,9 +840,9 @@ def live_target() -> tuple[str, str]:
     base_url = os.environ.get("LOCALHARNESS_LIVE_BASE_URL")
     if not model or not base_url:
         raise RuntimeError(
-            "live tests are opted in (LOCALHARNESS_LIVE_VLLM=1) but the target is not pinned. Set "
-            "BOTH LOCALHARNESS_LIVE_MODEL and LOCALHARNESS_LIVE_BASE_URL to your served model id and "
-            "endpoint, e.g. LOCALHARNESS_LIVE_MODEL=qwen3.6-27b "
+            "live tests are opted in (a LOCALHARNESS_LIVE_* gate is set) but the target is not "
+            "pinned. Set BOTH LOCALHARNESS_LIVE_MODEL and LOCALHARNESS_LIVE_BASE_URL to your "
+            "served model id and endpoint, e.g. LOCALHARNESS_LIVE_MODEL=qwen3.6-27b "
             "LOCALHARNESS_LIVE_BASE_URL=http://localhost:8000/v1"
         )
     return (model, base_url)
