@@ -79,6 +79,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "live_vllm: opt-in real-model spine test hitting a live vLLM endpoint; skipped by default unless LOCALHARNESS_LIVE_VLLM=1 is set",
+    "live_ollama: opt-in real-model round-trip test hitting a live Ollama endpoint; skipped by default unless LOCALHARNESS_LIVE_OLLAMA=1 is set",
+    "live_llamacpp: opt-in real-model round-trip test hitting a live llama.cpp endpoint; skipped by default unless LOCALHARNESS_LIVE_LLAMACPP=1 is set",
+    "live_lmstudio: opt-in real-model round-trip test hitting a live LM Studio endpoint; skipped by default unless LOCALHARNESS_LIVE_LMSTUDIO=1 is set",
 ]
 
 [tool.ruff.lint]

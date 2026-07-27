@@ -3,19 +3,33 @@
 corpus_path: bench/scenarios
 results_path: bench/results
 
-# Multi-model matrix (BENCH-06). Default v1.0.2 trio.
+# Multi-model matrix (BENCH-06). matrix[0] (qwen-3.6-27b/vllm) is the DEFAULT backend — a bare
+# `localharness bench` run touches ONLY that entry. Every other entry below is an OPT-IN
+# validation target: `--matrix` runs the whole list, `--model <name>` (repeatable) subsets it by
+# name. Entries beyond [0] are never touched otherwise.
 # Each entry: discriminator + concrete model identifier + optional overrides.
 matrix:
   - name: qwen-3.6-27b
     provider: vllm
     model_id: qwen3.6-27b
     base_url: http://localhost:8000/v1
+  # 0.10.0 provider-certification validation targets (opt-in only — see above). UNVERIFIED:
+  # neither entry below has a recorded run from this repo; pull the model into your own ollama
+  # first (`ollama pull gpt-oss:120b` / `ollama pull qwen2.5:7b`).
   - name: gpt-oss-120b
     provider: ollama
     model_id: gpt-oss:120b
   - name: qwen-7b
     provider: ollama
     model_id: qwen2.5:7b
+  - name: llamacpp-local
+    provider: llamacpp
+    # model_id is a PLACEHOLDER: llama.cpp serves whatever GGUF is loaded (no universal default
+    # name — see docs/reference-architectures/mac-mini.md's llama-server example). Fill in the
+    # real served id (and base_url, if not the llama.cpp default) before running this entry, e.g.
+    # via `--model llamacpp-local` once edited.
+    model_id: REPLACE_ME
+    base_url: http://127.0.0.1:8080/v1
 
 # Sequential adaptive sampling defaults.
 sampling:
