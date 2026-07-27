@@ -1928,3 +1928,54 @@ def test_agent_tool_advertises_shared_list_mutations():
     assert "hn-monitor" not in tool.info().description
     names.append("hn-monitor")  # what _register_deployed_agent does on deploy
     assert "hn-monitor" in tool.info().description
+
+
+# ---------------------------------------------------------------------------
+# 0.11 Phase A: autostart liveness-by-name fix — the docker autostart pre-check must
+# read the CONTAINER (docker_container_running), not the docker-run CLIENT pidfile pid.
+# The autostart path had no test today; this pins the decision seam it turns on.
+# ---------------------------------------------------------------------------
+
+def test_managed_server_running_docker_uses_container_not_pidfile():
+    """DOCKER mode consults docker_container_running(DOCKER_CONTAINER_NAME) and NEVER
+    server_pid — the pidfile holds the sig-proxy client pid, not the container (the bug fixed)."""
+    from types import SimpleNamespace
+
+    from localharness.cli.start_cmd import _managed_server_running
+
+    def _boom(*a, **k):
+        raise AssertionError("docker mode must not consult the pidfile via server_pid()")
+
+    ms = SimpleNamespace(
+        DOCKER_CONTAINER_NAME="localharness-vllm",
+        docker_container_running=lambda name: name == "localharness-vllm",
+        server_pid=_boom,
+    )
+    srv = SimpleNamespace(launch="docker")
+    assert _managed_server_running(ms, srv, Path("/cfg")) is True
+
+    ms.docker_container_running = lambda name: False
+    assert _managed_server_running(ms, srv, Path("/cfg")) is False
+
+
+def test_managed_server_running_binary_uses_server_pid():
+    """BINARY mode keeps server_pid (there the pidfile pid IS the vLLM process): a live pid ->
+    running, a cleared pidfile (None) -> not running. docker container liveness untouched —
+    proving binary behavior is byte-for-byte the pre-fix behavior."""
+    from types import SimpleNamespace
+
+    from localharness.cli.start_cmd import _managed_server_running
+
+    def _boom(*a, **k):
+        raise AssertionError("binary mode must not use docker container liveness")
+
+    ms = SimpleNamespace(
+        DOCKER_CONTAINER_NAME="localharness-vllm",
+        docker_container_running=_boom,
+        server_pid=lambda config_dir: 4321,
+    )
+    srv = SimpleNamespace(launch="binary")
+    assert _managed_server_running(ms, srv, Path("/cfg")) is True
+
+    ms.server_pid = lambda config_dir: None
+    assert _managed_server_running(ms, srv, Path("/cfg")) is False
