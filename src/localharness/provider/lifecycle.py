@@ -20,6 +20,7 @@ strategy AND the `start` autostart pre-check use it without going through the st
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -105,7 +106,11 @@ class ManagedVllmStrategy:
         return LiveEndpoint(base_url=base_url, served_models=served, handle=handle)
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
-        server.stop_server(config_dir, launch=spec.launch)
+        # OFF the event loop: the #100 verified docker stop can block ~90s worst-case (drain +
+        # name-free poll + rm -f), and a synchronous call inside this `async def` would freeze
+        # the whole loop — heartbeats, the Discord adapter, idle consolidation. `server.stop_server`
+        # is looked up at CALL time (module-attribute), so the harness's monkeypatches still fire.
+        await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         if spec.launch == "docker":
@@ -155,8 +160,22 @@ class SpawnedProcessStrategy:
         return LiveEndpoint(base_url=base_url, served_models=served, handle=pid)
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
-        server.stop_server(config_dir, launch="binary")
+        # OFF the event loop (same reason as ManagedVllmStrategy.stop): a SIGTERM→SIGKILL grace
+        # window blocks, so run it in a worker thread. `launch="binary"` ALWAYS here — a spawned
+        # server is a single tracked process, never a docker-run client.
+        await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
+
+
+def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
+    """Map a managed-server spec to its launch strategy by `runtime` (the launch-STRATEGY axis,
+    orthogonal to provider_type): 'llamacpp' → SpawnedProcessStrategy (the harness spawns
+    llama-server itself), anything else ('vllm', the default) → ManagedVllmStrategy (docker/binary
+    vLLM). The single construction point the callers — the REPL /model swap and `start` autostart —
+    route through, so the strategy, not the caller, owns HOW a backend is launched/stopped."""
+    if spec.runtime == "llamacpp":
+        return SpawnedProcessStrategy()
+    return ManagedVllmStrategy()

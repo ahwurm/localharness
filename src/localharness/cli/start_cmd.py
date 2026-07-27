@@ -428,13 +428,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
         from localharness.provider import server as managed_server
+        from localharness.provider.lifecycle import strategy_for
+        strategy = strategy_for(harness.server)
         try:
             if not _managed_server_running(managed_server, harness.server, cfg_path):
                 console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
-                managed_server.start_server(cfg_path, managed_server.serve_command(harness.server))
+                # activate = serve_command → start_server → wait_ready (launch + readiness) via the
+                # lifecycle strategy. Byte-equivalent to the old start_server+wait_ready pair; the
+                # off-loop verified-stop wrapper lives in the strategy, not this launch path.
+                await strategy.activate(harness.server, cfg_path, provider.base_url)
             else:
                 console.print("Managed vLLM is still loading — waiting...")
-            await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
+                # Already launched (a live pidfile / running container) — only wait for readiness.
+                await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
             probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
