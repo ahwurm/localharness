@@ -274,6 +274,24 @@ def _wait_name_free(name: str, attempts: int, poll_seconds: float = 0.5) -> bool
     return False
 
 
+def docker_container_running(name: str = DOCKER_CONTAINER_NAME) -> bool:
+    """True iff a container named `name` exists AND is currently running (NAME-based liveness).
+
+    The fix for the docker liveness bug: docker mode runs a *foreground* `docker run --rm`
+    client whose pid the pidfile holds, and that pid is the sig-proxy CLIENT — never the
+    container — so `server_pid()` there answers "is the docker-run client alive", not "is the
+    server up" (the orphan-client-pid bug class, #99/#100). `docker inspect -f
+    '{{.State.Running}}'` prints `true`/`false` for an existing container (rc 0) and errors
+    (rc != 0) when the name does not resolve, so a MISSING container and a STOPPED one both
+    read as not-running — exactly what a liveness check wants. Correct for `binary` mode is
+    still `server_pid()` (there the pidfile pid IS the vLLM process)."""
+    proc = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Running}}", name],
+        capture_output=True,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() == b"true"
+
+
 def _alive(pid: int) -> bool:
     if _is_zombie(pid):  # #99: a zombie can't be signalled down — don't stall stop on it
         return False

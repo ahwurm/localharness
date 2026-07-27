@@ -1792,6 +1792,17 @@ class ManagedServerConfig(BaseModel):
         default_factory=list,
         description="Named local checkpoints the /model picker can swap to (restart-on-swap).",
     )
+    gpu: bool = Field(
+        default=True,
+        description=(
+            "Does this managed server occupy the GPU? EXPLICIT per owner ruling (no inference "
+            "from provider_type/host). ADDITIVE — nothing keys off it in 0.11 Phase A. A future "
+            "GPU-lock (Phase C heavy-swap) reads it to encode the box rule: at most one GPU-heavy "
+            "backend active at a time, so switching to a cold heavy peer stops the incumbent and "
+            "confirms the GPU is free before launching, while CPU-only peers coexist. Defaults "
+            "True — a harness-managed vLLM server is GPU-bound."
+        ),
+    )
 
     def entry_for(self, name: str) -> Optional[LocalModelEntry]:
         return next((e for e in self.local_models if e.name == name), None)

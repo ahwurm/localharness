@@ -350,3 +350,50 @@ def test_docker_stop_raises_when_name_never_frees(monkeypatch, tmp_path):
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="still exists"):
         server.stop_server(tmp_path, launch="docker")
+
+
+# ---------------------------------------------------------------------------
+# 0.11 Phase A: NAME-based docker liveness — reads the CONTAINER, never the
+# docker-run client pidfile pid (the fix for the orphan-client-pid bug class)
+# ---------------------------------------------------------------------------
+
+
+class _FakeInspect:
+    """Scripted `docker inspect -f {{.State.Running}}`: one fixed (rc, stdout) verdict, argv
+    recorded. Mirrors _FakeDocker's nested-_R style (returncode/stdout read from __call__ locals)."""
+
+    def __init__(self, returncode, stdout):
+        self.returncode_val = returncode
+        self.stdout_val = stdout
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        rc = self.returncode_val
+        out = self.stdout_val
+
+        class _R:
+            returncode = rc
+            stdout = out
+            stderr = b""
+
+        return _R()
+
+
+def test_docker_container_running_true_only_when_container_up(monkeypatch):
+    """Verdict: running ('true', rc 0) -> True; stopped ('false', rc 0) and absent (rc 1) ->
+    False. The name-scoped `docker inspect -f {{.State.Running}} <name>` argv is asserted so the
+    check is provably name-based (a stopped OR missing container both read not-running)."""
+    for returncode, stdout, expected in [(0, b"true\n", True), (0, b"false\n", False), (1, b"", False)]:
+        fake = _FakeInspect(returncode, stdout)
+        monkeypatch.setattr(server.subprocess, "run", fake)
+        assert server.docker_container_running("localharness-vllm") is expected
+        assert fake.calls == [["docker", "inspect", "-f", "{{.State.Running}}", "localharness-vllm"]]
+
+
+def test_docker_container_running_defaults_to_module_container_name(monkeypatch):
+    """No name arg -> the module constant DOCKER_CONTAINER_NAME is inspected (kept a constant)."""
+    fake = _FakeInspect(0, b"true")
+    monkeypatch.setattr(server.subprocess, "run", fake)
+    assert server.docker_container_running() is True
+    assert fake.calls[0][-1] == server.DOCKER_CONTAINER_NAME
