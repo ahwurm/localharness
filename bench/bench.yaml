@@ -28,7 +28,7 @@ matrix:
     # name — see docs/reference-architectures/mac-mini.md's llama-server example). Fill in the
     # real served id (and base_url, if not the llama.cpp default) before running this entry, e.g.
     # via `--model llamacpp-local` once edited.
-    model_id: REPLACE_ME
+    model_id: qwen3.6-35b-a3b
     base_url: http://127.0.0.1:8080/v1
 
 # Sequential adaptive sampling defaults.
