@@ -24,6 +24,19 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
+def _managed_server_running(managed_server: Any, srv: Any, config_dir: Path) -> bool:
+    """Is the harness-managed vLLM ALREADY serving? DOCKER mode reads the CONTAINER by name
+    (`docker_container_running` → `docker inspect`), NOT the pidfile: docker runs a foreground
+    `docker run --rm` client whose pid is the sig-proxy CLIENT, never the container, so
+    `server_pid()` there answers "is the docker-run client alive" — the orphan-client-pid bug
+    (a pidfile client orphan-killed by a tmux teardown then reads dead though the container is
+    up, or vice-versa). BINARY mode keeps `server_pid()` — there the pidfile pid IS the vLLM
+    process. Called inside the autostart try, so an OSError from either path degrades as before."""
+    if srv.launch == "docker":
+        return managed_server.docker_container_running(managed_server.DOCKER_CONTAINER_NAME)
+    return managed_server.server_pid(config_dir) is not None
+
+
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
     """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
     the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
@@ -416,7 +429,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
         from localharness.provider import server as managed_server
         try:
-            if managed_server.server_pid(cfg_path) is None:
+            if not _managed_server_running(managed_server, harness.server, cfg_path):
                 console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
                 managed_server.start_server(cfg_path, managed_server.serve_command(harness.server))
             else:
