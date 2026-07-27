@@ -474,8 +474,8 @@ def probe_served_window(
     means "unknowable — disclose, don't guess". Blocking (httpx); callers run it OFF the event
     loop (#32). vLLM/OpenAI-compat: the /v1/models entry whose id==model, field
     max_model_len|context_length (id-matched, so a multi-model endpoint returns the TARGET
-    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama: POST /api/show →
-    model_info "<arch>.context_length". LM Studio: GET /api/v0/models loaded_context_length (the
+    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama: GET /api/ps context_length of the LOADED
+    model (the served window, NOT /api/show's model ceiling, which over-reports). LM Studio: GET /api/v0/models loaded_context_length (the
     LOADED window, NOT max_context_length — over-reporting would let the start guard pass a config
     that then 400s). Where a runtime genuinely doesn't expose it (not-loaded / older builds) →
     None (disclose, never fabricate a default). Never raises."""

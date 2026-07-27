@@ -93,8 +93,8 @@ def _assert_generated(message) -> None:
     can spend a small max_tokens budget entirely inside reasoning_content and return empty
     `content` with finish_reason='length' — that is a live generation, not a failure. Accept
     non-empty output in EITHER channel (content or reasoning_content)."""
-    produced = (message.content or "") or (getattr(message, "reasoning_content", "") or "")
-    assert produced.strip() != "", (
+    produced = (message.content or "").strip() or (getattr(message, "reasoning_content", "") or "").strip()
+    assert produced != "", (
         f"no content or reasoning_content produced "
         f"(finish_reason={getattr(message, 'finish_reason', None)!r})"
     )
