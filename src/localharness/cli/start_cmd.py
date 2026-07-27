@@ -464,7 +464,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # detect_capabilities' vLLM-shape /v1/models probe (max_model_len) — None for llama.cpp/
     # LM Studio/Ollama, so this fail-loud guard used to silently NO-OP for them (_effective_max_context
     # returns cfg unchanged on a None window). probe_served_window reads each runtime's real window
-    # (llama.cpp /props, Ollama /api/show, LM Studio /api/v0/models), so the guard FIRES when the
+    # (llama.cpp /props, Ollama /api/ps, LM Studio /api/v0/models), so the guard FIRES when the
     # window is discoverable and cleanly discloses (config wins) when it isn't. Blocking httpx → off
     # the event loop (#32); falls back to the probe's window (vLLM parity / a flaked provider probe).
     _served = await asyncio.to_thread(
