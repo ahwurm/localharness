@@ -88,6 +88,18 @@ def _preflight(base_url: str, model: str, gate_env: str) -> None:
         )
 
 
+def _assert_generated(message) -> None:
+    """Basic-generation proof that is correct for THINKING models. A thinking-capable local model
+    can spend a small max_tokens budget entirely inside reasoning_content and return empty
+    `content` with finish_reason='length' — that is a live generation, not a failure. Accept
+    non-empty output in EITHER channel (content or reasoning_content)."""
+    produced = (message.content or "") or (getattr(message, "reasoning_content", "") or "")
+    assert produced.strip() != "", (
+        f"no content or reasoning_content produced "
+        f"(finish_reason={getattr(message, 'finish_reason', None)!r})"
+    )
+
+
 @pytest.mark.parametrize(
     "provider_type",
     [
@@ -118,11 +130,13 @@ async def test_provider_round_trip(provider_type):
     window = probe_served_window(base_url, model, provider_type)
     assert window is None or isinstance(window, int)
 
-    # 3. Short real completion — proves basic generation works. Capped small on purpose: this
-    # leg only needs non-empty content, not a long answer.
-    client.config.max_tokens = 32
+    # 3. Short real completion — proves basic generation works. Budget must clear a thinking
+    # model's reasoning preamble (same reasoning as leg 4): a thinking-capable local model can
+    # spend the whole cap inside reasoning_content and emit empty `content` (finish_reason=
+    # 'length'). That is a live generation, so _assert_generated accepts either channel.
+    client.config.max_tokens = 256
     message, _usage = await client.complete(_SHORT_PROMPT)
-    assert (message.content or "").strip() != ""
+    _assert_generated(message)
 
     # 4. Tool-call fidelity check. Generous budget (mirrors detect_capabilities' own 256-token
     # probe cap, client.py): a thinking-capable local model spends real tokens on preamble/
@@ -147,9 +161,9 @@ async def test_provider_round_trip(provider_type):
         client.rebind_endpoint(base_url_2)
         client.config.model = model_2
         await client.detect_capabilities()
-        client.config.max_tokens = 32
+        client.config.max_tokens = 256
         message_2, _usage3 = await client.complete(_SHORT_PROMPT)
-        assert (message_2.content or "").strip() != ""
+        _assert_generated(message_2)
 
         # ... and back — proves the SAME client instance round-trips both directions, not just
         # a fresh one per endpoint.
@@ -157,4 +171,4 @@ async def test_provider_round_trip(provider_type):
         client.config.model = model
         await client.detect_capabilities()
         message_3, _usage4 = await client.complete(_SHORT_PROMPT)
-        assert (message_3.content or "").strip() != ""
+        _assert_generated(message_3)
