@@ -4,6 +4,47 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.10.0] — 2026-07-27
+
+Cross-framework provider support: switch between models served on different
+backends, and llama.cpp validated as a second provider.
+
+### Added
+- **Cross-endpoint model switching.** `/model` switches the live client between
+  models served on *different* endpoints/frameworks, not just different models on
+  one server. Configure peers under `extra_endpoints`; the switch re-points the
+  client (base_url + provider type), re-probes capabilities, and rebinds the token
+  counter. Same-server model switch is unchanged.
+- **Grouped model tree in `/model`** — the picker groups models by endpoint/
+  framework (`▸ framework · host:port`), discovered by probing configured peers
+  concurrently (unreachable peers are noted, not fatal).
+- **llama.cpp validated as a second provider** (alongside vLLM): auto-detected by
+  response shape, exact token counting via `/tokenize`, served-window discovery via
+  `/props`, and a live agentic tool-call round trip (multi-step web research driven
+  through the harness). Opt-in live markers `live_llamacpp` / `live_ollama` /
+  `live_lmstudio` + a `test_provider_round_trip` certification test.
+
+### Changed
+- Capability + token-counter probes are provider-aware (vLLM / llama.cpp / Ollama /
+  LM Studio), selected by detected type: exact counts where the runtime serves a
+  tokenizer, honest-labeled approximation where it does not.
+- The context budget is validated against the endpoint's *served* window and fails
+  loud if the configured context exceeds it, instead of silently truncating.
+
+### Fixed
+- Context budget could exceed a small served window (e.g. Ollama's default) →
+  silent prompt truncation; now clamped below the served window.
+- Native-mode 400s on unsupported params now retry scoped to known params.
+- The provider certification test false-failed thinking models (a small token cap
+  was consumed by reasoning, leaving `content` empty); it now accepts reasoning
+  output as proof of generation.
+
+### Notes
+- Ollama and LM Studio go through the same OpenAI-compatible client path, but their
+  full on-GPU certification — and the harness *launching* non-vLLM servers itself
+  (lifecycle) — land in 0.11. This release is the switch + attach + llama.cpp
+  validation.
+
 ## [0.9.26] — 2026-07-20
 
 Swap-reliability fix from the first user-driven swap in live use.
