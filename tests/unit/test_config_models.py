@@ -354,3 +354,59 @@ def test_endpoint_ref_rejects_malformed_base_url(url):
     from localharness.config.models import EndpointRef
     with pytest.raises(ValidationError):
         EndpointRef(name="peer", base_url=url)
+
+
+# --- C2.1: EndpointRef gains gpu + lifecycle (Phase C2 cross-framework heavy-swap launch spec) --- #
+
+
+def test_endpoint_ref_gpu_defaults_false_lifecycle_none():
+    """0.10.0 attach-only default preserved: a peer is CPU-light (coexists) and not launchable
+    unless explicitly declared. The GPU-lock only acts on gpu=True peers; a lifecycle block only
+    exists for peers the harness can bring up itself."""
+    from localharness.config.models import EndpointRef
+    ep = EndpointRef(name="peer", base_url="http://localhost:11434/v1")
+    assert ep.gpu is False
+    assert ep.lifecycle is None
+
+
+def test_endpoint_ref_accepts_gpu_lifecycle_launch_spec():
+    """A cold GPU-heavy peer carries a full ManagedServerConfig launch spec so the harness can
+    start it on the freed accelerator (Phase C2). Here: a llama.cpp peer."""
+    from localharness.config.models import EndpointRef, ManagedServerConfig
+    ep = EndpointRef(
+        name="llamacpp-local",
+        base_url="http://127.0.0.1:8080/v1",
+        provider_type="llamacpp",
+        gpu=True,
+        lifecycle=ManagedServerConfig(
+            runtime="llamacpp",
+            launch="binary",
+            binary="/home/x/llama.cpp/build/bin/llama-server",
+            model="/home/x/models/q.gguf",
+            port=8080,
+            extra_args=["-c", "32768", "--parallel", "1", "-ngl", "99", "--jinja", "-a", "qwen3.6-35b-a3b"],
+            gpu=True,
+        ),
+    )
+    assert ep.gpu is True
+    assert ep.lifecycle is not None
+    assert ep.lifecycle.runtime == "llamacpp"
+    assert ep.lifecycle.binary.endswith("llama-server")
+
+
+@pytest.mark.parametrize("ep_gpu, life_gpu", [(False, False), (False, True), (True, False)])
+def test_endpoint_ref_rejects_non_heavy_launchable_peer(ep_gpu, life_gpu):
+    """A LAUNCHABLE peer (lifecycle set) must be gpu=True on BOTH the endpoint and its lifecycle spec.
+    Every non-heavy combination is rejected: the harness tracks one launched server at a time via a
+    single per-config pidfile (and the GPU-lock keeps one launched heavy up), so a coexisting CPU
+    launchable peer — which the shared pidfile could not track without orphaning/mis-stopping a
+    process — is not yet supported. Attaching to a running CPU peer stays fine (lifecycle=None)."""
+    from localharness.config.models import EndpointRef, ManagedServerConfig
+    with pytest.raises(ValidationError):
+        EndpointRef(
+            name="bad", base_url="http://127.0.0.1:8080/v1", provider_type="llamacpp", gpu=ep_gpu,
+            lifecycle=ManagedServerConfig(
+                runtime="llamacpp", launch="binary", binary="/x/llama-server",
+                model="/x/q.gguf", gpu=life_gpu,
+            ),
+        )

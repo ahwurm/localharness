@@ -41,6 +41,68 @@ def _llamacpp_srv(**over) -> ManagedServerConfig:
 
 
 # ---------------------------------------------------------------------------
+# free_accelerator — the GPU-lock (Phase C2): at most one heavy server up
+# ---------------------------------------------------------------------------
+
+
+class _RecordingStrategy:
+    """A fake strategy that records stop() and forbids activate()/liveness() — free_accelerator
+    must only ever STOP, never launch or probe."""
+    def __init__(self, log):
+        self._log = log
+
+    async def stop(self, spec, config_dir):
+        self._log.append(("stop", spec, config_dir))
+
+    async def activate(self, *a, **k):
+        raise AssertionError("free_accelerator must never activate")
+
+    def liveness(self, *a, **k):
+        raise AssertionError("free_accelerator must never check liveness")
+
+
+async def test_free_accelerator_stops_different_heavy_incumbent(tmp_path, monkeypatch):
+    """A cold heavy target with a DIFFERENT incumbent up → verified-stop the incumbent (through its
+    OWN strategy) + settle, and RETURN it so a failed launch can restore it. Encodes the box rule."""
+    from localharness.provider import lifecycle
+    log: list = []
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    incumbent_spec = _docker_srv(gpu=True)
+    target = _llamacpp_srv(gpu=True)
+    returned = await lifecycle.free_accelerator(
+        (incumbent_spec, "http://127.0.0.1:8000/v1"), target, tmp_path, settle_seconds=0.0,
+    )
+    assert log == [("stop", incumbent_spec, tmp_path)]
+    assert returned == (incumbent_spec, "http://127.0.0.1:8000/v1")
+
+
+async def test_free_accelerator_noop_when_incumbent_is_target(tmp_path, monkeypatch):
+    """Same-server restart (incumbent IS the target — e.g. the primary vLLM reloading a new model):
+    free_accelerator does NOT stop; the caller's own stop→activate performs the reload."""
+    from localharness.provider import lifecycle
+    log: list = []
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    spec = _docker_srv(gpu=True)
+    returned = await lifecycle.free_accelerator(
+        (spec, "http://127.0.0.1:8000/v1"), spec, tmp_path, settle_seconds=0.0,
+    )
+    assert returned is None
+    assert log == []
+
+
+async def test_free_accelerator_noop_when_nothing_heavy_up(tmp_path, monkeypatch):
+    """No heavy incumbent (bound to a CPU-light peer, or an unmanaged primary) → nothing to free."""
+    from localharness.provider import lifecycle
+    log: list = []
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    returned = await lifecycle.free_accelerator(
+        None, _llamacpp_srv(gpu=True), tmp_path, settle_seconds=0.0,
+    )
+    assert returned is None
+    assert log == []
+
+
+# ---------------------------------------------------------------------------
 # Interface shape
 # ---------------------------------------------------------------------------
 
