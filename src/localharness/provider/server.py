@@ -148,6 +148,16 @@ def serve_command(srv: ManagedServerConfig) -> list[str]:
             "--host", "127.0.0.1", "--port", str(srv.port),
             *srv.extra_args,
         ]
+    if srv.runtime == "ollama":
+        # Ollama (0.11 Phase D): the harness spawns the DAEMON — `ollama serve` takes NO model arg
+        # (models load lazily per request; DaemonStrategy warm-loads srv.model after). Env carries
+        # the bind host/port + keep-loaded-while-the-daemon-is-up; CPU-only when gpu=False (lets the
+        # daemon lifecycle be validated with NO GPU window). The `env` prefix sets vars through
+        # start_server's plain Popen without adding a param. `binary` defaults to PATH `ollama`.
+        env = ["env", f"OLLAMA_HOST=127.0.0.1:{srv.port}", "OLLAMA_KEEP_ALIVE=-1"]
+        if not srv.gpu:
+            env.append("CUDA_VISIBLE_DEVICES=")
+        return [*env, str(srv.binary) if srv.binary else "ollama", "serve"]
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
     if srv.launch == "docker":

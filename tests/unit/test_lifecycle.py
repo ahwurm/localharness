@@ -7,6 +7,8 @@ name-based liveness, without launching anything real.
 """
 from __future__ import annotations
 
+import pytest
+
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import server
 from localharness.provider.lifecycle import (
@@ -304,3 +306,192 @@ def test_spawned_liveness_is_pid_based_never_docker(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
     assert SpawnedProcessStrategy().liveness(_llamacpp_srv(), tmp_path).alive is False
+
+
+# ---------------------------------------------------------------------------
+# DaemonStrategy — Ollama: harness spawns `ollama serve`, loads the model, OWNS the stop (Phase D)
+# ---------------------------------------------------------------------------
+
+
+def _ollama_srv(**over) -> ManagedServerConfig:
+    kw = dict(runtime="ollama", model="qwen2.5:7b", port=11434, gpu=False)
+    kw.update(over)
+    return ManagedServerConfig(**kw)
+
+
+def test_daemon_strategy_satisfies_protocol():
+    from localharness.provider import lifecycle
+    assert isinstance(lifecycle.DaemonStrategy(), LifecycleStrategy)
+
+
+async def test_daemon_activate_spawns_daemon_and_loads_target_model(tmp_path, monkeypatch):
+    """activate spawns `ollama serve` (serve_command→start_server), waits for the daemon, and
+    warm-LOADS the target tag → served_models is [the tag] (NOT the full pulled list), handle=pid."""
+    from localharness.provider import lifecycle
+    calls: dict = {}
+    monkeypatch.setattr(server, "serve_command",
+                        lambda spec: ["env", "OLLAMA_HOST=127.0.0.1:11434", "ollama", "serve"])
+
+    def fake_start(cd, cmd):
+        calls["start"] = (cd, cmd)
+        return 5555
+
+    monkeypatch.setattr(server, "start_server", fake_start)
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        calls["wait"] = base_url
+        return ["qwen2.5:7b", "qwen3"]  # PULLED-to-disk models (resident or not)
+
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+    loaded: dict = {}
+
+    async def fake_load(self, base_url, model):
+        loaded["load"] = (base_url, model)
+
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_load", fake_load)
+
+    async def _not_up(self, v1):  # no pre-existing daemon on the port
+        return False
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_daemon_already_up", _not_up)
+
+    ep = await lifecycle.DaemonStrategy().activate(_ollama_srv(), tmp_path, "http://localhost:11434/v1")
+    assert ep.served_models == ["qwen2.5:7b"]
+    assert ep.handle == 5555
+    assert loaded["load"] == ("http://localhost:11434/v1", "qwen2.5:7b")
+    assert calls["wait"] == "http://localhost:11434/v1"
+
+
+async def test_daemon_activate_pulls_when_tag_not_on_disk(tmp_path, monkeypatch):
+    """If the tag isn't in wait_ready's pulled list, activate pulls it BEFORE loading (pull→load)."""
+    from localharness.provider import lifecycle
+    monkeypatch.setattr(server, "serve_command", lambda spec: ["ollama", "serve"])
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd: 1)
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        return ["other:1b"]  # target NOT present on disk
+
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+    order: list = []
+
+    async def fake_pull(self, spec):
+        order.append(("pull", spec.model))
+
+    async def fake_load(self, base_url, model):
+        order.append(("load", model))
+
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_pull", fake_pull)
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_load", fake_load)
+
+    async def _not_up(self, v1):
+        return False
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_daemon_already_up", _not_up)
+
+    await lifecycle.DaemonStrategy().activate(_ollama_srv(model="target:7b"), tmp_path, "http://x/v1")
+    assert order == [("pull", "target:7b"), ("load", "target:7b")]
+
+
+# --- D3 critic fixes: activate honors the (RuntimeError|TimeoutError) contract + /v1 + fail-fast --- #
+
+
+async def test_daemon_load_and_pull_map_native_errors(tmp_path, monkeypatch):
+    """_load maps httpx timeout→TimeoutError & http-status→RuntimeError; _pull maps a missing binary
+    (FileNotFoundError/OSError)→RuntimeError. All within the activate failure contract."""
+    import httpx
+    from localharness.provider import lifecycle
+    strat = lifecycle.DaemonStrategy()
+
+    class _TimeoutClient:
+        def __init__(self, *a, **k): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _TimeoutClient)
+    with pytest.raises(TimeoutError):
+        await strat._load("http://x/v1", "m")
+
+    class _StatusClient(_TimeoutClient):
+        async def post(self, *a, **k):
+            return httpx.Response(404, request=httpx.Request("POST", "http://x"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", _StatusClient)
+    with pytest.raises(RuntimeError):
+        await strat._load("http://x/v1", "m")
+
+    # _pull with a binary that does not exist → RuntimeError (not a bare OSError)
+    with pytest.raises(RuntimeError):
+        await strat._pull(_ollama_srv(binary="/no/such/ollama-binary-xyz", model="m"))
+
+
+async def test_daemon_activate_fails_fast_on_preexisting_daemon(tmp_path, monkeypatch):
+    """A daemon already listening on the port → activate raises (loud) BEFORE spawning a second one,
+    rather than silently mis-tracking it (which a later stop would miss = silent two-heavy)."""
+    from localharness.provider import lifecycle
+    spawned = {"n": 0}
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd: spawned.__setitem__("n", spawned["n"] + 1) or 1)
+
+    async def _already_up(self, v1):
+        return True
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_daemon_already_up", _already_up)
+    with pytest.raises(RuntimeError, match="already listening"):
+        await lifecycle.DaemonStrategy().activate(_ollama_srv(), tmp_path, "http://localhost:11434/v1")
+    assert spawned["n"] == 0  # never spawned a second daemon
+
+
+async def test_daemon_activate_normalizes_bare_base_url_to_v1(tmp_path, monkeypatch):
+    """A BARE base_url (no /v1 — EndpointRef allows it for Ollama) is normalized to /v1 for wait_ready,
+    so readiness polls /v1/models (not /models → 404 → 1800s hang)."""
+    from localharness.provider import lifecycle
+    seen = {}
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        seen["wait_url"] = base_url
+        return ["qwen2.5:7b"]
+
+    monkeypatch.setattr(server, "serve_command", lambda spec: ["ollama", "serve"])
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd: 1)
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+
+    async def _not_up(self, v1):
+        return False
+
+    async def _noop_load(self, base_url, model):
+        return None
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_daemon_already_up", _not_up)
+    monkeypatch.setattr(lifecycle.DaemonStrategy, "_load", _noop_load)
+
+    ep = await lifecycle.DaemonStrategy().activate(_ollama_srv(), tmp_path, "http://localhost:11434")
+    assert seen["wait_url"] == "http://localhost:11434/v1"   # normalized
+    assert ep.base_url == "http://localhost:11434/v1"
+
+
+async def test_daemon_stop_kills_whole_daemon_not_keepalive(tmp_path, monkeypatch):
+    """Owner ruling: stop = kill the WHOLE daemon (stop_server launch='binary'), off the loop —
+    NOT a per-model keep_alive:0 unload."""
+    from localharness.provider import lifecycle
+    seen: dict = {}
+    monkeypatch.setattr(server, "stop_server",
+                        lambda cd, launch="binary": seen.setdefault("args", (cd, launch)) or True)
+    await lifecycle.DaemonStrategy().stop(_ollama_srv(), tmp_path)
+    assert seen["args"] == (tmp_path, "binary")
+
+
+def test_daemon_liveness_is_daemon_pid(tmp_path, monkeypatch):
+    from localharness.provider import lifecycle
+    monkeypatch.setattr(server, "server_pid", lambda cd: 4242)
+    assert lifecycle.DaemonStrategy().liveness(_ollama_srv(), tmp_path).alive is True
+    monkeypatch.setattr(server, "server_pid", lambda cd: None)
+    assert lifecycle.DaemonStrategy().liveness(_ollama_srv(), tmp_path).alive is False
+
+
+def test_daemon_root_strips_v1():
+    from localharness.provider import lifecycle
+    assert lifecycle.DaemonStrategy._daemon_root("http://localhost:11434/v1") == "http://localhost:11434"
+    assert lifecycle.DaemonStrategy._daemon_root("http://localhost:11434/v1/") == "http://localhost:11434"
+
+
+def test_strategy_for_ollama_dispatches_daemon():
+    from localharness.provider import lifecycle
+    assert isinstance(lifecycle.strategy_for(_ollama_srv()), lifecycle.DaemonStrategy)
+    assert isinstance(lifecycle.strategy_for(_llamacpp_srv()), lifecycle.SpawnedProcessStrategy)
+    assert isinstance(lifecycle.strategy_for(_docker_srv()), lifecycle.ManagedVllmStrategy)

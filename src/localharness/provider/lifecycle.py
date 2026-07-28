@@ -170,14 +170,139 @@ class SpawnedProcessStrategy:
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
 
 
+class DaemonStrategy:
+    """Ollama (0.11 Phase D). The harness spawns the `ollama serve` DAEMON itself and loads the
+    target model into it. Two ollama facts shape this:
+
+    - `ollama serve` takes NO model argument — models load lazily per request — so activate must
+      LOAD `spec.model` (an HTTP warm-up) after the daemon is up, else `served_models` would just
+      mean "daemon up" (Ollama's /v1/models lists PULLED-to-disk models, resident or not).
+    - **STOP kills the WHOLE daemon** (owner ruling): stopping the daemon process is a hard,
+      verified GPU-free guarantee (same class as docker-stop / process-kill), whereas a per-model
+      `keep_alive:0` unload is a soft signal that may not promptly/fully free VRAM.
+
+    Mechanically the daemon is a harness-SPAWNED process, so it reuses SpawnedProcessStrategy's
+    proven launch / pidfile / verified-stop / pid-liveness primitives — the ollama-specific parts
+    are only the env-built `serve_command`, the model warm-up, and a pull-if-absent. Under the
+    GPU-lock (at most one launched server up) the daemon's pid in the shared per-config pidfile is
+    the sole live one, so the C2 single-pidfile invariant holds unchanged. (Attaching to a
+    PRE-EXISTING daemon the harness didn't spawn is a later concern — this box's ollama.service is
+    disabled, so the harness always owns the daemon it starts.)"""
+
+    async def activate(
+        self,
+        spec: ManagedServerConfig,
+        config_dir: Path,
+        base_url: str,
+        *,
+        timeout_seconds: float = 1800.0,
+        on_poll: Callable[[float], None] | None = None,
+    ) -> LiveEndpoint:
+        # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
+        # on failure — the /model swap callers catch exactly those to tear down + restore. _load
+        # (httpx) and _pull (subprocess) therefore MAP their native errors into that vocabulary;
+        # without it an httpx.* / OSError would escape the caller's except and crash the session with
+        # the just-spawned daemon orphaned.
+        v1 = self._v1(base_url)
+        if await self._daemon_already_up(v1):
+            # Fail-fast, NOT silent: the harness owns only daemons IT spawns (pidfile-tracked). If one
+            # is already listening, a 2nd `ollama serve` can't bind and we'd mis-track it → a later
+            # stop misses the real daemon (silent two-heavy). Attach-and-own is deferred (see docstring).
+            raise RuntimeError(
+                f"an ollama daemon is already listening at {v1} — the harness manages only daemons it "
+                "starts; stop the existing one first (attach-and-own is deferred)."
+            )
+        cmd = server.serve_command(spec)                 # env-prefixed `ollama serve`
+        pid = server.start_server(config_dir, cmd)
+        available = await server.wait_ready(             # daemon up; returns PULLED model ids
+            v1, config_dir=config_dir, timeout_seconds=timeout_seconds, on_poll=on_poll,
+        )
+        if spec.model not in available:
+            await self._pull(spec)                       # tag not on disk → pull it
+        await self._load(v1, spec.model)                 # warm-up: load into memory (no generation)
+        return LiveEndpoint(base_url=v1, served_models=[spec.model], handle=pid)
+
+    async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
+        # OWNER RULING: stop the WHOLE daemon (verified GPU-free), NOT keep_alive:0. A spawned daemon
+        # leads its own process group (start_new_session=True), so stop_server's killpg SIGTERM→SIGKILL
+        # reaps the daemon AND its runner children (which hold the weights), off the loop.
+        await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+
+    def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
+        pid = server.server_pid(config_dir)
+        return Liveness(
+            alive=pid is not None,
+            detail=f"ollama daemon pid {pid}" if pid is not None else "no daemon",
+        )
+
+    @staticmethod
+    def _v1(base_url: str) -> str:
+        """Ensure the OpenAI-compat /v1 suffix. wait_ready polls {base_url}/models and the client
+        speaks OpenAI, but EndpointRef.validate_base_url leniently allows a BARE Ollama root — which
+        would make wait_ready poll /models (404) and spin to the full timeout. Normalize here."""
+        b = base_url.rstrip("/")
+        return b if b.endswith("/v1") else b + "/v1"
+
+    @staticmethod
+    def _daemon_root(base_url: str) -> str:
+        """Ollama's NATIVE API (/api/*) lives at the daemon root, not under the OpenAI-compat /v1."""
+        return base_url.rstrip("/").removesuffix("/v1")
+
+    async def _daemon_already_up(self, v1_base: str) -> bool:
+        """A daemon already listening on the target port (one the harness did NOT spawn → can't
+        pidfile-track → can't stop). Regular method so tests can monkeypatch it hermetically."""
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{v1_base.rstrip('/')}/models")
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    async def _load(self, base_url: str, model: str) -> None:
+        # POST /api/generate with an EMPTY prompt is Ollama's canonical "load into memory without
+        # generating" call (returns done_reason=load). No token budget — nothing is generated — so
+        # this respects "give thinking room". MAP httpx failures into the activate contract.
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                r = await client.post(
+                    f"{self._daemon_root(base_url)}/api/generate",
+                    json={"model": model, "prompt": "", "keep_alive": -1, "stream": False},
+                )
+                r.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f"ollama load of {model!r} timed out after 600s: {exc}") from exc
+        except httpx.HTTPError as exc:  # incl. HTTPStatusError from raise_for_status
+            raise RuntimeError(f"ollama load of {model!r} failed: {exc}") from exc
+
+    async def _pull(self, spec: ManagedServerConfig) -> None:
+        # MAP a missing/unrunnable `ollama` binary into the activate contract (else FileNotFoundError
+        # escapes the swap caller's except and crashes the session).
+        binary = str(spec.binary) if spec.binary else "ollama"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary, "pull", spec.model,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:  # FileNotFoundError (binary not on PATH) is an OSError
+            raise RuntimeError(f"could not run `{binary} pull {spec.model}`: {exc}") from exc
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"`ollama pull {spec.model}` failed: {(err or b'').decode()[:200]}")
+
+
 def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
     """Map a managed-server spec to its launch strategy by `runtime` (the launch-STRATEGY axis,
     orthogonal to provider_type): 'llamacpp' → SpawnedProcessStrategy (the harness spawns
-    llama-server itself), anything else ('vllm', the default) → ManagedVllmStrategy (docker/binary
-    vLLM). The single construction point the callers — the REPL /model swap and `start` autostart —
-    route through, so the strategy, not the caller, owns HOW a backend is launched/stopped."""
+    llama-server itself), 'ollama' → DaemonStrategy (the harness spawns + owns the `ollama serve`
+    daemon), anything else ('vllm', the default) → ManagedVllmStrategy (docker/binary vLLM). The
+    single construction point the callers — the REPL /model swap and `start` autostart — route
+    through, so the strategy, not the caller, owns HOW a backend is launched/stopped."""
     if spec.runtime == "llamacpp":
         return SpawnedProcessStrategy()
+    if spec.runtime == "ollama":
+        return DaemonStrategy()
     return ManagedVllmStrategy()
 
 

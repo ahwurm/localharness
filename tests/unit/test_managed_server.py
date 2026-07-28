@@ -427,3 +427,31 @@ def test_docker_container_running_defaults_to_module_container_name(monkeypatch)
     monkeypatch.setattr(server.subprocess, "run", fake)
     assert server.docker_container_running() is True
     assert fake.calls[0][-1] == server.DOCKER_CONTAINER_NAME
+
+
+# --- Phase D: serve_command builds the `ollama serve` daemon launch (no model arg) --- #
+
+
+def test_serve_command_ollama_daemon_gpu():
+    """runtime=ollama → env-prefixed `ollama serve` (NO model arg — models load lazily). GPU mode
+    adds no CUDA override; `binary` defaults to PATH `ollama`."""
+    from localharness.config.models import ManagedServerConfig
+    cmd = server.serve_command(
+        ManagedServerConfig(runtime="ollama", model="qwen2.5:7b", port=11434, gpu=True)
+    )
+    assert cmd == ["env", "OLLAMA_HOST=127.0.0.1:11434", "OLLAMA_KEEP_ALIVE=-1", "ollama", "serve"]
+
+
+def test_serve_command_ollama_daemon_cpu_and_custom_binary():
+    """gpu=False adds CUDA_VISIBLE_DEVICES= (CPU-only daemon → lifecycle-testable with no GPU
+    window); a custom binary path and port are honored."""
+    from localharness.config.models import ManagedServerConfig
+    cmd = server.serve_command(
+        ManagedServerConfig(runtime="ollama", model="m", port=11434, gpu=False)
+    )
+    assert cmd == ["env", "OLLAMA_HOST=127.0.0.1:11434", "OLLAMA_KEEP_ALIVE=-1",
+                   "CUDA_VISIBLE_DEVICES=", "ollama", "serve"]
+    cmd2 = server.serve_command(
+        ManagedServerConfig(runtime="ollama", model="m", port=9999, binary="/opt/ollama", gpu=True)
+    )
+    assert cmd2 == ["env", "OLLAMA_HOST=127.0.0.1:9999", "OLLAMA_KEEP_ALIVE=-1", "/opt/ollama", "serve"]
