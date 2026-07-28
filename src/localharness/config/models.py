@@ -1818,13 +1818,15 @@ class ManagedServerConfig(BaseModel):
     user-managed servers."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    runtime: Literal["vllm", "llamacpp"] = Field(
+    runtime: Literal["vllm", "llamacpp", "ollama"] = Field(
         default="vllm",
         description=(
             "Which server the harness launches. 'vllm' (default) = the existing docker/binary "
             "vLLM path, unaffected. 'llamacpp' = the harness spawns llama.cpp's `llama-server` "
-            "itself (launch stays 'binary'; `runtime` drives the command builder — 0.11 Phase B). "
-            "ADDITIVE: existing vLLM configs never set this and keep the default."
+            "itself (0.11 Phase B). 'ollama' = the harness spawns the `ollama serve` daemon and "
+            "loads a model into it (0.11 Phase D; `model` is the ollama tag, `binary` defaults to "
+            "PATH `ollama`, `port` is the daemon port). `runtime` drives the command builder + the "
+            "lifecycle strategy. ADDITIVE: existing vLLM configs never set this and keep the default."
         ),
     )
     launch: Literal["binary", "docker"] = Field(
@@ -1858,6 +1860,10 @@ class ManagedServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
+        if self.runtime == "ollama":
+            # ollama: the harness spawns `ollama serve` (a PATH command; `binary` defaults to
+            # 'ollama'); `model` is a pulled tag, not a checkpoint/image — no launch target to check.
+            return self
         if self.runtime == "llamacpp" and not self.binary:
             raise ValueError("runtime=llamacpp requires `binary` (path to the llama-server executable)")
         if self.launch == "binary" and not self.binary:

@@ -410,3 +410,29 @@ def test_endpoint_ref_rejects_non_heavy_launchable_peer(ep_gpu, life_gpu):
                 model="/x/q.gguf", gpu=life_gpu,
             ),
         )
+
+
+# --- D1: ManagedServerConfig runtime="ollama" (Phase D DaemonStrategy) --- #
+
+
+def test_managed_server_ollama_runtime_needs_no_binary():
+    """runtime='ollama' — the harness spawns `ollama serve` (a PATH command, no checkpoint/image),
+    so the launch-target validator requires neither binary nor docker_image; `model` is the ollama
+    tag, `binary` defaults to None (resolved to PATH `ollama` by the command builder)."""
+    from localharness.config.models import ManagedServerConfig
+    srv = ManagedServerConfig(runtime="ollama", model="qwen2.5:7b", port=11434, gpu=False)
+    assert srv.runtime == "ollama"
+    assert srv.binary is None and srv.docker_image is None
+    assert srv.model == "qwen2.5:7b" and srv.port == 11434
+
+
+@pytest.mark.parametrize("kw", [
+    dict(runtime="llamacpp", model="/x/m.gguf"),               # llamacpp needs binary
+    dict(runtime="vllm", launch="binary", model="m"),          # binary launch needs binary
+    dict(runtime="vllm", launch="docker", model="m"),          # docker launch needs docker_image
+])
+def test_managed_server_non_ollama_launch_validators_unchanged(kw):
+    """Regression: the ollama exemption is scoped — vLLM/llama.cpp still require their launch target."""
+    from localharness.config.models import ManagedServerConfig
+    with pytest.raises(ValidationError):
+        ManagedServerConfig(**kw)
