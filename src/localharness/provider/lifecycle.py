@@ -179,3 +179,40 @@ def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
     if spec.runtime == "llamacpp":
         return SpawnedProcessStrategy()
     return ManagedVllmStrategy()
+
+
+GPU_FREE_SETTLE_SECONDS = 3.0
+"""Brief pause after a verified-stop before launching the next heavy server. On the DGX Spark's
+UNIFIED memory (119 GiB shared CPU+GPU; no discrete VRAM — `nvidia-smi` reports memory N/A here),
+the verified-stop (process/container GONE) IS the accelerator-free guarantee: the kernel reclaims
+the pages on process exit. This settle is cheap insurance against a reclaim-vs-mmap race under
+memory pressure, NOT the gate itself. Tune from live heavy-swap data."""
+
+
+async def free_accelerator(
+    incumbent: tuple[ManagedServerConfig, str] | None,
+    target: ManagedServerConfig,
+    config_dir: Path,
+    *,
+    settle_seconds: float | None = None,
+) -> tuple[ManagedServerConfig, str] | None:
+    """GPU-lock: make the single accelerator free for `target`, honoring the box rule "at most one
+    GPU-heavy server up at a time".
+
+    If a DIFFERENT heavy server holds the accelerator (`incumbent` is not None and is not `target`
+    itself), verified-STOP it through its own strategy — the stop contract (process/container gone)
+    IS the accelerator-free guarantee on unified memory — then settle briefly, and RETURN the
+    stopped ``(spec, base_url)`` so a failed launch can restore it. Returns ``None`` (no action)
+    when nothing heavy is up, or when the incumbent IS the target (a same-server model-reload
+    restart, whose stop the caller performs itself). This function only ever FREES — it never starts
+    or probes anything."""
+    if incumbent is None:
+        return None
+    inc_spec, _inc_url = incumbent
+    if inc_spec is target:
+        return None
+    await strategy_for(inc_spec).stop(inc_spec, config_dir)
+    # Read the settle from the module global at CALL time (not a def-time default) so it stays
+    # tunable from live heavy-swap data and silenceable in tests.
+    await asyncio.sleep(GPU_FREE_SETTLE_SECONDS if settle_seconds is None else settle_seconds)
+    return incumbent

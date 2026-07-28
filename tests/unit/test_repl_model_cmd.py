@@ -638,6 +638,224 @@ async def test_model_cross_endpoint_persist_writes_active_endpoint_overlay(tmp_p
     HarnessConfig.model_validate(deep_merge(harness.model_dump(mode="python"), overlay))
 
 
+# --- Phase C2: cold-peer cross-framework heavy-swap (GPU-lock) --- #
+
+
+def _cold_peer(name="llamacpp-local", base_url="http://127.0.0.1:8080/v1", served="qwen-gguf"):
+    """A peer that is NOT running but carries a lifecycle launch spec the harness can bring up (a
+    llama.cpp llama-server). gpu=True → it participates in the GPU-lock."""
+    from localharness.config.models import EndpointRef
+    return EndpointRef(
+        name=name, base_url=base_url, provider_type="llamacpp", gpu=True,
+        lifecycle=ManagedServerConfig(
+            runtime="llamacpp", launch="binary", binary="/x/llama-server",
+            model="/x/model.gguf", port=8080, gpu=True,
+            extra_args=["-c", "32768", "--parallel", "1", "-ngl", "99", "--jinja", "-a", served],
+        ),
+    )
+
+
+def _heavy_primary(model="model-a"):
+    """A harness-managed GPU vLLM (docker) — the incumbent heavy the GPU-lock must stop before a
+    cold peer can launch. gpu defaults True."""
+    return ManagedServerConfig(launch="docker", docker_image="vllm:latest", model=model)
+
+
+def test_cold_lifecycle_targets_surfaces_cold_launchable_peer(tmp_path):
+    """A down peer WITH a lifecycle block is offered (by its configured served-name); an attach-only
+    peer (lifecycle=None) is not; a lifecycle peer already probed live is left to the live path."""
+    cold = _cold_peer(served="qwen-gguf")
+    attach = _peer(name="ollama", base_url="http://localhost:11434/v1")  # lifecycle=None
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold, attach])
+    repl, _, _, _ = _xrepl(tmp_path, harness, {})
+    assert repl._cold_lifecycle_targets(["model-a"], {}) == {"qwen-gguf": cold}
+    # a lifecycle peer that IS up (present as a peer_target value) is NOT re-offered as cold
+    assert repl._cold_lifecycle_targets(["model-a"], {"qwen-gguf": cold}) == {}
+
+
+@pytest.mark.asyncio
+async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(tmp_path, monkeypatch):
+    """/model <cold-peer> → GPU-lock: verified-stop the incumbent heavy (docker vLLM), LAUNCH the
+    cold llama.cpp peer ourselves (start→wait), rebind the client at the peer, and move _active_heavy.
+    Ordering: stop-incumbent → start-peer → wait-peer."""
+    from localharness.provider import server as managed_server
+    from localharness.provider import lifecycle
+
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)  # no real settle in tests
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
+    calls: list[str] = []
+    monkeypatch.setattr(managed_server, "stop_server",
+                        lambda cfg, launch="binary": calls.append(f"stop:{launch}") or True)
+    monkeypatch.setattr(managed_server, "start_server",
+                        lambda cfg, cmd: calls.append("start") or 4321)
+
+    async def fake_wait_ready(base_url, config_dir=None, **kw):
+        calls.append("wait")
+        return ["qwen-gguf"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
+
+    cold = _cold_peer(served="qwen-gguf")
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"],       # primary (current) serving model-a
+         "http://127.0.0.1:8080/v1": "unreachable"},    # the peer is COLD
+    )
+
+    async def _refresh(model, *, base_url=None, provider_type=None):
+        return ""
+    repl._refresh_token_counter = _refresh
+    persisted: list = []
+
+    async def _persist_active(endpoint, model):
+        persisted.append((endpoint.base_url, model))
+    repl._persist_active_endpoint = _persist_active
+
+    assert repl._active_heavy is not None and repl._active_heavy[0] is harness.server  # seeded
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert calls == ["stop:docker", "start", "wait"]          # incumbent stopped BEFORE peer launch
+    assert agent._llm.config.model == "qwen-gguf"
+    assert agent._llm.config.base_url == "http://127.0.0.1:8080/v1"
+    assert agent._llm.rebinds and agent._llm.rebinds[0][0] == "http://127.0.0.1:8080/v1"
+    assert repl._active_heavy == (cold.lifecycle, "http://127.0.0.1:8080/v1")  # GPU occupant moved
+    assert persisted == [("http://127.0.0.1:8080/v1", "qwen-gguf")]
+    assert "Switched to qwen-gguf on llamacpp-local" in channel.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_model_cold_peer_launch_failure_restores_incumbent(tmp_path, monkeypatch):
+    """If launching the cold peer FAILS after the incumbent was stopped, the harness re-activates the
+    incumbent (best-effort) so the box is never left with nothing serving; the client stays put."""
+    from localharness.provider import server as managed_server
+    from localharness.provider import lifecycle
+
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
+    events: list[str] = []
+    monkeypatch.setattr(managed_server, "stop_server",
+                        lambda cfg, launch="binary": events.append(f"stop:{launch}") or True)
+    monkeypatch.setattr(managed_server, "start_server",
+                        lambda cfg, cmd: events.append("start") or 4321)
+
+    async def fake_wait_ready(base_url, config_dir=None, **kw):
+        # the PEER (8080) never comes up; the RESTORE of the primary (8081) succeeds
+        if base_url.startswith("http://127.0.0.1:8080"):
+            events.append("peer-wait-FAIL")
+            raise TimeoutError("llama-server never became ready")
+        events.append("restore-wait-ok")
+        return ["model-a"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
+
+    cold = _cold_peer()
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"], "http://127.0.0.1:8080/v1": "unreachable"},
+    )
+
+    async def _refresh(model, *, base_url=None, provider_type=None):
+        return ""
+    repl._refresh_token_counter = _refresh
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    # orphan-safe restore: incumbent stopped → peer launched → peer FAILED → peer torn down FIRST
+    # (stop:binary — else it orphans on the shared pidfile) → incumbent relaunched + ready.
+    assert events == ["stop:docker", "start", "peer-wait-FAIL", "stop:binary", "start", "restore-wait-ok"]
+    assert agent._llm.config.model == "model-a"          # client never moved to the failed peer
+    assert agent._llm.rebinds == []
+    assert repl._active_heavy == (harness.server, "http://localhost:8081/v1")  # restored occupant
+    assert "Restored" in channel.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_model_swap_back_to_primary_stops_cold_peer_first(tmp_path, monkeypatch):
+    """The b2 case: while ON a cold-launched llama.cpp peer (the real GPU occupant), /model <primary
+    registry model> must stop the PEER before restarting the primary vLLM. Proves the GPU-lock
+    generalizes to the managed-restart branch — the primary is DOWN, the peer holds the accelerator."""
+    from localharness.provider import server as managed_server
+    from localharness.provider import lifecycle
+
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    stops: list[str] = []
+    monkeypatch.setattr(managed_server, "stop_server",
+                        lambda cfg, launch="binary": stops.append(launch) or True)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: 1234)
+
+    async def fake_wait_ready(base_url, config_dir=None, **kw):
+        return ["cached-b"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
+
+    cold = _cold_peer()
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
+    repl, channel, agent, _ = _xrepl(tmp_path, harness, {"http://localhost:8081/v1": ["model-a"]})
+    # simulate we're currently ON the cold-launched peer: it's the GPU occupant + the bound endpoint
+    repl._active_heavy = (cold.lifecycle, cold.base_url)
+    agent._llm.config.base_url = cold.base_url
+    agent._llm.config.model = "qwen-gguf"
+
+    await repl._handle_slash("/model cached-b")
+
+    assert stops == ["binary", "docker"]  # PEER stopped (GPU-lock) THEN primary (restart), in order
+    assert agent._llm.config.model == "cached-b"
+    assert repl._active_heavy == (harness.server, "http://localhost:8081/v1")
+
+
+@pytest.mark.asyncio
+async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch):
+    """New Finding B: if freeing the current heavy peer FAILS during a swap-back, the primary is NOT
+    (re)started and the user is told honestly — no misleading 'managed server is down' claim."""
+    from localharness.provider import server as managed_server
+    from localharness.provider import lifecycle
+
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    started: list = []
+
+    def _boom_stop(cfg, launch="binary"):
+        if launch == "binary":                       # the peer we're trying to free won't die
+            raise RuntimeError("llama-server won't die")
+        return True
+
+    monkeypatch.setattr(managed_server, "stop_server", _boom_stop)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: started.append(cmd) or 1)
+
+    async def fake_wait_ready(base_url, config_dir=None, **kw):
+        return ["cached-b"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
+
+    cold = _cold_peer()
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
+    repl, channel, agent, _ = _xrepl(tmp_path, harness, {"http://localhost:8081/v1": ["model-a"]})
+    repl._active_heavy = (cold.lifecycle, cold.base_url)   # currently on the cold peer
+    agent._llm.config.base_url = cold.base_url
+    agent._llm.config.model = "qwen-gguf"
+
+    await repl._handle_slash("/model cached-b")
+
+    assert started == []                               # the primary was NEVER (re)started
+    assert agent._llm.config.model == "qwen-gguf"      # session model unchanged
+    assert "Could not free the GPU" in channel.messages[-1]
+
+
+def test_cold_alias_colliding_with_downloaded_is_not_offered(tmp_path):
+    """Finding 6: a cold peer alias equal to a downloaded checkpoint name is dropped from cold_target
+    (passed local_choices = live + downloaded), so it can't shadow the local name or duplicate a menu
+    number into the wrong (cross-framework launch) branch."""
+    cold = _cold_peer(served="collide")
+    harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
+    repl, _, _, _ = _xrepl(tmp_path, harness, {})
+    assert repl._cold_lifecycle_targets(["model-a", "collide"], {}) == {}   # collides → dropped
+    assert repl._cold_lifecycle_targets(["model-a"], {}) == {"collide": cold}  # no collision → offered
+
+
 @pytest.mark.asyncio
 async def test_backward_compat_no_extra_endpoints_probes_only_primary(tmp_path):
     """Backward compat: with extra_endpoints=[], discovery probes ONLY the primary — zero extra

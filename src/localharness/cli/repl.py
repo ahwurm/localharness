@@ -160,6 +160,20 @@ class OrchestratorREPL:
         self._model_prefetch: Optional[asyncio.Task] = None
         if hasattr(self._channel, "model_names_fn"):
             self._channel.model_names_fn = lambda: self._model_cache
+        # Phase C2 GPU-lock: the heavy (GPU) server currently occupying the single accelerator, as
+        # (spec, base_url), or None. Seeded from the harness-managed primary when it's GPU-bound; a
+        # cold-peer heavy-swap moves it, and a swap BACK to the primary moves it back. Tracks the
+        # accelerator occupant INDEPENDENT of which endpoint the conversation is bound to (switching
+        # to a CPU-light peer leaves the heavy primary up), so the enforceable invariant — the harness
+        # never LAUNCHES a heavy server while a heavy it MANAGES is running — holds before a cold
+        # heavy launch. BOUNDARY: only a harness-managed primary (server set) is tracked/stoppable;
+        # an unmanaged primary (server=None) or an attach-only peer is the operator's to manage — the
+        # lock cannot stop what it did not launch.
+        self._active_heavy: Optional[tuple[Any, str]] = None
+        _srv = getattr(harness_config, "server", None)
+        _prov = getattr(harness_config, "provider", None)
+        if _srv is not None and getattr(_srv, "gpu", False) and _prov is not None:
+            self._active_heavy = (_srv, _prov.base_url)
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
@@ -709,15 +723,22 @@ class OrchestratorREPL:
             peer_target, disc_notes = await self._discover_peer_models(
                 llm.config.base_url, live, downloaded
             )
+            # Phase C2: cold peers the harness can LAUNCH itself (lifecycle block, not yet serving).
+            # Config-only (no probe), so they surface even while down — the heavy-swap targets. Pass
+            # local_choices (live + downloaded) so a cold alias never shadows a local checkpoint name.
+            cold_target = self._cold_lifecycle_targets(local_choices, peer_target)
         else:
-            peer_target, disc_notes = {}, []
-        choices = local_choices + list(peer_target)
+            peer_target, disc_notes, cold_target = {}, [], {}
+        choices = local_choices + list(peer_target) + list(cold_target)
         if reachable:
             # picker menu = live + registry + peer-endpoint models (each tagged with its
             # framework · host so a vLLM model reads apart from an Ollama one); HF-cache noise
             # stays out of the menu. Peers only join when they were probed (a routine local arg
             # doesn't probe → peer_target is {} → menu is live+registry, unchanged).
             self._model_cache[:] = self._compose_model_menu(live, managed, current, peer_target)
+            # Phase C2: cold launchable peers are pickable too (the menu never fetches; these are
+            # config-derived served-names).
+            self._model_cache.extend(n for n in cold_target if n not in self._model_cache)
 
         if not arg:
             if not choices:
@@ -760,6 +781,12 @@ class OrchestratorREPL:
                     )
                 for n in disc_notes:
                     lines.append(f"  · {n}")
+            # Phase C2: cold launchable peers, numbered continuously after live+downloaded+peers.
+            for i, name in enumerate(cold_target, start=len(local_choices) + len(peer_target) + 1):
+                cep = cold_target[name]
+                lines.append(
+                    f"  {i}. {name}  (cold on {cep.name} — /model launches it on the GPU)"
+                )
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines))
             open_menu = getattr(self._channel, "box_open_model_menu", None)
@@ -820,6 +847,76 @@ class OrchestratorREPL:
             )
             return
 
+        if target in cold_target:
+            # Cold lifecycle peer (always GPU-heavy — EndpointRef validator) → free the accelerator of
+            # any DIFFERENT heavy incumbent the harness MANAGES (the GPU-lock — at most one launched
+            # heavy up, so the single per-config pidfile always tracks the sole live launched server),
+            # LAUNCH the peer, then rebind like a cross-endpoint switch. A failed launch tears the
+            # half-started peer down (shared pidfile → else it orphans) and RESTORES the incumbent, so
+            # the box is never left with two heavies or nothing serving. The lock governs servers the
+            # harness LAUNCHED; it can't stop an unmanaged/attach-only one (see __init__ seeding note).
+            from localharness.provider import lifecycle as _lifecycle
+            ep = cold_target[target]
+            box_note = getattr(self._channel, "box_activity", None)
+
+            def _cold_progress(elapsed: float) -> None:
+                if box_note is not None:
+                    box_note(f"launching {ep.name} · {int(elapsed)}s")
+
+            stopped = None
+            try:
+                stopped = await _lifecycle.free_accelerator(
+                    self._active_heavy, ep.lifecycle, self._config_dir
+                )
+            except (RuntimeError, TimeoutError) as exc:
+                # The incumbent would not stop → we launched NOTHING and it is still up (the
+                # verified-stop only raises when the server survives). Leave the session as-is.
+                await self._channel.send_message(
+                    f"Could not free the GPU for {ep.name}: {exc}. No change made — the current "
+                    "model should still be serving.", metadata={"style": "system.error"}
+                )
+                return
+            if stopped is not None:
+                self._active_heavy = None
+            await self._send_info(f"Launching {ep.name} — the swap can take several minutes...")
+            try:
+                live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
+                    ep.lifecycle, self._config_dir, ep.base_url, on_poll=_cold_progress
+                )
+            except (RuntimeError, TimeoutError) as exc:
+                # The peer half-started (a TimeoutError means its process is still ALIVE, per
+                # server.py wait_ready). Tear it down FIRST — the shared pidfile means the restore's
+                # own launch would otherwise clobber its handle and orphan it as a 2nd heavy — THEN
+                # restore the incumbent we stopped.
+                await self._safe_stop(ep.lifecycle)
+                restored = await self._restore_incumbent(stopped)
+                tail = (f" Restored {restored}." if restored
+                        else " The box now has NO model serving — manual attention needed." if stopped
+                        else "")
+                await self._channel.send_message(
+                    f"Launch of {ep.name} failed: {exc}{tail}", metadata={"style": "system.error"}
+                )
+                return
+            finally:
+                if box_note is not None:
+                    box_note(None)
+            self._active_heavy = (ep.lifecycle, ep.base_url)
+            served = live_ep.served_models[0] if live_ep.served_models else target
+            # #3: pass ep.extra_headers directly (see the cross-endpoint branch above) — never None,
+            # which would leave the previous endpoint's headers on the client.
+            llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers)
+            llm.config.model = served
+            cap = await llm.detect_capabilities()
+            note = await self._refresh_token_counter(
+                served, base_url=ep.base_url, provider_type=ep.provider_type
+            )
+            await self._persist_landed(ep.base_url, served)
+            await self._send_info(
+                f"Switched to {served} on {ep.name} — {ep.base_url} "
+                f"(tool calling: {cap.tool_call_mode}).{note}"
+            )
+            return
+
         # Downloaded-but-not-served → managed restart. The managed vLLM serves at the PRIMARY
         # provider base_url; if we're currently on a peer (an in-session cross-endpoint switch),
         # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
@@ -830,7 +927,7 @@ class OrchestratorREPL:
             # None, which would leave the peer's headers on the client). ProviderConfig has no
             # headers field, so the primary's identity carries none.
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={})
-        from localharness.provider.lifecycle import strategy_for
+        from localharness.provider.lifecycle import free_accelerator, strategy_for
         strategy = strategy_for(managed)
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
@@ -842,11 +939,28 @@ class OrchestratorREPL:
             if box_note is not None:
                 box_note(f"loading {target} · {int(elapsed)}s")
 
+        # GPU-lock (Phase C2): if a DIFFERENT heavy peer holds the accelerator — we're swapping BACK
+        # to the primary from a cold-launched peer — verified-stop it FIRST, in its OWN try so a
+        # stop-failure is reported honestly and NOTHING is torn down (the peer is still up). A no-op
+        # when the primary is itself the incumbent (the common restart case), whose own stop below
+        # reloads the model.
         try:
-            # The verified stop can block ~90s worst-case (#100) — the strategy runs it OFF the
-            # event loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay
-            # live while the old server drains. The model mutation MUST land strictly BETWEEN stop
-            # and activate: activate's serve_command reads spec.model to build the launch command.
+            freed = await free_accelerator(self._active_heavy, managed, self._config_dir)
+        except (RuntimeError, TimeoutError) as exc:
+            if box_note is not None:
+                box_note(None)
+            await self._channel.send_message(
+                f"Could not free the GPU: {exc}. No change made — the previous model should still "
+                "be serving.", metadata={"style": "system.error"}
+            )
+            return
+        if freed is not None:
+            self._active_heavy = None
+        try:
+            # The verified stop can block ~90s worst-case (#100); the strategy runs it OFF the event
+            # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
+            # the old server drains. The model mutation MUST land strictly BETWEEN stop and activate:
+            # activate's serve_command reads spec.model to build the launch command.
             await strategy.stop(managed, self._config_dir)
             managed.model = target
             ep = await strategy.activate(
@@ -854,13 +968,22 @@ class OrchestratorREPL:
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
+            # The primary half-started (still alive on a TimeoutError) — tear it down before restoring
+            # a peer incumbent (shared pidfile → else it orphans). If we freed a peer (b2 swap-back),
+            # restore it; otherwise the primary is simply down (the pre-existing restart-failure mode).
+            await self._safe_stop(managed)
+            restored = await self._restore_incumbent(freed)
+            tail = (f" Restored {restored}." if restored
+                    else " The box now has NO model serving — manual attention needed." if freed
+                    else " The managed server is down — retry /model to relaunch.")
             await self._channel.send_message(
-                f"Model swap failed: {exc}", metadata={"style": "system.error"}
+                f"Model swap failed: {exc}{tail}", metadata={"style": "system.error"}
             )
             return
         finally:
             if box_note is not None:
                 box_note(None)
+        self._active_heavy = (managed, llm.config.base_url)
         served = models[0] if models else target
         llm.config.model = served
         cap = await llm.detect_capabilities()
@@ -1006,6 +1129,66 @@ class OrchestratorREPL:
             if ep.base_url == base_url:
                 return ep
         return None
+
+    @staticmethod
+    def _cold_served_name(ep) -> str:
+        """The model id a cold lifecycle peer will serve — the llama.cpp ``-a``/``--alias`` (or vLLM
+        ``--served-model-name``) from its launch args, falling back to the endpoint label. A
+        pre-launch MENU LABEL only; the client binds to the real ``live_ep.served_models[0]`` the
+        peer reports after it comes up, so a mislabel here can never mis-dispatch."""
+        args = ep.lifecycle.extra_args if ep.lifecycle is not None else []
+        for flag in ("-a", "--alias", "--served-model-name"):
+            if flag in args:
+                i = args.index(flag)
+                if i + 1 < len(args):
+                    return args[i + 1]
+        return ep.name
+
+    def _cold_lifecycle_targets(self, taken: list[str], peer_target: dict) -> dict:
+        """Peer endpoints that carry a ``lifecycle`` launch spec and are NOT currently serving (cold)
+        → their configured served-name → ``EndpointRef``. The /model picker can LAUNCH these itself
+        (Phase C2 heavy-swap), unlike attach-only peers (lifecycle=None), which must already be up.
+        A peer already probed live (a value in ``peer_target``) is offered on the live path, not here.
+        ``taken`` = names already resolvable locally (live + downloaded): a cold alias that COLLIDES
+        with one is dropped, so ``/model <name>`` keeps taking the local/managed-restart path it
+        implies rather than silently launching an unrelated cross-framework server."""
+        up = {id(ep) for ep in peer_target.values()}
+        cold: dict = {}
+        for ep in getattr(self._harness, "extra_endpoints", None) or []:
+            if ep.lifecycle is None or id(ep) in up:
+                continue
+            name = self._cold_served_name(ep)
+            if name in taken or name in peer_target or name in cold:
+                continue
+            cold[name] = ep
+        return cold
+
+    async def _safe_stop(self, spec) -> None:
+        """Best-effort verified-stop of a server, swallowing errors. Used to tear a HALF-STARTED
+        target down before restoring an incumbent: the pidfile is one-per-config_dir (shared across
+        primary and peer), so a still-alive orphan would be clobbered-and-lost by the restore's own
+        launch (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy."""
+        from localharness.provider import lifecycle as _lifecycle
+        try:
+            await _lifecycle.strategy_for(spec).stop(spec, self._config_dir)
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            pass
+
+    async def _restore_incumbent(self, stopped) -> str | None:
+        """Best-effort re-launch of a heavy incumbent stopped for a swap that then FAILED, so the box
+        is never left with nothing serving. ``stopped`` is the ``(spec, base_url)`` free_accelerator
+        returned, or None. Returns a label on success (and restores ``_active_heavy``), None on
+        failure — the caller then reports the box needs manual attention."""
+        if stopped is None:
+            return None
+        spec, base_url = stopped
+        from localharness.provider import lifecycle as _lifecycle
+        try:
+            await _lifecycle.strategy_for(spec).activate(spec, self._config_dir, base_url)
+            self._active_heavy = (spec, base_url)
+            return spec.model
+        except Exception:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
+            return None
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config

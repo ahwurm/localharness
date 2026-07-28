@@ -1608,9 +1608,10 @@ class OrgConfig(BaseModel):
 
 class EndpointRef(BaseModel):
     """A peer OpenAI-compatible endpoint the `/model` tree can switch to, beyond the primary
-    `provider`. Each is an ALREADY-RUNNING server (attach-only); lifecycle management (start/stop)
-    is out of scope for the cross-endpoint switch — the harness re-points its client at the peer,
-    re-probes capabilities, and refits the token budget, exactly as a same-endpoint hot-swap does.
+    `provider`. Default (lifecycle=None) is an ALREADY-RUNNING server (attach-only): the harness
+    re-points its client at the peer, re-probes capabilities, and refits the token budget, exactly
+    as a same-endpoint hot-swap does. A peer MAY instead carry a `lifecycle` launch spec (Phase C2)
+    so the harness brings it up itself — a cold cross-framework heavy-swap on the freed accelerator.
     The primary provider is the implicit endpoint[0]; do NOT duplicate it into the peer list."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
@@ -1624,6 +1625,26 @@ class EndpointRef(BaseModel):
     api_key: str = Field(default="none", description="API key ('none' for local servers).")
     extra_headers: dict[str, str] = Field(
         default_factory=dict, description="Optional per-endpoint HTTP headers."
+    )
+    gpu: bool = Field(
+        default=False,
+        description=(
+            "Does this peer occupy the GPU/accelerator? EXPLICIT per owner ruling (no inference). "
+            "Default False — the 0.10.0 use case is a CPU-light peer (e.g. CPU-Ollama) coexisting "
+            "with the primary heavy server. The Phase C2 GPU-lock reads it: at most one gpu=True "
+            "endpoint serves at a time, so switching to a cold gpu peer stops the incumbent heavy "
+            "first, while CPU-only ATTACH peers coexist. MUST be True when a `lifecycle` block is "
+            "present — a launchable peer is heavy (validator below)."
+        ),
+    )
+    lifecycle: Optional[ManagedServerConfig] = Field(
+        default=None,
+        description=(
+            "How to LAUNCH this peer when it is cold (not already serving). None = attach-only "
+            "(0.10.0 behavior; the peer must already be up). Present = the harness brings the peer "
+            "up itself on a /model switch (Phase C2 heavy-swap) — the nested spec carries "
+            "runtime/binary/model/port/extra_args (e.g. a llama.cpp llama-server on the freed GPU)."
+        ),
     )
 
     @field_validator("base_url")
@@ -1643,6 +1664,26 @@ class EndpointRef(BaseModel):
                 "'http://localhost:11434/v1'."
             )
         return v
+
+    @model_validator(mode="after")
+    def _lifecycle_requires_gpu(self) -> "EndpointRef":
+        """A LAUNCHABLE peer (a `lifecycle` block) must be GPU-heavy: `gpu` AND `lifecycle.gpu` both
+        True. Rationale — the harness tracks one launched server at a time via a single per-config
+        pidfile, and the GPU-lock keeps at most one launched heavy up, so the pidfile always tracks
+        the sole live launched server. A CPU-light *launchable* peer would COEXIST with the heavy
+        primary, and the shared pidfile cannot track two live processes (the second launch overwrites
+        the first's handle → an orphaned/mis-stopped process, and with a binary primary a real
+        two-heavy freeze). Attaching to an already-running CPU peer is fully supported (lifecycle=None);
+        LAUNCHING one needs per-server process tracking — a future phase. (Subsumes the older
+        gpu==lifecycle.gpu consistency guard.)"""
+        if self.lifecycle is not None and not (self.gpu and self.lifecycle.gpu):
+            raise ValueError(
+                f"a launchable peer (lifecycle set) must be gpu=True on both the endpoint "
+                f"(gpu={self.gpu}) and its lifecycle spec (lifecycle.gpu={self.lifecycle.gpu}) — "
+                "the harness tracks one launched server at a time (single pidfile), so a coexisting "
+                "CPU launchable peer is not yet supported; attach to it instead (omit lifecycle)."
+            )
+        return self
 
 
 class ActiveSelection(BaseModel):
