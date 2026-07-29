@@ -177,9 +177,11 @@ class DaemonStrategy:
     - `ollama serve` takes NO model argument — models load lazily per request — so activate must
       LOAD `spec.model` (an HTTP warm-up) after the daemon is up, else `served_models` would just
       mean "daemon up" (Ollama's /v1/models lists PULLED-to-disk models, resident or not).
-    - **STOP kills the WHOLE daemon** (owner ruling): stopping the daemon process is a hard,
-      verified GPU-free guarantee (same class as docker-stop / process-kill), whereas a per-model
-      `keep_alive:0` unload is a soft signal that may not promptly/fully free VRAM.
+    - **STOP kills the WHOLE daemon** (owner ruling): killpg SIGTERM→SIGKILL of the daemon's
+      process group is a hard free (the kernel reclaims memory on process exit; runner children
+      are reaped with the group) — though unlike docker-stop / LM Studio's stop it does not
+      re-poll for death after SIGKILL — whereas a per-model `keep_alive:0` unload is a soft
+      signal that may not promptly/fully free VRAM.
 
     Mechanically the daemon is a harness-SPAWNED process, so it reuses SpawnedProcessStrategy's
     proven launch / pidfile / verified-stop / pid-liveness primitives — the ollama-specific parts
