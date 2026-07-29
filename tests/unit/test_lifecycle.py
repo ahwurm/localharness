@@ -640,36 +640,44 @@ async def test_lms_stop_is_whole_daemon_down_not_server_stop(tmp_path, monkeypat
         seen["args"] = args
         seen["ok_codes"] = ok_codes
 
-    async def _gone(self, v1):  # endpoint gone after daemon down → the verify passes
+    async def _gone(self):  # llmster process gone after daemon down → the verify passes
         return False
 
     monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
-    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _gone)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_llmster_running", _gone)
     await lifecycle.LmsStrategy().stop(_lms_srv(), tmp_path)
     assert seen["args"] == ("/home/u/.lmstudio/bin/lms", "daemon", "down")
     assert seen["ok_codes"] == (0, 1)
 
 
-async def test_lms_stop_fails_explicit_if_still_serving(tmp_path, monkeypatch):
-    """stop VERIFIES the endpoint is gone after `lms daemon down` (the #100 fail-explicit doctrine):
-    if LM Studio is somehow STILL answering, stop raises rather than reporting a false GPU-free — the
-    caller then aborts the swap instead of launching a 2nd heavy on an occupied accelerator."""
+async def test_lms_stop_fails_explicit_if_daemon_still_running(tmp_path, monkeypatch):
+    """stop VERIFIES the llmster PROCESS is gone after `lms daemon down` (the true GPU-free signal on
+    unified memory — the endpoint + `lms daemon status` both flip to down ~0.4s BEFORE the process
+    exits). If llmster never dies, stop raises rather than report a false GPU-free — the caller then
+    aborts the swap instead of launching a 2nd heavy on an occupied accelerator (the #100 doctrine)."""
     from localharness.provider import lifecycle
 
     async def fake_run(self, *args, **kw):
         pass
 
-    async def _still_up(self, v1):
-        return True  # endpoint NEVER goes away
+    async def _still_running(self):
+        return True  # llmster NEVER dies
 
     async def _no_sleep(*a, **k):
         pass
 
     monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
-    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _still_up)
-    monkeypatch.setattr(lifecycle.asyncio, "sleep", _no_sleep)  # skip the ~3s poll
-    with pytest.raises(RuntimeError, match="still answering"):
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_llmster_running", _still_running)
+    monkeypatch.setattr(lifecycle.asyncio, "sleep", _no_sleep)  # skip the ~5s poll
+    with pytest.raises(RuntimeError, match="still running"):
         await lifecycle.LmsStrategy().stop(_lms_srv(), tmp_path)
+
+
+async def test_lms_llmster_running_returns_bool_never_raises():
+    """_llmster_running is the process-gone probe (real `pgrep`): returns a bool, never raises, even
+    where pgrep is absent (OSError → best-effort 'gone')."""
+    from localharness.provider import lifecycle
+    assert isinstance(await lifecycle.LmsStrategy()._llmster_running(), bool)
 
 
 async def test_lms_activate_normalizes_bare_base_url_to_v1(tmp_path, monkeypatch):
