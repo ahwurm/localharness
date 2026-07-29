@@ -4,6 +4,69 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.11.0] — 2026-07-29
+
+Full provider lifecycle: the harness can now start, stop, and swap the model
+server itself on all four supported runtimes — and token counting is exact
+everywhere, verified against each server's own numbers.
+
+### Added
+- **Harness-managed server lifecycle for all four runtimes.** A pluggable
+  lifecycle-strategy layer (`docs/specs/13-provider-support.md`):
+  vLLM (docker — stop polls until the container is gone and fails loud —
+  or binary), llama.cpp (the harness spawns `llama-server` itself), Ollama
+  (the harness spawns and owns `ollama serve`; stop kills the whole daemon,
+  SIGTERM→SIGKILL, so no runner child keeps the GPU), LM Studio (the harness
+  drives headless `lms`; stop is `lms daemon down` and is re-verified — a
+  bare `server stop` leaves the model resident).
+- **Cross-framework heavy swap with a GPU lock.** `/model` can stop the GPU
+  incumbent (e.g. the vLLM docker) and launch a cold llama.cpp peer from
+  config, then swap back — stopping the incumbent is the accelerator-free
+  step, with restore-on-failure; see Known limitations for which stop paths
+  re-verify death. Live-proven on a DGX Spark in an attended run
+  (35B vLLM ⇄ llama.cpp).
+- **Exact token counting on every runtime.** Ollama and LM Studio serve no
+  tokenize endpoint, so the harness loads the served model's *own* GGUF vocab
+  and chat template in-process (optional `exact-tokenizer` extra) and counts
+  to the token — verified equal to each server's own count. vLLM and llama.cpp
+  are now *message-level* exact too: the server renders its own chat template
+  (vLLM `/tokenize` messages-mode; llama.cpp `/apply-template`), tools block
+  included, verified equal to the real call's `usage.prompt_tokens` — with
+  opt-in live certification tests (`live_vllm` / `live_llamacpp`).
+- **Provider support matrix + setup pages.** Honest per-runtime status in the
+  README; `docs/runtimes/{llamacpp,ollama,lmstudio}.md` walk through real
+  configs; `doctor` reports each runtime's counting capability and why.
+
+### Changed
+- Token counting has two named contracts: `count_messages` (exact whole
+  request) and `estimate_messages` (fragment-safe budget arithmetic — the
+  estimator all budget thresholds were tuned on).
+- Docker autostart liveness checks the container by name, not by client pid.
+
+### Fixed
+- A turn-killing crash where budget code fed message fragments to the exact
+  template renderer (templates reject non-conversations) — caught by live
+  first-run dogfooding before release.
+- Ollama/LM Studio activate failures now map into the model-swap handlers'
+  error contract instead of crashing the session and orphaning the daemon.
+- `/model list` lists models instead of answering "Unknown model 'list'".
+- No-usage token estimates count the same wire-format tools the call carried
+  (and stop counting them once a server has rejected the tools param);
+  malformed tokenize replies degrade gracefully instead of crashing startup.
+
+### Known limitations (named, not hidden)
+- `~` is not expanded in configured `binary:`/`model:` paths — use absolute
+  paths (documented in each runtime page).
+- Launchable peers must be GPU peers; CPU peers attach to an already-running
+  server instead.
+- The GGUF-based counting path (Ollama/LM Studio) does not count the rendered
+  tools block; vLLM/llama.cpp do. Its server-parity was verified live once,
+  manually — the automated live parity certification currently covers
+  vLLM/llama.cpp only.
+- SIGKILL-based stops (binary vLLM, spawned llama.cpp, the Ollama daemon) do
+  not re-poll for process death after the kill signal; docker-mode vLLM and
+  LM Studio stops do poll and fail loud if the process survives.
+
 ## [0.10.0] — 2026-07-27
 
 Cross-framework provider support: switch between models served on different

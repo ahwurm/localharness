@@ -137,8 +137,10 @@ foreground process to track):
   returned)
 - Token counting — TESTED (exact): LM Studio serves no tokenize endpoint, so the harness loads the
   served model's own GGUF vocab + chat template in-process (`llama-cpp-python` vocab-only, the
-  `exact-tokenizer` extra) and counts to the token — verified equal to LM Studio's own
-  `usage.prompt_tokens`. Falls back to a labeled approximate estimate only when no local GGUF is reachable
+  `exact-tokenizer` extra — install with `uv sync --extra exact-tokenizer`, or
+  `pip install "localharness[exact-tokenizer]"`) and counts to the token — verified equal to
+  LM Studio's own `usage.prompt_tokens`. Falls back to a labeled approximate estimate only when
+  no local GGUF is reachable
 - Bench run — an opt-in `bench.yaml` matrix entry is provided; no bench run is recorded in this
   repo yet (pull your own model + run it)
 

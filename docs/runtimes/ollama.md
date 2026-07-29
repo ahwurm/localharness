@@ -124,8 +124,10 @@ Ollama-specific handling wrapped around them:
 - Tool-calling (native) — TESTED (a real tool_call returned via qwen2.5:7b)
 - Token counting — TESTED (exact): Ollama serves no `/tokenize`, so the harness loads the served
   model's own GGUF vocab + chat template in-process (`llama-cpp-python` vocab-only, the
-  `exact-tokenizer` extra) and counts to the token — verified equal to Ollama's own
-  `prompt_eval_count`. Falls back to a labeled approximate estimate only when no local GGUF is reachable
+  `exact-tokenizer` extra — install with `uv sync --extra exact-tokenizer`, or
+  `pip install "localharness[exact-tokenizer]"`) and counts to the token — verified equal to
+  Ollama's own `prompt_eval_count`. Falls back to a labeled approximate estimate only when no
+  local GGUF is reachable
 - Bench run — opt-in `bench.yaml` matrix entries are provided but UNVERIFIED (no recorded run in
   this repo)
 

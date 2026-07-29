@@ -1,5 +1,5 @@
 """LocalHarness: Model-agnostic hierarchical agent harness for local LLMs."""
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 
 def resolved_version() -> str:

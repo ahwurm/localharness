@@ -98,7 +98,7 @@ The single construction point. Dispatches on `spec.runtime`: `"llamacpp"` → `S
 
 ## The verified-stop doctrine (`#100`)
 
-A cross-cutting invariant: **every `stop` confirms the resource is actually freed before returning.** A false free is the worst outcome — the caller would then launch a second heavy into a still-occupied accelerator (on unified memory, an instant OOM freeze). The verb-specific proofs:
+A cross-cutting invariant: **every `stop` either confirms the resource is freed, or ends with a signal the kernel is obligated to honor (SIGKILL).** A false free is the worst outcome — the caller would then launch a second heavy into a still-occupied accelerator (on unified memory, an instant OOM freeze). The confirmation strength differs by strategy — docker (vLLM) and lms (LM Studio) poll for confirmed death and **raise** if the process survives; binary/spawned/daemon stops SIGTERM→SIGKILL with a grace-window poll but do **not** re-poll after SIGKILL (a process wedged in an uninterruptible kernel wait would not be caught). The verb-specific proofs:
 
 | Strategy | Free proof |
 |---|---|
