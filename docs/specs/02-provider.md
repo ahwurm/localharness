@@ -763,6 +763,11 @@ httpx.AsyncClient(timeout=5.0)  # DO NOT DO THIS for local endpoints
 
 ## Provider Cascade (Future Multi-Model Support)
 
+> **Note (0.11):** this speculative `ProviderCascade` was NOT built. Multi-model / cross-endpoint
+> support shipped instead as a **lifecycle-strategy layer + cross-framework model tree** — see
+> [Spec 13: Provider Support & Lifecycle](13-provider-support.md). The sketch below is retained
+> only as historical design context.
+
 v1 has a single active provider. The interface is designed so a cascade can be layered on top without modifying `LLMClient`.
 
 ```python

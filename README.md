@@ -60,6 +60,39 @@ LocalHarness is an *agent layer* — not an inference engine, and not a cloud Sa
 
 If you already serve a model with Ollama or vLLM and want to run real agents against it — with tools, isolated memory, and deny-first permissions — that's the gap LocalHarness fills.
 
+## Supported runtimes
+
+Every backend is reached over one OpenAI-compatible client, so the *request* path is
+provider-agnostic. What differs per runtime is **lifecycle** (whether the harness can start and
+stop the server itself), **introspection** (exact vs approximate token counting, context-window
+discovery), and how much has been validated on real hardware. All four also work as a plain
+**attach** target — point `init` at an already-running endpoint. Setup pages:
+[llama.cpp](docs/runtimes/llamacpp.md) · [Ollama](docs/runtimes/ollama.md) ·
+[LM Studio](docs/runtimes/lmstudio.md) · vLLM (see [reference architectures](docs/reference-architectures/README.md)).
+
+| Runtime | Harness-managed lifecycle | Model tree / switch | Tool-calling | Token counting | Context window | Live-validated |
+|---|---|---|---|---|---|---|
+| **vLLM** | ✅ docker / binary | ✅ | ✅ native | ✅ exact | ✅ `max_model_len` | ✅ reference + bench |
+| **llama.cpp** | ✅ spawns `llama-server` | ✅ cross-framework | ✅ XML / Hermes | ✅ exact (`/tokenize`) | ✅ `/props` `n_ctx` | ✅ incl. live heavy-swap |
+| **Ollama** | ✅ spawns + owns `ollama serve` | ✅ | ✅ native | ⚠️ approximate¹ | ✅ `/api/ps`² | ✅ CPU round-trip |
+| **LM Studio** | ✅ drives headless `lms` | ✅ | ✅ native | ⚠️ approximate¹ | ✅ `loaded_context_length`² | ✅ CPU round-trip |
+
+✅ validated · ⚠️ partial — works, with a named limitation:
+
+1. **Token counting** is exact for vLLM and llama.cpp (their `/tokenize` endpoint). Ollama and
+   LM Studio expose no exact tokenizer, so counts are an explicit *approximation* — surfaced as
+   `approximate` by `doctor`/`init`, never a silent guess.
+2. **Context window** is read at server level for vLLM (`max_model_len`) and llama.cpp (`/props`),
+   and from the *loaded* model for Ollama (`/api/ps` `context_length`) and LM Studio
+   (`loaded_context_length`) — the latter two are known once the model is resident (the harness
+   warm-loads it) and fall back to config, disclosed, before then. Never a silent guess; the served
+   window, not a model ceiling that would over-report and 400 mid-session.
+
+*Live-validated* means a real end-to-end run on the [DGX Spark](docs/reference-architectures/dgx-spark.md)
+reference machine (detect → serve → tool-call → verified stop). Recorded **bench** runs currently
+exist for vLLM only; the other runtimes ship opt-in `bench.yaml` entries you run against your own
+model. Per-runtime live markers: `LOCALHARNESS_LIVE_{VLLM,OLLAMA,LLAMACPP,LMSTUDIO}=1 uv run pytest -m live_<name>`.
+
 ## Requirements
 
 - Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)

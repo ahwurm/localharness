@@ -33,13 +33,17 @@ long before the harness ever compacts.
 
 ## §3 Runtime coverage — vLLM + Ollama must work out of box
 
-Project requirement: vLLM and Ollama are first-class on both machines. Current state:
+Project requirement: vLLM and Ollama are first-class on both machines. As of 0.11 all four
+runtimes have a harness-managed lifecycle and a live round-trip on architecture A — the full
+per-dimension state is the [provider support matrix](../../README.md#supported-runtimes). This
+row tracks HARDWARE fit on each target:
 
 | Runtime | Arch A (Spark) | Arch B (base mini, Qwen3.5-9B) |
 |---------|----------------|--------------------------------|
 | vLLM | ✅ tier 1, tested | ✅ via [vllm-metal](https://github.com/vllm-project/vllm-metal) — feature parity (tool parser, quant formats) unvalidated |
-| Ollama | works (untested here) | ✅ model fits resident — parity unvalidated |
-| llama.cpp `--mmap` | n/a | ✅ third option (`:8080`) |
+| Ollama | ✅ lifecycle validated (CPU round-trip, zero orphans) | ✅ model fits resident — parity unvalidated |
+| llama.cpp `--mmap` | ✅ spawn + live cross-framework swap validated | ✅ third option (`:8080`) |
+| LM Studio | ✅ lifecycle validated (CPU round-trip) | untested here |
 
 - **Validate:** vllm-metal tool-call parsing and sampling parity with CUDA vLLM (same
   agent YAML must behave identically on both architectures).
