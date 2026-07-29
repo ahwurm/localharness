@@ -252,9 +252,33 @@ def doctor(
                         )
                         failures.append("tokenize-unreachable")
                     else:
-                        console.print(
-                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts (llama.cpp)"
-                        )
+                        # Message-level capability: /apply-template renders the server's own
+                        # chat template so count_messages matches usage.prompt_tokens exactly.
+                        try:
+                            at = httpx.post(
+                                f"{root}/apply-template",
+                                json={"messages": [{"role": "user", "content": "x"}]},
+                                timeout=5.0,
+                            )
+                            msg_exact = (
+                                at.status_code == 200 and isinstance(at.json().get("prompt"), str)
+                            )
+                        except Exception:
+                            msg_exact = False
+                        if msg_exact:
+                            console.print(
+                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
+                                f"message-level via /apply-template (llama.cpp)"
+                            )
+                        else:
+                            console.print(
+                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact content "
+                                f"counts (llama.cpp)"
+                            )
+                            console.print(
+                                f"{_INFO}  /apply-template not served — whole-message counts use a "
+                                f"summed estimate; upgrade llama.cpp for template-exact message counts."
+                            )
                 except Exception:
                     console.print(
                         f"{_FAIL} llama.cpp /tokenize unreachable at {root}/tokenize — token "
@@ -300,7 +324,34 @@ def doctor(
                         )
                         failures.append("tokenize-unreachable")
                     else:
-                        console.print(f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts")
+                        # Message-level capability: vLLM's /tokenize messages-mode applies the
+                        # chat template server-side, so count_messages == usage.prompt_tokens.
+                        try:
+                            mt = httpx.post(
+                                f"{root}/tokenize",
+                                json={
+                                    "model": default_model,
+                                    "messages": [{"role": "user", "content": "x"}],
+                                    "add_generation_prompt": True,
+                                },
+                                timeout=5.0,
+                            )
+                            msg_exact = mt.status_code == 200 and "count" in mt.json()
+                        except Exception:
+                            msg_exact = False
+                        if msg_exact:
+                            console.print(
+                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
+                                f"message-level (chat template applied server-side)"
+                            )
+                        else:
+                            console.print(
+                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts"
+                            )
+                            console.print(
+                                f"{_INFO}  /tokenize has no messages mode — whole-message counts use "
+                                f"a summed estimate; upgrade vLLM for template-exact message counts."
+                            )
                 except Exception:
                     console.print(
                         f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "
