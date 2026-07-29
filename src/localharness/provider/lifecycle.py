@@ -16,7 +16,7 @@ monkeypatch the harness's tests rely on). The one behavior change shipped now is
 liveness-by-name fix, and it lives in `server.py` (`docker_container_running`) so both this
 strategy AND the `start` autostart pre-check use it without going through the strategy.
 
-`DaemonStrategy` (Ollama) and `LmsStrategy` (LM Studio, Phase D) implement the same Protocol later.
+`DaemonStrategy` (Ollama, Phase D) and `LmsStrategy` (LM Studio, Phase D5) implement the same Protocol.
 """
 from __future__ import annotations
 
@@ -250,13 +250,15 @@ class DaemonStrategy:
 
     async def _daemon_already_up(self, v1_base: str) -> bool:
         """A daemon already listening on the target port (one the harness did NOT spawn → can't
-        pidfile-track → can't stop). Regular method so tests can monkeypatch it hermetically."""
+        pidfile-track → can't stop). Regular method so tests can monkeypatch it hermetically. Boolean
+        probe: catch broadly — a malformed base_url raises httpx.InvalidURL / an OverflowError group
+        (SIBLINGS of httpx.HTTPError) that would else escape activate and crash the /model swap."""
         import httpx
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 r = await client.get(f"{v1_base.rstrip('/')}/models")
             return r.status_code == 200
-        except httpx.HTTPError:
+        except Exception:  # noqa: BLE001 — boolean probe: any error = not-up (must never propagate)
             return False
 
     async def _load(self, base_url: str, model: str) -> None:
@@ -289,20 +291,189 @@ class DaemonStrategy:
             raise RuntimeError(f"could not run `{binary} pull {spec.model}`: {exc}") from exc
         _, err = await proc.communicate()
         if proc.returncode != 0:
-            raise RuntimeError(f"`ollama pull {spec.model}` failed: {(err or b'').decode()[:200]}")
+            raise RuntimeError(
+                f"`ollama pull {spec.model}` failed: {(err or b'').decode('utf-8', 'replace')[:200]}"
+            )
+
+
+class LmsStrategy:
+    """LM Studio (0.11 Phase D5). The harness drives LM Studio's HEADLESS `lms` CLI to bring the
+    backend up — `lms daemon up` (start/attach the persistent `llmster` daemon) → `lms load <model>`
+    → `lms server start` (the OpenAI server) — and takes it down with `lms daemon down`. Unlike
+    DaemonStrategy (ollama, a harness-SPAWNED foreground `ollama serve`), every `lms` subcommand
+    RETURNS immediately (the llmster daemon backgrounds itself), so there is no foreground process to
+    pidfile-track. Two consequences:
+
+    - **liveness + the pre-existing-server fail-fast are ENDPOINT-based** (GET {v1}/models), never a
+      pidfile — LmsStrategy touches NONE of server.py's pidfile primitives, so it sidesteps the C2
+      single-pidfile invariant entirely (an lmstudio launch never writes the shared pidfile a
+      vLLM/llama.cpp/ollama launch does).
+    - **STOP = `lms daemon down`** — the verified GPU-free teardown (owner's whole-daemon ruling, the
+      ollama analog), settled empirically 2026-07-29: `lms server stop` tears down ONLY the HTTP
+      listener while the llmster daemon KEEPS the model resident (`lms ps` still IDLE, the
+      `liblmstudio` engine still in memory) — a soft signal, the LM Studio analog of ollama's
+      keep_alive:0. `lms daemon down` reaps the whole daemon + engine (zero orphans confirmed). It
+      returns rc=0 when it stopped something and rc=1 when already down — both ARE the goal state, so
+      stop treats {0,1} as success; any other exit / a missing binary / a timeout propagates as the
+      activate contract's (RuntimeError|TimeoutError) so a failed teardown never reports GPU-free.
+
+    CONTRACT: every `lms` subprocess AND the endpoint probe MAP their native errors (OSError for a
+    missing binary, a non-zero exit, httpx failures) into (RuntimeError|TimeoutError) — the /model
+    swap callers catch exactly those to tear down + restore; a leaked httpx.* / OSError would escape
+    and crash the session with the just-started daemon orphaned (the CRITICAL trap the ollama critic
+    caught). Serving is LOCAL-only (`--bind 127.0.0.1`) on the port from the caller's base_url (where
+    it rebinds the client after activate). CPU when `spec.gpu` is False (`--gpu off`, so the lifecycle
+    validates with NO GPU window); `--gpu max` when heavy. (Attaching to a PRE-EXISTING daemon the
+    harness didn't start is deferred — same as ollama; this box runs no other LM Studio.)"""
+
+    async def activate(
+        self,
+        spec: ManagedServerConfig,
+        config_dir: Path,
+        base_url: str,
+        *,
+        timeout_seconds: float = 1800.0,
+        on_poll: Callable[[float], None] | None = None,
+    ) -> LiveEndpoint:
+        v1 = self._v1(base_url)
+        if await self._server_already_up(v1):
+            # Fail-fast, NOT silent (the ollama precedent): a server already answering at v1 is one
+            # the harness did NOT start (it pidfile-tracks nothing here), so a `lms daemon down` on a
+            # later swap would kill a backend we don't own. Refuse loudly.
+            raise RuntimeError(
+                f"an LM Studio server is already listening at {v1} — the harness manages only "
+                "servers it starts; stop the existing one first (`lms server stop && lms daemon down`)."
+            )
+        lms = self._lms_bin(spec)
+        port = self._port(base_url, spec.port)
+        await self._run(lms, "daemon", "up")                     # start/attach llmster (rc0 idempotent)
+        gpu = "max" if spec.gpu else "off"                       # spec.gpu → the GPU-lock signal
+        await self._run(
+            lms, "load", spec.model, "--gpu", gpu, "-y", *spec.extra_args,
+            timeout=timeout_seconds,                             # a model load can take minutes
+        )
+        await self._run(lms, "server", "start", "--port", str(port), "--bind", "127.0.0.1")
+        await server.wait_ready(                                 # confirm the OpenAI endpoint answers
+            v1, config_dir=None, timeout_seconds=timeout_seconds, on_poll=on_poll,
+        )
+        # The served id IS the loaded model key (LM Studio's /v1/models also lists any embedding
+        # model; the caller takes served_models[0], so return the intended key — the DaemonStrategy
+        # precedent — not wait_ready's raw list). No pidfile → an opaque daemon handle.
+        return LiveEndpoint(base_url=v1, served_models=[spec.model], handle="lms-daemon")
+
+    async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
+        # `lms daemon down` (whole daemon) = the verified GPU-free stop (a bare `lms server stop`
+        # leaves the model resident). rc0 = stopped, rc1 = already down — both the goal state. Off the
+        # event loop via _run's create_subprocess (never blocks the loop).
+        await self._run(self._lms_bin(spec), "daemon", "down", ok_codes=(0, 1))
+        # VERIFY (the #100 doctrine — never trust a single command's completion when freeing the
+        # accelerator for the NEXT heavy): confirm the HTTP surface is actually GONE. There is no
+        # pidfile / VRAM metric to poll on this unified-memory box, but a STILL-answering endpoint
+        # means the daemon did not go down — fail explicit so the caller aborts the swap rather than
+        # launch a 2nd heavy on a still-occupied accelerator (spec.port: base_url is not in scope
+        # here, so a config where base_url.port != spec.port must keep them equal).
+        v1 = self._v1(f"http://127.0.0.1:{int(spec.port)}")
+        for _ in range(15):  # ~3s, attempt-counted (deterministic with sleep patched) like _wait_name_free
+            if not await self._server_already_up(v1):
+                return
+            await asyncio.sleep(0.2)
+        raise RuntimeError(
+            f"LM Studio still answering at {v1} after `lms daemon down` — refusing to report the "
+            "accelerator free when it is not"
+        )
+
+    def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
+        # ENDPOINT-based (LmsStrategy owns no pidfile). No caller wires this yet (Protocol
+        # conformance); probe the local port the config declares. Sync (the Protocol is sync).
+        v1 = self._v1(f"http://127.0.0.1:{int(spec.port)}")
+        import httpx
+        try:
+            alive = httpx.get(f"{v1}/models", timeout=2.0).status_code == 200
+        except Exception:  # noqa: BLE001 — boolean probe (see _server_already_up): any error = down
+            alive = False
+        return Liveness(alive=alive, detail=f"lms endpoint {v1}" if alive else "lms endpoint down")
+
+    @staticmethod
+    def _v1(base_url: str) -> str:
+        """Ensure the OpenAI-compat /v1 suffix (EndpointRef.validate_base_url leniently allows a bare
+        root); wait_ready / the client poll {base}/models, so a bare root would hit /models → 404."""
+        b = base_url.rstrip("/")
+        return b if b.endswith("/v1") else b + "/v1"
+
+    @staticmethod
+    def _port(base_url: str, default: int) -> int:
+        """The port `lms server start` binds — the caller's base_url (repl rebinds the client THERE
+        after activate) wins, falling back to spec.port when the URL carries no explicit port."""
+        from urllib.parse import urlparse
+        try:
+            p = urlparse(base_url).port
+        except ValueError:
+            p = None
+        return p if p is not None else int(default)
+
+    @staticmethod
+    def _lms_bin(spec: ManagedServerConfig) -> str:
+        """The `lms` CLI: `spec.binary` (e.g. ~/.lmstudio/bin/lms, which is NOT on PATH by default)
+        or a bare `lms` fallback."""
+        return str(spec.binary) if spec.binary else "lms"
+
+    async def _server_already_up(self, v1_base: str) -> bool:
+        """A server already answering at v1 (one the harness did NOT start). Regular method so tests
+        monkeypatch it hermetically — mirrors DaemonStrategy._daemon_already_up. A BOOLEAN probe: any
+        failure to get a clean 200 means 'not confirmably up' → proceed. Catches broadly on purpose —
+        a malformed base_url is a DELIBERATE probe-time skip (EndpointRef.validate_base_url defers
+        port validity to here), and a bad port raises httpx.InvalidURL / an OverflowError group,
+        SIBLINGS of httpx.HTTPError that would else escape and crash the /model swap."""
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{v1_base.rstrip('/')}/models")
+            return r.status_code == 200
+        except Exception:  # noqa: BLE001 — boolean probe: any error = not-up (must never propagate)
+            return False
+
+    async def _run(self, *args: str, timeout: float = 600.0, ok_codes: tuple[int, ...] = (0,)) -> None:
+        """Run an `lms` subcommand, MAPPING native failures into the activate contract: a missing
+        binary (OSError) → RuntimeError; a timeout → TimeoutError; an exit code not in `ok_codes` →
+        RuntimeError with the stderr tail. Without this an OSError would escape the /model swap
+        caller's (RuntimeError|TimeoutError) except and crash the session. `ok_codes` lets the
+        idempotent `lms daemon down` (rc=1 when already down) count as success."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:  # FileNotFoundError (lms not on PATH) is an OSError
+            raise RuntimeError(f"could not run `{' '.join(args)}`: {exc}") from exc
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            try:
+                proc.kill()          # guard BOTH kill and wait: if the proc already exited in the
+                await proc.wait()    # timeout race, either raises ProcessLookupError (an OSError)
+            except ProcessLookupError:  # that would ELSE escape the (RuntimeError|TimeoutError)
+                pass                    # activate contract and crash the session. Reap on the live loop.
+            raise TimeoutError(f"`{' '.join(args)}` timed out after {timeout:.0f}s") from exc
+        if proc.returncode not in ok_codes:
+            raise RuntimeError(
+                f"`{' '.join(args)}` failed (exit {proc.returncode}): "
+                f"{(err or b'').decode('utf-8', 'replace')[:200]}"
+            )
 
 
 def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
     """Map a managed-server spec to its launch strategy by `runtime` (the launch-STRATEGY axis,
     orthogonal to provider_type): 'llamacpp' → SpawnedProcessStrategy (the harness spawns
     llama-server itself), 'ollama' → DaemonStrategy (the harness spawns + owns the `ollama serve`
-    daemon), anything else ('vllm', the default) → ManagedVllmStrategy (docker/binary vLLM). The
-    single construction point the callers — the REPL /model swap and `start` autostart — route
-    through, so the strategy, not the caller, owns HOW a backend is launched/stopped."""
+    daemon), 'lmstudio' → LmsStrategy (the harness drives LM Studio's headless `lms` CLI), anything
+    else ('vllm', the default) → ManagedVllmStrategy (docker/binary vLLM). The single construction
+    point the callers — the REPL /model swap and `start` autostart — route through, so the strategy,
+    not the caller, owns HOW a backend is launched/stopped."""
     if spec.runtime == "llamacpp":
         return SpawnedProcessStrategy()
     if spec.runtime == "ollama":
         return DaemonStrategy()
+    if spec.runtime == "lmstudio":
+        return LmsStrategy()
     return ManagedVllmStrategy()
 
 

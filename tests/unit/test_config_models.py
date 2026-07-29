@@ -426,6 +426,31 @@ def test_managed_server_ollama_runtime_needs_no_binary():
     assert srv.model == "qwen2.5:7b" and srv.port == 11434
 
 
+def test_managed_server_lmstudio_runtime_needs_no_binary():
+    """runtime='lmstudio' (Phase D5 LmsStrategy) — the harness drives LM Studio's `lms` CLI (a
+    command, not a checkpoint/image), so the launch-target validator requires neither binary nor
+    docker_image; `model` is the LM Studio model key. `binary` is normally the `lms` path but is not
+    REQUIRED (LmsStrategy falls back to a bare `lms` on PATH)."""
+    from localharness.config.models import ManagedServerConfig
+    srv = ManagedServerConfig(runtime="lmstudio", model="qwen2.5-0.5b-instruct", port=1234, gpu=False)
+    assert srv.runtime == "lmstudio"
+    assert srv.binary is None and srv.docker_image is None
+    assert srv.model == "qwen2.5-0.5b-instruct" and srv.port == 1234
+
+
+def test_managed_server_lmstudio_rejects_gpu_in_extra_args():
+    """runtime=lmstudio: `--gpu` is derived from `gpu` (the GPU-lock signal); a manual --gpu in
+    extra_args (which CLI last-wins would silently honor) is rejected at load to prevent GPU-lock
+    desync → a two-heavy freeze on a later swap."""
+    from localharness.config.models import ManagedServerConfig
+    with pytest.raises(ValidationError):
+        ManagedServerConfig(runtime="lmstudio", model="m", extra_args=["--gpu", "max"])
+    with pytest.raises(ValidationError):
+        ManagedServerConfig(runtime="lmstudio", model="m", extra_args=["--gpu=off"])
+    ok = ManagedServerConfig(runtime="lmstudio", model="m", extra_args=["-c", "4096"])
+    assert ok.extra_args == ["-c", "4096"]
+
+
 @pytest.mark.parametrize("kw", [
     dict(runtime="llamacpp", model="/x/m.gguf"),               # llamacpp needs binary
     dict(runtime="vllm", launch="binary", model="m"),          # binary launch needs binary
