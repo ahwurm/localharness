@@ -131,7 +131,10 @@ uses:
 - Managed lifecycle (harness spawns llama-server, verified process-group stop) — TESTED
   (live-proven; also drove a live cross-framework heavy-swap on a DGX Spark)
 - Tool-calling (taught XML dialect injected + parsed; tool-name sanitization) — TESTED
-- Token counting — TESTED: exact via `/tokenize`
+- Token counting — TESTED: exact via `/tokenize`; whole requests via `/apply-template` +
+  `/tokenize` (message structure AND tools block) — verified live equal to
+  `usage.prompt_tokens`. Older llama-server builds without `/apply-template` keep exact
+  content counts and estimate message overhead, disclosed at start
 - Bench run — a `bench.yaml` matrix entry is provided as a template (`model_id` is a
   placeholder — llama.cpp serves whatever GGUF is loaded); fill in your served id before running
 

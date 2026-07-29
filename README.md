@@ -79,12 +79,17 @@ how much has been validated on real hardware. All four also work as a plain
 
 ✅ validated — footnotes note setup caveats, not gaps:
 
-1. **Token counting** is exact for every runtime. vLLM and llama.cpp use their `/tokenize` endpoint;
-   Ollama and LM Studio serve none, so the harness loads the served model's *own* GGUF vocab + chat
-   template in-process (`llama-cpp-python` vocab-only — the `exact-tokenizer` extra) and counts to
-   the token — verified equal to each server's own count. Without that extra (or with the harness
-   pointed at a remote server with no local model files), they fall back to a labeled approximate
-   estimate.
+1. **Token counting** is exact for every runtime — whole-request exact, not just content. vLLM
+   applies its chat template server-side (`/tokenize` messages-mode) and llama.cpp renders it via
+   `/apply-template` before `/tokenize`, so message counts — *including the rendered tools block* —
+   equal the real call's `usage.prompt_tokens` to the token (verified live on both). Ollama and
+   LM Studio serve no tokenize endpoint, so the harness loads the served model's *own* GGUF vocab +
+   chat template in-process (`llama-cpp-python` vocab-only — the `exact-tokenizer` extra) and counts
+   to the token — verified equal to each server's own count (message structure exact; the tools
+   block is not rendered on these two). Older vLLM/llama.cpp builds without messages-mode /
+   `/apply-template` keep exact content counts and estimate message overhead, disclosed at start;
+   without the extra (or with no local model files), Ollama/LM Studio fall back to a labeled
+   approximate estimate.
 2. **Context window** is read at server level for vLLM (`max_model_len`) and llama.cpp (`/props`),
    and from the *loaded* model for Ollama (`/api/ps` `context_length`) and LM Studio
    (`loaded_context_length`) — the latter two are known once the model is resident (the harness

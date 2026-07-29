@@ -136,6 +136,7 @@ def test_token_counter_remote_path_and_cache(monkeypatch):
         return 999  # server-truth count, distinct from any tiktoken value
 
     monkeypatch.setattr(ctxmod.TokenCounter, "_remote_count", fake_remote)
+    monkeypatch.setattr(ctxmod.TokenCounter, "_remote_count_messages", lambda self, m, t: 7)
     tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen")
     assert tc._tokenize_url == "http://localhost:8000/tokenize"  # /v1 stripped, root path
     n1 = calls["n"]  # probe consumed one call
@@ -244,32 +245,203 @@ def test_token_counter_unknown_provider_falls_through_to_llamacpp_shape(monkeypa
     assert not tc.approximate
 
 
-def test_token_counter_llamacpp_shape(monkeypatch):
-    """provider_type=llamacpp POSTs {"content"} and counts len(tokens) — llama-server returns
-    {"tokens": [...]} with NO "count" field (verified against llama.cpp's /tokenize contract)."""
-    from localharness.agent import context as ctxmod
-
-    captured = {}
+def _patch_llama_server(monkeypatch, captured):
+    """Fake a full llama-server: /tokenize {content}->{tokens}, /apply-template
+    {messages}->{prompt}. Records every (url, body) in `captured` (a list)."""
+    import json
+    import urllib.request
 
     class _Resp:
+        def __init__(self, payload): self._payload = payload
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def read(self): return b'{"tokens": [1, 2, 3]}'
+        def read(self): return self._payload
 
     def fake_urlopen(req, timeout=0):
-        captured["url"] = req.full_url
-        captured["body"] = req.data
-        return _Resp()
+        captured.append((req.full_url, req.data))
+        if req.full_url.endswith("/apply-template"):
+            body = json.loads(req.data.decode())
+            rendered = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n"
+                               for m in body["messages"])
+            if body.get("tools"):
+                rendered = "TOOLS-BLOCK\n" + rendered
+            return _Resp(json.dumps({"prompt": rendered}).encode())
+        return _Resp(b'{"tokens": [1, 2, 3]}')
 
-    import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_token_counter_llamacpp_shape(monkeypatch):
+    """provider_type=llamacpp POSTs {"content"} and counts len(tokens) — llama-server returns
+    {"tokens": [...]} with NO "count" field (verified against llama.cpp's /tokenize contract).
+    Message-level capability locks on via /apply-template."""
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_llama_server(monkeypatch, captured)
     tc = ctxmod.TokenCounter(
         base_url="http://localhost:8080/v1", model="qwen", provider_type="llamacpp"
     )
-    assert captured["url"] == "http://localhost:8080/tokenize"
-    assert b"content" in captured["body"] and b"prompt" not in captured["body"]
+    url0, body0 = captured[0]  # content-shape probe
+    assert url0 == "http://localhost:8080/tokenize"
+    assert b"content" in body0 and b"prompt" not in body0
+    assert tc._messages_exact  # /apply-template answered the capability probe
     assert tc.count("hello world") == 3
     assert not tc.approximate
+
+
+def test_token_counter_llamacpp_count_messages_two_hop(monkeypatch):
+    """llamacpp count_messages = /apply-template (renders the server's own template, tools
+    included) then /tokenize {content, add_special:true} — the chat path tokenizes its render
+    with add_special=true (server-context.cpp tokenize_input_prompts(..., true, true)), so
+    BOS-adding models count identically by construction (parity with usage.prompt_tokens
+    verified live: 20==20 plain / 160==160 with tools). Result is whole-list cached."""
+    import json
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_llama_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(
+        base_url="http://localhost:8080/v1", model="qwen", provider_type="llamacpp"
+    )
+    captured.clear()
+    msgs = [{"role": "user", "content": "Say pong."}]
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+    assert tc.count_messages(msgs, tools=tools) == 3  # len(tokens) of the rendered prompt
+    apply_url, apply_body = captured[0]
+    tok_url, tok_body = captured[1]
+    assert apply_url.endswith("/apply-template")
+    sent = json.loads(apply_body.decode())
+    assert sent["messages"] == msgs and sent["tools"] == tools
+    tok_sent = json.loads(tok_body.decode())
+    assert tok_sent["add_special"] is True  # mirrors the chat path's tokenize flags
+    assert "TOOLS-BLOCK" in tok_sent["content"]  # tools rendered into the counted prompt
+    n_calls = len(captured)
+    assert tc.count_messages(msgs, tools=tools) == 3  # cached — no new network
+    assert len(captured) == n_calls
+
+
+def _patch_vllm_server(monkeypatch, captured, messages_count=50, fail_messages=False):
+    """Fake a vLLM /tokenize that answers BOTH contracts: {model,prompt}->{count:3} and
+    messages-mode {model,messages,...}->{count:messages_count} (400 when fail_messages)."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    class _Resp:
+        def __init__(self, payload): self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        captured.append((req.full_url, req.data))
+        body = json.loads(req.data.decode())
+        if "messages" in body:
+            if fail_messages:
+                raise urllib.error.HTTPError(req.full_url, 400, "no messages mode", {}, None)
+            return _Resp(json.dumps({"count": messages_count}).encode())
+        return _Resp(b'{"count": 3}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_token_counter_vllm_count_messages_exact(monkeypatch):
+    """vLLM count_messages POSTs the messages-mode /tokenize payload — model, messages,
+    add_generation_prompt, and the SAME wire-format tools the real call carries — and returns
+    the server's template-rendered count (verified live == usage.prompt_tokens: 22/282/24
+    incl. the tools block). Whole-list cached."""
+    import json
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_vllm_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen", provider_type="vllm")
+    assert tc._messages_exact
+    captured.clear()
+    msgs = [{"role": "user", "content": "Say pong."}]
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+    assert tc.count_messages(msgs, tools=tools) == 50
+    sent = json.loads(captured[0][1].decode())
+    assert sent["model"] == "qwen" and sent["messages"] == msgs
+    assert sent["add_generation_prompt"] is True and sent["tools"] == tools
+    assert tc.count_messages(msgs, tools=tools) == 50  # cached
+    assert len(captured) == 1
+    # A DIFFERENT tools list is a different request — never served from the tools-less cache.
+    assert tc.count_messages(msgs) == 50 and len(captured) == 2
+    # An empty list never dials (a template render of [] is a server-side error, not a count).
+    assert tc.count_messages([]) == 0 and len(captured) == 2
+
+
+def test_token_counter_vllm_messages_probe_failure_degrades_to_summed(monkeypatch, caplog):
+    """A vLLM build without messages-mode /tokenize keeps EXACT content counting but degrades
+    count_messages to the summed per-message estimate (+ serialized tools), warned once —
+    never a hard failure at rebind for a content-exact server."""
+    import logging
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_vllm_server(monkeypatch, captured, fail_messages=True)
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.context"):
+        tc = ctxmod.TokenCounter(
+            base_url="http://localhost:8000/v1", model="qwen", provider_type="vllm"
+        )
+    assert not tc._messages_exact
+    assert [r for r in caplog.records if "message-level" in r.getMessage()]
+    assert not tc.approximate  # content counting is still exact
+    msgs = [{"role": "user", "content": "hi"}]
+    base = tc.count_messages(msgs)
+    assert base == 4 + 3  # +4 overhead + server content count (3)
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    assert tc.count_messages(msgs, tools=tools) > base  # tools estimated into the sum
+
+
+def test_token_counter_count_messages_mid_session_failure_raises(monkeypatch):
+    """Once message-level exact is locked on, a mid-session miss fails LOUD (same contract as
+    count()) — never a silent substitution of an approximate number."""
+    import pytest
+    import urllib.error
+    import urllib.request
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_vllm_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen", provider_type="vllm")
+    assert tc._messages_exact
+
+    def refuse(req, timeout=0):
+        raise urllib.error.URLError("server went away")
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(RuntimeError, match="message-level tokenize failed"):
+        tc.count_messages([{"role": "user", "content": "fresh, uncached"}])
+
+
+def test_count_messages_offline_estimate_includes_tools():
+    """The offline/off-mode estimator adds the serialized tools block — the loop's no-usage
+    fallback passes the wire tools, and ignoring them would undercount by the largest
+    structural cost in the request."""
+    from localharness.agent.context import TokenCounter
+
+    tc = TokenCounter()
+    msgs = [{"role": "user", "content": "hello"}]
+    tools = [{"type": "function", "function": {"name": "get_weather",
+              "description": "Get weather for a city", "parameters": {"type": "object"}}}]
+    assert tc.count_messages(msgs, tools=tools) > tc.count_messages(msgs)
+
+
+def test_token_counter_exact_local_count_messages_ignores_tools(monkeypatch):
+    """exact_local (ollama/lmstudio GGUF path) renders message structure exactly but does NOT
+    render a tools block (per-runtime tool templating is unverified — Ollama re-renders with
+    its own Go template); `tools` must not change the count NOR poison the cache."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: _FakeGguf())
+    tc = TokenCounter(base_url="http://127.0.0.1:11434/v1", model="q", provider_type="ollama")
+    msgs = [{"role": "user", "content": "hi"}]
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    assert tc.count_messages(msgs) == 999
+    assert tc.count_messages(msgs, tools=tools) == 999
 
 
 def test_token_counter_ollama_approximate_mode_never_dials(monkeypatch):
@@ -1061,8 +1233,10 @@ def test_rebind_failure_restores_prior_binding_and_count_survives(monkeypatch):
     from localharness.agent.context import TokenCounter
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 5)
+    monkeypatch.setattr(TokenCounter, "_remote_count_messages", lambda self, m, t: 7)
     tc = TokenCounter(base_url="http://localhost:8000/v1", model="model-a", provider_type="vllm")
     assert tc._mode == "vllm" and tc._model == "model-a"
+    assert tc._messages_exact
     prev_url = tc._tokenize_url
     tc.count("prime the cache")  # counts cached under model-a's tokenizer
 
@@ -1075,6 +1249,7 @@ def test_rebind_failure_restores_prior_binding_and_count_survives(monkeypatch):
     assert tc._model == "model-a"
     assert tc._tokenize_url == prev_url
     assert tc._mode == "vllm"
+    assert tc._messages_exact  # message-level capability restored with the rest
 
     # The #30 symptom was count() raising on EVERY later turn. The restored exact binding answers.
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 5)

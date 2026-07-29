@@ -1059,8 +1059,17 @@ class AgentLoop:
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
                 session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
             else:
-                # Provider omitted usage — fall back to tiktoken estimate
-                est_in = self._ctx._token_counter.count_messages(request_messages)
+                # Provider omitted usage — count what it would have reported, including the
+                # SAME wire-format tools the call carried (the rendered tools block dwarfs
+                # the per-message overhead).
+                from localharness.provider.client import _tools_to_api_format
+                _api_tools = (
+                    _tools_to_api_format(tool_schemas)[0]
+                    if (tool_schemas and tool_call_mode != "text") else None
+                )
+                est_in = self._ctx._token_counter.count_messages(
+                    request_messages, tools=_api_tools
+                )
                 est_out = self._ctx._token_counter.count(
                     getattr(response_message, "content", "") or ""
                 )
@@ -1580,7 +1589,12 @@ class AgentLoop:
             session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
             session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
         else:
-            est_in = self._ctx._token_counter.count_messages(request_messages)
+            from localharness.provider.client import _tools_to_api_format
+            _api_tools = (
+                _tools_to_api_format(tool_schemas)[0]
+                if (tool_schemas and tool_call_mode != "text") else None
+            )
+            est_in = self._ctx._token_counter.count_messages(request_messages, tools=_api_tools)
             est_out = self._ctx._token_counter.count(
                 getattr(response_message, "content", "") or ""
             )

@@ -164,14 +164,20 @@ def test_doctor_llamacpp_tokenize_exact(mock_httpx, tmp_path):
     tok = MagicMock()
     tok.status_code = 200
     tok.json.return_value = {"tokens": [1, 2]}
-    mock_httpx.post.return_value = tok
+    at = MagicMock()
+    at.status_code = 200
+    at.json.return_value = {"prompt": "<|im_start|>user\nx<|im_end|>\n"}
+    mock_httpx.post.side_effect = (
+        lambda url, **kw: at if url.endswith("/apply-template") else tok
+    )
 
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "exact" in result.output.lower()
+    assert "message-level" in result.output  # /apply-template capability reported
     # probed with llama.cpp's {content} shape, not vLLM's {model,prompt}
-    _, kwargs = mock_httpx.post.call_args
-    assert "content" in kwargs.get("json", {})
+    first_kwargs = mock_httpx.post.call_args_list[0].kwargs
+    assert "content" in first_kwargs.get("json", {})
 
 
 @patch("localharness.cli.doctor_cmd.httpx")

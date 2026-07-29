@@ -777,7 +777,7 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
         def count(self, text=""):
             return max(1, len(str(text)) // 4)
 
-        def count_messages(self, messages):
+        def count_messages(self, messages, tools=None):
             return sum(self.count(m.get("content", "")) for m in messages)
     monkeypatch.setattr("localharness.agent.context.TokenCounter", _StubTokenCounter)
 
@@ -1654,7 +1654,7 @@ def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_model
         def count(self, text=""):
             return max(1, len(str(text)) // 4)
 
-        def count_messages(self, messages):
+        def count_messages(self, messages, tools=None):
             return sum(self.count(m.get("content", "")) for m in messages)
     monkeypatch.setattr("localharness.agent.context.TokenCounter", _StubTokenCounter)
 

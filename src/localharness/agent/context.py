@@ -283,6 +283,17 @@ class TokenCounter:
     a HARD error (doctor's check 5c reports the same); an UNKNOWN runtime degrades to labeled
     approximate rather than blocking `start` (#8's leniency for the ambiguous case). Counts
     are content-hash cached.
+
+    count_messages is MESSAGE-LEVEL exact on both live runtimes (verified == the real call's
+    usage.prompt_tokens, tools block included): vLLM applies the chat template server-side
+    (POST /tokenize {model,messages,add_generation_prompt,tools}); llama.cpp renders it via
+    POST /apply-template then tokenizes the rendered prompt. Capability is probed at rebind
+    (_messages_exact) — an older server build that lacks messages-mode/apply-template keeps
+    exact CONTENT counting and degrades message counting to the summed per-message estimate,
+    warned once. Counts render the template's DEFAULT thinking mode, matching subject-turn
+    calls (the only count_messages consumers); internal disable_thinking calls change the
+    rendered prompt (Qwen3: +2 tokens for the empty think block) but are never counted here —
+    vLLM's /tokenize accepts chat_template_kwargs if that ever changes.
     """
 
     def __init__(
@@ -303,6 +314,7 @@ class TokenCounter:
         self._tokenize_url: str | None = None
         self._gguf = None  # exact_local: a GgufTokenizer over the served model's own GGUF vocab
         self._model: str | None = None
+        self._messages_exact: bool = False  # server can count whole message lists (probed at rebind)
         self._cache: dict[str, int] = {}
         # "off": offline cl100k estimator (no server configured — tests/bench). "vllm"/"llamacpp":
         # exact remote via that runtime's /tokenize contract. "approximate": inflated cl100k (the
@@ -325,11 +337,15 @@ class TokenCounter:
         Exception-safe (#30): a failed re-probe RESTORES the prior binding before re-raising, so
         the counter is never left _mode=live + _tokenize_url=None — the half-set state that made
         count() raise on EVERY later turn (a bricked session the caller reported as a clean swap)."""
-        prev = (self._model, self._tokenize_url, self._gguf, self._mode, dict(self._cache))
+        prev = (
+            self._model, self._tokenize_url, self._gguf, self._mode,
+            self._messages_exact, dict(self._cache),
+        )
         try:
             self._rebind_probe(base_url, model, provider_type)
         except Exception:
-            self._model, self._tokenize_url, self._gguf, self._mode, self._cache = prev
+            (self._model, self._tokenize_url, self._gguf, self._mode,
+             self._messages_exact, self._cache) = prev
             raise
 
     def _rebind_probe(
@@ -344,6 +360,7 @@ class TokenCounter:
         self._tokenize_url = None
         self._gguf = None
         self._mode = "off"
+        self._messages_exact = False
         self._cache.clear()
         if not (base_url and model):
             return
@@ -382,6 +399,22 @@ class TokenCounter:
         for shape in shapes:
             self._mode = shape
             if self._remote_count("token") is not None:
+                # Message-level capability rides on the same lock: vLLM builds without
+                # /tokenize messages-mode and llama-server builds without /apply-template
+                # answer the content shape but not this — probe once so count_messages
+                # degrades to the summed estimate instead of failing every call.
+                self._messages_exact = (
+                    self._remote_count_messages([{"role": "user", "content": "x"}], None)
+                    is not None
+                )
+                if not self._messages_exact:
+                    log.warning(
+                        "TokenCounter: %s answers /tokenize but not message-level counting "
+                        "(vLLM messages-mode / llama.cpp /apply-template) — content counts "
+                        "stay exact; count_messages uses the summed per-message estimate. "
+                        "Upgrade the server for template-exact message counts.",
+                        self._mode,
+                    )
                 break  # exact mode locked onto the shape the server actually speaks
         else:
             # No exact source answered. A runtime we KNOW serves /tokenize (vllm/llamacpp)
@@ -413,32 +446,67 @@ class TokenCounter:
         /tokenize, or an unknown runtime's probe found none) — `start` surfaces a warning."""
         return self._mode == "approximate"
 
+    def _post_json(self, url: str, payload: dict) -> dict | None:
+        """POST JSON, return the parsed JSON reply, or None on ANY failure — callers decide
+        whether a miss is a probe result (degrade) or a mid-session error (raise)."""
+        import json as _json
+        import urllib.request
+        try:
+            body = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     def _remote_count(self, text: str) -> int | None:
         """Exact server-side count, or None on ANY failure. Shape follows self._mode:
         "llamacpp" POSTs {"content"} and reads len("tokens") (llama-server has no "count"
         field); otherwise POSTs {"model","prompt"} and reads "count" (vLLM contract)."""
         if not self._tokenize_url:
             return None
-        import json as _json
-        import urllib.request
-        try:
-            if self._mode == "llamacpp":
-                payload: dict = {"content": text}
-            else:
-                payload = {"model": self._model, "prompt": text}
-            body = _json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                self._tokenize_url, data=body, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
-            if self._mode == "llamacpp":
-                tokens = data.get("tokens")
-                return len(tokens) if isinstance(tokens, list) else None
-            count = data.get("count")
-            return int(count) if count is not None else None
-        except Exception:
+        if self._mode == "llamacpp":
+            data = self._post_json(self._tokenize_url, {"content": text})
+            tokens = data.get("tokens") if data else None
+            return len(tokens) if isinstance(tokens, list) else None
+        data = self._post_json(self._tokenize_url, {"model": self._model, "prompt": text})
+        count = data.get("count") if data else None
+        return int(count) if count is not None else None
+
+    def _remote_count_messages(
+        self, messages: list[dict], tools: list[dict] | None
+    ) -> int | None:
+        """Message-level exact count from the server's own chat-template render, or None on
+        any failure. vLLM: /tokenize messages-mode applies the template (+tools block)
+        server-side and returns the count. llama.cpp: /apply-template renders the exact
+        prompt the chat path would send (+tools), then /tokenize counts it with
+        add_special=true — the chat path tokenizes its render exactly that way
+        (server-context.cpp handle_completions_impl: tokenize_input_prompts(..., true, true)),
+        so BOS-adding models count identically by construction; parse_special defaults true.
+        Both verified live == the real call's usage.prompt_tokens, with and without tools."""
+        if not self._tokenize_url:
             return None
+        if self._mode == "llamacpp":
+            payload: dict = {"messages": messages}
+            if tools:
+                payload["tools"] = tools
+            root = self._tokenize_url.removesuffix("/tokenize")
+            data = self._post_json(f"{root}/apply-template", payload)
+            prompt = data.get("prompt") if data else None
+            if not isinstance(prompt, str) or not prompt:
+                return None
+            data = self._post_json(self._tokenize_url, {"content": prompt, "add_special": True})
+            tokens = data.get("tokens") if data else None
+            return len(tokens) if isinstance(tokens, list) else None
+        payload = {"model": self._model, "messages": messages, "add_generation_prompt": True}
+        if tools:
+            payload["tools"] = tools
+        data = self._post_json(self._tokenize_url, payload)
+        count = data.get("count") if data else None
+        return int(count) if count is not None else None
 
     def count(self, text: str) -> int:
         if not text:
@@ -470,24 +538,54 @@ class TokenCounter:
             self._cache[key] = n
         return n
 
-    def count_messages(self, messages: list[dict]) -> int:
+    def count_messages(self, messages: list[dict], tools: list[dict] | None = None) -> int:
+        """Token count for a whole request. `tools` = the wire-format tools list the call
+        carries (client `_tools_to_api_format` output) — the rendered tools block is typically
+        the LARGEST structural cost (260 tokens for ONE small schema, measured live), dwarfing
+        the +4/message overhead. vllm/llamacpp with _messages_exact count server-side and fail
+        LOUD on a mid-session miss (same contract as count()). exact_local renders the GGUF
+        chat template locally — message structure exact; the tools block is NOT rendered there
+        (needs per-runtime template verification — Ollama re-renders with its own Go template)
+        so `tools` is ignored, disclosed in the support matrix. Everything else (off /
+        approximate / older server builds) sums per-message content + overhead + the
+        serialized tools as an explicit estimate."""
+        if not messages:
+            return 0  # a template render of [] is a server-side error, not a count
+        key = "msgs:" + hashlib.sha1(
+            json.dumps([messages, tools], sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         if self._mode == "exact_local":
             # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the exact
             # count the server produces (message structure incl. role markers / default system prompt,
             # not the +4/message approximation the summed path below uses).
-            return self._gguf.count_messages(messages)
-        total = 0
-        for msg in messages:
-            total += 4  # message overhead tokens
-            content = msg.get("content") or ""
-            if isinstance(content, str):
-                total += self.count(content)
-            # tool_calls in assistant messages
-            for tc in (msg.get("tool_calls") or []):
-                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                total += self.count(fn.get("name", ""))
-                total += self.count(fn.get("arguments", ""))
-        return total
+            n = self._gguf.count_messages(messages)
+        elif self._mode in ("vllm", "llamacpp") and self._messages_exact:
+            n = self._remote_count_messages(messages, tools)
+            if n is None:
+                raise RuntimeError(
+                    f"TokenCounter: message-level tokenize failed mid-session at "
+                    f"{self._tokenize_url}; refusing to substitute an approximate count."
+                )
+        else:
+            n = 0
+            for msg in messages:
+                n += 4  # message overhead tokens
+                content = msg.get("content") or ""
+                if isinstance(content, str):
+                    n += self.count(content)
+                # tool_calls in assistant messages
+                for tc in (msg.get("tool_calls") or []):
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    n += self.count(fn.get("name", ""))
+                    n += self.count(fn.get("arguments", ""))
+            if tools:
+                n += self.count(json.dumps(tools, default=str))
+        if len(self._cache) < 50_000:
+            self._cache[key] = n
+        return n
 
 
 def probe_served_window(
