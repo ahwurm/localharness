@@ -290,10 +290,14 @@ class TokenCounter:
     POST /apply-template then tokenizes the rendered prompt. Capability is probed at rebind
     (_messages_exact) — an older server build that lacks messages-mode/apply-template keeps
     exact CONTENT counting and degrades message counting to the summed per-message estimate,
-    warned once. Counts render the template's DEFAULT thinking mode, matching subject-turn
-    calls (the only count_messages consumers); internal disable_thinking calls change the
-    rendered prompt (Qwen3: +2 tokens for the empty think block) but are never counted here —
-    vLLM's /tokenize accepts chat_template_kwargs if that ever changes.
+    warned once. Two message-counting contracts: count_messages = a COMPLETE wire request
+    (the loop's usage-fallback; anything costing a real call) — fail-loud, template-rendered;
+    estimate_messages = budget/compaction arithmetic over arbitrary history FRAGMENTS, which
+    no chat template accepts (Qwen3.6 rejects user-less lists) — structural, never renders.
+    Exact counts render the template's DEFAULT thinking mode, matching the subject-turn
+    requests they cost; internal disable_thinking calls change the rendered prompt (Qwen3:
+    +2 tokens for the empty think block) but are never counted through this path — vLLM's
+    /tokenize accepts chat_template_kwargs if that ever changes.
     """
 
     def __init__(
@@ -539,53 +543,72 @@ class TokenCounter:
         return n
 
     def count_messages(self, messages: list[dict], tools: list[dict] | None = None) -> int:
-        """Token count for a whole request. `tools` = the wire-format tools list the call
-        carries (client `_tools_to_api_format` output) — the rendered tools block is typically
-        the LARGEST structural cost (260 tokens for ONE small schema, measured live), dwarfing
-        the +4/message overhead. vllm/llamacpp with _messages_exact count server-side and fail
-        LOUD on a mid-session miss (same contract as count()). exact_local renders the GGUF
-        chat template locally — message structure exact; the tools block is NOT rendered there
-        (needs per-runtime template verification — Ollama re-renders with its own Go template)
-        so `tools` is ignored, disclosed in the support matrix. Everything else (off /
-        approximate / older server builds) sums per-message content + overhead + the
-        serialized tools as an explicit estimate."""
+        """EXACT token count of a whole RENDERABLE request — a complete conversation as it
+        would go over the wire (what usage.prompt_tokens will report). `tools` = the
+        wire-format tools list the call carries (client `_tools_to_api_format` output) — the
+        rendered tools block is typically the LARGEST structural cost (260 tokens for ONE
+        small schema, measured live), dwarfing the +4/message overhead. vllm/llamacpp with
+        _messages_exact count server-side and fail LOUD on a mid-session miss (same contract
+        as count()). exact_local renders the GGUF chat template locally — message structure
+        exact; the tools block is NOT rendered there (needs per-runtime template verification
+        — Ollama re-renders with its own Go template) so `tools` is ignored, disclosed in the
+        support matrix. Non-exact modes (off / approximate / older server builds) fall back to
+        estimate_messages + a serialized-tools term.
+
+        NOT for message FRAGMENTS: chat templates reject non-conversations (Qwen3.6 raises
+        "No user query found" on a system-only list, live-hit at build_messages' tool-schema
+        line), and the fail-loud contract turns that into a crashed turn. Budget/compaction
+        arithmetic slices history into fragments — that spine uses estimate_messages."""
         if not messages:
             return 0  # a template render of [] is a server-side error, not a count
+        if not (self._mode in ("vllm", "llamacpp") and self._messages_exact):
+            if self._mode == "exact_local":
+                # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the
+                # exact count the server produces (message structure incl. role markers / default
+                # system prompt). Template-rejected shapes fall back inside GgufTokenizer.
+                return self._gguf.count_messages(messages)
+            return self.estimate_messages(messages) + (
+                self.count(json.dumps(tools, default=str)) if tools else 0
+            )
         key = "msgs:" + hashlib.sha1(
             json.dumps([messages, tools], sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        if self._mode == "exact_local":
-            # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the exact
-            # count the server produces (message structure incl. role markers / default system prompt,
-            # not the +4/message approximation the summed path below uses).
-            n = self._gguf.count_messages(messages)
-        elif self._mode in ("vllm", "llamacpp") and self._messages_exact:
-            n = self._remote_count_messages(messages, tools)
-            if n is None:
-                raise RuntimeError(
-                    f"TokenCounter: message-level tokenize failed mid-session at "
-                    f"{self._tokenize_url}; refusing to substitute an approximate count."
-                )
-        else:
-            n = 0
-            for msg in messages:
-                n += 4  # message overhead tokens
-                content = msg.get("content") or ""
-                if isinstance(content, str):
-                    n += self.count(content)
-                # tool_calls in assistant messages
-                for tc in (msg.get("tool_calls") or []):
-                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                    n += self.count(fn.get("name", ""))
-                    n += self.count(fn.get("arguments", ""))
-            if tools:
-                n += self.count(json.dumps(tools, default=str))
+        n = self._remote_count_messages(messages, tools)
+        if n is None:
+            raise RuntimeError(
+                f"TokenCounter: message-level tokenize failed mid-session at "
+                f"{self._tokenize_url}; refusing to substitute an approximate count."
+            )
         if len(self._cache) < 50_000:
             self._cache[key] = n
         return n
+
+    def estimate_messages(self, messages: list[dict]) -> int:
+        """Structural token ESTIMATE for budget arithmetic — safe on ANY message fragment
+        (compaction/eviction/trimming operate on history slices that no chat template would
+        accept: system-only, assistant/tool-only, orphaned tool results). Sums exact per-
+        content counts + a flat 4-token/message overhead — the pre-exact-mode contract every
+        budget threshold was tuned against; never dials the message renderer, never raises on
+        shape. exact_local delegates to the GGUF render (which falls back internally on
+        template-rejected shapes). For the exact cost of a COMPLETE request, use
+        count_messages."""
+        if self._mode == "exact_local":
+            return self._gguf.count_messages(messages)
+        total = 0
+        for msg in messages:
+            total += 4  # message overhead tokens
+            content = msg.get("content") or ""
+            if isinstance(content, str):
+                total += self.count(content)
+            # tool_calls in assistant messages
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                total += self.count(fn.get("name", ""))
+                total += self.count(fn.get("arguments", ""))
+        return total
 
 
 def probe_served_window(
@@ -832,7 +855,7 @@ class SummaryCompactionStage:
                     "Summary compaction: %d messages → 1 summary (preserve %d/%d)",
                     len(middle), first_n, last_n,
                 )
-                if token_counter.count_messages(working) <= target_tokens:
+                if token_counter.estimate_messages(working) <= target_tokens:
                     return working, modified  # landed at target — the point of the fire
             # Above target (or nothing summarizable at this width): WIDEN the span and retry.
             next_f, next_l = max(1, first_n // 2), max(2, last_n // 2)
@@ -953,7 +976,7 @@ class CompactionPipeline:
                 working = result
                 any_modified = True
                 # Recompute budget after modification
-                new_usage = self._token_counter.count_messages(working)
+                new_usage = self._token_counter.estimate_messages(working)
                 budget = TokenBudget(
                     total_limit=budget.total_limit,
                     current_usage=new_usage,
@@ -1018,7 +1041,7 @@ def _hard_truncate_to_budget(
     working = list(messages)
     start = 1 if working and working[0].get("role") == "system" else 0
     dropped = 0
-    while token_counter.count_messages(working) > max_msg_tokens and len(working) - start > 1:
+    while token_counter.estimate_messages(working) > max_msg_tokens and len(working) - start > 1:
         first_user = next(
             (i for i in range(start, len(working)) if working[i].get("role") == "user"), None
         )
@@ -1048,7 +1071,7 @@ def _shrink_content_to_budget(
     working = list(messages)
     shrunk_any = False
     guard, limit = 0, len(working) * 16 + 32
-    while token_counter.count_messages(working) > max_msg_tokens and guard < limit:
+    while token_counter.estimate_messages(working) > max_msg_tokens and guard < limit:
         guard += 1
         i = max(range(len(working)), key=lambda k: len(working[k].get("content") or ""))
         content = working[i].get("content") or ""
@@ -1193,7 +1216,7 @@ class ContextManager:
             {**m, "content": ""} if m.get("content") is None else m for m in messages
         ]
         repaired = self.repair_tool_pairing(copied)
-        tool_tokens = self._token_counter.count_messages(
+        tool_tokens = self._token_counter.estimate_messages(
             [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
         ) if tool_schemas else 0
 
@@ -1202,7 +1225,7 @@ class ContextManager:
         # don't rewrite history — and invalidate the KV cache — every turn).
         evict_check = TokenBudget(
             total_limit=self.max_context_tokens,
-            current_usage=self._token_counter.count_messages(repaired),
+            current_usage=self._token_counter.estimate_messages(repaired),
             tool_schema_tokens=tool_tokens,
         )
         if evict_check.usage_fraction >= WEB_EVICT_USAGE_FRACTION:
@@ -1233,7 +1256,7 @@ class ContextManager:
                 )
 
         if self._pipeline is not None:
-            pre_usage = self._token_counter.count_messages(repaired)
+            pre_usage = self._token_counter.estimate_messages(repaired)
             pre_budget = TokenBudget(
                 total_limit=self.max_context_tokens,
                 current_usage=pre_usage,
@@ -1248,7 +1271,7 @@ class ContextManager:
                 if det_modified:
                     pre_budget = TokenBudget(
                         total_limit=self.max_context_tokens,
-                        current_usage=self._token_counter.count_messages(repaired),
+                        current_usage=self._token_counter.estimate_messages(repaired),
                         tool_schema_tokens=tool_tokens,
                     )
                 # Only the LLM-calling stages consume the fire budget. MOVE 0c: compaction is NEVER
@@ -1267,7 +1290,7 @@ class ContextManager:
                         if self._bus is not None:
                             post_budget = TokenBudget(
                                 total_limit=self.max_context_tokens,
-                                current_usage=self._token_counter.count_messages(repaired),
+                                current_usage=self._token_counter.estimate_messages(repaired),
                                 tool_schema_tokens=tool_tokens,
                             )
                             from localharness.core.events import CompactionTriggered
@@ -1291,7 +1314,7 @@ class ContextManager:
         # do not have).
         reserve = RESPONSE_RESERVE_TOKENS if self.max_context_tokens > RESPONSE_RESERVE_TOKENS else 0
         effective_limit = self.max_context_tokens - reserve
-        floor_usage = self._token_counter.count_messages(repaired)
+        floor_usage = self._token_counter.estimate_messages(repaired)
         # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
         # user turn, no history) gives SummaryCompactionStage no safe "middle" to summarize — the
         # LLM stages above always return any_modified=False and never publish CompactionTriggered.
@@ -1315,7 +1338,7 @@ class ContextManager:
             # remnant (system + the final message) itself exceeds budget. Shrink their CONTENT as
             # the true last resort so the request actually fits — a distinct, louder failure mode.
             shrunk = False
-            if self._token_counter.count_messages(repaired) + tool_tokens > effective_limit:
+            if self._token_counter.estimate_messages(repaired) + tool_tokens > effective_limit:
                 repaired, shrunk = _shrink_content_to_budget(
                     repaired, effective_limit - tool_tokens, self._token_counter,
                 )
@@ -1329,7 +1352,7 @@ class ContextManager:
             emergency_modified = n_dropped > 0 or shrunk
 
         # Recompute budget AFTER any compaction so the return reflects what will ship
-        post_usage = self._token_counter.count_messages(repaired)
+        post_usage = self._token_counter.estimate_messages(repaired)
         budget = TokenBudget(
             total_limit=self.max_context_tokens,
             current_usage=post_usage,
