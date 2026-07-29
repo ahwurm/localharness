@@ -429,6 +429,51 @@ def test_count_messages_offline_estimate_includes_tools():
     assert tc.count_messages(msgs, tools=tools) > tc.count_messages(msgs)
 
 
+@pytest.mark.asyncio
+async def test_build_messages_never_routes_fragments_through_exact_renderer(monkeypatch):
+    """LIVE-CAUGHT regression (the real-turn smoke): build_messages counts tool schemas as a
+    system-only pseudo-message, and compaction slices history into fragments — chat templates
+    REJECT non-conversations (Qwen3.6 raises 'No user query found' → vLLM 400), and
+    count_messages' fail-loud contract turned that into a crashed turn on the FIRST question.
+    The budget spine must run on estimate_messages (fragment-safe, never renders); the exact
+    renderer is for complete wire requests only."""
+    from localharness.agent import context as ctxmod
+    from localharness.tools.base import ToolSchema
+
+    captured: list = []
+    _patch_vllm_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen", provider_type="vllm")
+    assert tc._messages_exact
+
+    def boom(self, messages, tools):
+        raise AssertionError("budget spine dialed the exact message renderer on a fragment")
+    monkeypatch.setattr(ctxmod.TokenCounter, "_remote_count_messages", boom)
+
+    cm = ctxmod.ContextManager(token_counter=tc)
+    msgs = [{"role": "user", "content": "What is the capital of South Korea?"}]
+    schemas = [ToolSchema(name="get_weather", description="d", parameters={"type": "object"})]
+    request, budget = await cm.build_messages(msgs, schemas)
+    assert request and request[0]["role"] == "user"
+    assert budget.tool_schema_tokens > 0  # schemas were still costed (via the estimator)
+
+
+def test_estimate_messages_fragment_safe_in_exact_mode(monkeypatch):
+    """estimate_messages never dials the message renderer even when message-level exact is
+    live — system-only and tool-only fragments (no template accepts them) count structurally,
+    with per-content counts still server-exact."""
+    import json as _j
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_vllm_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="qwen", provider_type="vllm")
+    captured.clear()
+    assert tc.estimate_messages([{"role": "system", "content": "tool schema blob"}]) == 4 + 3
+    assert tc.estimate_messages([{"role": "tool", "content": "orphan result"}]) == 4 + 3
+    assert captured, "content counts still go through the exact /tokenize"
+    assert all("messages" not in _j.loads(body.decode()) for _, body in captured)
+
+
 def test_token_counter_exact_local_count_messages_ignores_tools(monkeypatch):
     """exact_local (ollama/lmstudio GGUF path) renders message structure exactly but does NOT
     render a tools block (per-runtime tool templating is unverified — Ollama re-renders with
@@ -442,6 +487,7 @@ def test_token_counter_exact_local_count_messages_ignores_tools(monkeypatch):
     tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
     assert tc.count_messages(msgs) == 999
     assert tc.count_messages(msgs, tools=tools) == 999
+    assert tc.estimate_messages(msgs) == 999  # spine delegates to the GGUF render too
 
 
 def test_token_counter_ollama_approximate_mode_never_dials(monkeypatch):
