@@ -272,13 +272,17 @@ def test_token_counter_llamacpp_shape(monkeypatch):
     assert not tc.approximate
 
 
-def test_token_counter_ollama_approximate_mode_never_dials():
+def test_token_counter_ollama_approximate_mode_never_dials(monkeypatch):
     """ollama serves no tokenize API: explicit approximate mode, ZERO network. Port 1 would
     hard-fail any probe — constructing against it proves nothing is dialed. Counts are the
-    plain cl100k estimate inflated by the safety factor (over-count = the safe direction)."""
+    plain cl100k estimate inflated by the safety factor (over-count = the safe direction).
+    load_gguf_tokenizer is stubbed to None so this stays hermetic on a box with a real Ollama
+    install (no ~/.ollama filesystem scan) and exercises the approximate FALLBACK path."""
     import math
 
+    from localharness.agent import gguf_tokenizer as gguf_mod
     from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR, TokenCounter
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: None)
     tc = TokenCounter(base_url="http://127.0.0.1:1/v1", model="m", provider_type="ollama")
     assert tc.approximate
     plain = TokenCounter()  # offline estimator baseline (no inflation)
@@ -286,12 +290,90 @@ def test_token_counter_ollama_approximate_mode_never_dials():
     assert tc.count(text) == math.ceil(plain.count(text) * APPROX_TOKENIZE_SAFETY_FACTOR)
 
 
-def test_token_counter_lmstudio_approximate_mode():
-    """LM Studio documents no tokenize endpoint on either API surface — same policy as ollama."""
+def test_token_counter_lmstudio_approximate_mode(monkeypatch):
+    """LM Studio documents no tokenize endpoint on either API surface — same policy as ollama.
+    load_gguf_tokenizer is stubbed to None so this stays hermetic on a box with a real LM
+    Studio install (no `lms ls` shell-out / ~/.lmstudio scan) and exercises the approximate
+    FALLBACK path only."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
     from localharness.agent.context import TokenCounter
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: None)
     tc = TokenCounter(base_url="http://127.0.0.1:1/v1", model="m", provider_type="lmstudio")
     assert tc.approximate
     assert tc.count("hello") >= TokenCounter().count("hello")
+
+
+class _FakeGguf:
+    """Deterministic stand-in for GgufTokenizer — never touches llama_cpp."""
+    def count(self, text):
+        return len(text.split())
+
+    def count_messages(self, messages):
+        return 999
+
+
+def test_token_counter_exact_local_when_gguf_resolves_ollama(monkeypatch):
+    """When load_gguf_tokenizer resolves a GGUF for an ollama-served model, TokenCounter locks
+    onto mode 'exact_local' and delegates count()/count_messages() to it — not approximate."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: _FakeGguf())
+    tc = TokenCounter(base_url="http://127.0.0.1:11434/v1", model="qwen2.5:7b", provider_type="ollama")
+    assert tc._mode == "exact_local"
+    assert tc.approximate is False
+    assert tc.count("a b c") == 3
+    assert tc.count_messages([{"role": "user", "content": "hi there"}]) == 999
+
+
+def test_token_counter_exact_local_when_gguf_resolves_lmstudio(monkeypatch):
+    """Same exact_local lock-on for LM Studio."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: _FakeGguf())
+    tc = TokenCounter(
+        base_url="http://127.0.0.1:1234/v1", model="qwen2.5-0.5b-instruct", provider_type="lmstudio"
+    )
+    assert tc._mode == "exact_local"
+    assert tc.approximate is False
+    assert tc.count("a b c") == 3
+    assert tc.count_messages([{"role": "user", "content": "hi there"}]) == 999
+
+
+def test_token_counter_exact_local_falls_back_when_no_gguf(monkeypatch):
+    """load_gguf_tokenizer returning None (no local GGUF reachable) degrades to the labeled
+    approximate estimator — never a silent guess, and never exact_local."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: None)
+    tc = TokenCounter(base_url="http://127.0.0.1:11434/v1", model="qwen2.5:7b", provider_type="ollama")
+    assert tc._mode == "approximate"
+    assert tc.approximate is True
+
+
+def test_token_counter_exact_local_survives_rebind(monkeypatch):
+    """A /model swap between two ollama-served models both backed by a local GGUF stays
+    exact_local across rebind (the fake gguf identity is preserved, not re-derived from stale
+    state); a swap to a model with no resolvable GGUF correctly falls to approximate — proving
+    _rebind_probe's unconditional `self._gguf = None` reset doesn't leak the prior tokenizer."""
+    from localharness.agent import gguf_tokenizer as gguf_mod
+    from localharness.agent.context import TokenCounter
+
+    fake = _FakeGguf()
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: fake)
+    tc = TokenCounter(base_url="http://127.0.0.1:11434/v1", model="qwen2.5:7b", provider_type="ollama")
+    assert tc._mode == "exact_local"
+
+    tc.rebind(base_url="http://127.0.0.1:11434/v1", model="other:tag", provider_type="ollama")
+    assert tc._mode == "exact_local"
+    assert tc._gguf is fake
+
+    monkeypatch.setattr(gguf_mod, "load_gguf_tokenizer", lambda *a, **k: None)
+    tc.rebind(base_url="http://127.0.0.1:11434/v1", model="no-gguf:tag", provider_type="ollama")
+    assert tc._mode == "approximate"
+    assert tc._gguf is None
 
 
 def test_token_counter_llamacpp_unreachable_fails_loud():

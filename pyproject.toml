@@ -46,6 +46,13 @@ dispatch = [
 embeddings = [
     "sentence-transformers>=2.2,<6",
 ]
+# Exact token counting for Ollama / LM Studio (which serve no /tokenize endpoint): the harness
+# loads the served model's OWN GGUF vocab + chat template (vocab-only, no weights, no GPU) and
+# counts to the token, offline. OPTIONAL: without it those runtimes fall back to a labeled
+# approximate estimate. No prebuilt aarch64 wheel — installs as a source build on ARM64.
+exact-tokenizer = [
+    "llama-cpp-python>=0.3",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

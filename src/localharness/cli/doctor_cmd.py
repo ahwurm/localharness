@@ -211,11 +211,30 @@ def doctor(
             # (root = _strip_v1(base_url) is computed once above and reused here.)
             provider_type = harness.provider.provider_type
             if provider_type in ("ollama", "lmstudio"):
-                console.print(
-                    f"{_INFO}  Token counting: approximate (tiktoken cl100k) — {provider_type} "
-                    f"serves no /tokenize endpoint; budget gates fire conservatively. Use vLLM "
-                    f"or llama.cpp for exact counts."
-                )
+                # Neither serves /tokenize, so the harness counts EXACTLY from the served model's own
+                # GGUF vocab (mode exact_local). Report that when it's actually available, else the
+                # honest approximate fallback and WHY (no llama-cpp-python / no local GGUF located).
+                import importlib.util
+                from localharness.agent.gguf_tokenizer import resolve_gguf_path
+                _model = harness.provider.default_model
+                _gguf = resolve_gguf_path(_model, provider_type)
+                _have_llama = importlib.util.find_spec("llama_cpp") is not None
+                if _gguf is not None and _have_llama:
+                    console.print(
+                        f"{_PASS} Token counting: exact — {provider_type} serves no /tokenize, so the "
+                        f"harness counts from the served model's own GGUF vocab ({_gguf.name})."
+                    )
+                elif _gguf is not None:
+                    console.print(
+                        f"{_INFO}  Token counting: approximate (cl100k) — a local GGUF was found but "
+                        f"llama-cpp-python is not installed; add the 'exact-tokenizer' extra for exact."
+                    )
+                else:
+                    console.print(
+                        f"{_INFO}  Token counting: approximate (cl100k) — {provider_type} serves no "
+                        f"/tokenize and no local GGUF was located for {_model!r} (co-locate the model "
+                        f"files + install the 'exact-tokenizer' extra for exact counts)."
+                    )
             elif provider_type == "llamacpp":
                 try:
                     tk = httpx.post(f"{root}/tokenize", json={"content": "token"}, timeout=5.0)

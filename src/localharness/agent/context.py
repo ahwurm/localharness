@@ -270,8 +270,10 @@ class TokenCounter:
     base_url+model are given, selected by provider_type and probed once at construction:
     vLLM's POST {server_root}/tokenize {model,prompt} -> {"count": N}, or llama.cpp's
     POST {server_root}/tokenize {content} -> {"tokens": [...]}. Runtimes that serve no
-    tokenize endpoint (ollama, lmstudio) run in EXPLICIT approximate mode — cl100k inflated
-    by APPROX_TOKENIZE_SAFETY_FACTOR, surfaced via `.approximate` so `start` can warn.
+    tokenize endpoint (ollama, lmstudio) count EXACTLY from the served model's own GGUF vocab
+    (mode "exact_local", `agent/gguf_tokenizer.py`) — matching the server to the token, offline —
+    and fall back to EXPLICIT approximate mode (cl100k x APPROX_TOKENIZE_SAFETY_FACTOR, surfaced
+    via `.approximate`) only when no local GGUF / llama-cpp-python is reachable.
     Unknown/absent provider_type probes BOTH exact shapes and locks onto whichever answers.
 
     cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the only
@@ -299,6 +301,7 @@ class TokenCounter:
         # Model-identity state (owned by rebind so a /model swap can re-derive it):
         # /tokenize lives at the SERVER ROOT, not under /v1.
         self._tokenize_url: str | None = None
+        self._gguf = None  # exact_local: a GgufTokenizer over the served model's own GGUF vocab
         self._model: str | None = None
         self._cache: dict[str, int] = {}
         # "off": offline cl100k estimator (no server configured — tests/bench). "vllm"/"llamacpp":
@@ -322,11 +325,11 @@ class TokenCounter:
         Exception-safe (#30): a failed re-probe RESTORES the prior binding before re-raising, so
         the counter is never left _mode=live + _tokenize_url=None — the half-set state that made
         count() raise on EVERY later turn (a bricked session the caller reported as a clean swap)."""
-        prev = (self._model, self._tokenize_url, self._mode, dict(self._cache))
+        prev = (self._model, self._tokenize_url, self._gguf, self._mode, dict(self._cache))
         try:
             self._rebind_probe(base_url, model, provider_type)
         except Exception:
-            self._model, self._tokenize_url, self._mode, self._cache = prev
+            self._model, self._tokenize_url, self._gguf, self._mode, self._cache = prev
             raise
 
     def _rebind_probe(
@@ -339,20 +342,34 @@ class TokenCounter:
         prior binding on failure so the counter always ends in a CONSISTENT, usable state."""
         self._model = model
         self._tokenize_url = None
+        self._gguf = None
         self._mode = "off"
         self._cache.clear()
         if not (base_url and model):
             return
         ptype = (provider_type or "").lower()
         if ptype in ("ollama", "lmstudio"):
-            # These runtimes serve NO /tokenize (Ollama: /api/* only; LM Studio: none
-            # documented). Approximate by DESIGN — never dial, label it, over-count.
+            # No /tokenize endpoint (Ollama: /api/* only; LM Studio: none). Count EXACTLY from the
+            # served model's OWN GGUF vocab (the harness's own tokenizer) — matches the server to the
+            # token, offline. Fall back to labeled-approximate ONLY when the GGUF / llama-cpp-python is
+            # unreachable (a remote server with no local model files).
+            from localharness.agent.gguf_tokenizer import load_gguf_tokenizer
+            self._gguf = load_gguf_tokenizer(model, ptype)
+            if self._gguf is not None:
+                self._mode = "exact_local"
+                return
             if self._encoder is None:
                 raise RuntimeError(
-                    f"TokenCounter: {ptype} serves no tokenize endpoint and tiktoken is "
-                    f"unavailable — no counting source exists. Install tiktoken."
+                    f"TokenCounter: {ptype} serves no tokenize endpoint, no local GGUF was found for "
+                    f"exact counting, and tiktoken is unavailable — no counting source exists."
                 )
             self._mode = "approximate"
+            log.warning(
+                "TokenCounter: exact GGUF counting unavailable for %s (%s) — no local model file "
+                "reachable; using APPROXIMATE (cl100k x %s). Co-locate the harness with the model "
+                "files (or install the exact-tokenizer extra) for exact counts.",
+                model, ptype, APPROX_TOKENIZE_SAFETY_FACTOR,
+            )
             return
         root = base_url.rstrip("/")
         if root.endswith("/v1"):
@@ -430,7 +447,10 @@ class TokenCounter:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        if self._mode in ("vllm", "llamacpp"):
+        if self._mode == "exact_local":
+            # The harness's own tokenizer — exact from the served model's GGUF vocab (ollama/lmstudio).
+            n = self._gguf.count(text)
+        elif self._mode in ("vllm", "llamacpp"):
             # Live mode: the server tokenizer is the only source of truth. Fail loud on a miss.
             n = self._remote_count(text)
             if n is None:
@@ -451,6 +471,11 @@ class TokenCounter:
         return n
 
     def count_messages(self, messages: list[dict]) -> int:
+        if self._mode == "exact_local":
+            # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the exact
+            # count the server produces (message structure incl. role markers / default system prompt,
+            # not the +4/message approximation the summed path below uses).
+            return self._gguf.count_messages(messages)
         total = 0
         for msg in messages:
             total += 4  # message overhead tokens
