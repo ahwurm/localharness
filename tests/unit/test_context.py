@@ -396,6 +396,70 @@ def test_token_counter_vllm_messages_probe_failure_degrades_to_summed(monkeypatc
     assert tc.count_messages(msgs, tools=tools) > base  # tools estimated into the sum
 
 
+def test_token_counter_llamacpp_apply_template_absent_degrades(monkeypatch, caplog):
+    """An older llama-server without /apply-template (404) keeps EXACT content counting but
+    degrades count_messages to the summed estimate, warned once — the llamacpp shape's OWN
+    probe-failure path, independent of the vLLM one."""
+    import json
+    import logging
+    import urllib.error
+    import urllib.request
+    from localharness.agent import context as ctxmod
+
+    class _Resp:
+        def __init__(self, payload): self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        if req.full_url.endswith("/apply-template"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        return _Resp(b'{"tokens": [1, 2, 3]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.context"):
+        tc = ctxmod.TokenCounter(
+            base_url="http://localhost:8080/v1", model="qwen", provider_type="llamacpp"
+        )
+    assert tc._mode == "llamacpp" and not tc._messages_exact
+    assert [r for r in caplog.records if "message-level" in r.getMessage()]
+    assert not tc.approximate  # content path still exact
+    assert tc.count("abc") == 3
+    assert tc.count_messages([{"role": "user", "content": "hi"}]) == 4 + 3  # summed estimate
+
+
+def test_successful_rebind_clears_message_cache(monkeypatch):
+    """A /model swap must invalidate the whole-list count_messages cache — a count computed
+    under the OLD model's tokenizer is wrong for the new one. (The list-level cache is new in
+    the exact-mode commit; count()'s content cache was already covered.)"""
+    import json
+    import urllib.request
+    from localharness.agent import context as ctxmod
+
+    counts = {"messages": 50}
+
+    class _Resp:
+        def __init__(self, payload): self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        body = json.loads(req.data.decode())
+        n = counts["messages"] if "messages" in body else 3
+        return _Resp(json.dumps({"count": n}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    tc = ctxmod.TokenCounter(base_url="http://localhost:8000/v1", model="model-a", provider_type="vllm")
+    msgs = [{"role": "user", "content": "hi"}]
+    assert tc.count_messages(msgs) == 50
+    counts["messages"] = 60
+    assert tc.count_messages(msgs) == 50  # cached under model-a
+    tc.rebind(base_url="http://localhost:8000/v1", model="model-b", provider_type="vllm")
+    assert tc.count_messages(msgs) == 60  # cache cleared — recounted under model-b
+
+
 def test_token_counter_count_messages_mid_session_failure_raises(monkeypatch):
     """Once message-level exact is locked on, a mid-session miss fails LOUD (same contract as
     count()) — never a silent substitution of an approximate number."""
@@ -414,6 +478,17 @@ def test_token_counter_count_messages_mid_session_failure_raises(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
     with pytest.raises(RuntimeError, match="message-level tokenize failed"):
         tc.count_messages([{"role": "user", "content": "fresh, uncached"}])
+
+
+def test_token_counter_malformed_count_degrades_not_crashes(monkeypatch):
+    """A non-conformant server returning 200 with a non-numeric 'count' must read as "no
+    exact source" — the probe fails with the CONTRACTED RuntimeError (start_cmd catches it) —
+    never a raw TypeError from int() that skips the `except RuntimeError` handler."""
+    from localharness.agent.context import TokenCounter
+
+    _patch_urlopen(monkeypatch, lambda url: b'{"count": ["not", "a", "number"]}')
+    with pytest.raises(RuntimeError, match="exact token counting unavailable"):
+        TokenCounter(base_url="http://localhost:8000/v1", model="m", provider_type="vllm")
 
 
 def test_count_messages_offline_estimate_includes_tools():
@@ -488,6 +563,7 @@ def test_token_counter_exact_local_count_messages_ignores_tools(monkeypatch):
     assert tc.count_messages(msgs) == 999
     assert tc.count_messages(msgs, tools=tools) == 999
     assert tc.estimate_messages(msgs) == 999  # spine delegates to the GGUF render too
+    assert tc._gguf.message_calls == 3  # each call really delegated (no stale cache serving)
 
 
 def test_token_counter_ollama_approximate_mode_never_dials(monkeypatch):
@@ -523,10 +599,14 @@ def test_token_counter_lmstudio_approximate_mode(monkeypatch):
 
 class _FakeGguf:
     """Deterministic stand-in for GgufTokenizer — never touches llama_cpp."""
+    def __init__(self):
+        self.message_calls = 0
+
     def count(self, text):
         return len(text.split())
 
     def count_messages(self, messages):
+        self.message_calls += 1
         return 999
 
 

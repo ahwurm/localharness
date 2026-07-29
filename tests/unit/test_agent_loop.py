@@ -2229,3 +2229,67 @@ async def test_ambient_injection_records_trace_on_empty_shelf(tmp_path):
         assert injection[0].stimulus_text == "a question with no memory to inject"
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_usage_fallback_counts_wire_tools_and_honors_sticky_rejection(mock_llm_client, bus):
+    """No-usage fallback (provider omits usage): est_in must count the SAME wire-format tools
+    the call carried — and NOT count them once the client's sticky _tools_param_rejected says
+    they were never on the wire. Locks the tools= forwarding the exact-counting commit added
+    (previously untested end-to-end: a regression dropping tools= shipped silently)."""
+    from localharness.tools.base import ToolSchema
+
+    Response = mock_llm_client.Response
+
+    class _NoUsageLLM:
+        _tools_param_rejected = False
+
+        class config:
+            tool_call_mode = "native"
+            context_window = 128_000
+
+        async def stream_complete(self, messages=None, tools=None, on_token=None):
+            return Response(content="Done."), None  # provider omits usage
+
+    class _Registry:
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            return {"get_weather": ToolSchema(
+                name="get_weather", description="d", parameters={"type": "object"})}
+
+        async def dispatch(self, *a, **k):
+            raise AssertionError("no dispatch expected in this test")
+
+    seen = {}
+
+    class _SpyCounter:
+        approximate = False
+
+        def count(self, text=""):
+            return 1
+
+        def count_messages(self, messages, tools=None):
+            seen["tools"] = tools
+            return 42
+
+        def estimate_messages(self, messages):
+            return 5
+
+    ctx = ContextManager(token_counter=_SpyCounter())
+    loop = _make_agent_loop(mock_llm_client, [], bus,
+                            tool_registry=_Registry(), context_manager=ctx)
+    loop._llm = _NoUsageLLM()
+    await loop.run_turn("task")
+    assert seen["tools"] and seen["tools"][0]["type"] == "function"
+    assert seen["tools"][0]["function"]["name"] == "get_weather"
+
+    # Sticky rejection: the server 400'd the tools param once — the client stopped sending
+    # it, so the estimate must stop counting it (overcount would silently inflate telemetry).
+    seen.clear()
+    loop2 = _make_agent_loop(mock_llm_client, [], bus,
+                             tool_registry=_Registry(),
+                             context_manager=ContextManager(token_counter=_SpyCounter()))
+    llm2 = _NoUsageLLM()
+    llm2._tools_param_rejected = True
+    loop2._llm = llm2
+    await loop2.run_turn("task")
+    assert seen["tools"] is None

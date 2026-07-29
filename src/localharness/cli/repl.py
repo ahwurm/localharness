@@ -1250,7 +1250,9 @@ class OrchestratorREPL:
         """After a swap, refit the context-window budget (#31) and rebind the shared TokenCounter
         (#25/#30) to the new served model. The counter is ONE object shared by the context manager,
         compaction pipeline and subagent runner, so an in-place rebind/refit updates them all. Both
-        probes BLOCK (urllib/httpx, up to ~20s for two shapes), so they run OFF the event loop (#32)
+        probes BLOCK (urllib/httpx; worst case ~40s: two content shapes plus the message-level
+        capability probe, which is one call for vLLM and two for llama.cpp, 10s timeout each),
+        so they run OFF the event loop (#32)
         — the Discord adapter and idle consolidation share it. Never aborts a completed swap; returns
         a disclosure string (leading space; '' when clean) to append to the switch message so the
         user is told on the CHANNEL — not a swallowed log line — when counting/budget can't track."""

@@ -1061,11 +1061,15 @@ class AgentLoop:
             else:
                 # Provider omitted usage — count what it would have reported, including the
                 # SAME wire-format tools the call carried (the rendered tools block dwarfs
-                # the per-message overhead).
+                # the per-message overhead). Mirrors the client's wire condition exactly,
+                # incl. the sticky tools-param rejection — a server that 400'd tools never
+                # received them, so they must not be counted either.
                 from localharness.provider.client import _tools_to_api_format
                 _api_tools = (
                     _tools_to_api_format(tool_schemas)[0]
-                    if (tool_schemas and tool_call_mode != "text") else None
+                    if (tool_schemas and tool_call_mode != "text"
+                        and not getattr(self._llm, "_tools_param_rejected", False))
+                    else None
                 )
                 est_in = self._ctx._token_counter.count_messages(
                     request_messages, tools=_api_tools
@@ -1592,7 +1596,9 @@ class AgentLoop:
             from localharness.provider.client import _tools_to_api_format
             _api_tools = (
                 _tools_to_api_format(tool_schemas)[0]
-                if (tool_schemas and tool_call_mode != "text") else None
+                if (tool_schemas and tool_call_mode != "text"
+                    and not getattr(self._llm, "_tools_param_rejected", False))
+                else None
             )
             est_in = self._ctx._token_counter.count_messages(request_messages, tools=_api_tools)
             est_out = self._ctx._token_counter.count(
