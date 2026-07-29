@@ -684,6 +684,10 @@ class OrchestratorREPL:
         """List models or switch. A model already served by the endpoint hot-swaps
         (Ollama serves many); a different downloaded model on a harness-managed
         vLLM triggers a server restart (vLLM serves one at a time)."""
+        if arg.strip().lower() == "list":
+            # /help says "/model — List available models"; typing "/model list" is the natural
+            # reading and must list, not error with "Unknown model 'list'" (new-user papercut).
+            arg = ""
         llm = getattr(self._agent, "_llm", None)
         if llm is None or self._harness is None or self._config_dir is None:
             await self._send_info("Model switching is unavailable in this session.")

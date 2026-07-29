@@ -121,6 +121,18 @@ async def test_model_unknown_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_model_list_arg_lists_instead_of_erroring(tmp_path):
+    """/help describes /model as "List available models" — typing "/model list" is the
+    natural reading and must behave like bare /model (new-user papercut caught in the
+    full-session dogfood), never 'Unknown model \\'list\\''."""
+    repl, channel, agent = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+    await repl._handle_slash("/model list")
+    assert agent._llm.config.model == "model-a"  # no swap happened
+    assert "Unknown model" not in channel.messages[-1]
+    assert "Models:" in channel.messages[-1] and "model-b" in channel.messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_model_managed_restart_path(tmp_path, monkeypatch):
     from localharness.provider import server as managed_server
 
