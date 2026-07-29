@@ -172,3 +172,45 @@ async def test_provider_round_trip(provider_type):
         await client.detect_capabilities()
         message_3, _usage4 = await client.complete(_SHORT_PROMPT)
         _assert_generated(message_3)
+
+
+@pytest.mark.parametrize(
+    "provider_type",
+    [
+        pytest.param("vllm", marks=pytest.mark.live_vllm, id="live_vllm"),
+        pytest.param("llamacpp", marks=pytest.mark.live_llamacpp, id="live_llamacpp"),
+    ],
+)
+def test_count_messages_matches_usage_live(provider_type):
+    """Codifies the message-level exactness bar as repeatable certification: the harness's
+    whole-request count — chat template applied, tools block included — must equal the
+    server's own usage.prompt_tokens for the SAME request. The original verification was a
+    one-off manual script; this pins it so a tokenize-contract drift (server upgrade, payload
+    regression) fails a live run instead of silently skewing every count."""
+    import httpx
+
+    from tests.conftest import LIVE_PROVIDER_GATES, live_target
+    from localharness.agent.context import TokenCounter
+
+    gate_env = LIVE_PROVIDER_GATES.get(f"live_{provider_type}", "LOCALHARNESS_LIVE_VLLM")
+    model, base_url = live_target()
+    _preflight(base_url, model, gate_env)
+
+    tc = TokenCounter(base_url=base_url, model=model, provider_type=provider_type)
+    assert tc._messages_exact, (
+        f"{provider_type} at {base_url} answered /tokenize but not message-level counting "
+        f"(vLLM messages-mode / llama.cpp /apply-template) — exactness certification failed"
+    )
+    tools = [{"type": "function", "function": _SIMPLE_TOOL}]
+    for msgs, use_tools in ((_SHORT_PROMPT, None), (_TOOL_PROMPT, tools)):
+        harness = tc.count_messages(msgs, tools=use_tools)
+        payload = {"model": model, "messages": msgs, "max_tokens": 1}
+        if use_tools:
+            payload["tools"] = use_tools
+        resp = httpx.post(base_url.rstrip("/") + "/chat/completions", json=payload, timeout=120.0)
+        resp.raise_for_status()
+        server = resp.json()["usage"]["prompt_tokens"]
+        assert harness == server, (
+            f"{provider_type}: harness count {harness} != usage.prompt_tokens {server} "
+            f"(tools={bool(use_tools)})"
+        )

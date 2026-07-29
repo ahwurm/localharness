@@ -336,3 +336,62 @@ def test_doctor_llamacpp_single_slot_stays_silent(mock_httpx, tmp_path):
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "--parallel 1" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_vllm_message_level_exact(mock_httpx, tmp_path):
+    """vLLM whose /tokenize answers messages-mode: doctor reports message-level exactness —
+    the capability line was previously untested in the PASS direction."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"count": 3}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "message-level" in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_vllm_messages_mode_absent_degrades(mock_httpx, tmp_path):
+    """An older vLLM without messages-mode /tokenize: content counting stays PASS-exact and
+    doctor prints the honest summed-estimate INFO — exit 0, never a failure record."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"count": 3}
+    bad = MagicMock()
+    bad.status_code = 400
+    bad.json.return_value = {}
+    mock_httpx.post.side_effect = (
+        lambda url, **kw: bad if "messages" in kw.get("json", {}) else tok
+    )
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "no messages mode" in result.output
+    assert "message-level (chat template applied server-side)" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_apply_template_absent_degrades(mock_httpx, tmp_path):
+    """llama-server without /apply-template: /tokenize stays PASS-exact, doctor prints the
+    honest INFO about summed message counts — exit 0, no failure appended."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1, 2]}
+
+    def post(url, **kw):
+        if url.endswith("/apply-template"):
+            raise RuntimeError("404: no such route on this build")
+        return tok
+    mock_httpx.post.side_effect = post
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "apply-template not served" in result.output

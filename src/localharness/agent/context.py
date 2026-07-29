@@ -265,6 +265,19 @@ biases budgets to OVER-count: compaction fires early instead of the provider 400
 context overflow (issue #8)."""
 
 
+def _as_count(value) -> int | None:
+    """Defensive int for a server-reported "count": a malformed 200 (non-numeric field from a
+    non-conformant OpenAI-compat server) must read as "no exact source" (None → degrade or
+    fail-loud RuntimeError per the caller's contract), never as a raw TypeError/ValueError
+    traceback that skips start_cmd's `except RuntimeError` handler."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class TokenCounter:
     """Token counting. Prefers the SERVED model's exact tokenizer (model-truth) when
     base_url+model are given, selected by provider_type and probed once at construction:
@@ -477,8 +490,7 @@ class TokenCounter:
             tokens = data.get("tokens") if data else None
             return len(tokens) if isinstance(tokens, list) else None
         data = self._post_json(self._tokenize_url, {"model": self._model, "prompt": text})
-        count = data.get("count") if data else None
-        return int(count) if count is not None else None
+        return _as_count(data.get("count") if data else None)
 
     def _remote_count_messages(
         self, messages: list[dict], tools: list[dict] | None
@@ -509,8 +521,7 @@ class TokenCounter:
         if tools:
             payload["tools"] = tools
         data = self._post_json(self._tokenize_url, payload)
-        count = data.get("count") if data else None
-        return int(count) if count is not None else None
+        return _as_count(data.get("count") if data else None)
 
     def count(self, text: str) -> int:
         if not text:
