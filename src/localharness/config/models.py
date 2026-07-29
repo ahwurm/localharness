@@ -1818,15 +1818,18 @@ class ManagedServerConfig(BaseModel):
     user-managed servers."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    runtime: Literal["vllm", "llamacpp", "ollama"] = Field(
+    runtime: Literal["vllm", "llamacpp", "ollama", "lmstudio"] = Field(
         default="vllm",
         description=(
             "Which server the harness launches. 'vllm' (default) = the existing docker/binary "
             "vLLM path, unaffected. 'llamacpp' = the harness spawns llama.cpp's `llama-server` "
             "itself (0.11 Phase B). 'ollama' = the harness spawns the `ollama serve` daemon and "
             "loads a model into it (0.11 Phase D; `model` is the ollama tag, `binary` defaults to "
-            "PATH `ollama`, `port` is the daemon port). `runtime` drives the command builder + the "
-            "lifecycle strategy. ADDITIVE: existing vLLM configs never set this and keep the default."
+            "PATH `ollama`, `port` is the daemon port). 'lmstudio' = the harness drives LM Studio's "
+            "headless `lms` CLI (0.11 Phase D5: daemon up → load → server start; `model` is the LM "
+            "Studio model key, `binary` the `lms` path, `port` the OpenAI server port). `runtime` "
+            "drives the command builder + the lifecycle strategy. ADDITIVE: existing vLLM configs "
+            "never set this and keep the default."
         ),
     )
     launch: Literal["binary", "docker"] = Field(
@@ -1860,9 +1863,20 @@ class ManagedServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
-        if self.runtime == "ollama":
-            # ollama: the harness spawns `ollama serve` (a PATH command; `binary` defaults to
-            # 'ollama'); `model` is a pulled tag, not a checkpoint/image — no launch target to check.
+        if self.runtime in ("ollama", "lmstudio"):
+            # ollama / lmstudio: the harness drives a PATH CLI (`ollama serve` / `lms`), not a
+            # checkpoint or image — `binary` defaults to that command and `model` is a pulled tag /
+            # LM Studio model key, so there is no launch-target file to validate here.
+            if self.runtime == "lmstudio" and any(
+                a == "--gpu" or a.startswith("--gpu=") for a in self.extra_args
+            ):
+                # LmsStrategy derives `lms load --gpu {max|off}` from `gpu` (the GPU-lock signal); a
+                # manual --gpu in extra_args would (CLI last-wins) silently override it and desync the
+                # GPU-lock bookkeeping → a two-heavy freeze on a later swap. Reject it at load.
+                raise ValueError(
+                    "runtime=lmstudio: `--gpu` must not appear in extra_args — it is derived from "
+                    "`gpu` (--gpu max when gpu=True, --gpu off when False)."
+                )
             return self
         if self.runtime == "llamacpp" and not self.binary:
             raise ValueError("runtime=llamacpp requires `binary` (path to the llama-server executable)")

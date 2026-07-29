@@ -495,3 +495,279 @@ def test_strategy_for_ollama_dispatches_daemon():
     assert isinstance(lifecycle.strategy_for(_ollama_srv()), lifecycle.DaemonStrategy)
     assert isinstance(lifecycle.strategy_for(_llamacpp_srv()), lifecycle.SpawnedProcessStrategy)
     assert isinstance(lifecycle.strategy_for(_docker_srv()), lifecycle.ManagedVllmStrategy)
+
+
+# ---------------------------------------------------------------------------
+# LmsStrategy — LM Studio: harness drives the headless `lms` CLI; STOP = `lms daemon down` (Phase D5)
+# ---------------------------------------------------------------------------
+
+
+def _lms_srv(**over) -> ManagedServerConfig:
+    kw = dict(runtime="lmstudio", model="qwen2.5-0.5b-instruct",
+              binary="/home/u/.lmstudio/bin/lms", port=1234, gpu=False)
+    kw.update(over)
+    return ManagedServerConfig(**kw)
+
+
+def test_lms_strategy_satisfies_protocol():
+    from localharness.provider import lifecycle
+    assert isinstance(lifecycle.LmsStrategy(), LifecycleStrategy)
+
+
+async def test_lms_activate_brings_up_daemon_loads_and_serves(tmp_path, monkeypatch):
+    """activate drives, IN ORDER: `lms daemon up` → `lms load <model> --gpu off -y` (CPU, gpu=False)
+    → `lms server start --port <base_url port> --bind 127.0.0.1`, then wait_ready(v1). served_models
+    is [the model key] (NOT wait_ready's raw list, which also carries the embedding model); handle is
+    the opaque 'lms-daemon' (LmsStrategy owns no pid)."""
+    from localharness.provider import lifecycle
+    calls: list = []
+
+    async def fake_run(self, *args, **kw):
+        calls.append(args)
+
+    async def _not_up(self, v1):
+        return False
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        calls.append(("wait", base_url))
+        return ["qwen2.5-0.5b-instruct", "text-embedding-nomic-embed-text-v1.5"]
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _not_up)
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+
+    ep = await lifecycle.LmsStrategy().activate(_lms_srv(), tmp_path, "http://127.0.0.1:1234/v1")
+    L = "/home/u/.lmstudio/bin/lms"
+    assert calls[0] == (L, "daemon", "up")
+    assert calls[1] == (L, "load", "qwen2.5-0.5b-instruct", "--gpu", "off", "-y")
+    assert calls[2] == (L, "server", "start", "--port", "1234", "--bind", "127.0.0.1")
+    assert ("wait", "http://127.0.0.1:1234/v1") in calls
+    assert ep.served_models == ["qwen2.5-0.5b-instruct"]  # the key, not the embedding model too
+    assert ep.handle == "lms-daemon"
+
+
+async def test_lms_activate_uses_gpu_max_when_heavy(tmp_path, monkeypatch):
+    """spec.gpu True (a heavy peer under the GPU-lock) → `lms load --gpu max` (full offload)."""
+    from localharness.provider import lifecycle
+    seen: dict = {}
+
+    async def fake_run(self, *args, **kw):
+        if len(args) > 1 and args[1] == "load":
+            seen["load"] = args
+
+    async def _not_up(self, v1):
+        return False
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        return ["m"]
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _not_up)
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+    await lifecycle.LmsStrategy().activate(_lms_srv(gpu=True), tmp_path, "http://127.0.0.1:1234/v1")
+    a = seen["load"]
+    assert a[a.index("--gpu") + 1] == "max"
+
+
+async def test_lms_activate_serves_on_base_url_port(tmp_path, monkeypatch):
+    """`lms server start` binds the port from the CALLER's base_url (repl rebinds the client THERE
+    after activate) — not spec.port when they differ."""
+    from localharness.provider import lifecycle
+    seen: dict = {}
+
+    async def fake_run(self, *args, **kw):
+        if len(args) > 1 and args[1] == "server":
+            seen["start"] = args
+
+    async def _not_up(self, v1):
+        return False
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        return ["m"]
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _not_up)
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+    await lifecycle.LmsStrategy().activate(_lms_srv(port=1234), tmp_path, "http://127.0.0.1:9099/v1")
+    a = seen["start"]
+    assert a[a.index("--port") + 1] == "9099"
+
+
+async def test_lms_run_maps_native_errors():
+    """_run MAPS native failures into the activate contract: a missing binary (OSError)→RuntimeError,
+    a non-zero exit not in ok_codes→RuntimeError, a timeout→TimeoutError — and ok_codes lets the
+    idempotent `lms daemon down` (rc=1 already-down) pass. Real subprocesses (/bin/sh), no network."""
+    from localharness.provider import lifecycle
+    strat = lifecycle.LmsStrategy()
+    with pytest.raises(RuntimeError):
+        await strat._run("/no/such/lms-binary-xyz", "daemon", "up")
+    with pytest.raises(RuntimeError):
+        await strat._run("/bin/sh", "-c", "exit 3")
+    with pytest.raises(TimeoutError):
+        await strat._run("/bin/sh", "-c", "exec sleep 5", timeout=0.1)  # exec: no orphan grandchild
+    await strat._run("/bin/sh", "-c", "exit 1", ok_codes=(0, 1))  # already-down tolerated
+    await strat._run("/bin/sh", "-c", "exit 0")                    # success
+
+
+async def test_lms_activate_fails_fast_on_preexisting_server(tmp_path, monkeypatch):
+    """A server already answering at v1 (one the harness didn't start) → activate raises loudly
+    BEFORE running any `lms` command, rather than mis-tracking it (a later `lms daemon down` would
+    then kill a backend we don't own = silent two-heavy)."""
+    from localharness.provider import lifecycle
+    ran = {"n": 0}
+
+    async def fake_run(self, *args, **kw):
+        ran["n"] += 1
+
+    async def _already_up(self, v1):
+        return True
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _already_up)
+    with pytest.raises(RuntimeError, match="already listening"):
+        await lifecycle.LmsStrategy().activate(_lms_srv(), tmp_path, "http://127.0.0.1:1234/v1")
+    assert ran["n"] == 0
+
+
+async def test_lms_stop_is_whole_daemon_down_not_server_stop(tmp_path, monkeypatch):
+    """Owner ruling + empirically settled: stop = `lms daemon down` (whole daemon = verified GPU-free),
+    NOT `lms server stop` (which leaves the model resident). ok_codes (0,1) so an already-down daemon
+    (rc=1) is success, not a spurious failure."""
+    from localharness.provider import lifecycle
+    seen: dict = {}
+
+    async def fake_run(self, *args, ok_codes=(0,), **kw):
+        seen["args"] = args
+        seen["ok_codes"] = ok_codes
+
+    async def _gone(self, v1):  # endpoint gone after daemon down → the verify passes
+        return False
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _gone)
+    await lifecycle.LmsStrategy().stop(_lms_srv(), tmp_path)
+    assert seen["args"] == ("/home/u/.lmstudio/bin/lms", "daemon", "down")
+    assert seen["ok_codes"] == (0, 1)
+
+
+async def test_lms_stop_fails_explicit_if_still_serving(tmp_path, monkeypatch):
+    """stop VERIFIES the endpoint is gone after `lms daemon down` (the #100 fail-explicit doctrine):
+    if LM Studio is somehow STILL answering, stop raises rather than reporting a false GPU-free — the
+    caller then aborts the swap instead of launching a 2nd heavy on an occupied accelerator."""
+    from localharness.provider import lifecycle
+
+    async def fake_run(self, *args, **kw):
+        pass
+
+    async def _still_up(self, v1):
+        return True  # endpoint NEVER goes away
+
+    async def _no_sleep(*a, **k):
+        pass
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _still_up)
+    monkeypatch.setattr(lifecycle.asyncio, "sleep", _no_sleep)  # skip the ~3s poll
+    with pytest.raises(RuntimeError, match="still answering"):
+        await lifecycle.LmsStrategy().stop(_lms_srv(), tmp_path)
+
+
+async def test_lms_activate_normalizes_bare_base_url_to_v1(tmp_path, monkeypatch):
+    """A bare base_url (no /v1) is normalized so wait_ready polls /v1/models and the returned
+    LiveEndpoint carries the /v1 form."""
+    from localharness.provider import lifecycle
+    seen = {}
+
+    async def fake_run(self, *args, **kw):
+        pass
+
+    async def _not_up(self, v1):
+        return False
+
+    async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
+        seen["wait"] = base_url
+        return ["m"]
+
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_run", fake_run)
+    monkeypatch.setattr(lifecycle.LmsStrategy, "_server_already_up", _not_up)
+    monkeypatch.setattr(server, "wait_ready", fake_wait)
+    ep = await lifecycle.LmsStrategy().activate(_lms_srv(), tmp_path, "http://127.0.0.1:1234")
+    assert seen["wait"] == "http://127.0.0.1:1234/v1"
+    assert ep.base_url == "http://127.0.0.1:1234/v1"
+
+
+def test_lms_liveness_is_endpoint_based(monkeypatch, tmp_path):
+    """liveness is ENDPOINT-based (LmsStrategy owns no pidfile): GET {v1}/models 200 → alive; a
+    connection error → not alive."""
+    import httpx
+    from localharness.provider import lifecycle
+
+    class _Resp:
+        status_code = 200
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    assert lifecycle.LmsStrategy().liveness(_lms_srv(), tmp_path).alive is True
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert lifecycle.LmsStrategy().liveness(_lms_srv(), tmp_path).alive is False
+
+
+def test_strategy_for_lmstudio_dispatches_lms():
+    from localharness.provider import lifecycle
+    assert isinstance(lifecycle.strategy_for(_lms_srv()), lifecycle.LmsStrategy)
+
+
+# --- Critic-round hardening: probes never propagate on a malformed URL; _run's kill-race is safe --- #
+
+
+async def test_lms_probe_swallows_malformed_base_url():
+    """_server_already_up is a BOOLEAN probe: a malformed base_url (bad port — a DELIBERATE
+    probe-time skip per validate_base_url) must return False, NOT escape as httpx.InvalidURL / an
+    OverflowError group and crash the /model swap. Exercises the REAL (unmocked) probe."""
+    from localharness.provider import lifecycle
+    strat = lifecycle.LmsStrategy()
+    assert await strat._server_already_up("http://127.0.0.1:abc/v1") is False     # InvalidURL
+    assert await strat._server_already_up("http://127.0.0.1:99999/v1") is False   # OverflowError group
+
+
+async def test_daemon_probe_swallows_malformed_base_url():
+    """DaemonStrategy._daemon_already_up hardened the same way (shipped-twin consistency)."""
+    from localharness.provider import lifecycle
+    strat = lifecycle.DaemonStrategy()
+    assert await strat._daemon_already_up("http://127.0.0.1:abc/v1") is False
+    assert await strat._daemon_already_up("http://127.0.0.1:99999/v1") is False
+
+
+def test_lms_liveness_swallows_bad_port(tmp_path):
+    """liveness likewise never raises on an out-of-range spec.port (99999 → OverflowError group)."""
+    from localharness.provider import lifecycle
+    assert lifecycle.LmsStrategy().liveness(_lms_srv(port=99999), tmp_path).alive is False
+
+
+async def test_lms_run_timeout_tolerates_proc_dead_at_kill(monkeypatch):
+    """_run's timeout path guards proc.kill()/wait() against ProcessLookupError (the proc exiting in
+    the timeout race) → it still raises TimeoutError, never a leaked OSError that would crash the
+    session. A fake proc whose communicate() hangs then whose kill()/wait() raise ProcessLookupError."""
+    from localharness.provider import lifecycle
+
+    class _DeadProc:
+        returncode = None
+
+        async def communicate(self):
+            await lifecycle.asyncio.sleep(10)  # never returns before the tiny timeout
+
+        def kill(self):
+            raise ProcessLookupError  # already exited in the race
+
+        async def wait(self):
+            raise ProcessLookupError
+
+    async def fake_exec(*a, **k):
+        return _DeadProc()
+
+    monkeypatch.setattr(lifecycle.asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(TimeoutError):
+        await lifecycle.LmsStrategy()._run("/x/lms", "daemon", "up", timeout=0.05)
