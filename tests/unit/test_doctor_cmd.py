@@ -127,10 +127,11 @@ def _models_resp(payload: dict) -> MagicMock:
     return r
 
 
+@patch("localharness.agent.gguf_tokenizer.resolve_gguf_path", return_value=None)
 @patch("localharness.cli.doctor_cmd.httpx")
-def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, tmp_path):
-    """#9: Ollama serves no /tokenize — doctor must NOT probe it or count a failure; an
-    INFO line explains approximate counting. Exit 0."""
+def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, mock_resolve, tmp_path):
+    """#9: Ollama serves no /tokenize — doctor must NOT probe it or count a failure; with no local
+    GGUF for exact counting an INFO line explains the approximate fallback. Exit 0."""
     _write_config(tmp_path, "ollama", "http://localhost:11434", model="m")
     mock_httpx.get.return_value = _models_resp({"models": [{"name": "m"}]})
 
@@ -141,9 +142,10 @@ def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, tmp_path):
     mock_httpx.post.assert_not_called()  # no /tokenize probe on a runtime that has none
 
 
+@patch("localharness.agent.gguf_tokenizer.resolve_gguf_path", return_value=None)
 @patch("localharness.cli.doctor_cmd.httpx")
-def test_doctor_lmstudio_tokenize_is_info_not_failure(mock_httpx, tmp_path):
-    """#9: LM Studio has no /tokenize — INFO, not a failure. Exit 0, no probe."""
+def test_doctor_lmstudio_tokenize_is_info_not_failure(mock_httpx, mock_resolve, tmp_path):
+    """#9: LM Studio has no /tokenize — with no local GGUF, INFO (approximate), not a failure. Exit 0."""
     _write_config(tmp_path, "lmstudio", "http://localhost:1234/v1", model="m")
     mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
 

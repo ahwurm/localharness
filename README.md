@@ -64,8 +64,8 @@ If you already serve a model with Ollama or vLLM and want to run real agents aga
 
 Every backend is reached over one OpenAI-compatible client, so the *request* path is
 provider-agnostic. What differs per runtime is **lifecycle** (whether the harness can start and
-stop the server itself), **introspection** (exact vs approximate token counting, context-window
-discovery), and how much has been validated on real hardware. All four also work as a plain
+stop the server itself), **introspection** (exact token counting, context-window discovery), and
+how much has been validated on real hardware. All four also work as a plain
 **attach** target — point `init` at an already-running endpoint. Setup pages:
 [llama.cpp](docs/runtimes/llamacpp.md) · [Ollama](docs/runtimes/ollama.md) ·
 [LM Studio](docs/runtimes/lmstudio.md) · vLLM (see [reference architectures](docs/reference-architectures/README.md)).
@@ -74,14 +74,17 @@ discovery), and how much has been validated on real hardware. All four also work
 |---|---|---|---|---|---|---|
 | **vLLM** | ✅ docker / binary | ✅ | ✅ native | ✅ exact | ✅ `max_model_len` | ✅ reference + bench |
 | **llama.cpp** | ✅ spawns `llama-server` | ✅ cross-framework | ✅ XML / Hermes | ✅ exact (`/tokenize`) | ✅ `/props` `n_ctx` | ✅ incl. live heavy-swap |
-| **Ollama** | ✅ spawns + owns `ollama serve` | ✅ | ✅ native | ⚠️ approximate¹ | ✅ `/api/ps`² | ✅ CPU round-trip |
-| **LM Studio** | ✅ drives headless `lms` | ✅ | ✅ native | ⚠️ approximate¹ | ✅ `loaded_context_length`² | ✅ CPU round-trip |
+| **Ollama** | ✅ spawns + owns `ollama serve` | ✅ | ✅ native | ✅ exact (GGUF)¹ | ✅ `/api/ps`² | ✅ CPU round-trip |
+| **LM Studio** | ✅ drives headless `lms` | ✅ | ✅ native | ✅ exact (GGUF)¹ | ✅ `loaded_context_length`² | ✅ CPU round-trip |
 
-✅ validated · ⚠️ partial — works, with a named limitation:
+✅ validated — footnotes note setup caveats, not gaps:
 
-1. **Token counting** is exact for vLLM and llama.cpp (their `/tokenize` endpoint). Ollama and
-   LM Studio expose no exact tokenizer, so counts are an explicit *approximation* — surfaced as
-   `approximate` by `doctor`/`init`, never a silent guess.
+1. **Token counting** is exact for every runtime. vLLM and llama.cpp use their `/tokenize` endpoint;
+   Ollama and LM Studio serve none, so the harness loads the served model's *own* GGUF vocab + chat
+   template in-process (`llama-cpp-python` vocab-only — the `exact-tokenizer` extra) and counts to
+   the token — verified equal to each server's own count. Without that extra (or with the harness
+   pointed at a remote server with no local model files), they fall back to a labeled approximate
+   estimate.
 2. **Context window** is read at server level for vLLM (`max_model_len`) and llama.cpp (`/props`),
    and from the *loaded* model for Ollama (`/api/ps` `context_length`) and LM Studio
    (`loaded_context_length`) — the latter two are known once the model is resident (the harness

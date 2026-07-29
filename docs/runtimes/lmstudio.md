@@ -7,9 +7,8 @@ daemon — no GUI required. LocalHarness runs the agent loop on top of LM Studio
 OpenAI-compatible server; LM Studio owns the model and the engine, the harness drives `lms` to
 bring that server up and down.
 
-**Support status:** detection, the managed lifecycle, and native tool-calling are all TESTED
-live (certified on an NVIDIA DGX Spark, CPU-mode); token counting is PARTIAL — LM Studio exposes
-no exact tokenize endpoint, so it's labeled "approximate" rather than silently guessed.
+**Support status:** detection, the managed lifecycle, native tool-calling, and exact token counting
+(from the model's own GGUF vocab) are all TESTED live (certified on an NVIDIA DGX Spark, CPU-mode).
 
 ## Install
 
@@ -136,8 +135,10 @@ foreground process to track):
   (live-certified on a DGX Spark, CPU-mode, 2026-07-29)
 - Tool-calling (native OpenAI function-calling) — TESTED (confirmed live: a real tool_call
   returned)
-- Token counting — PARTIAL: approximate (LM Studio exposes no exact tokenize endpoint), surfaced
-  honestly as "approximate", never silent
+- Token counting — TESTED (exact): LM Studio serves no tokenize endpoint, so the harness loads the
+  served model's own GGUF vocab + chat template in-process (`llama-cpp-python` vocab-only, the
+  `exact-tokenizer` extra) and counts to the token — verified equal to LM Studio's own
+  `usage.prompt_tokens`. Falls back to a labeled approximate estimate only when no local GGUF is reachable
 - Bench run — an opt-in `bench.yaml` matrix entry is provided; no bench run is recorded in this
   repo yet (pull your own model + run it)
 

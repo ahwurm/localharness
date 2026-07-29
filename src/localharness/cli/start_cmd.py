@@ -749,9 +749,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # both count EXACTLY; a KNOWN exact runtime whose /tokenize is unreachable hard-fails here
         # (doctor's check 5c reports the same) rather than silently mis-metering — an approximate
         # meter is what hid the context overflows (400s). Ollama / LM Studio serve no tokenize
-        # endpoint, so they run in EXPLICIT approximate mode (cl100k x safety factor, over-counting)
-        # surfaced by the warning below. This except also trips if NO tokenizer exists (tiktoken
-        # missing) — a genuinely unusable environment.
+        # endpoint, so they count EXACTLY from the served model's own GGUF vocab (mode exact_local),
+        # falling back to EXPLICIT approximate mode (cl100k x safety factor) — surfaced by the warning
+        # below — only when no local GGUF is reachable. This except also trips if NO tokenizer exists
+        # (tiktoken missing) — a genuinely unusable environment.
         try:
             token_counter = TokenCounter(
                 base_url=provider.base_url,
@@ -773,10 +774,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if token_counter.approximate:
             from localharness.agent.context import APPROX_TOKENIZE_SAFETY_FACTOR
             console.print(
-                f"[yellow]⚠[/yellow]  {provider.provider_type} serves no tokenize endpoint — "
-                f"token accounting uses a conservative estimate (cl100k × "
-                f"{APPROX_TOKENIZE_SAFETY_FACTOR}): budget gates fire early rather than overflow. "
-                f"For exact counts use vLLM or llama.cpp."
+                f"[yellow]⚠[/yellow]  {provider.provider_type} serves no tokenize endpoint and no "
+                f"local GGUF was found for exact counting — token accounting uses a conservative "
+                f"estimate (cl100k × {APPROX_TOKENIZE_SAFETY_FACTOR}): budget gates fire early rather "
+                f"than overflow. Install the 'exact-tokenizer' extra + co-locate the model files (or "
+                f"use vLLM/llama.cpp) for exact counts."
             )
 
         # --- 7. Compaction pipeline (soft) ---

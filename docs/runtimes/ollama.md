@@ -8,8 +8,8 @@ OpenAI-compatible surface — Ollama serves the model, the harness is the thing 
 loop, managing tools, and watching the context budget.
 
 **Support status:** detection, the managed lifecycle (spawn-and-own the daemon), native
-tool-calling, and context-window discovery (the loaded model's served window, via `/api/ps`) are
-all TESTED live; token counting is PARTIAL — labeled "approximate" rather than silently guessed.
+tool-calling, context-window discovery (the loaded model's served window, via `/api/ps`), and exact
+token counting (from the model's own GGUF vocab) are all TESTED live.
 
 ## Install
 
@@ -122,8 +122,10 @@ Ollama-specific handling wrapped around them:
 - Managed lifecycle (spawn+own `ollama serve`, warm-load, whole-daemon stop) — TESTED
   (live-proven, CPU, zero orphaned processes)
 - Tool-calling (native) — TESTED (a real tool_call returned via qwen2.5:7b)
-- Token counting — PARTIAL: approximate (no exact tokenize endpoint), surfaced honestly, never
-  silent
+- Token counting — TESTED (exact): Ollama serves no `/tokenize`, so the harness loads the served
+  model's own GGUF vocab + chat template in-process (`llama-cpp-python` vocab-only, the
+  `exact-tokenizer` extra) and counts to the token — verified equal to Ollama's own
+  `prompt_eval_count`. Falls back to a labeled approximate estimate only when no local GGUF is reachable
 - Bench run — opt-in `bench.yaml` matrix entries are provided but UNVERIFIED (no recorded run in
   this repo)
 
