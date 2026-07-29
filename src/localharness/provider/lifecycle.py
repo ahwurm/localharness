@@ -366,20 +366,21 @@ class LmsStrategy:
         # leaves the model resident). rc0 = stopped, rc1 = already down — both the goal state. Off the
         # event loop via _run's create_subprocess (never blocks the loop).
         await self._run(self._lms_bin(spec), "daemon", "down", ok_codes=(0, 1))
-        # VERIFY (the #100 doctrine — never trust a single command's completion when freeing the
-        # accelerator for the NEXT heavy): confirm the HTTP surface is actually GONE. There is no
-        # pidfile / VRAM metric to poll on this unified-memory box, but a STILL-answering endpoint
-        # means the daemon did not go down — fail explicit so the caller aborts the swap rather than
-        # launch a 2nd heavy on a still-occupied accelerator (spec.port: base_url is not in scope
-        # here, so a config where base_url.port != spec.port must keep them equal).
-        v1 = self._v1(f"http://127.0.0.1:{int(spec.port)}")
-        for _ in range(15):  # ~3s, attempt-counted (deterministic with sleep patched) like _wait_name_free
-            if not await self._server_already_up(v1):
+        # VERIFY the llmster DAEMON PROCESS is actually GONE before returning — the true
+        # accelerator-free signal on unified memory (the kernel reclaims the model's pages on process
+        # EXIT). Measured 2026-07-29: both the HTTP listener AND `lms daemon status` flip to down the
+        # INSTANT `daemon down` is issued — ~0.4s (a 0.5B; more for a heavy) BEFORE the process holding
+        # the weights exits — so neither is a sound free-signal. This matches the sibling strategies,
+        # whose stop_server polls `_alive(pid)` until the process is dead; LmsStrategy has no pidfile
+        # (`lms` backgrounds the daemon) so it polls by the stable daemon name. Fail explicit if it
+        # never dies (#100 — never report a false accelerator-free that lets the caller launch a 2nd heavy).
+        for _ in range(50):  # ~5s, attempt-counted (deterministic with sleep patched)
+            if not await self._llmster_running():
                 return
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
         raise RuntimeError(
-            f"LM Studio still answering at {v1} after `lms daemon down` — refusing to report the "
-            "accelerator free when it is not"
+            "the LM Studio `llmster` daemon is still running after `lms daemon down` — refusing to "
+            "report the accelerator free when it is not"
         )
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
@@ -431,6 +432,21 @@ class LmsStrategy:
             return r.status_code == 200
         except Exception:  # noqa: BLE001 — boolean probe: any error = not-up (must never propagate)
             return False
+
+    async def _llmster_running(self) -> bool:
+        """Is an `llmster` daemon process alive? A process-NAME check (LmsStrategy owns no pidfile,
+        and `lms daemon up` backgrounds the daemon so its pid is not ours to track). The harness owns
+        the ONLY llmster it starts (activate fail-fasts on a pre-existing server), so any live
+        `llmster` is ours. POSIX `pgrep -x` — the lifecycle layer is already POSIX-only. Instance
+        method (ignores self) so tests monkeypatch it hermetically, like _server_already_up."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-x", "llmster",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            return await proc.wait() == 0  # rc 0 = at least one match; 1 = none
+        except OSError:
+            return False  # no `pgrep` (missing / non-POSIX) → cannot verify → best-effort "gone"
 
     async def _run(self, *args: str, timeout: float = 600.0, ok_codes: tuple[int, ...] = (0,)) -> None:
         """Run an `lms` subcommand, MAPPING native failures into the activate contract: a missing
