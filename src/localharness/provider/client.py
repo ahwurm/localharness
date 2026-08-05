@@ -171,6 +171,13 @@ _probe_cache: dict[tuple[str, int], float] = {}  # (host, port) -> monotonic ts 
 # #62 (b) surface a queue wait once it passes this threshold (one honest INFO, not per poll).
 _QUEUE_VISIBILITY_SECONDS = 2.0
 
+# CAPABILITY probe retry (distinct from the TCP reachability probe above). detect_capabilities
+# decides tool_call_mode for the WHOLE session off one generation, so a transient failure used to
+# condemn every later turn to xml. Retried on an inconclusive result; a definitive one breaks out
+# first, so a genuinely xml-only server pays these attempts once at startup, not per turn.
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_DELAY_S = 1.0
+
 
 def _inference_lock_path(base_url: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9.]+", "-", base_url.split("://", 1)[-1]).strip("-")
@@ -482,39 +489,73 @@ class LLMClient:
             }
         ]
 
-        try:
-            async with _inference_gate(self.config):
-                response = await self._client.chat.completions.create(
-                    model=self.config.model,
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": "What files are in the current directory?"},
-                    ],
-                    tools=probe_tools,
-                    # Generous cap: preamble-prone models spend 30+ tokens narrating before
-                    # the call; at 64 the call got truncated and the probe misread a
-                    # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
-                    max_tokens=256,
-                    temperature=0.0,
+        # ONE request used to decide the whole session: any hiccup — a busy slot, a slow first
+        # token, a connection blip — silently downgraded every later turn to xml, and a model
+        # whose native syntax is not <tool_call> (DeepSeek emits DSML) then had EVERY call
+        # rendered as chat text. Nothing executed and the model looked like it was lying about
+        # its work. So an INCONCLUSIVE probe is retried; only a DEFINITIVE answer ends the loop.
+        # Definitive = native confirmed, taught-XML seen, or the server rejecting `tools` at all.
+        for attempt in range(_PROBE_ATTEMPTS):
+            try:
+                async with _inference_gate(self.config):
+                    response = await self._client.chat.completions.create(
+                        model=self.config.model,
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {
+                                "role": "user",
+                                "content": "What files are in the current directory?",
+                            },
+                        ],
+                        tools=probe_tools,
+                        # Generous cap: preamble-prone models spend 30+ tokens narrating before
+                        # the call; at 64 the call got truncated and the probe misread a
+                        # native-capable server as xml-only (observed on Qwen3.6 NVFP4).
+                        max_tokens=256,
+                        temperature=0.0,
+                    )
+                msg = response.choices[0].message
+                if msg.tool_calls:
+                    tool_call_mode = "native"
+                    probe_error = None
+                    log.info("Capability probe: native tool calling confirmed")
+                    break
+                if msg.content and "<tool_call>" in msg.content:
+                    tool_call_mode = "xml"
+                    probe_error = None
+                    log.warning(
+                        "Server returned XML tool calls instead of native — using xml mode"
+                    )
+                    break
+                probe_error = "no tool call in probe response"
+                tool_call_mode = "xml"
+            except openai.BadRequestError as exc:
+                # A 400 is the server ANSWERING: it does not accept `tools`. Retrying cannot
+                # change that, so this is definitive and ends the loop immediately.
+                probe_error = f"HTTP 400: {exc}"
+                tool_call_mode = "xml"
+                log.warning("Server rejected tools parameter, forcing XML mode: %s", exc)
+                break
+            except Exception as exc:
+                probe_error = str(exc)
+                tool_call_mode = "xml"
+            if attempt < _PROBE_ATTEMPTS - 1:
+                log.warning(
+                    "Capability probe inconclusive (attempt %d/%d): %s — retrying",
+                    attempt + 1,
+                    _PROBE_ATTEMPTS,
+                    probe_error,
                 )
-            msg = response.choices[0].message
-            if msg.tool_calls:
-                tool_call_mode = "native"
-                log.info("Capability probe: native tool calling confirmed")
-            elif msg.content and "<tool_call>" in msg.content:
-                tool_call_mode = "xml"
-                log.warning("Server returned XML tool calls instead of native — using xml mode")
-            else:
-                tool_call_mode = "xml"
-                log.warning("Could not confirm native function calling, defaulting to xml")
-        except openai.BadRequestError as exc:
-            probe_error = f"HTTP 400: {exc}"
-            tool_call_mode = "xml"
-            log.warning("Server rejected tools parameter, forcing XML mode: %s", exc)
-        except Exception as exc:
-            probe_error = str(exc)
-            tool_call_mode = "xml"
-            log.warning("Capability probe failed, defaulting to xml: %s", exc)
+                await asyncio.sleep(_PROBE_RETRY_DELAY_S * (attempt + 1))
+        if probe_error and tool_call_mode != "native":
+            log.warning(
+                "Capability probe never confirmed native tool calling after %d attempts (%s) — "
+                "falling back to xml. A model whose native syntax is not <tool_call> will have "
+                "its calls rendered as chat text in this mode; check the runtime's tool-call "
+                "parser flag (llama.cpp --jinja, vLLM --tool-call-parser).",
+                _PROBE_ATTEMPTS,
+                probe_error,
+            )
 
         # Context window detection — vLLM/OpenAI-compat /v1/models shape ONLY (context_length|
         # max_model_len). llama.cpp/Ollama/LM Studio don't report a window here, so this stays the
