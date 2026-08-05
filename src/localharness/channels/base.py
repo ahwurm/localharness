@@ -5,7 +5,15 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Escalation, Heartbeat, Observation, TaskComplete, TurnFailed
+from localharness.core.events import (
+    Action,
+    Escalation,
+    Heartbeat,
+    Observation,
+    ParseFailed,
+    TaskComplete,
+    TurnFailed,
+)
 
 
 class ChannelAdapter(ABC):
@@ -181,6 +189,25 @@ class ChannelAdapter(ABC):
         await self.send_error(
             error=f"turn failed — {event.reason}",
             detail=detail[:400] or None,
+            agent_id=event.agent_id,
+        )
+
+    async def on_parse_failed(self, event: ParseFailed) -> None:
+        """Default handler for ParseFailed events. Same principle as on_turn_failed: silence
+        is indistinguishable from progress.
+
+        The model emitted tool-call-shaped text that nothing parsed, so the turn did NO work
+        while reading to the user as ordinary prose. That is the failure that makes a working
+        model look like it is lying about what it did — observed 2026-08-05, where DeepSeek
+        emitted correct native tool calls (DSML) for a whole session, every one of them was
+        rendered as chat, no file was ever created, and the model took the blame for hours.
+        The loop nudges it with the taught format and retries; THIS line is what tells the
+        user, because a warning in a log nobody opens is the same as no warning at all."""
+        await self.send_message(
+            f"⚠️ tool call not parsed (retry {event.parse_retry_count}/3) — the model emitted "
+            f"tool-call-shaped text the harness could not read, so nothing ran. If this "
+            f"repeats, the serving runtime is not converting the model's native tool syntax: "
+            f"check llama.cpp --jinja / vLLM --tool-call-parser.",
             agent_id=event.agent_id,
         )
 

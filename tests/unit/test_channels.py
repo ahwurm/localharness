@@ -69,6 +69,30 @@ async def test_root_turn_failed_posts_error_to_channel():
 
 
 @pytest.mark.asyncio
+async def test_parse_failed_surfaces_to_channel():
+    """An unparsed tool call must reach the USER, not just a log.
+
+    Observed 2026-08-05: DeepSeek-V4-Flash emitted correct native tool calls (DSML) for a
+    whole session, the harness parsed none of them and rendered each as an assistant message,
+    no file was ever created, and the model read as though it had lied about its work. The
+    loop already published ParseFailed — nothing in any channel subscribed to it, so the one
+    signal that would have explained it went nowhere."""
+    from localharness.core.events import ParseFailed
+
+    chan, sent, errors = _capture_chan()
+    await chan.on_parse_failed(ParseFailed(
+        agent_id="default", session_id="s1", iteration=3,
+        parse_retry_count=1,
+        raw_content_preview='<｜DSML｜tool invoke="create_file">',
+    ))
+    assert errors == []          # recoverable: the loop nudges and retries, run continues
+    assert len(sent) == 1
+    assert "not parsed" in sent[0]
+    assert "1/3" in sent[0]      # tells the user this is retry 1, not a dead run
+    assert "--jinja" in sent[0]  # names the actual fix, not just the symptom
+
+
+@pytest.mark.asyncio
 async def test_child_turn_failed_posts_status_note_not_error():
     """Child (delegated) failures get a one-line status note: the parent continues
     and still owes the real answer, so no fatal-looking error — but no silence either."""

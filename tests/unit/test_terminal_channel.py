@@ -946,3 +946,54 @@ async def test_discord_renders_nothing_for_narration():
     await ch.on_action(_narration_action("Pulling the data…", has_tool_calls=True))
     await ch.on_action(_narration_action("final answer", has_tool_calls=False))
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_subscribes_parse_failed_end_to_end(tmp_path):
+    """WIRING, not just the handler: publish ParseFailed on a real bus and require it to
+    reach the terminal.
+
+    The 2026-08-05 failure was NOT a missing handler — the loop published ParseFailed the
+    whole time and no channel subscribed, so a correct signal died on the bus while the user
+    watched a model appear to lie about creating files. Asserting only the handler would
+    reproduce exactly that bug: green test, nothing wired."""
+    from localharness.core.events import ParseFailed
+
+    out = StringIO()
+    ch = make_terminal_channel(out=out, force_terminal=False)
+    ch._history_file = str(tmp_path / "hist")
+    await ch.start()
+    try:
+        await ch.bus.publish(ParseFailed(
+            agent_id="default", session_id="s1", iteration=2,
+            parse_retry_count=2,
+            raw_content_preview='<｜DSML｜tool invoke="create_file">',
+        ))
+    finally:
+        await ch.stop()
+
+    printed = out.getvalue()
+    assert "not parsed" in printed, printed
+    assert "2/3" in printed
+
+
+@pytest.mark.asyncio
+async def test_discord_subscribes_parse_failed():
+    """Dispatch sessions hit the same failure with nobody at the terminal — the Discord
+    channel must carry the signal too, or a remote run goes silent in exactly the same way."""
+    from localharness.channels.discord import DiscordChannel
+    from localharness.core.events import ParseFailed
+    from localharness.core.bus import EventBus
+
+    ch = DiscordChannel(EventBus(), {})
+    sent: list = []
+
+    async def _spy(content, agent_id=None, **kw):
+        sent.append(content)
+
+    ch.send_message = _spy
+    await ch.on_parse_failed(ParseFailed(
+        agent_id="default", session_id="s1", iteration=1,
+        parse_retry_count=1, raw_content_preview="x",
+    ))
+    assert len(sent) == 1 and "not parsed" in sent[0]

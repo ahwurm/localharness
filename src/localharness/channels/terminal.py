@@ -39,6 +39,7 @@ from localharness.core.events import (
     Escalation,
     Heartbeat,
     Observation,
+    ParseFailed,
     TaskComplete,
     TurnFailed,
 )
@@ -587,6 +588,7 @@ class TerminalChannel(ChannelAdapter):
         self._observation_handle = None
         self._task_complete_handle = None
         self._escalation_handle = None
+        self._parse_failed_handle = None
         self._heartbeat_handle = None
         self._turn_failed_handle = None
         self._consolidation_started_handle = None
@@ -604,6 +606,7 @@ class TerminalChannel(ChannelAdapter):
         self._task_complete_handle = self.bus.subscribe(TaskComplete, self.on_task_complete)
         self._turn_failed_handle = self.bus.subscribe(TurnFailed, self.on_turn_failed)
         self._escalation_handle = self.bus.subscribe(Escalation, self.on_escalation)
+        self._parse_failed_handle = self.bus.subscribe(ParseFailed, self.on_parse_failed)
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
         self._consolidation_started_handle = self.bus.subscribe(
             ConsolidationStarted, self.on_consolidation_started
@@ -621,6 +624,7 @@ class TerminalChannel(ChannelAdapter):
             self._task_complete_handle,
             self._turn_failed_handle,
             self._escalation_handle,
+            self._parse_failed_handle,
             self._heartbeat_handle,
             self._consolidation_started_handle,
             self._consolidation_finished_handle,
