@@ -58,6 +58,18 @@ _FENCED_BLOCK_PATTERN = re.compile(
 # tool_code fence is Python-call-style, e.g. list_files(path="/tmp")) or a JSON "name" key. No
 # specific verb/tool name required — the fence tag itself is already the strong signal.
 _FENCED_CALL_BODY_PATTERN = re.compile(r'\b[a-zA-Z_]\w*\s*\(|"name"\s*:')
+# Runtime-native tool-call syntaxes the harness deliberately does NOT parse. The SERVING RUNTIME
+# converts these into structured tool_calls (llama.cpp --jinja reads the GGUF's chat template;
+# vLLM needs --tool-call-parser). Seeing one as raw CONTENT means that conversion did not happen
+# — the model called a tool and the harness rendered it as prose, so the turn is a silent no-op
+# that reads as the model lying about its work. Matched only to SAY SO; never parsed here, since
+# per-model parsers in the harness are the whack-a-mole the runtime already solves upstream.
+# DeepSeek is the observed case: DSML on V4-Flash, the tool_calls_begin envelope on V3.
+_RUNTIME_NATIVE_CALL_PATTERN = re.compile(
+    "<｜DSML｜\\s*tool\\b"  # V4-Flash: <｜DSML｜tool invoke="create_file">
+    "|<｜tool▁calls?▁begin｜"  # V3: <｜tool▁calls▁begin｜>
+)
+
 # Bare inline JSON call shape (no fence needed): "name" co-occurring with "arguments"/"parameters"
 # within 200 chars of each other, either key order.
 _JSON_CALL_SHAPE_PATTERN = re.compile(
@@ -73,11 +85,14 @@ def has_tool_call_attempt(text: str) -> bool:
     Recognizes the harness's taught XML syntax (<tool_call>, <function=...><parameter=...>) AND
     untaught-but-plausible conventions a model may reach for anyway: a fenced ```tool_code/
     ```tool_call/```json block whose body looks like a call, or bare inline JSON shaped like
-    {"name": ..., "arguments"/"parameters": ...}.
+    {"name": ..., "arguments"/"parameters": ...}, or a RUNTIME-NATIVE syntax that arrived as
+    content because the server never parsed it (DeepSeek DSML — the observed silent no-op).
     """
     if not text:
         return False
     if "<tool_call" in text or ("<function=" in text and "<parameter=" in text):
+        return True
+    if _RUNTIME_NATIVE_CALL_PATTERN.search(text):
         return True
     for body in _FENCED_BLOCK_PATTERN.findall(text):
         if _FENCED_CALL_BODY_PATTERN.search(body):

@@ -224,6 +224,36 @@ def test_has_tool_call_attempt_fenced_json_call_shape():
     assert has_tool_call_attempt(text) is True
 
 
+def test_has_tool_call_attempt_deepseek_dsml_arrives_as_content():
+    """VERBATIM capture from a real DeepSeek-V4-Flash turn on llama-server (2026-08-05).
+
+    The session had been downgraded to xml mode, so the model's NATIVE tool syntax was never
+    parsed and got rendered to the user as an assistant message: it asked for a file, the model
+    correctly called create_file twice, and nothing was created. Reading as 'no tool call
+    intended' is what made a working model look like it was lying about its work.
+    """
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = (
+        '<｜DSML｜tool invoke="create_file">\n'
+        '<｜DSML｜parameter name="file_path">/tmp/lh_probe.txt</｜DSML｜parameter>\n'
+        '<｜DSML｜parameter name="content">hello</｜DSML｜parameter>\n'
+        "</｜DSML｜tool>"
+    )
+    assert has_tool_call_attempt(text) is True
+
+
+def test_has_tool_call_attempt_deepseek_v3_tool_calls_envelope():
+    """DeepSeek V3's envelope is the same class of failure — unparsed native syntax as content."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    assert has_tool_call_attempt("<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function") is True
+
+
+def test_has_tool_call_attempt_prose_about_dsml_is_not_a_call():
+    """Discussing the syntax is not emitting it — the guard must not fire on ordinary prose."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    assert has_tool_call_attempt("DeepSeek emits DSML, which the harness does not parse.") is False
+
+
 def test_has_tool_call_attempt_plain_json_fence_not_flagged():
     """A ```json fence with no call shape (e.g. a final JSON answer) must NOT be flagged — only
     fences that look like a call attempt count, keeping this heuristic from over-firing."""
