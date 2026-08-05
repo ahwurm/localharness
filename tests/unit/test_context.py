@@ -1487,3 +1487,79 @@ def test_probe_served_window_lmstudio_loaded_context(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", lambda url, timeout=0: _RespNotLoaded())
     assert ctxmod.probe_served_window("http://localhost:1234/v1", "target", "lmstudio") is None
+# --- provider_type is a PRIORITY HINT, not an exclusive lock ---------------------------
+# A stored provider_type that no longer matches the running server (user swapped vLLM ->
+# llama.cpp behind the same port) used to HARD-FAIL start: the hint selected exactly one
+# /tokenize shape and, when it didn't answer, raised. An ABSENT hint self-healed by trying
+# both. Explicit config was therefore strictly worse than no config. The hint now orders
+# the probe instead of narrowing it.
+
+
+def _patch_urlopen_by_shape(monkeypatch, *, answers: set[str]):
+    """Serve /tokenize ONLY for the shapes in `answers`, mirroring the real contracts:
+    vLLM {model,prompt}->{count}; llama.cpp {content}->{tokens:[...]}. A foreign shape
+    400s, which is what a real server does when handed the other runtime's payload."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    class _Resp:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        body = _json.loads(req.data.decode("utf-8"))
+        if "content" in body and "llamacpp" in answers:
+            return _Resp(b'{"tokens": [1, 2, 3]}')
+        if "prompt" in body and "vllm" in answers:
+            return _Resp(b'{"count": 3}')
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_stale_vllm_hint_falls_through_to_llamacpp(monkeypatch):
+    """Config says vllm, server is actually llama.cpp -> lock onto llamacpp, do NOT raise."""
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen_by_shape(monkeypatch, answers={"llamacpp"})
+    tc = TokenCounter(base_url="http://localhost:8000/v1", model="m", provider_type="vllm")
+    assert tc._mode == "llamacpp"
+    assert tc.count("abc") == 3
+    assert not tc.approximate
+
+
+def test_stale_llamacpp_hint_falls_through_to_vllm(monkeypatch):
+    """Symmetric: config says llamacpp, server is actually vLLM -> lock onto vllm."""
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen_by_shape(monkeypatch, answers={"vllm"})
+    tc = TokenCounter(base_url="http://localhost:8000/v1", model="m", provider_type="llamacpp")
+    assert tc._mode == "vllm"
+    assert tc.count("abc") == 3
+
+
+def test_hint_is_tried_first_when_both_shapes_answer(monkeypatch):
+    """The hint must ORDER the probe: with a server that would answer either shape, the
+    configured one wins. This is what keeps the common (correct-config) path at zero
+    extra round-trips."""
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen_by_shape(monkeypatch, answers={"vllm", "llamacpp"})
+    assert TokenCounter(
+        base_url="http://localhost:8000/v1", model="m", provider_type="llamacpp"
+    )._mode == "llamacpp"
+    assert TokenCounter(
+        base_url="http://localhost:8000/v1", model="m", provider_type="vllm"
+    )._mode == "vllm"
+
+
+def test_no_shape_answers_still_hard_fails(monkeypatch):
+    """The safety net stays: a runtime that SHOULD serve /tokenize but answers on neither
+    shape is still a hard error — silently degrading to approximate counting is what let
+    context overflows through (#8)."""
+    import pytest as _pytest
+    from localharness.agent.context import TokenCounter
+    _patch_urlopen_by_shape(monkeypatch, answers=set())
+    with _pytest.raises(RuntimeError, match="exact token counting unavailable"):
+        TokenCounter(base_url="http://localhost:8000/v1", model="m", provider_type="vllm")
