@@ -16,6 +16,10 @@ from localharness.core.types import Message
 
 log = logging.getLogger("localharness.agent.context")
 
+# Runtimes that serve an exact /tokenize. provider_type picks which contract to try FIRST;
+# both are always attempted, so a stale provider_type degrades to a warning, never a failure.
+_EXACT_SHAPES = ("vllm", "llamacpp")
+
 RESPONSE_RESERVE_TOKENS: int = 4096
 
 # Stale-web-result eviction (OpenHands BrowserOutputCondenser pattern): cheap first
@@ -287,7 +291,9 @@ class TokenCounter:
     (mode "exact_local", `agent/gguf_tokenizer.py`) — matching the server to the token, offline —
     and fall back to EXPLICIT approximate mode (cl100k x APPROX_TOKENIZE_SAFETY_FACTOR, surfaced
     via `.approximate`) only when no local GGUF / llama-cpp-python is reachable.
-    Unknown/absent provider_type probes BOTH exact shapes and locks onto whichever answers.
+    provider_type is a PRIORITY HINT, not a lock: both exact shapes are always probed, the
+    configured one first, so a config that has drifted from the running server self-heals
+    (logged) instead of hard-failing. Only when NEITHER shape answers is it an error.
 
     cl100k undercounts Qwen by ~1.85x on digit/code text, so the remote path is the only
     accurate source for non-cl100k models. The remote call is sync (urllib) — the agent loop
@@ -410,12 +416,26 @@ class TokenCounter:
             root = root[: -len("/v1")]
         self._tokenize_url = f"{root}/tokenize"
         # Probe the runtime's /tokenize contract. Known llama.cpp speaks {content}->{tokens};
-        # vLLM speaks {model,prompt}->{count}. With no provider_type, try vLLM then llama.cpp
-        # so a mis/undetected runtime still locks onto whichever shape actually answers.
-        shapes = {"vllm": ("vllm",), "llamacpp": ("llamacpp",)}.get(ptype, ("vllm", "llamacpp"))
+        # vLLM speaks {model,prompt}->{count}. provider_type ORDERS this probe, it never
+        # narrows it: a config that has drifted from the running server (vLLM swapped for
+        # llama.cpp behind the same port) self-heals instead of hard-failing. Before this,
+        # an explicit provider_type was strictly WORSE than an absent one — absent tried
+        # both shapes, explicit tried one and raised. Correct config is still one round
+        # trip: its own shape is probed first.
+        shapes = (
+            (ptype, *(s for s in _EXACT_SHAPES if s != ptype))
+            if ptype in _EXACT_SHAPES
+            else _EXACT_SHAPES
+        )
         for shape in shapes:
             self._mode = shape
             if self._remote_count("token") is not None:
+                if ptype in _EXACT_SHAPES and shape != ptype:
+                    log.warning(
+                        "provider_type=%s but %s/tokenize speaks the %s contract — counting "
+                        "with %s. Run `localharness init` to persist the real provider_type.",
+                        ptype, root, shape, shape,
+                    )
                 # Message-level capability rides on the same lock: vLLM builds without
                 # /tokenize messages-mode and llama-server builds without /apply-template
                 # answer the content shape but not this — probe once so count_messages
