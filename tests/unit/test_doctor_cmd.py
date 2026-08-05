@@ -293,8 +293,13 @@ def test_doctor_llamacpp_warns_on_parallel_slot_split(mock_httpx, tmp_path):
     """llama-server defaults to multiple parallel slots and divides --ctx-size among them
     (observed live: a 32k launch served 8k/request via 4 slots). The harness is
     single-stream, so doctor surfaces the split with the --parallel 1 remedy — advisory
-    only, exit stays 0 (a shared server may be deliberate)."""
+    only, exit stays 0 (a shared server may be deliberate).
+
+    The budget is what makes 8k/request a PROBLEM, so the fixture now supplies one. Slot
+    count alone is no longer treated as evidence: with a unified KV cache many slots share
+    one undivided window, and keying on `total_slots > 1` false-fired on healthy servers."""
     _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 28_672)
 
     def _get(url, *args, **kwargs):
         if str(url).endswith("/props"):
@@ -395,3 +400,68 @@ def test_doctor_llamacpp_apply_template_absent_degrades(mock_httpx, tmp_path):
     result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "apply-template not served" in result.output
+# --- slot-window check must key on the REAL per-request window, not on slot count -------
+# Modern llama.cpp shares ONE KV cache across slots (kv_unified), so --ctx-size is NOT
+# divided among them and /props reports the true per-request window. The old check keyed
+# purely on `total_slots > 1` and asserted "each request gets ~1/N" — which contradicted
+# the very number it printed alongside. Compare the reported window to the budget instead.
+
+
+def _props_resp(total_slots: int, slot_ctx: int) -> MagicMock:
+    r = MagicMock()
+    r.json.return_value = {
+        "total_slots": total_slots,
+        "default_generation_settings": {"n_ctx": slot_ctx},
+    }
+    return r
+
+
+def _write_orchestrator(tmp_path: Path, max_ctx: int) -> None:
+    d = tmp_path / "agents"
+    d.mkdir(exist_ok=True)
+    (d / "orchestrator.yaml").write_text(
+        "name: orchestrator\nmodel: inherit\nrole: test\n"
+        f"context:\n  max_context_tokens: {max_ctx}\n"
+    )
+
+
+def _llamacpp_mocks(mock_httpx, *, served: int, slots: int, slot_ctx: int) -> None:
+    def _get(url, **kw):
+        if url.endswith("/props"):
+            return _props_resp(slots, slot_ctx)
+        return _models_resp({"data": [{"id": "m", "meta": {"n_ctx": served}}]})
+    mock_httpx.get.side_effect = _get
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1]}
+    mock_httpx.post.return_value = tok
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_silent_when_slot_window_covers_budget(mock_httpx, tmp_path):
+    """kv_unified: 4 slots but each sees the FULL 131072 window, and the budget fits.
+    Nothing is wrong, so doctor must not warn (this was the false positive)."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 126_976)
+    _llamacpp_mocks(mock_httpx, served=131_072, slots=4, slot_ctx=131_072)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "parallel slots" not in result.output
+    assert "1/4" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_warns_when_slot_window_starves_budget(mock_httpx, tmp_path):
+    """Divided KV: /props reports the small per-slot window. That genuinely starves the
+    budget, so the warning must still fire — and quote the real numbers, not a guess.
+    budget(28672) sits just under served(32768) so neither the too-high nor the
+    under-utilisation check fires — isolating this one."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 28_672)
+    _llamacpp_mocks(mock_httpx, served=32_768, slots=4, slot_ctx=8_192)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "8,192" in result.output
+    assert "--parallel 1" in result.output
