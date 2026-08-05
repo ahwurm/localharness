@@ -252,6 +252,102 @@ async def test_detect_capabilities_fallback():
     assert result.probe_error is not None
 
 
+def _probe_client(create_side_effect):
+    """LLMClient whose probe generation is driven by `create_side_effect`, /v1/models empty."""
+    config = LLMConfig(
+        base_url="http://localhost:8000/v1", model="test", is_local=True, timeout_seconds=300.0
+    )
+    mock_openai = MagicMock()
+    mock_openai.chat = MagicMock()
+    mock_openai.chat.completions = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(side_effect=create_side_effect)
+    mock_openai.models = MagicMock()
+    mock_openai.models.list = AsyncMock(return_value=MagicMock(data=[]))
+    return config, mock_openai
+
+
+def _native_completion():
+    msg = MagicMock()
+    msg.tool_calls = [MagicMock()]
+    msg.content = None
+    return MagicMock(choices=[MagicMock(message=msg)])
+
+
+@pytest.mark.asyncio
+async def test_probe_retries_transient_failure_then_confirms_native():
+    """THE BUG: one blip condemned the whole session to xml.
+
+    A busy slot / slow first token / connection blip on the single probe request downgraded
+    every later turn, and a model whose native syntax is not <tool_call> (DeepSeek emits DSML)
+    then had every tool call rendered as chat text — nothing executed, model looked like it
+    was lying. A transient failure must be retried, not treated as a verdict.
+    """
+    config, mock_openai = _probe_client([TimeoutError("slot busy"), _native_completion()])
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        result = await LLMClient(config).detect_capabilities()
+
+    assert result.tool_call_mode == "native"
+    assert result.probe_error is None
+    assert mock_openai.chat.completions.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_retries_toolless_response_then_confirms_native():
+    """A preamble-prone model narrating instead of calling on ONE sample is not evidence the
+    server lacks native tool calling (the observed Qwen3.6 NVFP4 misread). Retry, don't condemn."""
+    toolless = MagicMock()
+    toolless.tool_calls = None
+    toolless.content = "Let me take a look at that directory."
+    config, mock_openai = _probe_client(
+        [MagicMock(choices=[MagicMock(message=toolless)]), _native_completion()]
+    )
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        result = await LLMClient(config).detect_capabilities()
+
+    assert result.tool_call_mode == "native"
+    assert mock_openai.chat.completions.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_does_not_retry_definitive_answers():
+    """A 400 is the server ANSWERING that it will not accept `tools`, and confirmed native is
+    already the best outcome — neither is retried, so the healthy path costs exactly one call."""
+    import openai as openai_module
+
+    bad_request = openai_module.BadRequestError(
+        message="tools not supported", response=MagicMock(status_code=400, headers={}), body=None
+    )
+    config, mock_openai = _probe_client(bad_request)
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        result = await LLMClient(config).detect_capabilities()
+    assert result.tool_call_mode == "xml"
+    assert mock_openai.chat.completions.create.await_count == 1
+
+    config, mock_openai = _probe_client([_native_completion()])
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        result = await LLMClient(config).detect_capabilities()
+    assert result.tool_call_mode == "native"
+    assert mock_openai.chat.completions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_gives_up_after_exhausting_attempts():
+    """A genuinely dead probe still ends in xml with probe_error set — retry widens the window
+    for a transient blip, it does NOT invent a capability the server never demonstrated."""
+    config, mock_openai = _probe_client(TimeoutError("still busy"))
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        result = await LLMClient(config).detect_capabilities()
+
+    assert result.tool_call_mode == "xml"
+    assert result.probe_error is not None
+    assert mock_openai.chat.completions.create.await_count == 3
+
+
 # ---------------------------------------------------------------------------
 # Error type hierarchy
 # ---------------------------------------------------------------------------
