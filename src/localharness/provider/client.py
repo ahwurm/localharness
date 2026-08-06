@@ -553,7 +553,10 @@ class LLMClient:
                 "falling back to xml. A model whose native syntax is not <tool_call> will have "
                 "its calls rendered as chat text in this mode; check the runtime's tool-call "
                 "parser flag (llama.cpp --jinja, vLLM --tool-call-parser).",
-                _PROBE_ATTEMPTS,
+                # ACTUAL attempts, not the ceiling: a definitive answer (HTTP 400) breaks on
+                # the first pass, and reporting "after 3 attempts" there sends whoever is
+                # debugging a probe failure looking for two retries that never happened.
+                attempt + 1,
                 probe_error,
             )
 

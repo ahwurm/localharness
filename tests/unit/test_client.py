@@ -335,6 +335,31 @@ async def test_probe_does_not_retry_definitive_answers():
 
 
 @pytest.mark.asyncio
+async def test_probe_give_up_log_reports_actual_attempts_not_the_ceiling(caplog):
+    """The give-up warning must count attempts that HAPPENED, not the retry ceiling.
+
+    A definitive HTTP 400 breaks on the first pass, so claiming "after 3 attempts" sends
+    whoever is debugging a probe failure hunting two retries that never occurred — in a log
+    line whose entire job is to orient them toward the runtime's parser flag."""
+    import logging
+    import openai as openai_module
+
+    bad_request = openai_module.BadRequestError(
+        message="tools not supported", response=MagicMock(status_code=400, headers={}), body=None
+    )
+    config, mock_openai = _probe_client(bad_request)
+    with caplog.at_level(logging.WARNING, logger="localharness.provider.client"), \
+         patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        await LLMClient(config).detect_capabilities()
+
+    give_up = [r.getMessage() for r in caplog.records if "never confirmed native" in r.getMessage()]
+    assert len(give_up) == 1, caplog.text
+    assert "after 1 attempts" in give_up[0], give_up[0]
+    assert mock_openai.chat.completions.create.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_probe_gives_up_after_exhausting_attempts():
     """A genuinely dead probe still ends in xml with probe_error set — retry widens the window
     for a transient blip, it does NOT invent a capability the server never demonstrated."""
