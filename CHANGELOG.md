@@ -4,6 +4,57 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.0] — 2026-08-06
+
+A tool call the serving runtime did not parse is no longer silent. It used to
+reach the user as an ordinary assistant message, so a model that had called its
+tools correctly all session looked like it was narrating work it never did.
+
+### Added
+- **Unparsed tool calls now reach the user.** The agent loop has always
+  published `ParseFailed` when a reply looks like a tool call but nothing
+  parsed — no channel subscribed to it, so the signal went only to the bench
+  metrics sink. The terminal and Discord channels now surface it with the
+  retry count and the runtime flag to check. The loop's existing behavior is
+  unchanged: it still nudges the model with the taught format and retries up
+  to three times, and a run is never killed over one unparsed turn.
+- **Detection of runtime-native tool syntax arriving as chat text.**
+  `has_tool_call_attempt` recognizes DeepSeek's DSML (V4-Flash) and the V3
+  `tool_calls_begin` envelope. **This is detection, not parsing** — the
+  harness deliberately does not add per-model tool-call parsers. Converting a
+  model's native syntax into structured `tool_calls` is the serving runtime's
+  job (llama.cpp `--jinja` reads the GGUF's embedded template; vLLM needs
+  `--tool-call-parser`), and it already works when that flag is set. What this
+  changes is that the failure is now named instead of rendered as prose.
+
+### Fixed
+- **The capability probe no longer condemns a session on one hiccup**
+  (`provider/client.py`). Tool-call mode for an entire session was decided by
+  a single generation, and any failure — a busy slot, a slow first token, a
+  connection blip — silently downgraded every later turn to XML mode. For a
+  model whose native syntax is not `<tool_call>`, that meant every tool call
+  in the session was rendered as chat and nothing ran. An inconclusive probe
+  is now retried; a definitive answer (native confirmed, taught XML seen, or
+  the server rejecting `tools` outright) still resolves on the first attempt,
+  so the healthy path costs exactly one request. Exhausting the retries still
+  ends in XML mode with the error recorded — the retry widens the window for a
+  transient blip, it never assumes a capability the server did not show.
+- **`doctor` no longer tells healthy multi-slot llama.cpp servers to relaunch**
+  (#101). The slot-split advisory fired on `total_slots > 1` alone, but modern
+  llama.cpp shares one KV cache across slots (`kv_unified`) and does not divide
+  `--ctx-size`. The check now compares the per-request window reported by
+  `/props` against the configured budget and speaks up only when a request
+  genuinely cannot hold it.
+- **An explicit `provider_type` no longer hard-fails `start` when it disagrees
+  with the running server** (#102, residual of #8). The stored value narrowed
+  the `/tokenize` probe to one contract and raised when it went unanswered,
+  which made an explicit setting strictly worse than an absent one — absent
+  tried both shapes and self-healed. `provider_type` now orders the probe
+  instead of narrowing it, so a config that has drifted (vLLM swapped for
+  llama.cpp behind the same port) recovers with a logged warning. Correct
+  config still costs one round trip, and the hard error when neither shape
+  answers is preserved.
+
 ## [0.11.0] — 2026-07-29
 
 Full provider lifecycle: the harness can now start, stop, and swap the model
