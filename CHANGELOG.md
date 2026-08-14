@@ -4,6 +4,36 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.2] — 2026-08-14
+
+Board-clearing follow-up to 0.12.1: the issues that release left open are
+fixed, and the tool-mode probe stops guessing.
+
+### Added
+- Deciding probe: when the capability probe exhausts its attempts without the
+  server ever demonstrating a native tool call, the client spends one more
+  request with the taught XML syntax folded in — the model emits
+  `<tool_call>` → xml is proven workable; it does not → native. A transport
+  error keeps xml (fail-safe, logged). Both static defaults failed silently
+  in opposite directions; evidence replaces the guess.
+
+### Fixed
+- `init --endpoint` auto-selects the model when the server serves exactly
+  one, and lists the served ids when it cannot pick for you (#118).
+- `validate` and `components` give doctor's "Run 'localharness init'"
+  guidance when the config is missing (#119).
+- Budget and stuck-recovery summaries no longer splice a prior turn's answer
+  into the current turn (the residual paths documented on #91).
+- The emergency context floor no longer crashes on an empty message list
+  with an oversized tools block (#124; reachable since v0.9.1).
+- The first-run input-box hint is consumed on first submit instead of
+  persisting all session (#125).
+- Managed LM Studio liveness is probed at the endpoint instead of read from
+  a pidfile it never writes (#126).
+- The summarizer subagent's numbered rules reach the model with real
+  newlines, and swap-announcement speed notes are colorized by band as
+  intended.
+
 ## [0.12.1] — 2026-08-13
 
 Fresh installs had been broken since 2026-07-28: the unpinned `mcp` dependency
