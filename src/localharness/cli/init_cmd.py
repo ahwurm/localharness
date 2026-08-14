@@ -6,6 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -23,7 +24,12 @@ from localharness.config.models import (
 )
 from localharness.provider import server as managed_server
 from localharness.provider.client import LLMClient, LLMConfig
-from localharness.provider.detector import DEFAULT_PORTS, DetectorResult, detect_provider
+from localharness.provider.detector import (
+    DEFAULT_PORTS,
+    DetectorResult,
+    ProviderType,
+    detect_provider,
+)
 from localharness.provider.refarch import REF_ARCHS
 
 console = Console()
@@ -106,6 +112,32 @@ def _detect_lmstudio_ctx(base_url: str) -> int | None:
         return None
 
 
+def _identify_endpoint_provider(base_url: str) -> ProviderType:
+    """Identify the runtime behind an explicit --endpoint, reusing the detector's shape rules.
+
+    provider_type is load-bearing, not a label: TokenCounter's exact GGUF counting and the
+    served-window probe are keyed on it, so hardcoding "unknown" here downgraded a remote
+    Ollama/LM Studio to approximate counting. Returns "unknown" only when identification
+    genuinely fails (every probe is best-effort — a slow or private endpoint must not block init).
+    """
+    import httpx
+    from localharness.provider.detector import _identify_provider
+
+    native = base_url.removesuffix("/v1")
+    try:  # Ollama self-identifies only on its native API — its /v1/models is a plain OpenAI list
+        if isinstance(httpx.get(f"{native}/api/tags", timeout=2.0).json().get("models"), list):
+            return "ollama"
+    except Exception:
+        pass
+    try:
+        response = httpx.get(f"{base_url.rstrip('/')}/models", timeout=2.0)
+        ptype = _identify_provider(urlparse(base_url).port or 0, response.json(), response.headers)
+    except Exception:
+        return "unknown"
+    # LM Studio 0.4.x is indistinguishable from vLLM on /v1/models; /api/v0 is unique to it.
+    return "lmstudio" if ptype == "vllm" and _detect_lmstudio_ctx(base_url) is not None else ptype
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -165,9 +197,17 @@ def init_app(
         if model is None:
             err_console.print("[bold red]Error:[/bold red] --model is required when using --endpoint")
             raise typer.Exit(1)
+        provider_type = _identify_endpoint_provider(base_url)
+        if provider_type == "unknown":
+            console.print(
+                "  [yellow]⚠[/yellow]  Could not identify the runtime at this endpoint — recording "
+                "provider_type: unknown (token counting falls back to approximate)."
+            )
+        else:
+            console.print(f"  [green]✓[/green] Runtime: [bold]{provider_type}[/bold]")
         result = DetectorResult(
             found=True,
-            provider_type="unknown",
+            provider_type=provider_type,
             base_url=base_url,
             models=[model],
             suggested_model=model,
@@ -219,6 +259,17 @@ def init_app(
     )
     client = LLMClient(llm_cfg)
     cap = asyncio.run(client.detect_capabilities())
+
+    # Reachability is a SEPARATE axis from capability (CapabilityResult.server_reached): a probe
+    # that never reached the server proves nothing about tool calling, so reporting "✓ configured"
+    # and persisting supports_function_calling from it fabricates a verified setup.
+    if not cap.server_reached:
+        err_console.print(
+            f"[bold red]Error:[/bold red] no answer from {result.base_url} ({cap.probe_error}). "
+            "No config was written — start the model server (or fix --endpoint/--model) and run "
+            "`localharness init` again."
+        )
+        raise typer.Exit(1)
 
     if cap.tool_call_mode == "native":
         console.print("  [green]✓[/green] Tool calling: native")
