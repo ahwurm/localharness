@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
-from localharness.config.loader import ConfigLoader
+from localharness.config.loader import ConfigLoader, ConfigNotFoundError
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.config.overlay import (
     atomic_write_overlay,
@@ -167,6 +167,13 @@ def _err(json_output: bool, message: str, exit_code: int = 2) -> None:
     raise typer.Exit(code=exit_code)
 
 
+def _err_config(json_output: bool, exc: Exception) -> None:
+    """Config load failure. #119: when the cause is a MISSING config, end with the same next
+    step doctor gives — otherwise a user who ran `components list` first never learns `init`."""
+    hint = " Run 'localharness init' to create it." if isinstance(exc, ConfigNotFoundError) else ""
+    _err(json_output, f"Failed to load config: {exc}{hint}", exit_code=2)
+
+
 def _serialize_value(value: Any) -> Any:
     """Render value for JSON output. Primitives passthrough; complex types -> repr."""
     if value is None or isinstance(value, (bool, int, float, str, list, dict)):
@@ -193,7 +200,7 @@ def components_list(
         loader = _build_loader()
         cfg = loader.load_harness()
     except Exception as exc:
-        _err(json_output, f"Failed to load config: {exc}", exit_code=2)
+        _err_config(json_output, exc)
         return  # unreachable but satisfies type checker
 
     overlays = _build_overlays(loader)
@@ -248,7 +255,7 @@ def components_get(
         loader = _build_loader()
         cfg = loader.load_harness()
     except Exception as exc:
-        _err(json_output, f"Failed to load config: {exc}", exit_code=2)
+        _err_config(json_output, exc)
         return
 
     overlays = _build_overlays(loader)
@@ -316,7 +323,7 @@ def components_set(
         loader = _build_loader()
         cfg = loader.load_harness()
     except Exception as exc:
-        _err(json_output, f"Failed to load config: {exc}", exit_code=2)
+        _err_config(json_output, exc)
         return
 
     # 2. Build catalogue, resolve entry

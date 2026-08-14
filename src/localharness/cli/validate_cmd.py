@@ -66,7 +66,10 @@ def validate(
         results = loader.validate_all()
 
     if not results:
+        # #119: every command that fails on a missing config ends with the same next step
+        # doctor gives — a user who ran `validate` first must not be left without `init`.
         console.print("[yellow]No configuration files found.[/yellow]")
+        console.print("Run 'localharness init' to create it.")
         raise typer.Exit(2)
 
     console.print("\nValidating configs...\n")

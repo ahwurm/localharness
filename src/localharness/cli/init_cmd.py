@@ -61,6 +61,20 @@ def _detect_max_model_len(base_url: str) -> int | None:
         return None
 
 
+def _list_endpoint_models(base_url: str) -> list[str] | None:
+    """Model ids advertised by an OpenAI-compatible /v1/models listing.
+
+    Returns None when the listing can't be read at all (unreachable/silent endpoint) — that is a
+    different answer from "reachable, serves nothing" ([]), and #118's caller must not conflate
+    them: only the first is an honest "I couldn't ask the server"."""
+    try:
+        import httpx
+        data = httpx.get(f"{base_url.rstrip('/')}/models", timeout=2.0).json()
+        return [m["id"] for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
+    except Exception:
+        return None
+
+
 def _fit_context_tokens(max_model_len: int, output_reserve: int = 4_096) -> int:
     """Context budget that compacts BEFORE the served window's input cap — and NEVER exceeds it.
     A normal window reserves output room and floors at 8192. A window too small to do both is
@@ -195,8 +209,38 @@ def init_app(
         # Skip probe — build result manually
         base_url = _build_base_url_for_endpoint(endpoint)
         if model is None:
-            err_console.print("[bold red]Error:[/bold red] --model is required when using --endpoint")
-            raise typer.Exit(1)
+            # #118: ask the server before demanding --model. One model served = nothing to
+            # disambiguate; otherwise keep the error but name the ids AND where they came from,
+            # since the id is usually a long path-like string the user has to go dig out.
+            listing = f"{base_url.rstrip('/')}/models"
+            served = _list_endpoint_models(base_url)
+            if served is None:
+                err_console.print(
+                    "[bold red]Error:[/bold red] --model is required when using --endpoint — "
+                    f"and {listing} could not be read to pick one for you."
+                )
+                raise typer.Exit(1)
+            if len(served) == 1:
+                model = served[0]
+                console.print(
+                    f"  [green]✓[/green] Using [bold]{model}[/bold] — the only model served at {listing}"
+                )
+            elif not served:
+                err_console.print(
+                    "[bold red]Error:[/bold red] --model is required when using --endpoint — "
+                    f"and {listing} lists no models. Load a model on the server, then run "
+                    "`localharness init` again."
+                )
+                raise typer.Exit(1)
+            else:
+                err_console.print(
+                    f"[bold red]Error:[/bold red] --model is required when using --endpoint. "
+                    f"{listing} serves {len(served)} models:"
+                )
+                for served_id in served:
+                    err_console.print(f"  - {served_id}")
+                err_console.print("Re-run with --model <one of the ids above>.")
+                raise typer.Exit(1)
         provider_type = _identify_endpoint_provider(base_url)
         if provider_type == "unknown":
             console.print(
