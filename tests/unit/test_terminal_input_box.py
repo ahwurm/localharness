@@ -12,6 +12,8 @@ is the first of its kind in this repo.
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
 from io import StringIO
 
 import pytest
@@ -179,7 +181,7 @@ class TestPromptEcho:
 
 
 class TestPersistentAppKeybindings:
-    async def _drive(self, feed: str):
+    async def _drive(self, feed: str, models: list[str] | None = None):
         subs: list[str] = []
         interrupts: list[bool] = []
         eofs: list[bool] = []
@@ -202,10 +204,13 @@ class TestPersistentAppKeybindings:
                     on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
                     hint_fn=lambda: [("class:hint", " ")], pct_fn=lambda: None,
                     status_fn=lambda: [],
+                    model_names_fn=(lambda: list(models)) if models is not None else None,
                 )
                 holder["app"] = app
                 inp.send_text(feed)
-                await app.run_async()
+                # wait_for guard: a feed that never reaches an exit key would otherwise hang the
+                # whole suite on this app instead of failing this one test.
+                await asyncio.wait_for(app.run_async(), timeout=10.0)
         return subs, interrupts, eofs
 
     async def test_enter_submits_without_exiting_and_resets(self):
@@ -231,3 +236,153 @@ class TestPersistentAppKeybindings:
         assert subs == []
         assert interrupts == []
         assert eofs == [True]
+
+    async def test_ctrl_j_is_enter_not_a_forced_nudge(self):
+        # Raw LF (0x0A) is what SOME TERMINALS SEND FOR RETURN (WSL) — prompt_toolkit binds it to
+        # Enter for exactly that reason. Binding it to the force-nudge instead silently prefixed
+        # every submission on those terminals with '!', which sends slash commands into the
+        # running turn as text instead of queueing them. It must submit plainly.
+        subs, _i, _e = await self._drive("hello via LF\x0a\x04")
+        assert subs == ["hello via LF"]
+
+    async def test_ctrl_j_lines_are_plain_submissions_not_nudges(self):
+        # Same for a multi-line paste on a terminal without bracketed paste: each embedded \n
+        # is one ordinary submission.
+        subs, _i, _e = await self._drive("check the logs\x0athen fix the parser\x0a\x04")
+        assert subs == ["check the logs", "then fix the parser"]
+
+    async def test_alt_enter_submits_as_forced_nudge(self):
+        # Alt+Enter arrives as ESC,CR — the universal Meta encoding (Shift+Enter is NOT
+        # bindable: prompt_toolkit remaps its xterm sequence to plain Enter).
+        subs, _i, _e = await self._drive("go deeper on that\x1b\r\x04")
+        assert subs == ["!go deeper on that"]
+
+    async def test_nudge_chord_empty_buffer_is_noop(self):
+        subs, interrupts, eofs = await self._drive("\x1b\r\x04")
+        assert subs == []
+        assert interrupts == []
+        assert eofs == [True]
+
+    async def test_escape_dismissing_a_menu_is_not_the_nudge_chord(self):
+        # Esc (dismiss the menu) then Enter is an ordinary two-keystroke motion, but it arrives
+        # as the same ESC,CR bytes as Alt+Enter. The dismiss binding is EAGER so Esc resolves on
+        # its own press: the menu closes and the line submits NORMALLY — never as a forced nudge
+        # carrying the previewed completion ('!/model') into the running turn.
+        subs, _i, _e = await self._drive("/m\t\x1b\r\x04")
+        assert subs == ["/m"]
+
+    async def test_escape_takes_back_the_picker_prefix(self):
+        # The /model picker pre-fills '/model ' + highlights the first model. Declining it (Esc)
+        # must leave an EMPTY line — otherwise the next thing typed submits as
+        # '/model rewrite the parser tests' and comes back as "Unknown model '…'".
+        subs, _i, _e = await self._drive(
+            "/model \t\x1brewrite the parser tests\r\x04", models=["qwen-a", "qwen-b"]
+        )
+        assert subs == ["rewrite the parser tests"]
+
+
+class TestModelPickerBox:
+    """box_open_model_menu writes into the LIVE box buffer — and it lands SECONDS after the user
+    typed /model (the listing runs live probes first) or at an arbitrary moment when a queued
+    /model plays. The box invites typing the whole time, so the picker must never take a line
+    that is already being written, and must not pre-fill when there is nothing to pick."""
+
+    @contextmanager
+    def _box(self, models: list[str]):
+        ch = _channel()
+        ch._box_active = True
+        ch.model_names_fn = lambda: list(models)
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=lambda t: None, on_interrupt=lambda: None, on_eof=lambda: None,
+                hint_fn=lambda: [], pct_fn=lambda: None, status_fn=lambda: [],
+                model_names_fn=ch._model_names_for_menu,
+            )
+            ch._box_app = app
+            yield ch, app._lh_input_buffer
+
+    async def test_picker_prefills_an_empty_box(self):
+        with self._box(["qwen-a", "qwen-b"]) as (ch, buf):
+            ch.box_open_model_menu()
+            await asyncio.sleep(0)  # let the async completer settle
+            assert buf.text.startswith("/model ")
+            # menu popped with the first model highlighted (the one-Enter picker), so the
+            # buffer shows its preview — Esc restores '/model ' and then clears it.
+            assert buf.complete_state is not None
+            assert buf.complete_state.current_completion is not None
+
+    async def test_picker_never_overwrites_a_line_being_typed(self):
+        with self._box(["qwen-a", "qwen-b"]) as (ch, buf):
+            buf.text = "summarize the last three commits"  # typed while the listing was fetched
+            ch.box_open_model_menu()
+            await asyncio.sleep(0)
+            assert buf.text == "summarize the last three commits"  # not in history yet — sacred
+
+    async def test_picker_skipped_when_there_is_nothing_to_pick(self):
+        with self._box([]) as (ch, buf):  # server unreachable → empty menu source
+            ch.box_open_model_menu()
+            await asyncio.sleep(0)
+            assert buf.text == ""  # no stranded '/model ' prefix in front of the next message
+
+
+class TestStatusRowTps:
+    """Colored tok/s readout in the box status row (speed_stats bands): shown for turn
+    activity (working/burst), suppressed for swap-loading and dreaming lines, `~` marks
+    the live approximation, and a broken source can never take the row down."""
+
+    def test_working_row_shows_live_rate_with_band_and_tilde(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_working = True
+        ch.tps_source = lambda: (28.4, False)
+        assert ("class:tps-yellow", "· ~28 tok/s ") in ch._box_status_frags()
+
+    def test_working_row_shows_verified_rate_plain(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_working = True
+        ch.tps_source = lambda: (31.24, True)
+        assert ("class:tps-green", "· 31.2 tok/s ") in ch._box_status_frags()
+
+    def test_red_band_below_twenty(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_working = True
+        ch.tps_source = lambda: (16.5, True)
+        assert ("class:tps-red", "· 16.5 tok/s ") in ch._box_status_frags()
+
+    def test_swap_loading_row_suppresses_stale_rate(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_activity = "loading qwen · 40s"  # /model load: old model's rate is stale
+        ch.tps_source = lambda: (31.2, True)
+        assert not any("tok/s" in t for _, t in ch._box_status_frags())
+
+    def test_no_source_or_no_data_renders_plain_row(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_working = True
+        assert not any("tok/s" in t for _, t in ch._box_status_frags())
+        ch.tps_source = lambda: None
+        assert not any("tok/s" in t for _, t in ch._box_status_frags())
+
+    def test_broken_source_never_breaks_the_row(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_working = True
+
+        def boom():
+            raise RuntimeError("snapshot exploded")
+
+        ch.tps_source = boom
+        assert ch._box_status_frags()  # row still renders
+
+    def test_classic_thinking_label_appends_verified_rate_only(self):
+        ch = _channel()
+        ch.tps_source = lambda: (16.5, True)
+        assert ch._thinking_label() == "[muted]thinking…[/muted] [red]16.5 tok/s[/red]"
+        ch.tps_source = lambda: (28.0, False)  # live approximation: classic label omits it
+        assert ch._thinking_label() == "[muted]thinking…[/muted]"
+        ch.tps_source = None
+        assert ch._thinking_label() == "[muted]thinking…[/muted]"

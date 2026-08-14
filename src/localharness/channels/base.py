@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 from localharness.core.bus import EventBus
 from localharness.core.events import (
     Action,
+    CompactionTriggered,
     Escalation,
     Heartbeat,
     Observation,
@@ -208,6 +209,18 @@ class ChannelAdapter(ABC):
             f"tool-call-shaped text the harness could not read, so nothing ran. If this "
             f"repeats, the serving runtime is not converting the model's native tool syntax: "
             f"check llama.cpp --jinja / vLLM --tool-call-parser.",
+            agent_id=event.agent_id,
+        )
+
+    async def on_compaction_triggered(self, event: CompactionTriggered) -> None:
+        """Default handler for CompactionTriggered. Same principle as on_parse_failed: an
+        invisible context squeeze reads as the model losing its memory mid-session for no
+        reason (observed 2026-08-13: a real compaction fired with zero telemetry because the
+        REPL's ContextManager had no bus). One line, so the squeeze is attributable."""
+        await self.send_message(
+            f"context compacted: {event.pre_usage_fraction:.0%} → "
+            f"{event.post_usage_fraction:.0%} of the window (older detail summarized; "
+            f"recent messages kept verbatim)",
             agent_id=event.agent_id,
         )
 

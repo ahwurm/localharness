@@ -283,6 +283,49 @@ def _format_completion_summary(session: Session, content: str | None) -> str:
     )
 
 
+# The deterministic harness nudges whose intended reply IS the bare CONFIRMED sentinel. Only
+# these may be popped together with that sentinel (see _strip_sentinel_exchanges): a role check
+# alone also deleted the human's own task whenever the model opened a turn with a spontaneous
+# CONFIRMED (documented small-local-model behaviour, #91) — the harness's own scolding then
+# became the only user turn for the rest of the sitting.
+_ACT_GUARD_NUDGE = (
+    "You ended your reply with stated intentions but took no action. "
+    "Execute your plan NOW: make the tool call in this response. "
+    "If the task genuinely needs no tools, reply with only the single "
+    "word: CONFIRMED. Your previous reply will then be delivered to "
+    "the user unchanged."
+)
+_SELF_CHECK_NUDGE = (
+    "Review your answer above for correctness and completeness. "
+    "If it is correct, reply with only the single word: CONFIRMED. If not, reply with "
+    "the corrected complete answer on its own — only your latest reply "
+    "is shown to the user, so never refer back to an earlier reply."
+)
+_SENTINEL_REPROMPT_NUDGE = (
+    "Your last reply was only a confirmation, but there is nothing in this "
+    "turn to confirm. Provide your full answer to the task now."
+)
+_PARSE_FAILURE_NUDGE = (
+    "Your tool call could not be parsed. Please use the correct format "
+    "and try again with your intended tool call:\n"
+    "<tool_call>\n"
+    "<name>tool_name</name>\n"
+    '<parameters>{"param_name": "value"}</parameters>\n'
+    "</tool_call>"
+)
+
+
+def _is_harness_nudge(message: Message) -> bool:
+    """True only for a message the harness itself pushed as a nudge (act-guard, baton gate,
+    self-check, #91 re-prompt, parse-failure retry) — never the user's own task, a type-anytime
+    user nudge, or the configurable stuck-recovery message. _BATON_NUDGE_MESSAGE is defined
+    below; the lookup happens at call time, so definition order does not matter."""
+    return (message.get("content") or "") in {
+        _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
+        _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
+    }
+
+
 def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
     """#91b: return a copy of `messages` with each deterministic nudge -> bare-CONFIRMED pair
     removed, for persistence into the cross-turn conversation.
@@ -292,8 +335,11 @@ def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
     teaches a small local model to emit a spontaneous CONFIRMED next turn (the #91 splice
     trigger). Same spirit as the xml trailing-prose truncation (~loop.py:1071-1083): sanitize
     the HISTORY copy, never the live decision (the summary was already surfaced from this turn's
-    real answer BEFORE this runs). The real answer the sentinel confirmed stays; only the
-    imitable user-nudge + sentinel pair is dropped. The input list is not mutated."""
+    real answer BEFORE this runs). The real answer the sentinel confirmed stays; the bare
+    sentinel always goes (it IS the imitable precedent), but the message before it is popped
+    ONLY when it is one of the harness's own nudges (_is_harness_nudge) — a role check alone
+    deleted the user's real task whenever the model opened a turn with a spontaneous CONFIRMED.
+    The input list is not mutated."""
     out: list[Message] = []
     for m in messages:
         if (
@@ -303,8 +349,9 @@ def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
             and out
             and out[-1].get("role") == "user"
         ):
-            out.pop()      # drop the inducing nudge …
-            continue       # … and the bare-sentinel reply
+            if _is_harness_nudge(out[-1]):
+                out.pop()  # drop the inducing nudge …
+            continue       # … and the bare-sentinel reply (never the user's own task)
         out.append(m)
     return out
 
@@ -514,6 +561,31 @@ def _sanitize_raw_tool_calls(raw: Any) -> Any:
     return clean or None
 
 
+def _dropped_call_preview(raw: Any) -> str:
+    """'name(arguments…)' rendering of native tool calls dropped as unrepairable — the
+    raw_content_preview for the ParseFailed the native drop path publishes (such a turn
+    carries no content, so the dropped calls themselves are the only evidence)."""
+    parts = []
+    for tc in raw or []:
+        fn = getattr(tc, "function", None) if not isinstance(tc, dict) else tc.get("function", {})
+        if fn is None:
+            continue
+        name = (getattr(fn, "name", "?") if not isinstance(fn, dict) else fn.get("name", "?"))
+        args = (getattr(fn, "arguments", "") if not isinstance(fn, dict)
+                else fn.get("arguments", "")) or ""
+        parts.append(f"{name}({args})")
+    return f"unparseable tool call arguments: {'; '.join(parts)}"
+
+
+def _extract_xml_tool_calls(content: str) -> list:
+    """Parse tool calls out of message CONTENT via FnCallConverter. Never raises."""
+    try:
+        from localharness.provider.fn_call import FnCallConverter
+        return FnCallConverter().extract_tool_calls(content)
+    except Exception:
+        return []
+
+
 def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
     """Extract tool calls from an LLM response regardless of mode."""
     from localharness.core.types import ToolCall
@@ -526,6 +598,12 @@ def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
                     args = json.loads(tc.function.arguments or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                # A parseable but non-OBJECT payload (positional '["/tmp/x"]', bare scalar)
+                # is not arguments: ToolCall is an unvalidated dataclass, so it would ride
+                # through to Action(tool_params=...) and kill the turn with a pydantic
+                # ValidationError. Same fallback as an unparseable payload.
+                if not isinstance(args, dict):
+                    args = {}
                 result.append(ToolCall(
                     name=tc.function.name,
                     arguments=args,
@@ -537,22 +615,37 @@ def _extract_tool_calls(response_message: Any, tool_call_mode: str) -> list:
                     args = json.loads(fn.get("arguments", "{}") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                if not isinstance(args, dict):
+                    args = {}
                 result.append(ToolCall(
                     name=fn.get("name", ""),
                     arguments=args,
                     id=tc.get("id", str(uuid.uuid4())),
                 ))
+        # The parse-failure nudge teaches the <tool_call> XML syntax in EVERY mode, but native
+        # extraction reads only response_message.tool_calls — so a model that obeyed the nudge
+        # burned all three retries and (after _clean_summary strips the block) delivered an
+        # EMPTY answer. Read the taught block here too, so obeying the harness works. Gated on
+        # the literal "<tool_call" so ordinary prose/JSON in a native answer stays untouched.
+        if not result:
+            content = getattr(response_message, "content", "") or ""
+            if "<tool_call" in content:
+                return _extract_xml_tool_calls(content)
         return result
     else:
         # xml/text mode — use FnCallConverter
-        try:
-            from localharness.provider.fn_call import FnCallConverter
-            converter = FnCallConverter()
-            content = getattr(response_message, "content", "") or ""
-            return converter.extract_tool_calls(content)
-        except Exception:
-            return []
+        return _extract_xml_tool_calls(getattr(response_message, "content", "") or "")
 
+
+# Returned (and carried as the TurnFailed detail) when the parse-retry budget is spent and the
+# model is still emitting an unparseable tool call. An honest failure notice — the alternative,
+# shipping the unparsed call text as the final answer, is a fabricated success.
+_PARSE_FAILED_TURN_NOTICE = (
+    "The model kept emitting a tool call this harness could not parse (4 attempts, including "
+    "3 corrections). Ending the turn without an answer rather than delivering the unparsed "
+    "tool-call text as one. Check the server's tool-call format (e.g. llama.cpp needs --jinja) "
+    "or switch tool_call_mode."
+)
 
 # #77: fed back (tool-role) when a completion is cut at the output-token ceiling
 # mid-tool-call. Names the cause AND the remedy so the model retries INFORMED instead of
@@ -700,8 +793,32 @@ class AgentLoop:
             ),
         ))
 
+        from localharness.provider.client import ProviderError
+
         try:
             summary = await self._execute_loop(session, task, on_token)
+        except ProviderError as exc:
+            # A provider failure escaping _execute_loop — e.g. the TokenCounter hitting a dead
+            # endpoint in build_messages after the server was killed mid-session. A KNOWN
+            # operational condition, not a harness bug: one calm line, NO traceback, and the
+            # same llm_error surface _execute_loop's own completion failures use — an
+            # internal_error + stack dump here read as failing harness behavior when the only
+            # fact was "your model server went away" (live 2026-08-10).
+            log.warning("Provider failure ended the turn for %s: %s", self._config.name, exc)
+            session.terminated_reason = "error"
+            summary = str(exc)
+            await self._bus.publish(TurnFailed(
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+                reason="llm_error",
+                detail=str(exc),
+                iterations=session.iteration,
+                duration_seconds=session.elapsed_seconds(),
+                input_tokens=session.input_tokens,
+                output_tokens=session.output_tokens,
+                tokens_estimated=session.tokens_estimated,
+            ))
+            return summary
         except Exception as exc:
             log.exception("Unhandled error in agent loop for %s", self._config.name)
             session.terminated_reason = "error"
@@ -898,9 +1015,13 @@ class AgentLoop:
         # survives the continuing-conversation refresh below.
         if self._prior_session_context:
             system_prompt = f"{system_prompt}\n\n{self._prior_session_context}"
-        has_prior_turns = any(m.get("role") == "user" for m in session.messages)
-        if has_prior_turns and session.messages and session.messages[0].get("role") == "system":
-            # Continuing conversation — refresh system prompt, append new user message
+        # Gate on the LIST'S OWN SHAPE, never on "does a user turn exist": a persisted
+        # conversation can carry the leading system message with no user turn (sentinel
+        # stripping empties one), and a has-user-turn gate then inserted a SECOND system
+        # message — the non-leading system role strict templates reject, permanently, for the
+        # rest of the sitting.
+        if session.messages and session.messages[0].get("role") == "system":
+            # Existing leading system message — refresh it, never duplicate it
             session.messages[0] = {"role": "system", "content": system_prompt}
         else:
             # First turn — insert the single leading system message at front
@@ -1103,7 +1224,21 @@ class AgentLoop:
             # HTTP 400), poisoning the rest of the session. Normalize to "" here (and
             # symmetrically at the build_messages egress); tool_calls stay untouched.
             content = strip_thinking_tags(raw_content) if raw_content else ""
-            raw_tool_calls = _sanitize_raw_tool_calls(getattr(response_message, "tool_calls", None))
+            unsanitized_tool_calls = getattr(response_message, "tool_calls", None)
+            raw_tool_calls = _sanitize_raw_tool_calls(unsanitized_tool_calls)
+            if unsanitized_tool_calls and not raw_tool_calls:
+                # Every native call was unrepairable and dropped — until now a log.warning was
+                # the ONLY trace: nothing ran, no channel said so, and the turn still reported
+                # success. Step 9's detector can never see it (a native tool turn carries empty
+                # content), so publish the loud signal here, on the native path.
+                session.parse_retries += 1
+                await self._bus.publish(ParseFailed(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    iteration=session.iteration,
+                    parse_retry_count=session.parse_retries,
+                    raw_content_preview=_dropped_call_preview(unsanitized_tool_calls)[:200],
+                ))
             try:
                 response_message.tool_calls = raw_tool_calls  # extraction must match history
             except Exception:
@@ -1129,9 +1264,10 @@ class AgentLoop:
                 has_tool_calls=bool(tool_calls),
             ))
 
-            # 8b. In xml mode, populate assistant message tool_calls so
-            # repair_tool_pairing doesn't strip tool results as orphaned
-            if tool_call_mode != "native" and tool_calls:
+            # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
+            # fallback), populate assistant message tool_calls so repair_tool_pairing
+            # doesn't strip this iteration's tool results as orphaned.
+            if tool_calls and (tool_call_mode != "native" or not raw_tool_calls):
                 tc_dicts = [
                     {
                         "id": tc.id,
@@ -1182,7 +1318,7 @@ class AgentLoop:
 
             # 9. No tool calls — check if parse failed on an attempted tool call
             if not tool_calls:
-                if has_tool_call_attempt(raw_content or "") and session.parse_retries < 3:
+                if has_tool_call_attempt(raw_content or ""):
                     session.parse_retries += 1
                     await self._bus.publish(ParseFailed(
                         agent_id=session.agent_id,
@@ -1191,23 +1327,33 @@ class AgentLoop:
                         parse_retry_count=session.parse_retries,
                         raw_content_preview=(raw_content or "")[:200],
                     ))
-                    log.warning(
-                        "Tool call XML parse failed (attempt %d/3) for %s",
-                        session.parse_retries,
-                        self._config.name,
+                    if session.parse_retries <= 3:
+                        log.warning(
+                            "Tool call XML parse failed (attempt %d/3) for %s",
+                            session.parse_retries,
+                            self._config.name,
+                        )
+                        session.push({"role": "user", "content": _PARSE_FAILURE_NUDGE})
+                        continue
+                    # Retry budget spent and the model is STILL emitting an unparseable tool
+                    # call. Falling through here published nothing and handed the raw call text
+                    # (or, once _clean_summary stripped a taught <tool_call> block, the empty
+                    # string) to the user as a SUCCESSFUL answer — the exact silent failure
+                    # v0.12.0 closed for the first three attempts. End the turn honestly.
+                    log.error(
+                        "Tool call unparseable after %d attempts for %s — ending the turn as a "
+                        "failure instead of delivering the raw text as an answer",
+                        session.parse_retries, self._config.name,
                     )
-                    session.push({
-                        "role": "user",
-                        "content": (
-                            "Your tool call could not be parsed. Please use the correct format "
-                            "and try again with your intended tool call:\n"
-                            "<tool_call>\n"
-                            "<name>tool_name</name>\n"
-                            '<parameters>{"param_name": "value"}</parameters>\n'
-                            "</tool_call>"
-                        ),
-                    })
-                    continue
+                    session.terminated_reason = "error"
+                    self._conversation = _strip_sentinel_exchanges(session.messages)
+                    # Carry the model's own text along as LABELLED evidence, never as the
+                    # answer: the detector has false positives (an ordinary JSON reply can
+                    # look like a call), and a hard failure must not silently eat a real
+                    # reply either.
+                    tail = _clean_summary(content)
+                    return (f"{_PARSE_FAILED_TURN_NOTICE}\n\nLast reply text (unparsed):\n{tail}"
+                            if tail else _PARSE_FAILED_TURN_NOTICE)
 
                 # 9b. Act-guard: a first response that would END the turn with ZERO
                 # actions taken is, empirically, usually announce-then-halt ("I'll
@@ -1223,13 +1369,7 @@ class AgentLoop:
                         and tool_schemas):
                     session.act_nudge_used = True
                     log.info("Act-guard: tool-less first completion — nudging once")
-                    session.push({"role": "user", "content": (
-                        "You ended your reply with stated intentions but took no action. "
-                        "Execute your plan NOW: make the tool call in this response. "
-                        "If the task genuinely needs no tools, reply with only the single "
-                        "word: CONFIRMED. Your previous reply will then be delivered to "
-                        "the user unchanged."
-                    )})
+                    session.push({"role": "user", "content": _ACT_GUARD_NUDGE})
                     continue
 
                 # Natural completion — reset parse retries
@@ -1262,12 +1402,7 @@ class AgentLoop:
                 # mid-conversation system messages.
                 if sc_cfg.enabled and self_check_passes_used < sc_cfg.max_passes:
                     self_check_passes_used += 1
-                    session.push({"role": "user", "content": (
-                        "Review your answer above for correctness and completeness. "
-                        "If it is correct, reply with only the single word: CONFIRMED. If not, reply with "
-                        "the corrected complete answer on its own — only your latest reply "
-                        "is shown to the user, so never refer back to an earlier reply."
-                    )})
+                    session.push({"role": "user", "content": _SELF_CHECK_NUDGE})
                     continue
 
                 # #91: a completion that is empty or a bare sentinel with NO real assistant
@@ -1280,10 +1415,7 @@ class AgentLoop:
                         and not _last_assistant_content(session.messages[session.turn_start_idx:])):
                     session.sentinel_reprompt_used = True
                     log.info("Sentinel completion with no in-turn answer — re-prompting once (#91)")
-                    session.push({"role": "user", "content": (
-                        "Your last reply was only a confirmation, but there is nothing in this "
-                        "turn to confirm. Provide your full answer to the task now."
-                    )})
+                    session.push({"role": "user", "content": _SENTINEL_REPROMPT_NUDGE})
                     continue
 
                 summary = _clean_summary(
@@ -1623,8 +1755,9 @@ class AgentLoop:
 
         tool_calls = _extract_tool_calls(response_message, tool_call_mode)
 
-        # Populate assistant tool_calls for xml mode (repair_tool_pairing compatibility)
-        if tool_call_mode != "native" and tool_calls:
+        # Populate assistant tool_calls when the calls came from CONTENT (xml mode, or the
+        # native taught-XML fallback) — repair_tool_pairing compatibility, same as step 8b.
+        if tool_calls and (tool_call_mode != "native" or not raw_tool_calls):
             tc_dicts = [
                 {
                     "id": tc.id,

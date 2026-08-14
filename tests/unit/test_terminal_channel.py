@@ -977,6 +977,31 @@ async def test_terminal_subscribes_parse_failed_end_to_end(tmp_path):
     assert "2/3" in printed
 
 
+async def test_terminal_subscribes_compaction_end_to_end(tmp_path):
+    """WIRING, not just the handler — same doctrine as the ParseFailed test above. On
+    2026-08-13 a real interactive compaction fired with zero telemetry (ContextManager had
+    no bus), so the user watched the model 'forget' with no explanation. Publish the event
+    on a real bus and require the terminal to say what the harness did."""
+    from localharness.core.events import CompactionTriggered
+
+    out = StringIO()
+    ch = make_terminal_channel(out=out, force_terminal=False)
+    ch._history_file = str(tmp_path / "hist")
+    await ch.start()
+    try:
+        await ch.bus.publish(CompactionTriggered(
+            agent_id="default", session_id="s1", iteration=21,
+            pre_usage_fraction=0.743, post_usage_fraction=0.288,
+            stages_modified=[],
+        ))
+    finally:
+        await ch.stop()
+
+    printed = out.getvalue()
+    assert "context compacted" in printed, printed
+    assert "74%" in printed and "29%" in printed
+
+
 @pytest.mark.asyncio
 async def test_discord_subscribes_parse_failed(monkeypatch):
     """WIRING for the Discord half — a dispatch run has nobody at a terminal, so if this
@@ -1027,3 +1052,64 @@ async def test_discord_subscribes_parse_failed(monkeypatch):
         if ch._client_task:
             ch._client_task.cancel()
         await ch.stop()
+
+
+# ---------------------------------------------------------------------------
+# Rate-note colorizing (/model listings + swap messages)
+# ---------------------------------------------------------------------------
+
+
+class TestRateNoteColorizing:
+    def test_colorize_helper_styles_each_note_by_band(self):
+        """Text SPANS carry the band styles; everything else stays literal (no markup
+        parsing — brackets and model names cannot inject styles)."""
+        from localharness.channels.terminal import _colorize_rate_notes
+
+        t = _colorize_rate_notes(
+            "1. fast [31.0 t/s measured]  2. mid [~25 t/s measured]  3. slow [17.0 t/s measured]"
+        )
+        styles = [s.style for s in t.spans]
+        assert styles == ["green", "yellow", "bold red"]
+        assert t.plain.count("t/s measured") == 3
+        assert "[31.0 t/s measured]" in t.plain  # literal brackets survive
+
+    def test_colorize_helper_passes_plain_text_through(self):
+        from localharness.channels.terminal import _colorize_rate_notes
+
+        t = _colorize_rate_notes("no rates here [active] (serving)")
+        assert t.plain == "no rates here [active] (serving)"
+        assert t.spans == []
+
+    @pytest.mark.asyncio
+    async def test_send_message_colorize_metadata_emits_ansi_color(self):
+        out = StringIO()
+        ch = make_terminal_channel(out=out)
+        await ch.send_message("deepseek [17.0 t/s measured]",
+                              metadata={"style": "system.info", "colorize": "rates"})
+        rendered = out.getvalue()
+        assert "17.0 t/s measured" in rendered
+        assert "\x1b[" in rendered  # force_terminal console emitted a color code
+
+    @pytest.mark.asyncio
+    async def test_send_message_without_flag_stays_escaped_plain(self):
+        out = StringIO()
+        ch = make_terminal_channel(out=out)
+        await ch.send_message("deepseek [17.0 t/s measured]",
+                              metadata={"style": "system.info"})
+        rendered = out.getvalue()
+        assert "17.0 t/s measured" in rendered
+        # the substring alone proves nothing (it survives BOTH branches) — the opt-in gate is
+        # what this guards: no colorize flag → not one style code, on a rate-shaped line.
+        assert "\x1b[" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_send_message_without_flag_keeps_markup_literal(self):
+        """The un-flagged path must stay escape(content): arbitrary agent/tool text goes to the
+        terminal as characters, never as rich markup that could style (or hide) itself."""
+        out = StringIO()
+        ch = make_terminal_channel(out=out)
+        await ch.send_message("[bold red]not markup[/bold red] 17.0 t/s measured",
+                              metadata={"style": "system.info"})
+        rendered = out.getvalue()
+        assert "[bold red]not markup[/bold red]" in rendered
+        assert "\x1b[" not in rendered

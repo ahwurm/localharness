@@ -158,9 +158,13 @@ async def test_prefetch_includes_managed_registry_names():
 
     r._live_models = fake_live
     await r._prefetch_model_cache()
+    # A row with a known rate becomes formatted-text meta: the t/s segment carries its
+    # color band (9.5 < 20 → tps-red); rateless rows stay plain strings.
     assert r._model_cache == [
         ("live-one", "serving"),
-        ("qwen3.6-27b", "nvfp4 (compressed-tensors) · ~9.5 t/s · swap"),
+        ("qwen3.6-27b", [("", "nvfp4 (compressed-tensors) · "),
+                         ("class:tps-red", "~9.5 t/s"),
+                         ("", " · swap")]),
     ]
 
 
@@ -211,3 +215,24 @@ def test_peer_model_completes_as_model_pick_with_endpoint_meta():
     assert comps[0].text == "gpt-oss:20b"
     assert comps[0].display_meta_text == "Ollama · localhost:11434"
     assert "model-pick" in (comps[0].style or "")
+
+
+def test_compose_menu_prefers_ledger_median_over_registry_tps():
+    """The auto-measured verified median outranks the hand-authored registry value and
+    renders unprefixed (~ marks the registry fallback). Keys are provider_type-scoped."""
+    models = [NS(name="a", quant=None, tps=9.5), NS(name="b", quant=None, tps=9.5)]
+    managed = NS(local_models=models,
+                 entry_for=lambda n: next((e for e in models if e.name == n), None))
+    menu = OrchestratorREPL._compose_model_menu(
+        ["a", "b"], managed, "a",
+        medians={"vllm:a": 34.56}, live_ptype="vllm", registry_ptype="vllm",
+    )
+    assert menu[0] == ("a", [("", "serving now · "), ("class:tps-green", "34.6 t/s")])
+    assert menu[1] == ("b", [("", "serving · "), ("class:tps-red", "~9.5 t/s")])
+
+
+def test_measured_note_prefers_ledger_and_falls_back_to_registry():
+    assert OrchestratorREPL._measured_note({"vllm:m": 31.0}, "vllm", "m", NS(tps=9.5)) \
+        == "31.0 t/s measured"
+    assert OrchestratorREPL._measured_note({}, "vllm", "m", NS(tps=9.5)) == "~9.5 t/s measured"
+    assert OrchestratorREPL._measured_note({}, None, "m", None) is None
