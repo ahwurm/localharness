@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -156,6 +157,50 @@ def test_server_pid_stale_file_cleared(tmp_path):
     server.server_dir(tmp_path).mkdir(parents=True)
     server.pid_path(tmp_path).write_text("999999999")
     assert server.server_pid(tmp_path) is None
+    assert not server.pid_path(tmp_path).exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
+)
+def test_stop_binary_raises_when_the_process_outlives_sigkill(tmp_path, monkeypatch):
+    """VERIFIED death, the binary twin of the docker branch's #100 name check. SIGKILL delivery
+    is ASYNCHRONOUS — a process unmapping tens of GiB of weights stays resident for seconds —
+    so returning True right after signalling told free_accelerator the accelerator was free
+    while the old model still held it (two heavies on unified memory), and unlinking the pidfile
+    made the strategies' liveness report "no daemon" for a live process. Fail explicit, keep the
+    pidfile: the REPL's `except (RuntimeError, TimeoutError)` swap guard exists for exactly this."""
+    signals: list[int] = []
+    server.server_dir(tmp_path).mkdir(parents=True)
+    server.pid_path(tmp_path).write_text("4242")
+    monkeypatch.setattr(server, "server_pid", lambda _cd: 4242)
+    monkeypatch.setattr(server, "_alive", lambda _pid: True)  # never dies
+    monkeypatch.setattr(server.os, "killpg", lambda pid, sig: signals.append(sig))
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+
+    with pytest.raises(RuntimeError, match="4242"):
+        server.stop_server(tmp_path, launch="binary", timeout_seconds=0.5)
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert server.pid_path(tmp_path).exists()  # still ours to reclaim — never report it gone
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
+)
+def test_stop_binary_confirms_death_after_sigkill(tmp_path):
+    """The positive half, on a REAL process that ignores SIGTERM: the grace expires, SIGKILL
+    lands, the confirm poll sees the corpse and only then reports stopped + drops the pidfile."""
+    cmd = [
+        sys.executable, "-c",
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+    ]
+    pid = server.start_server(tmp_path, cmd)
+    time.sleep(0.3)  # let the handler install before the SIGTERM lands
+    assert server.stop_server(tmp_path, launch="binary", timeout_seconds=1.0) is True
+    assert not server._alive(pid)
     assert not server.pid_path(tmp_path).exists()
 
 
