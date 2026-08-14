@@ -70,15 +70,22 @@ async def _probe_llm(
     """Probe LLM reachability with retry for cold start.
 
     Returns (reachable, probed_tool_call_mode, served_context_window, probe_error). On a clean
-    probe error is None; on failure mode/window are None and probe_error carries the concrete
-    cause (a 404 naming the model, or a connection error) for the caller's message (#44).
+    probe error is None. On reachable=True a non-None probe_error is a DEGRADATION NOTE (tools
+    rejected with HTTP 400, or probe inconclusive) for the caller's startup warnings, not a
+    failure. On reachable=False mode/window are None and probe_error carries the concrete cause
+    (a 404 naming the model, or a connection error) for the caller's message (#44).
 
-    detect_capabilities() NEVER raises — it reports failures via CapabilityResult.probe_error
-    (client.py). We MUST inspect it: a None error is a clean probe; an "HTTP 400" error is the
-    server rejecting the tools param (reachable AND serving the model — carry on in xml); any
-    OTHER probe_error (connection refused, 404 not-served, timeout, auth) is a real reachability
-    failure that must abort startup rather than proceed against a dead endpoint and then
-    misattribute the cause at the TokenCounter step.
+    detect_capabilities() NEVER raises — it reports via CapabilityResult. The gate is
+    CapabilityResult.server_reached (reachability), NOT probe_error's text: any probe the server
+    ANSWERED for this model — native confirmed, tools rejected with 400, or inconclusive (answers
+    arrived but no tool call was ever observed) — returns reachable=True with the probed mode.
+    Only transport-level failures (connection refused, 404 not-served, timeout, auth) retry here
+    (the cold-start purpose) and, exhausted, abort startup rather than proceed against a dead
+    endpoint and then misattribute the cause at the TokenCounter step. The 0.12.0 gate instead
+    string-matched probe_error and read the probe's own xml FALLBACK as a dead endpoint — the
+    probe announced "falling back to xml", then start died on "cannot reach model" with the
+    server up and serving. (probe_error is None still implies reached, for fabricated results
+    predating the field.)
 
     The served window is the single source of truth for the effective context budget — callers
     must use it rather than the config default. Callers must feed the probed mode into LLMConfig
@@ -89,8 +96,8 @@ async def _probe_llm(
     for attempt in range(max_retries):
         try:
             result = await llm.detect_capabilities()
-            if result.probe_error is None or result.probe_error.startswith("HTTP 400"):
-                return True, result.tool_call_mode, result.context_window, None
+            if result.server_reached or result.probe_error is None:
+                return True, result.tool_call_mode, result.context_window, result.probe_error
             probe_error = result.probe_error
         except Exception as exc:  # detect_capabilities shouldn't raise, but never wedge on a surprise
             probe_error = str(exc)
@@ -111,11 +118,22 @@ def _classify_probe_failure(probe_error: str | None) -> str:
         "connection error", "connection refused", "connection reset", "failed to connect",
         "could not connect", "cannot connect", "timed out", "timeout", "getaddrinfo",
         "errno 111", "name or service not known", "max retries",
+        # The harness's OWN vocabulary: for a local endpoint the inference gate's TCP pre-flight
+        # (provider/client.py _inference_gate) raises "... unreachable (TCP connect failed) ..."
+        # BEFORE any openai call, so openai's "Connection error." can no longer occur there — the
+        # dominant real failure (nothing listening) was classifying as 'unknown'.
+        "unreachable", "tcp connect", "connect failed",
     )):
         return "unreachable"
     if any(s in e for s in ("404", "not found", "does not exist", "no such model")):
         return "unserved"
     return "unknown"
+
+
+# ContextConfig.max_context_tokens is ge=1_000 (config/models.py), so a derived bound below it
+# CANNOT be written to config.yaml — the window guard must say the server is too small rather than
+# print an unsatisfiable "set max_context_tokens ≤ 0" (a 4,096-window Ollama hit exactly that).
+MIN_CONFIGURABLE_CONTEXT_TOKENS = 1_000
 
 
 def _effective_max_context(
@@ -127,10 +145,15 @@ def _effective_max_context(
     honored ONLY as an explicit cap when it already fits under served-reserve; otherwise
     the served-derived value wins. If the server didn't report a window, the config value
     is the only signal available.
+
+    No floor: `max(8_192, served - reserve)` sat ABOVE small served windows, so a 4,096-token
+    server green-lit an 8,192-token budget — the exact mid-session 400 this guard exists to
+    prevent — and disagreed with the bound the caller printed as the remedy. Below-minimum
+    results (a server too small to run at all) are the caller's to report honestly.
     """
     if not served_window:
         return cfg_window
-    served_effective = max(8_192, served_window - reserve)
+    served_effective = served_window - reserve
     return cfg_window if cfg_window <= served_effective else served_effective
 
 
@@ -163,32 +186,32 @@ def _ensure_packaged_tools(config_dir: Path) -> None:
         err_console.print(f"[yellow]⚠ could not install design-screenshot.js: {exc}[/yellow]")
 
 
+def _agent_yaml_paths(config_dir: Path) -> list[Path]:
+    """Every agent yaml discovery reads, global dir first so local .localharness/ wins."""
+    return [
+        f
+        for d in (config_dir / "agents", Path(".localharness") / "agents")
+        if d.exists()
+        for f in sorted(d.glob("*.yaml"))
+    ]
+
+
 def _discover_agents_for_start(config_dir: Path) -> list[dict]:
-    """Return agents from global config dir and local .localharness/agents/, local overrides."""
-    global_dir = config_dir / "agents"
-    local_dir = Path(".localharness") / "agents"
+    """Return agents from global config dir and local .localharness/agents/, local overrides.
 
+    An unparseable file is SKIPPED but never SILENTLY: swallowing the parse error made a typo'd
+    agents/orchestrator.yaml indistinguishable from a fresh install, and the caller's mint branch
+    then overwrote it with the default template (role/tools/mcp_servers/permissions lost, no backup).
+    """
     agents: dict[str, dict] = {}
-
-    if global_dir.exists():
-        for f in sorted(global_dir.glob("*.yaml")):
-            try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-                if "name" not in data:
-                    data["name"] = f.stem
-                agents[f.stem] = data
-            except Exception:
-                pass
-
-    if local_dir.exists():
-        for f in sorted(local_dir.glob("*.yaml")):
-            try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-                if "name" not in data:
-                    data["name"] = f.stem
-                agents[f.stem] = data
-            except Exception:
-                pass
+    for f in _agent_yaml_paths(config_dir):
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            if "name" not in data:
+                data["name"] = f.stem
+            agents[f.stem] = data
+        except Exception as exc:  # noqa: BLE001
+            err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
 
     return list(agents.values())
 
@@ -348,6 +371,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             raise typer.Exit(1)
         selected_data = match[0]
     elif not agents:
+        # Zero agents is NOT proof of a fresh install: discovery skips files it cannot parse, so a
+        # one-character YAML typo in agents/orchestrator.yaml lands here too — and the mint below
+        # used to write the 3-line default straight over it. Mint only when there is nothing to lose.
+        unparsed = _agent_yaml_paths(cfg_path)
+        if unparsed:
+            err_console.print(
+                "[bold red]Error:[/bold red] no agent could be loaded, but agent files exist: "
+                f"{', '.join(str(p) for p in unparsed)}. Fix the YAML (see the warnings above) — "
+                "refusing to overwrite it with the default orchestrator."
+            )
+            raise typer.Exit(1)
         # No agents: mint the root agent as 'orchestrator' (ORCH-01)
         console.print("[yellow]No agents configured. Creating the orchestrator (root agent)...[/yellow]")
         agents_dir = cfg_path / "agents"
@@ -419,6 +453,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
     )
+    # detect_capabilities SEEDS CapabilityResult.context_window from this config value and only
+    # overwrites it from a vLLM-shape /v1/models answer (and MUTATES config.context_window as it
+    # goes), so the seed captured here is the sentinel for "no window was ever server-reported".
+    _seed_window = _initial_cfg.context_window
     _probe_client = LLMClient(_initial_cfg)
 
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
@@ -486,17 +524,32 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # (llama.cpp /props, Ollama /api/ps, LM Studio /api/v0/models), so the guard FIRES when the
     # window is discoverable and cleanly discloses (config wins) when it isn't. Blocking httpx → off
     # the event loop (#32); falls back to the probe's window (vLLM parity / a flaked provider probe).
+    # The capability probe's window is only SERVER-REPORTED when it changed from the seed above;
+    # unchanged, it is the harness's own default and must never drive a fail-loud guard (it aborted
+    # every llama.cpp/Ollama/LM Studio/unknown start on a window no server ever served).
+    _probe_window = served_window if served_window != _seed_window else None
     _served = await asyncio.to_thread(
         probe_served_window, provider.base_url, resolved_model, provider.provider_type
-    ) or served_window
-    if _effective_max_context(_served, _cfg_window, RESPONSE_RESERVE_TOKENS) != _cfg_window:
-        usable = (_served or 0) - RESPONSE_RESERVE_TOKENS
-        err_console.print(
-            f"[bold red]Error:[/bold red] config max_context_tokens={_cfg_window} exceeds the "
-            f"served model's usable window ({usable} = {_served}−{RESPONSE_RESERVE_TOKENS} "
-            f"output reserve). It would 400 mid-session. Set max_context_tokens ≤ {usable} in "
-            f"your config.yaml, or run `localharness init` to fit it automatically."
-        )
+    ) or _probe_window
+    _bound = _effective_max_context(_served, _cfg_window, RESPONSE_RESERVE_TOKENS)
+    if _bound != _cfg_window:
+        # The bound printed is the SAME expression the check enforces — the old message derived its
+        # own unfloored number and could tell the user to set an unsatisfiable "≤ 0".
+        if _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
+            err_console.print(
+                f"[bold red]Error:[/bold red] the served context window ({_served}) is too small to "
+                f"run the harness: {RESPONSE_RESERVE_TOKENS} of it is the output reserve, leaving "
+                f"{_bound} for context. Raise the window at the SERVER (llama.cpp `-c`, Ollama "
+                "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
+            )
+        else:
+            err_console.print(
+                f"[bold red]Error:[/bold red] config max_context_tokens={_cfg_window} exceeds the "
+                f"served model's usable window ({_bound} = {_served}−{RESPONSE_RESERVE_TOKENS} "
+                f"output reserve). It would 400 mid-session. Set context.max_context_tokens ≤ "
+                f"{_bound} (under org: in config.yaml, or in the agent's yaml — it is not a "
+                f"top-level key), or raise the served window at the server."
+            )
         raise typer.Exit(1)
 
     # Build the real LLMClient with the probe-derived tool_call_mode (FIDEL-04).
@@ -508,6 +561,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
+        provider_type=provider.provider_type,  # keys the measured-speed ledger (speed_stats)
+        config_dir=cfg_path,  # …and WRITES it where the /model picker reads it (this session's dir)
     )
     llm = LLMClient(llm_cfg)
 
@@ -518,6 +573,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     plugins_loaded = 0
     mcp_connected = 0
     mcp_failed = 0
+
+    # Reachable-but-degraded probe (see _probe_llm): say so in the startup summary instead of
+    # blocking start — the endpoint is alive and serving the model.
+    if probe_error:
+        if probe_error.startswith("HTTP 400"):
+            warnings.append(
+                "provider rejects the `tools` param (HTTP 400) — tool calls run in taught-xml mode"
+            )
+        else:
+            warnings.append(
+                f"capability probe inconclusive ({probe_error}) — proceeding {probed_mode}; if "
+                "tool calls arrive as plain text, check the runtime's tool-call parser flag "
+                "(llama.cpp --jinja, vLLM --tool-call-parser)"
+            )
 
     # --- 1. HARD requirements (abort on failure) ---
     # Phase 33.1: adopt the legacy root data dir (agents/default -> agents/orchestrator)
@@ -804,6 +873,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             max_context_tokens=agent_config.context.max_context_tokens,
             preserve_first_n=agent_config.context.preserve_first_n_messages,
             preserve_last_n=agent_config.context.preserve_last_n_messages,
+            # Without bus= the CompactionTriggered publishes in ContextManager are dead code and
+            # interactive compactions are invisible (found forensically: a real compaction fired
+            # with zero telemetry). session_id stays unset — sessions rotate; agent+iteration id it.
+            bus=bus,
+            agent_id=agent_config.name,
             pipeline=pipeline,
             eviction_store=eviction_store,
             tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
@@ -928,6 +1002,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         ))
         if interactive and isinstance(channel, TerminalChannel):
             channel.first_prompt_hint = _first_prompt_hint(is_returning)
+        if isinstance(channel, TerminalChannel):
+            # Colored tok/s readout (status row / thinking label): poll the client's live
+            # decode-speed snapshot. The client object survives /model rebinds, so this
+            # stays valid across swaps.
+            channel.tps_source = llm.gen_speed_snapshot
 
         # --- Startup summary line ---
         parts = [f"({elapsed:.1f}s startup)"]

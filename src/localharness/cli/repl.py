@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re
 import signal
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
@@ -150,6 +151,7 @@ class OrchestratorREPL:
         self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
         self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
         self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
+        self._ctrl_ready_at: float = 0.0                      # when the coordinator last went idle
         # #93: bounded grace on exit for an in-flight turn to reach its own finalization
         # (TurnCompleted publish + ledger flush) before it is cancelled — never hangs exit.
         self._exit_grace_seconds: float = 2.0
@@ -291,10 +293,14 @@ class OrchestratorREPL:
         self._sigint_armed = False
         try:
             await self._channel.start_input_box(self._box_ctrl_q, self._on_box_interrupt)
+            self._ctrl_ready_at = time.monotonic()
             while True:
                 kind, payload = await self._box_ctrl_q.get()
                 if not await self._handle_box_event(kind, payload):
                     break
+                # Reference point for interrupt staleness: everything queued while the event
+                # above was being handled was typed BEFORE the loop could answer it.
+                self._ctrl_ready_at = time.monotonic()
         finally:
             await self._drain_turn_on_exit()
             await self._channel.stop_input_box()
@@ -329,7 +335,10 @@ class OrchestratorREPL:
             self._cancelled_by_user = True
             self._turn_task.cancel()
         elif self._box_ctrl_q is not None:
-            self._box_ctrl_q.put_nowait(("interrupt", None))
+            # Timestamped: a slash command holds this single coordinator for as long as it runs
+            # (a managed /model swap: minutes), so a queued interrupt must be datable to tell
+            # "the user is pressing Ctrl+C now" from "the user pressed it while we were blocked".
+            self._box_ctrl_q.put_nowait(("interrupt", time.monotonic()))
 
     async def _handle_box_event(self, kind: str, payload: Any) -> bool:
         """Apply one control event. Returns False to end the REPL."""
@@ -337,6 +346,12 @@ class OrchestratorREPL:
             if kind == "eof":
                 return False
             if kind == "interrupt":
+                if payload is not None and payload < self._ctrl_ready_at:
+                    # Pressed while the loop was blocked (a /model swap can block it for
+                    # minutes) → stale by the time it drains. It never reached the user as an
+                    # arming message, so counting it toward the ladder would end the session
+                    # the instant the wait they were sitting through finished.
+                    return True
                 # idle Ctrl+C: arm once, exit on the second (mirrors the classic prompt).
                 if self._sigint_armed:
                     return False
@@ -705,6 +720,11 @@ class OrchestratorREPL:
             )
             return
         managed = self._harness.server
+        # Verified speed context for every surface below (listing, picker, swap notes):
+        # ledger medians keyed provider_type:model, plus the ptypes that key each row group.
+        medians = self._measured_medians()
+        cur_ptype = self._provider_type_for_base_url(llm.config.base_url)
+        prim_ptype = getattr(getattr(self._harness, "provider", None), "provider_type", None)
         downloaded: list[str] = []
         if managed is not None:
             from localharness.provider import server as managed_server
@@ -739,7 +759,10 @@ class OrchestratorREPL:
             # framework · host so a vLLM model reads apart from an Ollama one); HF-cache noise
             # stays out of the menu. Peers only join when they were probed (a routine local arg
             # doesn't probe → peer_target is {} → menu is live+registry, unchanged).
-            self._model_cache[:] = self._compose_model_menu(live, managed, current, peer_target)
+            self._model_cache[:] = self._compose_model_menu(
+                live, managed, current, peer_target,
+                medians=medians, live_ptype=cur_ptype, registry_ptype=prim_ptype,
+            )
             # Phase C2: cold launchable peers are pickable too (the menu never fetches; these are
             # config-derived served-names).
             self._model_cache.extend(n for n in cold_target if n not in self._model_cache)
@@ -758,10 +781,11 @@ class OrchestratorREPL:
                 return
             def _info_suffix(name: str) -> str:
                 entry = managed.entry_for(name) if managed is not None else None
-                if entry is None:
-                    return ""
-                parts = [p for p in (entry.quant,
-                                     f"~{entry.tps:g} t/s measured" if entry.tps else None) if p]
+                rate = self._measured_note(
+                    medians, cur_ptype if name in live else prim_ptype, name, entry
+                )
+                quant = entry.quant if entry is not None and entry.quant else None
+                parts = [p for p in (quant, rate) if p]
                 return f"  [{' · '.join(parts)}]" if parts else ""
 
             # 0.10.0 model tree: with peer endpoints configured, render a grouped-by-endpoint tree
@@ -788,11 +812,13 @@ class OrchestratorREPL:
             # Phase C2: cold launchable peers, numbered continuously after live+downloaded+peers.
             for i, name in enumerate(cold_target, start=len(local_choices) + len(peer_target) + 1):
                 cep = cold_target[name]
+                rate = self._measured_note(medians, cep.provider_type, name)
                 lines.append(
                     f"  {i}. {name}  (cold on {cep.name} — /model launches it on the GPU)"
+                    + (f"  [{rate}]" if rate else "")
                 )
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
-            await self._send_info("\n".join(lines))
+            await self._send_info("\n".join(lines), colorize=True)
             open_menu = getattr(self._channel, "box_open_model_menu", None)
             if open_menu is not None:
                 open_menu()  # one-Enter picker: menu pops with the first model highlighted
@@ -821,8 +847,10 @@ class OrchestratorREPL:
             cap = await llm.detect_capabilities()
             note = await self._refresh_token_counter(target)
             await self._persist_landed(llm.config.base_url, target)
+            rate = self._measured_note(medians, cur_ptype, target)
             await self._send_info(
                 f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
+                + (f" {rate}." if rate else ""), colorize=True,
             )
             return
 
@@ -837,7 +865,8 @@ class OrchestratorREPL:
             # otherwise silently INHERIT the previous endpoint's headers. An endpoint's identity is
             # exactly its own headers.
             llm.rebind_endpoint(
-                ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers
+                ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
+                provider_type=ep.provider_type,
             )
             llm.config.model = target
             cap = await llm.detect_capabilities()
@@ -845,9 +874,11 @@ class OrchestratorREPL:
                 target, base_url=ep.base_url, provider_type=ep.provider_type
             )
             await self._persist_landed(ep.base_url, target)
+            rate = self._measured_note(medians, ep.provider_type, target)
             await self._send_info(
                 f"Switched to {target} on {ep.name} — {ep.base_url} "
                 f"(tool calling: {cap.tool_call_mode}).{note}"
+                + (f" {rate}." if rate else ""), colorize=True,
             )
             return
 
@@ -882,7 +913,11 @@ class OrchestratorREPL:
                 return
             if stopped is not None:
                 self._active_heavy = None
-            await self._send_info(f"Launching {ep.name} — the swap can take several minutes...")
+            tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
+            await self._send_info(
+                f"Launching {ep.name} — the swap can take several minutes...{tradeoff}",
+                colorize=True,
+            )
             try:
                 live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
                     ep.lifecycle, self._config_dir, ep.base_url, on_poll=_cold_progress
@@ -908,16 +943,19 @@ class OrchestratorREPL:
             served = live_ep.served_models[0] if live_ep.served_models else target
             # #3: pass ep.extra_headers directly (see the cross-endpoint branch above) — never None,
             # which would leave the previous endpoint's headers on the client.
-            llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers)
+            llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
+                                provider_type=ep.provider_type)
             llm.config.model = served
             cap = await llm.detect_capabilities()
             note = await self._refresh_token_counter(
                 served, base_url=ep.base_url, provider_type=ep.provider_type
             )
             await self._persist_landed(ep.base_url, served)
+            rate = self._measured_note(medians, ep.provider_type, served)
             await self._send_info(
                 f"Switched to {served} on {ep.name} — {ep.base_url} "
                 f"(tool calling: {cap.tool_call_mode}).{note}"
+                + (f" {rate}." if rate else ""), colorize=True,
             )
             return
 
@@ -926,15 +964,20 @@ class OrchestratorREPL:
         # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
         # the peer. A no-op in the common case (current already == primary).
         _prim = getattr(self._harness, "provider", None)
+        # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
+        # actually ran (possibly a peer), not the primary we are about to re-point at.
+        tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
         if _prim is not None and llm.config.base_url != _prim.base_url:
             # #3: restore the primary identity FULLY — clear any peer extra_headers with {} (not
             # None, which would leave the peer's headers on the client). ProviderConfig has no
             # headers field, so the primary's identity carries none.
-            llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={})
+            llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={},
+                                provider_type=_prim.provider_type)
         from localharness.provider.lifecycle import free_accelerator, strategy_for
         strategy = strategy_for(managed)
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
+            f"{tradeoff}", colorize=True,
         )
         box_note = getattr(self._channel, "box_activity", None)
 
@@ -993,8 +1036,10 @@ class OrchestratorREPL:
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
         await self._persist_landed(llm.config.base_url, served)
+        rate = self._measured_note(medians, prim_ptype, served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
+            + (f" {rate}." if rate else ""), colorize=True,
         )
 
     def _grouped_model_lines(
@@ -1033,6 +1078,7 @@ class OrchestratorREPL:
         groups: dict[str, tuple] = {}
         for m, ep in peer_target.items():
             groups.setdefault(ep.base_url, (ep, []))[1].append(m)
+        medians = self._measured_medians()
         for ep, names in groups.values():
             lines.append(
                 f"▸ {_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"
@@ -1040,7 +1086,8 @@ class OrchestratorREPL:
             for m in names:
                 n += 1
                 mark = "  ● [active]" if m == current else ""
-                lines.append(f"  {n}. {m}{mark}")
+                rate = self._measured_note(medians, ep.provider_type, m)
+                lines.append(f"  {n}. {m}{mark}" + (f"  [{rate}]" if rate else ""))
         for note in disc_notes:
             lines.append(f"  · {note}")
         return lines
@@ -1331,34 +1378,100 @@ class OrchestratorREPL:
         return await asyncio.to_thread(model_ops.list_live_models, base_url)
 
     @staticmethod
-    def _compose_model_menu(live: list, managed, current: str, peer_target: dict | None = None) -> list:
+    def _compose_model_menu(live: list, managed, current: str, peer_target: dict | None = None,
+                            medians: dict | None = None, live_ptype: str | None = None,
+                            registry_ptype: str | None = None) -> list:
         """Picker-menu entries: (name, info-meta) tuples, live models first then registry, then
         peer-endpoint models — HF-cache repos stay OUT of the menu (many are not vLLM-servable; the
-        printed listing keeps them). Info shows only what is KNOWN: quant and measured t/s from the
-        registry entry, never estimates. Peer models (0.10.0 tree) carry `<framework> · <host:port>`
-        as their meta so a vLLM model reads apart from an Ollama one; each is a normal /model
-        completion the completer styles model-pick (one-Enter cross-endpoint switch)."""
-        def info(entry) -> list:
-            if entry is None:
-                return []
-            parts = []
-            if getattr(entry, "quant", None):
-                parts.append(entry.quant)
-            if getattr(entry, "tps", None):
-                parts.append(f"~{entry.tps:g} t/s")
-            return parts
+        printed listing keeps them). Info shows only what is KNOWN: quant, and measured t/s — the
+        auto-recorded speed ledger's verified median first (keyed by the row's provider_type via
+        medians/live_ptype/registry_ptype), the hand-authored registry value (`~`) as fallback,
+        never estimates. A row with a rate returns prompt_toolkit formatted-text meta (list of
+        (style, text) fragments) so the value renders color-banded (tps-green/yellow/red classes
+        in INPUT_STYLE); rateless rows stay plain strings. Peer models (0.10.0 tree) carry
+        `<framework> · <host:port>` so a vLLM model reads apart from an Ollama one; each is a
+        normal /model completion the completer styles model-pick (one-Enter switch)."""
+        from localharness.provider.speed_stats import speed_key, tps_band
+
+        medians = medians or {}
+
+        def rate_for(name, ptype, entry) -> tuple[float, str] | None:
+            v = medians.get(speed_key(ptype, name)) if ptype else None
+            if v is not None:
+                return v, f"{v:.1f} t/s"
+            tps = getattr(entry, "tps", None) if entry is not None else None
+            if tps:
+                return tps, f"~{tps:g} t/s"
+            return None
+
+        def meta(before: list, rate, after: list = []):
+            if rate is None:
+                return " · ".join(before + after)
+            v, txt = rate
+            frags = []
+            if before:
+                frags.append(("", " · ".join(before) + " · "))
+            frags.append((f"class:tps-{tps_band(v)}", txt))
+            if after:
+                frags.append(("", " · " + " · ".join(after)))
+            return frags
+
         entry_for = (lambda n: managed.entry_for(n)) if managed is not None and hasattr(managed, "entry_for") \
             else (lambda n: next((e for e in getattr(managed, "local_models", []) or [] if e.name == n), None))
         out = []
         for name in live:
             status = "serving now" if name == current else "serving"
-            out.append((name, " · ".join([status] + info(entry_for(name)))))
+            entry = entry_for(name)
+            quant = [entry.quant] if entry is not None and getattr(entry, "quant", None) else []
+            out.append((name, meta([status] + quant, rate_for(name, live_ptype, entry))))
         for e in (getattr(managed, "local_models", []) or []) if managed is not None else []:
             if e.name not in live:
-                out.append((e.name, " · ".join(info(e) + ["swap"])))
+                quant = [e.quant] if getattr(e, "quant", None) else []
+                out.append((e.name, meta(quant, rate_for(e.name, registry_ptype, e), ["swap"])))
         for m, ep in (peer_target or {}).items():
-            out.append((m, f"{_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"))
+            head = [f"{_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"]
+            out.append((m, meta(head, rate_for(m, ep.provider_type, None))))
         return out
+
+    def _measured_medians(self) -> dict[str, float]:
+        """speed_key → median VERIFIED tok/s from the auto-recorded ledger (the client measures
+        every cleanly finished stream). Empty on any miss — surfaces fall back to the
+        hand-authored registry tps, or show nothing. Never estimates."""
+        from localharness.provider.speed_stats import all_median_tps, default_speed_stats_path
+        try:
+            return all_median_tps(default_speed_stats_path(self._config_dir))
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _measured_note(medians: dict, ptype: str | None, name: str, entry=None) -> str | None:
+        """Plain-text 'N t/s measured' for listings/swap notes: ledger median first, the
+        registry's hand-measured value (`~`-marked) as fallback, None when neither exists."""
+        from localharness.provider.speed_stats import speed_key
+        v = medians.get(speed_key(ptype, name)) if ptype else None
+        if v is not None:
+            return f"{v:.1f} t/s measured"
+        tps = getattr(entry, "tps", None) if entry is not None else None
+        if tps:
+            return f"~{tps:g} t/s measured"
+        return None
+
+    def _swap_tradeoff_note(self, cur_ptype: str | None, cur_model: str,
+                            tgt_ptype: str | None, tgt_model: str) -> str:
+        """One sentence naming the speed tradeoff a HEAVY swap is about to make, from verified
+        ledger medians only ('' when neither side has one). The colored per-row view lives in
+        the picker; this is the last-chance line where the swap costs minutes of model load."""
+        from localharness.provider.speed_stats import speed_key
+        m = self._measured_medians()
+        cur = m.get(speed_key(cur_ptype, cur_model)) if cur_ptype else None
+        tgt = m.get(speed_key(tgt_ptype, tgt_model)) if tgt_ptype else None
+        if cur is not None and tgt is not None:
+            return f" Measured speed: {cur:.1f} → {tgt:.1f} t/s."
+        if tgt is not None:
+            return f" Target measured at {tgt:.1f} t/s."
+        if cur is not None:
+            return f" Current model runs {cur:.1f} t/s measured; target unmeasured."
+        return ""
 
     async def _prefetch_model_cache(self) -> None:
         """Warm the /model picker menu without ever blocking the UI — best-effort and silent:
@@ -1373,7 +1486,14 @@ class OrchestratorREPL:
             return
         if reachable:
             managed = getattr(self._harness, "server", None) if self._harness is not None else None
-            self._model_cache[:] = self._compose_model_menu(live, managed, llm.config.model)
+            self._model_cache[:] = self._compose_model_menu(
+                live, managed, llm.config.model,
+                medians=self._measured_medians(),
+                live_ptype=(self._provider_type_for_base_url(llm.config.base_url)
+                            if self._harness is not None else None),
+                registry_ptype=getattr(getattr(self._harness, "provider", None),
+                                       "provider_type", None),
+            )
 
     async def _persist_default_model(self, model: str) -> None:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
@@ -1403,8 +1523,11 @@ class OrchestratorREPL:
             lines += [f"  - {name} (pinned to {pin!r})" for name, pin in pinned]
             await self._send_info("\n".join(lines))
 
-    async def _send_info(self, text: str) -> None:
-        await self._channel.send_message(text, metadata={"style": "system.info"})
+    async def _send_info(self, text: str, colorize: bool = False) -> None:
+        meta: dict = {"style": "system.info"}
+        if colorize:
+            meta["colorize"] = "rates"  # terminal styles 'N t/s measured' notes by band
+        await self._channel.send_message(text, metadata=meta)
 
     # ------------------------------------------------------------------ #
     # /memory — the tag-hierarchy window into persistent memory

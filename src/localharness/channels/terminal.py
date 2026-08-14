@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
@@ -32,8 +33,10 @@ from rich.theme import Theme
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
+from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
     Action,
+    CompactionTriggered,
     ConsolidationFinished,
     ConsolidationStarted,
     Escalation,
@@ -116,6 +119,10 @@ INPUT_STYLE = Style.from_dict({
     "ctx-high": "#ff8700",
     "ctx-crit": "ansired bold",
     "ctx-track": "ansibrightblack",
+    # measured tok/s bands (speed_stats.tps_band: >30 / 20–30 / <20) — status row + /model picker
+    "tps-green": "ansigreen",
+    "tps-yellow": "ansiyellow",
+    "tps-red": "ansired bold",
 })
 
 
@@ -136,6 +143,29 @@ def _ctx_segments(pct: float) -> tuple[list[tuple[str, str]], int]:
         (f"class:{level}", label),
     ]
     return frags, 10 + len(label)
+
+
+# 'N t/s measured' / '~N t/s measured' notes in /model listings and swap messages.
+_RATE_NOTE = re.compile(r"~?(\d+(?:\.\d+)?) t/s measured")
+_RATE_STYLE = {"green": "green", "yellow": "yellow", "red": "bold red"}
+
+
+def _colorize_rate_notes(content: str) -> Text:
+    """Plain string → rich Text with every rate note styled by its speed band
+    (speed_stats.tps_band). Text SPANS, never markup parsing: arbitrary surrounding
+    content (model names, URLs, brackets) stays literal, so this path needs no
+    escaping and cannot be style-injected — the safe way to color one substring of
+    an otherwise-untrusted line."""
+    from localharness.provider.speed_stats import tps_band
+
+    text = Text()
+    pos = 0
+    for m in _RATE_NOTE.finditer(content):
+        text.append(content[pos:m.start()])
+        text.append(m.group(0), style=_RATE_STYLE[tps_band(float(m.group(1)))])
+        pos = m.end()
+    text.append(content[pos:])
+    return text
 
 
 class SlashCommandCompleter(Completer):
@@ -195,12 +225,21 @@ def _is_model_pick(comp) -> bool:
     return comp is not None and "model-pick" in (comp.style or "")
 
 
-def _add_menu_keys(kb: KeyBindings) -> None:
+# What the /model picker pre-fills into the box (box_open_model_menu). Named here because the
+# menu-dismiss Esc must be able to take it back OUT again — declining the picker may not strand
+# a `/model ` prefix that turns the user's next line into "Unknown model '<their sentence>'".
+_MODEL_PICK_PREFIX = "/model "
+
+
+def _add_menu_keys(kb: KeyBindings, *, injected_prefix: str = "") -> None:
     """Tab and Esc for the completion menu, shared by both input apps. Tab (menu closed) accepts a
     sole match outright, else opens the menu with the first item highlighted; Tab (menu open)
     highlights the first item or advances to the next. Esc dismisses. Arrow navigation is
     prompt_toolkit's built-in behaviour once the menu is open. Tab computes completions
-    synchronously so it engages immediately, not only after complete-while-typing has fired."""
+    synchronously so it engages immediately, not only after complete-while-typing has fired.
+
+    `injected_prefix` is text the app itself put in the buffer to open the menu (the /model
+    picker's pre-fill): dismissing a menu the user never asked for must leave the line empty."""
 
     @kb.add("tab")
     def _complete(event) -> None:
@@ -222,9 +261,16 @@ def _add_menu_keys(kb: KeyBindings) -> None:
             b.complete_state = CompletionState(original_document=b.document, completions=comps)
             b.go_to_completion(0)
 
-    @kb.add("escape", filter=has_completions)
+    @kb.add("escape", filter=has_completions, eager=True)
     def _dismiss(event) -> None:
-        event.current_buffer.complete_state = None
+        # eager: Esc resolves on its OWN key press. Without it prompt_toolkit holds the press to
+        # see whether a second key completes the `escape, enter` (Alt+Enter) chord, so Esc-then-
+        # Enter inside the 1s timeout submitted a FORCED NUDGE with the menu still open instead
+        # of dismissing and submitting normally.
+        b = event.current_buffer
+        b.cancel_completion()  # back to the pre-preview line — a highlighted item is not a pick
+        if injected_prefix and b.text == injected_prefix:
+            b.reset()  # the picker's own pre-fill: dismissing means "never mind", not "/model "
 
 
 def _menu_float(body) -> FloatContainer:
@@ -346,9 +392,12 @@ def _build_persistent_input_app(
     )
 
     kb = KeyBindings()
-    _add_menu_keys(kb)
+    _add_menu_keys(kb, injected_prefix=_MODEL_PICK_PREFIX)
 
     @kb.add("enter")
+    @kb.add("c-j")  # raw LF: prompt_toolkit's own default treats \n as Enter, because some
+    #                 terminals send it for Return (WSL) — binding it to anything else silently
+    #                 turns every Enter on those terminals into that something else.
     def _submit(event) -> None:
         comp = _accept_completion(buf)
         if comp is not None and not _is_model_pick(comp):
@@ -359,6 +408,21 @@ def _build_persistent_input_app(
             buf.append_to_history()
             on_submit(text)
         buf.reset()  # ready for the next line; the app stays alive
+
+    @kb.add("escape", "enter")  # Alt+Enter (ESC-prefix Meta — works on every terminal)
+    def _submit_nudge(event) -> None:
+        # Chord-level twin of the `!` force prefix: submit the line as a FORCED NUDGE, steering
+        # the RUNNING turn past the nudge/queue classifier; when no turn runs, strip_force makes
+        # it an ordinary submit. Shift+Enter cannot carry this: prompt_toolkit remaps the xterm
+        # Shift+Enter sequence to plain Enter (ansi_escape_sequences: "currently unsupported"),
+        # and Ctrl+J cannot either (it IS Enter on LF terminals, see above), so ESC-prefixed
+        # Alt+Enter is the one reliable cross-terminal spelling. No completion-accept here —
+        # the chord means "send exactly this line, now".
+        text = buf.text
+        if text.strip():
+            buf.append_to_history()  # history keeps what was typed, without the synthetic prefix
+            on_submit(FORCE_PREFIX + text)
+        buf.reset()
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
@@ -584,6 +648,9 @@ class TerminalChannel(ChannelAdapter):
         self._decision_flash_task: asyncio.Task | None = None
         self._first_box_hint: str = ""           # #49 guidance hint, shown in the box until first use
         self.last_activity_summary: str = ""     # latest tool line — tier-2 routing context (box mode)
+        # Decode-speed supplier (start_cmd wires LLMClient.gen_speed_snapshot): () -> (tok/s,
+        # verified) | None. Drives the colored tok/s readout in the status row / thinking label.
+        self.tps_source: Callable[[], tuple[float, bool] | None] | None = None
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
@@ -607,6 +674,9 @@ class TerminalChannel(ChannelAdapter):
         self._turn_failed_handle = self.bus.subscribe(TurnFailed, self.on_turn_failed)
         self._escalation_handle = self.bus.subscribe(Escalation, self.on_escalation)
         self._parse_failed_handle = self.bus.subscribe(ParseFailed, self.on_parse_failed)
+        self._compaction_handle = self.bus.subscribe(
+            CompactionTriggered, self.on_compaction_triggered
+        )
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
         self._consolidation_started_handle = self.bus.subscribe(
             ConsolidationStarted, self.on_consolidation_started
@@ -659,6 +729,10 @@ class TerminalChannel(ChannelAdapter):
                     title=f"[agent.name]{escape(agent_id)}[/agent.name]",
                     border_style="cyan",
                 ))
+            elif metadata and metadata.get("colorize") == "rates":
+                # Trusted-shape opt-in from the REPL's /model surfaces: style the rate notes
+                # by band via Text spans (never markup — content stays injection-proof).
+                self._console.print(_colorize_rate_notes(content))
             else:
                 self._console.print(escape(content))
 
@@ -953,15 +1027,40 @@ class TerminalChannel(ChannelAdapter):
         if not (self._box_working or self._box_dreaming or self._box_activity):
             return []
         glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
+        show_tps = False  # only turn activity shows the rate — never a swap-load or dreaming line
         if self._burst is not None:
             activity = f"{' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
+            show_tps = True
         elif self._box_activity and not self._box_working:
             activity = self._box_activity   # e.g. a /model swap's 'loading <model> · 40s'
         elif self._box_dreaming and not self._box_working:
             activity = _DREAMING_LABEL   # · dreaming…
         else:
             activity = "working"
-        return [("class:hint", f"  {glyph} {activity} ")]
+            show_tps = True
+        frags = [("class:hint", f"  {glyph} {activity} ")]
+        if show_tps:
+            frags.extend(self._tps_frag())
+        return frags
+
+    def _tps_frag(self) -> list[tuple[str, str]]:
+        """Colored tok/s segment for the status row; [] when nothing is known. A live rate
+        carries `~` (chunk-approximate while streaming — self-corrects to the exact rate at
+        stream end); a verified rate is plain. Bands per speed_stats.tps_band (>30 green,
+        20–30 yellow, <20 red). Never raises — the status row must never take the app down."""
+        if self.tps_source is None:
+            return []
+        try:
+            snap = self.tps_source()
+        except Exception:
+            return []
+        if not snap:
+            return []
+        from localharness.provider.speed_stats import tps_band
+
+        tps, verified = snap
+        text = f"· {tps:.1f} tok/s " if verified else f"· ~{tps:.0f} tok/s "
+        return [(f"class:tps-{tps_band(tps)}", text)]
 
     def _invalidate_box(self) -> None:
         if self._box_app is not None and self._box_active:
@@ -972,12 +1071,19 @@ class TerminalChannel(ChannelAdapter):
 
     def box_open_model_menu(self) -> None:
         """Bare /model: pre-fill '/model ' and pop the completion menu with the first model
-        highlighted — the one-Enter picker (scroll + Enter switches). No-op without the box."""
+        highlighted — the one-Enter picker (scroll + Enter switches). No-op without the box.
+
+        Two guards, both about not taking the line away from the user: the listing that precedes
+        this call takes seconds of live probes while the box keeps accepting input, so a line
+        already being typed is NEVER overwritten (it is not in history yet — overwriting it
+        destroys it); and with nothing to pick from the prefix is not injected at all."""
         app = self._box_app
         buf = getattr(app, "_lh_input_buffer", None) if app is not None else None
-        if buf is None:
+        if buf is None or buf.text:
             return
-        buf.text = "/model "
+        if not self._model_names_for_menu():
+            return  # empty menu (server unreachable) — a bare '/model ' prefix would only be noise
+        buf.text = _MODEL_PICK_PREFIX
         buf.cursor_position = len(buf.text)
         buf.start_completion(select_first=True)
         self._invalidate_box()
@@ -1107,15 +1213,37 @@ class TerminalChannel(ChannelAdapter):
             # Box mode: in-frame glyph, never a rich Status (freeze-safe under patch_stdout).
             self.box_notify_working(True)
             return
-        if (self._thinking is None and self._dreaming is None
-                and self._burst is None and self._state == "IDLE"):
+        if self._thinking is not None:
+            try:  # already spinning (a later iteration's heartbeat): refresh the tok/s suffix
+                self._thinking.update(self._thinking_label())
+            except Exception:
+                pass
+            return
+        if (self._dreaming is None and self._burst is None and self._state == "IDLE"):
             try:
-                self._thinking = self._console.status(
-                    "[muted]thinking\u2026[/muted]", spinner="dots"
-                )
+                self._thinking = self._console.status(self._thinking_label(), spinner="dots")
                 self._thinking.start()
             except Exception:
                 self._thinking = None  # a broken spinner must never break output
+
+    def _thinking_label(self) -> str:
+        """Classic-mode spinner label: 'thinking\u2026' plus the last VERIFIED decode rate, colored
+        by band. No per-token ticker outside the box \u2014 the label refreshes once per iteration
+        heartbeat, so only the verified (stream-end) figure is shown, never the mid-stream
+        approximation."""
+        label = "[muted]thinking\u2026[/muted]"
+        snap = None
+        if self.tps_source is not None:
+            try:
+                snap = self.tps_source()
+            except Exception:
+                snap = None
+        if snap and snap[1]:
+            from localharness.provider.speed_stats import tps_band
+
+            band = tps_band(snap[0])
+            label += f" [{band}]{snap[0]:.1f} tok/s[/{band}]"
+        return label
 
     def _start_dreaming(self) -> None:
         """Quiet '\u00b7 dreaming\u2026' status while a background memory consolidation/mining

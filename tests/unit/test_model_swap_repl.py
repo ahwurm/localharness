@@ -89,10 +89,14 @@ async def test_listing_names_registry_models_and_feeds_picker_cache(tmp_path, mo
     assert "nvfp4 (compressed-tensors)" in out         # per-model info in the listing
     assert "~9.5 t/s" in out                           # measured throughput shown
     # picker menu = live + registry ONLY (HF-cache noise stays out of the scroll path),
-    # each with its info meta
+    # each with its info meta; the t/s segment is formatted text carrying its color band
+    # (30 is yellow — the owner spec colors >30 green, 20–30 yellow; 9.5 is red).
     assert r._model_cache == [
-        ("qwen3.6-35b-a3b", "serving now · nvfp4 (modelopt) · ~30 t/s"),
-        ("qwen3.6-27b", "nvfp4 (compressed-tensors) · ~9.5 t/s · swap"),
+        ("qwen3.6-35b-a3b", [("", "serving now · nvfp4 (modelopt) · "),
+                             ("class:tps-yellow", "~30 t/s")]),
+        ("qwen3.6-27b", [("", "nvfp4 (compressed-tensors) · "),
+                         ("class:tps-red", "~9.5 t/s"),
+                         ("", " · swap")]),
     ]
     assert chan.menu_opened == 1                       # bare /model auto-opens the picker menu
 

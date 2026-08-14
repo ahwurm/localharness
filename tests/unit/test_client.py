@@ -183,6 +183,7 @@ async def test_detect_capabilities_native():
 
     assert result.tool_call_mode == "native"
     assert result.probe_error is None
+    assert result.server_reached is True
 
 
 @pytest.mark.asyncio
@@ -217,6 +218,7 @@ async def test_detect_capabilities_xml():
         result = await client.detect_capabilities()
 
     assert result.tool_call_mode == "xml"
+    assert result.server_reached is True
 
 
 @pytest.mark.asyncio
@@ -250,6 +252,7 @@ async def test_detect_capabilities_fallback():
 
     assert result.tool_call_mode == "xml"
     assert result.probe_error is not None
+    assert result.server_reached is True  # a 400 IS the server answering for this model
 
 
 def _probe_client(create_side_effect):
@@ -370,7 +373,70 @@ async def test_probe_gives_up_after_exhausting_attempts():
 
     assert result.tool_call_mode == "xml"
     assert result.probe_error is not None
+    assert result.server_reached is False  # nothing ever answered — start must abort, not xml-run
     assert mock_openai.chat.completions.create.await_count == 3
+
+
+def _toolless_completion(text):
+    msg = MagicMock()
+    msg.tool_calls = None
+    msg.content = text
+    return MagicMock(choices=[MagicMock(message=msg)])
+
+
+@pytest.mark.asyncio
+async def test_probe_inconclusive_on_answering_server_keeps_taught_xml():
+    """An exhausted-INCONCLUSIVE probe on a server that answers and ACCEPTS `tools` stays xml —
+    the only mode that both sends `tools=` AND teaches the call syntax in the system prompt, so
+    every server class in this branch keeps a working path. The retry loop (622e27b) is what
+    keeps a transient blip from landing here at all; it must still not ABORT the session
+    (server_reached stays the separate reachability axis start's gate reads).
+
+    History: on 2026-08-10 this branch was flipped to native, reasoning that absence of evidence
+    must not condemn a session to xml (trigger: DeepSeek-V4-Flash Q2_K on llama.cpp answered 9/9
+    probe retries without a parsable call, then called tools natively minutes later). Reverted —
+    native is SILENT degradation for the other class landing here: a server that answers 200
+    while silently DROPPING the tools param (llama.cpp without --jinja, Gemma-class templates —
+    see _complete_xml's docstring). In native mode nothing ever tells that model a tool exists,
+    so it emits prose, no call attempt is made, and loop.py's ParseFailed — the claimed
+    mitigation — can never fire: a tool-blind session for its whole life."""
+    config, mock_openai = _probe_client(
+        [_toolless_completion(f"The directory contains files ({i}).") for i in range(3)]
+    )
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        client = LLMClient(config)
+        result = await client.detect_capabilities()
+
+    assert result.tool_call_mode == "xml"
+    assert result.probe_error == "no tool call in probe response"
+    assert result.server_reached is True  # reachable — start must proceed, not abort
+    # Mode and converter in lockstep: the taught-syntax injection is actually live (native mode
+    # clears the converter, which is what leaves a silent-drop server with no path at all).
+    assert client.config.tool_call_mode == "xml"
+    assert isinstance(client._fn_converter, FnCallConverter)
+    assert mock_openai.chat.completions.create.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_probe_varies_prompt_across_attempts():
+    """Identical probe retries are NOT independent samples: llama.cpp routes an identical request
+    to the same slot by prefix match and replays the same KV-cache state, deterministically
+    re-deriving the SAME completion (observed live: 9/9 no-tool-call, then the same request after
+    a fresh prompt eval called the tool). Each attempt must vary the prompt so a retry is a
+    genuinely new evaluation."""
+    config, mock_openai = _probe_client(
+        [_toolless_completion("There are some files here.") for _ in range(3)]
+    )
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        await LLMClient(config).detect_capabilities()
+
+    prompts = [
+        call.kwargs["messages"][1]["content"]
+        for call in mock_openai.chat.completions.create.await_args_list
+    ]
+    assert len(prompts) == 3 and len(set(prompts)) == 3, prompts
 
 
 # ---------------------------------------------------------------------------

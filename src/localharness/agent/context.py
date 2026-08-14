@@ -338,6 +338,10 @@ class TokenCounter:
         self._gguf = None  # exact_local: a GgufTokenizer over the served model's own GGUF vocab
         self._model: str | None = None
         self._messages_exact: bool = False  # server can count whole message lists (probed at rebind)
+        # Why the last _post_json returned None — the string for messages, the exception for
+        # classifying transport-death vs contract weirdness in _tokenize_failure.
+        self._last_post_error: str | None = None
+        self._last_post_exc: Exception | None = None
         self._cache: dict[str, int] = {}
         # "off": offline cl100k estimator (no server configured — tests/bench). "vllm"/"llamacpp":
         # exact remote via that runtime's /tokenize contract. "approximate": inflated cl100k (the
@@ -485,9 +489,14 @@ class TokenCounter:
 
     def _post_json(self, url: str, payload: dict) -> dict | None:
         """POST JSON, return the parsed JSON reply, or None on ANY failure — callers decide
-        whether a miss is a probe result (degrade) or a mid-session error (raise)."""
+        whether a miss is a probe result (degrade) or a mid-session error (raise). The failure
+        CAUSE is kept on _last_post_error so mid-session raises can name it — a dead server
+        (connection refused after a kill) and a contract miss are different operator problems,
+        and "call failed" alone sent the user hunting a counter bug when the endpoint was down."""
         import json as _json
         import urllib.request
+        self._last_post_error = None
+        self._last_post_exc = None
         try:
             body = _json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
@@ -495,9 +504,39 @@ class TokenCounter:
             )
             with urllib.request.urlopen(req, timeout=10.0) as resp:
                 data = _json.loads(resp.read().decode("utf-8"))
-            return data if isinstance(data, dict) else None
-        except Exception:
+            if isinstance(data, dict):
+                return data
+            self._last_post_error = f"non-object JSON reply from {url}"
             return None
+        except Exception as exc:
+            self._last_post_error = f"{type(exc).__name__}: {exc} (POST {url})"
+            self._last_post_exc = exc
+            return None
+
+    def _tokenize_failure(self, what: str) -> Exception:
+        """Build the mid-session fail-loud error for a counting miss. Transport-level causes
+        (connection refused / reset / timeout — the server was killed or restarted underneath
+        the session) become ProviderConnectionError so the agent loop surfaces "model server
+        unreachable" calmly, on the same llm_error path as a failed completion — NOT an
+        internal-error traceback (live 2026-08-10: llama-server took two SIGINTs mid-turn and
+        the resulting spew read as a harness bug). Everything else — an HTTP status, bad JSON,
+        a foreign reply shape — stays RuntimeError: the server is talking, the contract isn't
+        being met, and that IS a bug to fail loud on. Either way: never approximate."""
+        import urllib.error
+        cause = self._last_post_error or "unrecognized reply shape"
+        if isinstance(self._last_post_exc, OSError) and not isinstance(
+            self._last_post_exc, urllib.error.HTTPError  # HTTPError = the server ANSWERED
+        ):
+            from localharness.provider.client import ProviderConnectionError
+            return ProviderConnectionError(
+                f"model server unreachable at {self._tokenize_url} ({cause}) — it may have "
+                f"been stopped; restart it and the session will resume. Exact token counting "
+                f"refuses approximate substitutes."
+            )
+        return RuntimeError(
+            f"TokenCounter: {what} failed mid-session at {self._tokenize_url} ({cause}); "
+            f"refusing to substitute an approximate count."
+        )
 
     def _remote_count(self, text: str) -> int | None:
         """Exact server-side count, or None on ANY failure. Shape follows self._mode:
@@ -557,10 +596,7 @@ class TokenCounter:
             # Live mode: the server tokenizer is the only source of truth. Fail loud on a miss.
             n = self._remote_count(text)
             if n is None:
-                raise RuntimeError(
-                    f"TokenCounter: /tokenize call failed mid-session at {self._tokenize_url}; "
-                    f"refusing to substitute an approximate count."
-                )
+                raise self._tokenize_failure("/tokenize call")
         elif self._encoder is not None:
             # cl100k estimator. disallowed_special=() so literal special-token text is counted as
             # ordinary text. Approximate mode inflates by the safety factor (over-count is safe);
@@ -609,10 +645,7 @@ class TokenCounter:
             return cached
         n = self._remote_count_messages(messages, tools)
         if n is None:
-            raise RuntimeError(
-                f"TokenCounter: message-level tokenize failed mid-session at "
-                f"{self._tokenize_url}; refusing to substitute an approximate count."
-            )
+            raise self._tokenize_failure("message-level tokenize")
         if len(self._cache) < 50_000:
             self._cache[key] = n
         return n

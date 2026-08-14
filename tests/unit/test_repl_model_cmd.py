@@ -1,6 +1,7 @@
 """REPL /model — list, hot-swap, managed restart, persistence."""
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -27,23 +28,79 @@ class FakeChannel:
         self.messages.append(text)
 
 
+_REBIND_UNSET = object()  # mirrors LLMClient._REBIND_UNSET — see rebind_endpoint below
+
+
 class FakeLLM:
-    def __init__(self, model="model-a", base_url="http://localhost:8081/v1", mode="native"):
-        self.config = SimpleNamespace(base_url=base_url, model=model)
+    def __init__(self, model="model-a", base_url="http://localhost:8081/v1", mode="native",
+                 provider_type="vllm"):
+        self.config = SimpleNamespace(base_url=base_url, model=model, provider_type=provider_type)
         self._mode = mode
-        self.rebinds: list = []  # (base_url, api_key, extra_headers) per cross-endpoint rebind
+        # (base_url, api_key, extra_headers, provider_type) per cross-endpoint rebind — the
+        # provider_type is recorded, not swallowed: it is the speed ledger's key.
+        self.rebinds: list = []
 
     async def detect_capabilities(self):
         return SimpleNamespace(tool_call_mode=self._mode)
 
-    def rebind_endpoint(self, base_url, *, api_key=None, extra_headers=None):
-        # Mirrors LLMClient.rebind_endpoint's observable effect: re-point at the new server.
-        self.rebinds.append((base_url, api_key, extra_headers))
+    def rebind_endpoint(self, base_url, *, api_key=None, extra_headers=None,
+                        provider_type=_REBIND_UNSET):
+        # Mirrors LLMClient.rebind_endpoint's observable effect: re-point at the new server. The
+        # sentinel default is load-bearing — OMITTED means "leave provider_type unchanged" while
+        # an explicit None means "set it to unknown runtime". Collapsing the two (defaulting to
+        # None) would let a call site that DROPS provider_type still look correct here, while in
+        # production the client keeps the old endpoint's type and files speed samples under the
+        # wrong ledger key.
+        self.rebinds.append((base_url, api_key, extra_headers, provider_type))
         self.config.base_url = base_url
+        if provider_type is not _REBIND_UNSET:
+            self.config.provider_type = provider_type  # ledger key follows the target endpoint
 
 
-def _repl(tmp_path, harness, live):
-    channel = FakeChannel()
+class FakeBoxChannel(FakeChannel):
+    """FakeChannel + the box-mode surface `_run_with_box` drives: start/stop, the control-queue
+    hand-off and the frame hooks. Input arrives the way the real prompt_toolkit box delivers it —
+    through the queue the REPL hands us, with Ctrl+C going through the on_interrupt callback."""
+
+    def __init__(self):
+        super().__init__()
+        self.ctrl_q = None
+        self.on_interrupt = None
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def start_input_box(self, ctrl_queue, on_interrupt) -> None:
+        self.ctrl_q, self.on_interrupt = ctrl_queue, on_interrupt
+
+    async def stop_input_box(self) -> None:
+        pass
+
+    async def box_echo_prompt(self, text, annotation="") -> None:
+        pass
+
+    def box_set_queued(self, n: int) -> None:
+        pass
+
+    def box_notify_working(self, on: bool) -> None:
+        pass
+
+
+async def _until(pred, timeout: float = 2.0) -> None:
+    """Poll until `pred()` holds, with a HARD bound — a wedged coordinator fails this test
+    instead of hanging the suite."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not pred():
+        assert loop.time() < deadline, "condition never became true"
+        await asyncio.sleep(0.01)
+
+
+def _repl(tmp_path, harness, live, channel=None):
+    channel = channel if channel is not None else FakeChannel()
     agent = SimpleNamespace(_llm=FakeLLM())
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(),
@@ -158,6 +215,51 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     assert not (tmp_path / "config.yaml").exists()
     overlay = load_overlay(tmp_path / "overrides.yaml")  # #35: under config_dir, not LOCALHARNESS_HOME
     assert overlay["provider"]["default_model"] == "cached-b"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_during_a_slow_model_swap_never_exits_the_session(tmp_path):
+    """A /model swap blocks the single box coordinator for as long as it runs (a managed restart:
+    minutes). Ctrl+C presses land in the control queue meanwhile — invisible, since the loop
+    cannot answer them — and drain the INSTANT the swap finishes: two of them armed and then
+    exited the session the user had just spent minutes waiting for. A press from that blocked
+    window is stale and must not count toward the arm-then-exit ladder; a fresh one still does."""
+    channel = FakeBoxChannel()
+    repl, _, agent = _repl(tmp_path, _harness(), live=["model-a", "model-b"], channel=channel)
+    entered, gate = asyncio.Event(), asyncio.Event()
+
+    async def slow_live_models(base_url):  # stands in for the swap's blocking probe/restart
+        entered.set()
+        await gate.wait()
+        return ["model-a", "model-b"], True
+
+    repl._live_models = slow_live_models
+    loop_task = asyncio.ensure_future(repl._run_with_box())
+    try:
+        await _until(lambda: channel.ctrl_q is not None)
+        channel.ctrl_q.put_nowait(("submit", "/model model-b"))
+        await asyncio.wait_for(entered.wait(), timeout=2.0)  # the swap now owns the coordinator
+
+        channel.on_interrupt()  # impatient user: nothing is happening on screen…
+        channel.on_interrupt()
+        assert repl._sigint_armed is False, "the blocked loop cannot have answered either press"
+
+        gate.set()
+        await _until(lambda: any("Switched to model-b" in m for m in channel.messages))
+        await _until(lambda: channel.ctrl_q.empty())  # the backlog drains here
+        assert not loop_task.done(), "a Ctrl+C from the wait must not end the session"
+        assert repl._sigint_armed is False
+        assert not any("Ctrl+C again" in m for m in channel.messages)
+        assert agent._llm.config.model == "model-b"
+
+        # …and the ladder itself still works for presses made NOW: arm, then exit.
+        channel.on_interrupt()
+        await _until(lambda: repl._sigint_armed)
+        assert any("Ctrl+C again" in m for m in channel.messages)
+        channel.on_interrupt()
+        await asyncio.wait_for(loop_task, timeout=2.0)
+    finally:
+        loop_task.cancel()
 
 
 @pytest.mark.asyncio
@@ -591,6 +693,10 @@ async def test_model_cross_endpoint_switch_rebinds_refits_persists(tmp_path):
     assert agent._llm.rebinds and agent._llm.rebinds[0][0] == "http://localhost:11434/v1"
     assert agent._llm.config.model == "gpt-oss:20b"
     assert agent._llm.config.base_url == "http://localhost:11434/v1"
+    # the CLIENT's provider_type moved too (passed explicitly, not left at the old vLLM) — this
+    # is the speed ledger's key, so a stale one files this peer's samples under `vllm:…`
+    assert agent._llm.rebinds[0][3] == "ollama"
+    assert agent._llm.config.provider_type == "ollama"
     # counter refit used the PEER's provider_type (ollama → labeled approximate), not the old vLLM
     assert refresh_calls == [("gpt-oss:20b", "http://localhost:11434/v1", "ollama")]
     # persisted the peer endpoint (active_endpoint), not provider.default_model
@@ -732,6 +838,8 @@ async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(tmp_p
     assert agent._llm.config.model == "qwen-gguf"
     assert agent._llm.config.base_url == "http://127.0.0.1:8080/v1"
     assert agent._llm.rebinds and agent._llm.rebinds[0][0] == "http://127.0.0.1:8080/v1"
+    assert agent._llm.rebinds[0][3] == "llamacpp"          # ledger key follows the launched peer
+    assert agent._llm.config.provider_type == "llamacpp"
     assert repl._active_heavy == (cold.lifecycle, "http://127.0.0.1:8080/v1")  # GPU occupant moved
     assert persisted == [("http://127.0.0.1:8080/v1", "qwen-gguf")]
     assert "Switched to qwen-gguf on llamacpp-local" in channel.messages[-1]
@@ -1160,3 +1268,21 @@ async def test_model_flat_listing_unchanged_without_peers(tmp_path):
     assert "▸" not in out  # no grouped-tree headers
     assert out.startswith("Models:")
     assert "1. model-a" in out and "2. model-b" in out
+
+
+async def test_swap_tradeoff_note_from_ledger(tmp_path):
+    """Heavy-swap announcements name the verified tradeoff (ledger medians only): both sides,
+    target-only, current-only, or silence — never an estimate."""
+    from localharness.provider.speed_stats import record_tps
+
+    repl, channel, agent = _repl(tmp_path, _harness(), ["model-a"])
+    path = tmp_path / "speed_stats.json"  # config_dir=tmp_path roots the ledger here
+    record_tps(path, "vllm", "cur", 31.0)
+    record_tps(path, "ollama", "tgt", 12.0)
+    assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "tgt") \
+        == " Measured speed: 31.0 → 12.0 t/s."
+    assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope") \
+        == " Current model runs 31.0 t/s measured; target unmeasured."
+    assert repl._swap_tradeoff_note("vllm", "nope", "ollama", "tgt") \
+        == " Target measured at 12.0 t/s."
+    assert repl._swap_tradeoff_note(None, "cur", None, "tgt") == ""

@@ -10,6 +10,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -61,6 +62,17 @@ class LLMConfig:
     is_local: bool = True
     extra_headers: dict[str, str] = field(default_factory=dict)
     stop_sequences: list[str] = field(default_factory=list)
+    # Runtime family serving this endpoint ("vllm"/"llamacpp"/"ollama"/"lmstudio"/None-unknown).
+    # Keys the measured-speed ledger (speed_stats) — None disables recording, never guesses.
+    # rebind_endpoint() must carry the TARGET endpoint's type (a stale type would file samples
+    # under the wrong runtime).
+    provider_type: str | None = None
+    # The SESSION's config dir (start's `--config-dir`), for config-dir-relative state — today
+    # the speed ledger. None keeps the #35 ambient precedence ($LOCALHARNESS_DIR else ~), which
+    # is only ever right when no explicit dir was given: `--config-dir` never exports the env
+    # var, so a client without this writes a ledger the REPL (which reads the session's dir)
+    # never sees.
+    config_dir: str | Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +87,11 @@ class CapabilityResult:
     supports_streaming: bool
     probe_duration_ms: float
     probe_error: str | None
+    # Reachability is a SEPARATE axis from capability: True whenever the server ANSWERED the
+    # probe for this model (a 200, or a 400 rejecting `tools`) even if no tool call was ever
+    # observed. start's abort gate reads THIS — never probe_error's text, which conflated
+    # "inconclusive" with "dead endpoint" in 0.12.0.
+    server_reached: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +194,16 @@ _QUEUE_VISIBILITY_SECONDS = 2.0
 # first, so a genuinely xml-only server pays these attempts once at startup, not per turn.
 _PROBE_ATTEMPTS = 3
 _PROBE_RETRY_DELAY_S = 1.0
+# One prompt per attempt, all obvious list_files triggers. Retrying the IDENTICAL request is not
+# an independent sample: llama.cpp routes it to the same slot by prefix match and replays the same
+# KV-cache state, so the same completion comes back deterministically — observed live with
+# DeepSeek-V4-Flash Q2_K: 9/9 retries no parsable tool call, then the identical request after a
+# fresh prompt eval called the tool. Varying the prompt makes each retry a new evaluation.
+_PROBE_PROMPTS = (
+    "What files are in the current directory?",
+    "Show me the files in this directory.",
+    "Use the available tool to list this directory's contents.",
+)
 
 
 def _inference_lock_path(base_url: str) -> str:
@@ -398,6 +425,13 @@ class LLMClient:
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
         )
+        # Live decode-speed state (speed_stats): while a stream is active this points at that
+        # stream's progress dict ({"first_at","chunks","server_tps"}) for the UI's tick-poll;
+        # last_gen_tps is the previous stream's VERIFIED rate (exact usage over the measured
+        # window, or the engine's own reported rate). Concurrent streams on one client would
+        # race the pointer — display-only state, the per-call ledger recording stays correct.
+        self._stream_progress: dict | None = None
+        self.last_gen_tps: float | None = None
 
     def _build_client(self) -> AsyncOpenAI:
         """Construct the AsyncOpenAI bound to the CURRENT self.config (base_url/api_key/headers/
@@ -420,12 +454,15 @@ class LLMClient:
             max_retries=0 if c.is_local else 2,
         )
 
+    _REBIND_UNSET: Any = object()  # "param not passed" — None is a real value (unknown runtime)
+
     def rebind_endpoint(
         self,
         base_url: str,
         *,
         api_key: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        provider_type: str | None | Any = _REBIND_UNSET,
     ) -> None:
         """Re-point this client at a DIFFERENT server (a cross-endpoint /model swap). The
         AsyncOpenAI bakes base_url in at construction, so re-pointing REBUILDS it, and resets the
@@ -447,12 +484,18 @@ class LLMClient:
             self._client,
             self._tools_param_rejected,
             self._extra_body_rejected,
+            self.config.provider_type,
         )
         self.config.base_url = base_url
         if api_key is not None:
             self.config.api_key = api_key
         if extra_headers is not None:
             self.config.extra_headers = dict(extra_headers)
+        if provider_type is not self._REBIND_UNSET:
+            # SET, not leave-unchanged (the extra_headers #3 lesson): callers pass the target's
+            # actual type — None included — so a peer of unknown runtime never inherits the old
+            # endpoint's type and files speed samples under the wrong ledger key.
+            self.config.provider_type = provider_type
         try:
             # TODO(follow-up): the previous AsyncOpenAI (prev[3]) is not explicitly aclose()'d here —
             # closing an async client from this sync method needs care (event-loop ownership).
@@ -466,17 +509,30 @@ class LLMClient:
                 self._client,
                 self._tools_param_rejected,
                 self._extra_body_rejected,
+                self.config.provider_type,
             ) = prev
             raise
         self._tools_param_rejected = False
         self._extra_body_rejected = False
+        # Success only (a failed rebind still serves the OLD endpoint, whose rate is still true):
+        # the previous server's verified decode rate says nothing about the new one.
+        self.last_gen_tps = None
 
     async def detect_capabilities(self) -> CapabilityResult:
         """Probe the model to determine tool call mode and context window. Never raises."""
         start = time.monotonic()
+        # A measured rate belongs to the model that produced it. Every /model swap path assigns
+        # config.model then calls this, so clearing here is the one choke point that keeps the
+        # OLD model's tok/s from being shown — in green, as VERIFIED — for the new one.
+        self.last_gen_tps = None
         probe_error: str | None = None
         tool_call_mode: Literal["native", "xml", "text"] = "xml"
         context_window = self.config.context_window
+        # Tracked separately from the mode: reached = the server answered the probe for this
+        # model at least once; rejected = it answered 400 to the `tools` param (the one case
+        # where taught-xml is the only option left).
+        server_reached = False
+        server_rejected_tools = False
 
         probe_tools = [
             {
@@ -504,7 +560,9 @@ class LLMClient:
                             {"role": "system", "content": "You are a helpful assistant."},
                             {
                                 "role": "user",
-                                "content": "What files are in the current directory?",
+                                # Varied per attempt — see _PROBE_PROMPTS: an identical retry
+                                # replays the runtime's cached state and its exact completion.
+                                "content": _PROBE_PROMPTS[attempt % len(_PROBE_PROMPTS)],
                             },
                         ],
                         tools=probe_tools,
@@ -514,6 +572,7 @@ class LLMClient:
                         max_tokens=256,
                         temperature=0.0,
                     )
+                server_reached = True  # an HTTP answer for this model — the endpoint is alive
                 msg = response.choices[0].message
                 if msg.tool_calls:
                     tool_call_mode = "native"
@@ -528,17 +587,17 @@ class LLMClient:
                     )
                     break
                 probe_error = "no tool call in probe response"
-                tool_call_mode = "xml"
             except openai.BadRequestError as exc:
                 # A 400 is the server ANSWERING: it does not accept `tools`. Retrying cannot
                 # change that, so this is definitive and ends the loop immediately.
+                server_reached = True
+                server_rejected_tools = True
                 probe_error = f"HTTP 400: {exc}"
                 tool_call_mode = "xml"
                 log.warning("Server rejected tools parameter, forcing XML mode: %s", exc)
                 break
             except Exception as exc:
                 probe_error = str(exc)
-                tool_call_mode = "xml"
             if attempt < _PROBE_ATTEMPTS - 1:
                 log.warning(
                     "Capability probe inconclusive (attempt %d/%d): %s — retrying",
@@ -548,17 +607,39 @@ class LLMClient:
                 )
                 await asyncio.sleep(_PROBE_RETRY_DELAY_S * (attempt + 1))
         if probe_error and tool_call_mode != "native":
-            log.warning(
-                "Capability probe never confirmed native tool calling after %d attempts (%s) — "
-                "falling back to xml. A model whose native syntax is not <tool_call> will have "
-                "its calls rendered as chat text in this mode; check the runtime's tool-call "
-                "parser flag (llama.cpp --jinja, vLLM --tool-call-parser).",
-                # ACTUAL attempts, not the ceiling: a definitive answer (HTTP 400) breaks on
-                # the first pass, and reporting "after 3 attempts" there sends whoever is
-                # debugging a probe failure looking for two retries that never happened.
-                attempt + 1,
-                probe_error,
-            )
+            # ACTUAL attempts, not the ceiling: a definitive answer (HTTP 400) breaks on
+            # the first pass, and reporting "after 3 attempts" there sends whoever is
+            # debugging a probe failure looking for two retries that never happened.
+            if server_reached and not server_rejected_tools:
+                # Exhausted-INCONCLUSIVE on a server that ACCEPTED `tools` but never demonstrated
+                # one. Stays xml (the config default here), because the biggest class in this
+                # branch is the server that answers 200 while SILENTLY DROPPING the tools param
+                # (llama.cpp without --jinja, Gemma-class templates — see _complete_xml): in
+                # native mode nothing ever tells that model a tool exists, so it emits prose, no
+                # ParseFailed can fire (loop.py gates it on a recognizable call attempt) and the
+                # session is tool-blind for its whole life with one startup line as the only
+                # signal. xml still sends `tools=` AND folds the taught syntax into the system
+                # prompt, so both server classes at least have a working path. The retry loop
+                # above (622e27b) is what stops a transient blip from landing here at all.
+                log.warning(
+                    "Capability probe never confirmed native tool calling after %d attempts "
+                    "(%s) — server accepts the tools param but never used it; using xml (tools "
+                    "param + taught syntax). If the model calls tools in its own native dialect, "
+                    "check the runtime's tool-call parser flag (llama.cpp --jinja, "
+                    "vLLM --tool-call-parser).",
+                    attempt + 1,
+                    probe_error,
+                )
+            else:
+                log.warning(
+                    "Capability probe never confirmed native tool calling after %d attempts "
+                    "(%s) — falling back to xml. A model whose native syntax is not "
+                    "<tool_call> will have its calls rendered as chat text in this mode; "
+                    "check the runtime's tool-call parser flag (llama.cpp --jinja, "
+                    "vLLM --tool-call-parser).",
+                    attempt + 1,
+                    probe_error,
+                )
 
         # Context window detection — vLLM/OpenAI-compat /v1/models shape ONLY (context_length|
         # max_model_len). llama.cpp/Ollama/LM Studio don't report a window here, so this stays the
@@ -595,6 +676,7 @@ class LLMClient:
             supports_streaming=True,
             probe_duration_ms=duration_ms,
             probe_error=probe_error,
+            server_reached=server_reached,
         )
 
     @staticmethod
@@ -765,8 +847,17 @@ class LLMClient:
         if stream:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
-            response = await self._client.chat.completions.create(**kwargs)
-            message, usage = await self._consume_native_stream(response, on_token)
+            # Local dict per call (concurrent streams each keep their own); the instance
+            # pointer only serves the UI's tick-poll and is cleared before measurement.
+            progress: dict[str, Any] = {"first_at": None, "chunks": 0, "server_tps": None}
+            self._stream_progress = progress
+            try:
+                response = await self._client.chat.completions.create(**kwargs)
+                message, usage = await self._consume_native_stream(response, on_token, progress)
+            finally:
+                self._stream_progress = None
+            # Only a cleanly finished stream reaches here — errors/cancels above skip recording.
+            self._note_gen_speed(progress, usage)
         else:
             response = await self._client.chat.completions.create(**kwargs)
             message = response.choices[0].message
@@ -781,6 +872,51 @@ class LLMClient:
             usage = response.usage
         self._unmap_tool_call_names(message, name_unmap)
         return message, usage
+
+    def _note_gen_speed(self, progress: dict, usage: Any) -> None:
+        """Verified decode rate of a cleanly finished stream → last_gen_tps + the speed ledger.
+
+        The engine's own reported rate (llama.cpp `timings.predicted_per_second`) wins when
+        present; otherwise exact usage completion_tokens over the measured first-delta→done
+        wall window. No usage and no engine rate → nothing recorded (never estimate). Ledger
+        recording additionally needs config.provider_type (the key) — last_gen_tps still
+        updates without it — and lands in config.config_dir, the SESSION's dir, which is what
+        the REPL reads back. Never raises: a stats miss must not fail a completion."""
+        from localharness.provider.speed_stats import (
+            decode_tps, default_speed_stats_path, record_tps,
+        )
+        try:
+            tps = progress.get("server_tps")
+            if not tps:
+                ctokens = getattr(usage, "completion_tokens", None) if usage is not None else None
+                first_at = progress.get("first_at")
+                if ctokens and first_at is not None:
+                    tps = decode_tps(ctokens, first_at, time.monotonic())
+            if not tps or tps <= 0:
+                return
+            self.last_gen_tps = float(tps)
+            if self.config.provider_type:
+                record_tps(default_speed_stats_path(self.config.config_dir),
+                           self.config.provider_type, self.config.model, float(tps))
+        except Exception as exc:
+            log.warning("speed ledger update failed (non-fatal): %s", exc)
+
+    def gen_speed_snapshot(self) -> tuple[float, bool] | None:
+        """(tok/s, verified) for a status line, or None when nothing is known yet.
+
+        While a stream is active: its live chunk rate — chunks≈tokens on local runtimes, so
+        approximate (verified=False); the number self-corrects to the exact rate at stream
+        end. Otherwise the last stream's verified rate. Poll-cheap (UI tick): no locks, no I/O."""
+        from localharness.provider.speed_stats import decode_tps
+
+        p = self._stream_progress
+        if p is not None and p.get("first_at") is not None:
+            live = decode_tps(p.get("chunks", 0), p["first_at"], time.monotonic())
+            if live is not None:
+                return (live, False)
+        if self.last_gen_tps:
+            return (self.last_gen_tps, True)
+        return None
 
     @staticmethod
     def _unmap_tool_call_names(message: Any, unmap: dict[str, str] | None) -> None:
@@ -808,6 +944,7 @@ class LLMClient:
     async def _consume_native_stream(
         response: Any,
         on_token: Callable[[str], Awaitable[None]] | None,
+        progress: dict | None = None,
     ) -> tuple[Any, Any]:
         """Assemble a chat-completions chunk stream into (message, usage).
 
@@ -816,6 +953,11 @@ class LLMClient:
         cleanly when the assistant message is replayed in later request history. Usage
         arrives on the final chunk when stream_options.include_usage is set; None if
         the provider omits it (loop falls back to tiktoken estimation).
+
+        `progress` (speed_stats): mutated in place with first payload-delta time and a
+        payload-chunk count — content, tool-call AND reasoning deltas all count, so a
+        native tool-calling or thinking stream measures like a prose one — plus the
+        engine-reported decode rate when the runtime states one (llama.cpp `timings`).
         """
         from types import SimpleNamespace
 
@@ -826,6 +968,11 @@ class LLMClient:
         async for chunk in response:
             if getattr(chunk, "usage", None) is not None:
                 usage = chunk.usage
+            if progress is not None:
+                timings = getattr(chunk, "timings", None)  # llama.cpp extension field
+                pps = timings.get("predicted_per_second") if isinstance(timings, dict) else None
+                if pps:
+                    progress["server_tps"] = pps
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -838,6 +985,14 @@ class LLMClient:
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
+            if progress is not None and (
+                getattr(delta, "content", None)
+                or getattr(delta, "tool_calls", None)
+                or getattr(delta, "reasoning_content", None)
+            ):
+                progress["chunks"] += 1
+                if progress["first_at"] is None:
+                    progress["first_at"] = time.monotonic()
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)

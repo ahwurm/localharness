@@ -299,3 +299,201 @@ def test_rebind_none_headers_leaves_previous_unchanged():
     c.rebind_endpoint("http://127.0.0.1:11434/v1", extra_headers=None)
     assert c.config.extra_headers == {"X-Custom": "secret"}  # unchanged
     assert "X-Custom" in c._client.default_headers
+
+
+# ---------------------------------------------------------------------------
+# Measured decode speed (speed_stats wiring)
+# ---------------------------------------------------------------------------
+
+
+def _mk_speed_client(tmp_path, monkeypatch, provider_type="llamacpp"):
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path))  # ledger lands under tmp
+    return LLMClient(LLMConfig(base_url="http://127.0.0.1:9/v1", model="m",
+                               provider_type=provider_type))
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_counts_payload_deltas_once_each():
+    """Content, tool-call AND reasoning deltas all advance the live progress (a native
+    tool-calling or thinking stream measures like a prose one); role-only and usage-only
+    chunks are not payload."""
+    from localharness.provider.client import LLMClient
+
+    progress = {"first_at": None, "chunks": 0, "server_tps": None}
+    chunks = [
+        NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None))]),  # role-only
+        _chunk(content="a"),
+        _chunk(tool_calls=[NS(index=0, id="t", function=NS(name="f", arguments="{}"))]),
+        NS(usage=None,
+           choices=[NS(delta=NS(content=None, tool_calls=None, reasoning_content="hm"))]),
+        NS(usage=NS(prompt_tokens=1, completion_tokens=3, total_tokens=4), choices=[]),
+    ]
+    await LLMClient._consume_native_stream(_aiter(chunks), None, progress)
+    assert progress["chunks"] == 3
+    assert progress["first_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_captures_engine_reported_rate():
+    """llama.cpp's timings.predicted_per_second (engine ground truth) rides the final chunk."""
+    from localharness.provider.client import LLMClient
+
+    progress = {"first_at": None, "chunks": 0, "server_tps": None}
+    final = NS(usage=NS(prompt_tokens=8, completion_tokens=40, total_tokens=48), choices=[],
+               timings={"predicted_per_second": 16.49})
+    await LLMClient._consume_native_stream(_aiter([_chunk(content="x"), final]), None, progress)
+    assert progress["server_tps"] == 16.49
+
+
+def test_note_gen_speed_records_verified_wall_rate(tmp_path, monkeypatch):
+    """Exact usage tokens over the measured first-delta→done window → last_gen_tps + a
+    ledger sample under provider_type:model."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 13.0)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 31, "server_tps": None},
+                      NS(completion_tokens=31))
+    assert c.last_gen_tps == 10.0  # 30 intervals / 3s
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 10.0
+
+
+def test_note_gen_speed_prefers_engine_rate_and_needs_ptype_for_ledger(tmp_path, monkeypatch):
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    c = _mk_speed_client(tmp_path, monkeypatch, provider_type=None)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 5, "server_tps": 16.49},
+                      NS(completion_tokens=40))
+    assert c.last_gen_tps == 16.49  # engine truth wins over wall math
+    assert not default_speed_stats_path().exists()  # no provider_type → no key → no write
+
+
+def test_note_gen_speed_without_usage_or_engine_rate_records_nothing(tmp_path, monkeypatch):
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 50, "server_tps": None}, None)
+    assert c.last_gen_tps is None  # chunk counts alone are never a verified sample
+
+
+def test_gen_speed_snapshot_states(tmp_path, monkeypatch):
+    """None → live (~approximate) while a stream is active → last verified after."""
+    from localharness.provider import client as client_mod
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    assert c.gen_speed_snapshot() is None
+    c._stream_progress = {"first_at": 10.0, "chunks": 21, "server_tps": None}
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 12.0)
+    assert c.gen_speed_snapshot() == (10.0, False)  # 20 intervals / 2s, live
+    c._stream_progress = None
+    c.last_gen_tps = 16.5
+    assert c.gen_speed_snapshot() == (16.5, True)
+
+
+@pytest.mark.asyncio
+async def test_create_and_consume_stream_measures_and_records(tmp_path, monkeypatch):
+    """Full stream path: include_usage requested, progress cleared after the stream, and a
+    cleanly finished stream leaves a verified rate + a ledger sample."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    final = NS(usage=NS(prompt_tokens=8, completion_tokens=11, total_tokens=19), choices=[])
+    chunks = [_chunk(content="x"), _chunk(content="y"), _chunk(content="z"), final]
+
+    async def fake_create(**kwargs):
+        assert kwargs["stream_options"] == {"include_usage": True}
+        return _aiter(chunks)
+
+    c._client = NS(chat=NS(completions=NS(create=fake_create)))
+    ticks = iter([100.0, 102.0])  # first payload delta at 100, note-time at 102
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: next(ticks, 102.0))
+    msg, usage = await c._create_and_consume({}, stream=True)
+    assert msg.content == "xyz"
+    assert usage.completion_tokens == 11
+    assert c._stream_progress is None  # cleared even though the stream succeeded
+    assert c.last_gen_tps == 5.0  # 10 intervals / 2s
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 5.0
+
+
+def test_ledger_lands_in_the_sessions_config_dir_with_env_unset(tmp_path, monkeypatch):
+    """`--config-dir` must reach the WRITER. Typer's envvar only READS $LOCALHARNESS_DIR — the
+    flag never exports it — so a session started with an explicit dir has the env unset and the
+    ambient path resolves to ~/.localharness: a ledger the REPL (which reads the session's dir)
+    never sees, plus state leaking out of a deliberately isolated config dir."""
+    from localharness.provider.client import LLMClient, LLMConfig
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)  # legacy leg of the #35 chain
+    session_dir = tmp_path / "alt-config"
+    c = LLMClient(LLMConfig(base_url="http://127.0.0.1:9/v1", model="m",
+                            provider_type="llamacpp", config_dir=session_dir))
+    c._note_gen_speed({"first_at": 10.0, "chunks": 5, "server_tps": 16.49}, None)
+
+    assert median_tps(default_speed_stats_path(session_dir), "llamacpp", "m") == 16.49
+    assert default_speed_stats_path() != default_speed_stats_path(session_dir)  # ambient ≠ session
+
+
+def test_llm_config_without_config_dir_keeps_ambient_ledger(tmp_path, monkeypatch):
+    """Backward compatible: no config_dir (every existing caller until start passes one) keeps
+    the ambient #35 precedence — $LOCALHARNESS_DIR else ~."""
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)  # sets LOCALHARNESS_DIR, no config_dir field
+    assert c.config.config_dir is None
+    c._note_gen_speed({"first_at": 10.0, "chunks": 5, "server_tps": 20.0}, None)
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 20.0
+
+
+def test_rebind_endpoint_clears_the_previous_endpoints_verified_rate(tmp_path, monkeypatch):
+    """A verified rate belongs to the model that produced it. After a cross-endpoint swap the
+    old server's tok/s must not be reported as the new model's measurement (the terminal renders
+    verified rates in green, and _thinking_label shows ONLY verified ones)."""
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    c.last_gen_tps = 31.0
+    c.rebind_endpoint("http://127.0.0.1:11434/v1", provider_type="ollama")
+    assert c.last_gen_tps is None
+    assert c.gen_speed_snapshot() is None  # no number beats a stale one
+
+
+def test_failed_rebind_keeps_the_still_current_rate(tmp_path, monkeypatch):
+    """Mirror of the exception-safety contract: a rebind that raises leaves the client on the
+    OLD endpoint, where the measured rate is still true — clearing it would lose a real sample."""
+    from localharness.provider.client import LLMClient
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    c.last_gen_tps = 31.0
+
+    def boom(self):
+        raise RuntimeError("cannot build client")
+
+    monkeypatch.setattr(LLMClient, "_build_client", boom)
+    with pytest.raises(RuntimeError, match="cannot build client"):
+        c.rebind_endpoint("http://127.0.0.1:11434/v1")
+    assert c.last_gen_tps == 31.0
+
+
+@pytest.mark.asyncio
+async def test_detect_capabilities_clears_the_previous_models_verified_rate():
+    """Same-endpoint hot swap assigns config.model then re-probes — detect_capabilities is the
+    one choke point every swap path crosses, so the stale rate dies there too."""
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    # is_local=False → the inference gate yields without a TCP probe (CPU-only, no network).
+    c = LLMClient(LLMConfig(base_url="http://127.0.0.1:8000/v1", model="fast-model",
+                            timeout_seconds=600, is_local=False))
+    c.last_gen_tps = 31.0          # measured on the OUTGOING model
+    c.config.model = "slow-model"  # what the hot swap does, before probing
+
+    async def create_native(**kw):
+        return NS(choices=[NS(message=NS(tool_calls=[NS(id="t")], content=None))])
+
+    async def models_empty():
+        return NS(data=[])
+
+    c._client = NS(chat=NS(completions=NS(create=create_native)), models=NS(list=models_empty))
+    await c.detect_capabilities()
+    assert c.last_gen_tps is None
+    assert c.gen_speed_snapshot() is None  # no number beats the old model's number

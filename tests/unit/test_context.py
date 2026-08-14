@@ -290,6 +290,39 @@ def test_token_counter_llamacpp_shape(monkeypatch):
     assert not tc.approximate
 
 
+def test_token_counter_dead_server_raises_connection_error_with_cause(monkeypatch):
+    """Server killed mid-session (live 2026-08-10: llama-server took two SIGINTs mid-turn):
+    count() must fail loud as ProviderConnectionError NAMING the transport cause, so the agent
+    loop renders "model server unreachable" calmly instead of an internal-error traceback —
+    and never substitutes an approximate count. A server that ANSWERS badly (HTTP 500) is a
+    contract failure, not unreachability: that stays RuntimeError."""
+    import urllib.error
+    import urllib.request
+    from localharness.agent import context as ctxmod
+    from localharness.provider.client import ProviderConnectionError
+
+    captured: list = []
+    _patch_llama_server(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(
+        base_url="http://localhost:8080/v1", model="qwen", provider_type="llamacpp"
+    )
+
+    def refused(req, timeout=0):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+    with pytest.raises(ProviderConnectionError) as ei:
+        tc.count("fresh text the probe never cached")
+    assert "unreachable" in str(ei.value)
+    assert "Connection refused" in str(ei.value)
+
+    def erroring(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", erroring)
+    with pytest.raises(RuntimeError) as ei2:  # would NOT catch ProviderConnectionError
+        tc.count("another fresh text, also uncached")
+    assert "HTTPError" in str(ei2.value)
+
+
 def test_token_counter_llamacpp_count_messages_two_hop(monkeypatch):
     """llamacpp count_messages = /apply-template (renders the server's own template, tools
     included) then /tokenize {content, add_special:true} — the chat path tokenizes its render
@@ -462,11 +495,14 @@ def test_successful_rebind_clears_message_cache(monkeypatch):
 
 def test_token_counter_count_messages_mid_session_failure_raises(monkeypatch):
     """Once message-level exact is locked on, a mid-session miss fails LOUD (same contract as
-    count()) — never a silent substitution of an approximate number."""
+    count()) — never a silent substitution of an approximate number. A transport-level miss
+    ("server went away") is typed ProviderConnectionError so the loop surfaces it as the calm
+    llm_error path, naming the cause — still loud, better addressed."""
     import pytest
     import urllib.error
     import urllib.request
     from localharness.agent import context as ctxmod
+    from localharness.provider.client import ProviderConnectionError
 
     captured: list = []
     _patch_vllm_server(monkeypatch, captured)
@@ -476,7 +512,7 @@ def test_token_counter_count_messages_mid_session_failure_raises(monkeypatch):
     def refuse(req, timeout=0):
         raise urllib.error.URLError("server went away")
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
-    with pytest.raises(RuntimeError, match="message-level tokenize failed"):
+    with pytest.raises(ProviderConnectionError, match="unreachable"):
         tc.count_messages([{"role": "user", "content": "fresh, uncached"}])
 
 

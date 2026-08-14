@@ -359,6 +359,38 @@ async def test_run_turn_publishes_turn_completed(mock_llm_client, bus):
 
 
 @pytest.mark.asyncio
+async def test_run_turn_dead_provider_is_llm_error_not_traceback(mock_llm_client, bus, caplog):
+    """The model server dying mid-session (killed/restarted underneath the REPL — live
+    2026-08-10) is a KNOWN operational condition: a ProviderError escaping _execute_loop
+    (e.g. the TokenCounter's dead-endpoint raise in build_messages) must surface as the
+    calm llm_error TurnFailed — one WARNING line, NO internal_error, NO stack-trace spew
+    that reads as failing harness behavior."""
+    import logging
+    from localharness.provider.client import ProviderConnectionError
+
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="never reached")], bus)
+
+    async def dead_build_messages(*a, **k):
+        raise ProviderConnectionError(
+            "model server unreachable at http://localhost:8000/tokenize (Connection refused)"
+        )
+    loop._ctx.build_messages = dead_build_messages
+
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.loop"):
+        summary = await loop.run_turn("task")
+
+    assert "unreachable" in summary
+    failed = bus.history(event_types=[TurnFailed])
+    assert len(failed) == 1
+    assert failed[0].reason == "llm_error"
+    assert "unreachable" in failed[0].detail
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], \
+        "a dead provider must not log an ERROR/traceback — it is not an internal error"
+    assert any("Provider failure" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_sitting_session_id_stable_across_turns(mock_llm_client, bus):
     """SESS-01: a loop built with session_id keeps ONE sitting id across every turn, and
     current_session_id is valid BEFORE the first run_turn (kills the repl.py:94 off-by-one
@@ -2293,3 +2325,170 @@ async def test_no_usage_fallback_counts_wire_tools_and_honors_sticky_rejection(m
     loop2._llm = llm2
     await loop2.run_turn("task")
     assert seen["tools"] is None
+
+
+# ---------------------------------------------------------------------------
+# History hygiene: the sanitizer and the leading system message
+# ---------------------------------------------------------------------------
+
+
+class _OneToolRegistry:
+    """Registry exposing one real schema (so the act-guard arms) and recording dispatches."""
+    def __init__(self, dispatched: list | None = None):
+        self._dispatched = dispatched if dispatched is not None else []
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolSchema
+        return {"bash": ToolSchema(name="bash", description="run a command",
+                                   parameters={"type": "object"})}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolResult
+        self._dispatched.append((name, arguments))
+        return ToolResult(output="ok", success=True)
+
+
+@pytest.mark.asyncio
+async def test_spontaneous_confirmed_keeps_the_users_own_message(mock_llm_client, bus):
+    """A bare CONFIRMED as the turn's FIRST reply (documented small-local-model behaviour)
+    must not cost the user their question: only a HARNESS nudge may be popped with the
+    sentinel. Previously the role check alone deleted the task and left the act-guard's
+    scolding as the only user turn for the rest of the sitting."""
+    from localharness.agent.loop import _ACT_GUARD_NUDGE
+
+    Response = mock_llm_client.Response
+    responses = [Response(content="CONFIRMED"), Response(content="Paris.")]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_OneToolRegistry())
+
+    summary = await loop.run_turn("What is the capital of France?")
+
+    assert summary == "Paris."
+    user_msgs = [m["content"] for m in loop._conversation if m.get("role") == "user"]
+    assert "What is the capital of France?" in user_msgs      # the user's own turn survives
+    assert _ACT_GUARD_NUDGE not in user_msgs[:1]              # not replaced by the nudge
+    # The imitable bare sentinel is still dropped from the persisted history.
+    assert not any(m.get("role") == "assistant" and m.get("content") == "CONFIRMED"
+                   for m in loop._conversation)
+
+
+@pytest.mark.asyncio
+async def test_leading_system_message_refreshed_not_duplicated(mock_llm_client, bus):
+    """A persisted conversation carrying a system message but NO user turn must have that
+    message REFRESHED, not prefixed with a second one — a non-leading system role is the
+    SEMA-05 P0 (strict templates 400 every later turn of the sitting)."""
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus)
+    captured: list = []
+    original = loop._llm.stream_complete
+
+    async def capturing(messages=None, tools=None, on_token=None):
+        captured.append(list(messages or []))
+        return await original(messages=messages, tools=tools, on_token=on_token)
+
+    loop._llm.stream_complete = capturing
+    await loop.run_turn("task", initial_messages=[{"role": "system", "content": "stale prompt"}])
+
+    roles = [m.get("role") for m in captured[0]]
+    assert roles.count("system") == 1                      # refreshed in place
+    assert roles[0] == "system"
+    assert captured[0][0]["content"] != "stale prompt"     # …with the CURRENT prompt
+    assert [m.get("role") for m in loop._conversation].count("system") == 1
+
+
+# ---------------------------------------------------------------------------
+# Unparseable tool calls: loud, and never a fabricated success
+# ---------------------------------------------------------------------------
+
+_DSML_CALL = '<｜DSML｜tool invoke="create_file">\npath\n</｜DSML｜tool>'
+
+
+@pytest.mark.asyncio
+async def test_unparseable_tool_call_past_retry_budget_fails_the_turn(mock_llm_client, bus):
+    """Once the 3 retries are spent, a still-unparseable tool call must END THE TURN as a
+    failure. It used to fall through to the natural-completion path and ship the raw call
+    text as a SUCCESSFUL final answer — the silent failure v0.12.0 closed, moved past the
+    retry budget."""
+    from localharness.core.events import TaskComplete
+    from localharness.agent.loop import _PARSE_FAILED_TURN_NOTICE
+
+    Response = mock_llm_client.Response
+    responses = [Response(content=_DSML_CALL) for _ in range(6)]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_OneToolRegistry())
+
+    summary = await loop.run_turn("create a file")
+
+    assert summary.startswith(_PARSE_FAILED_TURN_NOTICE)      # honest notice, not an answer
+    assert "Last reply text (unparsed)" in summary            # …the raw text only as evidence
+    parse_failed = bus.history(event_types=[ParseFailed])
+    assert [e.parse_retry_count for e in parse_failed] == [1, 2, 3, 4]   # incl. the terminal one
+    assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
+    failed = bus.history(event_types=[TurnFailed])
+    assert len(failed) == 1 and failed[0].reason == "llm_error"
+    assert failed[0].detail.startswith(_PARSE_FAILED_TURN_NOTICE)
+
+
+@pytest.mark.asyncio
+async def test_native_mode_reads_the_taught_xml_the_nudge_asks_for(mock_llm_client, bus):
+    """In native mode the parse-failure nudge teaches <tool_call> XML that native extraction
+    could never read: an obedient model burned all 3 retries and (after _clean_summary stripped
+    the block) delivered an EMPTY answer. The taught block must now execute."""
+    Response = mock_llm_client.Response
+    dispatched: list = []
+    taught = ('<tool_call>\n<name>bash</name>\n'
+              '<parameters>{"cmd": "ls"}</parameters>\n</tool_call>')
+    responses = [Response(content=taught), Response(content="Listed.")]
+    loop = _make_agent_loop(mock_llm_client, responses, bus,
+                            tool_registry=_OneToolRegistry(dispatched))
+    assert loop._llm.config.tool_call_mode == "native"
+
+    summary = await loop.run_turn("list the files")
+
+    assert dispatched == [("bash", {"cmd": "ls"})]            # obeying the nudge now works
+    assert summary == "Listed."
+    assert not bus.history(event_types=[ParseFailed])
+    # Content-derived calls are back-filled onto the assistant message, so this iteration's
+    # tool result is not stripped as orphaned.
+    assistant = [m for m in loop._conversation if m.get("role") == "assistant"]
+    assert assistant[0].get("tool_calls")
+    assert any(m.get("role") == "tool" for m in loop._conversation)
+
+
+@pytest.mark.asyncio
+async def test_non_object_tool_arguments_do_not_kill_the_turn(mock_llm_client, bus):
+    """Positional-style native arguments ('["/tmp/x"]') parse as valid JSON but are not an
+    object: assigned straight through they blew up Action(tool_params=...) with a pydantic
+    ValidationError and ended the turn as internal_error."""
+    Response = mock_llm_client.Response
+    ToolCallObj = mock_llm_client.ToolCall
+    dispatched: list = []
+    tc = ToolCallObj(id="tc-1", name="bash", arguments=["/tmp/x"])   # JSON array, not an object
+    responses = [Response(content=None, tool_calls=[tc]), Response(content="Recovered.")]
+    loop = _make_agent_loop(mock_llm_client, responses, bus,
+                            tool_registry=_OneToolRegistry(dispatched))
+
+    summary = await loop.run_turn("read it")
+
+    assert not bus.history(event_types=[TurnFailed])          # no internal_error / traceback
+    assert dispatched == [("bash", {})]                       # coerced to an empty object
+    assert summary == "Recovered."
+
+
+@pytest.mark.asyncio
+async def test_dropped_native_tool_calls_publish_parse_failed(mock_llm_client, bus):
+    """Native tool calls whose arguments JSON is unrepairable are dropped — until now with a
+    log line as the ONLY trace: no ParseFailed, no channel warning, and the turn still reported
+    success (and bench counted parse_failures=0 for a turn that lost a tool call)."""
+    Response = mock_llm_client.Response
+    unrepairable = {"id": "tc-1", "type": "function",
+                    "function": {"name": "write_file", "arguments": '{"a": twelve}'}}
+    responses = [Response(content=None, tool_calls=[unrepairable]),
+                 Response(content="Answered without the tool.")]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_OneToolRegistry())
+
+    summary = await loop.run_turn("write the file")
+
+    parse_failed = bus.history(event_types=[ParseFailed])
+    assert len(parse_failed) == 1
+    assert parse_failed[0].parse_retry_count == 1
+    assert "write_file" in parse_failed[0].raw_content_preview
+    assert summary == "Answered without the tool."

@@ -123,6 +123,27 @@ def test_effective_max_context_no_served_uses_config():
     assert _effective_max_context(None, 61_440, 4_096) == 61_440
 
 
+def test_effective_max_context_never_exceeds_the_served_window():
+    """The old `max(8_192, served-reserve)` floor sat ABOVE small windows: a 4,096-token server
+    green-lit an 8,192-token budget — twice the window, the exact mid-session 400 this guard
+    exists to prevent."""
+    from localharness.cli.start_cmd import _effective_max_context
+    assert _effective_max_context(4_096, 8_192, 4_096) != 8_192
+    for served in (4_096, 8_192, 10_000, 12_288, 64_000, 131_072):
+        assert _effective_max_context(served, 200_000, 4_096) <= served - 4_096
+
+
+def test_min_configurable_context_tokens_matches_the_schema():
+    """The guard's honest-message threshold must BE ContextConfig's floor: printing a remedy the
+    config schema rejects ("set max_context_tokens ≤ 0") is what made the old message unusable."""
+    from localharness.cli.start_cmd import MIN_CONFIGURABLE_CONTEXT_TOKENS
+    from localharness.config.models import ContextConfig
+
+    ContextConfig(max_context_tokens=MIN_CONFIGURABLE_CONTEXT_TOKENS)  # accepted
+    with pytest.raises(Exception):
+        ContextConfig(max_context_tokens=MIN_CONFIGURABLE_CONTEXT_TOKENS - 1)
+
+
 # ---------------------------------------------------------------------------
 # start — no agents → init flow + default agent creation
 # ---------------------------------------------------------------------------
@@ -606,6 +627,43 @@ def test_start_single_agent_no_picker(tmp_path):
     assert agents[0]["name"] == "solo"
 
 
+def test_discovery_surfaces_unparseable_agent_file(tmp_path, monkeypatch):
+    """A YAML that will not parse is skipped but NAMED. Swallowing it (`except Exception: pass`)
+    made a typo'd root agent look exactly like a fresh install to the caller."""
+    from localharness.cli.start_cmd import _discover_agents_for_start
+    errs = _capture_err_console(monkeypatch)
+
+    _write_agent(tmp_path / "agents", "good")
+    (tmp_path / "agents" / "orchestrator.yaml").write_text(
+        "name: orchestrator\nrole: My tuned assistant\ntools:\n   builtin:\n  - bash\n"
+    )
+
+    agents = _discover_agents_for_start(tmp_path)
+    assert [a["name"] for a in agents] == ["good"]
+    assert any("orchestrator.yaml" in e for e in errs), errs
+
+
+async def test_start_refuses_to_mint_over_unparseable_root_agent(tmp_path, monkeypatch):
+    """DATA LOSS: discovery skips unparseable files, so a one-space indent typo in
+    agents/orchestrator.yaml reached the `not agents` mint branch and was overwritten by the
+    3-line default — role/tools/mcp_servers/permissions gone, no backup. start must refuse."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    errs = _capture_err_console(monkeypatch)
+
+    root = tmp_path / "agents" / "orchestrator.yaml"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    original = "name: orchestrator\nrole: My carefully tuned assistant\ntools:\n   builtin:\n  - bash\n"
+    root.write_text(original)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path))
+    assert ei.value.exit_code != 0
+    assert root.read_text() == original, "the user's agent yaml must be left byte-identical"
+    assert any("orchestrator.yaml" in e for e in errs), "the failing file must be named"
+
+
 def test_resolve_timeout_precedence():
     """Per-agent timeout override wins when set; None falls back to the provider default.
 
@@ -872,6 +930,139 @@ async def test_start_guard_fires_for_discoverable_nonvllm_window(tmp_path, monke
 
     with pytest.raises(typer.Exit):
         await _start_async(None, False, False, str(tmp_path))
+
+
+def _stub_nonvllm_start(tmp_path, monkeypatch, *, served, probe_window):
+    """A llama.cpp-shaped start: config.yaml at the default budget, _probe_llm returning what the
+    real capability probe returns for a non-vLLM runtime, and a chosen provider-aware window."""
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+    )
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", probe_window, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: served,
+    )
+
+
+async def test_start_does_not_abort_on_a_fabricated_probe_window(tmp_path, monkeypatch):
+    """detect_capabilities SEEDS CapabilityResult.context_window from LLMConfig and only overwrites
+    it from a vLLM-shape /v1/models answer — for llama.cpp/Ollama/LM Studio/unknown it returns the
+    harness's OWN default. The guard treated that fabricated number as a served window and aborted
+    every such start ("exceeds the served model's usable window" for a window nobody served)."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
+    # served=None: the provider-aware probe can't reach llama.cpp's /props either — so the ONLY
+    # window on offer is the probe's seeded default, which is no evidence at all.
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=None, probe_window=DEFAULT_MAX_CONTEXT_TOKENS)
+
+    await _start_async(None, False, False, str(tmp_path))  # must NOT raise
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete", \
+        "an undiscovered window must disclose (config wins), never hard-fail"
+
+
+async def test_start_window_guard_prints_the_bound_it_enforces(tmp_path, monkeypatch):
+    """The guard checked `max(8_192, served-reserve)` but printed the unfloored `served-reserve`,
+    so the remedy it named was not the value it accepted. The printed bound must BE the ceiling."""
+    import re
+
+    import typer
+    from localharness.agent.context import RESPONSE_RESERVE_TOKENS
+    from localharness.cli.start_cmd import _effective_max_context, _start_async
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=10_000, probe_window=None)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    msg = "\n".join(errs)
+    match = re.search(r"max_context_tokens ≤ (\d+)", msg)
+    assert match, msg
+    bound = int(match.group(1))
+    assert _effective_max_context(10_000, bound, RESPONSE_RESERVE_TOKENS) == bound, \
+        "the printed remedy must actually pass the guard"
+    assert _effective_max_context(10_000, bound + 1, RESPONSE_RESERVE_TOKENS) != bound + 1, \
+        "…and it must be the CEILING, not an arbitrary number below it"
+
+
+async def test_start_window_guard_small_window_names_the_server_fix(tmp_path, monkeypatch):
+    """Ollama's default num_ctx=4096 minus the 4096 output reserve leaves nothing, and the guard
+    told the user to "set max_context_tokens ≤ 0" — a value ContextConfig (ge=1_000) rejects, with
+    `localharness init` (which keeps 131,072 for Ollama) as the only other remedy. Onboarding
+    dead-ended. The message must name the SERVER-side fix instead."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=4_096, probe_window=None)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    msg = "\n".join(errs)
+    assert "≤ 0" not in msg and "≤ -" not in msg, f"unsatisfiable remedy: {msg}"
+    assert "too small" in msg
+    assert "OLLAMA_CONTEXT_LENGTH" in msg, "name the server-side knob that actually fixes it"
+
+
+async def test_start_threads_config_dir_into_llm_config(tmp_path, monkeypatch):
+    """The speed ledger the /model picker READS is <config-dir>/speed_stats.json (repl passes its
+    cfg_path). Without the config dir on LLMConfig the client writes to the ambient
+    ~/.localharness instead, so measured t/s never shows up for a `--config-dir` session."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    live = [c for c in seen if c.provider_type]  # the session client, not the bare probe client
+    assert live, "no LLMClient was built with the provider type"
+    assert all(Path(c.config_dir) == tmp_path for c in live), \
+        [str(c.config_dir) for c in live]
+
+
+async def test_start_wires_the_bus_into_the_context_manager(tmp_path, monkeypatch):
+    """CompactionTriggered is published by ContextManager only when it holds a bus; without
+    bus= the interactive REPL's compactions are invisible (a real one fired 2026-08-13 with
+    zero telemetry). Pin bus + agent_id wiring so the publishes stay reachable."""
+    from localharness.agent.context import ContextManager
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen: list = []
+    real_init = ContextManager.__init__
+
+    def spy_init(self, *a, **k):
+        seen.append(k)
+        return real_init(self, *a, **k)
+    monkeypatch.setattr(ContextManager, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    wired = [k for k in seen if k.get("bus") is not None]
+    assert wired, "session ContextManager was built without bus= — compaction events are dead code"
+    assert all(k.get("agent_id") for k in wired), "CompactionTriggered needs a non-empty agent_id"
 
 
 async def test_session_id_threaded_to_agent_loop(tmp_path, monkeypatch):
@@ -1599,14 +1790,19 @@ async def test_predictive_write_gate_kill_lever_reverts_writes_keeps_telemetry(t
 # AND serving the model, detect_capabilities forces xml) still proceeds in xml mode.
 # ===========================================================================================
 
-def _cap_result(probe_error, *, tool_call_mode="xml", context_window=262_144):
+def _cap_result(probe_error, *, tool_call_mode="xml", context_window=262_144, server_reached=None):
     from localharness.provider.client import CapabilityResult
+    if server_reached is None:
+        # Mirror client.py semantics: a clean probe or a 400 tools-rejection means the server
+        # ANSWERED for this model; transport/404 strings mean nothing ever did.
+        server_reached = probe_error is None or probe_error.startswith("HTTP 400")
     return CapabilityResult(
         tool_call_mode=tool_call_mode,
         context_window=context_window,
         supports_streaming=True,
         probe_duration_ms=0.0,
         probe_error=probe_error,
+        server_reached=server_reached,
     )
 
 
@@ -1620,11 +1816,11 @@ def _capture_err_console(monkeypatch):
     return printed
 
 
-def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_models=None):
+def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_models=None, **cap_kwargs):
     """Stub every boundary EXCEPT the probe: LLMClient.detect_capabilities returns a chosen
     CapabilityResult so the REAL _probe_llm logic runs (the code under test). Cold-start retries
     run instantly (asyncio.sleep no-op). TokenCounter/REPL/plugins are stubbed so a probe that
-    PROCEEDS runs offline."""
+    PROCEEDS runs offline. cap_kwargs forwards to _cap_result (tool_call_mode/server_reached)."""
     lines = [
         "version: '1'",
         "provider:",
@@ -1638,7 +1834,7 @@ def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_model
     (tmp_path / "config.yaml").write_text("\n".join(lines) + "\n")
 
     async def fake_detect(self):
-        return _cap_result(probe_error)
+        return _cap_result(probe_error, **cap_kwargs)
     monkeypatch.setattr("localharness.provider.client.LLMClient.detect_capabilities", fake_detect)
 
     async def fast_sleep(*a, **k):
@@ -1716,7 +1912,8 @@ async def test_probe_llm_http_400_is_reachable_xml():
     assert reachable is True
     assert mode == "xml"
     assert window == 99_000
-    assert err is None
+    # Carried through as the degradation note for the startup summary, no longer swallowed.
+    assert err == "HTTP 400: tools not supported"
 
 
 async def test_probe_llm_clean_probe_succeeds():
@@ -1729,6 +1926,31 @@ async def test_probe_llm_clean_probe_succeeds():
 
     reachable, mode, window, err = await _probe_llm(_LLM())
     assert (reachable, mode, window, err) == (True, "native", 131_072, None)
+
+
+async def test_probe_llm_inconclusive_native_is_reachable_no_outer_retry():
+    """The shipped 0.12.0 regression: detect_capabilities returned its exhausted-inconclusive
+    result and _probe_llm's gate — which only recognized None / 'HTTP 400' — read it as a DEAD
+    ENDPOINT: re-probed 3x (the give-up block printed three times) and start then aborted with
+    'cannot reach model' while the server was up and serving. server_reached gates now: reachable,
+    probed mode carried, probe_error kept as the degradation note — and NO cold-start retry is
+    burned on a server that answers."""
+    from localharness.cli.start_cmd import _probe_llm
+
+    calls = {"n": 0}
+
+    class _LLM:
+        async def detect_capabilities(self):
+            calls["n"] += 1
+            return _cap_result(
+                "no tool call in probe response",
+                tool_call_mode="native", context_window=131_072, server_reached=True,
+            )
+
+    reachable, mode, window, err = await _probe_llm(_LLM())
+    assert (reachable, mode, window) == (True, "native", 131_072)
+    assert err == "no tool call in probe response"
+    assert calls["n"] == 1, "an answering server must not be re-probed by the cold-start loop"
 
 
 # --- through the real _start_async: the hard-fail must fire BEFORE the store opens ----------
@@ -1753,6 +1975,44 @@ async def test_probe_connection_error_aborts_before_store(tmp_path, monkeypatch)
     assert "unreachable" in out
     assert "doctor" in out
     assert "tokenizer" not in out, "a reachability failure must not be misattributed to the tokenizer"
+
+
+# The harness's OWN unreachable text: for a local endpoint the inference gate's TCP pre-flight
+# (provider/client.py _inference_gate) raises this BEFORE any openai call, so it — not openai's
+# "Connection error." — is what a down local model server actually produces.
+_TCP_PREFLIGHT_ERROR = (
+    "inference endpoint 127.0.0.1:8081 unreachable (TCP connect failed) — not queueing a request "
+    "that cannot succeed (is the model server up at http://localhost:8081/v1?)"
+)
+
+
+def test_classify_probe_failure_matches_the_harness_tcp_preflight():
+    """#44's 'unreachable' branch was dead for the dominant real failure: the classifier only knew
+    openai's vocabulary, and the harness's own pre-flight message contains none of those tokens."""
+    from localharness.cli.start_cmd import _classify_probe_failure
+
+    assert _classify_probe_failure(_TCP_PREFLIGHT_ERROR) == "unreachable"
+    assert _classify_probe_failure("Connection error.") == "unreachable"  # openai's, still
+    assert _classify_probe_failure(
+        "Error code: 404 - {'error': {'message': 'The model `m` does not exist.'}}"
+    ) == "unserved", "a served 404 body proves the port is up — never 'unreachable'"
+
+
+async def test_start_names_the_endpoint_when_the_tcp_preflight_fails(tmp_path, monkeypatch):
+    """End-to-end: with the local model server down, the headline must point at the ENDPOINT, not
+    blame the model name (which sent users hunting for a typo in `model:` instead of starting vLLM)."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_realprobe(tmp_path, monkeypatch, probe_error=_TCP_PREFLIGHT_ERROR)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    msg = "\n".join(errs)
+    assert "endpoint unreachable" in msg
+    assert "cannot reach model" not in msg, "the generic fallback must not fire for a dead endpoint"
 
 
 async def test_probe_model_not_served_aborts_and_names_model(tmp_path, monkeypatch):
@@ -1795,6 +2055,34 @@ async def test_probe_http_400_proceeds_in_xml_mode(tmp_path, monkeypatch):
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete", \
         "a 400 tools-rejection is reachable + served — start proceeds in xml, does not hard-fail"
+
+
+async def test_probe_inconclusive_proceeds_native_with_visible_warning(tmp_path, monkeypatch):
+    """End-to-end pin of the shipped 0.12.0 bug: an exhausted-inconclusive probe (server answers,
+    no tool call ever observed — the live DeepSeek-V4-Flash/llama.cpp KV-cache flap) must START,
+    in native mode, and say so in the startup summary — not die on a fabricated 'cannot reach
+    model' after announcing a fallback it then discarded."""
+    import localharness.cli.start_cmd as _sc
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_realprobe(
+        tmp_path, monkeypatch,
+        probe_error="no tool call in probe response",
+        tool_call_mode="native", server_reached=True,
+    )
+    printed: list[str] = []
+    monkeypatch.setattr(
+        _sc.console, "print", lambda *a, **k: printed.append(" ".join(str(x) for x in a))
+    )
+
+    await _start_async(None, False, False, str(tmp_path))  # must NOT raise
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete", \
+        "an answering server is reachable — inconclusive capability must not block start"
+    out = "\n".join(printed)
+    assert "probe inconclusive" in out and "--jinja" in out, \
+        f"the degraded mode decision must be visible in the startup summary, got: {out!r}"
 
 
 # ===========================================================================================
