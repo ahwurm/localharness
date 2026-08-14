@@ -33,7 +33,9 @@ dependencies = [
     "ddgs>=6.0",
     "prompt-toolkit>=3.0,<4",
     "tiktoken>=0.13.0",
-    "mcp>=1.27.1",
+    # <2: mcp 2.0.0 renamed streamablehttp_client -> streamable_http_client; unpinned fresh
+    # installs crash on `start` (ImportError in tools/mcp.py). Raise only with a compat shim.
+    "mcp>=1.27.1,<2",
     "huggingface_hub>=0.26",
 ]
 
