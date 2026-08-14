@@ -4,6 +4,52 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.1] — 2026-08-13
+
+Fresh installs had been broken since 2026-07-28: the unpinned `mcp` dependency
+resolved to mcp 2.0, whose renamed import crashed `localharness start` with a
+raw traceback before any UI appeared. This release pins `mcp<2` and ships the
+rest of an adversarially-verified audit of the interactive path — every fix
+below carries a regression test that failed before it.
+
+### Added
+- Measured decode speed: verified tok/s per (provider, model) — the engine's
+  own reported rate when present, exact completion-tokens-over-wall-clock
+  otherwise, never an estimate — persisted per config dir and surfaced in
+  `/model` (median + green/yellow/red band) and the input-box status line.
+- Compactions are visible: `CompactionTriggered` is wired to the event bus and
+  the terminal prints one line ("context compacted: 74% → 29% of the window")
+  when the harness summarizes history. Interactive compactions used to be
+  fully silent — a real one fired with zero telemetry the day this was found.
+
+### Fixed
+- Fresh installs: `mcp` pinned `>=1.27.1,<2` (#117).
+- Tool-call honesty: exhausted parse retries fail the turn instead of posing
+  as a successful answer (#108); native mode reads the taught XML its own
+  nudge asks for (#109); native calls dropped in sanitization publish
+  ParseFailed (#111); non-dict parameters (#103) and non-object arguments
+  (#110) are parse failures, not turn-killing exceptions; the Hermes-JSON
+  "parameters" alias keeps its arguments (#104); a plain ```json answer no
+  longer trips the tool-call detector (#105).
+- History integrity: a bare sentinel reply no longer deletes the user's own
+  message (#106); no duplicate system message on user-turn-less history (#107).
+- CLI: `start` refuses to overwrite an unparseable agent yaml (#112); the
+  context-window guard only enforces server-reported windows and prints a
+  satisfiable remedy at the right config location (#113); `init --endpoint`
+  fails honestly on unreachable endpoints (#114) and detects the runtime
+  instead of writing provider_type "unknown" (#115); probe failures name the
+  endpoint when TCP connect fails (#116).
+- Server lifecycle: stop re-polls after SIGKILL and refuses to report a stop
+  it cannot confirm (#121) — closing the verified-stop gap disclosed in the
+  0.11.0 notes.
+- Terminal: the `/model` picker no longer clobbers typed text (#122) or
+  strands its injected prefix (#123); a stale Ctrl+C queued during a long
+  command can no longer replay and exit the session (#120).
+
+Known and deliberately not in this release: `init --endpoint` still requires
+`--model` even when the server advertises exactly one (#118), and no-config
+guidance is inconsistent across commands (#119).
+
 ## [0.12.0] — 2026-08-06
 
 A tool call the serving runtime did not parse is no longer silent. It used to
