@@ -52,11 +52,14 @@ def truncate_after_last_tool_call(text: str) -> str:
 # parse failure is nudged with the correct format instead of silently reading as "no tool call
 # intended" (which leaves parse_failures at 0 and hides the miss).
 _FENCED_BLOCK_PATTERN = re.compile(
-    r"```(?:tool_code|tool_call|json)\b(.*?)(?:```|\Z)", re.DOTALL | re.IGNORECASE,
+    r"```(tool_code|tool_call|json)\b(.*?)(?:```|\Z)", re.DOTALL | re.IGNORECASE,
 )
-# Cheap "looks like a call" body check for a fenced block above: a bareword call (Gemma's
-# tool_code fence is Python-call-style, e.g. list_files(path="/tmp")) or a JSON "name" key. No
-# specific verb/tool name required — the fence tag itself is already the strong signal.
+# Cheap "looks like a call" body check for a ```tool_code/```tool_call fence: a bareword call
+# (Gemma's tool_code fence is Python-call-style, e.g. list_files(path="/tmp")) or a JSON "name"
+# key. No specific verb/tool name required — the fence tag itself is already the strong signal.
+# A ```json fence carries no such signal and is held to _JSON_CALL_SHAPE_PATTERN instead: "name"
+# is one of the commonest keys in an ordinary JSON answer, and a false hit costs the user a bogus
+# "check --jinja" alarm plus a wasted round trip per nudge.
 _FENCED_CALL_BODY_PATTERN = re.compile(r'\b[a-zA-Z_]\w*\s*\(|"name"\s*:')
 # Runtime-native tool-call syntaxes the harness deliberately does NOT parse. The SERVING RUNTIME
 # converts these into structured tool_calls (llama.cpp --jinja reads the GGUF's chat template;
@@ -94,8 +97,9 @@ def has_tool_call_attempt(text: str) -> bool:
         return True
     if _RUNTIME_NATIVE_CALL_PATTERN.search(text):
         return True
-    for body in _FENCED_BLOCK_PATTERN.findall(text):
-        if _FENCED_CALL_BODY_PATTERN.search(body):
+    for tag, body in _FENCED_BLOCK_PATTERN.findall(text):
+        body_check = _JSON_CALL_SHAPE_PATTERN if tag.lower() == "json" else _FENCED_CALL_BODY_PATTERN
+        if body_check.search(body):
             return True
     return bool(_JSON_CALL_SHAPE_PATTERN.search(text))
 
@@ -255,11 +259,16 @@ class FnCallConverter:
             if parsed is None or not isinstance(parsed, dict):
                 continue
             name = parsed.get("name", "")
-            args = parsed.get("arguments", {})
+            # 'parameters' is a first-class alias everywhere else in this module (and the word the
+            # system injection teaches), so a model blending both conventions must not lose its args.
+            args = parsed.get("arguments", parsed.get("parameters", {}))
             if not name:
                 continue
             if isinstance(args, str):
                 args = self._repair_json(args) or {}
+            if not isinstance(args, dict):
+                log.warning("Tool call arguments for %s are not an object — skipping", name)
+                continue
             calls.append(ToolCall(name=name, arguments=args, id=str(uuid.uuid4())))
         return calls
 
@@ -268,7 +277,9 @@ class FnCallConverter:
         calls: list[ToolCall] = []
         for name, raw_params in _LEGACY_TOOL_PATTERN.findall(text):
             parsed = self._repair_json(raw_params.strip())
-            if parsed is None:
+            # Non-dict (a JSON array/scalar body) is a parse failure too: ToolCall is an unvalidated
+            # dataclass, so it would only blow up later at Action(tool_params=...) and kill the turn.
+            if not isinstance(parsed, dict):
                 log.warning("Could not parse tool call parameters for %s — skipping", name)
                 continue
             calls.append(ToolCall(name=name, arguments=parsed, id=str(uuid.uuid4())))
@@ -279,7 +290,7 @@ class FnCallConverter:
         calls: list[ToolCall] = []
         for name, raw_params in _LEGACY_PARTIAL.findall(text):
             parsed = self._repair_json(raw_params.strip())
-            if parsed is None:
+            if not isinstance(parsed, dict):
                 log.warning("Could not parse partial tool call parameters for %s — skipping", name)
                 continue
             calls.append(ToolCall(name=name, arguments=parsed, id=str(uuid.uuid4())))

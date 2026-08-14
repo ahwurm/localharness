@@ -59,6 +59,22 @@ def test_extract_partial_tool_call(converter: FnCallConverter):
     assert calls[0].name == "my_tool"
 
 
+def test_extract_legacy_non_dict_parameters_is_parse_failure(converter: FnCallConverter):
+    """A JSON ARRAY body is not arguments. ToolCall is an unvalidated dataclass, so letting it
+    through only blew up later at Action(tool_params=[...]) — a traceback and a dead turn instead
+    of the nudge. Dropping the call routes it to ParseFailed, the intended recovery."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    text = '<tool_call>\n<name>glob</name>\n<parameters>["*.py"]</parameters>\n</tool_call>'
+    assert converter.extract_tool_calls(text) == []
+    assert has_tool_call_attempt(text) is True
+
+
+def test_extract_legacy_partial_non_dict_parameters_is_parse_failure(converter: FnCallConverter):
+    """Same guard on the truncated-output path."""
+    text = '<tool_call>\n<name>glob</name>\n<parameters>["*.py"]'
+    assert converter.extract_tool_calls(text) == []
+
+
 # ---------------------------------------------------------------------------
 # _repair_json
 # ---------------------------------------------------------------------------
@@ -262,6 +278,16 @@ def test_has_tool_call_attempt_plain_json_fence_not_flagged():
     assert has_tool_call_attempt(text) is False
 
 
+def test_has_tool_call_attempt_json_fence_with_name_key_not_flagged():
+    """A ```json ANSWER that merely carries a "name" key (package.json, a record list) is not a
+    call attempt — "name" is one of the commonest keys in ordinary JSON. Flagging it cost the user
+    three bogus 'check --jinja' alarms and four extra generations before the real answer landed."""
+    from localharness.provider.fn_call import has_tool_call_attempt
+    assert has_tool_call_attempt('```json\n{"name": "my-app", "version": "1.0.0"}\n```') is False
+    assert has_tool_call_attempt('```json\n[{"name": "alice", "age": 30}]\n```') is False
+    assert has_tool_call_attempt('```json\n{"expr": "sum(a, b)"}\n```') is False
+
+
 # ---------------------------------------------------------------------------
 # Permissive XML parsing
 # ---------------------------------------------------------------------------
@@ -456,6 +482,26 @@ def test_extract_hermes_json_multiple(converter: FnCallConverter):
     assert len(calls) == 2
     assert calls[0].name == "glob"
     assert calls[1].name == "read"
+
+
+def test_extract_hermes_json_parameters_alias(converter: FnCallConverter):
+    """'parameters' is the key the system injection teaches, and every other pattern in the module
+    accepts it. A model blending it with its native Hermes JSON used to parse "successfully" with
+    arguments={} — the tool ran empty and answered 'Field required' for a field it DID supply."""
+    text = (
+        '<tool_call>{"name": "write_file", '
+        '"parameters": {"path": "/tmp/a", "content": "hello"}}</tool_call>'
+    )
+    calls = converter.extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "write_file"
+    assert calls[0].arguments == {"path": "/tmp/a", "content": "hello"}
+
+
+def test_extract_hermes_json_non_dict_arguments_is_parse_failure(converter: FnCallConverter):
+    """Array arguments are dropped, not handed to Action(tool_params=[...]) to crash the turn."""
+    text = '<tool_call>{"name": "glob", "arguments": ["*.py"]}</tool_call>'
+    assert converter.extract_tool_calls(text) == []
 
 
 # ---------------------------------------------------------------------------
