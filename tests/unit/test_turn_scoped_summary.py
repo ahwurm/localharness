@@ -296,3 +296,67 @@ async def test_persist_strips_echoed_confirmed_pair(bus):
     assert not any(
         m["role"] == "user" and "Review your answer" in (m.get("content") or "") for m in conv
     )
+
+
+# ---------------------------------------------------------------------------
+# #91 residual — the SAME splice on the budget + stuck fallbacks (public comment
+# on the closed issue). Both are what a turn returns when the forced no-tools
+# wrap-up generation comes back empty (the common case on a reasoning-parser
+# model, where content=None normalizes to ""), so they are reached often.
+# ---------------------------------------------------------------------------
+
+def _probe_session() -> Session:
+    """The probe shape from the #91 residual report: a completed prior turn, then a turn whose
+    only assistant message is a tool call with no content."""
+    s = Session(
+        agent_id="a",
+        session_id="s",
+        messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4."},                       # PRIOR turn's answer
+            {"role": "user", "content": "Now research the Korean market holidays."},
+            {"role": "assistant", "content": "", "tool_calls": [          # this turn: no content
+                {"id": "c1", "function": {"name": "web_search", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "results..."},
+        ],
+    )
+    s.turn_start_idx = 4  # this turn's first assistant message
+    return s
+
+
+def test_budget_summary_never_splices_prior_turn():
+    """`4.` (a prior turn's arithmetic answer) must not be presented as this turn's research
+    result. No in-turn answer -> no stale prefix at all, just the budget notice."""
+    from localharness.agent.loop import BudgetViolation, _format_budget_summary
+
+    summary = _format_budget_summary(
+        _probe_session(),
+        BudgetViolation(reason="actions", limit=1, current=2, message="Max actions reached."),
+    )
+    assert "4." not in summary
+    assert summary.startswith("[Budget limit reached:")
+
+
+def test_stuck_summary_never_splices_prior_turn():
+    """Same splice on the stuck path."""
+    from localharness.agent.loop import _format_stuck_summary
+
+    summary = _format_stuck_summary(_probe_session())
+    assert "4." not in summary
+    assert summary.startswith("[Agent stuck:")
+
+
+def test_budget_and_stuck_summaries_keep_this_turns_answer():
+    """The turn-scoping must not delete the prefix outright: an answer produced INSIDE the turn
+    is still surfaced ahead of the notice."""
+    from localharness.agent.loop import BudgetViolation, _format_budget_summary, _format_stuck_summary
+
+    s = _probe_session()
+    s.messages.append({"role": "assistant", "content": "THIS-TURN PARTIAL ANSWER."})
+    budget = _format_budget_summary(
+        s, BudgetViolation(reason="time", limit=1, current=2, message="Time limit reached.")
+    )
+    assert budget.startswith("THIS-TURN PARTIAL ANSWER.\n\n[Budget limit reached:")
+    assert _format_stuck_summary(s).startswith("THIS-TURN PARTIAL ANSWER.\n\n[Agent stuck:")

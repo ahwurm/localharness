@@ -418,7 +418,9 @@ def detect_dropped_baton(content: str) -> bool:
 
 
 def _format_budget_summary(session: Session, violation: BudgetViolation) -> str:
-    last = _last_assistant_content(session.messages)
+    # #91 (same defect, second call site): TURN-SCOPED. Walking the full history spliced a PRIOR
+    # turn's reply in front of this turn's budget notice. No in-turn answer -> no prefix at all.
+    last = _last_assistant_content(session.messages[getattr(session, "turn_start_idx", 0):])
     prefix = f"{last}\n\n" if last else ""
     return (
         f"{prefix}"
@@ -432,7 +434,8 @@ def _format_kill_summary(session: Session) -> str:
 
 
 def _format_stuck_summary(session: Session) -> str:
-    last = _last_assistant_content(session.messages)
+    # #91 (same defect, third call site) — turn-scoped, see _format_budget_summary.
+    last = _last_assistant_content(session.messages[getattr(session, "turn_start_idx", 0):])
     prefix = f"{last}\n\n" if last else ""
     return (
         f"{prefix}"
