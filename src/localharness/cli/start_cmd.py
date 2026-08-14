@@ -24,17 +24,17 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
-def _managed_server_running(managed_server: Any, srv: Any, config_dir: Path) -> bool:
-    """Is the harness-managed vLLM ALREADY serving? DOCKER mode reads the CONTAINER by name
-    (`docker_container_running` → `docker inspect`), NOT the pidfile: docker runs a foreground
-    `docker run --rm` client whose pid is the sig-proxy CLIENT, never the container, so
-    `server_pid()` there answers "is the docker-run client alive" — the orphan-client-pid bug
-    (a pidfile client orphan-killed by a tmux teardown then reads dead though the container is
-    up, or vice-versa). BINARY mode keeps `server_pid()` — there the pidfile pid IS the vLLM
-    process. Called inside the autostart try, so an OSError from either path degrades as before."""
-    if srv.launch == "docker":
-        return managed_server.docker_container_running(managed_server.DOCKER_CONTAINER_NAME)
-    return managed_server.server_pid(config_dir) is not None
+def _managed_server_running(strategy: Any, srv: Any, config_dir: Path) -> bool:
+    """Is the harness-managed server ALREADY serving? Asks the LIFECYCLE STRATEGY (the single
+    owner of how a backend is launched/stopped/checked) instead of re-deriving liveness here:
+    docker reads the CONTAINER by name — never the pidfile, whose pid is the `docker run`
+    sig-proxy CLIENT, the orphan-client-pid bug; binary/ollama read `server_pid()`, correct
+    there; lmstudio probes the ENDPOINT. Re-deriving it from `srv.launch` alone (the old code)
+    ignored `srv.runtime`, so a managed LM Studio — which by design writes NO pidfile — always
+    read False and start took the "not running" branch into LmsStrategy.activate, whose
+    pre-existing-server fail-fast then raised on the server that was in fact already up.
+    Called inside the autostart try, so an OSError from the pid path degrades as before."""
+    return strategy.liveness(srv, config_dir).alive
 
 
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
@@ -469,7 +469,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.provider.lifecycle import strategy_for
         strategy = strategy_for(harness.server)
         try:
-            if not _managed_server_running(managed_server, harness.server, cfg_path):
+            if not _managed_server_running(strategy, harness.server, cfg_path):
                 console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
                 # activate = serve_command → start_server → wait_ready (launch + readiness) via the
                 # lifecycle strategy. Byte-equivalent to the old start_server+wait_ready pair; the

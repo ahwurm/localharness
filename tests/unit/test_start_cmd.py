@@ -2224,46 +2224,77 @@ def test_agent_tool_advertises_shared_list_mutations():
 # The autostart path had no test today; this pins the decision seam it turns on.
 # ---------------------------------------------------------------------------
 
-def test_managed_server_running_docker_uses_container_not_pidfile():
-    """DOCKER mode consults docker_container_running(DOCKER_CONTAINER_NAME) and NEVER
-    server_pid — the pidfile holds the sig-proxy client pid, not the container (the bug fixed)."""
-    from types import SimpleNamespace
+def _mss(**over):
+    from localharness.config.models import ManagedServerConfig
 
+    kw = dict(launch="docker", docker_image="img:tag", model="m", port=8000)
+    kw.update(over)
+    return ManagedServerConfig(**kw)
+
+
+def test_managed_server_running_docker_uses_container_not_pidfile(monkeypatch):
+    """DOCKER mode consults docker_container_running(DOCKER_CONTAINER_NAME) and NEVER
+    server_pid — the pidfile holds the sig-proxy client pid, not the container (the bug fixed).
+    Now routed through the lifecycle strategy, which owns that rule."""
+    from localharness.provider import lifecycle
     from localharness.cli.start_cmd import _managed_server_running
 
     def _boom(*a, **k):
         raise AssertionError("docker mode must not consult the pidfile via server_pid()")
 
-    ms = SimpleNamespace(
-        DOCKER_CONTAINER_NAME="localharness-vllm",
-        docker_container_running=lambda name: name == "localharness-vllm",
-        server_pid=_boom,
-    )
-    srv = SimpleNamespace(launch="docker")
-    assert _managed_server_running(ms, srv, Path("/cfg")) is True
+    monkeypatch.setattr(lifecycle.server, "server_pid", _boom)
+    monkeypatch.setattr(lifecycle.server, "docker_container_running", lambda name: True)
+    srv = _mss()
+    strategy = lifecycle.strategy_for(srv)
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is True
 
-    ms.docker_container_running = lambda name: False
-    assert _managed_server_running(ms, srv, Path("/cfg")) is False
+    monkeypatch.setattr(lifecycle.server, "docker_container_running", lambda name: False)
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is False
 
 
-def test_managed_server_running_binary_uses_server_pid():
+def test_managed_server_running_binary_uses_server_pid(monkeypatch):
     """BINARY mode keeps server_pid (there the pidfile pid IS the vLLM process): a live pid ->
     running, a cleared pidfile (None) -> not running. docker container liveness untouched —
     proving binary behavior is byte-for-byte the pre-fix behavior."""
-    from types import SimpleNamespace
-
+    from localharness.provider import lifecycle
     from localharness.cli.start_cmd import _managed_server_running
 
     def _boom(*a, **k):
         raise AssertionError("binary mode must not use docker container liveness")
 
-    ms = SimpleNamespace(
-        DOCKER_CONTAINER_NAME="localharness-vllm",
-        docker_container_running=_boom,
-        server_pid=lambda config_dir: 4321,
-    )
-    srv = SimpleNamespace(launch="binary")
-    assert _managed_server_running(ms, srv, Path("/cfg")) is True
+    monkeypatch.setattr(lifecycle.server, "docker_container_running", _boom)
+    monkeypatch.setattr(lifecycle.server, "server_pid", lambda config_dir: 4321)
+    srv = _mss(launch="binary", binary="/usr/bin/vllm", docker_image=None)
+    strategy = lifecycle.strategy_for(srv)
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is True
 
-    ms.server_pid = lambda config_dir: None
-    assert _managed_server_running(ms, srv, Path("/cfg")) is False
+    monkeypatch.setattr(lifecycle.server, "server_pid", lambda config_dir: None)
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is False
+
+
+def test_managed_server_running_lmstudio_is_endpoint_based_not_pidfile(monkeypatch):
+    """runtime: lmstudio owns NO pidfile (LmsStrategy never touches server.py's primitives), so
+    the old launch-only branch fell through to server_pid() and read False for a server that WAS
+    up — start then called activate, whose pre-existing-server fail-fast raised. Liveness here is
+    the endpoint probe LmsStrategy already implements."""
+    import httpx
+
+    from localharness.provider import lifecycle
+    from localharness.cli.start_cmd import _managed_server_running
+
+    def _boom(*a, **k):
+        raise AssertionError("lmstudio liveness must never consult the shared pidfile")
+
+    monkeypatch.setattr(lifecycle.server, "server_pid", _boom)
+    srv = _mss(runtime="lmstudio", launch="binary", docker_image=None,
+               binary="/x/lms", model="qwen2.5-0.5b-instruct", port=1234)
+    strategy = lifecycle.strategy_for(srv)
+
+    monkeypatch.setattr(httpx, "get", lambda url, **k: httpx.Response(200))
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is True
+
+    def _refused(url, **k):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _refused)
+    assert _managed_server_running(strategy, srv, Path("/cfg")) is False
