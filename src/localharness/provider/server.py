@@ -242,7 +242,8 @@ def server_pid(config_dir: Path) -> int | None:
 def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0) -> bool:
     """SIGTERM the process group, SIGKILL on timeout. Docker: also stop by name.
 
-    Returns True if something was stopped."""
+    Returns True if something was stopped — and ONLY once death is confirmed: raises
+    RuntimeError (naming the surviving pid / container) rather than report a false free."""
     pid = server_pid(config_dir)
     stopped = False
     if pid is not None:
@@ -258,6 +259,17 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+            # VERIFIED death, same contract as the docker branch below: SIGKILL delivery is
+            # ASYNCHRONOUS — a process unmapping tens of GiB of weights, or blocked in
+            # uninterruptible I/O, stays resident for seconds after the signal. Returning True
+            # here told free_accelerator the accelerator was free while the old model still held
+            # its pages (two heavies on unified memory), and unlinking the pidfile made the
+            # strategies' liveness report "no daemon" for a live process. Fail explicit instead.
+            if not _wait_dead(pid, attempts=20):  # 10s at the 0.5s poll
+                raise RuntimeError(
+                    f"pid {pid} still alive after SIGTERM+SIGKILL — refusing to report the "
+                    "accelerator free while the process still holds it"
+                )
         stopped = True
     if launch == "docker":
         # VERIFIED stop (#100): a vLLM drain can outlast the grace, and the --rm removal
@@ -282,6 +294,16 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
         stopped = True
     pid_path(config_dir).unlink(missing_ok=True)
     return stopped
+
+
+def _wait_dead(pid: int, attempts: int, poll_seconds: float = 0.5) -> bool:
+    """Poll until the pid is gone (post-SIGKILL confirmation). Attempt-counted so tests stay
+    deterministic with sleep patched out — mirrors _wait_name_free's contract."""
+    for _ in range(max(1, attempts)):
+        if not _alive(pid):
+            return True
+        time.sleep(poll_seconds)
+    return False
 
 
 def _wait_name_free(name: str, attempts: int, poll_seconds: float = 0.5) -> bool:
