@@ -612,24 +612,23 @@ class LLMClient:
             # debugging a probe failure looking for two retries that never happened.
             if server_reached and not server_rejected_tools:
                 # Exhausted-INCONCLUSIVE on a server that ACCEPTED `tools` but never demonstrated
-                # one. Stays xml (the config default here), because the biggest class in this
-                # branch is the server that answers 200 while SILENTLY DROPPING the tools param
-                # (llama.cpp without --jinja, Gemma-class templates — see _complete_xml): in
-                # native mode nothing ever tells that model a tool exists, so it emits prose, no
-                # ParseFailed can fire (loop.py gates it on a recognizable call attempt) and the
-                # session is tool-blind for its whole life with one startup line as the only
-                # signal. xml still sends `tools=` AND folds the taught syntax into the system
-                # prompt, so both server classes at least have a working path. The retry loop
-                # above (622e27b) is what stops a transient blip from landing here at all.
+                # one. BOTH static defaults fail silently here, in opposite directions: xml
+                # condemns a merely-shy native server whose dialect is not <tool_call> to having
+                # every call rendered as chat text, while native leaves the other class in this
+                # branch — the server that answers 200 while SILENTLY DROPPING the tools param
+                # (llama.cpp without --jinja, Gemma-class templates, see _complete_xml) — with
+                # nothing ever telling the model a tool exists: it emits prose, no ParseFailed can
+                # fire (loop.py gates that on a recognizable call attempt) and the session is
+                # tool-blind for its whole life. So stop guessing and ASK: one deciding attempt
+                # with the taught syntax folded in, and decide on what comes back.
                 log.warning(
                     "Capability probe never confirmed native tool calling after %d attempts "
-                    "(%s) — server accepts the tools param but never used it; using xml (tools "
-                    "param + taught syntax). If the model calls tools in its own native dialect, "
-                    "check the runtime's tool-call parser flag (llama.cpp --jinja, "
-                    "vLLM --tool-call-parser).",
+                    "(%s) — server accepts the tools param but never used it; running one "
+                    "deciding probe with the taught XML syntax folded into the system prompt.",
                     attempt + 1,
                     probe_error,
                 )
+                tool_call_mode = await self._decide_mode_by_taught_xml(probe_tools)
             else:
                 log.warning(
                     "Capability probe never confirmed native tool calling after %d attempts "
@@ -678,6 +677,62 @@ class LLMClient:
             probe_error=probe_error,
             server_reached=server_reached,
         )
+
+    async def _decide_mode_by_taught_xml(
+        self, probe_tools: list[dict]
+    ) -> Literal["native", "xml"]:
+        """ONE deciding attempt for the exhausted-inconclusive branch, decided on EVIDENCE.
+
+        Re-asks with the taught-XML instruction folded into the system prompt exactly as xml mode
+        does at runtime (FnCallConverter.build_system_injection — the same text the session would
+        actually run on, not a probe-only variant). Decision rule:
+          * a <tool_call block comes back -> taught xml is PROVEN workable here -> "xml"
+          * no taught XML in the response -> no evidence xml works -> "native", the owner's
+            2026-08-10 tiebreak for absence of evidence (and the right answer for the server that
+            silently drops `tools` yet calls in its own dialect).
+        Single attempt, no loop — the 3-attempt probe above already widened the transient window;
+        any transport failure keeps the current xml default (fail-safe) and says so.
+        """
+        converter = self._fn_converter or FnCallConverter()
+        # build_system_injection reads name/description/parameters: hand it the inner function
+        # dicts, not the OpenAI {"type": "function", ...} envelope.
+        injection = converter.build_system_injection([t["function"] for t in probe_tools])
+        try:
+            async with _inference_gate(self.config):
+                response = await self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        # Same fold as _fold_tool_injection: system content, blank line, block.
+                        {
+                            "role": "system",
+                            "content": "You are a helpful assistant.\n\n" + injection,
+                        },
+                        # The most explicit trigger of the three. Reusing a prompt the loop already
+                        # sent is safe here: the new system prefix makes this a fresh evaluation,
+                        # not a prefix-cache replay (see _PROBE_PROMPTS).
+                        {"role": "user", "content": _PROBE_PROMPTS[-1]},
+                    ],
+                    tools=probe_tools,
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+            msg = response.choices[0].message
+            if "<tool_call" in (getattr(msg, "content", None) or ""):
+                log.warning(
+                    "Deciding probe: the model emitted the taught <tool_call> XML — xml is proven "
+                    "workable on this server, using xml."
+                )
+                return "xml"
+            log.warning(
+                "Deciding probe: no taught <tool_call> XML in the response — no evidence xml "
+                "works here, using native. If tool calls now arrive in the model's own dialect "
+                "and go unparsed, check the runtime's tool-call parser flag (llama.cpp --jinja, "
+                "vLLM --tool-call-parser)."
+            )
+            return "native"
+        except Exception as exc:
+            log.warning("Deciding probe failed (%s) — keeping xml (fail-safe).", exc)
+            return "xml"
 
     @staticmethod
     async def _consume_bounded(coro: Awaitable[Any], gen_timeout: float | None) -> tuple[Any, Any]:

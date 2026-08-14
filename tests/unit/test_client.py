@@ -15,7 +15,7 @@ from localharness.provider.client import (
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
-from localharness.provider.fn_call import FnCallConverter
+from localharness.provider.fn_call import _TOOL_INJECTION_MARKER, FnCallConverter
 
 
 # ---------------------------------------------------------------------------
@@ -385,12 +385,12 @@ def _toolless_completion(text):
 
 
 @pytest.mark.asyncio
-async def test_probe_inconclusive_on_answering_server_keeps_taught_xml():
-    """An exhausted-INCONCLUSIVE probe on a server that answers and ACCEPTS `tools` stays xml —
-    the only mode that both sends `tools=` AND teaches the call syntax in the system prompt, so
-    every server class in this branch keeps a working path. The retry loop (622e27b) is what
-    keeps a transient blip from landing here at all; it must still not ABORT the session
-    (server_reached stays the separate reachability axis start's gate reads).
+async def test_probe_inconclusive_on_answering_server_runs_a_deciding_probe():
+    """An exhausted-INCONCLUSIVE probe on a server that answers and ACCEPTS `tools` must not be
+    settled by a static default at all — it runs ONE more attempt with the taught XML folded into
+    the system prompt (the same injection xml mode uses at runtime) and decides on the evidence.
+    It must still not ABORT the session (server_reached stays the separate reachability axis
+    start's gate reads).
 
     History: on 2026-08-10 this branch was flipped to native, reasoning that absence of evidence
     must not condemn a session to xml (trigger: DeepSeek-V4-Flash Q2_K on llama.cpp answered 9/9
@@ -399,9 +399,17 @@ async def test_probe_inconclusive_on_answering_server_keeps_taught_xml():
     while silently DROPPING the tools param (llama.cpp without --jinja, Gemma-class templates —
     see _complete_xml's docstring). In native mode nothing ever tells that model a tool exists,
     so it emits prose, no call attempt is made, and loop.py's ParseFailed — the claimed
-    mitigation — can never fire: a tool-blind session for its whole life."""
+    mitigation — can never fire: a tool-blind session for its whole life.
+
+    RESOLUTION (option c): review found both defaults fail SILENTLY, in opposite directions, so
+    neither wins on argument — get evidence. The deciding attempt teaches the syntax and looks at
+    what comes back: taught XML emitted -> xml is PROVEN workable -> xml; no taught XML -> nothing
+    supports xml, so the OWNER RULING above stands as the absence-of-evidence tiebreak -> native.
+    A transport failure during the deciding attempt keeps xml (fail-safe). This case: the model
+    answers the deciding probe in the taught syntax, so xml is proven and kept."""
     config, mock_openai = _probe_client(
         [_toolless_completion(f"The directory contains files ({i}).") for i in range(3)]
+        + [_toolless_completion("<tool_call>\n<name>list_files</name>\n</tool_call>")]
     )
     with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
          patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
@@ -415,7 +423,88 @@ async def test_probe_inconclusive_on_answering_server_keeps_taught_xml():
     # clears the converter, which is what leaves a silent-drop server with no path at all).
     assert client.config.tool_call_mode == "xml"
     assert isinstance(client._fn_converter, FnCallConverter)
-    assert mock_openai.chat.completions.create.await_count == 3
+    assert mock_openai.chat.completions.create.await_count == 4  # 3 probes + 1 deciding attempt
+
+    # The deciding attempt must carry the REAL taught-syntax injection (the runtime one), folded
+    # into the system message, while still sending `tools=` — anything else tests nothing.
+    deciding = mock_openai.chat.completions.create.await_args_list[-1].kwargs
+    system = deciding["messages"][0]["content"]
+    assert deciding["messages"][0]["role"] == "system"
+    assert _TOOL_INJECTION_MARKER in system
+    assert "list_files" in system  # the probe tool actually serialized, not an empty <tools/>
+    assert deciding["tools"]
+
+
+@pytest.mark.asyncio
+async def test_deciding_probe_prose_response_selects_native():
+    """No taught XML back from the deciding attempt = no evidence xml works on this server, so the
+    OWNER RULING (2026-08-10) tiebreak applies: native, not a silent xml life sentence. The
+    converter must be cleared with it — mode and converter never disagree."""
+    config, mock_openai = _probe_client(
+        [_toolless_completion(f"The directory contains files ({i}).") for i in range(3)]
+        + [_toolless_completion("I am not able to browse the filesystem, but I can help.")]
+    )
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        client = LLMClient(config)
+        result = await client.detect_capabilities()
+
+    assert result.tool_call_mode == "native"
+    assert result.server_reached is True
+    assert client.config.tool_call_mode == "native"
+    assert client._fn_converter is None
+    assert mock_openai.chat.completions.create.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_deciding_probe_transport_error_keeps_xml_and_warns(caplog):
+    """The deciding attempt is a single shot with no retry, so a blip on IT must not be read as
+    evidence for anything. Fail-safe: keep the xml default (both server classes have a path in
+    xml) and log that the decision never happened — a silent 'native' here would be the exact
+    failure this whole branch exists to prevent."""
+    import logging
+
+    config, mock_openai = _probe_client(
+        [_toolless_completion(f"The directory contains files ({i}).") for i in range(3)]
+        + [TimeoutError("slot busy")]
+    )
+    with caplog.at_level(logging.WARNING, logger="localharness.provider.client"), \
+         patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+         patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+        client = LLMClient(config)
+        result = await client.detect_capabilities()
+
+    assert result.tool_call_mode == "xml"
+    assert isinstance(client._fn_converter, FnCallConverter)
+    assert mock_openai.chat.completions.create.await_count == 4  # one shot, not a retry loop
+    failed = [r.getMessage() for r in caplog.records if "Deciding probe failed" in r.getMessage()]
+    assert len(failed) == 1, caplog.text
+    assert "slot busy" in failed[0] and "xml" in failed[0]
+
+
+@pytest.mark.asyncio
+async def test_deciding_probe_logs_which_way_the_evidence_went(caplog):
+    """One log line naming the evidence, either way — the give-up warning alone would leave a
+    reader unable to tell whether xml was PROVEN or merely defaulted to."""
+    import logging
+
+    for last, expect_mode, expect_phrase in (
+        ("<tool_call>\n<name>list_files</name>\n</tool_call>", "xml", "emitted the taught"),
+        ("Sorry, I cannot list files.", "native", "no taught <tool_call> XML"),
+    ):
+        caplog.clear()
+        config, mock_openai = _probe_client(
+            [_toolless_completion("no call") for _ in range(3)] + [_toolless_completion(last)]
+        )
+        with caplog.at_level(logging.WARNING, logger="localharness.provider.client"), \
+             patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
+             patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
+            result = await LLMClient(config).detect_capabilities()
+
+        assert result.tool_call_mode == expect_mode
+        lines = [r.getMessage() for r in caplog.records if "Deciding probe:" in r.getMessage()]
+        assert len(lines) == 1, caplog.text
+        assert expect_phrase in lines[0], lines[0]
 
 
 @pytest.mark.asyncio
@@ -426,7 +515,7 @@ async def test_probe_varies_prompt_across_attempts():
     a fresh prompt eval called the tool). Each attempt must vary the prompt so a retry is a
     genuinely new evaluation."""
     config, mock_openai = _probe_client(
-        [_toolless_completion("There are some files here.") for _ in range(3)]
+        [_toolless_completion("There are some files here.") for _ in range(4)]  # +1: deciding probe
     )
     with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai), \
          patch("localharness.provider.client.asyncio.sleep", new=AsyncMock()):
@@ -435,7 +524,7 @@ async def test_probe_varies_prompt_across_attempts():
     prompts = [
         call.kwargs["messages"][1]["content"]
         for call in mock_openai.chat.completions.create.await_args_list
-    ]
+    ][:3]  # the retry loop only; the 4th call is the deciding probe (own system prefix)
     assert len(prompts) == 3 and len(set(prompts)) == 3, prompts
 
 
