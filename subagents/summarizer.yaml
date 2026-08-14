@@ -12,7 +12,7 @@
 # file, produces a compact structured summary, and returns — no write, no bash.
 
 name: summarizer
-role: >-
+role: |-
   You are a summarization specialist. Given a text file, produce a concise,
   structured summary that preserves all important information — key facts,
   decisions, numbers, names, dates, and action items — while stripping filler,

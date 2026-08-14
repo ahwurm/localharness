@@ -953,6 +953,10 @@ class TerminalChannel(ChannelAdapter):
         self._box_active = True
 
         def _on_submit(text: str) -> None:
+            # #49: the guidance hint is shown "until first use" — a submit IS that first use.
+            # Without this the box border keeps repeating it all session, while the classic
+            # read_input path consumes it after one prompt (the two modes disagreed).
+            self._first_box_hint = ""
             ctrl_queue.put_nowait(("submit", text))
 
         def _on_eof() -> None:

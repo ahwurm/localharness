@@ -88,6 +88,24 @@ class TestHintFrame:
         assert "working" not in self._text(ch._box_hint_frags()), "border no longer carries it"
         assert "working" in self._text(ch._box_status_frags()), "status row does"
 
+    async def test_first_hint_is_consumed_on_the_first_submit(self):
+        """#49 says the hint shows "until first use" — submitting IS that use. It used to be set
+        once in start_input_box and never cleared, so the border repeated it all session (the
+        classic read_input path consumes it after one prompt; the two modes must agree)."""
+        ch = _channel()
+        ch._history = InMemoryHistory()  # start()'s only box prerequisite; no history file here
+        ch.first_prompt_hint = "Describe a task, or /help for commands."
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                assert "Describe a task" in self._text(ch._box_hint_frags())
+                inp.send_text("hello\r")
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("submit", "hello")
+                assert "Describe a task" not in self._text(ch._box_hint_frags())
+            finally:
+                await ch.stop_input_box()
+
     def test_decision_flash_shows_then_can_clear(self):
         ch = _channel()
         ch._box_active = True

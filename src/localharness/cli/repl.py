@@ -1460,15 +1460,19 @@ class OrchestratorREPL:
                             tgt_ptype: str | None, tgt_model: str) -> str:
         """One sentence naming the speed tradeoff a HEAVY swap is about to make, from verified
         ledger medians only ('' when neither side has one). The colored per-row view lives in
-        the picker; this is the last-chance line where the swap costs minutes of model load."""
+        the picker; this is the last-chance line where the swap costs minutes of model load.
+
+        The 'N t/s measured' phrasing is LOAD-BEARING, not prose: both callers send this line
+        with colorize=True and terminal._RATE_NOTE only bands numbers written that way. Shapes
+        that put the number before a bare 't/s' rendered with no band at all."""
         from localharness.provider.speed_stats import speed_key
         m = self._measured_medians()
         cur = m.get(speed_key(cur_ptype, cur_model)) if cur_ptype else None
         tgt = m.get(speed_key(tgt_ptype, tgt_model)) if tgt_ptype else None
         if cur is not None and tgt is not None:
-            return f" Measured speed: {cur:.1f} → {tgt:.1f} t/s."
+            return f" Speed: {cur:.1f} t/s measured → {tgt:.1f} t/s measured."
         if tgt is not None:
-            return f" Target measured at {tgt:.1f} t/s."
+            return f" Target: {tgt:.1f} t/s measured."
         if cur is not None:
             return f" Current model runs {cur:.1f} t/s measured; target unmeasured."
         return ""

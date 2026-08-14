@@ -521,3 +521,22 @@ def test_role_prompt_examples_use_placeholders_not_concrete_tickers():
     ):
         assert "SPCX" not in prompt
         assert "QNT" not in prompt
+
+
+def test_shipped_summarizer_role_keeps_its_rules_on_separate_lines():
+    """subagents/summarizer.yaml's prompt is a LITERAL block (`|-`), not a folded one (`>-`).
+    YAML folding joins equally-indented lines with spaces, so a folded prompt hands the model
+    'Rules: 1. … 2. … 3. …' as one run-on line and flattens the markdown output template — and
+    AgentLoop uses AgentConfig.role verbatim as the system-prompt base, so that IS the text the
+    model sees. The sibling samples (citation_checker, screenshot) use a literal block too."""
+    from pathlib import Path
+
+    import yaml
+
+    path = Path(__file__).resolve().parents[2] / "subagents" / "summarizer.yaml"
+    role = yaml.safe_load(path.read_text(encoding="utf-8"))["role"]
+    lines = [ln.strip() for ln in role.splitlines()]
+    for rule in ("1.", "2.", "3.", "4.", "6.", "7."):
+        assert sum(ln.startswith(rule) for ln in lines) == 1, f"rule {rule} not on its own line"
+    for heading in ("## Overview", "## Key Points", "## Action Items (if any)", "## Notable Details"):
+        assert heading in lines, f"{heading!r} lost its own line (folded scalar)"

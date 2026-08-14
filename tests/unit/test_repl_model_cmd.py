@@ -1280,9 +1280,32 @@ async def test_swap_tradeoff_note_from_ledger(tmp_path):
     record_tps(path, "vllm", "cur", 31.0)
     record_tps(path, "ollama", "tgt", 12.0)
     assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "tgt") \
-        == " Measured speed: 31.0 → 12.0 t/s."
+        == " Speed: 31.0 t/s measured → 12.0 t/s measured."
     assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope") \
         == " Current model runs 31.0 t/s measured; target unmeasured."
     assert repl._swap_tradeoff_note("vllm", "nope", "ollama", "tgt") \
-        == " Target measured at 12.0 t/s."
+        == " Target: 12.0 t/s measured."
     assert repl._swap_tradeoff_note(None, "cur", None, "tgt") == ""
+
+
+async def test_swap_tradeoff_note_is_colorized_by_band(tmp_path):
+    """Both callers send this line with colorize=True, and terminal._RATE_NOTE only bands
+    'N t/s measured'. Two of the three shapes put the number before a bare 't/s', so the one
+    line warning the user they are about to spend minutes loading a SLOWER model rendered with
+    no band at all. Every rate a shape names must colorize, in its own speed band."""
+    from localharness.channels.terminal import _colorize_rate_notes
+    from localharness.provider.speed_stats import record_tps
+
+    repl, _channel, _agent = _repl(tmp_path, _harness(), ["model-a"])
+    path = tmp_path / "speed_stats.json"
+    record_tps(path, "vllm", "cur", 31.0)   # green band (>30)
+    record_tps(path, "ollama", "tgt", 12.0)  # red band (<20)
+
+    both = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "cur", "ollama", "tgt"))
+    assert both.spans, "no styled spans — the note never colorizes"
+    assert [str(s.style) for s in both.spans] == ["green", "bold red"], "both rates band"
+
+    tgt_only = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "nope", "ollama", "tgt"))
+    assert [str(s.style) for s in tgt_only.spans] == ["bold red"]
+    cur_only = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope"))
+    assert [str(s.style) for s in cur_only.spans] == ["green"]
