@@ -421,6 +421,144 @@ def test_identify_endpoint_provider_unknown_when_probes_fail(monkeypatch):
     assert _real_identify_provider("http://host:9999/v1") == "unknown"
 
 
+# ---------------------------------------------------------------------------
+# #118: --endpoint without --model asks the server before refusing
+# ---------------------------------------------------------------------------
+
+def _models_payload(*ids: str):
+    return {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]}
+
+
+def _flat(result) -> str:
+    """Rich wraps at 80 cols — normalize whitespace so a phrase assertion survives the wrap."""
+    return " ".join(((result.output or "") + (result.stderr or "")).split())
+
+
+def test_list_endpoint_models_parses_ids(monkeypatch):
+    """#118: the /v1/models listing is the source for auto-selection — parse its ids."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    class _Resp:
+        def json(self):
+            return _models_payload("a/b-awq", "c/d-fp8")
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    assert init_cmd._list_endpoint_models("http://host:9999/v1") == ["a/b-awq", "c/d-fp8"]
+
+
+def test_list_endpoint_models_none_when_unreachable(monkeypatch):
+    """An unreadable listing is None ("couldn't ask"), NOT [] ("serves nothing")."""
+    import httpx
+    from localharness.cli import init_cmd
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert init_cmd._list_endpoint_models("http://host:9999/v1") is None
+
+
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_endpoint_auto_selects_sole_served_model(mock_client_cls, tmp_path, monkeypatch):
+    """#118: exactly one model served -> nothing to disambiguate. init selects it, says so,
+    and writes it to config instead of erroring out with '--model is required'."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return _models_payload("solo-model")
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(
+        app,
+        ["init", "--config-dir", str(tmp_path), "--force", "--endpoint", "http://h:9/v1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "the only model served" in _flat(result)
+    content = (tmp_path / "config.yaml").read_text()
+    assert "solo-model" in content, "the auto-selected model must reach config.yaml"
+
+
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_endpoint_lists_served_ids_when_ambiguous(mock_client_cls, tmp_path, monkeypatch):
+    """#118: several models -> keep the error, but name the ids and where they came from,
+    so the user knows what to pass to --model."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return _models_payload("model-a", "model-b")
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(
+        app,
+        ["init", "--config-dir", str(tmp_path), "--force", "--endpoint", "http://h:9/v1"],
+    )
+    assert result.exit_code == 1, result.output
+    flat = _flat(result)
+    assert "--model is required" in flat
+    assert "model-a" in flat and "model-b" in flat, "the served ids must be listed"
+    assert "/models" in flat, "the message must say where the list came from"
+    assert not (tmp_path / "config.yaml").exists()
+
+
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_endpoint_no_models_served_says_so(mock_client_cls, tmp_path, monkeypatch):
+    """#118: a reachable endpoint serving NOTHING is a different failure from an unreadable
+    one — say the listing is empty rather than claiming we couldn't read it."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return _models_payload()
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(
+        app,
+        ["init", "--config-dir", str(tmp_path), "--force", "--endpoint", "http://h:9/v1"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "lists no models" in _flat(result)
+    assert not (tmp_path / "config.yaml").exists()
+
+
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_endpoint_no_model_unreachable_keeps_honest_failure(mock_client_cls, tmp_path, monkeypatch):
+    """#118 must not paper over a dead endpoint: an unreadable listing still errors,
+    says it couldn't be read, and writes no config."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+
+    result = runner.invoke(
+        app,
+        ["init", "--config-dir", str(tmp_path), "--force", "--endpoint", "http://127.0.0.1:1/v1"],
+    )
+    assert result.exit_code == 1, result.output
+    flat = _flat(result)
+    assert "--model is required" in flat and "could not be read" in flat
+    assert not (tmp_path / "config.yaml").exists()
+
+
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
 def test_init_lmstudio_fits_loaded_context(mock_client_cls, mock_detect, tmp_path, monkeypatch):

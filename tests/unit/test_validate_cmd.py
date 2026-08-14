@@ -85,6 +85,16 @@ def test_validate_no_configs(tmp_path):
     assert result.exit_code == 2
 
 
+def test_validate_no_configs_points_at_init(tmp_path):
+    """#119: a user who runs `validate` first must get the same next step `doctor` gives —
+    'No configuration files found.' alone leaves them without the command that fixes it.
+    The exit code stays 2."""
+    result = runner.invoke(app, ["validate", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 2
+    flat = " ".join((result.output + (result.stderr or "")).split())
+    assert "Run 'localharness init' to create it." in flat
+
+
 def test_validate_path_flag(tmp_path):
     """--path specific file -> only that file validated."""
     _setup_config_dir(tmp_path)

@@ -415,3 +415,19 @@ def test_set_agent_axis_rejects_wrong_type(components_home):
     r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "banana"])
     assert r.exit_code == 2, r.output
     assert _read_overlay_bytes(components_home) == before
+
+
+def test_list_missing_config_points_at_init(tmp_path, monkeypatch):
+    """#119: `components list` with no config on disk must end with the same next step
+    `doctor` gives — 'Failed to load config: ...' alone leaves a new user with no way out.
+    The exit code stays 2."""
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(empty_home))
+
+    r = runner.invoke(app, ["components", "list"])
+    assert r.exit_code == 2, r.output
+    flat = " ".join((r.output + (r.stderr or "")).split())
+    assert "Failed to load config" in flat
+    assert "Run 'localharness init' to create it." in flat
