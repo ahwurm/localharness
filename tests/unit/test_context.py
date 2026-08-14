@@ -1599,3 +1599,35 @@ def test_no_shape_answers_still_hard_fails(monkeypatch):
     _patch_urlopen_by_shape(monkeypatch, answers=set())
     with _pytest.raises(RuntimeError, match="exact token counting unavailable"):
         TokenCounter(base_url="http://localhost:8000/v1", model="m", provider_type="vllm")
+
+
+# ---------------------------------------------------------------------------
+# #124 — the content-shrink last resort must not raise on an empty span
+# ---------------------------------------------------------------------------
+
+def test_shrink_content_to_budget_no_ops_on_empty_span():
+    """#124: `estimate_messages([]) == 0`, so a NEGATIVE budget (reachable at the emergency
+    floor as `effective_limit - tool_tokens` when the tools block exceeds the window) entered
+    the shrink loop with nothing to shrink and `max(range(0))` raised
+    `ValueError: max() iterable argument is empty` — crashing the turn the floor exists to save.
+    An empty span is a no-op, not an error."""
+    from localharness.agent.context import TokenCounter, _shrink_content_to_budget
+    out, shrunk = _shrink_content_to_budget([], -1, TokenCounter())
+    assert out == []
+    assert shrunk is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_floor_survives_empty_history_with_oversized_tools():
+    """#124 through the public path: empty history + a tools block larger than a small window
+    reaches `_shrink_content_to_budget` with a negative budget. Must return a budget, not raise."""
+    from localharness.tools.base import ToolSchema
+    cm = ContextManager(max_context_tokens=200)
+    schemas = [
+        ToolSchema(name=f"t{i}", description="d" * 300,
+                   parameters={"type": "object", "properties": {}})
+        for i in range(5)
+    ]
+    out, budget = await cm.build_messages([], tool_schemas=schemas)
+    assert out == []
+    assert budget.tool_schema_tokens > 0

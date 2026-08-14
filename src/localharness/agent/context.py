@@ -1133,6 +1133,11 @@ def _shrink_content_to_budget(
     (new list, shrunk_any). Residual risk: if even the markers exceed budget it returns the
     smallest it could reach (the `min_chars` floor) — genuine overflow is only possible below that."""
     working = list(messages)
+    # #124: an empty span has nothing to shrink. estimate_messages([]) == 0, so any NEGATIVE budget
+    # (reachable: effective_limit - tool_tokens when the tools block exceeds the window) entered the
+    # loop below and max(range(0)) raised ValueError, crashing the turn the floor exists to save.
+    if not working:
+        return working, False
     shrunk_any = False
     guard, limit = 0, len(working) * 16 + 32
     while token_counter.estimate_messages(working) > max_msg_tokens and guard < limit:
