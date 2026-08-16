@@ -39,6 +39,17 @@ TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
 _TOOL_STUB_PREFIX = "[tool result evicted"
+# #134 RESTORE PIN: restoring a body re-inflates usage, which re-arms this very pass, which
+# evicts the just-restored body under the SAME handle — measured live as a 24-minute turn of
+# restore/evict/restore. A body pulled back by these tools is therefore PINNED against the
+# usage-fraction pass for the rest of the TURN (ContextManager owns the turn scope). Pins do
+# NOT shield it from the 0.80/0.95 compaction stages or the emergency floor. Be precise
+# about what that means: once usage crosses 0.80 for ANY reason (not necessarily the pinned
+# body's fault), ToolResultCapStage may head+tail-truncate a pinned body silently — the model
+# then holds a partial view of content it just restored in full. That is bounded and
+# idempotent (deterministic off canonical messages — no spiral), but it is a silent partial
+# view, not merely graceful degradation.
+_RESTORE_TOOLS = frozenset({"tool_result_get"})
 # MOVE 0c (coordinator ruling 2026-07-06, REPLACING the earlier must-shrink latch): bound the
 # summary-compaction storm with hysteresis + a hard floor — never by switching compaction off.
 # The latch inherited the root problem: shrink-per-fire near the trigger is often tiny (SEMA-05
@@ -167,29 +178,41 @@ class ContentStore:
         self._fetch_seq = 0
 
 
-def _evict_large_tool_results(
-    messages: list[Message],
-    store: "ContentStore",
-    threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
-    keep_last: int = TOOL_EVICT_KEEP_LAST,
-) -> tuple[list[Message], int]:
-    """Replace the bodies of bulky NON-web tool results with a restorable stub keyed by a
-    deterministic content hash; the full body is stashed in `store` for tool_result_get.
-    Web results are handled by _evict_stale_web_results (URL-restorable, no store needed).
-    The newest `keep_last` evictable results are left verbatim for immediate reasoning.
-    Returns (new list, evicted count); input messages are never mutated. Deterministic:
-    same input -> same stubs (same id), so the prompt stays prefix-cache stable."""
-    # tool_call_ids that resolve to web tools — those go through the web path, skip here.
-    web_ids: set[str] = set()
+def _tool_call_ids_named(messages: list[Message], names: frozenset[str]) -> set[str]:
+    """tool_call ids whose function name is in `names`. tool_calls arrive as dicts (replayed
+    history) or objects (fresh provider parse), so both shapes are read."""
+    ids: set[str] = set()
     for m in messages:
         if m.get("role") != "assistant":
             continue
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
             name = (fn.get("name", "") if isinstance(fn, dict) else getattr(fn, "name", "")) or ""
-            if name in _WEB_TOOLS:
+            if name in names:
                 tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                web_ids.add(tc_id)
+                if tc_id:
+                    ids.add(tc_id)
+    return ids
+
+
+def _evict_large_tool_results(
+    messages: list[Message],
+    store: "ContentStore",
+    threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
+    keep_last: int = TOOL_EVICT_KEEP_LAST,
+    pinned_call_ids: frozenset[str] = frozenset(),
+) -> tuple[list[Message], int]:
+    """Replace the bodies of bulky NON-web tool results with a restorable stub keyed by a
+    deterministic content hash; the full body is stashed in `store` for tool_result_get.
+    Web results are handled by _evict_stale_web_results (URL-restorable, no store needed).
+    The newest `keep_last` evictable results are left verbatim for immediate reasoning.
+    `pinned_call_ids` (#134) are results the model restored THIS turn: they are SKIPPED, never
+    evicted — but they still count toward the keep-last window, so a pin costs exactly its own
+    eviction and never pushes another body into protection (non-pinned bodies evict first).
+    Returns (new list, evicted count); input messages are never mutated. Deterministic:
+    same input -> same stubs (same id), so the prompt stays prefix-cache stable."""
+    # tool_call_ids that resolve to web tools — those go through the web path, skip here.
+    web_ids = _tool_call_ids_named(messages, _WEB_TOOLS)
     evictable = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
@@ -198,6 +221,8 @@ def _evict_large_tool_results(
         and not (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)
     ]
     stale = evictable[:-keep_last] if keep_last > 0 else evictable
+    if pinned_call_ids:
+        stale = [i for i in stale if messages[i].get("tool_call_id") not in pinned_call_ids]
     if not stale:
         return messages, 0
     out = list(messages)
@@ -1247,15 +1272,34 @@ class ContextManager:
         # ruling): compaction is never switched off — compact-to-target + the emergency floor in
         # build_messages own the not-shrinking case.
         self._compaction_fires = 0
+        # #134: tool_call ids of the tool_result_get calls ALREADY in history at the start of the
+        # current turn — their bodies are a prior turn's restores and stay evictable. None = the
+        # turn's baseline has not been taken yet (set on the turn's first build_messages).
+        self._pre_turn_restore_ids: set[str] | None = None
 
     def set_iteration(self, iteration: int) -> None:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
         self._iteration = int(iteration)
 
     def reset_compaction_guard(self) -> None:
-        """MOVE 0c: the agent loop calls this at the start of each turn so the per-turn
-        summary-compaction fire cap re-arms (a new turn earns fresh attempts)."""
+        """The agent loop's per-turn reset (the only turn-boundary signal the manager gets).
+        MOVE 0c: the summary-compaction fire cap re-arms (a new turn earns fresh attempts).
+        #134: restore pins expire — the next turn re-baselines, so a body restored in a past
+        turn is ordinary evictable content again and pins never become permanent bloat."""
         self._compaction_fires = 0
+        self._pre_turn_restore_ids = None
+
+    def _restore_pins(self, messages: list[Message]) -> frozenset[str]:
+        """#134: tool_call ids of THIS turn's tool_result_get calls — the restored bodies the
+        usage-fraction eviction pass must not take back. The turn's FIRST call baselines what
+        history already carried (prior turns' restores: evictable), so pins are turn-scoped.
+        Called on every build_messages pass, not only when the eviction gate is armed: a restore
+        made while usage sat below the gate must still be pinned once usage re-crosses it."""
+        ids = _tool_call_ids_named(messages, _RESTORE_TOOLS)
+        if self._pre_turn_restore_ids is None:
+            self._pre_turn_restore_ids = ids
+            return frozenset()
+        return frozenset(ids - self._pre_turn_restore_ids)
 
     def repair_tool_pairing(self, messages: list[Message]) -> list[Message]:
         """Remove orphaned tool role messages.
@@ -1285,6 +1329,7 @@ class ContextManager:
             {**m, "content": ""} if m.get("content") is None else m for m in messages
         ]
         repaired = self.repair_tool_pairing(copied)
+        restore_pins = self._restore_pins(repaired)
         tool_tokens = self._token_counter.estimate_messages(
             [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
         ) if tool_schemas else 0
@@ -1317,11 +1362,13 @@ class ContextManager:
             repaired, t_evicted = _evict_large_tool_results(
                 repaired, self._eviction_store,
                 threshold_chars=self._tool_evict_threshold_chars,
+                pinned_call_ids=restore_pins,
             )
             if t_evicted:
                 log.info(
-                    "evicted %d large tool result(s) to restorable stubs at %.0f%% usage",
-                    t_evicted, evict_check.usage_fraction * 100,
+                    "evicted %d large tool result(s) to restorable stubs at %.0f%% usage "
+                    "(%d restored this turn held pinned)",
+                    t_evicted, evict_check.usage_fraction * 100, len(restore_pins),
                 )
 
         if self._pipeline is not None:
