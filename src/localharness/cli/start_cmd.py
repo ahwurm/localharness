@@ -533,6 +533,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     ) or _probe_window
     _bound = _effective_max_context(_served, _cfg_window, RESPONSE_RESERVE_TOKENS)
     if _bound != _cfg_window:
+        from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+        # #127: the untouched FACTORY default must never hard-block startup — on the reference
+        # setup (served == default) it mathematically cannot fit under served-reserve, so the
+        # guard aborted every fresh install. Default => auto-fit for this session (nothing
+        # written to disk); an explicitly configured value keeps the fail-loud abort below.
+        if _cfg_window == DEFAULT_MAX_CONTEXT_TOKENS and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS:
+            console.print(
+                f"Context budget fitted to {_bound:,}: the factory default ({_cfg_window:,}) "
+                f"exceeds this server's usable window ({_served}−{RESPONSE_RESERVE_TOKENS} "
+                f"output reserve). Set context.max_context_tokens to pin it explicitly."
+            )
+            agent_config.context.max_context_tokens = _bound
+            _cfg_window = _bound
+    if _bound != _cfg_window:
         # The bound printed is the SAME expression the check enforces — the old message derived its
         # own unfloored number and could tell the user to set an unsatisfiable "≤ 0".
         if _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:

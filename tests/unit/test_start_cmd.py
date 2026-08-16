@@ -916,6 +916,10 @@ async def test_start_guard_fires_for_discoverable_nonvllm_window(tmp_path, monke
         "  base_url: http://localhost:8080/v1\n"
         "  default_model: test-model\n"
         "  api_key: none\n"
+        # #127: the factory default auto-fits now — pin explicitly to keep testing the abort.
+        "org:\n"
+        "  context:\n"
+        "    max_context_tokens: 120000\n"
     )
 
     async def _probe_no_window(llm, max_retries=3, delay=2.0):
@@ -973,6 +977,42 @@ async def test_start_does_not_abort_on_a_fabricated_probe_window(tmp_path, monke
         "an undiscovered window must disclose (config wins), never hard-fail"
 
 
+async def test_factory_default_budget_autofits_on_the_reference_window(tmp_path, monkeypatch):
+    """#127: served == DEFAULT_MAX_CONTEXT_TOKENS (the documented reference setup) means the
+    untouched factory default can never satisfy config <= served-reserve — the guard aborted
+    every fresh install on the exact rig the default documents. The default must auto-fit
+    (session-only) and start cleanly; an explicit value keeps the fail-loud abort."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
+    _stub_nonvllm_start(
+        tmp_path, monkeypatch, served=DEFAULT_MAX_CONTEXT_TOKENS, probe_window=None
+    )
+
+    await _start_async(None, False, False, str(tmp_path))  # must NOT raise
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete", \
+        "factory default vs its own reference window must auto-fit, never hard-fail"
+    # And the fit must not silently persist: the config file keeps no max_context_tokens pin.
+    assert "max_context_tokens" not in (tmp_path / "config.yaml").read_text()
+
+
+async def test_explicit_over_window_budget_still_aborts(tmp_path, monkeypatch):
+    """The #127 auto-fit is for the FACTORY default only — a user-pinned over-window value
+    keeps the honest abort (it would 400 mid-session and the user asked for it by name)."""
+    import typer
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=131_072, probe_window=None)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(cfg.read_text() + "org:\n  context:\n    max_context_tokens: 130000\n")
+
+    import pytest as _pytest
+    with _pytest.raises((typer.Exit, SystemExit)):
+        await _start_async(None, False, False, str(tmp_path))
+
+
 async def test_start_window_guard_prints_the_bound_it_enforces(tmp_path, monkeypatch):
     """The guard checked `max(8_192, served-reserve)` but printed the unfloored `served-reserve`,
     so the remedy it named was not the value it accepted. The printed bound must BE the ceiling."""
@@ -983,6 +1023,9 @@ async def test_start_window_guard_prints_the_bound_it_enforces(tmp_path, monkeyp
     from localharness.cli.start_cmd import _effective_max_context, _start_async
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=10_000, probe_window=None)
+    # #127: the factory default now auto-fits — an EXPLICIT over-window pin keeps the abort.
+    _c = tmp_path / "config.yaml"
+    _c.write_text(_c.read_text() + "org:\n  context:\n    max_context_tokens: 120000\n")
     errs = _capture_err_console(monkeypatch)
 
     with pytest.raises(typer.Exit):
