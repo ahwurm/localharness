@@ -5,8 +5,11 @@ BaseModel with frozen=True for immutability. Because bubus.BaseEvent uses valida
 which conflicts with frozen=True (bubus writes event_processed_at post-dispatch), we implement
 our own subscriber registry and JSONL persistence via anyio directly.
 
-JSONL persistence: O_APPEND writes under PIPE_BUF (4096 bytes) are atomic on POSIX.
-All event records are well under this limit.
+JSONL persistence: appends within this process are serialized per path. The POSIX
+PIPE_BUF (4096-byte) atomicity guarantee is pipe-specific; Observation lines can be tens
+of KB now that full tool results are stored (#133), and the consolidation scheduler
+appends from worker threads — in practice Linux keeps O_APPEND regular-file writes
+line-atomic, and replay() skips any torn line rather than crashing.
 """
 from __future__ import annotations
 

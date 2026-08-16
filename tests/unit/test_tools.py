@@ -528,7 +528,7 @@ async def test_grep_file_count_cap_returns_partial_with_note(tmp_path: Path, mon
     result = await tool.run(pattern="CAPTOKEN", path=str(tmp_path))
     assert result.success is True
     assert "scan capped" in result.output              # honest truncation note
-    assert result.metadata.get("truncated") is True
+    assert result.truncated is True  # real field since the ok() lift (#133)
     assert "CAPTOKEN" in result.output                  # found-so-far returned, never nothing
     assert result.output.count("CAPTOKEN") <= 5         # stopped at the cap
 
@@ -545,7 +545,7 @@ async def test_grep_time_budget_returns_without_hang(tmp_path: Path, monkeypatch
     result = await tool.run(pattern="TIMETOKEN", path=str(tmp_path))
     assert result.success is True
     assert "scan capped" in result.output       # capped note even at zero budget
-    assert result.metadata.get("truncated") is True
+    assert result.truncated is True  # real field since the ok() lift (#133)
 
 
 @pytest.mark.asyncio
@@ -963,3 +963,39 @@ def test_decode_output_handles_utf16le():
     assert "\x00" not in out
     assert "no installed distributions" in out
     assert _decode_output("plain utf-8 ✓".encode("utf-8")) == "plain utf-8 ✓"
+
+
+def test_ok_lifts_truncated_onto_the_real_field():
+    """#133 critic finding: Tool.ok(..., truncated=True) buried the flag in metadata, so
+    grep's limit-capped results published truncated=False. ok() now lifts truncated /
+    original_length onto the ToolResult fields the audit trail actually reads."""
+    r = _EchoTool().ok("... (limit 200 reached)", match_count=200, truncated=True)
+    assert r.truncated is True
+    assert r.original_length is None  # unknown at producer — honest, not invented
+    assert r.metadata == {"match_count": 200}  # lifted keys don't linger in metadata
+
+
+class _HugeErrTool(Tool):
+    def info(self) -> ToolSchema:
+        return ToolSchema(
+            name="hugeerr",
+            description="Always fails with an enormous error payload.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def _execute(self, **kwargs: Any) -> ToolResult:
+        return ToolResult(output="", success=False, error="x" * 60_000,
+                          error_type="execution_error")
+
+
+@pytest.mark.asyncio
+async def test_registry_caps_error_payloads_too():
+    """#133 critic finding: .error was never capped at dispatch — MCP tools mirror whole
+    server responses into it, and the old event slice bounded it only by accident."""
+    reg = ToolRegistry(result_size_cap_chars=50_000)
+    await reg.register(_HugeErrTool(), scope="global")
+    config = ToolConfig(inherit=["global"])
+    result = await reg.dispatch("hugeerr", {}, "agent-1", "div-1", config)
+    assert result.success is False
+    assert len(result.error) <= 50_000 + 100
+    assert "[error truncated: 60,000 chars total]" in result.error

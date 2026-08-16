@@ -132,7 +132,13 @@ class Tool(ABC):
             )
 
     def ok(self, output: str, **metadata: Any) -> ToolResult:
-        return ToolResult(output=output, success=True, metadata=metadata)
+        # truncated/original_length are real ToolResult fields, not metadata: a producer
+        # passing them means the audit trail must see them. Burying truncated in metadata
+        # made grep's limit-capped results claim completeness (#133 critic finding).
+        truncated = bool(metadata.pop("truncated", False))
+        original_length = metadata.pop("original_length", None)
+        return ToolResult(output=output, success=True, truncated=truncated,
+                          original_length=original_length, metadata=metadata)
 
     def err(self, message: str, error_type: str = "execution_error", **metadata: Any) -> ToolResult:
         return ToolResult(

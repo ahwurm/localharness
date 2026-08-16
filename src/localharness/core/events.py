@@ -173,6 +173,11 @@ class Observation(BaseEvent):
     tool_name: Optional[str] = None
     output: Optional[str] = None
     truncated: bool = False
+    # Real pre-cap size of the result (#133), when the producer knows it. None = unknown
+    # (old ledger lines, or a tool that flagged truncation without measuring the original);
+    # consumers fall back to len(output). Additive/default-None: every existing construction
+    # and every replayed JSONL line stays valid.
+    original_length: Optional[int] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
 
