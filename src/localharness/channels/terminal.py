@@ -231,7 +231,30 @@ def _is_model_pick(comp) -> bool:
 _MODEL_PICK_PREFIX = "/model "
 
 
-def _add_menu_keys(kb: KeyBindings, *, injected_prefix: str = "") -> None:
+def _picker_loan_live(buf: Buffer, prefix: str) -> bool:
+    """Is the picker's pre-fill still a LOAN — the app's text, which the user has not made their
+    own? True only while the line IS the loan: the bare prefix, or the prefix under the menu's
+    preview of a highlighted model (the one-Enter picker leaves that preview in the buffer, and
+    it is what the next thing typed used to be appended to). Self-expiring: any other line means
+    the user has taken the line over, so the loan is dropped for good and a `/model ` they type
+    by hand later is never mistaken for the app's own pre-fill."""
+    if not prefix or not getattr(buf, "_lh_picker_loan", False):
+        return False
+    cs = buf.complete_state
+    live = buf.text == prefix or (cs is not None and cs.original_document.text == prefix)
+    if not live:
+        buf._lh_picker_loan = False
+    return live
+
+
+def _replace_picker_loan(buf: Buffer, data: str) -> None:
+    """Take the loan back and enter `data` on the empty line it leaves behind."""
+    buf._lh_picker_loan = False
+    buf.reset()
+    buf.insert_text(data)
+
+
+def _add_menu_keys(kb: KeyBindings, buf: Buffer, *, injected_prefix: str = "") -> None:
     """Tab and Esc for the completion menu, shared by both input apps. Tab (menu closed) accepts a
     sole match outright, else opens the menu with the first item highlighted; Tab (menu open)
     highlights the first item or advances to the next. Esc dismisses. Arrow navigation is
@@ -272,6 +295,29 @@ def _add_menu_keys(kb: KeyBindings, *, injected_prefix: str = "") -> None:
         if injected_prefix and b.text == injected_prefix:
             b.reset()  # the picker's own pre-fill: dismissing means "never mind", not "/model "
 
+    on_loan = Condition(lambda: _picker_loan_live(buf, injected_prefix))
+
+    @kb.add("<any>", filter=on_loan)
+    def _type_over_loan(event) -> None:
+        # #135: typing while the pre-fill is on loan REPLACES it — declining by typing is Esc
+        # plus typing. Appending is what turned the next line into '/model qwen3.8-27b/quit':
+        # an "Unknown model" error where the user typed /quit, and a quit that never happened.
+        if len(event.data) != 1 or not event.data.isprintable():
+            return  # special key (F-key, a lone Esc flush): never insert its raw sequence
+        _replace_picker_loan(event.current_buffer, event.data)
+
+    @kb.add("<bracketed-paste>", filter=on_loan)
+    def _paste_over_loan(event) -> None:
+        _replace_picker_loan(event.current_buffer, event.data)  # pasting a line is typing it
+
+    @kb.add("backspace", filter=on_loan)
+    @kb.add("delete", filter=on_loan)
+    def _erase_loan(event) -> None:
+        # Backspacing into the loan is declining it too. Deleting one char of text the user
+        # never typed would expire the loan and strand '/model qwen3.8-27' for the next line
+        # to append to — the same trap as typing. The loan is one unit: erasing erases it all.
+        _replace_picker_loan(event.current_buffer, "")
+
 
 def _menu_float(body) -> FloatContainer:
     """Host a completion menu as a Float over the input body — part of the pt layout, never a
@@ -299,7 +345,7 @@ def _build_input_app(
     )
 
     kb = KeyBindings()
-    _add_menu_keys(kb)
+    _add_menu_keys(kb, buf)
 
     @kb.add("enter")
     def _accept(event) -> None:
@@ -392,7 +438,7 @@ def _build_persistent_input_app(
     )
 
     kb = KeyBindings()
-    _add_menu_keys(kb, injected_prefix=_MODEL_PICK_PREFIX)
+    _add_menu_keys(kb, buf, injected_prefix=_MODEL_PICK_PREFIX)
 
     @kb.add("enter")
     @kb.add("c-j")  # raw LF: prompt_toolkit's own default treats \n as Enter, because some
@@ -1080,7 +1126,10 @@ class TerminalChannel(ChannelAdapter):
         Two guards, both about not taking the line away from the user: the listing that precedes
         this call takes seconds of live probes while the box keeps accepting input, so a line
         already being typed is NEVER overwritten (it is not in history yet — overwriting it
-        destroys it); and with nothing to pick from the prefix is not injected at all."""
+        destroys it); and with nothing to pick from the prefix is not injected at all.
+
+        What IS injected is marked a loan (#135): the box takes it straight back the moment the
+        user types or pastes anything instead of picking, so the next line is theirs alone."""
         app = self._box_app
         buf = getattr(app, "_lh_input_buffer", None) if app is not None else None
         if buf is None or buf.text:
@@ -1088,6 +1137,7 @@ class TerminalChannel(ChannelAdapter):
         if not self._model_names_for_menu():
             return  # empty menu (server unreachable) — a bare '/model ' prefix would only be noise
         buf.text = _MODEL_PICK_PREFIX
+        buf._lh_picker_loan = True
         buf.cursor_position = len(buf.text)
         buf.start_completion(select_first=True)
         self._invalidate_box()
