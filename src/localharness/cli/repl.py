@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 # Derived from the single-source SLASH_COMMANDS table (shared with the input completion menu).
 HELP_TEXT = help_text()
 
+# #129: a /model swap that writes a new default to the user overlay must SAY so — the write
+# outlives the session, and a silent one leaves the user running an experiment forever.
+SAVED_DEFAULT_NOTE = " (saved as default — persists across restarts)"
+
 
 # Keywords that signal the user wants to create an agent via conversation.
 # Checked case-insensitively against user input when no workflow is active.
@@ -846,11 +850,12 @@ class OrchestratorREPL:
             llm.config.model = target
             cap = await llm.detect_capabilities()
             note = await self._refresh_token_counter(target)
-            await self._persist_landed(llm.config.base_url, target)
+            saved = await self._persist_landed(llm.config.base_url, target)
             rate = self._measured_note(medians, cur_ptype, target)
             await self._send_info(
                 f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else ""), colorize=True,
+                + (f" {rate}." if rate else "")
+                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
             )
             return
 
@@ -873,12 +878,13 @@ class OrchestratorREPL:
             note = await self._refresh_token_counter(
                 target, base_url=ep.base_url, provider_type=ep.provider_type
             )
-            await self._persist_landed(ep.base_url, target)
+            saved = await self._persist_landed(ep.base_url, target)
             rate = self._measured_note(medians, ep.provider_type, target)
             await self._send_info(
                 f"Switched to {target} on {ep.name} — {ep.base_url} "
                 f"(tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else ""), colorize=True,
+                + (f" {rate}." if rate else "")
+                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
             )
             return
 
@@ -950,12 +956,13 @@ class OrchestratorREPL:
             note = await self._refresh_token_counter(
                 served, base_url=ep.base_url, provider_type=ep.provider_type
             )
-            await self._persist_landed(ep.base_url, served)
+            saved = await self._persist_landed(ep.base_url, served)
             rate = self._measured_note(medians, ep.provider_type, served)
             await self._send_info(
                 f"Switched to {served} on {ep.name} — {ep.base_url} "
                 f"(tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else ""), colorize=True,
+                + (f" {rate}." if rate else "")
+                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
             )
             return
 
@@ -1035,11 +1042,12 @@ class OrchestratorREPL:
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
-        await self._persist_landed(llm.config.base_url, served)
+        saved = await self._persist_landed(llm.config.base_url, served)
         rate = self._measured_note(medians, prim_ptype, served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
-            + (f" {rate}." if rate else ""), colorize=True,
+            + (f" {rate}." if rate else "")
+            + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
         )
 
     def _grouped_model_lines(
@@ -1255,15 +1263,17 @@ class OrchestratorREPL:
         ep = self._peer_by_base_url(base_url)
         return ep.provider_type if ep is not None else None
 
-    async def _persist_landed(self, base_url: str, model: str) -> None:
+    async def _persist_landed(self, base_url: str, model: str) -> bool:
         """Persist a completed switch by WHERE it landed. The primary provider endpoint keeps
         today's default-model overlay path (issue #22); a PEER endpoint records an additive
         active-endpoint selection that never mutates provider/server. (Restart-resume that reads a
-        peer selection back is a scoped follow-up — see model_ops.persist_active_endpoint.)"""
+        peer selection back is a scoped follow-up — see model_ops.persist_active_endpoint.)
+
+        Returns True only when a new DEFAULT MODEL actually landed on disk — #129: the caller
+        announces persistence, so the flag must never be optimistic."""
         provider = getattr(self._harness, "provider", None)
         if provider is None or base_url == provider.base_url:
-            await self._persist_default_model(model)
-            return
+            return await self._persist_default_model(model)
         ep = self._peer_by_base_url(base_url)
         if ep is None:
             # #6: an unknown base_url is NEITHER the primary NOR a configured peer. Persisting it via
@@ -1277,8 +1287,9 @@ class OrchestratorREPL:
                 "matches neither the primary provider nor any configured extra_endpoints.",
                 base_url, model,
             )
-            return
+            return False
         await self._persist_active_endpoint(ep, model)
+        return False   # a peer selection is not a persisted default model
 
     async def _persist_active_endpoint(self, endpoint, model: str) -> None:
         """Persist a cross-endpoint (peer) switch to the atomic user overlay as an additive
@@ -1332,7 +1343,16 @@ class OrchestratorREPL:
         # stale 128K budget on a 32K model passes over-window requests that 400 mid-session. The
         # ContextManager reads max_context_tokens live, so the in-place mutation updates every
         # consumer (TokenBudget gates, compaction thresholds, emergency floor).
-        if getattr(ctx, "max_context_tokens", None):
+        # #132: an explicit per-model pin OUTRANKS the probe — it is configuration, not discovery.
+        # It is also the only answer when a runtime's window is undiscoverable (the probe path below
+        # can only disclose and keep a budget that belongs to the model we just left).
+        _pins = getattr(getattr(self._agent, "_config", None), "context", None)
+        pin = _pins.model_context_overrides.get(model) if _pins is not None else None
+        if getattr(ctx, "max_context_tokens", None) and pin is not None:
+            if pin != ctx.max_context_tokens:
+                ctx.max_context_tokens = pin
+                notes.append(f"context budget pinned to {pin:,} tokens for {model}.")
+        elif getattr(ctx, "max_context_tokens", None):
             try:
                 window = await asyncio.to_thread(
                     context_mod.probe_served_window, base_url, model, ptype
@@ -1499,7 +1519,7 @@ class OrchestratorREPL:
                                        "provider_type", None),
             )
 
-    async def _persist_default_model(self, model: str) -> None:
+    async def _persist_default_model(self, model: str) -> bool:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
         start uses it — replaces the prior full, non-atomic config.yaml rewrite. Best-effort:
         a persistence failure (e.g. the new default collides with a configured proposer.model)
@@ -1514,7 +1534,7 @@ class OrchestratorREPL:
                 f"Switched for this session, but persisting the new default failed: {exc}",
                 metadata={"style": "system.error"},
             )
-            return
+            return False
         # #37: the overlay write succeeded; a post-write audit-emit failure is a secondary note,
         # not a persist failure — surface it without contradicting the successful switch.
         if audit_warning:
@@ -1526,6 +1546,7 @@ class OrchestratorREPL:
             lines = ["Note: this new default won't reach these agents until their yaml model pin changes:"]
             lines += [f"  - {name} (pinned to {pin!r})" for name, pin in pinned]
             await self._send_info("\n".join(lines))
+        return True
 
     async def _send_info(self, text: str, colorize: bool = False) -> None:
         meta: dict = {"style": "system.info"}

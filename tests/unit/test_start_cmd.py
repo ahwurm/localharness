@@ -2341,3 +2341,129 @@ def test_managed_server_running_lmstudio_is_endpoint_based_not_pidfile(monkeypat
 
     monkeypatch.setattr(httpx, "get", _refused)
     assert _managed_server_running(strategy, srv, Path("/cfg")) is False
+
+
+@pytest.mark.parametrize(
+    "served, fragment",
+    [
+        (4_500, "too small"),        # bound < MIN_CONFIGURABLE_CONTEXT_TOKENS branch
+        (8_192, "max_context_tokens"),  # config-exceeds-served branch
+    ],
+)
+async def test_window_guard_errors_name_the_model(tmp_path, monkeypatch, served, fragment):
+    """#128: both window-guard aborts printed windows but never WHICH model they describe —
+    unusable when several models are configured and inheritance/--model picked the resolved one.
+    The resolved model name is already in scope; it must appear in both messages."""
+    import io
+
+    import typer
+    from rich.console import Console
+
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        "  default_model: guard-probe-model\n"
+        "  api_key: none\n"
+        "org:\n"
+        "  context:\n"
+        "    max_context_tokens: 120000\n"   # pinned: the factory default would auto-fit instead
+    )
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: served,
+    )
+    # A wide capture console: rich's 80-col default would wrap the name mid-assertion.
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        "localharness.cli.start_cmd.err_console", Console(file=buf, width=200, no_color=True)
+    )
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    out = buf.getvalue()
+    assert fragment in out, out
+    assert "guard-probe-model" in out, out
+
+
+def _pinned_window_config(tmp_path, *, overrides_block: str) -> None:
+    """A start whose GLOBAL budget (120000) cannot fit the served 16384 window — so the guard
+    aborts unless a per-model pin gives this model a budget that does fit."""
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        "  default_model: pinned-model\n"
+        "  api_key: none\n"
+        "org:\n"
+        "  context:\n"
+        "    max_context_tokens: 120000\n"
+        + overrides_block
+    )
+
+
+async def test_start_guard_honors_a_per_model_context_pin(tmp_path, monkeypatch):
+    """#132: one global budget cannot be right across models with different windows. An exact
+    per-model pin is consulted by the window guard AND becomes the budget the session runs on —
+    the same config aborts without it."""
+    from localharness.cli.start_cmd import _start_async
+
+    budgets: list[int] = []
+
+    async def _capture(self):
+        budgets.append(self._agent._ctx.max_context_tokens)
+        return None
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=_capture)
+    _pinned_window_config(
+        tmp_path,
+        overrides_block="    model_context_overrides:\n      pinned-model: 8000\n",
+    )
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 16_384,
+    )
+
+    await _start_async(None, False, False, str(tmp_path))   # must NOT raise
+
+    # End-to-end: the pin is not just guard arithmetic — it reached the live ContextManager.
+    assert budgets == [8000]
+
+
+async def test_start_guard_without_a_matching_pin_is_unchanged(tmp_path, monkeypatch):
+    """#132 control: no map (and a map naming a DIFFERENT model) leaves the scalar in charge —
+    the identical setup still aborts, so the pin is the only thing that changed the outcome."""
+    import typer
+
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _pinned_window_config(
+        tmp_path,
+        overrides_block="    model_context_overrides:\n      some-other-model: 8000\n",
+    )
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 16_384,
+    )
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))

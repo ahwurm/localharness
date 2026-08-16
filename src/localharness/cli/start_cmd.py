@@ -516,6 +516,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
     from localharness.agent.context import RESPONSE_RESERVE_TOKENS, probe_served_window
+    # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
+    # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
+    _pin = agent_config.context.model_context_overrides.get(resolved_model)
+    if _pin is not None:
+        agent_config.context.max_context_tokens = _pin
     _cfg_window = agent_config.context.max_context_tokens
     # PROVIDER-AWARE served-window discovery for the guard. _probe_llm's window comes from
     # detect_capabilities' vLLM-shape /v1/models probe (max_model_len) — None for llama.cpp/
@@ -551,7 +556,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # own unfloored number and could tell the user to set an unsatisfiable "≤ 0".
         if _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
             err_console.print(
-                f"[bold red]Error:[/bold red] the served context window ({_served}) is too small to "
+                f"[bold red]Error:[/bold red] the context window served for '{resolved_model}' "
+                f"({_served}) is too small to "
                 f"run the harness: {RESPONSE_RESERVE_TOKENS} of it is the output reserve, leaving "
                 f"{_bound} for context. Raise the window at the SERVER (llama.cpp `-c`, Ollama "
                 "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
@@ -559,7 +565,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         else:
             err_console.print(
                 f"[bold red]Error:[/bold red] config max_context_tokens={_cfg_window} exceeds the "
-                f"served model's usable window ({_bound} = {_served}−{RESPONSE_RESERVE_TOKENS} "
+                f"usable window served for '{resolved_model}' "
+                f"({_bound} = {_served}−{RESPONSE_RESERVE_TOKENS} "
                 f"output reserve). It would 400 mid-session. Set context.max_context_tokens ≤ "
                 f"{_bound} (under org: in config.yaml, or in the agent's yaml — it is not a "
                 f"top-level key), or raise the served window at the server."

@@ -160,6 +160,27 @@ async def test_model_hotswap_updates_client_and_persists(tmp_path):
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
     assert "Switched to model-b" in channel.messages[-1]
+    # #129: the overlay write outlives the session — the confirmation must SAY it persisted.
+    assert "saved as default — persists across restarts" in channel.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_stays_silent_when_persistence_fails(tmp_path, monkeypatch):
+    """#129: the 'saved as default' claim is earned, not decorative — a failed overlay write
+    must NOT be announced as persisted (the session still switched)."""
+    from localharness.cli import model_ops
+
+    repl, channel, agent = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
+
+    async def _boom(*a, **k):
+        raise RuntimeError("overlay is read-only")
+    monkeypatch.setattr(model_ops, "persist_default_model", _boom)
+
+    await repl._handle_slash("/model model-b")
+    assert agent._llm.config.model == "model-b"          # the live swap still happened
+    joined = "\n".join(channel.messages)
+    assert "persisting the new default failed" in joined
+    assert "saved as default" not in joined
 
 
 @pytest.mark.asyncio
@@ -512,10 +533,16 @@ async def test_model_swap_no_pin_warning_when_none_pinned(tmp_path):
 # --- #30/#31/#32: swap must refit the window + disclose a failed counter rebind, off-loop --- #
 
 
-def _repl_with_ctx(tmp_path, tc, max_ctx=131_072, live=("model-a", "model-b")):
+def _repl_with_ctx(tmp_path, tc, max_ctx=131_072, live=("model-a", "model-b"), overrides=None):
     channel = FakeChannel()
     ctx = SimpleNamespace(_token_counter=tc, max_context_tokens=max_ctx)
     agent = SimpleNamespace(_llm=FakeLLM(), _ctx=ctx)
+    if overrides is not None:
+        # #132: the per-model pin map lives on the running agent's ContextConfig.
+        from localharness.config.models import ContextConfig
+        agent._config = SimpleNamespace(
+            context=ContextConfig(max_context_tokens=max_ctx, model_context_overrides=overrides)
+        )
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
         bus=SimpleNamespace(), config_dir=tmp_path, harness_config=_harness(),
@@ -1309,3 +1336,45 @@ async def test_swap_tradeoff_note_is_colorized_by_band(tmp_path):
     assert [str(s.style) for s in tgt_only.spans] == ["bold red"]
     cur_only = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope"))
     assert [str(s.style) for s in cur_only.spans] == ["green"]
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_refit_honors_a_per_model_context_pin(tmp_path, monkeypatch):
+    """#132: a per-model pin is CONFIGURATION and outranks the served-window probe. Without it
+    the swap refits to the probe's 32K window; with it the pinned budget wins and is disclosed."""
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(
+        tmp_path, tc, max_ctx=131_072, overrides={"model-b": 24_000}
+    )
+
+    def _probe_must_not_decide(*a, **k):
+        raise AssertionError("the pin must short-circuit the served-window probe")
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", _probe_must_not_decide)
+
+    await repl._handle_slash("/model model-b")
+
+    assert ctx.max_context_tokens == 24_000
+    assert "pinned to 24,000 tokens for model-b" in "\n".join(channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_refit_unchanged_when_no_pin_matches(tmp_path, monkeypatch):
+    """#132: a map that does not name THIS model changes nothing — the probe still decides
+    (exact-name match only; no globbing, no accidental cross-model pinning)."""
+    from localharness.agent.context import TokenCounter
+    from localharness.cli.init_cmd import _fit_context_tokens
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(
+        tmp_path, tc, max_ctx=131_072, overrides={"some-other-model": 24_000}
+    )
+
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 32_768)
+    await repl._handle_slash("/model model-b")
+
+    assert ctx.max_context_tokens == _fit_context_tokens(32_768)
+    assert "pinned to" not in "\n".join(channel.messages)
