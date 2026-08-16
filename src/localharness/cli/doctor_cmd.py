@@ -134,11 +134,28 @@ def doctor(
                 failures.append("model-not-found")
 
             # 5b. Window reconciliation: configured budget vs served max_model_len.
+            # #137 (critic fix): the budget below is resolved for the ROOT AGENT's model, so
+            # the served window must be matched against that SAME model. Keying it to
+            # provider.default_model paired one model's pin with another model's window on
+            # multi-model endpoints — a specifically-attributed, backwards verdict.
+            cfg_ctx = None
+            pinned_for: str | None = None
+            budget_model = default_model
+            for _root_name in ("orchestrator", "default"):  # Phase 33.1: new root name, then pre-migration fallback
+                try:
+                    _root = loader.load_agent(_root_name)
+                    budget_model = _root.model if _root.model != "inherit" else default_model
+                    cfg_ctx, _is_pinned = _root.context.resolve_budget(budget_model)
+                    pinned_for = budget_model if _is_pinned else None
+                    break
+                except Exception:
+                    continue
+
             served = None
             try:
                 entries = data.get("data", []) if isinstance(data, dict) else []
                 for m in entries:
-                    if m.get("id") == default_model or len(entries) == 1:
+                    if m.get("id") == budget_model or len(entries) == 1:
                         # #9: llama.cpp reports its served window as meta.n_ctx (no max_model_len).
                         served = (
                             m.get("max_model_len")
@@ -170,33 +187,35 @@ def doctor(
                 except Exception:
                     served = None
 
-            cfg_ctx = None
-            for _root_name in ("orchestrator", "default"):  # Phase 33.1: new root name, then pre-migration fallback
-                try:
-                    cfg_ctx = loader.load_agent(_root_name).context.max_context_tokens
-                    break
-                except Exception:
-                    continue
-
+            # The effective budget (#137) was resolved above, before the served-window lookup,
+            # so both halves of this check speak about the SAME model.
             if served and cfg_ctx:
                 reserve = 4_096
+                # Name the value actually checked — a pinned number and the scalar are different
+                # settings, and the fix for each lives in a different place.
+                attr = f" (pinned for {pinned_for})" if pinned_for else ""
                 if cfg_ctx > served:
                     console.print(
-                        f"{_FAIL} Context budget {cfg_ctx:,} EXCEEDS served window "
+                        f"{_FAIL} Context budget {cfg_ctx:,}{attr} EXCEEDS served window "
                         f"{served:,} — compaction can't fire, long turns will 400 at the "
                         f"provider input cap. `start` clamps to {served - reserve:,}."
                     )
                     failures.append("context-budget-too-high")
                 elif cfg_ctx < (served - reserve) * 0.75:
+                    fix = (
+                        f"Raise context.model_context_overrides['{pinned_for}']"
+                        if pinned_for
+                        else "Run 'localharness init' to refit"
+                    )
                     console.print(
-                        f"{_FAIL} Context budget {cfg_ctx:,} is far BELOW served window "
-                        f"{served:,} — wasting >25% of the window. Run 'localharness init' "
-                        f"to refit (e.g. {served - reserve:,})."
+                        f"{_FAIL} Context budget {cfg_ctx:,}{attr} is far BELOW served window "
+                        f"{served:,} — wasting >25% of the window. {fix} "
+                        f"(e.g. {served - reserve:,})."
                     )
                     failures.append("context-budget-too-low")
                 else:
                     console.print(
-                        f"{_PASS} Context budget {cfg_ctx:,} fits served window {served:,}"
+                        f"{_PASS} Context budget {cfg_ctx:,}{attr} fits served window {served:,}"
                     )
             elif served is None:
                 console.print(

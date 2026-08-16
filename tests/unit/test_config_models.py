@@ -165,6 +165,21 @@ def test_context_config_defaults():
     assert cfg.compaction_threshold_pct == 80.0
 
 
+def test_context_config_resolve_budget_pin_outranks_scalar():
+    """#137: ONE resolution of pin-vs-scalar, so `start` and `doctor` can never report
+    different budgets for the same session. Exact name only — no globbing, no prefix match."""
+    from localharness.config.models import ContextConfig
+    cfg = ContextConfig(
+        max_context_tokens=61_440, model_context_overrides={"qwen3.8-27b": 40_000}
+    )
+    assert cfg.resolve_budget("qwen3.8-27b") == (40_000, True)
+    assert cfg.resolve_budget("qwen3.8-27b-awq") == (61_440, False)  # no prefix globbing
+    assert cfg.resolve_budget("other-model") == (61_440, False)
+    assert cfg.resolve_budget(None) == (61_440, False)
+    # Empty map (the overwhelmingly common case) = the scalar, unchanged.
+    assert ContextConfig(max_context_tokens=8_000).resolve_budget("m") == (8_000, False)
+
+
 # --- Phase 14-02 Task 1: StuckDetectorConfig / RecoveryInjectionConfig / OrgConfig.hooks ---
 
 def test_stuck_detector_config_defaults_mirror_loop_hardcode():

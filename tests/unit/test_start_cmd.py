@@ -1941,6 +1941,28 @@ async def test_probe_llm_reports_reachability_failure(monkeypatch):
     assert err == "Connection error."
 
 
+async def test_probe_llm_unreachable_stops_outer_retries(monkeypatch):
+    """#138: a definitively unreachable endpoint must not replay the probe cycle — the inner
+    client probe already spent its attempts, so the outer retry loop breaks after one call
+    instead of printing the identical conclusion three times over ~13s of backoff."""
+    from localharness.cli.start_cmd import _probe_llm
+
+    async def fast_sleep(*a, **k):
+        return None
+    monkeypatch.setattr("asyncio.sleep", fast_sleep)
+
+    class _LLM:
+        calls = 0
+
+        async def detect_capabilities(self):
+            type(self).calls += 1
+            return _cap_result("Connection error.")
+
+    reachable, mode, window, err = await _probe_llm(_LLM(), max_retries=3, delay=0.0)
+    assert reachable is False and err == "Connection error."
+    assert _LLM.calls == 1
+
+
 async def test_probe_llm_http_400_is_reachable_xml():
     """An 'HTTP 400' probe_error is NOT a reachability failure: the server rejected the tools param
     but IS reachable and serving the model. _probe_llm returns reachable=True in xml mode — else
@@ -2467,3 +2489,86 @@ async def test_start_guard_without_a_matching_pin_is_unchanged(tmp_path, monkeyp
 
     with pytest.raises(typer.Exit):
         await _start_async(None, False, False, str(tmp_path))
+
+
+async def test_start_confirms_an_active_context_pin_on_the_happy_path(tmp_path, monkeypatch):
+    """#137: a pin that silently applies is indistinguishable from a pin that never matched.
+    The only pin feedback shipped in 0.12.4 fired on a /model swap — unreachable on a
+    single-model server — so the happy path said NOTHING about the budget it ran on."""
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _pinned_window_config(
+        tmp_path,
+        overrides_block="    model_context_overrides:\n      pinned-model: 8000\n",
+    )
+    printed = _capture_start_console(monkeypatch)
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 16_384,
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    joined = "\n".join(printed)
+    assert "Context budget pinned for pinned-model: 8,000 tokens" in joined
+
+
+async def test_start_without_a_matching_pin_prints_nothing_about_pins(tmp_path, monkeypatch):
+    """#137 control: an unmatched map is silent — the confirmation line must only appear when a
+    pin actually governs this session. The served window here comfortably holds the scalar, so
+    the run reaches the same happy path as the test above."""
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _pinned_window_config(
+        tmp_path,
+        overrides_block="    model_context_overrides:\n      some-other-model: 8000\n",
+    )
+    printed = _capture_start_console(monkeypatch)
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 262_144,
+    )
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert "pinned" not in "\n".join(printed).lower()
+
+
+async def test_start_guard_error_names_the_pin_that_actually_governs(tmp_path, monkeypatch):
+    """#137: when the over-ceiling number came from a PIN, the abort must name the setting that
+    would actually fix it. 'Set context.max_context_tokens ≤ N' sends a pinned user round a loop
+    that changes nothing — the pin still outranks the scalar on the next start."""
+    import typer
+
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _pinned_window_config(
+        tmp_path,
+        overrides_block="    model_context_overrides:\n      pinned-model: 100000\n",
+    )
+    errs = _capture_err_console(monkeypatch)
+
+    async def _probe(llm, max_retries=3, delay=2.0):
+        return (True, "native", None, None)
+    monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
+    monkeypatch.setattr(
+        "localharness.agent.context.probe_served_window",
+        lambda base_url, model, provider_type=None: 16_384,
+    )
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    joined = "\n".join(errs)
+    assert "model_context_overrides['pinned-model']" in joined
