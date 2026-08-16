@@ -933,12 +933,14 @@ class LLMClient:
 
         The engine's own reported rate (llama.cpp `timings.predicted_per_second`) wins when
         present; otherwise exact usage completion_tokens over the measured first-delta→done
-        wall window. No usage and no engine rate → nothing recorded (never estimate). Ledger
+        wall window, which must clear speed_stats' substance floors to count as a measurement
+        at all (#136). No usage and no engine rate → nothing recorded (never estimate). Ledger
         recording additionally needs config.provider_type (the key) — last_gen_tps still
         updates without it — and lands in config.config_dir, the SESSION's dir, which is what
         the REPL reads back. Never raises: a stats miss must not fail a completion."""
         from localharness.provider.speed_stats import (
-            MAX_PLAUSIBLE_TPS, decode_tps, default_speed_stats_path, record_tps,
+            MAX_PLAUSIBLE_TPS, decode_tps, default_speed_stats_path, is_substantive_sample,
+            record_tps,
         )
         try:
             tps = progress.get("server_tps")
@@ -946,7 +948,16 @@ class LLMClient:
                 ctokens = getattr(usage, "completion_tokens", None) if usage is not None else None
                 first_at = progress.get("first_at")
                 if ctokens and first_at is not None:
-                    tps = decode_tps(ctokens, first_at, time.monotonic())
+                    done_at = time.monotonic()
+                    # #136: this window times chunk ARRIVAL. A burst the runtime buffered and
+                    # flushed in one or two deltas measures transport, not decoding — 60 tokens
+                    # in 12ms reads as 4,916 tok/s, which the ceiling below happily admits. Only
+                    # a sample with real substance may become a rate at all.
+                    if not is_substantive_sample(ctokens, done_at - first_at):
+                        log.debug("skipping insubstantial decode sample (%s tokens over %.3fs)",
+                                  ctokens, done_at - first_at)
+                        return
+                    tps = decode_tps(ctokens, first_at, done_at)
             if not tps or tps <= 0:
                 return
             # #130: a sub-millisecond measured window turns an exact token count into tens of
