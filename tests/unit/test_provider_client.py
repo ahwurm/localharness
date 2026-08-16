@@ -497,3 +497,32 @@ async def test_detect_capabilities_clears_the_previous_models_verified_rate():
     await c.detect_capabilities()
     assert c.last_gen_tps is None
     assert c.gen_speed_snapshot() is None  # no number beats the old model's number
+
+
+def test_note_gen_speed_discards_implausible_rate_from_degenerate_window(tmp_path, monkeypatch):
+    """#130: a sub-millisecond measured window makes decode_tps return tens of thousands of
+    tok/s. The old guard only rejected tps<=0, so the artifact reached both the status line and
+    the ledger median. Nothing is recorded and last_gen_tps stays untouched."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    # 5 tokens over a 0.1 ms window -> decode_tps == 40000.0
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.0001)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 5, "server_tps": None},
+                      NS(completion_tokens=5))
+    assert c.last_gen_tps is None
+    assert not default_speed_stats_path().exists()
+
+
+def test_note_gen_speed_still_records_a_fast_but_plausible_rate(tmp_path, monkeypatch):
+    """The ceiling must not clip real hardware: a genuinely fast local decode still records."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.1)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 31, "server_tps": None},
+                      NS(completion_tokens=31))
+    assert c.last_gen_tps == pytest.approx(300.0)  # 30 intervals / 0.1s
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == pytest.approx(300.0)
