@@ -899,6 +899,17 @@ class ContextConfig(BaseModel):
         ),
     )
 
+    model_context_overrides: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model context budgets, keyed by EXACT model name (no globbing). A model listed "
+            "here uses its own budget instead of max_context_tokens — consulted by the start-time "
+            "window guard and by the budget refit after a /model swap. One global scalar cannot be "
+            "correct across models with different served windows; this is how you pin one. "
+            "Absent an entry, the scalar applies exactly as before."
+        ),
+    )
+
     compaction_threshold_pct: float = Field(
         default=80.0,
         ge=50.0,
