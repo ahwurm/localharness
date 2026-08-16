@@ -2377,7 +2377,14 @@ class MemoryStore:
                 "is_error": event.error is not None,
                 "error_type": None,
                 "truncated": event.truncated,
-                "original_length": len(event.output or ""),
+                # #133: the REAL pre-cap size, not a re-measure of what we stored (which made
+                # a capped 2k result record original_length == stored_length). None means the
+                # producer didn't know it — then stored length is the best honest answer.
+                "original_length": (
+                    event.original_length
+                    if event.original_length is not None
+                    else len(event.output or "")
+                ),
                 "stored_length": len(event.output or ""),
             }
             await self._history_writer.append(record)

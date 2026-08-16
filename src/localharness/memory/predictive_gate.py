@@ -108,7 +108,7 @@ class PredictiveGate:
             prior, action_ts = pending
             duration_ms = max(0, int((event.timestamp - action_ts).total_seconds() * 1000))
             is_error = 1 if event.error is not None else 0
-            output_len = len(event.output or "")  # capped at 200 upstream (34-01 schema note)
+            output_len = len(event.output or "")  # true length (rows before the #133 fix were capped at 200)
             ts = int(event.timestamp.timestamp())
             obs_row_id = await self._store.record_tool_observation(
                 session_id=event.session_id,

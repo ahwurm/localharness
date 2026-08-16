@@ -289,6 +289,14 @@ class ToolRegistry:
                 metadata=result.metadata,
             )
 
+        if result.error and len(result.error) > self._result_size_cap_chars:
+            # .error was never capped here — the old event-slice bounded it by accident (#133).
+            # MCP tools mirror whole server responses into .error, so cap at the choke point.
+            result = result.model_copy(update={
+                "error": result.error[: self._result_size_cap_chars]
+                + f"\n… [error truncated: {len(result.error):,} chars total]",
+            })
+
         result = result.model_copy(update={"duration_ms": int(time.monotonic() * 1000) - start_ms})
 
         for hook in self._post_hooks:

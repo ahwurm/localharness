@@ -1503,6 +1503,8 @@ class AgentLoop:
                 # Dispatch the tool call against the agent's registry.
                 result_content = ""
                 is_error = False
+                result_truncated = False
+                original_length: int | None = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -1517,6 +1519,13 @@ class AgentLoop:
                         # forward it or the model sees an empty result it can't react to.
                         result_content = (result.output if result.success
                                           else f"[tool error] {result.error or 'unknown error'}")
+                        # #133: truncation is whatever the registry/tool cap ALREADY applied to
+                        # result.output — never something invented at the publish site. On the
+                        # error branch result_content is the forwarded message, so the flag on
+                        # result.output doesn't describe it.
+                        if result.success and result.truncated:
+                            result_truncated = True
+                            original_length = result.original_length
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -1536,7 +1545,13 @@ class AgentLoop:
                     observation_type="tool_result",
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
-                    output=result_content[:200],
+                    # The audit trail carries the FULL result the model was given (#133),
+                    # already bounded upstream by the registry's result_size_cap_chars. The old
+                    # [:200] slice made bus-events.jsonl, history.jsonl and the terminal badge
+                    # all report a 200-char fragment as the complete result.
+                    output=result_content,
+                    truncated=result_truncated,
+                    original_length=original_length if result_truncated else len(result_content),
                     error=result_content if is_error else None,
                 ))
 
