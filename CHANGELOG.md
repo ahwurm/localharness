@@ -4,6 +4,19 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.3] — 2026-08-16
+
+First-run fix, credit to an external fork's commit trail
+([Ruivalim](https://github.com/Ruivalim/localharness)) for surfacing it.
+
+### Fixed
+- The factory-default context budget (131,072) could never pass the start
+  guard on the reference setup it was derived from — default == served means
+  default > served − reserve, always, so a stock config aborted at startup
+  (#127). An untouched default now auto-fits to the served window with a
+  printed note (session-only, never persisted); explicitly configured values
+  keep the honest abort.
+
 ## [0.12.2] — 2026-08-14
 
 Board-clearing follow-up to 0.12.1: the issues that release left open are
