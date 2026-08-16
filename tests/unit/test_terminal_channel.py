@@ -1113,3 +1113,15 @@ class TestRateNoteColorizing:
         rendered = out.getvalue()
         assert "[bold red]not markup[/bold red]" in rendered
         assert "\x1b[" not in rendered
+
+
+def test_suite_pins_terminal_color_env():
+    """#131: the color-rendering assertions in this file are only meaningful if the suite owns
+    its terminal environment. An ambient NO_COLOR (1 failure) or TERM=dumb (3 failures) used to
+    strip the escape codes and redden a correct build. The autouse conftest fixture pins it —
+    this test fails if that pinning is ever dropped."""
+    import os
+
+    assert os.environ.get("TERM") == "xterm-256color"
+    assert "NO_COLOR" not in os.environ
+    assert "FORCE_COLOR" not in os.environ
