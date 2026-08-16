@@ -175,6 +175,13 @@ Introspection is where "just OpenAI-compat" leaks, and the rule is **never a sil
 - **LM Studio** — `GET /api/v0/models` `loaded_context_length` — the window the model was *loaded* with, never `max_context_length` (over-reporting would let the `start` guard pass a config that then 400s mid-session).
 - **Ollama** — `GET /api/ps` `context_length` of the *loaded* model (the served `num_ctx`, **not** `/api/show`'s model ceiling, which over-reports). Because Ollama lazy-loads on first request, this is absent until the model is resident, so `init` cannot reliably auto-probe it and falls back to the config value with an explicit approximate flag; the in-session refit reads `/api/ps` once loaded.
 
+**Decode speed** (`provider/speed_stats.py`) — *0.12.5 behavior notes.* The speed ledger records tok/s per `(provider_type, model)` and displays the median of recent samples. Same rule as everything else here: never a silent guess — a model with no admitted sample shows no number at all rather than an estimate. Two source classes, and which one a runtime falls into is the thing to know:
+
+- **Engine-reported** — llama.cpp streams `timings.predicted_per_second`, measured *inside* the decode loop. The harness takes it as-is; chunk-arrival timing cannot reach it, so there is nothing to filter.
+- **Client-measured** (vLLM, Ollama, LM Studio) — the harness divides an exact completion-token count by the observed first-token→last-token wall window. That window times chunk **arrival**, so a burst whose deltas land coalesced measures transport, not decoding. 0.12.5 therefore admits a client-measured sample only when it carries **substance**: ≥`MIN_SAMPLE_TOKENS` (16) completion tokens over a ≥`MIN_SAMPLE_SECONDS` (0.25 s) window. Both floors, because the artifact appears in both directions — a sub-10 ms flush states an impossible rate, a two-token sample states whatever one stall did. (Before this gate, short agentic generations between tool calls produced samples up to 6,788 tok/s on a ~78 tok/s vLLM config, dragging one session's display median to 152 tok/s.)
+
+The deliberate consequence: **a turn too small to measure does not refresh the readout** — the display keeps the last real median instead of taking a fresh artifact. Stale-honest beats fresh-garbage, and an agent loop emits plenty of sub-threshold turns.
+
 `doctor` (spec 10) reconciles all of this live per runtime — tokenize contract reachable, served window vs configured budget — and labels every approximate path.
 
 ---

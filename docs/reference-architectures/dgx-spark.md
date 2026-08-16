@@ -4,6 +4,18 @@
 and each was measured on this exact stack at the date given below. Numbers labelled
 *measured* were produced here; anything else is labelled as an estimate or as unverified.
 
+Two provenance labels recur below, and they are not interchangeable:
+
+- **Controlled runs** — a fixed workload, repeated reps, warmup excluded (`llama-bench`,
+  scripted long completions). Tight spread, reproducible.
+- **The August 2026 live-use test pass** — real agent sessions driven through the harness
+  REPL, where workload, generation length and context depth all vary turn to turn. Wider
+  spread by construction.
+
+Where the two differ, **the controlled number stays this doc's headline** (its workload is
+pinned, so it is the one you can reproduce) and the live range is reported alongside it to
+say what the config actually feels like in use. Each table below states which it is.
+
 ## Hardware
 
 | | |
@@ -21,8 +33,8 @@ tok/s single-stream). Pick by what the workload needs — there is no single win
 |---|-------|---------|--------------|---------|----------------------------------|----------|
 | **A1** | **Qwen3.8-27B** — dense, multimodal, MTP head | llama.cpp + MTP speculative decode | GGUF `UD-Q4_K_XL` 17.9 GB + MTP head 4.5 GB | 64k | **17 tok/s** prose, **19.5–21.3 tok/s** code (11.3 tok/s synthetic baseline with MTP not engaged — see the section for why these two are not directly comparable) | Aug 2026 |
 | **A2** | Qwen3.6-35B-A3B — MoE, 35B total / ~3B active | vLLM | NVFP4 ~22 GB | 128k | **~78 tok/s** | Jul 2026 |
-| **A3** | DeepSeek V4 Flash — MoE, MLA attention | llama.cpp + DSpark draft model | GGUF `UD-Q2_K_XL` ~90 GB + drafter 10.9 GB | 64k | **37–40 tok/s** | Aug 2026 |
-| **A4** | Qwen3.6-27B — dense | vLLM | NVFP4 ~15.6 GB | 64k | **9.5 tok/s** | Jun 2026 |
+| **A3** | DeepSeek V4 Flash — MoE, MLA attention | llama.cpp + DSpark draft model | GGUF `UD-Q2_K_XL` ~90 GB + drafter 10.9 GB | 64k | **37–40 tok/s** (live agent sessions span ~24–47, set by draft acceptance — see the section) | Aug 2026 |
+| **A4** | Qwen3.6-27B — dense | vLLM | NVFP4 ~15.6 GB | 64k | **9.5 tok/s** | Jun 2026 — **not** re-validated in the Aug 2026 pass |
 
 **Which one:**
 
@@ -127,12 +139,32 @@ So MTP is worth roughly **1.5–1.9×** on this hardware. Treat that as the hone
 the effect rather than a precise multiplier: the 11.3 baseline excludes prefill and the
 17–21 figures include it, so a like-for-like decode-only comparison would differ somewhat.
 
+*Live agent sessions — the August 2026 live-use test pass, in-REPL decode readout:*
+
+| Metric | Value |
+|--------|-------|
+| Per-session median decode | **19.9 / 24.7 / 22.3 tok/s** (independent sessions) |
+| Individual samples across those sessions | **18.25–26.84 tok/s** |
+
+This is a **third** measurement class, not a correction of the two above: real agent turns
+at varying context depth and generation length, versus fixed 256-token generations. It
+lands at or above the controlled 17.0–21.3 band rather than below it, and the likely reason
+is the same acceptance effect the controlled numbers already show — an agent loop emits
+tool calls and structured output, which the MTP head drafts better than free prose, so live
+sessions skew toward the code end. **The controlled figures stay the headline for A1**; read
+the session medians as the in-use spread, not as a competing claim. Neither set changes the
+one honest caveat: the gain is task-dependent, so a session's position in the range is set
+by what that session was doing.
+
 Speculative decoding is lossless with respect to output — rejected draft tokens are thrown
 away, so the text is what the 27B would have produced anyway. The **gain** varies with how
 predictable the next tokens are, which is why code beats prose. Per-workload draft
 *acceptance rates* are deliberately not published here: the maintainer's acceptance
 telemetry for this config was not retained in a form that survives audit, so only the mean
-accepted draft length above is stated as measured.
+accepted draft length above is stated as measured. (A3 below *does* publish an acceptance
+range — that is not an inconsistency but a difference in evidence: A3's came off the
+`llama-server` log during the August 2026 pass and was kept. The same figures were never
+captured for A1, and no A1 number is inferred from A3's.)
 
 ~34 GB of 119 GiB leaves roughly 85 GB free — room for a second model, an embedding
 server, or higher concurrency.
@@ -172,7 +204,9 @@ decoding, and llama.cpp has first-class support for it.
 
 **Status: parked, not deprecated.** The maintainer's box currently runs A1 instead — this
 config leaves ~16 GB of headroom and reloads ~90 GB on every restart. The recipe below is
-complete and the numbers are measured here.
+complete and the numbers are measured here. Parked does not mean stale: it was brought back
+up and driven live during the August 2026 test pass, and the live-session numbers below are
+from that.
 
 ### Serving
 
@@ -208,18 +242,36 @@ Every flag here is load-bearing:
 
 | Metric | Value |
 |--------|-------|
-| Decode, no speculation | **~17 tok/s** (baseline, matches the published figure for this model/quant/box) |
-| Decode with the drafter, 64k context | **37–40 tok/s** aggregate (40.6 tok/s best measured) |
+| Decode, no speculation | **17.0 tok/s** (Aug 2026: 8 samples, 16.75–17.13 — a notably tight spread, and the harness's speed ledger, `llama-server`'s own log and the in-REPL readout all agree. Matches the 17.35 tok/s independently published for this model/quant/box.) |
+| Decode with the drafter, 64k context | **37–40 tok/s** aggregate (40.6 tok/s best in that round) |
 | Decode with the drafter, by task type (32k-era measurements) | code ~30, structured ~36, prose ~22 tok/s |
 | Resident footprint with drafter @ 64k | **~105 GB of 121 GiB** |
 
-Two honesty notes:
+*Live agent sessions with the drafter — the August 2026 live-use test pass:*
+
+| Metric | Value |
+|--------|-------|
+| Per-session median decode | **31.9 / 33.0 / 33.5 / 40.8 tok/s** (independent sessions) |
+| Individual samples across those sessions | **23.75–47.45 tok/s** |
+| Draft acceptance rate (from the `llama-server` log) | **0.43–0.80** |
+| 400-token code-generation sanity check | **26.07 tok/s** |
+
+The honest live range for this config is therefore **~24–47 tok/s** (floor = the lowest
+recorded sample, 23.75). The 37–40 headline sits
+inside it and stands as the aggregate figure; the spread around it is not noise, it is the
+0.43–0.80 acceptance spread showing through — those two rows are the same fact measured two
+ways.
+
+Three honesty notes:
 
 - The 37–40 tok/s headline and the per-task breakdown come from **different measurement
   rounds** (64k vs an earlier 32k pass) — treat the per-task row as the shape of the
   effect, not as directly comparable numbers.
 - The gain is entirely acceptance-rate driven and therefore task-dependent, same as A1.
   Code and agent/structured output gain most; free prose gains least.
+- **Don't read that task mapping too tightly.** The 400-token code generation above measured
+  26.07 tok/s — near the *bottom* of the live range, not the top. Task type is a tendency,
+  not a predictor; acceptance on the specific tokens being generated is what decides.
 
 **Why 64k and not 128k:** MLA makes the KV cache cheap enough that 128k costs only a few
 GB, so the window is not what forces the choice — the 10.9 GB drafter plus its own KV is.
@@ -254,7 +306,9 @@ docker run -d --name vllm-qwen36-35b --gpus all --restart no --ipc=host \
 ```
 
 Image: `vllm/vllm-openai:nightly`, tested at digest
-`sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9`. **vLLM ≥0.22.1
+`sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9` — re-checked
+against the running image during the August 2026 live-use test pass and still the same
+digest, so the performance numbers below describe the image documented here. **vLLM ≥0.22.1
 is required** — older builds cannot load this checkpoint's NVFP4 MoE weights.
 
 Two flags in that recipe are non-obvious and worth calling out:
@@ -267,9 +321,11 @@ Two flags in that recipe are non-obvious and worth calling out:
 
 ### Measured performance
 
-Method: temperature 0, concurrency 1 (single stream), medians over repeated reps,
-warmup run excluded, prefix cache defeated with nonces so every request is a genuine
-cache miss.
+Method (**controlled run**, July 2026): temperature 0, concurrency 1 (single stream),
+medians over repeated reps, warmup run excluded, prefix cache defeated with nonces so every
+request is a genuine cache miss. The August 2026 pass re-verified the image digest for this
+config but did **not** re-run this measurement — see the readout caveat below for why its
+live sessions produced no usable replacement number.
 
 | Metric | Value |
 |--------|-------|
@@ -281,6 +337,15 @@ cache miss.
 
 Caveats:
 
+- **The harness's in-REPL speed readout was unreliable on vLLM before 0.12.5 — discard any
+  vLLM tok/s figure you saw in the REPL from that period.** On client-measured runtimes the
+  harness timed chunk *arrival*, and the short bursty generations an agent loop emits
+  between tool calls arrive coalesced, so the arithmetic divided a real token count by a
+  near-zero window. Displayed values ran as high as **152 tok/s** on this ~78 tok/s config.
+  That was the measurement, not the model. 0.12.5 fixed it with a sample-substance gate: a
+  client-measured sample is admitted only if it carries ≥16 completion tokens over a ≥0.25 s
+  window. **~78 tok/s remains the number for A2** — it comes from the controlled July 2026
+  method above, which never went through the affected path.
 - With reasoning on, small `max_tokens` budgets (≤512) can be consumed entirely by
   hidden reasoning, returning empty `content` with `finish_reason: length`. Set
   per-request `chat_template_kwargs: {"enable_thinking": false}` when a direct answer
@@ -303,6 +368,10 @@ rigorous single-stream figure this doc otherwise treats as ground truth.)
 Qwen3.6-27B was the original recommended model for this hardware (tested June 2026). It
 remains fully supported and documented below as a smaller-footprint config
 (~15.6 GB weights vs. ~22 GB for the 35B-A3B recipe above).
+
+**Not re-validated in the August 2026 live-use test pass** — this config was not brought up
+at all during it. Everything in this section is the June 2026 measurement, standing
+unrevalidated against the current vLLM builds and the current harness.
 
 ### Model
 
@@ -359,7 +428,7 @@ Qwen-recommended sampling (also harness defaults): `temperature 0.6, top_p 0.95,
 | Runtime overhead | a few GB |
 | **Headroom** | **~95 GB** — room for secondary models (embeddings, vision) or higher concurrency |
 
-### Measured performance
+### Measured performance (June 2026 — unrevalidated since)
 
 | Metric | Value |
 |--------|-------|
@@ -395,6 +464,22 @@ model: inherit
 context:
   max_context_tokens: 65536   # optional cap; never set this ABOVE the served window
 ```
+
+If you swap between the configs above on the same box, note that `max_context_tokens` is a
+single scalar and cannot be correct for two models with different served windows. Pin the
+odd one out by exact model name instead of re-editing the scalar on every swap:
+
+```yaml
+context:
+  max_context_tokens: 65536       # every model without a pin
+  model_context_overrides:
+    <served-model-name>: 40000    # this model only; name must match the server EXACTLY
+```
+
+The key must be the model name the runtime reports, character for character — there is no
+globbing or prefix matching, and a mistyped key silently falls back to the scalar. A pin
+larger than the served window aborts `start` with an error naming the pin. See
+[spec 06](../specs/06-config.md#per-model-context-pins-contextmodel_context_overrides).
 
 Config files live under `~/.localharness` by default (override with `LOCALHARNESS_DIR`).
 Note that agent-level keys like `context:` and `timeout_seconds:` belong in an **agent**
@@ -438,7 +523,11 @@ draft-dspark` with its `--spec-draft-n-max 5 --spec-draft-p-min 0.3 --fit off` f
 ## Known issues
 
 1. **Tool-call format drift** on Qwen3.6-27B (A4) — intermittent stray closing tags;
-   [gaps.md](gaps.md) §5.
+   [gaps.md](gaps.md) §5. Not seen in the August 2026 live-use test pass, which recorded
+   **zero tool-call parse failures** in every session — across both llama.cpp configs
+   (A1, A3, `--jinja` path) and vLLM native tool-calling (A2). That is live evidence, not a
+   bench score, and it does **not** clear A4: A4 was never brought up during that pass, so
+   the model this issue was actually reported against remains untested against it.
 2. **NVFP4 kernel maturity on SM 12.x** — re-validate decode rate on each vLLM upgrade.
    The concern was raised against the community PTQ 27B checkpoint (A4) on then-current
    kernels; A2 is separately measured on a specific `nightly` digest and a pinned vLLM

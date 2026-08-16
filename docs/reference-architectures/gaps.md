@@ -84,6 +84,13 @@ hand-written parser. That is the right mechanism, but its format fidelity on thi
 has **not** been scored against `bench/` yet — the same measurement owed for the models
 above.
 
+**Live evidence, short of that score:** the August 2026 live-use test pass recorded **zero
+tool-call parse failures** across every session, on both the llama.cpp `--jinja` configs
+(A1, A3) and vLLM native tool-calling (A2). That is encouraging but it is not the owed
+measurement — it is an absence of observed failures over a set of hand-driven sessions, with
+no fixed scenario set, no failure-rate denominator, and no coverage of Qwen3.6-27B (A4), the
+model the drift issue was actually filed against. The bench scenarios below are still owed.
+
 - **Fix:** harden the XML fallback parser (`provider/fn_call.py`) to tolerate stray/
   unbalanced tags; have `init`'s capability probe (`CapabilityResult`) record the
   per-architecture `tool_call_mode` plus a drift-tolerance flag; add bench scenarios
@@ -153,25 +160,73 @@ type and the tuning flags can only be passed as raw strings through
 - **Consequence:** nothing validates them. A typo in `--spec-type` or a missing `-ngld 99`
   silently costs most of the speedup, and `doctor` cannot tell the user their expensive
   drafter is sitting on the CPU. Nothing surfaces the acceptance rate either, which is the
-  one number that says whether speculation is helping on the current workload.
+  one number that says whether speculation is helping on the current workload. The August
+  2026 pass demonstrated the cost concretely: A3's acceptance varied 0.43–0.80 across
+  sessions — the whole explanation for its ~24–47 tok/s live spread — and reading it meant
+  tailing `llama-server`'s own log, because the harness surfaces nothing.
 - **Fix:** first-class `speculative:` fields on the server config (draft model path, spec
   type, n-max, p-min) with validation, and surface llama.cpp's draft-acceptance telemetry
   in `doctor`.
+
+## §12 What the August 2026 live-use test pass did *not* cover
+
+That pass is the freshest validation behind [dgx-spark.md](dgx-spark.md): real agent
+sessions driven through the harness REPL on architecture A, on 0.12.5 code. It is worth
+being equally explicit about its edges, because "recently validated" is easy to read as
+"validated everywhere". Four holes:
+
+- **A4 (Qwen3.6-27B dense, vLLM) was never brought up.** Its June 2026 numbers — 9.5 tok/s
+  single stream — stand unrevalidated against current vLLM builds and the current harness,
+  and so does the tool-call drift in §5, which was filed against *that* model.
+  **Fix:** re-run A4 and either refresh its numbers or demote it out of the tested set.
+
+- **Cross-session memory continuity was not exercised.** Every session in the pass started
+  clean. Restarting the harness against an **existing** memory home — the case where
+  recall, activation scoring and consolidation have to survive a process boundary and
+  actually earn their keep — was not tested live at all. This is the load-bearing promise of
+  the memory subsystem, so an untested restart path is the most consequential hole here.
+  **Fix:** a live continuity scenario — seed a home, restart, verify prior-session facts are
+  retrieved and scored — plus a `bench/` scenario that fails when they are not.
+
+- **Compaction was observed firing live exactly once (n=1).** That one firing was clean:
+  context at 106% of budget dropped to 40% after a restore-heavy turn, on 0.12.5 code. But
+  eleven other sessions never crossed the threshold at all, because eviction reaches
+  equilibrium first and holds doc-heavy sessions around 62–65%. So the honest state is:
+  eviction is well-exercised, **compaction is not** — one clean observation is an anecdote,
+  not a validated path, and the workload that reliably reaches it (restore-heavy turns) is
+  now the known way to provoke it.
+  **Fix:** a deterministic compaction test that forces the threshold rather than waiting for
+  a session to drift there, so the path gets exercised every run instead of once a month.
+
+- **Ollama and LM Studio were not exercised in the pass at all**, and one 0.12.5 change
+  makes that gap sharper than it looks. The speed ledger now admits only substantive samples
+  (≥16 completion tokens over a ≥0.25 s window) on **client-measured** runtimes; llama.cpp
+  is exempt because it reports engine-side timings. Ollama and LM Studio are both on the
+  client-measured path, so whether real turns on them clear that floor often enough to keep
+  a live readout populated is **unverified** — the gate is correct-by-construction but its
+  practical sample yield on those two runtimes has never been watched live.
+  **Fix:** drive a live session on each and confirm the ledger populates; if sub-threshold
+  turns dominate, the floor needs a per-runtime answer rather than one constant.
 
 ---
 
 ## Priority order (suggested)
 
-1. §5 tool-call hardening (agent-loop correctness)
-2. §10 multimodal input path (the default reference model's headline capability is
+1. §12 cross-session memory continuity + a forced compaction test (untested paths beat
+   under-tuned ones — and these two are the memory subsystem's actual promise)
+2. §5 tool-call hardening (agent-loop correctness)
+3. §10 multimodal input path (the default reference model's headline capability is
    unreachable)
-3. §3 runtime parity validation + doctor RAM-fit warning
-4. §11 speculative-decoding validation + acceptance telemetry
-5. §1 timeout derivation (constant works today; re-opens silently on slower models)
-6. §4 configurable concurrency level
-7. §9 bench profile for B
-8. §6 thinking-token accounting
-9. §8 prefill-aware thresholds
-10. §7 window-scaled defaults
+4. §3 runtime parity validation + doctor RAM-fit warning
+5. §11 speculative-decoding validation + acceptance telemetry
+6. §1 timeout derivation (constant works today; re-opens silently on slower models)
+7. §4 configurable concurrency level
+8. §9 bench profile for B
+9. §6 thinking-token accounting
+10. §8 prefill-aware thresholds
+11. §7 window-scaled defaults
+
+§12's other two items ride along cheaply: A4 re-validation belongs to the next vLLM upgrade
+(§3), and the Ollama/LM Studio ledger check belongs to the same runtime-parity pass.
 
 §2 is resolved and kept for its residual note.

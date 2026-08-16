@@ -4,6 +4,16 @@
 **Requirements:** CTX-01, CTX-02, CTX-03, LOOP-02
 **Dependencies:** `core/types.py`, `config/models.py`, `provider/client.py`
 
+> **Doc status — reconciled to the implementation on 2026-08-16.** This spec was written
+> before the ContentStore/eviction subsystem existed, and parts of it drifted. The three
+> specifics that a reader could previously take away as fact and be wrong about — a
+> `ContextOverflowError` exception, `preserve_first_n`/`preserve_last_n` defaults of 2/6, and a
+> token-denominated `tool_result_max_tokens` field — have been corrected against the source, and
+> the eviction layer the spec never documented now has a section of its own. The rest of the
+> document remains a design-level sketch: **the docstrings in `agent/context.py` are ground truth
+> wherever this spec disagrees with them.** Code blocks below illustrate intent and do not
+> reproduce the shipped signatures line for line.
+
 ---
 
 ## Purpose
@@ -13,8 +23,10 @@ The context manager is the gatekeeper between `session.messages` (the canonical 
 1. **Token counting** — track how full the model's context window is.
 2. **Tool result budget** — cap individual tool results before they consume the entire window.
 3. **Boundary guard** — ensure every `tool_use`/`tool_result` pair is complete; repair or remove orphans before sending any request.
-4. **Summary compaction** — when the window reaches 80%, summarize the middle portion to reclaim space while preserving task context.
-5. **Full auto-compact** — emergency full-session LLM summary and reset when window reaches 95%.
+4. **Eviction** — at 50% usage, page bulky tool-result and web bodies out to the ContentStore, leaving a restorable stub. Cheap, deterministic, and non-lossy; see [Eviction Layer](#eviction-layer-the-contentstore).
+5. **Summary compaction** — when the window reaches 80%, summarize the middle portion to reclaim space while preserving task context.
+6. **Full auto-compact** — emergency full-session LLM summary and reset when window reaches 95%.
+7. **Emergency floor** — if a request still would not fit, drop the oldest whole exchanges (and, last of all, shrink the surviving bodies) so overflow is impossible rather than fatal.
 
 The context manager is called once per loop iteration, before every LLM request. It returns a message list ready for the API — the caller (agent loop) does not need to think about any of these concerns.
 
@@ -24,7 +36,9 @@ The context manager is called once per loop iteration, before every LLM request.
 
 ```
 src/localharness/agent/
-    context.py   # ContextManager, TokenCounter, CompactionPipeline, RepairResult
+    context.py   # ContextManager, TokenCounter, CompactionPipeline, ContentStore
+src/localharness/tools/builtin/
+    tool_result_get_tool.py   # ToolResultGetTool — redeems an eviction stub
 ```
 
 ---
@@ -43,10 +57,11 @@ class ContextConfig:
     at startup. This is the total window — system prompt + history + tools + response.
     The context manager targets % of this value, not an absolute token count."""
 
-    tool_result_max_tokens: int = 2000
-    """Maximum tokens allowed for a single tool result before truncation.
-    2000 tokens is ~1500 words — sufficient for most tool outputs.
-    Increase for agents that regularly read large files."""
+    max_tool_output_chars: int = 32_000
+    """Maximum CHARACTERS — not tokens — of a single tool result kept in context.
+    Passed to CompactionPipeline as `tool_result_cap` and consumed by
+    ToolResultCapStage, which head+tail truncates anything longer. Range 100–500,000.
+    Distinct from the ToolRegistry's own 50,000-char dispatch cap (see Stage 1)."""
 
     summary_compaction_threshold: float = 0.80
     """Trigger summarize-middle compaction when context usage exceeds this fraction.
@@ -56,15 +71,18 @@ class ContextConfig:
     """Trigger full auto-compact when context usage exceeds this fraction.
     Default: 0.95 (95%). Must be > summary_compaction_threshold."""
 
-    preserve_first_n: int = 2
+    preserve_first_n: int = 4
     """Messages to preserve at the start of history during summary compaction.
-    Preserves system prompt (always at index 0) + the initial user task message.
-    Default 2 is correct for the standard message layout. Do not set below 2."""
+    Preserves the system prompt (always at index 0) and the opening task exchange.
+    Config key: `context.preserve_first_n_messages` (minimum 1). Stage 4 overrides
+    this to 1 internally when it forces an emergency compaction — that override is
+    not this default and does not change it."""
 
-    preserve_last_n: int = 6
+    preserve_last_n: int = 8
     """Messages to preserve at the end of history during summary compaction.
-    Preserves recent context (last ~3 iterations of back-and-forth).
-    Default 6: last assistant msg + up to 2 iterations of tool calls/results."""
+    Preserves the recent working context — the last few iterations of tool
+    calls and results. Config key: `context.preserve_last_n_messages` (minimum 2).
+    Stage 4's internal emergency override is 2; again, not this default."""
 
     summarization_model: str | None = None
     """Model to use for summarization LLM calls. If None, uses the agent's own model.
@@ -206,11 +224,11 @@ class ContextManager:
             A new list, ready for the API. May be shorter than the input.
 
         Raises:
-            RepairImpossibleError: The message list contains orphaned tool_result
-                                   blocks that cannot be repaired (e.g. the entire
-                                   history is malformed). The agent loop must stop.
-            ContextOverflowError: Even after full compaction, the message list
-                                   exceeds the context window. The agent loop must stop.
+            Nothing for a too-large context. build_messages() has no overflow
+            exception: pairing is repaired rather than rejected, and a request that
+            still would not fit is cut down by the emergency floor (see below).
+            It can propagate RuntimeError from the TokenCounter when no exact
+            token source is available and the caller demanded one.
         """
         working = list(messages)  # copy; never mutate input
 
@@ -246,10 +264,9 @@ class ContextManager:
                    Default False (respects normal thresholds).
 
         Returns:
-            CompactionResult describing what was done.
-
-        Raises:
-            ContextOverflowError: Even after full compaction, still over budget.
+            CompactionResult describing what was done. Being over budget after
+            compaction is not an error condition — it is what the emergency floor
+            exists to handle.
         """
 
     def _compute_budget(
@@ -276,32 +293,27 @@ RESPONSE_RESERVE_TOKENS: int = 4096
 
 ### Error Types
 
-```python
-class ContextError(Exception):
-    """Base class for context manager errors."""
+**There is no context-specific exception hierarchy.** Earlier drafts of this spec described a
+`ContextError` base class with `ContextOverflowError`, `RepairImpossibleError`, and
+`SummarizationError` subclasses. None of them were ever implemented, and no module in `src/`
+defines or catches them. Do not write `except ContextOverflowError` — it will not import.
 
-class RepairImpossibleError(ContextError):
-    """The message list cannot be repaired to a valid tool_use/tool_result sequence.
-    Indicates a harness bug in message construction. The agent loop should stop
-    and log the full message list for debugging."""
-    def __init__(self, message: str, messages: list[Message]) -> None:
-        super().__init__(message)
-        self.messages = messages
+The design settled somewhere more boring, and deliberately so: **each failure mode degrades in
+place rather than raising past the caller.**
 
-class ContextOverflowError(ContextError):
-    """Even after maximum compaction, the context exceeds the model window.
-    Agent loop must stop — sending this to the LLM would produce garbage."""
-    def __init__(self, message: str, usage_fraction: float) -> None:
-        super().__init__(message)
-        self.usage_fraction = usage_fraction
+| Condition | What actually happens |
+|-----------|----------------------|
+| Orphaned `tool_use`/`tool_result` pairs | `_repair_tool_pairing()` drops the orphans and returns a valid list. There is no unrepairable case — repair is a filter, not a validation. |
+| Over budget after every compaction stage | The emergency floor drops the oldest whole user-turn exchanges; if the un-droppable remnant still does not fit, `_shrink_content_to_budget()` head+tail truncates the surviving bodies. Both log at ERROR, and a `CompactionTriggered` event is published so the cut is on the ledger. Overflow is designed to be impossible, not fatal. |
+| Summarization call fails | The stage returns `modified=False` and the pipeline moves on. The turn continues. |
+| No exact token source, and the runtime is one that should have one | `TokenCounter` raises **`RuntimeError`** (a fail-loud refusal to guess), which `start` catches at session setup. This is the only exception this module raises by design. |
+| Provider unreachable while probing the tokenizer | `ProviderConnectionError`, from the provider layer. |
 
-class SummarizationError(ContextError):
-    """LLM summarization call failed. Compaction pipeline falls back to
-    truncation-without-summary. This is recoverable — the agent continues."""
-    def __init__(self, message: str, cause: Exception | None = None) -> None:
-        super().__init__(message)
-        self.cause = cause
-```
+The trade-off this encodes: a silently shorter history is recoverable and a dead session is not,
+so the module prefers a loudly-logged lossy cut over an exception. The cost is that a caller
+cannot distinguish "compacted normally" from "the floor amputated four exchanges" by control
+flow — that distinction lives in the log stream and the `CompactionTriggered` event, which is
+why both are emitted unconditionally.
 
 ---
 
@@ -384,6 +396,130 @@ If exact counting is critical for a specific model (e.g., a model with unusual t
 
 ---
 
+## Eviction Layer: the ContentStore
+
+Everything above this line describes compaction — the expensive, lossy, LLM-driven path that fires
+at 80%. In practice most sessions never get there, because a cheaper layer runs first.
+
+**Eviction pages bulky tool-result bodies out of the prompt and into a content-addressable store,
+leaving a stub the model can redeem on demand.** It costs no LLM call, loses nothing, and fires at
+half a window rather than four-fifths of one. In the sessions observed so far (one live pass —
+a tendency of the design, not a guarantee) it is why doc-heavy sessions ran for hours without a
+single summarization.
+
+The prior art is OpenHands' `BrowserOutputCondenser` (stale web pages are the bulkiest, least
+re-read observations in an agent trace) and the Manus caveat that history must not be rewritten
+every turn — rewriting invalidates the KV cache and costs more than it saves. Both constraints show
+up directly in the design below: a usage-fraction gate so eviction is not a per-turn rewrite, and
+deterministic content-hash handles so an evicted prompt is byte-identical across turns.
+
+### The ContentStore
+
+`ContentStore` (`agent/context.py`) is one per agent: `handle → (body, origin)`.
+
+- **Handles are a deterministic content hash** — the first 12 hex characters of the body's SHA-1.
+  Not a counter, not a timestamp, not a UUID. Two consequences follow, and both are load-bearing:
+  identical bodies dedupe to one entry, and a stub rendered from the same body is byte-identical on
+  every later turn, so the vLLM prefix cache stays warm. A random id would silently invalidate the
+  cache from the first evicted result onward.
+- **Origin is a sticky taint.** A body is `trusted` unless it came from the web (`put_web`) or was
+  derived from an untrusted handle (`derived_from=`). Taint is monotonic — an untrusted handle
+  never relaunders, and only a clean-origin handle may be bound into an exec namespace. That is
+  the injection floor; see `SECURITY.md`. **Known gap:** memory-recall output
+  (`memory_search`/`memory_get`) is NOT currently tainted — if a large recall result is evicted it
+  enters the store with the default trusted origin, although memory can hold content that
+  originally arrived from untrusted channels. The cruncher's own design comment treats memory as
+  untrusted; the wiring does not yet. Tracked as a hardening gap.
+- **Web bodies are LRU-bounded** (32 entries) because they are re-fetchable; trusted bodies are
+  durable, because a restore must not fail.
+- **A child agent gets a grant view** — built with `(parent, granted)`, it may read only the parent
+  handles explicitly granted to it. That is the per-delegation capability; there is no global
+  registry and no ambient cross-agent read.
+
+### The 50% gate
+
+On every `build_messages()` pass the manager computes usage once, then:
+
+```
+if usage_fraction >= 0.50:      # WEB_EVICT_USAGE_FRACTION
+    evict stale web results     # keep newest 2, min 500 chars, URL/query preserved
+if usage_fraction >= 0.50:      # TOOL_EVICT_USAGE_FRACTION
+    evict large tool results    # keep newest 3, bodies > 8,000 chars
+```
+
+The **8,000-character threshold** (`TOOL_EVICT_THRESHOLD_CHARS`, config key
+`context.tool_result_evict_threshold_chars`) exists because stubbing a small body saves nothing and
+still costs a cache invalidation. The **keep-last window** (3 for tool results, 2 for web) leaves
+the most recent observations verbatim — those are the ones the model is actively reasoning over.
+
+Eviction requires a wired eviction store, which the root agent has and a leaf child does not. This
+is deliberate: the root registers `tool_result_get` and can redeem a stub, so a child must never
+stub a body it would have no way to re-pull. The whole layer is switchable via
+`context.tool_result_eviction` (default `true`).
+
+### Stub and restore
+
+An evicted body is replaced in-place with:
+
+```
+[tool result evicted — ~N tokens — call tool_result_get('<id>') to restore the full body]
+```
+
+`N` is a `chars // 4` approximation, present so the model can judge whether the body is worth
+redeeming. `tool_result_get(id)` returns the exact original body from the store. Nothing is lost —
+the content moved out of the prompt, not out of the session.
+
+### The restore pin
+
+Restoring a body re-inflates usage, which re-arms the very gate that evicted it, which evicts the
+just-restored body again under the same handle. That loop was measured live as a 24-minute turn of
+restore/evict/restore.
+
+The fix: **a body pulled back by `tool_result_get` is pinned against the usage-fraction eviction
+pass for the rest of the turn.** Precisely:
+
+- Pins are keyed by the **restore call's `tool_call_id`**, and scoped to the turn. The turn's first
+  `build_messages()` baselines whichever `tool_result_get` calls history already carried, so a
+  restore made in an *earlier* turn is ordinary evictable content again.
+- Pins are recomputed on **every** pass, not only when the gate is armed — a restore made while
+  usage sat below 50% must still be pinned once usage re-crosses it.
+- A pinned result still counts toward the keep-last window. A pin costs exactly its own eviction
+  and never pushes another body into protection; non-pinned bodies evict first.
+- Pins **expire at turn rollover** (`reset_compaction_guard()`), so they can never accumulate into
+  permanent context bloat.
+
+**What a pin does not do, stated plainly:** it shields a body from the *eviction* pass only. The
+hard-overflow stages keep priority. Once usage crosses 0.80 for any reason — not necessarily the
+pinned body's fault — `ToolResultCapStage` may head+tail truncate a pinned body, and the model then
+holds a *partial* view of content it just restored in full, with only the elision marker to say so.
+That outcome is bounded and idempotent (the stage is deterministic over the canonical messages, so
+there is no spiral), but it is a silent partial view, not merely graceful degradation. If a session
+routinely restores bodies while sitting above 0.80, the budget is too small for the workload.
+
+### How eviction (50%) relates to compaction (80%)
+
+They are not alternatives; they are a ladder, and the rungs are ordered by cost:
+
+| | Eviction | Compaction |
+|---|---|---|
+| Fires at | 50% | 80% (95% for full auto-compact) |
+| Cost | No LLM call | An LLM summarization call per fire, capped at 3 per turn |
+| Lossy? | No — the body is redeemable via `tool_result_get` | Yes — the summarized middle is gone |
+| Effect on prefix cache | Stable (deterministic stubs) | Invalidated from the summary point |
+
+The intended equilibrium is that eviction absorbs the growth so compaction rarely has to run. That
+held under the August 2026 live-use test pass: on doc-heavy sessions usage **peaked at 79.10%
+without compaction firing at all** — eviction repeatedly pulled the session back from the trigger.
+One clean compaction firing was observed in the same pass, on a restore-heavy turn, taking usage
+from **106% down to 40%**; the floor and the stages behaved as specified.
+
+Read those two numbers for what they are — observations from one live pass on one hardware and
+model configuration, not a guarantee. The 79.10% peak in particular is a near-miss: a workload with
+slightly larger tool results would have crossed 0.80 and paid for a summarization. The equilibrium
+is a tendency of the design, not an invariant of it.
+
+---
+
 ## Compaction Pipeline: 4 Stages
 
 The pipeline runs stages in order. Each stage receives the output of the previous stage. A stage may be a no-op (if its condition is not met). Stages are not retried — if a stage fails, the error propagates up.
@@ -426,11 +562,9 @@ class CompactionPipeline:
 
         tokens_after = self._counter.count_messages(working)
 
-        if budget.usage_fraction > 1.0:
-            raise ContextOverflowError(
-                f"Context still at {budget.usage_fraction:.0%} after full compaction.",
-                usage_fraction=budget.usage_fraction,
-            )
+        # NOTE: being over 100% here raises nothing. The caller (build_messages) applies the
+        # emergency floor afterwards — dropping oldest exchanges, then shrinking bodies — so the
+        # request always fits. See "Error Types" above.
 
         return CompactionResult(
             messages=working,
@@ -447,55 +581,61 @@ class CompactionPipeline:
 
 ## Stage 1: Tool Result Cap
 
-**Trigger:** Always. Runs on every call, regardless of context usage.
+**Trigger:** Every *over-threshold* build. Stage 1 and Stage 2 are the pipeline's **deterministic**
+stages (no LLM call, no per-turn fire budget), so `build_messages()` runs them on every pass where
+usage has already reached the 0.80 compaction threshold — including passes where the LLM stages are
+skipped because the per-turn fire cap is spent. Below 0.80 the pipeline is not entered at all;
+oversized results below that line are handled by eviction (50%) and by the registry cap at dispatch.
 
-**Purpose:** Prevent any single tool result from consuming an outsized fraction of the context window. A `grep` over a large codebase can return megabytes of text. Without this cap, one tool call fills the entire window.
+**Purpose:** Prevent any single tool result from consuming an outsized fraction of the context
+window. A `grep` over a large codebase can return megabytes of text. Without this cap, one tool call
+fills the entire window.
+
+**The cap is denominated in CHARACTERS, not tokens.** There is no `tool_result_max_tokens` field
+anywhere in the harness. The knob is `context.max_tool_output_chars` (default **32,000** characters),
+which the pipeline receives as its `tool_result_cap` constructor argument.
+
+### Two different caps, two different places
+
+These are easy to conflate and are not the same mechanism:
+
+| Cap | Value | Where it lives | When it applies |
+|-----|-------|----------------|-----------------|
+| `ToolRegistry.result_size_cap_chars` | 50,000 chars | `tools/registry.py` | At **dispatch** — the moment a tool returns, before its output ever becomes a message. A hard ceiling on what enters history at all. |
+| `CompactionPipeline` `tool_result_cap`, from `context.max_tool_output_chars` | 32,000 chars | `agent/context.py`, Stage 1 | At **prompt build** — applied to tool messages already in history, on over-threshold passes. |
+
+The registry cap is the wider one and fires first; the Stage 1 cap is the tighter one and fires
+later, on the history. A tool result can therefore be truncated twice by two independent
+mechanisms, and the constructor default on `CompactionPipeline` itself is 50,000 — the 32,000 the
+harness actually runs on comes from config, not from that default.
 
 ```python
 class ToolResultCapStage:
-    """Cap individual tool result messages at config.tool_result_max_tokens.
+    """Stage 1: Pre-clean every tool result (ANSI/whitespace) and cap oversized ones with a
+    head+tail keep (lossy first defense; the restorable page-out is the eviction stage)."""
 
-    Runs unconditionally — before checking any compaction thresholds.
-    Truncation is applied to the working copy, never the canonical session.messages.
-    """
+    def __init__(self, max_chars: int = 50_000) -> None:
+        self.max_chars = max_chars
 
-    def apply(self, messages: list[Message], budget: TokenBudget) -> StageResult:
-        modified = False
-        result = []
-        for msg in messages:
-            if msg["role"] != "tool":
-                result.append(msg)
-                continue
-            content = msg.get("content", "")
-            token_count = self._counter.count_string(content)
-            if token_count <= self._config.tool_result_max_tokens:
-                result.append(msg)
-                continue
-            # Truncate
-            truncated = self._truncate_to_budget(content, self._config.tool_result_max_tokens)
-            truncation_notice = (
-                f"\n\n[Output truncated from {token_count} to "
-                f"~{self._config.tool_result_max_tokens} tokens. "
-                f"Use more specific queries to retrieve targeted results.]"
-            )
-            result.append({**msg, "content": truncated + truncation_notice})
-            modified = True
-        return StageResult(messages=result, modified=modified, stage_name="tool_result_cap")
-
-    def _truncate_to_budget(self, text: str, max_tokens: int) -> str:
-        """Truncate text to approximately max_tokens tokens.
-
-        Strategy: binary search on character count using count_string().
-        This is called only when truncation is needed (not in the hot path),
-        so the binary search cost is acceptable.
-        """
+    def apply(self, messages, budget, token_counter):
+        for m in messages:
+            if m.get("role") == "tool":
+                cleaned = _clean_tool_output(m.get("content") or "")   # ANSI, whitespace, blank runs
+                if len(cleaned) > self.max_chars:
+                    cleaned = _head_tail(cleaned, self.max_chars)      # 60% head / 40% tail
+        ...
 ```
 
 **Truncation strategy details:**
-- Truncation is from the END of the tool output, not the beginning.
-- Reasoning: Tool output headers (file paths, line numbers) appear at the start and are more important for the model's orientation than tail content.
-- Exception: For `bash` tool results that contain both stdout and stderr, preserve stderr at the tail (it usually contains the error the model needs to see).
-- A clear truncation notice is appended so the model knows the output is incomplete and can ask for a more targeted query.
+- Every tool result is **pre-cleaned** first, whether or not it is oversized: ANSI escape sequences
+  stripped, trailing per-line whitespace dropped, runs of 3+ blank lines collapsed. This is cheap,
+  deterministic, and runs before length is measured, so the cap reflects real content rather than
+  terminal formatting.
+- Truncation keeps **both ends** — 60% of the budget from the head, 40% from the tail, with an
+  `... [N chars elided — head+tail kept] ...` marker between them. Head-only truncation was
+  rejected because it discards exactly where exit codes, stack traces, and test summaries live.
+- The elision marker is the model's signal that the output is incomplete, so it can re-run a more
+  targeted query or restore the full body via `tool_result_get` if the result was also evicted.
 
 ---
 
@@ -586,6 +726,11 @@ def repair_tool_pairing(messages: list[Message]) -> RepairResult:
 
 ### Post-Repair Validation
 
+> **Design sketch — not implemented.** No `validate_tool_pairing()` and no
+> `RepairImpossibleError` exist in `src/` (see the Error Types table above). The
+> implemented `repair_tool_pairing()` enforces the invariant by construction — it drops
+> orphaned tool results rather than asserting afterward. Kept for design intent only.
+
 After `repair_tool_pairing()` runs, a structural validator asserts the invariant:
 
 ```python
@@ -634,8 +779,8 @@ SUMMARY COMPACTION ALGORITHM:
 Precondition: budget.usage_fraction >= 0.80
 
 1. Identify the preservation zones:
-   head = messages[:preserve_first_n]       # default: first 2 (system + task)
-   tail = messages[-preserve_last_n:]       # default: last 6
+   head = messages[:preserve_first_n]       # default: first 4 (system + opening exchange)
+   tail = messages[-preserve_last_n:]       # default: last 8 (recent working context)
 
    Note: If len(messages) <= preserve_first_n + preserve_last_n:
    → The history is too short to compact. Return unchanged.
@@ -659,7 +804,8 @@ Precondition: budget.usage_fraction >= 0.80
 5. Invoke LLM summarization:
    summary_text = await _summarize_middle(middle, context_config)
 
-   If summarization fails (SummarizationError):
+   If summarization fails (any exception — no typed `SummarizationError` exists; the
+   implementation catches broadly in `SummaryCompactionStage.apply`):
    → Log WARNING: "Summarization failed: {error}. Skipping summary compaction."
    → Return unchanged (stage result: modified=False)
    → Do NOT raise — let stage 4 (full auto-compact) handle the situation.
@@ -679,7 +825,8 @@ Precondition: budget.usage_fraction >= 0.80
    compacted = head + [summary_message] + tail
 
 8. Apply repair_tool_pairing() to compacted list (safety check):
-   If orphans detected after compaction → RepairImpossibleError
+   If orphans detected after compaction → repaired in place by `repair_tool_pairing()`
+   (the sketch's `RepairImpossibleError` was never implemented)
 
 9. Return StageResult(messages=compacted, modified=True, summary_text=summary_text)
 ```
@@ -741,6 +888,12 @@ def _safe_cut_boundary(
 
 **Purpose:** Emergency full-session compaction. Summarizes the entire session history (excluding system prompt) into a single summary message and resets the working message list. More aggressive than stage 3 — used when the window is nearly full.
 
+**How "more aggressive" is implemented:** Stage 4 does not have a separate algorithm. It
+constructs a `SummaryCompactionStage` with hard-coded `preserve_first_n=1, preserve_last_n=2`
+and hands it a synthetic budget pinned just over the 0.80 trigger to force it to fire. Those
+**1/2 values are Stage 4's internal override only** — they are not the configured defaults (4/8),
+they are not readable or settable from config, and they do not describe Stage 3's behavior.
+
 ```
 FULL AUTO-COMPACT ALGORITHM:
 ──────────────────────────────────────────────────────────────────
@@ -759,8 +912,8 @@ Precondition: budget.usage_fraction >= 0.95
 
    If summarization fails:
    → Log ERROR: "Full auto-compact summarization failed. Context overflow imminent."
-   → Try truncation fallback: keep only last preserve_last_n messages
-   → If even that is over 95%: raise ContextOverflowError
+   → Return unchanged (modified=False) and let the emergency floor take the turn:
+     it drops the oldest whole exchanges, then shrinks bodies. No exception is raised.
 
 3. Build compacted list:
    compact_history_message = {
@@ -819,7 +972,8 @@ async def _summarize_middle(
         Summary string. Never empty — falls back to a structured list of
         "what was attempted / what was found" if the LLM returns an empty response.
 
-    Raises:
+    Raises (design sketch — the implemented path raises nothing typed; see the
+    Error Types table: `SummaryCompactionStage.apply` catches broadly and skips):
         SummarizationError: LLM call failed or timed out.
                             DOES NOT raise on empty response — falls back instead.
     """
@@ -909,12 +1063,14 @@ def _extract_fallback_summary(messages: list[Message]) -> str:
 
 | Threshold | Default | When Fires | What Happens |
 |-----------|---------|-----------|-------------|
-| `summary_compaction_threshold` | 0.80 | usage >= 80% | Stage 3: summarize-middle |
+| `TOOL_EVICT_USAGE_FRACTION` / `WEB_EVICT_USAGE_FRACTION` | 0.50 | usage >= 50% | Eviction: bulky tool/web bodies → restorable stubs (no LLM call) |
+| `summary_compaction_threshold` | 0.80 | usage >= 80% | Stages 1–2 (deterministic) always; Stage 3 summarize-middle if fire budget remains |
 | `full_compact_threshold` | 0.95 | usage >= 95% | Stage 4: full auto-compact |
+| Emergency floor | > budget − 4,096 reserve | request still would not fit | Drop oldest whole exchanges, then shrink bodies. Never raises. |
 
 **Threshold rationale:**
 - 80%: Fires early enough that the summary compaction + the next LLM response will still fit. At 80% on a 128K window, there are 25.6K tokens left. The summary replaces N messages but consumes only ~1K tokens. The next iteration starts well under 80%.
-- 95%: Emergency threshold. By this point, the model may already be degrading (context saturation effects appear above 80% for most models). Full compact is the last resort before `ContextOverflowError`.
+- 95%: Emergency threshold. By this point, the model may already be degrading (context saturation effects appear above 80% for most models). Full compact is the last *summarizing* resort; past it, the emergency floor cuts the history mechanically rather than failing the turn.
 - The 15% gap between thresholds prevents thrashing: after a successful summary compact at 80%, usage drops significantly. The next summary compact will not trigger again for several more iterations.
 
 **Estimation error margin:** `_CharHeuristic` can be ±30% inaccurate. At 80% threshold with 30% overestimation, the actual usage when the stage fires could be as low as 56%. This is conservative (fires earlier than needed) rather than catastrophic (fires too late). Summary compaction is cheap to run unnecessarily — running it early has no negative consequences beyond a slightly shorter history.
@@ -929,15 +1085,17 @@ def _extract_fallback_summary(messages: list[Message]) -> str:
 SUMMARIZATION FAILURE HANDLING:
 ────────────────────────────────
 Stage 3 (summary compaction):
-    SummarizationError → log WARNING, return stage result with modified=False
+    any summarization failure (no typed error exists) → log WARNING, modified=False
     Effect: Stage 3 is skipped. Stage 4 (full auto-compact) runs next iteration.
     Agent continues normally.
 
 Stage 4 (full auto-compact):
-    SummarizationError → log ERROR, attempt truncation fallback
-    Truncation fallback: keep system_messages + last preserve_last_n messages
-    If truncation brings usage below 95%: continue
-    If truncation still above 95%: raise ContextOverflowError
+    Summarization failure → the stage returns modified=False.
+    The emergency floor in build_messages() then guarantees the request fits:
+      1. drop the oldest whole user-turn exchanges (never a lone user message —
+         a survivor list must still begin with a user turn or the server 400s)
+      2. if the un-droppable remnant still overflows, head+tail shrink its bodies
+    Both steps log at ERROR and publish CompactionTriggered. Nothing is raised.
 ```
 
 ### Token Count Estimation Errors
@@ -954,40 +1112,33 @@ def count_string(self, text: str) -> int:
         return self._strategy.count(text)
 ```
 
-### Repair Impossible
+### Orphaned Tool Pairs
 
-`RepairImpossibleError` is raised when `validate_tool_pairing()` detects orphans after `repair_tool_pairing()` runs. This indicates a bug in the repair algorithm, not in user code or model behavior. The agent loop catches this and stops:
-
-```python
-# In agent loop._execute_loop():
-try:
-    request_messages = context_manager.build_messages(session.messages, tool_schemas)
-except RepairImpossibleError as exc:
-    log.error(
-        "repair_tool_pairing() produced invalid result for %s. "
-        "Full message list: %s",
-        config.name,
-        json.dumps(exc.messages, default=str),
-    )
-    session.terminated_reason = "error"
-    return _format_error_summary(session, exc)
-```
+`repair_tool_pairing()` is a filter, not a validator. Any tool message whose `tool_call_id` does
+not appear in a preceding assistant message's `tool_calls` is dropped, and a new list is returned.
+There is no "unrepairable" outcome and no exception — the agent loop calls `build_messages()`
+without an exception handler for this case.
 
 ### Context Overflow
 
-`ContextOverflowError` is raised when all compaction stages have run and context is still above 100%. This means the session has accumulated so much history that even a full summary + system prompt exceeds the model window. This should be extremely rare (would require thousands of tool calls on a 128K model).
+**Overflow does not produce an error.** When every compaction stage has run and the message tokens
+plus tool-schema tokens still exceed `max_context_tokens − 4,096` (the reply reserve), the
+emergency floor in `build_messages()` cuts the history until the request fits:
 
-```python
-# In agent loop._execute_loop():
-except ContextOverflowError as exc:
-    log.error(
-        "Context overflow for %s at %.0f%% after full compaction. "
-        "Consider increasing max_context_tokens or reducing max_actions.",
-        config.name, exc.usage_fraction * 100,
-    )
-    session.terminated_reason = "error"
-    return _format_error_summary(session, exc)
-```
+1. `_hard_truncate_to_budget()` drops the oldest whole user-turn exchanges — a user message
+   through everything before the next user message. The unit is deliberately the whole exchange:
+   dropping a lone user message would leave a history starting `[system, assistant, tool, …]`,
+   which an OpenAI-compatible server rejects with HTTP 400. The leading system message is never
+   dropped and the last remaining exchange is never emptied.
+2. If the un-droppable remnant (system + the final message) still overflows, and only then,
+   `_shrink_content_to_budget()` head+tail truncates the message bodies themselves.
+
+Both log at ERROR with agent, session, and iteration, and publish `CompactionTriggered` so the cut
+appears in the event ledger rather than only in the log stream.
+
+This design replaced an earlier "stop the turn" posture after a live run stalled at 101.1%
+utilization with compaction latched off. The rule now is that **overflow is impossible, not fatal**
+— a loudly-logged lossy history beats a dead session.
 
 ---
 
@@ -995,18 +1146,26 @@ except ContextOverflowError as exc:
 
 ### Agent YAML
 
+Real key names and shipped defaults. `docs/specs/06-config.md` is the full config reference;
+this is the context-relevant subset.
+
 ```yaml
 context:
-  max_context_tokens: 131072          # set by detect_capabilities(), override here
-  tool_result_max_tokens: 2000        # cap per tool result
-  summary_compaction_threshold: 0.80  # fire summary compaction at 80%
-  full_compact_threshold: 0.95        # fire full compact at 95%
-  preserve_first_n: 2                 # keep first N messages in summary compact
-  preserve_last_n: 6                  # keep last N messages in summary compact
-  summarization_model: null           # null = use agent's own model
-  summarization_max_tokens: 1024
-  summarization_timeout_seconds: 60.0
+  max_context_tokens: 131072              # budget; start refits it to the SERVED window
+  model_context_overrides: {}             # per-model pins, keyed by EXACT model name
+  compaction_threshold_pct: 80.0          # fire summary compaction at 80%
+  preserve_first_n_messages: 4            # keep first N messages in summary compact (min 1)
+  preserve_last_n_messages: 8             # keep last N messages in summary compact (min 2)
+  max_tool_output_chars: 32000            # CHARACTER cap per tool result (Stage 1)
+  tool_result_eviction: true              # page bulky results out to the ContentStore at 50%
+  tool_result_evict_threshold_chars: 8000 # only bodies larger than this are evicted
 ```
+
+Fields the earlier draft of this spec listed that **do not exist**: `tool_result_max_tokens`,
+`summary_compaction_threshold`, `full_compact_threshold`, `preserve_first_n`, `preserve_last_n`,
+`summarization_model`, `summarization_max_tokens`, `summarization_timeout_seconds`. The 0.95
+full-compact threshold and the summarizer's parameters are module constants and call-site
+arguments, not config keys.
 
 ---
 
@@ -1025,7 +1184,7 @@ No additional dependencies beyond what the provider layer already requires.
 
 1. **`build_messages()` always operates on a copy.** The input `messages` list is never modified. All stages receive and return new lists. The canonical session history (`session.messages`) is mutated only by the agent loop's `session.push()` method.
 
-2. **Stages are not stateful across calls.** Each call to `build_messages()` runs the full pipeline from scratch on the current snapshot of the message list. There is no "we already compacted this section" tracking. This is intentional — it makes the pipeline deterministic and easy to test.
+2. **Stages are not stateful across calls; the manager holds two counters that are.** Each call to `build_messages()` runs the full pipeline from scratch on the current snapshot of the message list — there is no "we already compacted this section" tracking, which keeps the stages deterministic and easy to test. The `ContextManager` itself does carry two pieces of **per-turn** state, both reset by `reset_compaction_guard()` at the turn boundary: the summary-compaction fire count (capped at 3 per turn) and the restore-pin baseline (see [Eviction Layer](#eviction-layer-the-contentstore)). Neither survives a turn, and neither makes a stage's output depend on anything but its inputs.
 
 3. **Compaction runs on the working copy, not the session.** The compacted message list returned by `build_messages()` is used for the LLM request only. It is not written back to `session.messages`. The session history grows unboundedly — only the LLM request is compacted. If the agent wants a full reset (e.g., after full auto-compact), the agent loop may update `session.messages` to match the compacted list. This is optional — the compacted list for the next request will be compacted again automatically.
 

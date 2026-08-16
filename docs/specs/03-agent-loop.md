@@ -667,7 +667,7 @@ This function is the boundary guard described in PITFALLS.md Pitfall 1. It is ca
 **Full specification is in spec 08-context-management.md.** The contract from the agent loop's perspective:
 
 - `build_messages()` guarantees that its returned list has no orphaned `tool_result` blocks.
-- If `build_messages()` raises `RepairImpossibleError`, the agent loop must not proceed with the LLM call. It should log the error and terminate the session with `terminated_reason = "error"`.
+- `RepairImpossibleError` was a design-sketch exception that never existed in `src/` (spec 08's Error Types table is authoritative). In the implementation, `repair_tool_pairing()` drops orphaned tool results itself; `build_messages()` does not raise on pairing problems.
 - The agent loop never calls `repair_tool_pairing()` directly. It calls `context_manager.build_messages()` which calls it internally.
 
 ---
@@ -893,11 +893,18 @@ When a tool execution produces an error result (via `observation.is_error = True
 
 ### Context Overflow Recovery
 
-If `ContextManager.build_messages()` raises `ContextOverflowError` (context is too full to compact further):
-1. Log at ERROR: "Context overflow for agent {name} at iteration {N}. Stopping."
-2. Set `session.terminated_reason = "error"`
-3. Return the last meaningful assistant message as the summary.
-4. Do NOT attempt to continue — sending an overflowed context will produce garbage.
+> **Doc status (2026-08-16):** `ContextOverflowError` never existed in the implementation —
+> this section previously described a design sketch. Reality below; spec 08's Error Types
+> table is the authoritative account.
+
+`ContextManager.build_messages()` does **not** raise on overflow. When the message list
+exceeds the budget even after compaction, the pipeline degrades deterministically instead:
+`_hard_truncate_to_budget` drops the oldest whole exchanges, then `_shrink_content_to_budget`
+head+tail-shrinks remaining bodies to fit. Both log at ERROR and publish
+`CompactionTriggered`, so the condition is observable — but the loop keeps running on the
+degraded context rather than terminating the turn. The only by-design raise in the context
+module is `RuntimeError` from `TokenCounter` (tokenizer failure), which the loop surfaces
+as a turn error.
 
 ---
 

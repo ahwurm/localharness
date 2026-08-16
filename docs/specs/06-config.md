@@ -379,13 +379,25 @@ class ContextConfig(BaseModel):
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     max_context_tokens: int = Field(
-        default=128_000,
+        default=131_072,  # DEFAULT_MAX_CONTEXT_TOKENS (config/defaults.py) — single source of truth
         ge=1_000,
         le=2_000_000,
         description=(
             "Maximum context window size in tokens. "
-            "Set to match your model's actual context length. "
+            "init fits this to the served window (max_model_len − output reservation), "
+            "and start's guard refuses a value the served window cannot honor. "
             "The ContextManager uses this to determine when to compact."
+        ),
+    )
+
+    model_context_overrides: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model context budgets, keyed by EXACT model name (no globbing). A model listed "
+            "here uses its own budget instead of max_context_tokens — consulted by the start-time "
+            "window guard and by the budget refit after a /model swap. One global scalar cannot be "
+            "correct across models with different served windows; this is how you pin one. "
+            "Absent an entry, the scalar applies exactly as before."
         ),
     )
 
@@ -445,6 +457,63 @@ class ContextConfig(BaseModel):
         ),
     )
 ```
+
+#### Per-model context pins (`context.model_context_overrides`)
+
+`max_context_tokens` is a single scalar, and one scalar cannot be right for two models with
+different served windows. Swap from a model served at 65,536 to one served at 40,960 and the
+scalar is now a lie — compaction never fires and long turns die at the provider's input cap.
+A **pin** gives one named model its own budget.
+
+```yaml
+context:
+  max_context_tokens: 61440           # applies to every model without a pin
+  model_context_overrides:
+    qwen3.8-27b: 40000                # this model, and only this model, runs on 40,000
+```
+
+**Matching is exact-name, and that is the whole rule.** The key is the served model name,
+verbatim — no globbing, no prefixes, no wildcards, no case folding. A key that does not match the
+served model name is simply never consulted, and the scalar applies instead. **A typo is therefore
+silent**: `qwen3.8-27B` when the server reports `qwen3.8-27b` produces no warning and no error, it
+just quietly leaves you on the scalar. If a pin does not appear to be taking effect, check the
+name against what the provider actually serves before checking anything else.
+
+**Precedence.** A matching pin outranks `max_context_tokens` for that model. Everything downstream
+sees the pinned number: the start-time window guard, the session's real budget, `doctor`'s
+reconciliation, and the budget refit after a `/model` swap in the REPL all resolve through one
+helper (`ContextConfig.resolve_budget`), so they cannot disagree. What a pin does **not** outrank
+is the physical served window — see the guard below.
+
+**The guard.** `start` validates the resolved budget against the window the server actually serves,
+minus a 4,096-token output reserve. An over-window pin aborts startup rather than 400ing mid-session,
+and the error names the pinned setting — not the scalar, which would be a fix that changes nothing:
+
+```
+Error: context.model_context_overrides['qwen3.8-27b']=80000 exceeds the usable window
+served for 'qwen3.8-27b' (61440 = 65536−4096 output reserve). It would 400 mid-session.
+Set context.model_context_overrides['qwen3.8-27b'] ≤ 61440 (under org: in config.yaml, or
+in the agent's yaml — it is not a top-level key), or raise the served window at the server.
+```
+
+**Confirmation on the happy path.** A pin that is applied says so at start, so the budget the
+session runs on is never a silent assumption:
+
+```
+✓ Context budget pinned for qwen3.8-27b: 40,000 tokens
+```
+
+`localharness doctor` names the same resolved value when it reconciles config against the served
+window, and annotates it as pinned:
+
+```
+✓ Context budget 50,000 (pinned for qwen3.8-27b) fits served window 65,536
+```
+
+Its remedies are pin-aware too. A budget far below the served window (wasting more than 25% of it)
+tells a pinned session to `Raise context.model_context_overrides['<model>']`, and an unpinned one
+to run `localharness init` to refit — because for a pinned model, refitting the scalar would be
+overruled by the pin on the very next start.
 
 ### 3.7 ScheduleConfig
 
@@ -849,7 +918,8 @@ Every field, its type, default, and constraints.
 | `memory.max_notes_chars` | int | `16000` | 0–200000 | Notes injection limit |
 | `memory.shared_read` | list[string] | `[]` | division, org | Shared memory scopes |
 | `memory.inject_into_context` | bool | `true` | — | Auto-inject memory |
-| `context.max_context_tokens` | int | `128000` | 1000–2000000 | Context window size |
+| `context.max_context_tokens` | int | `131072` | 1000–2000000 | Context window size (init refits to the served window) |
+| `context.model_context_overrides` | map[string, int] | `{}` | keys match the served model name EXACTLY | Per-model context budget; outranks `max_context_tokens` for that model |
 | `context.compaction_threshold_pct` | float | `80.0` | 50.0–99.0 | Compaction trigger |
 | `context.preserve_first_n_messages` | int | `4` | 1+ | Preserved prefix count |
 | `context.preserve_last_n_messages` | int | `8` | 2+ | Preserved suffix count |
@@ -1375,7 +1445,8 @@ memory:
   inject_into_context: true
 
 context:
-  max_context_tokens: 128000
+  max_context_tokens: 131072
+  model_context_overrides: {}     # e.g. {qwen3.8-27b: 40000} — EXACT model name
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
@@ -1424,7 +1495,7 @@ permissions:
     kill_file: ~/.localharness/KILL
 
 context:
-  max_context_tokens: 128000
+  max_context_tokens: 131072
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
@@ -1459,7 +1530,7 @@ permissions:
     kill_file: ~/.localharness/KILL
 
 context:
-  max_context_tokens: 128000
+  max_context_tokens: 131072
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
@@ -1552,7 +1623,7 @@ After inheritance resolution for `model-research`:
 - `tools.add`: `[exa_search, exa_crawl]` (division's exa_search + agent's exa_crawl)
 - `permissions.deny_patterns`: union of org + division + agent deny lists
 - `permissions.budget.max_actions`: `150` (from division — agent didn't override)
-- `context.max_context_tokens`: `128000` (from org default — neither agent nor division overrode it)
+- `context.max_context_tokens`: `131072` (from org default — neither agent nor division overrode it)
 
 ---
 

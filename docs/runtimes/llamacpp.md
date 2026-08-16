@@ -137,6 +137,13 @@ uses:
   content counts and estimate message overhead, disclosed at start
 - Bench run — a `bench.yaml` matrix entry is provided as a template (`model_id` is a
   placeholder — llama.cpp serves whatever GGUF is loaded); fill in your served id before running
+- Decode-speed readout (**0.12.5 behavior note**) — llama.cpp is the one runtime whose rate
+  the harness does **not** measure itself: `llama-server` streams `timings.predicted_per_second`,
+  computed inside its own decode loop, and the speed ledger takes that. It is therefore exempt
+  from the sample-substance floors 0.12.5 applies to client-measured runtimes (≥16 completion
+  tokens over a ≥0.25 s window) — chunk-arrival timing can't distort an engine-side number.
+  Practical upshot: llama.cpp populates the readout on short turns that vLLM/Ollama/LM Studio
+  would skip
 
 ## Troubleshooting
 
