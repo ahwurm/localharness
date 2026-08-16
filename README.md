@@ -165,12 +165,13 @@ Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytes
 ## Reference architectures
 
 LocalHarness is developed against two maintainer-tested hardware targets. Both must meet
-the practicality bar — **64k of KV-cache headroom and ≥9.5 tok/s single-stream** — with
-the newest Qwen model that fits it:
+the practicality bar — **64k of KV-cache headroom and ≥9.5 tok/s single-stream**. Four
+tested configs on architecture A (Qwen 3.8 / 3.6 and DeepSeek V4 Flash across llama.cpp
+and vLLM); the current default:
 
 | | Hardware | Model / Runtime | Status |
 |---|---|---|---|
-| [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.6-27B NVFP4 / vLLM, 64k ctx, 9.5 tok/s | TESTED |
+| [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.8-27B UD-Q4 GGUF + MTP spec decode / llama.cpp, 64k ctx, 17–21 tok/s measured | TESTED |
 | [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.5-9B 4-bit / vLLM (vllm-metal), 64k ctx | PROPOSED |
 
 Start at [docs/reference-architectures/](docs/reference-architectures/README.md). Per-hardware setup and tuning notes — timeouts, context budgets, runtime parity — are in [gaps.md](docs/reference-architectures/gaps.md).
@@ -182,7 +183,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.12.3, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.12.4, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 

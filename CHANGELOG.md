@@ -4,6 +4,35 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.4] — 2026-08-16
+
+Completes the fork-surfaced bug sweep (credit
+[Ruivalim](https://github.com/Ruivalim/localharness) — commit trail read as
+bug signal; their feature work remains theirs to PR) and refreshes the
+reference-architecture docs to match measured reality.
+
+### Added
+- Per-model context pins: `context.model_context_overrides` maps a model name
+  to its own token budget, honored by the start guard and the `/model` swap
+  refit; the global scalar remains the fallback (#132).
+- Reference architectures rewritten around four tested DGX Spark configs
+  (Qwen3.8-27B + MTP on llama.cpp — the current default — Qwen3.6-35B-A3B on
+  vLLM/NVFP4, DeepSeek V4 Flash + drafter, Qwen3.6-27B), with measured
+  numbers labeled measured and unmeasured depths said out loud.
+
+### Fixed
+- Window-guard errors name the model whose window they reject (#128).
+- The REPL `/model` swap says when it saves the new default instead of
+  silently writing overrides.yaml — and stays honest when the write fails (#129).
+- Implausible tok/s samples (degenerate timing windows reporting 40,000 t/s)
+  are rejected before they reach the speed ledger (#130).
+- The test suite no longer inherits ambient `NO_COLOR`/`TERM` — green under
+  hostile color environments (#131).
+
+Verified-invalid from the same sweep, no change shipped: Ollama reasoning-token
+counting (no per-provider tally exists to have missed) and a claimed doc
+overstatement of failing tests (no such claim exists; the suite has zero).
+
 ## [0.12.3] — 2026-08-16
 
 First-run fix, credit to an external fork's commit trail
