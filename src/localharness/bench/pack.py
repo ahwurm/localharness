@@ -69,8 +69,9 @@ def _messages_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                                     "params": ev.get("tool_params") or {}}]
             msgs.append(m)
         elif etype == "Observation":
+            # The bus serializes the tool result as "output"; "content"/"result" kept for old packs.
             msgs.append({"role": "tool",
-                         "content": ev.get("content") or ev.get("result") or ""})
+                         "content": ev.get("output") or ev.get("content") or ev.get("result") or ""})
     return msgs
 
 

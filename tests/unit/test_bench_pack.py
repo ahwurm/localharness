@@ -153,3 +153,30 @@ def test_bench_shaped_run_reconstructs_prompt_from_turnstarted(tmp_path):
         {"role": "assistant", "content": "42"},
     ]
     assert [m["role"] for m in recs["scen-repl"]["messages"]] == ["user", "assistant"]
+
+
+def test_observation_output_field_is_packed(tmp_path):
+    """The bus serializes Observation tool results as "output" (Observation.output) — real run
+    files never carry "content" for tool results, so packs built from real bench runs emitted
+    empty tool messages (#139). "content"/"result" stay as fallbacks for older hand-built packs."""
+    root = tmp_path / "results"
+    d = root / "m" / "scen-out"
+    d.mkdir(parents=True)
+    events = [
+        {"event_type": "UserMessage", "content": "do the scen-out task"},
+        {"event_type": "Action", "action_type": "llm_response", "content": "scanning…",
+         "has_tool_calls": True, "tool_name": "glob", "tool_params": {"pattern": "*"}},
+        {"event_type": "Observation", "output": "7 files found"},
+        {"event_type": "Action", "action_type": "llm_response", "content": "Done.",
+         "has_tool_calls": False},
+        {"event_type": "ScenarioCompleted", "scenario_name": "scen-out", "model": "m",
+         "success": True, "tokens_in": 100, "tokens_out": 40, "iterations": 2,
+         "tool_call_count": 1, "parse_failures": 0, "stuck_recoveries": 0},
+    ]
+    (d / "20260720T120000Z.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    out = tmp_path / "pack"
+    build_pack(root, out)
+    recs = [json.loads(l) for l in (out / "trajectories.jsonl").read_text().splitlines()]
+    tool_msgs = [m for r in recs for m in r["messages"] if m["role"] == "tool"]
+    assert tool_msgs and tool_msgs[0]["content"] == "7 files found"
