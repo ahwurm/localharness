@@ -416,13 +416,23 @@ def _props_resp(total_slots: int, slot_ctx: int) -> MagicMock:
     return r
 
 
-def _write_orchestrator(tmp_path: Path, max_ctx: int) -> None:
+def _write_orchestrator(
+    tmp_path: Path,
+    max_ctx: int,
+    overrides: dict[str, int] | None = None,
+    model: str = "inherit",
+) -> None:
     d = tmp_path / "agents"
     d.mkdir(exist_ok=True)
-    (d / "orchestrator.yaml").write_text(
-        "name: orchestrator\nmodel: inherit\nrole: test\n"
+    body = (
+        f"name: orchestrator\nmodel: {model}\nrole: test\n"
         f"context:\n  max_context_tokens: {max_ctx}\n"
     )
+    if overrides:
+        body += "  model_context_overrides:\n" + "".join(
+            f"    {k}: {v}\n" for k, v in overrides.items()
+        )
+    (d / "orchestrator.yaml").write_text(body)
 
 
 def _llamacpp_mocks(mock_httpx, *, served: int, slots: int, slot_ctx: int) -> None:
@@ -465,3 +475,99 @@ def test_doctor_warns_when_slot_window_starves_budget(mock_httpx, tmp_path):
     assert result.exit_code == 0, result.output
     assert "8,192" in result.output
     assert "--parallel 1" in result.output
+
+
+# --- #137: doctor must reconcile the EFFECTIVE budget — the same pin-vs-scalar resolution
+# `start` runs — and say WHICH value it checked. The pins feature (#132) and this blindness
+# shipped together in 0.12.4: `start` ran on the pin while doctor blessed the scalar. ---
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_reconciles_the_pinned_budget_and_names_the_model(mock_httpx, tmp_path):
+    """#137: with a pin for the served model, doctor checks the PINNED number (and says so).
+    The scalar (120,000) would EXCEED this window — so a green line here can only come from
+    reading the pin, exactly as `start` does."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 120_000, overrides={"m": 56_000})
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "56,000" in result.output
+    assert "pinned for m" in result.output       # names the value it actually checked
+    assert "120,000" not in result.output        # the scalar is NOT this model's budget
+    assert "EXCEEDS" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_without_a_pin_reports_the_scalar_unchanged(mock_httpx, tmp_path):
+    """#137 control: no map (and a map naming a DIFFERENT model) leaves the scalar in charge,
+    with the original wording — no phantom 'pinned' attribution."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 56_000, overrides={"some-other-model": 8_000})
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Context budget 56,000 fits served window 65,536" in result.output
+    assert "pinned" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_fails_on_a_pin_that_exceeds_the_served_window(mock_httpx, tmp_path):
+    """#137: the check semantics are unchanged — only the number changes. An over-ceiling PIN
+    must fail and cite the pinned value (the scalar, 30,000, fits fine and must not mask it)."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 30_000, overrides={"m": 200_000})
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "200,000" in result.output
+    assert "EXCEEDS" in result.output
+    assert "pinned for m" in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_pin_lookup_uses_the_root_agents_own_model(mock_httpx, tmp_path):
+    """#137: `start` resolves the served model as agent.model unless 'inherit' — doctor must
+    key the pin off the SAME name, or a root agent pinned to its own model reads the wrong
+    budget. Here the pin is keyed to the agent's model, not the provider default."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 120_000, overrides={"agent-model": 56_000}, model="agent-model")
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert "56,000" in result.output
+    assert "pinned for agent-model" in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_served_window_follows_the_root_agents_model(mock_httpx, tmp_path):
+    """#137 critic repro: multi-model endpoint + root agent on its own model — the served
+    window must come from THAT model's entry, not provider.default_model's, or the check
+    pairs one model's pin with another model's window (a backwards EXCEEDS verdict: the
+    56,000 pin fits agent-model's 131,072 window with room to spare, but was previously
+    judged against m's 8,192)."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 120_000, overrides={"agent-model": 56_000}, model="agent-model")
+
+    def _get(url, **kw):
+        if url.endswith("/props"):
+            return _props_resp(1, 131_072)
+        return _models_resp({"data": [
+            {"id": "m", "meta": {"n_ctx": 8_192}},
+            {"id": "agent-model", "meta": {"n_ctx": 131_072}},
+        ]})
+    mock_httpx.get.side_effect = _get
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1]}
+    mock_httpx.post.return_value = tok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert "EXCEEDS" not in result.output          # the backwards verdict is gone
+    assert "pinned for agent-model" in result.output
+    assert "131,072" in result.output              # judged against the ROOT model's window
+    # The honest verdict for a 56k pin on a ~127k usable window is the under-use warning:
+    assert "BELOW" in result.output

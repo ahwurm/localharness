@@ -99,6 +99,8 @@ async def _probe_llm(
             if result.server_reached or result.probe_error is None:
                 return True, result.tool_call_mode, result.context_window, result.probe_error
             probe_error = result.probe_error
+            if _classify_probe_failure(probe_error) == "unreachable":
+                break  # the probe already spent its attempts on a dead endpoint; outer retries just replay it
         except Exception as exc:  # detect_capabilities shouldn't raise, but never wedge on a surprise
             probe_error = str(exc)
         if attempt < max_retries - 1:
@@ -518,9 +520,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.agent.context import RESPONSE_RESERVE_TOKENS, probe_served_window
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
-    _pin = agent_config.context.model_context_overrides.get(resolved_model)
-    if _pin is not None:
+    # #137: resolve_budget is the ONE resolution `doctor` reads too — and CONFIRM an applied pin
+    # here, because the only pin feedback that shipped fires on a /model swap (unreachable on a
+    # single-model server), leaving the happy path silent about the budget it actually runs on.
+    _pin, _pinned = agent_config.context.resolve_budget(resolved_model)
+    if _pinned:
         agent_config.context.max_context_tokens = _pin
+        console.print(
+            f"[green]✓[/green] Context budget pinned for {resolved_model}: {_pin:,} tokens"
+        )
     _cfg_window = agent_config.context.max_context_tokens
     # PROVIDER-AWARE served-window discovery for the guard. _probe_llm's window comes from
     # detect_capabilities' vLLM-shape /v1/models probe (max_model_len) — None for llama.cpp/
@@ -563,11 +571,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
             )
         else:
+            # #137: name the setting that actually GOVERNS this number. When the budget came from
+            # a pin, "set context.max_context_tokens ≤ N" is a loop that changes nothing — the pin
+            # outranks the scalar on the next start too.
+            _key = (
+                f"context.model_context_overrides['{resolved_model}']" if _pinned
+                else "context.max_context_tokens"
+            )
             err_console.print(
-                f"[bold red]Error:[/bold red] config max_context_tokens={_cfg_window} exceeds the "
+                f"[bold red]Error:[/bold red] {_key}={_cfg_window} exceeds the "
                 f"usable window served for '{resolved_model}' "
                 f"({_bound} = {_served}−{RESPONSE_RESERVE_TOKENS} "
-                f"output reserve). It would 400 mid-session. Set context.max_context_tokens ≤ "
+                f"output reserve). It would 400 mid-session. Set {_key} ≤ "
                 f"{_bound} (under org: in config.yaml, or in the agent's yaml — it is not a "
                 f"top-level key), or raise the served window at the server."
             )

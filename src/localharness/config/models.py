@@ -991,6 +991,19 @@ class ContextConfig(BaseModel):
         ),
     )
 
+    def resolve_budget(self, model: str | None) -> tuple[int, bool]:
+        """Effective context budget for `model` as (tokens, pinned).
+
+        THE single pin-vs-scalar resolution (#132/#137). An EXACT-name entry in
+        model_context_overrides is that model's budget and outranks the scalar; absent an
+        entry the scalar applies unchanged. `start` (window guard + the session's real
+        budget) and `doctor` (window reconciliation) both call this — when they resolved it
+        separately, doctor blessed a 61,440 scalar for a session actually running on a 40,000
+        pin. No globbing, no prefix match: the key is the served model name, verbatim.
+        """
+        pin = self.model_context_overrides.get(model) if model else None
+        return (pin, True) if pin is not None else (self.max_context_tokens, False)
+
 
 class ScheduleConfig(BaseModel):
     """Scheduled execution configuration (v2 — parsed but not executed in v1)."""
