@@ -130,6 +130,16 @@ Ollama-specific handling wrapped around them:
   local GGUF is reachable
 - Bench run — opt-in `bench.yaml` matrix entries are provided but UNVERIFIED (no recorded run in
   this repo)
+- Decode-speed readout (**0.12.5 behavior note**) — Ollama serves no engine-side rate, so the
+  harness measures it client-side: exact completion tokens over the observed
+  first-token→last-token window. That window times chunk *arrival*, so 0.12.5 admits a sample
+  to the speed ledger only when it has substance — ≥16 completion tokens over a ≥0.25 s window
+  — after coalesced bursts on another runtime were recorded as impossible rates. A turn below
+  those floors simply doesn't refresh the readout; the last real median stands (stale-honest
+  beats fresh-garbage), and a model with no admitted sample shows no number rather than a
+  guess. **UNVERIFIED here:** how often real Ollama turns clear the floors has not been
+  watched live — the gate is sound by construction, its sample yield on this runtime is not
+  yet measured
 
 ## Troubleshooting
 

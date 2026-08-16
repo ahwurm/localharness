@@ -51,6 +51,16 @@ doc carries four measured configurations rather than one. Summary:
 | **A3** | DeepSeek V4 Flash MoE | llama.cpp + DSpark draft model | 64k | 37–40 tok/s | Strongest reasoning model that fits the box at all; uses ~105 of 121 GB |
 | **A4** | Qwen3.6-27B dense | vLLM (NVFP4) | 64k | 9.5 tok/s | Smallest footprint; the original reference config |
 
+Those decode figures are **controlled runs** — fixed workload, repeated reps. Real agent
+sessions spread wider, because speculative-decoding gain tracks what the model is
+generating: the August 2026 live-use test pass measured A1 session medians of 19.9–24.7
+tok/s and A3 sessions spanning ~24–47 tok/s. The controlled numbers stay the headline (they
+are the reproducible ones); [dgx-spark.md](dgx-spark.md) carries both side by side.
+
+Coverage, stated plainly: **A4 was not re-validated in that pass** — its June 2026 numbers
+stand unrevalidated. A2's ~78 tok/s is the July 2026 controlled figure, re-anchored only by
+a container-digest check.
+
 **Will not fit:** the Qwen 3.8 MoE flagship (~2.4T total / ~95B active parameters) does
 not fit 121 GiB-class hardware at any quantization. Hosted API only — don't start the
 download.
