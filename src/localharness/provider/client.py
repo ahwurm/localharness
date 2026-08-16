@@ -938,7 +938,7 @@ class LLMClient:
         updates without it — and lands in config.config_dir, the SESSION's dir, which is what
         the REPL reads back. Never raises: a stats miss must not fail a completion."""
         from localharness.provider.speed_stats import (
-            decode_tps, default_speed_stats_path, record_tps,
+            MAX_PLAUSIBLE_TPS, decode_tps, default_speed_stats_path, record_tps,
         )
         try:
             tps = progress.get("server_tps")
@@ -948,6 +948,13 @@ class LLMClient:
                 if ctokens and first_at is not None:
                     tps = decode_tps(ctokens, first_at, time.monotonic())
             if not tps or tps <= 0:
+                return
+            # #130: a sub-millisecond measured window turns an exact token count into tens of
+            # thousands of tok/s. That is a timing artifact, not a decode rate — drop it before it
+            # reaches last_gen_tps (the status line) or the ledger's median. Debug, not warning:
+            # nothing is wrong with the session, the sample is just unusable.
+            if float(tps) > MAX_PLAUSIBLE_TPS:
+                log.debug("discarding implausible decode rate %.1f tok/s (degenerate window)", tps)
                 return
             self.last_gen_tps = float(tps)
             if self.config.provider_type:

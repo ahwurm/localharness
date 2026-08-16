@@ -18,11 +18,16 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from statistics import median
 from uuid import uuid4
 
 SAMPLE_CAP = 10
+# #130: the ceiling above which a "measured" rate is a timing artifact, not a decode speed.
+# decode_tps divides an exact token count by the measured window, so a sub-millisecond window
+# yields tens of thousands of tok/s — no local runtime decodes anywhere near this.
+MAX_PLAUSIBLE_TPS = 10_000.0
 # Color bands (owner spec 2026-08-11): >30 green, 20–30 yellow, <20 red.
 GREEN_ABOVE_TPS = 30.0
 YELLOW_FROM_TPS = 20.0
@@ -68,7 +73,13 @@ def _load(path: Path) -> dict:
 
 
 def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
-    """Append one verified sample, keeping the newest SAMPLE_CAP per model."""
+    """Append one verified sample, keeping the newest SAMPLE_CAP per model.
+
+    #130: the file defends itself. A non-finite (nan/inf) or out-of-range value is DROPPED
+    rather than stored — nan poisons this model's median forever, and an implausible rate is a
+    degenerate-window artifact. The ledger's contract is verified samples only."""
+    if not isfinite(tps) or tps <= 0 or tps > MAX_PLAUSIBLE_TPS:
+        return
     data = _load(path)
     key = speed_key(provider_type, model)
     entry = data.get(key)

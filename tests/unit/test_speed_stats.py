@@ -1,5 +1,7 @@
 """speed_stats: verified decode-rate ledger — banding, math, persistence."""
 
+import pytest
+
 from localharness.provider.speed_stats import (
     SAMPLE_CAP,
     all_median_tps,
@@ -90,3 +92,26 @@ def test_concurrent_writers_do_not_share_one_temp_file(tmp_path, monkeypatch):
     assert all_median_tps(path)["vllm:a"] == 40.5  # this writer's publish won, ledger readable
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == [], leftovers  # per-writer name, cleaned up — never a shared fixed one
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), 0.0, -5.0, 40_000.0])
+def test_record_tps_rejects_non_finite_and_out_of_range(tmp_path, bad):
+    """#130: the ledger defends its own file. nan poisons this model's median forever and an
+    implausible rate is a timing artifact — neither may reach speed_stats.json, whatever the
+    caller passes."""
+    from localharness.provider.speed_stats import median_tps, record_tps
+
+    p = tmp_path / "speed_stats.json"
+    record_tps(p, "vllm", "m", bad)
+    assert not p.exists()
+    assert median_tps(p, "vllm", "m") is None
+
+
+def test_record_tps_rejection_never_disturbs_existing_samples(tmp_path):
+    """A dropped sample is a no-op, not a rewrite: earlier verified samples survive intact."""
+    from localharness.provider.speed_stats import median_tps, record_tps
+
+    p = tmp_path / "speed_stats.json"
+    record_tps(p, "vllm", "m", 20.0)
+    record_tps(p, "vllm", "m", float("nan"))
+    assert median_tps(p, "vllm", "m") == 20.0
