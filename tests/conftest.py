@@ -33,6 +33,19 @@ def _isolate_memory_logger():
 
 
 @pytest.fixture(autouse=True)
+def _pin_terminal_color_env(monkeypatch):
+    """#131: color-rendering tests build consoles with force_terminal=True but never pin
+    color_system, so Rich still consults the AMBIENT environment for whether color is allowed.
+    A shell exporting NO_COLOR, or TERM=dumb (CI runners, containers with TERM stripped, some
+    editor terminals), silently strips the escape codes those tests assert on — the suite then
+    passes or fails by who ran it, which makes a red run ambiguous. Pin the terminal environment
+    for the whole suite so color assertions test the CODE, not the operator's shell."""
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _disable_inference_probe():
     """#62: the inference gate runs a real TCP reachability probe before entering the queue.
     Unit/integration tests mock the HTTP layer against dead/unserved ports (127.0.0.1:9, :59999),
