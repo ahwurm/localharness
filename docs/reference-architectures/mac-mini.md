@@ -35,9 +35,13 @@ full-attention layers × 4 KV heads × 256 head-dim × K+V × FP16 = **32 KB/tok
 2.1 GB at 65,536 tokens. Native context 262k; the GDN linear layers carry constant-size
 state (~tens of MB) regardless of depth.
 
-**Family-policy note:** Qwen 3.6 ships no dense smaller than 27B (verified June 2026 —
-collection is 27B + 35B-A3B only). Architecture B therefore runs the **newest dense
-model that meets the bar**. When a small Qwen3.6 dense releases, this doc revises to it.
+**Family-policy note:** architecture B runs the **newest dense model that meets the bar**,
+which is not always the newest family. Qwen 3.6 ships no dense smaller than 27B (verified
+June 2026 — the collection is 27B + 35B-A3B only), and Qwen 3.8's dense flagship is also
+27B, which is comfortably past 16 GB at any usable quantization; its MoE sibling is far
+past it (see [dgx-spark.md](dgx-spark.md)). No small dense in either newer family has been
+verified as of August 2026, so B stays on Qwen3.5-9B. When one releases, this doc revises
+to it.
 
 ### Memory budget (16 GB) @ 64k
 
@@ -98,14 +102,20 @@ cost in agent loops. See [gaps.md](gaps.md) §8.
 ## Harness configuration
 
 `localharness init` detects vLLM on `:8081`/`:8000` (or the alternatives on their ports)
-automatically. Per-agent overrides required today:
+automatically. **No per-agent overrides are required today**: the provider default
+`timeout_seconds` is 600.0, which covers a 4096-token completion at this architecture's
+estimated 10–15 tok/s (≈273–410s), and the harness derives its context budget from the
+served window at startup rather than from a hardcoded default.
+
+Set a budget explicitly only when you want one *smaller* than the served window:
 
 ```yaml
-# agent YAML — architecture B profile
-timeout_seconds: 600.0        # 4096 max_tokens at ~10-15 tok/s ≈ 273-410s; default 300s too tight
-max_tokens: 2048
+# <config_dir>/agents/<name>.yaml — name and role are required fields
+name: coder
+role: Writes and reviews code.
+model: inherit
 context:
-  max_context_tokens: 65536   # match --max-model-len; harness default is 128k
+  max_context_tokens: 65536   # optional cap; never set this ABOVE the served window
 ```
 
 ## Validation checklist

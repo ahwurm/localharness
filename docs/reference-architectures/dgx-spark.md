@@ -1,25 +1,231 @@
 # Reference Architecture A — NVIDIA DGX Spark
 
-**Status: TESTED** (maintainer hardware). The recommended Qwen3.6-35B-A3B config below
-was measured July 2026; the Qwen3.6-27B alternative was measured June 2026 and remains
-documented as-is. Figures in each section are measured on this exact stack; treat them
-as ground truth for harness defaults.
+**Status: TESTED** (maintainer hardware). Four configurations are supported on this box
+and each was measured on this exact stack at the date given below. Numbers labelled
+*measured* were produced here; anything else is labelled as an estimate or as unverified.
 
-## Summary
+## Hardware
 
 | | |
 |---|---|
 | Hardware | NVIDIA DGX Spark — GB10 Grace Blackwell, SM 12.1 |
 | Memory | 128 GB LPDDR5x unified (119 GiB usable), 273 GB/s |
 | CPU | 20-core ARM (10× Cortex-X925 + 10× Cortex-A725) |
-| **Recommended model** | [`nvidia/Qwen3.6-35B-A3B-NVFP4`](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) — MoE, 35B total / ~3B active |
-| Quantization | **NVFP4** (~22 GB weights) |
-| Runtime | vLLM (`vllm/vllm-openai:nightly`, ≥0.22.1), OpenAI API on `:8000` |
-| Context served | **128k** (131,072 tokens exactly — `--max-model-len 131072`) |
-| Measured decode | **~78 tok/s single-stream** |
-| Alternative | Qwen3.6-27B dense, ~15.6 GB, ~9.5 tok/s single-stream — see below |
 
-## Recommended model: Qwen3.6-35B-A3B (NVFP4)
+## Supported configurations
+
+All four clear the [practicality bar](README.md#practicality-bar) (≥64k context, ≥9.5
+tok/s single-stream). Pick by what the workload needs — there is no single winner.
+
+| # | Model | Runtime | Quantization | Context | Decode, single stream (measured) | Measured |
+|---|-------|---------|--------------|---------|----------------------------------|----------|
+| **A1** | **Qwen3.8-27B** — dense, multimodal, MTP head | llama.cpp + MTP speculative decode | GGUF `UD-Q4_K_XL` 17.9 GB + MTP head 4.5 GB | 64k | **17 tok/s** prose, **19.5–21.3 tok/s** code (11.3 tok/s synthetic baseline with MTP not engaged — see the section for why these two are not directly comparable) | Aug 2026 |
+| **A2** | Qwen3.6-35B-A3B — MoE, 35B total / ~3B active | vLLM | NVFP4 ~22 GB | 128k | **~78 tok/s** | Jul 2026 |
+| **A3** | DeepSeek V4 Flash — MoE, MLA attention | llama.cpp + DSpark draft model | GGUF `UD-Q2_K_XL` ~90 GB + drafter 10.9 GB | 64k | **37–40 tok/s** | Aug 2026 |
+| **A4** | Qwen3.6-27B — dense | vLLM | NVFP4 ~15.6 GB | 64k | **9.5 tok/s** | Jun 2026 |
+
+**Which one:**
+
+- **A1 (default recommendation)** — newest model, the only one here that takes images and
+  video, and it leaves ~85 GB of the box free. Slowest decode of the four, but well over
+  the bar.
+- **A2** — fastest decode and the largest context window (128k). Text only. Pick this when
+  turn latency matters more than model recency.
+- **A3** — the strongest reasoning model that fits this machine at all, at the price of
+  filling it (~105 of 121 GB with the drafter loaded). Currently **parked** on the
+  maintainer's box in favour of A1, but the recipe is complete and was measured here.
+- **A4** — the original reference config. Smallest footprint; kept for reproducibility of
+  older results.
+
+The full recipes follow, **grouped by runtime rather than by number** — the two llama.cpp
+configs (A1, A3) first, then the two vLLM ones (A2, A4) — because the setup work is shared
+within each pair.
+
+**Does not fit — don't start the download:** the Qwen 3.8 MoE flagship (~2.4T total
+parameters, ~95B active) does not fit 121 GiB-class hardware at **any** quantization.
+Estimated weight sizes are ~1.2 TB at NVFP4 and still ~600 GB heavily quantized to 2 bits —
+an order of magnitude past the machine, not a near miss that a smaller quant or offload
+trick rescues. (Those two figures are sizing estimates from the parameter count, not
+measurements; nothing was downloaded.) Use that model through a hosted API or not at all.
+
+## A1 (recommended): Qwen3.8-27B — llama.cpp with MTP speculative decode
+
+### Model
+
+Qwen3.8-27B is the dense flagship of the Qwen 3.8 family: 64 transformer layers, 262,144-token
+native context, natively multimodal (the checkpoint ships image **and** video preprocessor
+configs, not a bolted-on projector), and it publishes a **multi-token-prediction (MTP)
+head** — a small extra module trained to guess the next few tokens, which llama.cpp can
+drive as a speculative-decoding draft model. That head is what turns 11.3 tok/s into
+17–21 tok/s below.
+
+### Serving
+
+**llama.cpp must be a master build from mid-August 2026 or newer.** Support for this
+model's graph and the MTP draft path (`--spec-type draft-mtp`) is that recent. The failure
+mode on an older binary is nasty because it is not a clean refusal: the model *loads* (it
+gets mapped onto the older Qwen 3.5 architecture) and short benchmarks look plausible, then
+`ggml_abort` fires during decode once prompts or generations get longer. If you see that,
+rebuild from master before debugging anything else — and discard any numbers the old build
+produced. Keeping the new build as a separate checkout is the low-drama option.
+
+Two files are needed — the quantized weights and the separately-packaged MTP head:
+
+| File | Size | Purpose |
+|------|------|---------|
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` (`unsloth/Qwen3.8-27B-GGUF`) | 17.9 GB (16.7 GiB) | target model |
+| `Qwen3.8-27B-MTP-ONLY-Q8_0.gguf` (`a4lg/Qwen3.8-27B-MTP-ONLY-GGUF`) | 4.5 GB | draft head |
+
+The MTP head ships as a separate repack because it is not part of the standard GGUF
+conversion — you cannot extract it from the main file.
+
+```bash
+llama-server \
+  -m Qwen3.8-27B-UD-Q4_K_XL.gguf \
+  -md Qwen3.8-27B-MTP-ONLY-Q8_0.gguf \
+  --spec-type draft-mtp \
+  -ngl 99 -ngld 99 -fa on \
+  --host 127.0.0.1 --port 8000 -c 65536 --jinja -a qwen3.8-27b
+```
+
+- `--spec-type draft-mtp` tells llama.cpp the "draft model" is this checkpoint's own MTP
+  head rather than an independent small model.
+- `-ngld 99` puts the draft head fully on the GPU as well; leaving it on CPU throws away
+  most of the speedup.
+- `-fa on` takes an explicit value in current builds — a bare `-fa` is not the same thing.
+- `--jinja` is required for tool calling — it uses the model's own chat template instead
+  of llama.cpp's generic one.
+- `-a qwen3.8-27b` sets the name the server advertises, which is what you put in
+  `provider.default_model`.
+- Check the startup banner for `n_ctx_slot` rather than assuming: llama-server's slot
+  semantics for `-c` have changed between releases, and what you care about is that one
+  request can use the full 65,536 tokens.
+
+### Measured performance (GB10, `UD-Q4_K_XL`, August 2026)
+
+Read the two halves of this table separately — **they are different measurements**, and
+the difference matters more than the ratio between them.
+
+*Synthetic, via `llama-bench` at zero context depth, prefill excluded from the decode rows:*
+
+| Metric | Value |
+|--------|-------|
+| Prefill, 512-token prompt | **~816–820 tok/s** |
+| Prefill, 2048-token prompt | **~821 tok/s** |
+| Decode, MTP not engaged (`tg32`/`tg128`/`tg256`) | **11.3 tok/s** (±0.02) |
+
+*End-to-end wall clock, MTP engaged, 256-token generations with prefill included:*
+
+| Workload | Value |
+|----------|-------|
+| Prose | **17.0–17.1 tok/s** |
+| Code | **19.5–21.3 tok/s** |
+| Mean accepted draft length | **2.45 tokens** |
+| Total resident footprint | **~34 GB** (weights + MTP head + KV/buffers) |
+
+So MTP is worth roughly **1.5–1.9×** on this hardware. Treat that as the honest shape of
+the effect rather than a precise multiplier: the 11.3 baseline excludes prefill and the
+17–21 figures include it, so a like-for-like decode-only comparison would differ somewhat.
+
+Speculative decoding is lossless with respect to output — rejected draft tokens are thrown
+away, so the text is what the 27B would have produced anyway. The **gain** varies with how
+predictable the next tokens are, which is why code beats prose. Per-workload draft
+*acceptance rates* are deliberately not published here: the maintainer's acceptance
+telemetry for this config was not retained in a form that survives audit, so only the mean
+accepted draft length above is stated as measured.
+
+~34 GB of 119 GiB leaves roughly 85 GB free — room for a second model, an embedding
+server, or higher concurrency.
+
+Prefill and decode were both measured at zero context depth. **Decode at 32k–64k depth has
+not been measured for this config** — expect it to be slower, as on any attention model.
+
+### The vLLM / NVFP4 lane: not yet
+
+An NVFP4 checkpoint for this model exists (`unsloth/Qwen3.8-27B-NVFP4` — 22.6 GB of
+weights plus a 0.85 GB MTP head), which on paper is the faster route on Blackwell.
+**No Spark-compatible vLLM build could serve it as of August 2026.** Two attempts, both
+maintainer-reported and neither with a retained log, so treat these as pointers for the
+next person rather than as reproducible findings:
+
+- The community ARM/Spark vLLM 0.17 build rejects the checkpoint's quantization config.
+  The checkpoint declares `quant_method: compressed-tensors` with
+  `format: mixed-precision`, which that version does not accept.
+- The NGC 26.07 container fails during engine-core initialization on this model.
+
+The next NGC container drop (or an updated community tag) is the thing to retest. Until
+then **A1 is a llama.cpp config.** No performance claim is made for the NVFP4 path here,
+because nothing has successfully run it on this hardware — the checkpoint is worth
+downloading only if you intend to be the person who gets it working.
+
+## A3: DeepSeek V4 Flash — llama.cpp with the DSpark draft model
+
+### Model
+
+DeepSeek V4 Flash is a large MoE model using MLA (multi-head latent attention), which
+compresses the KV cache hard — the practical consequence on this box is that context is
+nearly free (a 128k window costs only a few GB over the weights). It is the strongest
+reasoning model that fits this machine at all, and it fits only at ~2-bit.
+
+DeepSeek publishes an official **DSpark draft checkpoint** (MIT-licensed) for speculative
+decoding, and llama.cpp has first-class support for it.
+
+**Status: parked, not deprecated.** The maintainer's box currently runs A1 instead — this
+config leaves ~16 GB of headroom and reloads ~90 GB on every restart. The recipe below is
+complete and the numbers are measured here.
+
+### Serving
+
+Requires a llama.cpp build with the DSpark speculative-decoding merge (mainline since
+early August 2026 — build b10269 or newer).
+
+```bash
+llama-server \
+  -m DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf \
+  -md dspark-DeepSeek-V4-Flash-Q8_0.gguf \
+  --spec-type draft-dspark --spec-draft-n-max 5 --spec-draft-p-min 0.3 \
+  --fit off -ngl 99 -ngld 99 -fa on \
+  --host 127.0.0.1 --port 8000 -c 65536 --jinja -a deepseek-v4-flash --parallel 1
+```
+
+Reloading ~90 GB takes a while and this box runs close to full with this config — restart
+it deliberately, not in a loop.
+
+Every flag here is load-bearing:
+
+- `--spec-type draft-dspark`, **not** `draft-dflash` — the latter drafts shifted by one
+  token and produces wrong results.
+- `--spec-draft-n-max 5` explicitly. The default of 3 wastes a drafter trained on blocks
+  of 5. Do **not** raise it further: larger blocks measured *slower* than the no-draft
+  baseline on GB10.
+- `--spec-draft-p-min 0.3` — the confidence floor below which the drafter stops proposing.
+- `--fit off` — the auto-fit memory planner mis-accounts for two resident models. If your
+  build rejects the flag, drop it and watch the load output for the real allocation.
+- `-ngld 99` puts the drafter on the GPU. Do not use `-devd` for this; it is documented
+  broken.
+
+### Measured performance (GB10, `UD-Q2_K_XL`, August 2026)
+
+| Metric | Value |
+|--------|-------|
+| Decode, no speculation | **~17 tok/s** (baseline, matches the published figure for this model/quant/box) |
+| Decode with the drafter, 64k context | **37–40 tok/s** aggregate (40.6 tok/s best measured) |
+| Decode with the drafter, by task type (32k-era measurements) | code ~30, structured ~36, prose ~22 tok/s |
+| Resident footprint with drafter @ 64k | **~105 GB of 121 GiB** |
+
+Two honesty notes:
+
+- The 37–40 tok/s headline and the per-task breakdown come from **different measurement
+  rounds** (64k vs an earlier 32k pass) — treat the per-task row as the shape of the
+  effect, not as directly comparable numbers.
+- The gain is entirely acceptance-rate driven and therefore task-dependent, same as A1.
+  Code and agent/structured output gain most; free prose gains least.
+
+**Why 64k and not 128k:** MLA makes the KV cache cheap enough that 128k costs only a few
+GB, so the window is not what forces the choice — the 10.9 GB drafter plus its own KV is.
+Without speculative decoding, 128k fits fine.
+
+## A2: Qwen3.6-35B-A3B (NVFP4, vLLM) — fastest decode
 
 ### Model
 
@@ -87,15 +293,15 @@ Caveats:
   bandwidth implies a naive ceiling around 180 tok/s. Measured ~78 tok/s is ~43% of
   that — plausible for batch-1 decode once attention and KV overhead are counted in.
 
-For orientation: the 27B dense NVFP4 alternative documented below decodes roughly
+For orientation: the A4 27B dense NVFP4 config documented below decodes roughly
 10–15 tok/s on this hardware by informal observation — not benchmarked to the same
 standard as the numbers above. (That section's own Measured performance table has the
 rigorous single-stream figure this doc otherwise treats as ground truth.)
 
-## Alternative: Qwen3.6-27B (dense, NVFP4)
+## A4: Qwen3.6-27B (dense, NVFP4, vLLM)
 
 Qwen3.6-27B was the original recommended model for this hardware (tested June 2026). It
-remains fully supported and documented below as a smaller-footprint alternative
+remains fully supported and documented below as a smaller-footprint config
 (~15.6 GB weights vs. ~22 GB for the 35B-A3B recipe above).
 
 ### Model
@@ -166,43 +372,81 @@ figure ([gaps.md](gaps.md) §1).
 
 ## Harness configuration
 
-`localharness init` detects vLLM on `:8081`/`:8000` automatically; with no server
-running, its guided setup uses the container route — Docker and the NVIDIA container
-toolkit must already be installed — pulling the vLLM image, downloading a checkpoint, and
-launching on `:8081` (this architecture).
+`localharness init` detects a running server automatically — vLLM on `:8081`/`:8000`,
+llama.cpp on `:8080` — and writes the `provider:` block for you. With no server running,
+its guided setup can install and launch vLLM itself (container route; Docker and the
+NVIDIA container toolkit must already be installed).
 
-With the recommended 35B-A3B recipe, **no per-agent overrides are required** — harness
-defaults already fit. The served context (131,072 tokens) comfortably covers the
-harness's default `max_context_tokens` (128,000), and the default `max_tokens` (4096) at
-~78 tok/s decodes in ~53s, well inside the default 300s `timeout_seconds`.
+**No per-agent overrides are required for any of the four configs.** At startup the
+harness reads the served context length from the runtime (vLLM `/v1/models`, llama.cpp
+`/props`) and derives its own context budget from that minus an output reservation, so a
+64k server is respected without you restating 64k in YAML. The provider default
+`timeout_seconds` is 600.0, which covers a full 4096-token completion at every decode
+rate in the table above (the slowest, A4 at 9.5 tok/s, needs ~431s).
 
-Running the 27B alternative instead still needs the overrides below (unchanged from
-when it was the sole reference config):
+Set `context.max_context_tokens` only when you deliberately want a budget **smaller**
+than what the server offers — for example to cap cost or force earlier compaction:
 
 ```yaml
-# agent YAML — architecture A profile, 27B alternative
-model: inherit            # Qwen3.6-27B NVFP4 via vLLM
-timeout_seconds: 600.0    # default 300s < 4096 tokens / 9.5 tok/s ≈ 431s
-max_tokens: 2048          # or keep 4096 with the 600s timeout
+# <config_dir>/agents/<name>.yaml — name and role are required
+name: coder
+role: Writes and reviews code.
+model: inherit
 context:
-  max_context_tokens: 65536   # MUST match --max-model-len; harness default is 128k
+  max_context_tokens: 65536   # optional cap; never set this ABOVE the served window
 ```
 
-Why: harness defaults (`provider/client.py`: `timeout_seconds=300`, `max_tokens=4096`;
-`core/events.py`: `max_context_tokens=128_000`) were set before either config on this
-architecture was measured. See [gaps.md](gaps.md) §1–2 for the out-of-box fixes.
+Config files live under `~/.localharness` by default (override with `LOCALHARNESS_DIR`).
+Note that agent-level keys like `context:` and `timeout_seconds:` belong in an **agent**
+file; the root `config.yaml` has a different shape and rejects unknown keys outright.
+
+### Letting the harness own the llama.cpp server (A1/A3)
+
+For the two llama.cpp configs, a `server:` block in `config.yaml` makes `localharness
+start` bring the server up and take it down with the session. Speculative-decoding flags
+are passed straight through — the harness has no schema of its own for them:
+
+```yaml
+# <config_dir>/config.yaml (excerpt)
+server:
+  runtime: llamacpp
+  launch: binary
+  binary: ~/llama.cpp/build/bin/llama-server
+  model: ~/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf
+  port: 8000
+  extra_args:
+    - "-md"
+    - "~/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-MTP-ONLY-Q8_0.gguf"
+    - "--spec-type"
+    - "draft-mtp"
+    - "-ngl"
+    - "99"
+    - "-ngld"
+    - "99"
+    - "-fa"
+    - "on"
+    - "-c"
+    - "65536"
+    - "--jinja"
+    - "--parallel"
+    - "1"
+```
+
+The same block works for A3 by swapping the model paths and using `--spec-type
+draft-dspark` with its `--spec-draft-n-max 5 --spec-draft-p-min 0.3 --fit off` flags.
 
 ## Known issues
 
-The items below are specific to the 27B alternative unless noted otherwise.
-
-1. Tool-call format drift (stray closing tags) on Qwen3.6-27B — [gaps.md](gaps.md) §5.
-2. Default timeout math breaks at 9.5 tok/s (27B only — the 35B-A3B recipe's harness
-   defaults need no override; see Harness configuration above) — [gaps.md](gaps.md) §1.
-3. Harness 128k context default exceeds the 27B config's 64k served window (27B only,
-   for the same reason) — [gaps.md](gaps.md) §2.
-4. NVFP4 kernel maturity on SM 12.x — re-validate decode rate on each vLLM upgrade. This
-   concern was raised against the community PTQ 27B checkpoint on then-current vLLM
-   kernels; the 35B-A3B recipe above is separately measured on a specific `nightly`
-   digest and a pinned vLLM ≥0.22.1 floor, and should be re-benchmarked the same way on
-   future vLLM upgrades.
+1. **Tool-call format drift** on Qwen3.6-27B (A4) — intermittent stray closing tags;
+   [gaps.md](gaps.md) §5.
+2. **NVFP4 kernel maturity on SM 12.x** — re-validate decode rate on each vLLM upgrade.
+   The concern was raised against the community PTQ 27B checkpoint (A4) on then-current
+   kernels; A2 is separately measured on a specific `nightly` digest and a pinned vLLM
+   ≥0.22.1 floor, and should be re-benchmarked the same way on future upgrades.
+3. **Qwen3.8-27B on vLLM does not work yet** (A1) — see the NVFP4 lane note above. The
+   llama.cpp path is the only tested one for this model on this hardware.
+4. **Speculative-decoding gain is task-dependent** (A1, A3) — the measured ranges assume
+   a mix of code and prose. A prose-only workload lands at the bottom of each range.
+5. **Memory-footprint telemetry is unreliable** on GB10's unified memory — `docker stats`
+   undercounts and `nvidia-smi` memory counters return `N/A`. Footprint figures in this
+   doc come from process-level accounting at load time, not from GPU counters.
