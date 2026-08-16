@@ -1,7 +1,8 @@
 """Measured decode-speed ledger — rolling tok/s samples per (provider_type, model).
 
 Records VERIFIED decode rates only: an exact completion-token count over the measured
-first-token→last-token wall window of a real streamed completion. No estimate ever
+first-token→last-token wall window of a real streamed completion, and only when that
+window has enough substance to be a measurement (is_substantive_sample). No estimate ever
 enters the file — a model with no recorded sample shows no number anywhere (hard rule:
 no placeholder data). The display value is the median of the last SAMPLE_CAP samples:
 robust to a one-off stall while still tracking real drift (decode slows as the KV
@@ -28,6 +29,14 @@ SAMPLE_CAP = 10
 # decode_tps divides an exact token count by the measured window, so a sub-millisecond window
 # yields tens of thousands of tok/s — no local runtime decodes anywhere near this.
 MAX_PLAUSIBLE_TPS = 10_000.0
+# #136: the ceiling alone was not enough — 1,715..6,788 tok/s samples were recorded on a ~78 tok/s
+# vLLM config (one session's display median reached 152.4). A CLIENT-measured sample times chunk
+# ARRIVAL, first payload delta → done, so any burst whose deltas land coalesced — the shape the
+# short agentic generations between tool calls produced there — measures transport, not decoding.
+# Admission therefore needs substance, not just a plausible rate.
+MIN_SAMPLE_TOKENS = 16    # >=15 intervals, so no single coalesced or stalled delta sets the rate
+MIN_SAMPLE_SECONDS = 0.25  # ~100x local chunk-arrival jitter (single-digit ms) — a window this
+                           # long cannot be jitter; every observed artifact implies one under 10ms
 # Color bands (owner spec 2026-08-11): >30 green, 20–30 yellow, <20 red.
 GREEN_ABOVE_TPS = 30.0
 YELLOW_FROM_TPS = 20.0
@@ -58,6 +67,22 @@ def decode_tps(completion_tokens: int, first_token_at: float, done_at: float) ->
     if completion_tokens < 2 or window <= 0:
         return None
     return (completion_tokens - 1) / window
+
+
+def is_substantive_sample(
+    completion_tokens: int | None, window_seconds: float | None
+) -> bool:
+    """Does a CLIENT-measured sample carry enough substance to be a decode measurement (#136)?
+
+    Both floors, because the artifact appears in both directions: a burst flushed inside a few
+    milliseconds states an impossible rate, and a two-token sample states whatever one stall did.
+    Missing evidence is never substance. Engine-REPORTED rates (llama.cpp
+    timings.predicted_per_second) skip this — they are measured inside the decode loop, where
+    chunk-arrival timing cannot reach them.
+    """
+    if not completion_tokens or window_seconds is None:
+        return False
+    return completion_tokens >= MIN_SAMPLE_TOKENS and window_seconds >= MIN_SAMPLE_SECONDS
 
 
 def speed_key(provider_type: str, model: str) -> str:

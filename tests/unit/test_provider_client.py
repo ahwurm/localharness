@@ -399,7 +399,9 @@ async def test_create_and_consume_stream_measures_and_records(tmp_path, monkeypa
     from localharness.provider.speed_stats import default_speed_stats_path, median_tps
 
     c = _mk_speed_client(tmp_path, monkeypatch)
-    final = NS(usage=NS(prompt_tokens=8, completion_tokens=11, total_tokens=19), choices=[])
+    # 21 completion tokens over the 2s window below: a substantive sample (#136 floors), so the
+    # wiring under test is exercised end to end rather than dropped at admission.
+    final = NS(usage=NS(prompt_tokens=8, completion_tokens=21, total_tokens=29), choices=[])
     chunks = [_chunk(content="x"), _chunk(content="y"), _chunk(content="z"), final]
 
     async def fake_create(**kwargs):
@@ -411,10 +413,10 @@ async def test_create_and_consume_stream_measures_and_records(tmp_path, monkeypa
     monkeypatch.setattr(client_mod.time, "monotonic", lambda: next(ticks, 102.0))
     msg, usage = await c._create_and_consume({}, stream=True)
     assert msg.content == "xyz"
-    assert usage.completion_tokens == 11
+    assert usage.completion_tokens == 21
     assert c._stream_progress is None  # cleared even though the stream succeeded
-    assert c.last_gen_tps == 5.0  # 10 intervals / 2s
-    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 5.0
+    assert c.last_gen_tps == 10.0  # 20 intervals / 2s
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 10.0
 
 
 def test_ledger_lands_in_the_sessions_config_dir_with_env_unset(tmp_path, monkeypatch):
@@ -516,13 +518,75 @@ def test_note_gen_speed_discards_implausible_rate_from_degenerate_window(tmp_pat
 
 
 def test_note_gen_speed_still_records_a_fast_but_plausible_rate(tmp_path, monkeypatch):
-    """The ceiling must not clip real hardware: a genuinely fast local decode still records."""
+    """The ceiling must not clip real hardware: a genuinely fast local decode still records.
+    Measured over a substantive window (#136) — 301 tokens across a full second, not the same
+    300 tok/s inferred from a 0.1s window that no longer counts as a measurement."""
     from localharness.provider import client as client_mod
     from localharness.provider.speed_stats import default_speed_stats_path, median_tps
 
     c = _mk_speed_client(tmp_path, monkeypatch)
-    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.1)
-    c._note_gen_speed({"first_at": 10.0, "chunks": 31, "server_tps": None},
-                      NS(completion_tokens=31))
-    assert c.last_gen_tps == pytest.approx(300.0)  # 30 intervals / 0.1s
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 11.0)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 301, "server_tps": None},
+                      NS(completion_tokens=301))
+    assert c.last_gen_tps == pytest.approx(300.0)  # 300 intervals / 1.0s
     assert median_tps(default_speed_stats_path(), "llamacpp", "m") == pytest.approx(300.0)
+
+
+def test_note_gen_speed_discards_a_buffered_burst_the_ceiling_would_admit(tmp_path, monkeypatch):
+    """#136 (the regression pin): 60 EXACT tokens whose deltas all landed inside 12ms — the
+    coalesced-burst shape the short generations between tool calls produced on vLLM — measure
+    4,916 tok/s. That is transport timing, not decoding, and it sails under #130's 10k ceiling:
+    samples of 1,715..6,788 tok/s were recorded on a ~78 tok/s config that way."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.012)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 2, "server_tps": None},
+                      NS(completion_tokens=60))
+    assert c.last_gen_tps is None            # never reaches the status line either
+    assert not default_speed_stats_path().exists()
+
+
+def test_note_gen_speed_records_the_calibration_sample(tmp_path, monkeypatch):
+    """The other half of #136's calibration: the honest 60-token / 1.5s generation (39.3 tok/s)
+    the box actually produces must still be admitted — the floors reject artifacts, not work."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 11.5)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 60, "server_tps": None},
+                      NS(completion_tokens=60))
+    assert c.last_gen_tps == pytest.approx(39.33, abs=0.01)  # 59 intervals / 1.5s
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == pytest.approx(39.33, abs=0.01)
+
+
+def test_note_gen_speed_keeps_the_ceiling_behind_the_substance_floors(tmp_path, monkeypatch):
+    """#130's backstop stays live: a sample that CLEARS both floors (3,001 tokens over 0.29s)
+    but states an impossible rate (10,344 tok/s) is still dropped."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.29)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 3001, "server_tps": None},
+                      NS(completion_tokens=3001))
+    assert c.last_gen_tps is None
+    assert not default_speed_stats_path().exists()
+
+
+def test_note_gen_speed_trusts_the_engines_own_rate_on_a_short_burst(tmp_path, monkeypatch):
+    """The substance floors are for CLIENT-measured windows only. llama.cpp's
+    timings.predicted_per_second is measured inside the engine's decode loop, so chunk-arrival
+    timing cannot corrupt it — and it stayed clean across 25 live samples while vLLM's
+    client-measured path produced the #136 garbage. A short burst still records."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: 10.012)
+    c._note_gen_speed({"first_at": 10.0, "chunks": 2, "server_tps": 16.49},
+                      NS(completion_tokens=5))
+    assert c.last_gen_tps == 16.49
+    assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 16.49

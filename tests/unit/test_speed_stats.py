@@ -115,3 +115,39 @@ def test_record_tps_rejection_never_disturbs_existing_samples(tmp_path):
     record_tps(p, "vllm", "m", 20.0)
     record_tps(p, "vllm", "m", float("nan"))
     assert median_tps(p, "vllm", "m") == 20.0
+
+
+# --- #136: minimum substance for a CLIENT-MEASURED sample ---------------------------------
+
+
+def test_substantive_sample_admits_a_real_generation():
+    """The calibration anchor from the live evidence: 60 tokens over ~1.5s (39.5 tok/s on the
+    measured vLLM config) is a decode measurement and must reach the ledger."""
+    from localharness.provider.speed_stats import is_substantive_sample
+
+    assert is_substantive_sample(60, 1.5)
+
+
+@pytest.mark.parametrize("tokens,window,why", [
+    (60, 0.012, "a burst flushed in one delta: 59 intervals over 12ms reads as 4,900 tok/s"),
+    (200, 0.04, "same artifact at a bigger token count — the window is still transport, not decode"),
+    (5, 0.0001, "#130's degenerate window, now refused before the ceiling ever sees it"),
+    (11, 2.0, "too few intervals: one stalled delta would set the whole rate"),
+    (60, 0.24, "just under the window floor"),
+    (15, 3.0, "just under the token floor"),
+])
+def test_substantive_sample_rejects_insubstantial(tokens, window, why):
+    """#136: the ledger's leak was samples the 10k ceiling admits — 1,715..6,788 tok/s recorded
+    on a ~78 tok/s config, dragging a displayed median to 152.4 tok/s."""
+    from localharness.provider.speed_stats import is_substantive_sample
+
+    assert not is_substantive_sample(tokens, window), why
+
+
+def test_substantive_sample_without_evidence_is_not_substance():
+    """No token count or no window = nothing was measured; absence never admits."""
+    from localharness.provider.speed_stats import is_substantive_sample
+
+    assert not is_substantive_sample(None, 1.5)
+    assert not is_substantive_sample(60, None)
+    assert not is_substantive_sample(60, -1.0)
