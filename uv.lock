@@ -1155,7 +1155,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/c1/2f/46487e949da42b318
 
 [[package]]
 name = "localharness"
-version = "0.12.0"
+version = "0.12.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1203,7 +1203,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "llama-cpp-python", marker = "extra == 'exact-tokenizer'", specifier = ">=0.3" },
-    { name = "mcp", specifier = ">=1.27.1" },
+    { name = "mcp", specifier = ">=1.27.1,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "openai", specifier = ">=1.0,<2" },
     { name = "pluggy", specifier = ">=1.5,<2" },
