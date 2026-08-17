@@ -4,6 +4,64 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.5] — 2026-08-16
+
+A day of scripted live-use sessions across the four reference serving
+configurations surfaced seven shipped bugs — one live since the earliest
+releases — all fixed here, each adversarially reviewed, and each re-verified
+live against a real server after the fix.
+
+### Fixed
+- The tool-result audit trail (bus events, history records, the terminal's
+  line-count badges) silently capped every result at 200 characters and
+  stamped it `truncated: false`. The model always saw the full result, but
+  every audit surface lied — it misled this project's own tool-use audit
+  within hours of being exercised. Events now carry the full output with
+  honest `truncated`/`original_length`; grep's limit-capped results set the
+  real flag (it was buried in metadata); error payloads are capped at the
+  dispatch choke point like outputs (#133).
+- Large-read eviction could trap a turn in a read → evict → restore → re-read
+  loop at small context budgets — measured live as a 24-minute never-returning
+  turn at a 64k window. Restored bodies are now pinned for the rest of the
+  turn; the same six-file ask completes unaided in ~6 minutes with zero
+  re-reads (#134).
+- Bare `/model` left the input box pre-filled with the active model name, so
+  the next command was appended and misparsed — `/quit` silently became a
+  no-op. The prefill is now a loan: typing, pasting, or backspacing replaces
+  it whole; the one-Enter pick and Escape behavior are unchanged (#135).
+- The speed ledger admitted physically impossible tok/s samples on vLLM
+  (client-side chunk-arrival timing over coalesced stream bursts — 60 tokens
+  in 12 ms reads as ~5,000 t/s, under the 10,000 cap). Client-measured samples
+  now require ≥16 tokens over ≥0.25 s; llama.cpp's engine-reported rates are
+  unaffected (#136, follow-up to #130).
+- `doctor` reported the global context budget even when a per-model pin
+  (#132) governed the session, and on multi-model endpoints could judge one
+  model's pin against another model's served window. doctor and start now
+  resolve the same effective budget, name the pin, and match the window to
+  the same model; start confirms an active pin at startup (#137).
+- A dead endpoint made start repeat its identical 3-attempt probe cycle three
+  times (~14 s of noise); one cycle now, ~4 s to the same honest error (#138).
+- Trace packs emitted empty tool messages — the pack reader looked for a
+  field name the event bus never writes. Live since trace packs shipped in
+  v0.9.25 (#139).
+
+### Changed
+- Spec 08 (context management) reconciled to the implementation: a currency
+  banner, three false specifics corrected (a fictional exception class, wrong
+  preserve counts, a wrong cap name/unit/value), and the previously
+  undocumented eviction layer — ContentStore, the 50% usage gate,
+  stub/restore, the new restore pin — written in. Spec 03's twin falsehood
+  corrected; spec 06 documents per-model pins and the real default budget.
+- Reference-architecture docs fold in the live-pass measurements with
+  provenance labels: controlled figures stay the headlines, live-session
+  spread is labeled as such, and the one config the pass did not cover says
+  so explicitly.
+
+### Known gaps (documented, deliberately unfixed here)
+- Memory-recall output is not marked untrusted in the ContentStore taint
+  model — the spec previously claimed it was. The docs now tell the truth,
+  and #140 tracks the hardening.
+
 ## [0.12.4] — 2026-08-16
 
 Completes the fork-surfaced bug sweep (credit
