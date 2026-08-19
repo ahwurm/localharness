@@ -4,6 +4,29 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.6] — 2026-08-19
+
+Two community-surfaced fixes, shipped same-day.
+
+### Fixed
+- llama.cpp **router mode** (one server hosting several models) rejected exact
+  token counting: `/tokenize` and `/apply-template` requests now name the
+  session's model on every hop — single-model servers ignore the field
+  (live-verified, including with mismatched names). `doctor`'s tokenizer probes
+  send it too, and a tokenizer endpoint that answers with an error is now
+  reported as "rejected the request (with the server's own message)" instead of
+  "unreachable" (#141 — reported by @bgtmanuel with a complete repro).
+- **Ollama reasoning deltas were invisible**: the client only read
+  `reasoning_content` (the vLLM/llama.cpp spelling), not Ollama's `reasoning`.
+  On reasoning models the decode-speed window opened only when the answer began
+  — a 21-token generation with 1.5 s of thinking recorded 40 tok/s where the
+  honest figure is 10 — and reasoning text never reached
+  `message.reasoning_content`. Both spellings are read in both paths now; an
+  empty-text thinking delta counts as the start of generation; and the
+  streaming path exposes reasoning text on the assembled message at all — it
+  previously did for no provider (#142 — surfaced by an external fork's commit
+  trail, credit Ruivalim).
+
 ## [0.12.5] — 2026-08-16
 
 A day of scripted live-use sessions across the four reference serving
