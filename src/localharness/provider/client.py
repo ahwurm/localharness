@@ -401,6 +401,24 @@ def _tools_to_api_format(tools: list[ToolSchema]) -> tuple[list[dict], dict[str,
     return result, unmap
 
 
+def _reasoning_text(obj: Any) -> str | None:
+    """Thinking text off a streaming delta or a response message, whichever field the runtime
+    spells it with (#142).
+
+    vLLM and llama.cpp send `reasoning_content`; Ollama's OpenAI-compatible endpoint sends
+    `reasoning`. Returns "" for a thinking delta carrying no text yet — a DIFFERENT answer
+    from None ("no reasoning field on this object at all"), which is what lets the decode
+    window open at the first thinking delta instead of at the first answer token. Ollama
+    additionally streams an empty `content` while thinking, so a falsy test on either field
+    made the whole reasoning phase look like dead air.
+    """
+    for name in ("reasoning_content", "reasoning"):
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
 class LLMClient:
     """OpenAI-compatible async LLM client with XML fallback and local timeout handling."""
 
@@ -924,6 +942,18 @@ class LLMClient:
                 message.finish_reason = response.choices[0].finish_reason
             except Exception:
                 pass
+            # #142: every downstream reader asks for `reasoning_content`, which is what vLLM and
+            # llama.cpp send — Ollama names the same thing `reasoning`, so its thinking text
+            # reached nobody. Fill the canonical field from whichever one arrived; never
+            # overwrite a value the runtime already put there. Best-effort assignment for the
+            # same reason finish_reason is above (pydantic may refuse an unknown attribute).
+            if getattr(message, "reasoning_content", None) is None:
+                alt = _reasoning_text(message)
+                if alt is not None:
+                    try:
+                        message.reasoning_content = alt
+                    except Exception:
+                        pass
             usage = response.usage
         self._unmap_tool_call_names(message, name_unmap)
         return message, usage
@@ -1031,10 +1061,15 @@ class LLMClient:
         payload-chunk count — content, tool-call AND reasoning deltas all count, so a
         native tool-calling or thinking stream measures like a prose one — plus the
         engine-reported decode rate when the runtime states one (llama.cpp `timings`).
+        A reasoning delta counts on its PRESENCE, not its truthiness (#142): thinking that
+        has produced no text in this delta is still generation under way, and the window
+        must open there or the reported rate divides a full token count by an answer-only
+        window (observed shape: Ollama streams `reasoning` plus an empty `content`).
         """
         from types import SimpleNamespace
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         calls: dict[int, dict] = {}
         usage = None
         finish_reason = None
@@ -1058,14 +1093,17 @@ class LLMClient:
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
+            reasoning = _reasoning_text(delta)
             if progress is not None and (
                 getattr(delta, "content", None)
                 or getattr(delta, "tool_calls", None)
-                or getattr(delta, "reasoning_content", None)
+                or reasoning is not None
             ):
                 progress["chunks"] += 1
                 if progress["first_at"] is None:
                     progress["first_at"] = time.monotonic()
+            if reasoning:
+                reasoning_parts.append(reasoning)
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)
@@ -1087,6 +1125,7 @@ class LLMClient:
         tool_calls = [calls[i] for i in sorted(calls)] or None
         message = SimpleNamespace(
             content="".join(content_parts) or None,
+            reasoning_content="".join(reasoning_parts) or None,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
         )
