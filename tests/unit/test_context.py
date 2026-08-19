@@ -285,6 +285,7 @@ def test_token_counter_llamacpp_shape(monkeypatch):
     url0, body0 = captured[0]  # content-shape probe
     assert url0 == "http://localhost:8080/tokenize"
     assert b"content" in body0 and b"prompt" not in body0
+    assert b'"model": "qwen"' in body0  # #141: named even on a single-model server
     assert tc._messages_exact  # /apply-template answered the capability probe
     assert tc.count("hello world") == 3
     assert not tc.approximate
@@ -346,12 +347,105 @@ def test_token_counter_llamacpp_count_messages_two_hop(monkeypatch):
     assert apply_url.endswith("/apply-template")
     sent = json.loads(apply_body.decode())
     assert sent["messages"] == msgs and sent["tools"] == tools
+    assert sent["model"] == "qwen"  # #141: router mode routes /apply-template by name too
     tok_sent = json.loads(tok_body.decode())
     assert tok_sent["add_special"] is True  # mirrors the chat path's tokenize flags
+    assert tok_sent["model"] == "qwen"
     assert "TOOLS-BLOCK" in tok_sent["content"]  # tools rendered into the counted prompt
     n_calls = len(captured)
     assert tc.count_messages(msgs, tools=tools) == 3  # cached — no new network
     assert len(captured) == n_calls
+
+
+# --- #141: llama.cpp ROUTER mode (one server, many models) demands a model name -------
+# Router mode (`llama-server --models-preset`) routes every request by the body's "model"
+# field and 400s a body without one. Our llama.cpp tokenize contract sent none, so exact
+# counting died at `start`. Single-model llama-server ignores the extra field (live-verified
+# on the box: identical token ids with and without it), so it now always rides along.
+
+
+def _patch_llama_router(monkeypatch, captured):
+    """Fake a llama.cpp ROUTER-mode server: a body with no "model" is refused with the
+    reporter's exact 400 payload; a named body answers the normal single-model contracts.
+    Records every (url, parsed body) in `captured`."""
+    import io
+    import json
+    import urllib.error
+    import urllib.request
+
+    class _Resp:
+        def __init__(self, payload): self._payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def fake_urlopen(req, timeout=0):
+        body = json.loads(req.data.decode())
+        captured.append((req.full_url, body))
+        if not body.get("model"):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b'{"error":{"code":400,"message":'
+                           b'"model name is missing from the request"}}'),
+            )
+        if req.full_url.endswith("/apply-template"):
+            rendered = "".join(m["content"] for m in body["messages"])
+            return _Resp(json.dumps({"prompt": rendered}).encode())
+        if "content" not in body:  # handed vLLM's {model,prompt}: no content to tokenize
+            return _Resp(b'{"tokens": []}')
+        return _Resp(b'{"tokens": [1, 2, 3]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+def test_token_counter_llamacpp_router_mode_names_the_model(monkeypatch):
+    """#141: router mode rejected our unnamed /tokenize body ("model name is missing from the
+    request"), and `start` aborted refusing to approximate. Every llama.cpp tokenize /
+    apply-template body now carries the session's model, so router mode counts exactly."""
+    from localharness.agent import context as ctxmod
+
+    captured: list = []
+    _patch_llama_router(monkeypatch, captured)
+    tc = ctxmod.TokenCounter(
+        base_url="http://127.0.0.1:8080/v1",
+        model="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF:IQ4_NL",
+        provider_type="llamacpp",
+    )
+    assert tc._mode == "llamacpp" and not tc.approximate
+    assert tc._messages_exact  # /apply-template answered too — message counts stay exact
+    assert tc.count("hello world") == 3
+    assert tc.count_messages([{"role": "user", "content": "hi"}]) == 3
+    assert captured, "the router was never called"
+    assert all(
+        b.get("model") == "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF:IQ4_NL"
+        for url, b in captured
+        if url.endswith(("/tokenize", "/apply-template"))
+    )
+
+
+def test_tokenize_rejection_reads_as_rejected_not_unreachable(monkeypatch):
+    """#141 fallout: a server that ANSWERED 400 was reported as "/tokenize unreachable", which
+    sent the reporter debugging the connection instead of the request. A refusal must say so
+    and quote the server's own message."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    from localharness.agent.context import TokenCounter
+
+    def refusing(req, timeout=0):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {},
+            io.BytesIO(b'{"error":{"code":400,"message":'
+                       b'"model name is missing from the request"}}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", refusing)
+    with pytest.raises(RuntimeError, match="exact token counting unavailable") as ei:
+        TokenCounter(base_url="http://127.0.0.1:8080/v1", model="m", provider_type="llamacpp")
+    msg = str(ei.value)
+    assert "rejected" in msg and "unreachable" not in msg
+    assert "model name is missing from the request" in msg  # the server's own words
 
 
 def _patch_vllm_server(monkeypatch, captured, messages_count=50, fail_messages=False):

@@ -488,10 +488,19 @@ class TokenCounter:
             # reports the same failure. An UNKNOWN runtime degrades to labeled approximate.
             self._tokenize_url = None
             if ptype in ("vllm", "llamacpp"):
+                # An HTTPError means the server ANSWERED and refused: a wrong REQUEST, not a
+                # dead port. Calling that "unreachable" sent #141's reporter debugging the
+                # connection while the server was healthily 400ing a body it disliked.
+                import urllib.error as _urlerr
+                why = (
+                    f"rejected the request at {root}/tokenize ({self._last_post_error})"
+                    if isinstance(self._last_post_exc, _urlerr.HTTPError)
+                    else f"unreachable at {root}/tokenize"
+                )
                 raise RuntimeError(
                     f"TokenCounter: exact token counting unavailable — {ptype} /tokenize "
-                    f"unreachable at {root}/tokenize. Refusing an approximate fallback for a "
-                    f"runtime that should count exactly."
+                    f"{why}. Refusing an approximate fallback for a runtime that should "
+                    f"count exactly."
                 )
             if self._encoder is None:
                 raise RuntimeError(
@@ -519,6 +528,7 @@ class TokenCounter:
         (connection refused after a kill) and a contract miss are different operator problems,
         and "call failed" alone sent the user hunting a counter bug when the endpoint was down."""
         import json as _json
+        import urllib.error
         import urllib.request
         self._last_post_error = None
         self._last_post_exc = None
@@ -534,7 +544,15 @@ class TokenCounter:
             self._last_post_error = f"non-object JSON reply from {url}"
             return None
         except Exception as exc:
-            self._last_post_error = f"{type(exc).__name__}: {exc} (POST {url})"
+            said = ""
+            if isinstance(exc, urllib.error.HTTPError):
+                # The server ANSWERED and refused — its body says WHY (#141: "model name is
+                # missing from the request"). Without it the operator only sees "400".
+                try:
+                    said = f" — server said: {exc.read().decode('utf-8', 'replace').strip()[:300]}"
+                except Exception:
+                    said = ""
+            self._last_post_error = f"{type(exc).__name__}: {exc}{said} (POST {url})"
             self._last_post_exc = exc
             return None
 
@@ -566,11 +584,17 @@ class TokenCounter:
     def _remote_count(self, text: str) -> int | None:
         """Exact server-side count, or None on ANY failure. Shape follows self._mode:
         "llamacpp" POSTs {"content"} and reads len("tokens") (llama-server has no "count"
-        field); otherwise POSTs {"model","prompt"} and reads "count" (vLLM contract)."""
+        field); otherwise POSTs {"model","prompt"} and reads "count" (vLLM contract).
+
+        Both shapes NAME the model (#141): llama.cpp ROUTER mode (one llama-server fronting
+        several models via --models-preset) routes by the body's "model" and answers an
+        unnamed body HTTP 400 "model name is missing from the request" — which killed exact
+        counting at `start`. A single-model llama-server ignores the extra field (verified
+        live: identical token ids with and without it), so it always rides along."""
         if not self._tokenize_url:
             return None
         if self._mode == "llamacpp":
-            data = self._post_json(self._tokenize_url, {"content": text})
+            data = self._post_json(self._tokenize_url, {"content": text, "model": self._model})
             tokens = data.get("tokens") if data else None
             return len(tokens) if isinstance(tokens, list) else None
         data = self._post_json(self._tokenize_url, {"model": self._model, "prompt": text})
@@ -590,7 +614,8 @@ class TokenCounter:
         if not self._tokenize_url:
             return None
         if self._mode == "llamacpp":
-            payload: dict = {"messages": messages}
+            # "model" on both hops for router mode (#141) — ignored by single-model servers.
+            payload: dict = {"messages": messages, "model": self._model}
             if tools:
                 payload["tools"] = tools
             root = self._tokenize_url.removesuffix("/tokenize")
@@ -598,7 +623,10 @@ class TokenCounter:
             prompt = data.get("prompt") if data else None
             if not isinstance(prompt, str) or not prompt:
                 return None
-            data = self._post_json(self._tokenize_url, {"content": prompt, "add_special": True})
+            data = self._post_json(
+                self._tokenize_url,
+                {"content": prompt, "add_special": True, "model": self._model},
+            )
             tokens = data.get("tokens") if data else None
             return len(tokens) if isinstance(tokens, list) else None
         payload = {"model": self._model, "messages": messages, "add_generation_prompt": True}

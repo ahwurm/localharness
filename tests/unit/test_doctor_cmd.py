@@ -181,6 +181,39 @@ def test_doctor_llamacpp_tokenize_exact(mock_httpx, tmp_path):
 
 
 @patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_llamacpp_router_mode_names_the_model(mock_httpx, tmp_path):
+    """#141: llama.cpp ROUTER mode (one llama-server fronting several models) 400s any body
+    without a "model" name. Doctor's probes must carry it, or a perfectly healthy router
+    false-fails as 'tokenize unreachable' — the same gap that broke `start`."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="router-model")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "router-model"}]})
+
+    def _post(url, **kw):
+        body = kw.get("json") or {}
+        r = MagicMock()
+        if not body.get("model"):
+            r.status_code = 400
+            r.json.return_value = {
+                "error": {"code": 400, "message": "model name is missing from the request"}
+            }
+            return r
+        r.status_code = 200
+        r.json.return_value = (
+            {"prompt": "<|im_start|>user\nx<|im_end|>\n"}
+            if url.endswith("/apply-template")
+            else {"tokens": [1, 2]}
+        )
+        return r
+
+    mock_httpx.post.side_effect = _post
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Tokenizer endpoint reachable" in result.output
+    assert "message-level" in result.output  # /apply-template named the model too
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
 def test_doctor_vllm_tokenize_absent_still_fails(mock_httpx, tmp_path):
     """#9: vLLM SHOULD serve /tokenize — a 404 there stays a real FAILURE (exit 1)."""
     _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
