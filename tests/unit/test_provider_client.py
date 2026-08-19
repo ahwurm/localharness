@@ -590,3 +590,189 @@ def test_note_gen_speed_trusts_the_engines_own_rate_on_a_short_burst(tmp_path, m
                       NS(completion_tokens=5))
     assert c.last_gen_tps == 16.49
     assert median_tps(default_speed_stats_path(), "llamacpp", "m") == 16.49
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-delta field spelling (#142)
+#
+# vLLM and llama.cpp name the thinking delta `reasoning_content`; Ollama's
+# OpenAI-compatible endpoint names it `reasoning` and streams an EMPTY `content`
+# alongside it while thinking. Reading only `reasoning_content` therefore left the
+# whole thinking phase invisible on Ollama: the decode window opened at the first
+# ANSWER token while usage counted the reasoning tokens too (inflated tok/s), and
+# the reasoning text never reached anyone.
+# ---------------------------------------------------------------------------
+
+
+def _think_chunk(field, text, content=None):
+    """A thinking delta spelled the way one runtime spells it, plus Ollama's empty
+    `content` companion. `field` is "reasoning_content" (vLLM/llama.cpp) or "reasoning"."""
+    delta = NS(content=content, tool_calls=None, **{field: text})
+    return NS(usage=None, choices=[NS(delta=delta)])
+
+
+class _TickClock:
+    """A monotonic clock that advances with the STREAM rather than with calls, so WHICH
+    delta stamps first_at changes the measured window — the whole consequence of #142."""
+
+    def __init__(self, start=100.0, step=0.5):
+        self.now, self.step = start, step
+
+    def __call__(self):
+        return self.now
+
+    async def stream(self, chunks):
+        for c in chunks:
+            self.now += self.step
+            yield c
+
+
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+@pytest.mark.asyncio
+async def test_stream_window_opens_at_the_first_thinking_delta_either_spelling(field, monkeypatch):
+    """first_at stamps on the arrival of ANY reasoning delta — including one carrying no text
+    yet ("") — never waiting for the first answer token. Both spellings, same behavior."""
+    from localharness.provider import client as client_mod
+
+    clock = _TickClock()
+    monkeypatch.setattr(client_mod.time, "monotonic", clock)
+    progress = {"first_at": None, "chunks": 0, "server_tps": None}
+    chunks = [
+        _think_chunk(field, "", content=""),        # thinking started, no text in this delta
+        _think_chunk(field, "hm", content=""),
+        _chunk(content="42"),                       # answer begins
+    ]
+    await client_mod.LLMClient._consume_native_stream(clock.stream(chunks), None, progress)
+    assert progress["first_at"] == 100.5            # the FIRST thinking delta, not the answer
+    assert progress["chunks"] == 3                  # every thinking delta is payload too
+
+
+@pytest.mark.asyncio
+async def test_stream_role_only_delta_is_still_not_payload(monkeypatch):
+    """The stamp rule widened to reasoning deltas only — a delta with no reasoning field at all
+    and nothing else in it stays non-payload (a role-only chunk must not open the window)."""
+    from localharness.provider import client as client_mod
+
+    clock = _TickClock()
+    monkeypatch.setattr(client_mod.time, "monotonic", clock)
+    progress = {"first_at": None, "chunks": 0, "server_tps": None}
+    chunks = [
+        NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None))]),
+        _chunk(content="hi"),
+    ]
+    await client_mod.LLMClient._consume_native_stream(clock.stream(chunks), None, progress)
+    assert progress["first_at"] == 101.0            # the content delta, not the role chunk
+    assert progress["chunks"] == 1
+
+
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+@pytest.mark.asyncio
+async def test_stream_surfaces_reasoning_text_under_either_spelling(field):
+    """The assembled message exposes the thinking text on `reasoning_content` whatever the
+    runtime called it on the wire — downstream readers ask for one field name."""
+    from localharness.provider.client import LLMClient
+
+    chunks = [
+        _think_chunk(field, "Let me", content=""),
+        _think_chunk(field, " think", content=""),
+        _think_chunk(field, "", content=""),
+        _chunk(content="42"),
+    ]
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None)
+    assert msg.reasoning_content == "Let me think"
+    assert msg.content == "42"                      # answer text stays separate
+
+
+@pytest.mark.asyncio
+async def test_stream_without_reasoning_reports_none():
+    """A plain prose stream carries no thinking: the field is None, not ""."""
+    from localharness.provider.client import LLMClient
+
+    msg, _ = await LLMClient._consume_native_stream(_aiter([_chunk(content="hi")]), None)
+    assert msg.reasoning_content is None
+
+
+@pytest.mark.asyncio
+async def test_ollama_thinking_stream_measures_the_whole_generation(tmp_path, monkeypatch):
+    """The tok/s consequence, end to end. 21 exact completion tokens are spent over 2.0s, of
+    which 1.5s is thinking. Reading only `reasoning_content` opened the window at the answer
+    delta — 0.5s — and reported 40 tok/s for a 10 tok/s generation."""
+    from localharness.provider import client as client_mod
+    from localharness.provider.speed_stats import default_speed_stats_path, median_tps
+
+    c = _mk_speed_client(tmp_path, monkeypatch, provider_type="ollama")
+    clock = _TickClock()
+    monkeypatch.setattr(client_mod.time, "monotonic", clock)
+    final = NS(usage=NS(prompt_tokens=8, completion_tokens=21, total_tokens=29), choices=[])
+    chunks = [
+        _think_chunk("reasoning", "Let me", content=""),   # t=100.5 — window opens here
+        _think_chunk("reasoning", " think", content=""),   # t=101.0
+        _think_chunk("reasoning", "", content=""),         # t=101.5
+        _chunk(content="42"),                              # t=102.0 — answer
+        final,                                             # t=102.5 — done
+    ]
+
+    async def fake_create(**kwargs):
+        return clock.stream(chunks)
+
+    c._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, usage = await c._create_and_consume({}, stream=True)
+    assert msg.content == "42"
+    assert msg.reasoning_content == "Let me think"
+    assert c.last_gen_tps == 10.0                          # 20 intervals / 2.0s, not / 0.5s
+    assert median_tps(default_speed_stats_path(), "ollama", "m") == 10.0
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_normalizes_ollama_reasoning_onto_reasoning_content(tmp_path, monkeypatch):
+    """Non-streaming: Ollama's `reasoning` is copied onto the field the rest of the code reads."""
+    c = _mk_speed_client(tmp_path, monkeypatch, provider_type="ollama")
+    message = NS(content="42", tool_calls=None, reasoning="Let me think")
+
+    async def fake_create(**kwargs):
+        return NS(choices=[NS(message=message, finish_reason="stop")], usage=None)
+
+    c._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, _ = await c._create_and_consume({}, stream=False)
+    assert msg.reasoning_content == "Let me think"
+    assert msg.content == "42"
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_leaves_an_existing_reasoning_content_alone(tmp_path, monkeypatch):
+    """vLLM/llama.cpp shape is untouched — normalization only fills an ABSENT field."""
+    c = _mk_speed_client(tmp_path, monkeypatch)
+    message = NS(content="42", tool_calls=None,
+                 reasoning_content="native", reasoning="should not win")
+
+    async def fake_create(**kwargs):
+        return NS(choices=[NS(message=message, finish_reason="stop")], usage=None)
+
+    c._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, _ = await c._create_and_consume({}, stream=False)
+    assert msg.reasoning_content == "native"
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_normalization_survives_a_message_that_rejects_new_fields(
+    tmp_path, monkeypatch
+):
+    """Same best-effort contract as the finish_reason surfacing (#77): the SDK message is a
+    pydantic model that may refuse an unknown attribute. A refusal leaves the field unset —
+    it never fails the completion."""
+    class _Strict:
+        __slots__ = ("content", "tool_calls", "reasoning")
+
+        def __init__(self):
+            self.content, self.tool_calls, self.reasoning = "42", None, "thinking"
+
+    c = _mk_speed_client(tmp_path, monkeypatch, provider_type="ollama")
+    message = _Strict()
+
+    async def fake_create(**kwargs):
+        return NS(choices=[NS(message=message, finish_reason="stop")], usage=None)
+
+    c._client = NS(chat=NS(completions=NS(create=fake_create)))
+    msg, _ = await c._create_and_consume({}, stream=False)
+    assert msg.content == "42"
+    assert getattr(msg, "reasoning_content", None) is None
