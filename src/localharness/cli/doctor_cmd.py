@@ -256,7 +256,15 @@ def doctor(
                     )
             elif provider_type == "llamacpp":
                 try:
-                    tk = httpx.post(f"{root}/tokenize", json={"content": "token"}, timeout=5.0)
+                    # "model" named on every llama.cpp probe (#141): ROUTER mode (one
+                    # llama-server, several models via --models-preset) 400s an unnamed body
+                    # ("model name is missing from the request"); single-model servers ignore
+                    # the field. Without it a healthy router false-failed here.
+                    tk = httpx.post(
+                        f"{root}/tokenize",
+                        json={"content": "token", "model": default_model},
+                        timeout=5.0,
+                    )
                     if tk.status_code != 200:
                         console.print(
                             f"{_FAIL} llama.cpp /tokenize returned {tk.status_code} — token "
@@ -276,7 +284,10 @@ def doctor(
                         try:
                             at = httpx.post(
                                 f"{root}/apply-template",
-                                json={"messages": [{"role": "user", "content": "x"}]},
+                                json={
+                                    "messages": [{"role": "user", "content": "x"}],
+                                    "model": default_model,
+                                },
                                 timeout=5.0,
                             )
                             msg_exact = (
