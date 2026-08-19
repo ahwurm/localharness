@@ -183,7 +183,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.12.5, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.12.6, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
