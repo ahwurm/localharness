@@ -7,6 +7,7 @@ Wilson score interval is closed-form and computed inline. numpy provides percent
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,40 @@ def wilson_ci_95(successes: int, n: int) -> ProportionCI:
 # Welch's t-test (A/B early-stop in bench compare)
 # -------------------------------------------------------------------------
 
+def _welch(first: list[float], second: list[float], **kwargs: Any) -> tuple[float, float]:
+    """``stats.ttest_ind`` (Welch) with the zero-variance degenerate case handled explicitly.
+
+    Two things are wrong with calling scipy bare here, and both are about NOT letting a
+    numerical edge case decide a promotion silently:
+
+    1. scipy emits a catastrophic-cancellation RuntimeWarning whenever an arm's variance is at
+       or near zero. In THIS harness that is routine, not an accident: a success_rate slice
+       where every fixture scores the same is an ordinary outcome. Left unhandled the warning
+       sprays onto the stderr of a running bench (and every test that exercises the gate), where
+       it reads like a fault. It is informational — the statistic scipy returns is unchanged —
+       so it is contained at the one call site that provokes it.
+    2. A fully degenerate pair (both arms constant AND equal) makes the t-statistic 0/0 -> nan.
+       Every downstream ``p < alpha`` against nan is False, so the verdict — no evidence of a
+       difference — happens to be right, but only by inheriting NaN comparison semantics. State
+       it instead: nan collapses to ``(0.0, 1.0)``.
+
+    NOT normalized: two constant arms with DIFFERENT means still yield ``t=inf, p=0.0`` from
+    scipy, i.e. certainty from arms that contain no within-arm information at all. That is
+    pre-existing gate behavior (``_IMPROVED_TRAIN_*`` in the experiment tests promotes on it),
+    so it is left alone here rather than changed under cover of a warning fix.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation",
+            category=RuntimeWarning,
+        )
+        t_stat, p_value = stats.ttest_ind(first, second, **kwargs)
+    if math.isnan(p_value):
+        return (0.0, 1.0)
+    return (float(t_stat), float(p_value))
+
+
 def welch_ab_test(baseline: list[float], head: list[float], alpha: float = 0.05) -> tuple[float, float, bool]:
     """Welch's t-test for A/B comparison. Returns (t_stat, p_value, regressed).
 
@@ -89,9 +124,9 @@ def welch_ab_test(baseline: list[float], head: list[float], alpha: float = 0.05)
     """
     if len(baseline) < 2 or len(head) < 2:
         return (0.0, 1.0, False)  # insufficient data — never flag regression
-    t_stat, p_value = stats.ttest_ind(head, baseline, equal_var=False)
+    t_stat, p_value = _welch(head, baseline, equal_var=False)
     regressed = bool(np.mean(head) > np.mean(baseline)) and bool(p_value < alpha)
-    return (float(t_stat), float(p_value), regressed)
+    return (t_stat, p_value, regressed)
 
 
 def welch_improvement(baseline: list[float], head: list[float], alpha: float = 0.05) -> tuple[float, float, bool]:
@@ -109,8 +144,8 @@ def welch_improvement(baseline: list[float], head: list[float], alpha: float = 0
     """
     if len(baseline) < 2 or len(head) < 2:
         return (0.0, 1.0, False)
-    t_stat, p_value = stats.ttest_ind(head, baseline, equal_var=False, alternative="greater")
-    return (float(t_stat), float(p_value), bool(p_value < alpha))
+    t_stat, p_value = _welch(head, baseline, equal_var=False, alternative="greater")
+    return (t_stat, p_value, bool(p_value < alpha))
 
 
 def welch_regression(baseline: list[float], head: list[float], alpha: float) -> bool:
@@ -123,7 +158,7 @@ def welch_regression(baseline: list[float], head: list[float], alpha: float) -> 
     """
     if len(baseline) < 2 or len(head) < 2:
         return False
-    _t, p_value = stats.ttest_ind(baseline, head, equal_var=False, alternative="greater")
+    _t, p_value = _welch(baseline, head, equal_var=False, alternative="greater")
     return bool(p_value < alpha)
 
 

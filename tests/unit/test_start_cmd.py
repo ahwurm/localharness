@@ -33,6 +33,22 @@ def _make_mock_orchestrator():
     return mock
 
 
+def _make_mock_agent_loop():
+    """Agent-loop double for the OrchestratorREPL routing tests.
+
+    ``_llm = None`` is the point of the helper. ``run()`` always fires the best-effort /model
+    prefetch, which reads ``_llm.config.base_url`` and hands it to ``model_ops.list_live_models``
+    in a worker thread. On a bare AsyncMock that attribute is itself an AsyncMock, so the
+    ``base_url.rstrip('/')`` inside the probe returns a coroutine nobody awaits (a 'never
+    awaited' RuntimeWarning) and the probe then goes out over httpx to a URL built from a
+    mock's repr. None is the no-LLM shape ``_prefetch_model_cache`` already short-circuits on,
+    which is honest for tests about input routing rather than the model picker.
+    """
+    loop = AsyncMock()
+    loop._llm = None
+    return loop
+
+
 # ---------------------------------------------------------------------------
 # app.py registration
 # ---------------------------------------------------------------------------
@@ -173,7 +189,7 @@ def test_repl_slash_help():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -192,7 +208,7 @@ def test_repl_slash_quit_raises_eof():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(return_value="/quit")
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -210,7 +226,7 @@ def test_repl_slash_exit_raises_eof():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(return_value="/exit")
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -236,7 +252,7 @@ def test_repl_slash_agents_empty():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -267,7 +283,7 @@ def test_repl_slash_agents_with_cards():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
     mock_orch._card_registry.all_cards.return_value = [mock_card]
@@ -299,7 +315,7 @@ def test_repl_unknown_slash_rejected_deterministically():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
@@ -339,7 +355,7 @@ def test_repl_normal_input_routes_to_agent():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
@@ -376,7 +392,7 @@ def test_repl_does_not_double_fire_output():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
@@ -409,7 +425,7 @@ def test_repl_skips_empty_input():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -425,7 +441,7 @@ def test_repl_exits_on_eof():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = AsyncMock(side_effect=EOFError)
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -454,7 +470,7 @@ def test_repl_creation_intent_starts_workflow():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -494,7 +510,7 @@ def test_repl_active_workflow_routes_to_creation_handler():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -580,7 +596,7 @@ def test_repl_creation_cancel_clears_workflow():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
@@ -715,7 +731,7 @@ def test_repl_publishes_user_message_before_run_turn():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
     mock_loop.run_turn = AsyncMock(return_value="Done.")
@@ -754,7 +770,7 @@ def test_repl_slash_commands_no_user_message():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
-    mock_loop = AsyncMock()
+    mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
 
