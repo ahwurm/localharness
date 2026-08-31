@@ -952,7 +952,7 @@ async def test_tool_call_action_published_before_observation(mock_llm_client, bu
 # Task 2: Memory loader tiered prompt tests
 # ---------------------------------------------------------------------------
 
-from unittest.mock import AsyncMock as _AsyncMock
+from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
 from dataclasses import dataclass as _dataclass
 
 
@@ -963,6 +963,21 @@ class _MockMemoryContext:
     guardrails_md: str
     fact_count: int
     token_estimate: int
+
+
+def _mock_memory_loader(**load_context_kwargs):
+    """A memory-loader double shaped like the REAL MemoryStore: an async ``load_context`` on an
+    otherwise SYNCHRONOUS object.
+
+    Deliberately NOT a bare AsyncMock. On one of those every attribute is async, including
+    ``set_current_session`` — which MemoryStore defines as a plain ``def`` and loop.py therefore
+    calls without awaiting. The bare mock turned that call into an orphaned coroutine (a
+    'never awaited' RuntimeWarning), and worse, it made the mock incapable of catching the
+    inverse bug: production switching a sync memory call to async would still pass here.
+    """
+    loader = _MagicMock()
+    loader.load_context = _AsyncMock(**load_context_kwargs)
+    return loader
 
 
 def _make_memory_agent_loop(memory_loader=None):
@@ -990,8 +1005,7 @@ def _make_memory_agent_loop(memory_loader=None):
 @pytest.mark.asyncio
 async def test_memory_loader_tiered_prompt():
     """MEM-03: load_context() result builds tiered system prompt with all 3 sections."""
-    memory = _AsyncMock()
-    memory.load_context = _AsyncMock(return_value=_MockMemoryContext(
+    memory = _mock_memory_loader(return_value=_MockMemoryContext(
         agent_memory_md="my notes",
         division_md="div context",
         guardrails_md="safety rules",
@@ -1029,8 +1043,7 @@ async def test_memory_loader_tiered_prompt():
 @pytest.mark.asyncio
 async def test_memory_loader_empty_tiers_omitted():
     """MEM-03: Empty tiers silently omitted -- no empty ## headings."""
-    memory = _AsyncMock()
-    memory.load_context = _AsyncMock(return_value=_MockMemoryContext(
+    memory = _mock_memory_loader(return_value=_MockMemoryContext(
         agent_memory_md="notes only",
         division_md="",
         guardrails_md="",
@@ -1061,8 +1074,7 @@ async def test_memory_loader_empty_tiers_omitted():
 @pytest.mark.asyncio
 async def test_memory_loader_failure_nonfatal():
     """MEM-03: Memory load failure is non-fatal -- agent runs with base role only."""
-    memory = _AsyncMock()
-    memory.load_context = _AsyncMock(side_effect=RuntimeError("db gone"))
+    memory = _mock_memory_loader(side_effect=RuntimeError("db gone"))
 
     loop, llm = _make_memory_agent_loop(memory_loader=memory)
 
