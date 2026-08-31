@@ -590,9 +590,10 @@ async def test_model_hotswap_rebind_failure_discloses_and_stays_usable(tmp_path,
 @pytest.mark.asyncio
 async def test_model_hotswap_refits_context_window_budget(tmp_path, monkeypatch):
     """#31: a hot-swap must refit ctx.max_context_tokens to the new served window and disclose
-    the refit, so a 128K->32K swap can't leave a stale budget that 400s mid-session."""
+    the refit, so a 128K->32K swap can't leave a stale budget that 400s mid-session.
+    #145: the refit writes the window VERBATIM — a swap that re-subtracted the reply reserve
+    would put the double reserve back at runtime, contradicting what init writes."""
     from localharness.agent.context import TokenCounter
-    from localharness.cli.init_cmd import _fit_context_tokens
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
     tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
@@ -601,7 +602,7 @@ async def test_model_hotswap_refits_context_window_budget(tmp_path, monkeypatch)
     monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 32_768)
     await repl._handle_slash("/model model-b")
 
-    assert ctx.max_context_tokens == _fit_context_tokens(32_768)  # refit to fit the 32K window
+    assert ctx.max_context_tokens == 32_768  # the served window itself
     assert "budget" in "\n".join(channel.messages).lower()
 
 
@@ -1365,7 +1366,6 @@ async def test_model_hotswap_refit_unchanged_when_no_pin_matches(tmp_path, monke
     """#132: a map that does not name THIS model changes nothing — the probe still decides
     (exact-name match only; no globbing, no accidental cross-model pinning)."""
     from localharness.agent.context import TokenCounter
-    from localharness.cli.init_cmd import _fit_context_tokens
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
     tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
@@ -1376,5 +1376,5 @@ async def test_model_hotswap_refit_unchanged_when_no_pin_matches(tmp_path, monke
     monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 32_768)
     await repl._handle_slash("/model model-b")
 
-    assert ctx.max_context_tokens == _fit_context_tokens(32_768)
+    assert ctx.max_context_tokens == 32_768
     assert "pinned to" not in "\n".join(channel.messages)

@@ -75,17 +75,6 @@ def _list_endpoint_models(base_url: str) -> list[str] | None:
         return None
 
 
-def _fit_context_tokens(max_model_len: int, output_reserve: int = 4_096) -> int:
-    """Context budget that compacts BEFORE the served window's input cap — and NEVER exceeds it.
-    A normal window reserves output room and floors at 8192. A window too small to do both is
-    clamped BELOW the served cap (proportional reserve) rather than over-run: e.g. Ollama's
-    default num_ctx=4096 would otherwise floor to 8192 and drive silent prompt truncation."""
-    ideal = max_model_len - output_reserve
-    if ideal >= 8_192:
-        return ideal
-    return max(1_024, max_model_len - max(256, max_model_len // 8))
-
-
 def _detect_llamacpp_nctx(base_url: str) -> int | None:
     """llama.cpp's /props exposes the served context window (n_ctx).
 
@@ -340,12 +329,15 @@ def init_app(
         max_len = _detect_lmstudio_ctx(result.base_url)
     else:
         max_len = _detect_max_model_len(result.base_url)
-    if max_len:
-        fitted = _fit_context_tokens(max_len)
-        org_kwargs["context"] = ContextConfig(max_context_tokens=fitted)
+    # max_context_tokens IS the served window: the harness subtracts the reply reserve at runtime
+    # (agent.context.response_reserve), so subtracting it here too would reserve it twice.
+    # ContextConfig floors at 1_000, so a window below that cannot be written at all — leave the
+    # key unset and let `start`'s window guard report the unusable server honestly.
+    if max_len and max_len >= 1_000:
+        org_kwargs["context"] = ContextConfig(max_context_tokens=max_len)
         console.print(
-            f"  [green]✓[/green] Context budget: {fitted:,} tokens "
-            f"(served window {max_len:,} − 4,096 output reservation)"
+            f"  [green]✓[/green] Context budget: {max_len:,} tokens "
+            f"(the full served window — the harness reserves output room inside it)"
         )
     elif result.provider_type == "ollama":
         console.print(

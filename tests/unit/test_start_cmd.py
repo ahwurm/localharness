@@ -114,39 +114,40 @@ def test_memory_logs_routed_to_file_not_repl_console(tmp_path):
 # single-source window derivation: served -> effective -> override
 # ---------------------------------------------------------------------------
 
-def test_effective_max_context_served_minus_reserve():
-    """No explicit cap below served-reserve -> derive from served window."""
+def test_effective_max_context_is_the_served_window():
+    """#145: max_context_tokens MEANS the full served window (the reply reserve is taken inside
+    it, at runtime), so a config equal to the served window is exactly right — the old
+    served-minus-reserve bound rejected the value `init` itself writes."""
     from localharness.cli.start_cmd import _effective_max_context
-    # cfg at schema default (131072) on a 131072 server -> clamps to served-reserve.
-    assert _effective_max_context(131_072, 131_072, 4_096) == 126_976
+    assert _effective_max_context(131_072, 131_072) == 131_072
 
 
 def test_effective_max_context_honors_fitting_override():
-    """An explicit cap that fits under served-reserve wins (override)."""
+    """An explicit cap that fits inside the served window wins (override)."""
     from localharness.cli.start_cmd import _effective_max_context
-    assert _effective_max_context(131_072, 32_000, 4_096) == 32_000
+    assert _effective_max_context(131_072, 32_000) == 32_000
 
 
 def test_effective_max_context_clamps_oversized_config():
-    """A config larger than served-reserve is clamped down to the served value."""
+    """A config larger than the served window is clamped down to it."""
     from localharness.cli.start_cmd import _effective_max_context
-    assert _effective_max_context(64_000, 200_000, 4_096) == 59_904
+    assert _effective_max_context(64_000, 200_000) == 64_000
 
 
 def test_effective_max_context_no_served_uses_config():
     """Server didn't report a window -> config value is the only signal."""
     from localharness.cli.start_cmd import _effective_max_context
-    assert _effective_max_context(None, 61_440, 4_096) == 61_440
+    assert _effective_max_context(None, 61_440) == 61_440
 
 
 def test_effective_max_context_never_exceeds_the_served_window():
-    """The old `max(8_192, served-reserve)` floor sat ABOVE small windows: a 4,096-token server
-    green-lit an 8,192-token budget — twice the window, the exact mid-session 400 this guard
-    exists to prevent."""
+    """The invariant that survives #145: whatever the config asks for, the bound never exceeds
+    what the server actually serves — an over-window budget is the mid-session 400 this exists
+    to prevent. (Room for the reply is held back inside that window by response_reserve.)"""
     from localharness.cli.start_cmd import _effective_max_context
-    assert _effective_max_context(4_096, 8_192, 4_096) != 8_192
+    assert _effective_max_context(4_096, 8_192) != 8_192
     for served in (4_096, 8_192, 10_000, 12_288, 64_000, 131_072):
-        assert _effective_max_context(served, 200_000, 4_096) <= served - 4_096
+        assert _effective_max_context(served, 200_000) <= served
 
 
 def test_min_configurable_context_tokens_matches_the_schema():
@@ -1022,7 +1023,9 @@ async def test_explicit_over_window_budget_still_aborts(tmp_path, monkeypatch):
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=131_072, probe_window=None)
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(cfg.read_text() + "org:\n  context:\n    max_context_tokens: 130000\n")
+    # #145: 130000 now FITS a 131072 server (the reserve lives inside the window), so the
+    # over-window value the abort is about has to be genuinely over the window.
+    cfg.write_text(cfg.read_text() + "org:\n  context:\n    max_context_tokens: 140000\n")
 
     import pytest as _pytest
     with _pytest.raises((typer.Exit, SystemExit)):
@@ -1035,7 +1038,6 @@ async def test_start_window_guard_prints_the_bound_it_enforces(tmp_path, monkeyp
     import re
 
     import typer
-    from localharness.agent.context import RESPONSE_RESERVE_TOKENS
     from localharness.cli.start_cmd import _effective_max_context, _start_async
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=10_000, probe_window=None)
@@ -1051,21 +1053,25 @@ async def test_start_window_guard_prints_the_bound_it_enforces(tmp_path, monkeyp
     match = re.search(r"max_context_tokens ≤ (\d+)", msg)
     assert match, msg
     bound = int(match.group(1))
-    assert _effective_max_context(10_000, bound, RESPONSE_RESERVE_TOKENS) == bound, \
+    assert _effective_max_context(10_000, bound) == bound, \
         "the printed remedy must actually pass the guard"
-    assert _effective_max_context(10_000, bound + 1, RESPONSE_RESERVE_TOKENS) != bound + 1, \
+    assert _effective_max_context(10_000, bound + 1) != bound + 1, \
         "…and it must be the CEILING, not an arbitrary number below it"
 
 
 async def test_start_window_guard_small_window_names_the_server_fix(tmp_path, monkeypatch):
-    """Ollama's default num_ctx=4096 minus the 4096 output reserve leaves nothing, and the guard
-    told the user to "set max_context_tokens ≤ 0" — a value ContextConfig (ge=1_000) rejects, with
-    `localharness init` (which keeps 131,072 for Ollama) as the only other remedy. Onboarding
-    dead-ended. The message must name the SERVER-side fix instead."""
+    """A served window under ContextConfig's ge=1_000 floor cannot be written to config at all,
+    and the guard used to tell the user to "set max_context_tokens ≤ 0" — a value the schema
+    rejects, with `localharness init` (which keeps 131,072 for Ollama) as the only other remedy.
+    Onboarding dead-ended. The message must name the SERVER-side fix instead.
+
+    #145: the threshold moved with the semantic — the bound is the served window itself, so a
+    4,096-token Ollama is now merely TIGHT (it runs on 3,584 usable), not impossible. Only a
+    window below the configurable minimum is unrunnable, and that is what this asserts."""
     import typer
     from localharness.cli.start_cmd import _start_async
 
-    _stub_nonvllm_start(tmp_path, monkeypatch, served=4_096, probe_window=None)
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=512, probe_window=None)
     errs = _capture_err_console(monkeypatch)
 
     with pytest.raises(typer.Exit):
@@ -2384,7 +2390,9 @@ def test_managed_server_running_lmstudio_is_endpoint_based_not_pidfile(monkeypat
 @pytest.mark.parametrize(
     "served, fragment",
     [
-        (4_500, "too small"),        # bound < MIN_CONFIGURABLE_CONTEXT_TOKENS branch
+        (512, "too small"),          # bound < MIN_CONFIGURABLE_CONTEXT_TOKENS branch (#145: the
+                                     # bound is now the served window, so only a sub-1_000 server
+                                     # is unrunnable — 4_500 is tight but legal)
         (8_192, "max_context_tokens"),  # config-exceeds-served branch
     ],
 )
