@@ -869,6 +869,29 @@ def test_response_reserve_table():
         assert window - response_reserve(window) >= min(1_024, window)  # usable budget survives
 
 
+def test_clamp_response_tokens_table():
+    """#145: the output cap is the other half of the shared reserve. History may fill
+    (window - reserve), so what the request ASKS to generate must fit the reserve — otherwise
+    prompt + max_tokens overruns the served window and a strict server (vLLM validates exactly
+    this) 400s mid-session. The old double reserve made small windows safe by accident."""
+    from localharness.agent.context import clamp_response_tokens, response_reserve
+
+    assert clamp_response_tokens(131_072, 4_096) == 4_096   # normal window: unchanged
+    assert clamp_response_tokens(32_768, 4_096) == 4_096
+    assert clamp_response_tokens(12_288, 4_096) == 4_096    # the last window with a full reserve
+    assert clamp_response_tokens(8_192, 4_096) == 1_024     # 7_168 input + 1_024 out = 8_192
+    assert clamp_response_tokens(4_096, 4_096) == 512       # 3_584 + 512 = 4_096
+    assert clamp_response_tokens(131_072, 512) == 512       # already smaller: never raised
+    for window in (0, -1):                                  # window unknown: leave it alone
+        assert clamp_response_tokens(window, 4_096) == 4_096
+    for window in (1_000, 1_024):                           # reserve 0: nothing to fit into
+        assert response_reserve(window) == 0
+        assert clamp_response_tokens(window, 4_096) == 4_096
+    # The invariant the fix exists for: input allowance + output cap never exceeds the window.
+    for window in (2_048, 4_096, 8_192, 12_288, 32_768, 131_072):
+        assert (window - response_reserve(window)) + clamp_response_tokens(window, 4_096) <= window
+
+
 def test_compaction_triggers_fire_before_the_emergency_floor():
     """#145 (the ordering inversion): the floor fires at usage > effective_limit, so the 0.95
     full-compact trigger — measured against the SAME effective limit — must become true STRICTLY

@@ -32,7 +32,8 @@ from localharness.bench.config import (
 from localharness.bench.report import _sanitize_for_json, write_summary_json, write_summary_md
 from localharness.bench.runner import accumulate_runs
 from localharness.bench.schema import ScenarioSpec, load_scenario
-from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+from localharness.agent.context import clamp_response_tokens
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_MAX_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ def _build_bench_client(entry: MatrixEntry) -> Any:
             f"Matrix entry {entry.name!r} (provider={entry.provider!r}) has no base_url "
             f"and no default is known. Add base_url to the matrix entry."
         )
+    _window = entry.num_ctx or DEFAULT_MAX_CONTEXT_TOKENS
     cfg = LLMConfig(
         base_url=base_url,
         model=entry.model_id,
@@ -105,7 +107,12 @@ def _build_bench_client(entry: MatrixEntry) -> Any:
         # #10: inherit the 600s LLMConfig default (was a hardcoded 300s that timed out slow
         # single-stream decode — the exact bench symptom in the issue).
         # #13: fall back to the canonical served-window constant, not a bare 128_000 literal.
-        context_window=entry.num_ctx or DEFAULT_MAX_CONTEXT_TOKENS,
+        context_window=_window,
+        # #145: fit the reply inside the window's reserve so a small-num_ctx entry cannot 400
+        # mid-run. No-op unless the entry pins num_ctx under ~12K (no shipped entry does), and
+        # conservative when it does: the runner's own budget may be smaller than num_ctx, which
+        # only leaves MORE room than this assumes, never less.
+        max_tokens=clamp_response_tokens(_window, DEFAULT_MAX_TOKENS),
         is_local=True,
     )
     return LLMClient(cfg)

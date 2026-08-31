@@ -42,6 +42,25 @@ def response_reserve(max_context_tokens: int) -> int:
         return RESPONSE_RESERVE_TOKENS
     return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
 
+
+def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -> int:
+    """The per-request output cap that FITS the reserve — the other half of one shared reserve.
+
+    History is allowed to fill `max_context_tokens - response_reserve(...)`, so the output the
+    request asks for must fit the reserve itself, or prompt + max_tokens exceeds the served
+    window. Strict servers reject that outright: vLLM validates prompt + max_tokens against
+    max_model_len and 400s mid-session, and recent Ollama hard-errors too.
+
+    It only ever bites where the reserve is smaller than the configured output cap — a window
+    under ~12K. On a normal window the reserve IS the 4,096 default, so nothing changes. An
+    unknown (<= 0) window, or one degenerate enough to reserve nothing, is left alone: there is
+    no reserve to fit the output into, so guessing would be worse than the caller's own value.
+    """
+    if max_context_tokens <= 0:
+        return configured_max_tokens
+    reserve = response_reserve(max_context_tokens)
+    return min(configured_max_tokens, reserve) if reserve > 0 else configured_max_tokens
+
 # Stale-web-result eviction (OpenHands BrowserOutputCondenser pattern): cheap first
 # line of defense, applied well before LLM summary-compaction (0.80) kicks in.
 WEB_EVICT_USAGE_FRACTION: float = 0.50

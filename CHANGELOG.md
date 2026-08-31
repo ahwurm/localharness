@@ -26,6 +26,18 @@ All notable changes to LocalHarness are documented here. The format follows
   and the floor and the triggers now measure the same effective limit — so the
   0.95 stage is strictly earlier than the floor at every window size (#145).
 
+- **Small-window sessions could 400 on strict servers**, because the tokens a
+  request asks to generate were never clamped to the window. History is allowed
+  to fill `window − reserve`, so on an 8,192-token server a request could ask for
+  7,168 tokens of prompt plus the flat 4,096-token output default — 11,264
+  against an 8,192 window, which vLLM rejects outright (it validates prompt +
+  max_tokens against max_model_len) and recent Ollama hard-errors on. The output
+  cap now fits the same shared reserve, so input + output fit the window by
+  construction: 1,024 output tokens on an 8,192 window, 512 on 4,096, and no
+  change at all on a normal window, where the reserve already is the 4,096
+  default. Applied when the session's client is built, re-derived on a `/model`
+  swap (down AND back up), and on bench matrix entries that pin a small
+  `num_ctx` (#145).
 - The emergency context floor logged the same ERROR line however many times it
   fired. A **second fire within one turn** — the per-turn compaction budget is
   spent and history is being cut mechanically, turn after turn — now logs a
