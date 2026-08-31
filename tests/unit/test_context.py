@@ -1548,6 +1548,43 @@ async def test_floor_uses_the_shared_reserve_on_a_small_window():
     assert budget.headroom >= 0
 
 
+@pytest.mark.asyncio
+async def test_repeated_emergency_floor_fire_escalates_within_the_turn(caplog):
+    """#145: one floor fire is the designed last resort; a SECOND in the same turn means the
+    window cannot hold this workload — a distinct, actionable line (count + window + overshoot),
+    not the same ERROR again. The turn reset clears the count."""
+    import logging
+
+    from localharness.agent.context import ContextManager, TokenCounter
+
+    tc = TokenCounter()
+    cm = ContextManager(max_context_tokens=2_000, token_counter=tc, agent_id="a", session_id="s")
+    oversized = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": " ".join(f"w{i}" for i in range(5_000))},
+    ]
+
+    with caplog.at_level(logging.ERROR, logger="localharness.agent.context"):
+        await cm.build_messages(list(oversized))
+        first = [r.getMessage() for r in caplog.records if "fired" in r.getMessage()]
+        assert first == [], "a single fire must not escalate"
+
+        caplog.clear()
+        await cm.build_messages(list(oversized))  # same turn: no reset between builds
+        escalated = [r.getMessage() for r in caplog.records if "fired" in r.getMessage()]
+        assert len(escalated) == 1, [r.getMessage() for r in caplog.records]
+        assert "fired 2x this turn" in escalated[0]
+        assert "2000" in escalated[0], "the window size must be named"
+        assert "max_context_tokens" in escalated[0], "name the setting the user can act on"
+        assert "%" in escalated[0], "the overshoot fraction must be reported"
+
+        cm.reset_compaction_guard()  # a new turn is a new workload
+        caplog.clear()
+        await cm.build_messages(list(oversized))
+        assert [r.getMessage() for r in caplog.records if "fired" in r.getMessage()] == [], \
+            "the turn reset must clear the escalation counter"
+
+
 # --- #30: rebind must be exception-safe (a failed re-probe must not brick the session) --- #
 
 
