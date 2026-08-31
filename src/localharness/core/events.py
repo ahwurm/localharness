@@ -233,6 +233,8 @@ class CompactionTriggered(BaseEvent):
     SCEN-event-counts derives `compaction_triggered` per scenario by counting these events.
     pre_usage_fraction = TokenBudget.usage_fraction BEFORE compaction ran.
     post_usage_fraction = TokenBudget.usage_fraction AFTER compaction ran.
+    Both are denominated against TokenBudget.effective_limit — the window MINUS the shared
+    reply reserve — so a value above 1.0 means the request overran the usable budget.
     stages_modified lists CompactionStage subclass names that returned modified=True
     (for diagnostic visibility — not currently surfaced through the pipeline; use empty
     list for now and revisit if stage-level granularity is needed).

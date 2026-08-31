@@ -219,7 +219,7 @@ class ChannelAdapter(ABC):
         REPL's ContextManager had no bus). One line, so the squeeze is attributable."""
         await self.send_message(
             f"context compacted: {event.pre_usage_fraction:.0%} → "
-            f"{event.post_usage_fraction:.0%} of the window (older detail summarized; "
+            f"{event.post_usage_fraction:.0%} of the usable budget (older detail summarized; "
             f"recent messages kept verbatim)",
             agent_id=event.agent_id,
         )

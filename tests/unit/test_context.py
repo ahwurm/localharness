@@ -832,9 +832,12 @@ def test_token_counter_fallback_logs_single_approximate_warning(monkeypatch, cap
 
 
 def test_token_budget_usage_fraction():
+    """#145: fractions are denominated against the USABLE budget (window - shared reply reserve),
+    not the raw window — 80_000 of a 100_000 window is 83% of the 95_904 actually spendable."""
     from localharness.agent.context import TokenBudget
     budget = TokenBudget(total_limit=100_000, current_usage=70_000, tool_schema_tokens=10_000)
-    assert budget.usage_fraction == pytest.approx(0.80, abs=0.01)
+    assert budget.effective_limit == 95_904
+    assert budget.usage_fraction == pytest.approx(0.83, abs=0.01)
     assert budget.needs_summary_compact is True
     assert budget.needs_full_compact is False
 
@@ -842,8 +845,47 @@ def test_token_budget_usage_fraction():
 def test_token_budget_below_threshold():
     from localharness.agent.context import TokenBudget
     budget = TokenBudget(total_limit=100_000, current_usage=50_000, tool_schema_tokens=5_000)
-    assert budget.usage_fraction == pytest.approx(0.55, abs=0.01)
+    assert budget.usage_fraction == pytest.approx(0.57, abs=0.01)  # 55_000 / 95_904 usable
     assert budget.needs_summary_compact is False
+
+
+def test_response_reserve_table():
+    """#145: the ONE place output room is reserved. Normal windows give up the flat reserve;
+    windows too small for that reserve proportionally, and never below ~1_024 usable."""
+    from localharness.agent.context import RESPONSE_RESERVE_TOKENS, response_reserve
+
+    for window in (12_288, 32_768, 65_536, 131_072):  # normal: flat reserve
+        assert response_reserve(window) == RESPONSE_RESERVE_TOKENS
+    assert response_reserve(8_192) == 1_024   # proportional: window // 8
+    assert response_reserve(8_000) == 1_000
+    assert response_reserve(4_096) == 512     # Ollama's default num_ctx
+    assert response_reserve(2_048) == 256     # the 256 floor
+    assert response_reserve(1_024) == 0       # nothing left to reserve above the 1_024 usable clamp
+    assert response_reserve(1_000) == 0
+    for window in (0, -1, -100_000):          # degenerate: you cannot reserve what you do not have
+        assert response_reserve(window) == 0
+    for window in (1_000, 1_024, 2_048, 4_096, 8_000, 8_192, 12_288, 65_536, 131_072):
+        assert 0 <= response_reserve(window) < window, window          # never eats the whole window
+        assert window - response_reserve(window) >= min(1_024, window)  # usable budget survives
+
+
+def test_compaction_triggers_fire_before_the_emergency_floor():
+    """#145 (the ordering inversion): the floor fires at usage > effective_limit, so the 0.95
+    full-compact trigger — measured against the SAME effective limit — must become true STRICTLY
+    below it, for every window size. The old raw-window denominator inverted this below ~82K."""
+    from localharness.agent.context import TokenBudget, response_reserve
+
+    for window in (4_096, 8_192, 12_288, 32_768, 131_072):
+        effective = window - response_reserve(window)
+        full_compact_at = min(
+            u for u in range(0, effective + 1)
+            if TokenBudget(total_limit=window, current_usage=u, tool_schema_tokens=0).needs_full_compact
+        )
+        floor_fires_at = effective + 1  # build_messages: usage + tool_tokens > effective_limit
+        assert full_compact_at < floor_fires_at, (
+            f"window {window}: full compact only at {full_compact_at}, floor already at "
+            f"{floor_fires_at} — the last resort would fire before the designed stage"
+        )
 
 
 # --- Phase 4: CompactionPipeline ---
@@ -1431,7 +1473,7 @@ async def test_floor_shrinks_undroppable_final_message_with_marker():
     """FIX 3 (root cause C): when the un-droppable remnant (system + the final message) itself
     exceeds budget, dropping whole exchanges cannot help. The floor must head+tail SHRINK the
     content as a true last resort so the request actually fits UNDER (budget - reply reserve)."""
-    from localharness.agent.context import ContextManager, TokenCounter, RESPONSE_RESERVE_TOKENS
+    from localharness.agent.context import ContextManager, TokenCounter, response_reserve
     tc = TokenCounter()
     cm = ContextManager(max_context_tokens=8_000, token_counter=tc)  # no pipeline: floor is the only lever
     huge = " ".join(f"tok{i}" for i in range(40_000))  # ~250K chars / tens of K tokens >> budget
@@ -1442,8 +1484,11 @@ async def test_floor_shrinks_undroppable_final_message_with_marker():
         _make_tool_result("tc-1", huge),  # final tool message larger than the whole budget
     ]
     out, budget = await cm.build_messages(messages)
-    # (1) the built request fits UNDER (budget - reserve) — room for the model's reply
-    assert budget.current_usage + budget.tool_schema_tokens <= cm.max_context_tokens - RESPONSE_RESERVE_TOKENS
+    # (1) the built request fits UNDER (budget - reserve) — room for the model's reply. #145: the
+    # reserve is the SHARED one (a 8_000 window reserves proportionally), not the flat constant.
+    assert budget.current_usage + budget.tool_schema_tokens <= (
+        cm.max_context_tokens - response_reserve(cm.max_context_tokens)
+    )
     # (2) content was visibly truncated with the head+tail marker (not silently dropped whole)
     assert any("elided" in (m.get("content") or "") for m in out), "content must be shrunk with the marker"
     assert out[-1].get("role") == "tool", "the final tool message must survive (shrunk), not be deleted"
@@ -1451,10 +1496,10 @@ async def test_floor_shrinks_undroppable_final_message_with_marker():
 
 @pytest.mark.asyncio
 async def test_floor_reserves_response_headroom():
-    """FIX 3 (reserve): the floor must compare against (max_context_tokens - RESPONSE_RESERVE_TOKENS),
+    """FIX 3 (reserve): the floor must compare against (max_context_tokens - the SHARED reserve),
     not the full budget — so a request that 'fits' still leaves room for the reply. A conversation
     sized just above (max - reserve) but under max must trigger the floor and land headroom >= 0."""
-    from localharness.agent.context import ContextManager, TokenCounter, RESPONSE_RESERVE_TOKENS
+    from localharness.agent.context import ContextManager, TokenCounter, response_reserve
     tc = TokenCounter()
     filler = " ".join(f"f{i}" for i in range(5_000))
     messages = [
@@ -1469,13 +1514,38 @@ async def test_floor_reserves_response_headroom():
     total = tc.count_messages(messages)
     # Place `total` inside (max - reserve, max]: old floor (keyed to max) would NOT fire, shipping a
     # request with < reserve free; the fix (keyed to max - reserve) must fire and leave headroom >= 0.
-    max_ctx = total + RESPONSE_RESERVE_TOKENS // 2
-    assert max_ctx > RESPONSE_RESERVE_TOKENS, "budget must exceed the reserve so it actually applies"
+    # Sized off the SHARED reserve (#145), so the window stays in that band whatever its size:
+    # response_reserve is monotone, so max - reserve(max) <= total - reserve(total)/2 < total.
+    reserve = response_reserve(total)
+    assert reserve > 0, "budget must actually reserve something for this to test anything"
+    max_ctx = total + reserve // 2
     cm = ContextManager(max_context_tokens=max_ctx, token_counter=tc)
+    assert max_ctx - response_reserve(max_ctx) < total <= max_ctx, "window must sit in the fire band"
     out, budget = await cm.build_messages(messages)
     assert budget.headroom >= 0, "floor must leave >= reserve tokens free for the model's reply"
     non_system = [m for m in out if m.get("role") != "system"]
     assert non_system and non_system[0]["role"] == "user"  # FIX 1 structure preserved by the floor
+
+
+@pytest.mark.asyncio
+async def test_floor_uses_the_shared_reserve_on_a_small_window():
+    """#145: the floor reserves via response_reserve, so a window too small for the flat 4_096
+    reserves proportionally instead of falling back to reserving NOTHING (the old branch shipped
+    a 4_096-window request with zero room for the reply)."""
+    from localharness.agent.context import ContextManager, TokenCounter, response_reserve
+
+    tc = TokenCounter()
+    cm = ContextManager(max_context_tokens=4_096, token_counter=tc)  # < the flat reserve
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "OLD " + " ".join(f"o{i}" for i in range(4_000))},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "NEW task"},
+    ]
+    _out, budget = await cm.build_messages(messages)
+    assert response_reserve(4_096) == 512, "small windows reserve proportionally, not zero"
+    assert budget.current_usage + budget.tool_schema_tokens <= 4_096 - 512
+    assert budget.headroom >= 0
 
 
 # --- #30: rebind must be exception-safe (a failed re-probe must not brick the session) --- #
