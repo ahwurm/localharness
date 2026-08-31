@@ -303,6 +303,19 @@ def response_reserve(max_context_tokens: int) -> int:
     Normal windows reserve RESPONSE_RESERVE_TOKENS. A window too small to give that up and
     still leave a workable prompt reserves proportionally (max(256, window // 8)), clamped
     so ~1_024 usable tokens survive. A non-positive window reserves 0."""
+
+
+def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -> int:
+    """The other half of the same reserve: the per-request output cap.
+
+    History may fill (window - reserve), so what a request ASKS to generate must fit the
+    reserve, or prompt + max_tokens exceeds the served window — vLLM validates exactly that
+    against max_model_len and 400s mid-session. Returns min(configured, reserve), and leaves
+    the caller's value alone when the window is unknown (<= 0) or reserves nothing.
+
+    Applied where the window is known: start's session LLMConfig, the /model swap refit, and
+    bench matrix entries with a pinned num_ctx. A no-op on normal windows, where the reserve
+    already IS the 4,096 default."""
 ```
 
 ### Error Types
