@@ -11,7 +11,9 @@ DEFAULT_TIMEOUT_SECONDS: float = 600.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS: float = 5.0
 DEFAULT_TEMPERATURE: float = 0.6
 DEFAULT_MAX_TOKENS: int = 4096
-DEFAULT_MAX_CONTEXT_TOKENS: int = 131_072  # served Qwen/vLLM max_model_len (single source of truth)
+# The FULL served window (Qwen/vLLM max_model_len, single source of truth). The harness reserves
+# response room internally (agent.context.response_reserve) — never pre-subtract it here.
+DEFAULT_MAX_CONTEXT_TOKENS: int = 131_072
 DEFAULT_COMPACTION_THRESHOLD_PCT: float = 80.0
 DEFAULT_MAX_TOOL_OUTPUT_CHARS: int = 32_000
 DEFAULT_MAX_NOTES_CHARS: int = 16_000

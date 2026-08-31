@@ -1321,7 +1321,6 @@ class OrchestratorREPL:
         import asyncio
 
         from localharness.agent import context as context_mod
-        from localharness.cli.init_cmd import _fit_context_tokens
 
         ctx = getattr(self._agent, "_ctx", None)
         # Cross-endpoint swap passes the TARGET endpoint's base_url + provider_type so the window
@@ -1360,12 +1359,11 @@ class OrchestratorREPL:
             except Exception:  # noqa: BLE001 — a probe error must never brick a done swap
                 window = None
             if window:
-                fitted = _fit_context_tokens(window)
-                if fitted != ctx.max_context_tokens:
-                    ctx.max_context_tokens = fitted
-                    notes.append(
-                        f"context budget refit to {fitted:,} tokens (served window {window:,})."
-                    )
+                # The budget IS the served window — the reply reserve is taken at runtime
+                # (agent.context.response_reserve), never a second time here.
+                if window != ctx.max_context_tokens:
+                    ctx.max_context_tokens = window
+                    notes.append(f"context budget refit to the served window ({window:,} tokens).")
             else:
                 notes.append(
                     "context budget unchanged — couldn't read this model's served window; "

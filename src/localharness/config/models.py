@@ -890,12 +890,13 @@ class ContextConfig(BaseModel):
         ge=1_000,
         le=2_000_000,
         description=(
-            "Context budget in tokens. At runtime `start` derives the effective window "
-            "from the SERVED max_model_len minus the output reservation; this config value "
-            "acts only as an explicit cap/override (used when set and <= served-reserve). "
-            "The default tracks the served reference window (single source of truth). "
-            "If this exceeds the real window, compaction never triggers and long "
-            "turns die at the provider's input cap instead of compacting."
+            "The FULL context window the server serves, in tokens — `init` writes the detected "
+            "window verbatim. The harness reserves room for the model's reply INSIDE this number "
+            "(agent.context.response_reserve), so never subtract an output reservation here: that "
+            "reserves it twice and compacts earlier than it needs to. `start` validates the value "
+            "against the served window and refuses one the server cannot honor. The default tracks "
+            "the served reference window (single source of truth). If this exceeds the real window, "
+            "compaction never triggers and long turns die at the provider's input cap."
         ),
     )
 

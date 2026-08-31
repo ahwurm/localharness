@@ -138,25 +138,22 @@ def _classify_probe_failure(probe_error: str | None) -> str:
 MIN_CONFIGURABLE_CONTEXT_TOKENS = 1_000
 
 
-def _effective_max_context(
-    served_window: int | None, cfg_window: int, reserve: int
-) -> int:
+def _effective_max_context(served_window: int | None, cfg_window: int) -> int:
     """Single source of truth for the context budget.
 
-    Derive from the SERVED max_model_len minus the output reserve. The config value is
-    honored ONLY as an explicit cap when it already fits under served-reserve; otherwise
-    the served-derived value wins. If the server didn't report a window, the config value
-    is the only signal available.
+    max_context_tokens MEANS the full served window — the reply reserve is subtracted at
+    runtime by agent.context.response_reserve, inside this number — so the bound here is the
+    SERVED window itself, not served-minus-reserve. Subtracting it again was the double reserve
+    (#145): it made a config equal to the served window (exactly what `init` writes) fail a
+    guard that exists only to catch a budget LARGER than the server can serve.
 
-    No floor: `max(8_192, served - reserve)` sat ABOVE small served windows, so a 4,096-token
-    server green-lit an 8,192-token budget — the exact mid-session 400 this guard exists to
-    prevent — and disagreed with the bound the caller printed as the remedy. Below-minimum
-    results (a server too small to run at all) are the caller's to report honestly.
+    The config value is honored when it fits inside the served window; otherwise the served
+    window wins. If the server didn't report a window, the config value is the only signal.
+    Below-minimum results (a server too small to run at all) are the caller's to report honestly.
     """
     if not served_window:
         return cfg_window
-    served_effective = served_window - reserve
-    return cfg_window if cfg_window <= served_effective else served_effective
+    return min(cfg_window, served_window)
 
 
 def _resolve_timeout(agent_timeout: float | None, provider_timeout: float) -> float:
@@ -517,7 +514,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # which kills the 61,440-in-a-131,072-world bug). We do NOT silently override it — we
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
-    from localharness.agent.context import RESPONSE_RESERVE_TOKENS, probe_served_window
+    from localharness.agent.context import probe_served_window
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
     # #137: resolve_budget is the ONE resolution `doctor` reads too — and CONFIRM an applied pin
@@ -544,7 +541,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _served = await asyncio.to_thread(
         probe_served_window, provider.base_url, resolved_model, provider.provider_type
     ) or _probe_window
-    _bound = _effective_max_context(_served, _cfg_window, RESPONSE_RESERVE_TOKENS)
+    _bound = _effective_max_context(_served, _cfg_window)
     if _bound != _cfg_window:
         from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
         # #127: the untouched FACTORY default must never hard-block startup — on the reference
@@ -554,8 +551,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if _cfg_window == DEFAULT_MAX_CONTEXT_TOKENS and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS:
             console.print(
                 f"Context budget fitted to {_bound:,}: the factory default ({_cfg_window:,}) "
-                f"exceeds this server's usable window ({_served}−{RESPONSE_RESERVE_TOKENS} "
-                f"output reserve). Set context.max_context_tokens to pin it explicitly."
+                f"exceeds the window this server serves ({_served}). "
+                f"Set context.max_context_tokens to pin it explicitly."
             )
             agent_config.context.max_context_tokens = _bound
             _cfg_window = _bound
@@ -565,10 +562,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
             err_console.print(
                 f"[bold red]Error:[/bold red] the context window served for '{resolved_model}' "
-                f"({_served}) is too small to "
-                f"run the harness: {RESPONSE_RESERVE_TOKENS} of it is the output reserve, leaving "
-                f"{_bound} for context. Raise the window at the SERVER (llama.cpp `-c`, Ollama "
-                "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
+                f"({_served}) is too small to run the harness: the minimum configurable budget is "
+                f"{MIN_CONFIGURABLE_CONTEXT_TOKENS}. Raise the window at the SERVER (llama.cpp "
+                "`-c`, Ollama `OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
             )
         else:
             # #137: name the setting that actually GOVERNS this number. When the budget came from
@@ -580,11 +576,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             err_console.print(
                 f"[bold red]Error:[/bold red] {_key}={_cfg_window} exceeds the "
-                f"usable window served for '{resolved_model}' "
-                f"({_bound} = {_served}−{RESPONSE_RESERVE_TOKENS} "
-                f"output reserve). It would 400 mid-session. Set {_key} ≤ "
-                f"{_bound} (under org: in config.yaml, or in the agent's yaml — it is not a "
-                f"top-level key), or raise the served window at the server."
+                f"window served for '{resolved_model}' ({_bound}). It would 400 mid-session. "
+                f"Set {_key} ≤ {_bound} (under org: in config.yaml, or in the agent's yaml — it "
+                f"is not a top-level key), or raise the served window at the server."
             )
         raise typer.Exit(1)
 

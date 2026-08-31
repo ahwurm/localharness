@@ -39,16 +39,38 @@ def test_init_help_probe_order_matches_detector():
     assert ":8000" in result.output  # the specific omission #52 flags
 
 
-def test_fit_context_tokens_reserves_output():
-    from localharness.cli.init_cmd import _fit_context_tokens
-    assert _fit_context_tokens(65_536) == 61_440    # reference 64K window
-    assert _fit_context_tokens(131_072) == 126_976  # 128K window
-    # A budget must NEVER exceed the served window (was: tiny windows floored to 8192, over-running
-    # the cap → silent truncation; Ollama's default num_ctx=4096 hit exactly this).
-    assert _fit_context_tokens(8_000) == 7_000      # clamped below the 8000 window, not 8192
-    assert _fit_context_tokens(4_096) == 3_584      # Ollama default num_ctx: budget < window
-    for w in (1_024, 2_048, 4_096, 8_000, 12_288, 65_536, 131_072):
-        assert _fit_context_tokens(w) <= w          # invariant: never over-run any served window
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_writes_the_full_served_window(mock_client_cls, mock_detect, tmp_path, monkeypatch):
+    """#145: init writes the served window VERBATIM. It used to write window − 4,096 while the
+    harness ALSO reserved 4,096 at runtime — the same room reserved twice, which pushed the
+    emergency floor below the 0.95 full-compact trigger on small windows.
+
+    The budget the harness actually spends is still window − response_reserve(window); that
+    subtraction now happens in exactly one place, and it is not this one."""
+    import httpx
+
+    from localharness.agent.context import response_reserve
+
+    mock_detect.return_value = DetectorResult(
+        found=True, provider_type="llamacpp", base_url="http://localhost:8080/v1",
+        models=["qwen"], suggested_model="qwen", probe_duration_ms=1.0,
+    )
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": 32_768}}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    assert "max_context_tokens: 32768" in (tmp_path / "config.yaml").read_text()
+    assert "4,096 output reservation" not in result.output, "the double-reserve claim is gone"
+    assert response_reserve(32_768) == 4_096  # …and the reserve still happens, once, at runtime
 
 
 def test_detect_llamacpp_nctx_parses_props(monkeypatch):
@@ -562,8 +584,9 @@ def test_init_endpoint_no_model_unreachable_keeps_honest_failure(mock_client_cls
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
 def test_init_lmstudio_fits_loaded_context(mock_client_cls, mock_detect, tmp_path, monkeypatch):
-    """Issue #13a: LM Studio init fits the budget to the loaded model's
-    loaded_context_length (16384 − 4096 reserve = 12288), not its max_context_length (32768)."""
+    """Issue #13a: LM Studio init fits the budget to the loaded model's loaded_context_length
+    (16384), not its max_context_length (32768). #145: the window is written verbatim — the
+    reply reserve is taken at runtime, so subtracting it here too would reserve it twice."""
     import httpx
     mock_detect.return_value = DetectorResult(
         found=True, provider_type="lmstudio", base_url="http://localhost:1234/v1",
@@ -584,7 +607,7 @@ def test_init_lmstudio_fits_loaded_context(mock_client_cls, mock_detect, tmp_pat
     result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
     assert result.exit_code == 0, result.output
     content = (tmp_path / "config.yaml").read_text()
-    assert "max_context_tokens: 12288" in content
+    assert "max_context_tokens: 16384" in content
 
 
 @patch("localharness.cli.init_cmd.detect_provider")
