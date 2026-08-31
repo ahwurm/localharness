@@ -12,6 +12,7 @@ import typer
 from rich.console import Console
 from rich.prompt import Confirm, IntPrompt, Prompt
 
+from localharness.agent.context import response_reserve
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import (
@@ -331,13 +332,22 @@ def init_app(
         max_len = _detect_max_model_len(result.base_url)
     # max_context_tokens IS the served window: the harness subtracts the reply reserve at runtime
     # (agent.context.response_reserve), so subtracting it here too would reserve it twice.
-    # ContextConfig floors at 1_000, so a window below that cannot be written at all — leave the
-    # key unset and let `start`'s window guard report the unusable server honestly.
-    if max_len and max_len >= 1_000:
+    # Two independent floors: ContextConfig rejects anything under 1_000, and a window that
+    # reserves nothing (<= 1_024) cannot run at all — `start` refuses it, so writing it would only
+    # persist a budget the next command rejects.
+    if max_len and max_len >= 1_000 and response_reserve(max_len) > 0:
         org_kwargs["context"] = ContextConfig(max_context_tokens=max_len)
         console.print(
             f"  [green]✓[/green] Context budget: {max_len:,} tokens "
             f"(the full served window — the harness reserves output room inside it)"
+        )
+    elif max_len:
+        console.print(
+            f"  [yellow]⚠[/yellow]  The served window ({max_len:,} tokens) is too small to run "
+            "the harness — at or below 1,024 tokens nothing is left to hold the model's reply "
+            "once history fits. No context budget was written. Raise the window at the SERVER "
+            "(llama.cpp [bold]-c[/bold], [bold]OLLAMA_CONTEXT_LENGTH[/bold], LM Studio's context "
+            "length); the practical minimum is 1,025 tokens."
         )
     elif result.provider_type == "ollama":
         console.print(

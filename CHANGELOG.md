@@ -56,8 +56,11 @@ All notable changes to LocalHarness are documented here. The format follows
   bound is the served window, so a 4,096-token Ollama — which previously failed
   the guard outright ("too small to run the harness", its bound computed to 0)
   — now starts and runs on 3,584 usable tokens. It is tight, and the escalated
-  floor signal above is what says so. Only a window below the configurable
-  minimum (1,000 tokens) is still refused.
+  floor signal above is what says so. What is still refused, loudly, is a window
+  too small to hold any reply reserve at all: at or below 1,024 tokens nothing is
+  left for the model's answer once history fits, so every request would overrun
+  the window. The practical minimum is 1,025 tokens, which subsumes the 1,000
+  configurable minimum. `init` will not write such a window either, and says why.
 
 ### Migration
 - **Nothing breaks, and nothing is dangerous.** A config written by an older
