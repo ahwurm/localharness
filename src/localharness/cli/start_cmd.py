@@ -516,7 +516,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # which kills the 61,440-in-a-131,072-world bug). We do NOT silently override it — we
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
-    from localharness.agent.context import probe_served_window
+    from localharness.agent.context import clamp_response_tokens, probe_served_window
+    from localharness.config.defaults import DEFAULT_MAX_TOKENS
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
     # #137: resolve_budget is the ONE resolution `doctor` reads too — and CONFIRM an applied pin
@@ -591,6 +592,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         model=resolved_model,
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
+        # #145: history may fill (budget - reserve), so the output cap has to fit the reserve or
+        # prompt + max_tokens overruns the served window and a strict server 400s. A no-op on
+        # normal windows. DEFAULT_MAX_TOKENS is the baseline because nothing threads a configured
+        # per-session max_tokens yet — thread it HERE and in repl's swap refit together, or the
+        # two will disagree about what the unclamped value was.
+        max_tokens=clamp_response_tokens(_cfg_window, DEFAULT_MAX_TOKENS),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
         provider_type=provider.provider_type,  # keys the measured-speed ledger (speed_stats)

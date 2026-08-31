@@ -1107,6 +1107,38 @@ async def test_start_threads_config_dir_into_llm_config(tmp_path, monkeypatch):
         [str(c.config_dir) for c in live]
 
 
+@pytest.mark.parametrize("served, expected_max_tokens", [(8_192, 1_024), (131_072, 4_096)])
+async def test_start_clamps_output_tokens_to_the_window_reserve(
+    tmp_path, monkeypatch, served, expected_max_tokens
+):
+    """#145: the session's LLMConfig must ask for an output that fits inside the reserve. With
+    the budget now equal to the served window, history may fill (window - reserve): on an 8,192
+    server that is 7,168 tokens, and the flat 4,096 default would make every request
+    7,168 + 4,096 = 11,264 > 8,192 — an HTTP 400 mid-session on vLLM, which validates
+    prompt + max_tokens against max_model_len. A normal window is untouched."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=served, probe_window=None)
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    live = [c for c in seen if c.provider_type]  # the session client, not the bare probe client
+    assert live, "no LLMClient was built with the provider type"
+    for cfg in live:
+        assert cfg.max_tokens == expected_max_tokens, cfg.max_tokens
+        # the invariant, stated end-to-end: input allowance + requested output fits the server
+        from localharness.agent.context import response_reserve
+        assert (served - response_reserve(served)) + cfg.max_tokens <= served
+
+
 async def test_start_wires_the_bus_into_the_context_manager(tmp_path, monkeypatch):
     """CompactionTriggered is published by ContextManager only when it holds a bus; without
     bus= the interactive REPL's compactions are invisible (a real one fired 2026-08-13 with

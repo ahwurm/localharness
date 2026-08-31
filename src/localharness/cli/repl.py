@@ -1321,6 +1321,7 @@ class OrchestratorREPL:
         import asyncio
 
         from localharness.agent import context as context_mod
+        from localharness.config.defaults import DEFAULT_MAX_TOKENS
 
         ctx = getattr(self._agent, "_ctx", None)
         # Cross-endpoint swap passes the TARGET endpoint's base_url + provider_type so the window
@@ -1369,6 +1370,19 @@ class OrchestratorREPL:
                     "context budget unchanged — couldn't read this model's served window; "
                     "re-run `localharness init` if its window differs."
                 )
+
+        # #145: the output cap must fit the reserve inside the (possibly new) budget, or prompt +
+        # max_tokens overruns the served window and a strict server 400s mid-session. Re-derived
+        # from DEFAULT_MAX_TOKENS rather than the live value, so a swap DOWN to a small window and
+        # back UP restores the full allotment instead of ratcheting the cap down for the session.
+        # (Baseline must match start_cmd's — see the note at its LLMConfig construction.)
+        _budget = getattr(ctx, "max_context_tokens", None)
+        _llm_cfg = getattr(self._agent._llm, "config", None)
+        if _budget and _llm_cfg is not None:
+            _cap = context_mod.clamp_response_tokens(_budget, DEFAULT_MAX_TOKENS)
+            if _cap != getattr(_llm_cfg, "max_tokens", None):
+                _llm_cfg.max_tokens = _cap
+                notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")
 
         # #30: rebind the counter off-loop. rebind() is exception-safe (restores the prior binding
         # on a failed re-probe), so a failure leaves an exact, usable counter — but bound to the OLD

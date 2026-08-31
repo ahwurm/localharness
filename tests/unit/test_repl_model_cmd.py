@@ -34,7 +34,10 @@ _REBIND_UNSET = object()  # mirrors LLMClient._REBIND_UNSET — see rebind_endpo
 class FakeLLM:
     def __init__(self, model="model-a", base_url="http://localhost:8081/v1", mode="native",
                  provider_type="vllm"):
-        self.config = SimpleNamespace(base_url=base_url, model=model, provider_type=provider_type)
+        # max_tokens mirrors the real LLMConfig field (default 4096): the swap refit clamps it to
+        # the new window's reserve (#145), and a double without it would hide that entirely.
+        self.config = SimpleNamespace(base_url=base_url, model=model, provider_type=provider_type,
+                                      max_tokens=4096)
         self._mode = mode
         # (base_url, api_key, extra_headers, provider_type) per cross-endpoint rebind — the
         # provider_type is recorded, not swallowed: it is the speed ledger's key.
@@ -604,6 +607,30 @@ async def test_model_hotswap_refits_context_window_budget(tmp_path, monkeypatch)
 
     assert ctx.max_context_tokens == 32_768  # the served window itself
     assert "budget" in "\n".join(channel.messages).lower()
+
+
+@pytest.mark.asyncio
+async def test_model_hotswap_clamps_output_tokens_and_restores_them(tmp_path, monkeypatch):
+    """#145: a swap DOWN to a small-window model must shrink the per-reply output cap to fit that
+    window's reserve — history may fill (window - reserve), so an unclamped 4,096 would make
+    prompt + max_tokens overrun the 8,192 server and 400 mid-session. Swapping back UP must
+    RESTORE the full cap: the clamp is re-derived from the default, never ratcheted down."""
+    from localharness.agent.context import TokenCounter
+
+    monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
+    tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
+    repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc, max_ctx=131_072)
+    assert agent._llm.config.max_tokens == 4_096
+
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 8_192)
+    await repl._handle_slash("/model model-b")
+    assert ctx.max_context_tokens == 8_192
+    assert agent._llm.config.max_tokens == 1_024, "output cap must fit the 8_192 window's reserve"
+    assert "output cap" in "\n".join(channel.messages), "a shrunk output cap must be disclosed"
+
+    monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 131_072)
+    await repl._handle_slash("/model model-a")
+    assert agent._llm.config.max_tokens == 4_096, "swapping back up must restore the full cap"
 
 
 @pytest.mark.asyncio
