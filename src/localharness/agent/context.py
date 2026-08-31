@@ -22,6 +22,26 @@ _EXACT_SHAPES = ("vllm", "llamacpp")
 
 RESPONSE_RESERVE_TOKENS: int = 4096
 
+
+def response_reserve(max_context_tokens: int) -> int:
+    """Output room held back from the window — the ONE place the harness reserves it.
+
+    `max_context_tokens` MEANS the full served window (config/defaults.py): init writes the
+    window the server serves, and the reply reserve is subtracted here, once. No other site
+    may subtract it again — an init-time reserve plus a runtime reserve is the double reserve
+    this function exists to kill.
+
+    A normal window gives up RESPONSE_RESERVE_TOKENS. A window too small to give that up and
+    still leave a workable prompt reserves proportionally instead (`max(256, window // 8)`),
+    clamped so ~1_024 tokens of prompt budget always survive. A non-positive window reserves
+    nothing (you cannot reserve what you do not have).
+    """
+    if max_context_tokens <= 0:
+        return 0
+    if max_context_tokens - RESPONSE_RESERVE_TOKENS >= 8_192:
+        return RESPONSE_RESERVE_TOKENS
+    return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
+
 # Stale-web-result eviction (OpenHands BrowserOutputCondenser pattern): cheap first
 # line of defense, applied well before LLM summary-compaction (0.80) kicks in.
 WEB_EVICT_USAGE_FRACTION: float = 0.50
@@ -806,11 +826,19 @@ class TokenBudget:
     headroom: int = 0
 
     def __post_init__(self) -> None:
-        self.headroom = self.total_limit - self.current_usage - self.tool_schema_tokens - RESPONSE_RESERVE_TOKENS
+        self.headroom = self.effective_limit - self.current_usage - self.tool_schema_tokens
+
+    @property
+    def effective_limit(self) -> int:
+        """The window minus the shared output reserve — what history may actually occupy.
+        Every fraction below is denominated against THIS, not the raw window, so the 0.80/0.95
+        triggers and the emergency floor measure the same budget and cannot invert."""
+        return self.total_limit - response_reserve(self.total_limit)
 
     @property
     def usage_fraction(self) -> float:
-        return (self.current_usage + self.tool_schema_tokens) / self.total_limit if self.total_limit > 0 else 1.0
+        eff = self.effective_limit
+        return (self.current_usage + self.tool_schema_tokens) / eff if eff > 0 else 1.0
 
     @property
     def needs_summary_compact(self) -> bool:
@@ -949,7 +977,7 @@ class SummaryCompactionStage:
             return messages, False
 
         # Mirror usage_fraction's math: message tokens must fit target*limit minus tool schemas.
-        target_tokens = self.target_usage_fraction * budget.total_limit - budget.tool_schema_tokens
+        target_tokens = self.target_usage_fraction * budget.effective_limit - budget.tool_schema_tokens
         working = messages
         modified = False
         first_n, last_n = self.preserve_first_n, self.preserve_last_n
@@ -1452,11 +1480,10 @@ class ContextManager:
         # the oldest user-turn exchanges until the request fits. Loud by design: this only runs
         # when compaction could not save the turn (the live stall: 101.1% with compaction latched
         # off — that latch no longer exists).
-        # FIX 3 (reserve): compare against (budget - RESPONSE_RESERVE_TOKENS), not the full budget,
-        # so a "fits" verdict still leaves room for the model's reply. Degenerate configs whose
-        # whole budget is <= the reserve fall back to the full budget (you cannot reserve what you
-        # do not have).
-        reserve = RESPONSE_RESERVE_TOKENS if self.max_context_tokens > RESPONSE_RESERVE_TOKENS else 0
+        # FIX 3 (reserve): compare against the budget minus the SHARED reply reserve, not the full
+        # budget, so a "fits" verdict still leaves room for the model's reply. Same function the
+        # 0.80/0.95 triggers use, so the floor can never fire before the stage designed to prevent it.
+        reserve = response_reserve(self.max_context_tokens)
         effective_limit = self.max_context_tokens - reserve
         floor_usage = self._token_counter.estimate_messages(repaired)
         # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
@@ -1467,7 +1494,10 @@ class ContextManager:
         emergency_modified = False
         emergency_pre_frac = 0.0
         if self.max_context_tokens > 0 and floor_usage + tool_tokens > effective_limit:
-            over_frac = (floor_usage + tool_tokens) / self.max_context_tokens
+            # Denominated against the SAME effective limit as TokenBudget.usage_fraction, so the
+            # number published as CompactionTriggered.pre_usage_fraction is on one scale with the
+            # post fraction (a mixed-denominator pair would understate the overshoot).
+            over_frac = (floor_usage + tool_tokens) / effective_limit if effective_limit > 0 else 1.0
             emergency_pre_frac = over_frac
             repaired, n_dropped = _hard_truncate_to_budget(
                 repaired, effective_limit - tool_tokens, self._token_counter,
