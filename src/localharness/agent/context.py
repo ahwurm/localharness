@@ -1328,6 +1328,9 @@ class ContextManager:
         # ruling): compaction is never switched off — compact-to-target + the emergency floor in
         # build_messages own the not-shrinking case.
         self._compaction_fires = 0
+        # Emergency-floor fires in the current turn. Fire 1 is the designed last resort; fire 2+ is
+        # a different, actionable signal (see build_messages). Same turn scope as the fire cap.
+        self._emergency_fires = 0
         # #134: tool_call ids of the tool_result_get calls ALREADY in history at the start of the
         # current turn — their bodies are a prior turn's restores and stay evictable. None = the
         # turn's baseline has not been taken yet (set on the turn's first build_messages).
@@ -1341,9 +1344,12 @@ class ContextManager:
         """The agent loop's per-turn reset (the only turn-boundary signal the manager gets).
         MOVE 0c: the summary-compaction fire cap re-arms (a new turn earns fresh attempts).
         #134: restore pins expire — the next turn re-baselines, so a body restored in a past
-        turn is ordinary evictable content again and pins never become permanent bloat."""
+        turn is ordinary evictable content again and pins never become permanent bloat.
+        The emergency-floor escalation counter is turn-scoped for the same reason: a new turn is a
+        new workload, so it must not inherit the previous turn's fire count."""
         self._compaction_fires = 0
         self._pre_turn_restore_ids = None
+        self._emergency_fires = 0
 
     def _restore_pins(self, messages: list[Message]) -> frozenset[str]:
         """#134: tool_call ids of THIS turn's tool_result_get calls — the restored bodies the
@@ -1499,6 +1505,7 @@ class ContextManager:
             # post fraction (a mixed-denominator pair would understate the overshoot).
             over_frac = (floor_usage + tool_tokens) / effective_limit if effective_limit > 0 else 1.0
             emergency_pre_frac = over_frac
+            self._emergency_fires += 1
             repaired, n_dropped = _hard_truncate_to_budget(
                 repaired, effective_limit - tool_tokens, self._token_counter,
             )
@@ -1508,6 +1515,20 @@ class ContextManager:
                 "(agent=%s session=%s iter=%d)",
                 over_frac * 100, reserve, n_dropped, self._agent_id, self._session_id, self._iteration,
             )
+            # A single fire is compaction's normal last resort. A SECOND fire in the same turn means
+            # compaction cannot hold this workload inside this window at all — a config problem the
+            # user can act on, not a transient, so say so distinctly instead of repeating the line.
+            if self._emergency_fires >= 2:
+                log.error(
+                    "EMERGENCY context floor fired %dx this turn (window %d tokens, this fire at "
+                    "%.1f%% of the usable budget) — the per-turn compaction budget is exhausted and "
+                    "history is being cut mechanically. context.max_context_tokens (%d) is likely "
+                    "too tight for this workload: raise the SERVED window and match it in config, "
+                    "or cut the size of the tool output this turn produces "
+                    "(agent=%s session=%s iter=%d)",
+                    self._emergency_fires, self.max_context_tokens, over_frac * 100,
+                    self.max_context_tokens, self._agent_id, self._session_id, self._iteration,
+                )
             # FIX 3 (root cause C): dropping whole exchanges cannot help when the un-droppable
             # remnant (system + the final message) itself exceeds budget. Shrink their CONTENT as
             # the true last resort so the request actually fits — a distinct, louder failure mode.
