@@ -15,6 +15,26 @@ All notable changes to LocalHarness are documented here. The format follows
   the configured binary; Vulkan-without-HIP linkage gets an advisory warning naming the
   exact rebuild flags. Advisory only, Linux only, silent whenever it cannot tell.
 
+### Fixed
+- **`context.compaction_threshold_pct` is now actually wired into compaction** (#147 —
+  contributed by @mjdufresne). The config field was previously parsed but never
+  consulted: `SummaryCompactionStage` and `TokenBudget.needs_summary_compact` both
+  hardcoded the 0.80 trigger directly. `start` now threads the configured value through
+  `ContextManager`/`CompactionPipeline`; every direct construction (including all
+  existing callers) keeps the historical 0.80 default, so behavior is unchanged unless a
+  caller opts in. The now-dead `needs_summary_compact` property is removed.
+  `FullAutoCompactStage`'s emergency full-compact stage — which forces a fire once
+  utilization hits 95% — derives its own forced-fire budget FROM the configured trigger
+  (instead of a fixed constant), so a raised trigger can never silently no-op that
+  emergency stage and reopen the mechanical-truncation-before-full-compact ordering hole
+  v0.12.7 closed. Shipped defaults are unchanged in this release; retuning them is
+  tracked separately in #149.
+- **`ReadTool` no longer dumps raw binary content into context.** A binary file (e.g. a
+  SQLite `.db`) previously decoded as replacement-character soup that bypassed the
+  line-count limit entirely — observed live as a single read injecting ~287K garbage
+  characters. `read` now sniffs for binary content (the same heuristic `grep` already
+  used, via the shared `BINARY_SNIFF_BYTES` constant) and returns a short error instead.
+
 ### Security
 - **Memory-recall output now enters the ContentStore with untrusted origin** (#140).
   The store's origin tag is the structural injection floor: only clean-origin

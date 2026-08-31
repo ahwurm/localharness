@@ -910,6 +910,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         # --- 7. Compaction pipeline (soft) ---
         pipeline: CompactionPipeline | None = None
+        # THE real wiring for ContextConfig.compaction_threshold_pct (#132-class fix): this field
+        # used to be parsed but never consulted — both TokenBudget.needs_summary_compact and
+        # SummaryCompactionStage hardcoded 0.80 directly. Every direct construction elsewhere
+        # (tests, subagents) still defaults to 0.80; this is the one production call site that
+        # threads the configured value through.
+        _compaction_trigger_fraction = agent_config.context.compaction_threshold_pct / 100.0
         try:
             compact_md_path = agent_dir / "compact.md"
 
@@ -921,6 +927,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 preserve_last_n=agent_config.context.preserve_last_n_messages,
                 llm_summarize_fn=make_compaction_summarize_fn(llm),  # shared, tuple-unpack tested
                 compact_md_path=compact_md_path,
+                trigger_usage_fraction=_compaction_trigger_fraction,
             )
         except Exception as exc:
             warnings.append(f"compaction: {exc}")
@@ -941,6 +948,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
             tool_evict_enabled=agent_config.context.tool_result_eviction,
             token_counter=token_counter,
+            compaction_trigger_fraction=_compaction_trigger_fraction,
         )
 
         # --- 9. Orchestrator layer ---

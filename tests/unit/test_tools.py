@@ -613,6 +613,71 @@ async def test_read_tool_offset_and_limit(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_read_tool_refuses_binary_file(tmp_path: Path):
+    """Live incident (2026-08-30): `read` on a SQLite .db file silently decoded raw bytes with
+    errors='replace' and returned ~287,000 chars of replacement-character soup in one call —
+    the offset/limit (line-count) bound never applied since binary content has almost no
+    newlines. `read` must refuse binary content outright instead of dumping it as text."""
+    from localharness.tools.builtin.read_tool import ReadTool
+
+    f = tmp_path / "data.db"
+    f.write_bytes(b"SQLite format 3\x00" + b"\x01\x02\x03" * 2000)
+    tool = ReadTool()
+    result = await tool.run(path=str(f))
+    assert result.success is False
+    assert result.error_type == "validation_error"
+    assert "binary" in result.error.lower()
+    assert "sqlite3" in result.error.lower()  # names the actual remedy for a .db file
+
+
+@pytest.mark.asyncio
+async def test_read_tool_binary_guard_agrees_with_grep(tmp_path: Path):
+    """`read` and `grep` must agree on what counts as binary — both sniff for a NUL byte,
+    so a file grep silently skips is a file read refuses outright rather than dumping."""
+    from localharness.tools.builtin.grep_tool import _read_text_guarded
+    from localharness.tools.builtin.read_tool import ReadTool
+
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"BINTOKEN\x00\x00\x00payload here\n")
+    assert _read_text_guarded(str(f)) is None  # grep's own guard skips it
+
+    result = await ReadTool().run(path=str(f))
+    assert result.success is False
+    assert result.error_type == "validation_error"
+
+
+@pytest.mark.asyncio
+async def test_read_tool_caps_a_single_oversized_line(tmp_path: Path):
+    """Defense in depth independent of the binary guard: a single enormous line (no newlines
+    at all, e.g. minified output) would otherwise bypass the offset/limit (line-count) bound
+    entirely. A char cap backstops ANY oversized single result, binary or not."""
+    from localharness.tools.builtin.read_tool import MAX_RETURNED_CHARS, ReadTool
+
+    f = tmp_path / "huge_line.txt"
+    f.write_text("x" * (MAX_RETURNED_CHARS * 2))  # one line, well over the cap, zero newlines
+    tool = ReadTool()
+    result = await tool.run(path=str(f))
+    assert result.success is True
+    assert result.truncated is True
+    assert result.original_length is not None and result.original_length > MAX_RETURNED_CHARS
+    assert len(result.output) < result.original_length
+    assert "truncated" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_read_tool_small_file_reports_no_truncation(tmp_path: Path):
+    """Control: an ordinary small text file is untouched by the new char cap."""
+    from localharness.tools.builtin.read_tool import ReadTool
+
+    f = tmp_path / "small.txt"
+    f.write_text("hello\nworld\n")
+    result = await ReadTool().run(path=str(f))
+    assert result.success is True
+    assert result.truncated is False
+    assert result.original_length is None
+
+
+@pytest.mark.asyncio
 async def test_write_tool_creates_file(tmp_path: Path):
     from localharness.tools.builtin.write_tool import WriteTool
 
