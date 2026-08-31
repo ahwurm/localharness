@@ -35,6 +35,14 @@ def response_reserve(max_context_tokens: int) -> int:
     still leave a workable prompt reserves proportionally instead (`max(256, window // 8)`),
     clamped so ~1_024 tokens of prompt budget always survive. A non-positive window reserves
     nothing (you cannot reserve what you do not have).
+
+    KNOWN WART — the curve is not monotonic at the branch cutover. A 12_287-token window
+    reserves 1_535 (10_752 usable); one token larger takes the flat branch and reserves 4_096
+    (8_192 usable), so every window in [12_288, 14_847] gets LESS usable budget than a smaller
+    one does. It is safe (the invariants above hold either side) and it is not fixed here on
+    purpose: a continuous curve moves the published small-window numbers (512 on 4_096, 1_024
+    on 8_192) and changes real 16K-window behavior, which is a deliberate follow-up, not a
+    quiet edit inside a correctness fix.
     """
     if max_context_tokens <= 0:
         return 0

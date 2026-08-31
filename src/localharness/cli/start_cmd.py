@@ -516,7 +516,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # which kills the 61,440-in-a-131,072-world bug). We do NOT silently override it — we
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
-    from localharness.agent.context import clamp_response_tokens, probe_served_window
+    from localharness.agent.context import (
+        clamp_response_tokens,
+        probe_served_window,
+        response_reserve,
+    )
     from localharness.config.defaults import DEFAULT_MAX_TOKENS
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
@@ -545,13 +549,24 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         probe_served_window, provider.base_url, resolved_model, provider.provider_type
     ) or _probe_window
     _bound = _effective_max_context(_served, _cfg_window)
+    # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
+    # allowed to fill the whole thing, so prompt + max_tokens overruns it on the first real turn
+    # whatever the config says, and clamp_response_tokens has no reserve to fit the reply into.
+    # Keyed to the SERVED window, not the resolved budget: a deliberately tiny budget on a roomy
+    # server is safe (the request still fits the server) and must not be swept up in this.
+    # (`_served and …` also narrows away the None/unknown case: no window read, no refusal.)
+    _unrunnable = bool(_served and response_reserve(_served) <= 0)
     if _bound != _cfg_window:
         from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
         # #127: the untouched FACTORY default must never hard-block startup — on the reference
         # setup (served == default) it mathematically cannot fit under served-reserve, so the
         # guard aborted every fresh install. Default => auto-fit for this session (nothing
         # written to disk); an explicitly configured value keeps the fail-loud abort below.
-        if _cfg_window == DEFAULT_MAX_CONTEXT_TOKENS and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS:
+        if (
+            _cfg_window == DEFAULT_MAX_CONTEXT_TOKENS
+            and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS
+            and not _unrunnable  # never auto-fit onto a window that cannot run
+        ):
             console.print(
                 f"Context budget fitted to {_bound:,}: the factory default ({_cfg_window:,}) "
                 f"exceeds the window this server serves ({_served}). "
@@ -559,15 +574,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             agent_config.context.max_context_tokens = _bound
             _cfg_window = _bound
-    if _bound != _cfg_window:
+    # `or _unrunnable`: an explicit budget EQUAL to a too-small served window agrees with the
+    # bound, so the disagreement gate alone would wave it through to a guaranteed 400.
+    if _bound != _cfg_window or _unrunnable:
         # The bound printed is the SAME expression the check enforces — the old message derived its
         # own unfloored number and could tell the user to set an unsatisfiable "≤ 0".
-        if _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
+        if _unrunnable or _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
             err_console.print(
                 f"[bold red]Error:[/bold red] the context window served for '{resolved_model}' "
-                f"({_served}) is too small to run the harness: the minimum configurable budget is "
-                f"{MIN_CONFIGURABLE_CONTEXT_TOKENS}. Raise the window at the SERVER (llama.cpp "
-                "`-c`, Ollama `OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
+                f"({_served}) is too small to run the harness: at or below 1,024 tokens nothing is "
+                "left to hold the model's reply once history fits, so every request would overrun "
+                f"the window (the configurable minimum is {MIN_CONFIGURABLE_CONTEXT_TOKENS}; the "
+                "practical one is 1,025). Raise the window at the SERVER (llama.cpp `-c`, Ollama "
+                "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
             )
         else:
             # #137: name the setting that actually GOVERNS this number. When the budget came from

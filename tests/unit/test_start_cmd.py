@@ -1139,6 +1139,84 @@ async def test_start_clamps_output_tokens_to_the_window_reserve(
         assert (served - response_reserve(served)) + cfg.max_tokens <= served
 
 
+@pytest.mark.parametrize("served", [1_000, 1_024])
+async def test_start_refuses_a_window_with_no_room_for_a_reply(tmp_path, monkeypatch, served):
+    """#145 boundary: windows in [1_000, 1_024] are legal to ContextConfig (ge=1_000) and to the
+    MIN_CONFIGURABLE floor, but response_reserve returns 0 there — nothing is held back for the
+    reply, and clamp_response_tokens stands down because there is no reserve to fit into. Such a
+    session would start silently and 400 on its first real turn. It must be refused LOUDLY, and
+    no session client may be built."""
+    import typer
+
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=served, probe_window=None)
+    errs = _capture_err_console(monkeypatch)
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    msg = "\n".join(errs)
+    assert "too small" in msg, msg
+    assert "OLLAMA_CONTEXT_LENGTH" in msg, "name the server-side knob that actually fixes it"
+    assert "below 1,000" not in msg, f"1,024 is not below the 1,000 minimum — say why it fails: {msg}"
+    assert not [c for c in seen if c.provider_type], "no session client may be built for it"
+
+
+async def test_start_refuses_a_tiny_window_even_when_the_config_agrees_with_it(
+    tmp_path, monkeypatch
+):
+    """#145: the guard's other branches only fire when the config DISAGREES with the served
+    window. A hand-written budget equal to a too-small served window agrees with it, so the
+    disagreement gate alone would wave through exactly the config that cannot run."""
+    import typer
+
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=1_024, probe_window=None)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(cfg.read_text() + "org:\n  context:\n    max_context_tokens: 1024\n")
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path))
+
+    assert "too small" in "\n".join(errs), errs
+
+
+async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch):
+    """#145: 1_025 is the first window that reserves anything, so it must START — and what it
+    builds must satisfy the invariant the whole fix exists for: the history allowance plus the
+    requested output fit inside the served window."""
+    from localharness.agent.context import response_reserve
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=1_025, probe_window=None)
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    live = [c for c in seen if c.provider_type]
+    assert live, "the smallest runnable window must still start a session"
+    for cfg in live:
+        assert (1_025 - response_reserve(1_025)) + cfg.max_tokens <= 1_025, cfg.max_tokens
+
+
 async def test_start_wires_the_bus_into_the_context_manager(tmp_path, monkeypatch):
     """CompactionTriggered is published by ContextManager only when it holds a bus; without
     bus= the interactive REPL's compactions are invisible (a real one fired 2026-08-13 with

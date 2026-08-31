@@ -73,6 +73,49 @@ def test_init_writes_the_full_served_window(mock_client_cls, mock_detect, tmp_pa
     assert response_reserve(32_768) == 4_096  # …and the reserve still happens, once, at runtime
 
 
+@pytest.mark.parametrize(
+    "n_ctx, writes_budget", [(1_024, False), (1_025, True)]
+)
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_init_skips_a_window_too_small_to_hold_a_reply(
+    mock_client_cls, mock_detect, tmp_path, monkeypatch, n_ctx, writes_budget
+):
+    """#145 boundary: a window at or below 1_024 reserves nothing for the reply, so `start`
+    refuses it — writing it here would only persist a budget the next command rejects. 1_025 is
+    the first runnable window and is written verbatim. The skip must say WHY, not go quiet."""
+    import httpx
+
+    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+
+    mock_detect.return_value = DetectorResult(
+        found=True, provider_type="llamacpp", base_url="http://localhost:8080/v1",
+        models=["qwen"], suggested_model="qwen", probe_duration_ms=1.0,
+    )
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    class _Resp:
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": n_ctx}}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    content = (tmp_path / "config.yaml").read_text()
+    if writes_budget:
+        assert f"max_context_tokens: {n_ctx}" in content
+    else:
+        # The schema always serializes a context block, so the check is that the UNRUNNABLE
+        # window was not adopted as the budget — the untouched default stands and `start`
+        # refuses the server itself.
+        assert f"max_context_tokens: {n_ctx}" not in content, content
+        assert f"max_context_tokens: {DEFAULT_MAX_CONTEXT_TOKENS}" in content, content
+        assert "too small" in _flat(result), _flat(result)
+
+
 def test_detect_llamacpp_nctx_parses_props(monkeypatch):
     """llama.cpp /props.default_generation_settings.n_ctx is read as the served window."""
     import httpx
