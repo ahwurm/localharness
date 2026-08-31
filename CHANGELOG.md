@@ -4,6 +4,58 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Fixed
+- **The context window's reply reserve was subtracted twice, and it inverted the
+  compaction ordering.** `init` wrote `served_window − 4,096` into new configs
+  while the harness subtracted another 4,096 at the emergency floor, so an
+  init-written config ran on two reserves' worth less than the window it named.
+  Worse, `TokenBudget` measured its 0.80/0.95 compaction triggers against the
+  RAW window: on a 32,768-token window the floor's threshold (28,672) sat BELOW
+  the 0.95 full-compact trigger (31,130), so the last-resort mechanical cut
+  fired before the stage designed to prevent it was ever eligible — for every
+  window under ~82K, which is every llama.cpp/Ollama/LM Studio default.
+
+  `max_context_tokens` now means the FULL served window, and the harness
+  reserves response room internally in one shared place
+  (`agent.context.response_reserve`): the flat 4,096 for normal windows, a
+  proportional reserve for windows too small to give that up. `init` and the
+  `/model` hot-swap refit write the detected window verbatim, `start`'s window
+  guard bounds the config by the served window rather than served-minus-reserve,
+  and the floor and the triggers now measure the same effective limit — so the
+  0.95 stage is strictly earlier than the floor at every window size (#145).
+
+- The emergency context floor logged the same ERROR line however many times it
+  fired. A **second fire within one turn** — the per-turn compaction budget is
+  spent and history is being cut mechanically, turn after turn — now logs a
+  distinct escalated line with the fire count, the window size, the overshoot,
+  and what to change (#145).
+
+### Changed
+- **Context percentages read slightly higher.** `usage_fraction` (the REPL's
+  `ctx` reading, `Heartbeat.context_utilization_pct`, and
+  `CompactionTriggered`'s pre/post fractions) is now denominated against the
+  usable budget — the window minus the reply reserve — not the raw window. Same
+  history, a few points higher: 80,000 tokens of a 100,000-token window reads
+  83%, not 80%. Compaction therefore triggers marginally earlier in absolute
+  tokens.
+- **A tight-but-valid served window no longer aborts startup.** `start`'s guard
+  bound is the served window, so a 4,096-token Ollama — which previously failed
+  the guard outright ("too small to run the harness", its bound computed to 0)
+  — now starts and runs on 3,584 usable tokens. It is tight, and the escalated
+  floor signal above is what says so. Only a window below the configurable
+  minimum (1,000 tokens) is still refused.
+
+### Migration
+- **Nothing breaks, and nothing is dangerous.** A config written by an older
+  `init` holds `served_window − 4,096` (e.g. `126976` for a 128K server). That
+  value is still valid and still safe — it is simply conservative now, because
+  the reserve it already subtracts is taken again internally. To reclaim the
+  ~4,096 tokens, set `context.max_context_tokens` to the window your server
+  actually serves (`126976` → `131072`). Re-running `localharness init` writes
+  the full window for you.
+
 ## [0.12.6] — 2026-08-19
 
 Two community-surfaced fixes, shipped same-day.

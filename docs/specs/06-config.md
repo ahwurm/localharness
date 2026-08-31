@@ -383,10 +383,11 @@ class ContextConfig(BaseModel):
         ge=1_000,
         le=2_000_000,
         description=(
-            "Maximum context window size in tokens. "
-            "init fits this to the served window (max_model_len − output reservation), "
-            "and start's guard refuses a value the served window cannot honor. "
-            "The ContextManager uses this to determine when to compact."
+            "The FULL context window the server serves, in tokens — init writes the detected "
+            "window verbatim. The harness reserves room for the model's reply INSIDE this "
+            "number (agent.context.response_reserve), so never subtract an output reservation "
+            "here: that reserves it twice. start's guard refuses a value larger than the "
+            "served window. The ContextManager uses this to determine when to compact."
         ),
     )
 
@@ -485,14 +486,15 @@ reconciliation, and the budget refit after a `/model` swap in the REPL all resol
 helper (`ContextConfig.resolve_budget`), so they cannot disagree. What a pin does **not** outrank
 is the physical served window — see the guard below.
 
-**The guard.** `start` validates the resolved budget against the window the server actually serves,
-minus a 4,096-token output reserve. An over-window pin aborts startup rather than 400ing mid-session,
-and the error names the pinned setting — not the scalar, which would be a fix that changes nothing:
+**The guard.** `start` validates the resolved budget against the window the server actually serves.
+The bound is that window itself — the reply reserve is held back inside it at runtime, not
+subtracted here. An over-window pin aborts startup rather than 400ing mid-session, and the error
+names the pinned setting — not the scalar, which would be a fix that changes nothing:
 
 ```
-Error: context.model_context_overrides['qwen3.8-27b']=80000 exceeds the usable window
-served for 'qwen3.8-27b' (61440 = 65536−4096 output reserve). It would 400 mid-session.
-Set context.model_context_overrides['qwen3.8-27b'] ≤ 61440 (under org: in config.yaml, or
+Error: context.model_context_overrides['qwen3.8-27b']=80000 exceeds the window served for
+'qwen3.8-27b' (65536). It would 400 mid-session. Set
+context.model_context_overrides['qwen3.8-27b'] ≤ 65536 (under org: in config.yaml, or
 in the agent's yaml — it is not a top-level key), or raise the served window at the server.
 ```
 
@@ -918,7 +920,7 @@ Every field, its type, default, and constraints.
 | `memory.max_notes_chars` | int | `16000` | 0–200000 | Notes injection limit |
 | `memory.shared_read` | list[string] | `[]` | division, org | Shared memory scopes |
 | `memory.inject_into_context` | bool | `true` | — | Auto-inject memory |
-| `context.max_context_tokens` | int | `131072` | 1000–2000000 | Context window size (init refits to the served window) |
+| `context.max_context_tokens` | int | `131072` | 1000–2000000 | The FULL served window (init writes it verbatim; the reply reserve is held back inside it) |
 | `context.model_context_overrides` | map[string, int] | `{}` | keys match the served model name EXACTLY | Per-model context budget; outranks `max_context_tokens` for that model |
 | `context.compaction_threshold_pct` | float | `80.0` | 50.0–99.0 | Compaction trigger |
 | `context.preserve_first_n_messages` | int | `4` | 1+ | Preserved prefix count |

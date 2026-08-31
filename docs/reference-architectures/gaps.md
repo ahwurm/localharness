@@ -26,8 +26,10 @@ No override is needed today.
 64k served window, so compaction triggered at 80% of a budget the server would already
 have rejected requests against.
 
-**Now:** `start` derives the effective window from the runtime's served `max_model_len`
-minus the output reservation, so a 64k server is respected without per-agent YAML.
+**Now:** `init` writes the runtime's served `max_model_len` and `start` validates the budget
+against it, so a 64k server is respected without per-agent YAML. (Room for the model's reply is
+held back inside that window at runtime by `agent.context.response_reserve`, not subtracted from
+the configured value — see #145.)
 `context.max_context_tokens` remains available as an explicit **cap** — use it to request a
 budget smaller than the server offers, never larger.
 

@@ -448,8 +448,8 @@ NVIDIA container toolkit must already be installed).
 
 **No per-agent overrides are required for any of the four configs.** At startup the
 harness reads the served context length from the runtime (vLLM `/v1/models`, llama.cpp
-`/props`) and derives its own context budget from that minus an output reservation, so a
-64k server is respected without you restating 64k in YAML. The provider default
+`/props`) and uses it as the context budget, holding room for the model's reply back inside
+that window, so a 64k server is respected without you restating 64k in YAML. The provider default
 `timeout_seconds` is 600.0, which covers a full 4096-token completion at every decode
 rate in the table above (the slowest, A4 at 9.5 tok/s, needs ~431s).
 

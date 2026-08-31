@@ -113,9 +113,13 @@ class TokenBudget:
     """Estimated token count of the tool schemas being sent with this request."""
 
     headroom: int
-    """= total_limit - current_usage - tool_schema_tokens - RESPONSE_RESERVE_TOKENS
-    RESPONSE_RESERVE_TOKENS = config.max_tokens (from LLMConfig) — space to leave
-    for the model's response. Do not consume this in history."""
+    """= effective_limit - current_usage - tool_schema_tokens, where
+    effective_limit = total_limit - response_reserve(total_limit) — the space left
+    for the model's response. Do not consume this in history.
+
+    usage_fraction (and therefore the 0.80/0.95 triggers) is denominated against
+    effective_limit too, so every threshold and the emergency floor measure ONE budget.
+    Percentages read against the usable budget, not the raw window."""
 
     @property
     def usage_fraction(self) -> float:
@@ -281,14 +285,24 @@ class ContextManager:
             tool_schema_tokens=tool_tokens,
             headroom=(
                 self._config.max_context_tokens
+                - response_reserve(self._config.max_context_tokens)
                 - current_usage
                 - tool_tokens
-                - RESPONSE_RESERVE_TOKENS
             ),
         )
 
 # Reserve for model output — do not consume in history
 RESPONSE_RESERVE_TOKENS: int = 4096
+
+
+def response_reserve(max_context_tokens: int) -> int:
+    """The ONE place output room is reserved. max_context_tokens MEANS the full served
+    window (init writes it verbatim), so nothing else — not init, not the /model refit,
+    not start's window guard — may subtract a reservation of its own.
+
+    Normal windows reserve RESPONSE_RESERVE_TOKENS. A window too small to give that up and
+    still leave a workable prompt reserves proportionally (max(256, window // 8)), clamped
+    so ~1_024 usable tokens survive. A non-positive window reserves 0."""
 ```
 
 ### Error Types
@@ -1066,7 +1080,7 @@ def _extract_fallback_summary(messages: list[Message]) -> str:
 | `TOOL_EVICT_USAGE_FRACTION` / `WEB_EVICT_USAGE_FRACTION` | 0.50 | usage >= 50% | Eviction: bulky tool/web bodies → restorable stubs (no LLM call) |
 | `summary_compaction_threshold` | 0.80 | usage >= 80% | Stages 1–2 (deterministic) always; Stage 3 summarize-middle if fire budget remains |
 | `full_compact_threshold` | 0.95 | usage >= 95% | Stage 4: full auto-compact |
-| Emergency floor | > budget − 4,096 reserve | request still would not fit | Drop oldest whole exchanges, then shrink bodies. Never raises. |
+| Emergency floor | usage > `effective_limit` (100% of usable) | request still would not fit | Drop oldest whole exchanges, then shrink bodies. Never raises. A SECOND fire in the same turn logs a distinct escalated line (count, window, overshoot, what to change). |
 
 **Threshold rationale:**
 - 80%: Fires early enough that the summary compaction + the next LLM response will still fit. At 80% on a 128K window, there are 25.6K tokens left. The summary replaces N messages but consumes only ~1K tokens. The next iteration starts well under 80%.
@@ -1122,8 +1136,10 @@ without an exception handler for this case.
 ### Context Overflow
 
 **Overflow does not produce an error.** When every compaction stage has run and the message tokens
-plus tool-schema tokens still exceed `max_context_tokens − 4,096` (the reply reserve), the
-emergency floor in `build_messages()` cuts the history until the request fits:
+plus tool-schema tokens still exceed `max_context_tokens − response_reserve(max_context_tokens)`
+(the reply reserve — the SAME limit the 0.80/0.95 triggers use, so the floor can never fire before
+the stage designed to prevent it), the emergency floor in `build_messages()` cuts the history until
+the request fits:
 
 1. `_hard_truncate_to_budget()` drops the oldest whole user-turn exchanges — a user message
    through everything before the next user message. The unit is deliberately the whole exchange:
@@ -1135,6 +1151,12 @@ emergency floor in `build_messages()` cuts the history until the request fits:
 
 Both log at ERROR with agent, session, and iteration, and publish `CompactionTriggered` so the cut
 appears in the event ledger rather than only in the log stream.
+
+A repeated fire is a different diagnosis from the first one. The manager counts floor fires per
+turn (reset on the same `reset_compaction_guard()` seam as the compaction fire cap); from the
+second fire onward it logs an additional escalated line naming the count, the window, the
+overshoot against the usable budget, and the remedy — the window is too tight for this workload,
+or the turn's tool output is too large. Logging only: no new event type.
 
 This design replaced an earlier "stop the turn" posture after a live run stalled at 101.1%
 utilization with compaction latched off. The rule now is that **overflow is impossible, not fatal**
@@ -1151,7 +1173,8 @@ this is the context-relevant subset.
 
 ```yaml
 context:
-  max_context_tokens: 131072              # budget; start refits it to the SERVED window
+  max_context_tokens: 131072              # the FULL served window; the reply reserve is held
+                                          # back inside it (response_reserve), never subtracted here
   model_context_overrides: {}             # per-model pins, keyed by EXACT model name
   compaction_threshold_pct: 80.0          # fire summary compaction at 80%
   preserve_first_n_messages: 4            # keep first N messages in summary compact (min 1)
