@@ -134,7 +134,9 @@ def _classify_probe_failure(probe_error: str | None) -> str:
 
 # ContextConfig.max_context_tokens is ge=1_000 (config/models.py), so a derived bound below it
 # CANNOT be written to config.yaml — the window guard must say the server is too small rather than
-# print an unsatisfiable "set max_context_tokens ≤ 0" (a 4,096-window Ollama hit exactly that).
+# print a remedy the schema rejects (the bound was once served−4_096, so a 4,096-window Ollama got
+# "set max_context_tokens ≤ 0"; #145 made the bound the served window, so only a sub-1_000 server
+# reaches this branch now).
 MIN_CONFIGURABLE_CONTEXT_TOKENS = 1_000
 
 
