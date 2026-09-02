@@ -10,6 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
+from localharness.cli.start_cmd import _reconcile_sole_served_model
 
 runner = CliRunner()
 
@@ -148,6 +149,51 @@ def test_effective_max_context_never_exceeds_the_served_window():
     assert _effective_max_context(4_096, 8_192) != 8_192
     for served in (4_096, 8_192, 10_000, 12_288, 64_000, 131_072):
         assert _effective_max_context(served, 200_000) <= served
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_sole_served_model — `start` adopts the only model an endpoint serves
+# ---------------------------------------------------------------------------
+
+def test_reconcile_adopts_the_sole_served_model_when_config_is_stale():
+    """A single-model runtime serves ONE checkpoint, so a stale name has one sensible meaning."""
+    model, notice = _reconcile_sole_served_model(
+        "gemma4-31b", ["qwen3.8-27b"], True, "http://x/v1"
+    )
+    assert model == "qwen3.8-27b"
+    assert notice is not None
+    # The swap must be announced: a bench run recording the wrong model is a corrupted result.
+    assert "gemma4-31b" in notice and "qwen3.8-27b" in notice
+
+
+def test_reconcile_is_a_noop_when_the_configured_model_is_the_served_one():
+    model, notice = _reconcile_sole_served_model(
+        "qwen3.8-27b", ["qwen3.8-27b"], True, "http://x/v1"
+    )
+    assert model == "qwen3.8-27b"
+    assert notice is None
+
+
+def test_reconcile_never_guesses_when_several_models_are_served():
+    """2+ served (Ollama/LM Studio) is a REAL choice — fall through to the unserved error."""
+    model, notice = _reconcile_sole_served_model(
+        "gemma4-31b", ["qwen3.8-27b", "deepseek-v4-flash"], True, "http://x/v1"
+    )
+    assert model == "gemma4-31b"
+    assert notice is None
+
+
+def test_reconcile_does_not_adopt_when_the_endpoint_is_unreachable():
+    """A dead endpoint must surface as 'unreachable', not be masked by a bogus adoption."""
+    model, notice = _reconcile_sole_served_model("gemma4-31b", [], False, "http://x/v1")
+    assert model == "gemma4-31b"
+    assert notice is None
+
+
+def test_reconcile_does_not_adopt_when_endpoint_reachable_but_serving_nothing():
+    model, notice = _reconcile_sole_served_model("gemma4-31b", [], True, "http://x/v1")
+    assert model == "gemma4-31b"
+    assert notice is None
 
 
 def test_min_configurable_context_tokens_matches_the_schema():
