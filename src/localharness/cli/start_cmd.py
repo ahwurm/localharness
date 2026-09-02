@@ -140,6 +140,31 @@ def _classify_probe_failure(probe_error: str | None) -> str:
 MIN_CONFIGURABLE_CONTEXT_TOKENS = 1_000
 
 
+def _reconcile_sole_served_model(
+    resolved_model: str, live: list[str], reachable: bool, base_url: str
+) -> tuple[str, str | None]:
+    """Reconcile a configured model name against what the endpoint is ACTUALLY serving.
+
+    A single-model runtime (vLLM / llama.cpp) serves exactly ONE checkpoint, so a stale
+    configured name has exactly one sensible meaning — `start` should pick up what is there
+    rather than fail on a name. Returns ``(model_to_use, notice_or_None)``.
+
+    Adopts ONLY when the endpoint is reachable AND serves exactly one model AND that model
+    differs from the configured one. Two-or-more served models is a REAL choice (attach-only
+    providers like Ollama/LM Studio serve many) and is never guessed at — the caller's normal
+    unserved-model error path handles it.
+
+    Returns a notice rather than adopting silently: this is a benchmarking harness, and a run
+    whose recorded model differs from the one actually used is a corrupted result.
+    """
+    if not reachable or len(live) != 1 or live[0] == resolved_model:
+        return resolved_model, None
+    return live[0], (
+        f"Configured model {resolved_model!r} is not served at {base_url}; "
+        f"using {live[0]!r} (the only model there)."
+    )
+
+
 def _effective_max_context(served_window: int | None, cfg_window: int) -> int:
     """Single source of truth for the context budget.
 
@@ -514,6 +539,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 )
             raise typer.Exit(1)
         resolved_model = model_override
+    elif harness.server is None:
+        # ATTACH mode with no --model: reconcile the configured name against the live endpoint
+        # BEFORE probing. Probing a stale name burns three retries and prints the alarming
+        # "falling back to xml" warning before any correction could apply; fixing the name first
+        # means ONE clean probe, in the right tool-call mode. Skipped for a managed server, which
+        # may legitimately not be up yet — its own launch path below covers that.
+        from localharness.cli import model_ops as _mo
+        try:
+            _live_now, _reachable_now = _mo.list_live_models(provider.base_url)
+        except _mo.MalformedModelListError:
+            _live_now, _reachable_now = [], False
+        resolved_model, _notice = _reconcile_sole_served_model(
+            resolved_model, _live_now, _reachable_now, provider.base_url
+        )
+        if _notice:
+            console.print(_notice)
+
     # Build initial client for the probe (tool_call_mode will be overwritten by probe result).
     _initial_cfg = LLMConfig(
         base_url=provider.base_url,
