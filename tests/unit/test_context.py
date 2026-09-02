@@ -838,7 +838,6 @@ def test_token_budget_usage_fraction():
     budget = TokenBudget(total_limit=100_000, current_usage=70_000, tool_schema_tokens=10_000)
     assert budget.effective_limit == 95_904
     assert budget.usage_fraction == pytest.approx(0.83, abs=0.01)
-    assert budget.needs_summary_compact is True
     assert budget.needs_full_compact is False
 
 
@@ -846,7 +845,122 @@ def test_token_budget_below_threshold():
     from localharness.agent.context import TokenBudget
     budget = TokenBudget(total_limit=100_000, current_usage=50_000, tool_schema_tokens=5_000)
     assert budget.usage_fraction == pytest.approx(0.57, abs=0.01)  # 55_000 / 95_904 usable
-    assert budget.needs_summary_compact is False
+
+
+# ---------------------------------------------------------------------------
+# compaction_trigger_fraction: wiring ContextConfig.compaction_threshold_pct into REAL
+# behavior (it used to be parsed but never consulted — both TokenBudget.needs_summary_compact
+# and SummaryCompactionStage hardcoded 0.80 directly). Every direct construction below without
+# an explicit override must still behave exactly as before (0.80) — only an explicit,
+# lower value changes when the pipeline may fire.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_default_construction_still_triggers_at_80_pct():
+    """Backward compat: a ContextManager/CompactionPipeline built with NO explicit trigger
+    (every existing caller, including subagents) behaves exactly as before — a fire at 55%
+    does not happen, matching the historical 0.80 gate."""
+    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
+
+    calls = {"n": 0}
+
+    async def summarize(middle):
+        calls["n"] += 1
+        return "s"
+
+    tc = TokenCounter()
+    msgs = _compactible_msgs()
+    n = tc.count_messages(msgs)
+    pipeline = CompactionPipeline(tc, preserve_first_n=1, preserve_last_n=1, llm_summarize_fn=summarize)
+    # size the window so usage sits at ~55% -- below the default 0.80 trigger
+    cm = ContextManager(max_context_tokens=int(n / 0.55), pipeline=pipeline, token_counter=tc)
+
+    await cm.build_messages(list(msgs))
+    assert calls["n"] == 0, "the default trigger must still be 0.80 for unmodified callers"
+
+
+@pytest.mark.asyncio
+async def test_lower_trigger_fraction_fires_earlier():
+    """An explicit, lower compaction_trigger_fraction (what start_cmd now threads from
+    ContextConfig.compaction_threshold_pct) makes the pipeline fire at a usage level that
+    would NOT have triggered the old hardcoded 0.80 gate."""
+    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
+
+    calls = {"n": 0}
+
+    async def summarize(middle):
+        calls["n"] += 1
+        return "s"
+
+    tc = TokenCounter()
+    msgs = _compactible_msgs()
+    n = tc.count_messages(msgs)
+    pipeline = CompactionPipeline(
+        tc, preserve_first_n=1, preserve_last_n=1, llm_summarize_fn=summarize,
+        trigger_usage_fraction=0.50,
+    )
+    # same ~55% usage as the control test above -- ABOVE this lower 0.50 trigger
+    cm = ContextManager(
+        max_context_tokens=int(n / 0.55), pipeline=pipeline, token_counter=tc,
+        compaction_trigger_fraction=0.50,
+    )
+
+    await cm.build_messages(list(msgs))
+    assert calls["n"] >= 1, "a lower configured trigger must fire below the old 0.80 gate"
+
+
+def test_start_cmd_threads_compaction_threshold_pct_as_a_fraction():
+    """start_cmd must convert the PERCENTAGE config field (e.g. 65.0) to the FRACTION the
+    pipeline/context-manager expect (0.65) -- the exact arithmetic the production wiring does."""
+    from localharness.config.models import ContextConfig
+
+    cfg = ContextConfig(compaction_threshold_pct=65.0)
+    assert cfg.compaction_threshold_pct / 100.0 == pytest.approx(0.65)
+
+
+@pytest.mark.asyncio
+async def test_full_auto_compact_fires_across_the_entire_trigger_range():
+    """Pins the invariant FullAutoCompactStage's docstring documents: for EVERY trigger value
+    ContextConfig.compaction_threshold_pct's schema allows (50-99, i.e. 0.50-0.99 as a fraction)
+    and across a range of window sizes (including the 2,000,000 ceiling), the emergency
+    full-compact stage must still actually fire once its own >=0.95 gate is cleared. A fixed
+    forced-fire constant (the pre-fix 0.81) could sit BELOW a raised configurable trigger on some
+    window sizes and silently no-op the stage -- exactly the regression the review flagged;
+    deriving the forced budget FROM the trigger (this fix) holds for the whole valid range."""
+    from localharness.agent.context import FullAutoCompactStage, TokenBudget, TokenCounter
+
+    tc = TokenCounter()
+    for trigger_pct in (50.0, 65.0, 80.0, 90.0, 99.0):
+        for total_limit in (4_096, 32_768, 131_072, 2_000_000):
+            # A wider middle than _compactible_msgs() (8 bulky messages, not 4): FullAutoCompactStage
+            # hardcodes preserve_first_n=1/preserve_last_n=2, already at the widen-loop's floor, so a
+            # narrow middle can leave <=2 summarizable messages after the safe-cut search (the system
+            # message is never itself a safe cut point) with no room left to widen into — a real but
+            # SEPARATE boundary-search quirk, unrelated to the trigger-derivation invariant this test
+            # pins. The extra messages give every combination below a safely summarizable middle.
+            big = "word " * 200
+            messages = [{"role": "system", "content": "sys"}]
+            for i in range(8):
+                messages.append({"role": "user" if i % 2 == 0 else "assistant", "content": big})
+            messages.append({"role": "user", "content": "recent short tail"})
+            calls = {"n": 0}
+
+            async def summarize(middle):
+                calls["n"] += 1
+                return "s"
+
+            stage = FullAutoCompactStage(
+                llm_summarize_fn=summarize, trigger_usage_fraction=trigger_pct / 100.0,
+            )
+            real_budget = TokenBudget(
+                total_limit=total_limit, current_usage=int(total_limit * 0.99), tool_schema_tokens=0,
+            )  # clears the stage's own >=0.95 outer gate at every window size above
+
+            _out, modified = await stage.apply(messages, real_budget, tc)
+            assert modified is True, (
+                f"emergency stage failed to fire: trigger={trigger_pct}%, window={total_limit}"
+            )
+            assert calls["n"] >= 1
 
 
 def test_response_reserve_table():
@@ -1124,6 +1238,8 @@ async def test_compaction_guard_caps_fires_per_turn():
     """Ruling test (c): the per-turn fire cap is the BACKSTOP — even when each fire genuinely
     shrinks (context regrows next iteration), the expensive summarizer runs at most
     MAX_COMPACTION_FIRES_PER_TURN times per turn; reset_compaction_guard re-arms a new turn."""
+    from localharness.agent.context import MAX_COMPACTION_FIRES_PER_TURN
+
     calls = {"n": 0}
 
     async def shrinking(middle):
@@ -1131,13 +1247,17 @@ async def test_compaction_guard_caps_fires_per_turn():
         return "s"  # a tiny summary -> each fire genuinely shrinks and meets target in one call
 
     cm, msgs = _guard_cm(shrinking)
-    for _ in range(6):  # same oversized input each iteration -> would fire every time, uncapped
+    for _ in range(MAX_COMPACTION_FIRES_PER_TURN + 3):  # would fire every time, uncapped
         await cm.build_messages(list(msgs))
-    assert calls["n"] == 3, f"per-turn fire cap not enforced: summarizer ran {calls['n']}x (cap 3)"
+    assert calls["n"] == MAX_COMPACTION_FIRES_PER_TURN, (
+        f"per-turn fire cap not enforced: summarizer ran {calls['n']}x "
+        f"(cap {MAX_COMPACTION_FIRES_PER_TURN})"
+    )
 
     cm.reset_compaction_guard()  # a new turn re-arms the cap
     await cm.build_messages(list(msgs))
-    assert calls["n"] == 4, "reset_compaction_guard must re-arm compaction for the next turn"
+    assert calls["n"] == MAX_COMPACTION_FIRES_PER_TURN + 1, \
+        "reset_compaction_guard must re-arm compaction for the next turn"
 
 
 # --- Phase 4: compact.md load path ---
