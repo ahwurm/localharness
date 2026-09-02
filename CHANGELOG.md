@@ -4,6 +4,22 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Security
+- **Memory-recall output now enters the ContentStore with untrusted origin** (#140).
+  The store's origin tag is the structural injection floor: only clean-origin
+  handles may be bound into a cruncher exec namespace. Web content has carried
+  the untrusted tag since the model landed; memory recall didn't — a bulky
+  `memory_search`/`memory_get` result evicted into the store arrived with the
+  default trusted origin, even though memory can hold content that originally
+  came from untrusted channels (remembered web material) and facts carry no
+  per-item provenance. Recall results still evict to restorable stubs like any
+  other bulky body, but the stored body is now untrusted by default: verbs read
+  it as data, the exec floor refuses to bind it, and the tag stays sticky across
+  restore/re-evict (the same body hash never relaunders). Closes the "known
+  gaps" note shipped with 0.12.7.
+
 ## [0.12.7] — 2026-08-31
 
 ### Fixed
