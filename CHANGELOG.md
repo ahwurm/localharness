@@ -6,6 +6,15 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`doctor` warns when an AMD GPU is paired with a Vulkan-linked llama.cpp binary**
+  (#144, #148 — contributed by @mjdufresne, verified on real AMD hardware). llama.cpp's
+  cmake quietly prefers Vulkan when the SDK is present, and `-ngl` offloads onto the GPU
+  either way, so a Vulkan build looks healthy while running the slower backend. For a
+  harness-managed llama.cpp server, `doctor` now sniffs sysfs for an AMD GPU and `ldd`s
+  the configured binary; Vulkan-without-HIP linkage gets an advisory warning naming the
+  exact rebuild flags. Advisory only, Linux only, silent whenever it cannot tell.
+
 ### Security
 - **Memory-recall output now enters the ContentStore with untrusted origin** (#140).
   The store's origin tag is the structural injection floor: only clean-origin
