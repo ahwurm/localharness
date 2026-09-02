@@ -376,6 +376,189 @@ def test_doctor_llamacpp_single_slot_stays_silent(mock_httpx, tmp_path):
     assert "--parallel 1" not in result.output
 
 
+# --- #144: AMD GPU present + llama.cpp binary linked against Vulkan, not HIP -> warn --------
+
+
+def _write_managed_llamacpp_config(tmp_path: Path, binary: str, model: str = "m") -> None:
+    (tmp_path / "config.yaml").write_text(
+        'version: "1"\n'
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        f"  default_model: {model}\n"
+        "  available_models:\n"
+        f"    - {model}\n"
+        "  supports_function_calling: true\n"
+        "  timeout_seconds: 600.0\n"
+        "server:\n"
+        "  runtime: llamacpp\n"
+        f"  binary: {binary}\n"
+        f"  model: {model}.gguf\n"
+        "  port: 8080\n"
+    )
+
+
+def _basic_llamacpp_mocks(mock_httpx, model: str = "m") -> None:
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": model}]})
+    tok = MagicMock()
+    tok.status_code = 200
+    tok.json.return_value = {"tokens": [1, 2]}
+    mock_httpx.post.return_value = tok
+
+
+@patch("localharness.cli.doctor_cmd._has_amd_gpu", return_value=True)
+@patch("localharness.cli.doctor_cmd._llama_server_linked_backends", return_value={"vulkan"})
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_warns_amd_gpu_vulkan_only_binary(mock_httpx, mock_backends, mock_amd, tmp_path):
+    """AMD GPU present + a managed llama.cpp binary linked ONLY against Vulkan -> a WARN
+    advisory naming the fix, but doctor still exits 0 (a Vulkan build still works)."""
+    binary = str(tmp_path / "llama-server")
+    _write_managed_llamacpp_config(tmp_path, binary)
+    _basic_llamacpp_mocks(mock_httpx)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Vulkan, not HIP/ROCm" in result.output
+    assert "-DGGML_HIP=ON" in result.output
+    mock_backends.assert_called_once_with(binary)
+
+
+@patch("localharness.cli.doctor_cmd._has_amd_gpu", return_value=True)
+@patch("localharness.cli.doctor_cmd._llama_server_linked_backends", return_value={"hip", "vulkan"})
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_silent_when_binary_is_hip_linked(mock_httpx, mock_backends, mock_amd, tmp_path):
+    """A binary linked against HIP (even alongside Vulkan support compiled in) is fine —
+    the warning is specifically for Vulkan-without-HIP."""
+    binary = str(tmp_path / "llama-server")
+    _write_managed_llamacpp_config(tmp_path, binary)
+    _basic_llamacpp_mocks(mock_httpx)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "HIP/ROCm" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd._has_amd_gpu", return_value=False)
+@patch("localharness.cli.doctor_cmd._llama_server_linked_backends", return_value={"vulkan"})
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_silent_without_amd_gpu(mock_httpx, mock_backends, mock_amd, tmp_path):
+    """A Vulkan-only build is fine on non-AMD hardware (e.g. Intel/NVIDIA Vulkan) — the
+    warning is AMD-specific (that's where the HIP/ROCm backend applies)."""
+    binary = str(tmp_path / "llama-server")
+    _write_managed_llamacpp_config(tmp_path, binary)
+    _basic_llamacpp_mocks(mock_httpx)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "HIP/ROCm" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd._has_amd_gpu", return_value=True)
+@patch("localharness.cli.doctor_cmd._llama_server_linked_backends", return_value=None)
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_silent_when_backend_undeterminable(mock_httpx, mock_backends, mock_amd, tmp_path):
+    """None (ldd missing/failed, non-Linux) means "can't tell" — must never be treated as
+    evidence of a problem."""
+    binary = str(tmp_path / "llama-server")
+    _write_managed_llamacpp_config(tmp_path, binary)
+    _basic_llamacpp_mocks(mock_httpx)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "HIP/ROCm" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd._has_amd_gpu", return_value=True)
+@patch("localharness.cli.doctor_cmd._llama_server_linked_backends")
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_skips_amd_check_for_attach_only_llamacpp(mock_httpx, mock_backends, mock_amd, tmp_path):
+    """No `server:` block (attach-only endpoint) -> the harness has no binary path to inspect,
+    so the check must skip entirely rather than guess."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _basic_llamacpp_mocks(mock_httpx)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "HIP/ROCm" not in result.output
+    mock_backends.assert_not_called()
+
+
+def test_has_amd_gpu_reads_sysfs_pci_vendor(tmp_path, monkeypatch):
+    """_has_amd_gpu reads /sys/class/drm/card*/device/vendor for AMD's PCI vendor id
+    (0x1002) — no subprocess, so it works even without rocm-smi/lspci installed."""
+    from localharness.cli import doctor_cmd
+
+    drm = tmp_path / "drm"
+    (drm / "card0" / "device").mkdir(parents=True)
+    (drm / "card0" / "device" / "vendor").write_text("0x1002\n")
+    monkeypatch.setattr(doctor_cmd, "Path", lambda p: Path(str(drm)) if p == "/sys/class/drm" else Path(p))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    assert doctor_cmd._has_amd_gpu() is True
+
+
+def test_has_amd_gpu_false_for_other_vendor(tmp_path, monkeypatch):
+    from localharness.cli import doctor_cmd
+
+    drm = tmp_path / "drm"
+    (drm / "card0" / "device").mkdir(parents=True)
+    (drm / "card0" / "device" / "vendor").write_text("0x10de\n")  # NVIDIA
+    monkeypatch.setattr(doctor_cmd, "Path", lambda p: Path(str(drm)) if p == "/sys/class/drm" else Path(p))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    assert doctor_cmd._has_amd_gpu() is False
+
+
+def test_has_amd_gpu_false_off_linux(monkeypatch):
+    from localharness.cli import doctor_cmd
+
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "win32")
+    assert doctor_cmd._has_amd_gpu() is False
+
+
+def test_linked_backends_none_off_linux(monkeypatch):
+    from localharness.cli import doctor_cmd
+
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "darwin")
+    assert doctor_cmd._llama_server_linked_backends("/usr/bin/anything") is None
+
+
+def test_linked_backends_none_when_binary_missing(monkeypatch):
+    from localharness.cli import doctor_cmd
+
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    assert doctor_cmd._llama_server_linked_backends("/no/such/binary") is None
+
+
+def test_linked_backends_detects_hip_and_vulkan(tmp_path, monkeypatch):
+    """Recognizes both the current library names and the old-tree spellings the #144 docs
+    fix also had to account for (LLAMA_HIPBLAS/GGML_HIPBLAS -> GGML_HIP rename)."""
+    from localharness.cli import doctor_cmd
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "libamdhip64.so.7 => /opt/rocm/lib/libamdhip64.so.7\n"
+        return result
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    assert doctor_cmd._llama_server_linked_backends(str(binary)) == {"hip"}
+
+
+def test_linked_backends_none_when_ldd_fails(tmp_path, monkeypatch):
+    from localharness.cli import doctor_cmd
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+
+    def fake_run(cmd, capture_output, text, timeout):
+        raise FileNotFoundError("ldd not found")
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    assert doctor_cmd._llama_server_linked_backends(str(binary)) is None
+
+
 @patch("localharness.cli.doctor_cmd.httpx")
 def test_doctor_vllm_message_level_exact(mock_httpx, tmp_path):
     """vLLM whose /tokenize answers messages-mode: doctor reports message-level exactness —
