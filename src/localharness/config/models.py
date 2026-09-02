@@ -917,7 +917,12 @@ class ContextConfig(BaseModel):
         le=99.0,
         description=(
             "Trigger summarize-middle compaction when context utilization exceeds this percentage. "
-            "Default: 80% — compact when 80% of max_context_tokens is used."
+            "Default: 80% — compact when 80% of max_context_tokens is used. Wired through `start` "
+            "into ContextManager/CompactionPipeline's trigger_usage_fraction — previously this "
+            "field was parsed but never consulted at runtime (SummaryCompactionStage hardcoded "
+            "0.80 directly). FullAutoCompactStage's emergency full-compact derives its own "
+            "forced-fire point FROM this value (see that class's docstring), so any value in "
+            "this field's own range is always safe — no separate ceiling needed here."
         ),
     )
 
