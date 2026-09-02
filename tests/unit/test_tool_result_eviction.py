@@ -290,6 +290,73 @@ async def test_no_restores_means_unchanged_eviction():
     assert _n_stubs(built) == 5 - TOOL_EVICT_KEEP_LAST
 
 
+# ---------------------------------------------------------------------------
+# #140: memory-recall output enters the store with UNTRUSTED origin. Memory can hold
+# material that originally arrived from untrusted channels (remembered web content),
+# and facts carry no per-item provenance — so an evicted recall body is verb-readable
+# data, never exec-bindable. Web already had this; memory was the gap.
+# ---------------------------------------------------------------------------
+
+
+def _named_exchange(call_id: str, body: str, tool: str):
+    return [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": call_id, "type": "function",
+            "function": {"name": tool, "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": call_id, "content": body},
+    ]
+
+
+def test_memory_recall_evicts_with_untrusted_origin():
+    """#140: an evicted memory_search/memory_get body carries untrusted origin in the store,
+    while a generic tool body evicted in the same pass keeps the trusted default."""
+    store = ContentStore()
+    recall, fact, generic = "R" * 12_000, "F" * 12_000, "G" * 12_000
+    msgs = (_named_exchange("m1", recall, "memory_search")
+            + _named_exchange("m2", fact, "memory_get")
+            + _named_exchange("b1", generic, "bash_exec"))
+    out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    assert n == 3
+    assert store.origin(_content_handle(recall)) == "untrusted"
+    assert store.origin(_content_handle(fact)) == "untrusted"
+    assert store.origin(_content_handle(generic)) == "trusted"
+
+
+def test_memory_recall_handle_refused_by_exec_floor():
+    """#140 end-to-end: the exec floor refuses an evicted recall handle outright, and the
+    refusal doesn't take bystander trusted handles down with it when bound alone."""
+    from localharness.tools.builtin.cruncher_exec import (
+        UntrustedHandleError,
+        bind_clean_origin_bodies,
+    )
+
+    store = ContentStore()
+    recall, generic = "R" * 12_000, "G" * 12_000
+    msgs = (_named_exchange("m1", recall, "memory_search")
+            + _named_exchange("b1", generic, "bash_exec"))
+    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    with pytest.raises(UntrustedHandleError):
+        bind_clean_origin_bodies(store, [_content_handle(recall)])
+    seed = bind_clean_origin_bodies(store, [_content_handle(generic)])
+    assert seed["h0"] == generic
+
+
+@pytest.mark.asyncio
+async def test_memory_recall_restore_and_reevict_stays_untrusted():
+    """#140 relaunder guard: restoring a recall body and re-storing it via the generic
+    trusted-default path keeps untrusted origin — the tag is sticky on the body hash."""
+    store = ContentStore()
+    recall = "sticky recall body\n" * 800
+    msgs = _named_exchange("m1", recall, "memory_search")
+    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    tool = ToolResultGetTool(store)
+    res = await tool.run(id=_content_handle(recall))
+    assert res.success and res.output == recall
+    assert store.put(res.output) == _content_handle(recall)  # generic re-put, no origin arg
+    assert store.origin(_content_handle(recall)) == "untrusted"
+
+
 def test_pin_costs_exactly_one_eviction_not_the_keep_last_window():
     """#134 ordering: a pinned result is SKIPPED by the pass, it does not push another result
     into the protected keep-last window — non-pinned eligible results are still evicted first."""

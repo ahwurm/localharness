@@ -86,6 +86,12 @@ TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
 _TOOL_STUB_PREFIX = "[tool result evicted"
+# #140: recall output enters the store with UNTRUSTED origin. Memory can hold material that
+# originally arrived from untrusted channels (remembered web content), and facts carry no
+# per-item provenance — so the floor assumes the worst: an evicted recall body is data the
+# verbs may read but never exec-bindable. Provenance-tracked inheritance would refine this;
+# until it exists, untrusted-by-default is the only sound default.
+_MEMORY_TOOLS = frozenset({"memory_search", "memory_get"})
 # #134 RESTORE PIN: restoring a body re-inflates usage, which re-arms this very pass, which
 # evicts the just-restored body under the SAME handle — measured live as a 24-minute turn of
 # restore/evict/restore. A body pulled back by these tools is therefore PINNED against the
@@ -257,9 +263,12 @@ def _evict_large_tool_results(
     evicted — but they still count toward the keep-last window, so a pin costs exactly its own
     eviction and never pushes another body into protection (non-pinned bodies evict first).
     Returns (new list, evicted count); input messages are never mutated. Deterministic:
-    same input -> same stubs (same id), so the prompt stays prefix-cache stable."""
+    same input -> same stubs (same id), so the prompt stays prefix-cache stable.
+    Memory-recall results (#140) evict like any other bulky body but enter the store with
+    untrusted origin — restorable and verb-readable, never exec-bindable."""
     # tool_call_ids that resolve to web tools — those go through the web path, skip here.
     web_ids = _tool_call_ids_named(messages, _WEB_TOOLS)
+    memory_ids = _tool_call_ids_named(messages, _MEMORY_TOOLS)
     evictable = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
@@ -276,7 +285,8 @@ def _evict_large_tool_results(
     for i in stale:
         m = out[i]
         body = m.get("content") or ""
-        rid = store.put(body)
+        origin: Origin = "untrusted" if m.get("tool_call_id") in memory_ids else "trusted"
+        rid = store.put(body, origin=origin)
         approx_tokens = len(body) // 4
         out[i] = {**m, "content": (
             f"{_TOOL_STUB_PREFIX} — ~{approx_tokens} tokens — "

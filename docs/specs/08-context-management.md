@@ -449,14 +449,15 @@ deterministic content-hash handles so an evicted prompt is byte-identical across
   identical bodies dedupe to one entry, and a stub rendered from the same body is byte-identical on
   every later turn, so the vLLM prefix cache stays warm. A random id would silently invalidate the
   cache from the first evicted result onward.
-- **Origin is a sticky taint.** A body is `trusted` unless it came from the web (`put_web`) or was
-  derived from an untrusted handle (`derived_from=`). Taint is monotonic — an untrusted handle
-  never relaunders, and only a clean-origin handle may be bound into an exec namespace. That is
-  the injection floor; see `SECURITY.md`. **Known gap:** memory-recall output
-  (`memory_search`/`memory_get`) is NOT currently tainted — if a large recall result is evicted it
-  enters the store with the default trusted origin, although memory can hold content that
-  originally arrived from untrusted channels. The cruncher's own design comment treats memory as
-  untrusted; the wiring does not yet. Tracked as a hardening gap.
+- **Origin is a sticky untrusted tag.** A body is `trusted` unless it came from the web
+  (`put_web`), was read back from memory, or was derived from an untrusted handle
+  (`derived_from=`). Memory-recall results (`memory_search`/`memory_get`) evict through the
+  generic path but enter the store with `origin="untrusted"` (#140): memory can hold content
+  that originally arrived from untrusted channels, and facts carry no per-item provenance, so
+  recall is untrusted by default — verb-readable data, never exec-bindable. The tag is
+  monotonic — an untrusted handle never relaunders (the same body hash stays untrusted even on
+  a later origin-less `put`), and only a clean-origin handle may be bound into an exec
+  namespace. That is the injection floor; see `SECURITY.md`.
 - **Web bodies are LRU-bounded** (32 entries) because they are re-fetchable; trusted bodies are
   durable, because a restore must not fail.
 - **A child agent gets a grant view** — built with `(parent, granted)`, it may read only the parent
