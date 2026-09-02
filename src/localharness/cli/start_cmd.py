@@ -303,7 +303,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
 
 
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
-                       channel_mode: str = "terminal", subagents: bool = False) -> None:
+                       channel_mode: str = "terminal", subagents: bool = False,
+                       model_override: str | None = None, list_models: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
     import uuid
@@ -347,6 +348,41 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+
+    # --list-models: a lightweight, config-only path — reuses the same live-probe `localharness
+    # model` (bare) uses, exposed on `start` too since that's the command most people reach for
+    # first. Never loads agents / starts a session.
+    if list_models:
+        from localharness.cli import model_ops
+        provider = harness.provider
+        try:
+            live, reachable = model_ops.list_live_models(provider.base_url)
+        except model_ops.MalformedModelListError as exc:
+            err_console.print(
+                f"[bold red]Error:[/bold red] the server at {provider.base_url} responded, but "
+                f"the response wasn't understood ({exc})"
+            )
+            raise typer.Exit(2)
+        configured_only = [m for m in provider.available_models if m not in live]
+        if not reachable and not configured_only:
+            err_console.print(
+                f"[bold red]Error:[/bold red] could not reach {provider.base_url} and no "
+                "configured models were found. Is the server running?"
+            )
+            raise typer.Exit(2)
+        console.print("Models:")
+        for m in live:
+            mark = "  [active]" if m == provider.default_model else ""
+            console.print(f"  {m}  (serving){mark}", markup=False)
+        for m in configured_only:
+            console.print(f"  {m}  (configured, not currently served)", markup=False)
+        if not live and not configured_only:
+            console.print("  (none)")
+        console.print(
+            "\nUse `localharness start --model <name>` for a one-off session, or "
+            "`localharness model <name>` to persist a new default."
+        )
+        raise typer.Exit(0)
 
     _ensure_packaged_tools(cfg_path)
 
@@ -446,6 +482,38 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if agent_config.model != "inherit"
         else provider.default_model
     )
+    if model_override:
+        # --model (session-only, never persisted): restricted to a model ALREADY being served.
+        # A harness-managed single-model server (llama.cpp/vLLM) serves exactly one checkpoint at
+        # a time; switching it means a restart, which `localharness model <name>` (persist +
+        # restart) or the REPL `/model` command (live restart) already handle deliberately — this
+        # flag must NOT trigger that, so it only accepts the model the managed server already
+        # serves. An attach-only provider (Ollama/LM Studio) can serve several models at once, so
+        # any already-live model is fair game.
+        from localharness.cli import model_ops
+        try:
+            _live, _reachable = model_ops.list_live_models(provider.base_url)
+        except model_ops.MalformedModelListError as exc:
+            err_console.print(
+                f"[bold red]Error:[/bold red] the server at {provider.base_url} responded, but "
+                f"the response wasn't understood ({exc})"
+            )
+            raise typer.Exit(1)
+        _choices = _live or list(provider.available_models)
+        if model_override not in _choices:
+            avail_hint = f" Available: {', '.join(_choices)}." if _choices else ""
+            err_console.print(
+                f"[bold red]Error:[/bold red] --model {model_override!r} is not currently "
+                f"served at {provider.base_url}.{avail_hint}"
+            )
+            if harness.server is not None:
+                err_console.print(
+                    "This is a harness-managed single-model server — switching models restarts "
+                    "it. Use `localharness model <name>` to persist + restart, or the REPL "
+                    "`/model <name>` command for a live restart."
+                )
+            raise typer.Exit(1)
+        resolved_model = model_override
     # Build initial client for the probe (tool_call_mode will be overwritten by probe result).
     _initial_cfg = LLMConfig(
         base_url=provider.base_url,
@@ -1213,9 +1281,11 @@ def start_app(
     config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
     channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,
+    list_models: Annotated[bool, typer.Option("--list-models", help="List models available at the configured provider, then exit")] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model, list_models))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")

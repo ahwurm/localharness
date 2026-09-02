@@ -2706,3 +2706,232 @@ async def test_start_guard_error_names_the_pin_that_actually_governs(tmp_path, m
 
     joined = "\n".join(errs)
     assert "model_context_overrides['pinned-model']" in joined
+
+
+# ===========================================================================================
+# --model / --list-models: session-only model selection on `start` (PR #146). --model is
+# restricted to a model ALREADY being served — freely on an attach-only provider (Ollama/LM
+# Studio, several models resident at once), but a harness-managed single-model server
+# (llama.cpp/vLLM) refuses to hot-switch (never auto-restarts) and points at the two
+# mechanisms that DO: `localharness model <name>` (persist + restart) and the REPL `/model`
+# command (live restart). --list-models is a read-only, config-only path with no side effects.
+# ===========================================================================================
+
+def _fake_live_models(models, reachable=True):
+    return lambda *a, **k: (list(models), reachable)
+
+
+async def test_model_override_accepts_served_model(tmp_path, monkeypatch):
+    """--model picks a model already live-served: the session proceeds using it, and — the
+    PR's core guarantee — config.yaml is never touched (session-only, unlike `localharness
+    model`'s persisted switch)."""
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_start_boundaries(tmp_path, monkeypatch)  # ollama, attach-only, default_model=test-model
+    monkeypatch.setattr(
+        model_ops, "list_live_models",
+        _fake_live_models(["test-model", "alt-model"]), raising=False,
+    )
+
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path), model_override="alt-model")
+
+    live = [c for c in seen if c.provider_type]  # the session client, not the bare probe client
+    assert live, "no LLMClient was built with the provider type"
+    assert all(c.model == "alt-model" for c in live), [c.model for c in live]
+    # session-only: --model must never touch provider.default_model on disk (unlike
+    # `localharness model <name>`'s persisted switch). The deny-defaults auto-migration may
+    # still legitimately rewrite the permissions block, so assert on the provider fields
+    # specifically rather than byte-for-byte file equality.
+    config_after = (tmp_path / "config.yaml").read_text()
+    assert "default_model: test-model" in config_after
+    assert "alt-model" not in config_after, \
+        "--model must be session-only — the override must never be written to config.yaml"
+
+
+async def test_model_override_attach_only_free_pick(tmp_path, monkeypatch):
+    """An attach-only provider (Ollama/LM Studio — no harness-managed server) can pick ANY
+    live-served model freely, even one that differs from the configured default."""
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        model_ops, "list_live_models",
+        _fake_live_models(["test-model", "second-model", "third-model"]), raising=False,
+    )
+
+    await _start_async(None, False, False, str(tmp_path), model_override="third-model")
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
+
+
+async def test_model_override_rejects_unserved_on_managed_server(tmp_path, monkeypatch):
+    """The PR's main safety behavior: a harness-managed single-model server (llama.cpp/vLLM)
+    serves exactly one checkpoint — --model must refuse to switch it (never auto-restart) and
+    the error must hint at the two mechanisms that DO switch it."""
+    import typer
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: llamacpp\n"
+        "  base_url: http://localhost:8080/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+        "server:\n"
+        "  runtime: llamacpp\n"
+        "  launch: binary\n"
+        "  binary: /x/llama-server\n"
+        "  model: test-model\n"
+    )
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live_models(["test-model"]), raising=False,
+    )
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path), model_override="other-model")
+    assert ei.value.exit_code != 0
+
+    out = "\n".join(errs)
+    assert "other-model" in out and "not currently" in out
+    assert "harness-managed single-model server" in out
+    assert "localharness model" in out and "/model" in out
+
+
+async def test_model_override_falls_back_to_configured_when_unreachable(tmp_path, monkeypatch):
+    """When the live probe can't reach the endpoint, --model falls back to the CONFIGURED
+    (available_models) list rather than failing outright — it only hard-errors when the
+    requested model is in neither list."""
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        "version: '1'\n"
+        "provider:\n"
+        "  provider_type: ollama\n"
+        "  base_url: http://localhost:11434/v1\n"
+        "  default_model: test-model\n"
+        "  api_key: none\n"
+        "  available_models: [test-model, configured-only-model]\n"
+    )
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live_models([], reachable=False), raising=False,
+    )
+
+    await _start_async(
+        None, False, False, str(tmp_path), model_override="configured-only-model"
+    )  # must NOT raise — the requested model is in the configured fallback list
+
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
+
+
+async def test_model_override_unreachable_and_unconfigured_still_errors(tmp_path, monkeypatch):
+    """The fallback above is not a blanket pass — unreachable AND not even configured must
+    still hard-error (never silently start against a model nobody named)."""
+    import typer
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live_models([], reachable=False), raising=False,
+    )
+
+    with pytest.raises(typer.Exit):
+        await _start_async(None, False, False, str(tmp_path), model_override="ghost-model")
+
+
+def _write_provider_only_config(tmp_path, *, available_models=None):
+    lines = [
+        "version: '1'",
+        "provider:",
+        "  provider_type: ollama",
+        "  base_url: http://localhost:11434/v1",
+        "  default_model: test-model",
+        "  api_key: none",
+    ]
+    if available_models is not None:
+        lines.append("  available_models: [" + ", ".join(available_models) + "]")
+    (tmp_path / "config.yaml").write_text("\n".join(lines) + "\n")
+
+
+async def test_list_models_reachable_shows_active_marker(tmp_path, monkeypatch):
+    """Reachable state: live models print with '(serving)', and the configured default is
+    marked [active]."""
+    import typer
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _write_provider_only_config(tmp_path)
+    monkeypatch.setattr(
+        model_ops, "list_live_models",
+        _fake_live_models(["test-model", "alt-model"]), raising=False,
+    )
+    printed = _capture_start_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path), list_models=True)
+    assert ei.value.exit_code == 0
+
+    out = "\n".join(printed)
+    assert "test-model" in out and "[active]" in out
+    assert "alt-model" in out and "(serving)" in out
+
+
+async def test_list_models_unreachable_errors(tmp_path, monkeypatch):
+    """Unreachable state with nothing configured either: a clear error, exit 2 — never a bare
+    empty list that looks like a legitimate zero-model server."""
+    import typer
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _write_provider_only_config(tmp_path)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live_models([], reachable=False), raising=False,
+    )
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path), list_models=True)
+    assert ei.value.exit_code == 2
+
+    out = "\n".join(errs)
+    assert "could not reach" in out.lower()
+
+
+async def test_list_models_nothing_live_shows_none(tmp_path, monkeypatch):
+    """Reachable but zero models being served AND none configured: a plain '(none)', not an
+    error — the server answered, it just isn't serving anything right now."""
+    import typer
+    from localharness.cli import model_ops
+    from localharness.cli.start_cmd import _start_async
+
+    _write_provider_only_config(tmp_path)
+    monkeypatch.setattr(
+        model_ops, "list_live_models", _fake_live_models([], reachable=True), raising=False,
+    )
+    printed = _capture_start_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as ei:
+        await _start_async(None, False, False, str(tmp_path), list_models=True)
+    assert ei.value.exit_code == 0
+
+    out = "\n".join(printed)
+    assert "(none)" in out

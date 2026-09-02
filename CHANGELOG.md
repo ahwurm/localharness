@@ -7,6 +7,19 @@ All notable changes to LocalHarness are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `localharness start --model <name>`/`-m`: a session-only model override that
+  is never persisted to config.yaml. Restricted to a model already being
+  served — an attach-only provider (Ollama/LM Studio) can pick any live
+  model, but a harness-managed single-model server (llama.cpp/vLLM) errors
+  out rather than hot-switching, pointing at `localharness model <name>`
+  (persist + restart) or the REPL `/model` command instead.
+- `localharness start --list-models`: lists live-served and configured models
+  and exits, without loading agents or starting a session.
+- `localharness model --download <repo_id>` (optionally `--file <name>`):
+  standalone Hugging Face download, independent of `init`'s guided vLLM
+  setup. `--file` fetches exactly one sibling file — the correct way to pull
+  a single GGUF quant out of a repo that ships several — instead of the
+  whole-repo snapshot `--download` alone performs.
 - **`doctor` warns when an AMD GPU is paired with a Vulkan-linked llama.cpp binary**
   (#144, #148 — contributed by @mjdufresne, verified on real AMD hardware). llama.cpp's
   cmake quietly prefers Vulkan when the SDK is present, and `-ngl` offloads onto the GPU
