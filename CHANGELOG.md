@@ -4,9 +4,17 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.12.8] — 2026-09-02
 
 ### Added
+- **`localharness update`**: upgrade an installed LocalHarness to the latest PyPI release
+  without retyping a long installer invocation. Detects how the copy was installed and
+  shells out to that installer (`uv tool upgrade` for a uv-managed tool environment, else
+  `pip install --upgrade`) rather than mutating a running interpreter's own site-packages.
+  `--check` reports whether an update exists and changes nothing. A source/editable
+  checkout is detected and refused with a pointer to `git pull` — upgrading one with pip
+  would shadow the working tree with a published wheel. Exits non-zero, with a plain
+  message rather than a traceback, when PyPI is unreachable.
 - `localharness start --model <name>`/`-m`: a session-only model override that
   is never persisted to config.yaml. Restricted to a model already being
   served — an attach-only provider (Ollama/LM Studio) can pick any live

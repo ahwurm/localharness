@@ -18,6 +18,7 @@ from localharness.cli.propose_cmd import propose
 # report_cmd registers `report`/`sentinel` on autoresearch_app at import time (sibling commands).
 from localharness.cli import report_cmd as _report_cmd  # noqa: F401
 from localharness.cli.start_cmd import start_app
+from localharness.cli.update_cmd import update
 from localharness.cli.validate_cmd import validate
 
 app = typer.Typer(
@@ -35,6 +36,7 @@ app.command("doctor")(doctor)
 app.command("validate")(validate)
 app.command("model")(model)
 app.command("propose")(propose)
+app.command("update")(update)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
