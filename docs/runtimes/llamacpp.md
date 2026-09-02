@@ -68,6 +68,21 @@ llama-server -m <model.gguf> --host 127.0.0.1 --port 8080 --jinja -c 32768 -ngl 
 OpenAI-compatible surface at `http://127.0.0.1:8080/v1`; native `/props` reports `n_ctx`, native
 `/tokenize` gives exact token counts.
 
+### Downloading a GGUF from Hugging Face
+
+A GGUF repo commonly ships several quantizations as sibling files in the SAME repo (e.g.
+`Q4_K_M.gguf`, `Q8_0.gguf`) — `localharness model --download <repo_id>` alone pulls the whole
+repo snapshot, every quant included. Name the one file you actually want with `--file`:
+
+```bash
+localharness model --download Qwen/Qwen3.6-35B-A3B-GGUF --file Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+```
+
+This lands the file in the standard HF cache and prints its local path — point `server.model` /
+`-m` at that path. The download is standalone (no server or config required); it does not
+restart a running managed server or change `provider.default_model` — update `server.model` in
+config.yaml (or `localharness model <path>`, once it's being served) yourself afterward.
+
 **Load-bearing gotcha:** recent `llama-server` builds default to multiple parallel slots and
 silently divide `-c` among them (e.g. `-c 32768` across 4 slots = an 8k window per request). The
 harness is single-stream — pass `--parallel 1` so one slot owns the whole context. `init`/`doctor`

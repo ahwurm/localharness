@@ -388,3 +388,88 @@ def test_model_cli_warns_on_pinned_agent(components_home, monkeypatch):
     result = runner.invoke(app, ["model", "model-b"])
     assert result.exit_code == 0, result.output
     assert "pinned-agent" in result.output and "some-pinned-model" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --download / --file: standalone Hugging Face download routing. huggingface_hub itself is
+# never invoked in these tests — provider.server's download_model/download_file (the ONLY
+# boundary that would reach the network) is mocked, so CI never touches the network. No
+# config or running server is required (the download path runs before ConfigLoader).
+# ---------------------------------------------------------------------------
+
+def test_model_download_full_snapshot_without_file(monkeypatch):
+    """--download alone pulls the whole repo snapshot via download_model, not download_file."""
+    from localharness.provider import server as managed_server
+
+    snapshot_calls: list[str] = []
+    file_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        managed_server, "download_model",
+        lambda repo_id: snapshot_calls.append(repo_id) or f"/fake/cache/{repo_id}",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        managed_server, "download_file",
+        lambda repo_id, filename: file_calls.append((repo_id, filename)),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["model", "--download", "org/repo"])
+
+    assert result.exit_code == 0, result.output
+    assert snapshot_calls == ["org/repo"]
+    assert file_calls == [], "whole-repo download must not touch the single-file path"
+    assert "/fake/cache/org/repo" in result.output
+
+
+def test_model_download_with_file_fetches_one_sibling(monkeypatch):
+    """--download with --file fetches exactly ONE sibling file via download_file — not the
+    whole-repo snapshot — the correct way to grab a single GGUF quant out of a multi-quant repo."""
+    from localharness.provider import server as managed_server
+
+    snapshot_calls: list[str] = []
+    file_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        managed_server, "download_model",
+        lambda repo_id: snapshot_calls.append(repo_id),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        managed_server, "download_file",
+        lambda repo_id, filename: file_calls.append((repo_id, filename))
+        or f"/fake/cache/{filename}",
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app, ["model", "--download", "org/gguf-repo", "--file", "model-Q4_K_M.gguf"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert file_calls == [("org/gguf-repo", "model-Q4_K_M.gguf")]
+    assert snapshot_calls == [], "the whole-repo snapshot_download path must not run with --file"
+    assert "/fake/cache/model-Q4_K_M.gguf" in result.output
+
+
+def test_model_file_alone_without_download_errors():
+    """--file with no --download is a usage error, not a silent no-op or a switch attempt."""
+    result = runner.invoke(app, ["model", "--file", "model-Q4_K_M.gguf"])
+    assert result.exit_code == 2, result.output
+    assert "--download" in result.output
+
+
+def test_model_download_failure_reported_not_swallowed(monkeypatch):
+    """A download failure (bad repo id, network error inside huggingface_hub) surfaces as an
+    error exit, never a silent success."""
+    from localharness.provider import server as managed_server
+
+    monkeypatch.setattr(
+        managed_server, "download_model",
+        lambda repo_id: (_ for _ in ()).throw(RuntimeError("repo not found")),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["model", "--download", "org/does-not-exist"])
+
+    assert result.exit_code == 2, result.output
+    assert "repo not found" in result.output

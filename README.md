@@ -117,7 +117,7 @@ uv run localharness init    # probes vLLM :8081/:8000, Ollama :11434, LM Studio 
 uv run localharness start   # interactive session
 ```
 
-`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
+`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them; `localharness start --model <name>` picks one for a single session without touching config, and `--list-models` lists without starting a session. `localharness model --download <repo_id>` (optionally `--file <name>` for one GGUF quant out of a multi-quant repo) pulls a model from Hugging Face ahead of time. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
 
 > Got it running? If LocalHarness saved you an API bill, a [star](https://github.com/ahwurm/localharness/stargazers) helps other local-LLM folks find it.
 
@@ -140,11 +140,11 @@ share a machine. A laptop can run agents against a model served elsewhere on you
 | Command | Purpose |
 |---------|---------|
 | `init` | Detect endpoint/model, write config |
-| `start` | Interactive session |
+| `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit) |
 | `doctor` | Diagnose config/endpoint issues |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
-| `model` | List served/downloaded models, or switch the persisted default |
+| `model` | List served/downloaded models, switch the persisted default, or `--download <repo_id>` (optionally `--file <name>`) a model from Hugging Face |
 | `agent …` | Manage agent definitions |
 | `bench …` | Run the scenario benchmark |
 | `components …` | Autoresearch component registry |

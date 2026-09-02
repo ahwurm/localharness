@@ -22,6 +22,33 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def _download(repo_id: str, filename: Optional[str]) -> None:
+    """`localharness model --download <repo_id> [--file <name>]` — standalone HF fetch, no
+    running server / config required (unlike `init`'s guided-setup download, which is tied to
+    the vLLM install flow). Whole-repo snapshot by default; --file fetches exactly one sibling
+    file (the GGUF case, where a repo ships several quantizations side by side)."""
+    from localharness.provider import server as managed_server
+
+    try:
+        if filename:
+            console.print(f"Downloading {filename!r} from {repo_id}...")
+            path = managed_server.download_file(repo_id, filename)
+        else:
+            console.print(f"Downloading {repo_id} (full snapshot)...")
+            path = managed_server.download_model(repo_id)
+    except Exception as exc:
+        err_console.print(f"[bold red]Error:[/bold red] download failed: {exc}")
+        raise typer.Exit(2)
+
+    console.print(f"[green]✓[/green] Downloaded to {path}")
+    console.print(
+        "To use it: point a llama.cpp profile's `server.model` at this path in config.yaml "
+        "(single-model managed server), or run `localharness model "
+        f"{path}`" + ("" if filename else f" or `localharness model {repo_id}`") +
+        " once it's being served, to set it as the default."
+    )
+
+
 def model(
     name: Optional[str] = typer.Argument(
         None,
@@ -36,8 +63,28 @@ def model(
         "else ~/.localharness). Parity with `start`/`doctor`/`validate`; the persisted "
         "overlay is written HERE.",
     ),
+    download: Optional[str] = typer.Option(
+        None,
+        "--download",
+        help="Download a Hugging Face repo id into the local HF cache, then exit "
+        "(does not change the configured default — follow up with `localharness model <path>`).",
+    ),
+    file: Optional[str] = typer.Option(
+        None,
+        "--file",
+        help="With --download: fetch only this ONE filename from the repo (a specific GGUF "
+        "quant, e.g. `Qwen3-32B-Q4_K_M.gguf`) instead of the whole repo snapshot. Use this for "
+        "llama.cpp models — GGUF repos commonly ship several quantizations as sibling files.",
+    ),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
+    if download is not None:
+        _download(download, file)
+        return
+    if file is not None:
+        err_console.print("[bold red]Error:[/bold red] --file requires --download <repo_id>.")
+        raise typer.Exit(2)
+
     # config_dir=None routes through the resolver's env/default chain (#35); an explicit flag or
     # LOCALHARNESS_DIR isolates the overlay to that dir.
     loader = ConfigLoader(config_dir=config_dir)

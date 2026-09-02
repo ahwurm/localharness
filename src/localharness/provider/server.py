@@ -118,10 +118,26 @@ def is_model_cached(repo_id: str) -> bool:
 
 
 def download_model(repo_id: str) -> str:
-    """Download a checkpoint into the HF cache (tqdm progress). Raises on failure."""
+    """Download a checkpoint into the HF cache (tqdm progress). Raises on failure.
+
+    Pulls the WHOLE repo snapshot — right for a vLLM/transformers-format checkpoint (many
+    shard files, all needed). Wrong for a GGUF repo, which typically ships several quant
+    variants as siblings; use `download_file` for those instead."""
     from huggingface_hub import snapshot_download
 
     return snapshot_download(repo_id)
+
+
+def download_file(repo_id: str, filename: str) -> str:
+    """Download ONE file from a HF repo into the HF cache (tqdm progress). Raises on failure.
+
+    The llama.cpp/GGUF case: a GGUF repo commonly ships several quantizations as sibling files
+    (e.g. `Q4_K_M.gguf`, `Q8_0.gguf`) in the SAME repo — `download_model`'s whole-repo
+    `snapshot_download` would pull every one of them. `hf_hub_download` fetches exactly the
+    named file, returning its local cache path (ready to hand to a `server.model`/`-m` flag)."""
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=repo_id, filename=filename)
 
 
 # ---------------------------------------------------------------------------
