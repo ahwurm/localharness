@@ -4,6 +4,25 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.9] — 2026-09-02
+
+### Fixed
+- **The live tok/s readout no longer reads ~1/3 of the real rate under speculative
+  decoding.** The status line counted streamed deltas and treated each as one token — an
+  assumption its own docstring stated ("chunks≈tokens on local runtimes") that holds
+  without speculative decoding and fails with it, because vLLM MTP emits every accepted
+  draft token in a single delta. Measured on qwen3.8-27b + `qwen3_5_mtp`: 214 tokens
+  delivered in 63 deltas over 9.08s — a real 23.6 tok/s displayed as 6.9. Enabling MTP
+  therefore made the model ~3.4x faster *and* the meter ~3.4x slower, which reads exactly
+  like a performance regression. The rate is now scaled by a tokens-per-delta ratio learned
+  from the exact usage count of each finished stream, and that ratio is persisted on the
+  model's existing speed-ledger entry so a new session's first turn is honest too. When the
+  ratio has never been measured the live rate is suppressed rather than assuming 1.0 — no
+  number beats a wrong number — leaving a blind window of one stream per model, not one per
+  session. End-of-stream verified rates were always correct and are unchanged.
+- `record_tps` replaced its whole ledger entry instead of updating it, discarding any other
+  field on that entry. Sibling fields now survive a tps write.
+
 ## [0.12.8] — 2026-09-02
 
 ### Added
