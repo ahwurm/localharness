@@ -151,3 +151,114 @@ def test_substantive_sample_without_evidence_is_not_substance():
     assert not is_substantive_sample(None, 1.5)
     assert not is_substantive_sample(60, None)
     assert not is_substantive_sample(60, -1.0)
+
+
+# ---------------------------------------------------------------------------
+# Live tok/s under speculative decoding (MTP): a streamed delta carries every
+# accepted draft token, so counting chunks as tokens understates the rate by the
+# acceptance length. Measured live: qwen3.8-27b + qwen3_5_mtp ran 23.6 tok/s while
+# the chunk-counting readout showed 6.9 (214 tokens delivered in 63 deltas = 3.40).
+# ---------------------------------------------------------------------------
+
+def _client():
+    from localharness.provider.client import LLMClient, LLMConfig
+    return LLMClient(LLMConfig(base_url="http://x/v1", model="m", api_key="none"))
+
+
+def test_tokens_per_chunk_starts_unknown_not_one():
+    """Unknown must not masquerade as 1.0 — that guess reads 3x low on a spec-decode runtime."""
+    assert _client()._tokens_per_chunk is None
+
+
+def test_live_rate_is_suppressed_while_the_ratio_is_unknown():
+    """No number beats a wrong number: with no evidence, show nothing rather than ~1/3 of truth."""
+    import time as _t
+    c = _client()
+    c._tokens_per_chunk = None
+    c._stream_progress = {"first_at": _t.monotonic() - 9.0, "chunks": 63, "server_tps": None}
+    assert c.gen_speed_snapshot() is None
+
+
+def test_ledger_roundtrip_seeds_a_new_client(tmp_path):
+    """A NEW session's FIRST turn is honest only if the ratio survives in the ledger."""
+    from localharness.provider.speed_stats import record_tokens_per_chunk, tokens_per_chunk
+    p = tmp_path / "speed_stats.json"
+    assert tokens_per_chunk(p, "vllm", "qwen3.8-27b") is None
+    record_tokens_per_chunk(p, "vllm", "qwen3.8-27b", 3.40)
+    assert tokens_per_chunk(p, "vllm", "qwen3.8-27b") == 3.40
+
+
+def test_ratio_persistence_does_not_clobber_existing_tps_samples(tmp_path):
+    from localharness.provider.speed_stats import (
+        record_tokens_per_chunk, record_tps, median_tps,
+    )
+    p = tmp_path / "speed_stats.json"
+    record_tps(p, "vllm", "m", 20.0)
+    record_tps(p, "vllm", "m", 24.0)
+    record_tokens_per_chunk(p, "vllm", "m", 3.0)
+    assert median_tps(p, "vllm", "m") == 22.0
+
+
+def test_sub_one_ratio_is_refused_by_the_ledger(tmp_path):
+    from localharness.provider.speed_stats import record_tokens_per_chunk, tokens_per_chunk
+    p = tmp_path / "speed_stats.json"
+    record_tokens_per_chunk(p, "vllm", "m", 0.4)
+    assert tokens_per_chunk(p, "vllm", "m") is None
+
+
+def test_live_rate_is_scaled_by_the_learned_tokens_per_chunk():
+    import time as _t
+    c = _client()
+    c._tokens_per_chunk = 3.40
+    start = _t.monotonic() - 9.0
+    c._stream_progress = {"first_at": start, "chunks": 63, "server_tps": None}
+    live, verified = c.gen_speed_snapshot()
+    assert verified is False, "an in-flight estimate must not claim to be verified"
+    # 63 chunks * 3.40 = 214.2 tokens over ~9s -> ~23.7 tok/s, not ~6.9
+    assert 22.0 < live < 25.0, live
+
+
+def test_live_rate_without_scaling_would_understate(monkeypatch):
+    """Guard the regression itself: ratio 1.0 on spec-decoded output reads ~1/3.4 of truth."""
+    import time as _t
+    c = _client()
+    c._tokens_per_chunk = 1.0
+    c._stream_progress = {"first_at": _t.monotonic() - 9.0, "chunks": 63, "server_tps": None}
+    live, _ = c.gen_speed_snapshot()
+    assert 6.0 < live < 8.0, live
+
+
+def test_ratio_is_learned_from_exact_usage_at_stream_end():
+    c = _client()
+    progress = {"first_at": __import__("time").monotonic() - 9.0, "chunks": 63, "server_tps": None}
+
+    class _Usage:
+        completion_tokens = 214
+
+    c._note_gen_speed(progress, _Usage())
+    assert round(c._tokens_per_chunk, 2) == 3.40
+
+
+def test_ratio_never_drops_below_one():
+    """A chunk cannot carry less than a token; a sub-1 ratio would slow the readout, not fix it."""
+    c = _client()
+    progress = {"first_at": __import__("time").monotonic() - 9.0, "chunks": 100, "server_tps": None}
+
+    class _Usage:
+        completion_tokens = 40
+
+    c._note_gen_speed(progress, _Usage())
+    assert c._tokens_per_chunk == 1.0
+
+
+def test_recording_tps_does_not_clobber_the_tokens_per_chunk_ratio(tmp_path):
+    """The direction my first test missed: a tps write must preserve the ratio on the same
+    entry. Both are written in one _note_gen_speed call, ratio first — a replacing write ate it."""
+    from localharness.provider.speed_stats import (
+        record_tokens_per_chunk, record_tps, tokens_per_chunk,
+    )
+    p = tmp_path / "speed_stats.json"
+    record_tokens_per_chunk(p, "vllm", "m", 3.40)
+    record_tps(p, "vllm", "m", 23.6)
+    assert tokens_per_chunk(p, "vllm", "m") == 3.40
+
