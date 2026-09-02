@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,59 @@ console = Console()
 _PASS = "[green]✓[/green]"
 _FAIL = "[bold red]✗[/bold red]"
 _INFO = "[cyan]i[/cyan]"
+_WARN = "[yellow]⚠[/yellow]"
+
+_AMD_PCI_VENDOR_ID = "0x1002"
+
+
+def _has_amd_gpu() -> bool:
+    """An AMD/ATI GPU is present, via sysfs PCI vendor IDs — no subprocess, no extra binary
+    required (rocm-smi/lspci may not be installed even when an AMD GPU is). Linux-only
+    (issue #144's plan): returns False, never raises, on any other platform, and degrades the
+    same way in a container/sandbox where /sys/class/drm isn't readable."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        for vendor_file in Path("/sys/class/drm").glob("card[0-9]*/device/vendor"):
+            try:
+                if vendor_file.read_text().strip().lower() == _AMD_PCI_VENDOR_ID:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
+
+
+def _llama_server_linked_backends(binary: str) -> "set[str] | None":
+    """Which GPU backend(s) `binary` is linked against — a subset of {'hip', 'vulkan'} (both
+    empty means CPU-only/unknown backend libs). None means UNDETERMINABLE (not Linux, `ldd`
+    missing, binary missing/unreadable) — callers must treat that as "can't tell", never as
+    "CPU-only", or a missing `ldd` would falsely read as a healthy CPU build.
+
+    Recognizes both the current llama.cpp/ggml library names (`libggml-hip`/`libggml-vulkan`)
+    and the underlying vendor libs they link against (`libamdhip64`/`libvulkan`) so this works
+    across the `LLAMA_HIPBLAS`/`GGML_HIPBLAS` -> `GGML_HIP` build-flag rename too (issue #144).
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    if not Path(binary).is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["ldd", binary], capture_output=True, text=True, timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    text = proc.stdout.lower()
+    backends: set[str] = set()
+    if "libamdhip64" in text or "libggml-hip" in text:
+        backends.add("hip")
+    if "libvulkan" in text or "libggml-vulkan" in text:
+        backends.add("vulkan")
+    return backends
 
 
 def _strip_v1(base_url: str) -> str:
@@ -338,6 +392,31 @@ def doctor(
                         )
                 except Exception:
                     pass  # /props absent on older builds — the check is advisory only
+
+                # AMD backend check (#144): llama.cpp's cmake quietly PREFERS Vulkan over
+                # HIP/ROCm unless the build explicitly disables it, and -ngl offloads onto the
+                # GPU either way — so a Vulkan build looks perfectly healthy while running the
+                # slower, less-tested backend. Only checkable for a harness-MANAGED llama.cpp
+                # server: we need the actual binary path, which an attach-only endpoint never
+                # gives us. Advisory only (never fails) — a Vulkan build still works.
+                if (
+                    harness.server is not None
+                    and harness.server.runtime == "llamacpp"
+                    and harness.server.binary
+                ):
+                    backends = _llama_server_linked_backends(harness.server.binary)
+                    if (
+                        backends is not None
+                        and "vulkan" in backends
+                        and "hip" not in backends
+                        and _has_amd_gpu()
+                    ):
+                        console.print(
+                            f"{_WARN} AMD GPU detected, but {harness.server.binary} is linked "
+                            f"against Vulkan, not HIP/ROCm — it will run, but on the slower, "
+                            f"less-tested backend. Rebuild with -DGGML_HIP=ON -DGGML_VULKAN=OFF "
+                            f"-DAMDGPU_TARGETS=<your gfx> (see docs/runtimes/llamacpp.md)."
+                        )
             else:  # vllm (and unknown): the exact /tokenize {count} contract is expected here
                 try:
                     tk = httpx.post(
