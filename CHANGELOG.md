@@ -28,6 +28,25 @@ All notable changes to LocalHarness are documented here. The format follows
   the configured binary; Vulkan-without-HIP linkage gets an advisory warning naming the
   exact rebuild flags. Advisory only, Linux only, silent whenever it cannot tell.
 
+### Changed
+- **`localharness start` adopts the model an endpoint is actually serving, instead of
+  failing on a stale configured name.** A single-model runtime (vLLM / llama.cpp) serves
+  exactly one checkpoint, so a configured name that no longer matches has exactly one
+  sensible meaning — but `start` previously hard-errored, so any server-side model swap
+  404'd every client still pinned to the old name (acutely for a remote client on a
+  different machine from the endpoint). In attach mode with no `--model`, `start` now
+  reconciles the configured name against the live endpoint and adopts the sole served
+  model, printing one line naming the substitution. This makes `start` consistent with
+  `init`, which has always discovered `available_models` from the endpoint.
+  Guardrails: an explicit `--model` still fails loud (naming a model is a deliberate act);
+  two or more served models is a real choice and is never guessed at; an unreachable
+  endpoint does not adopt, so it still surfaces as "unreachable" rather than being masked.
+  The reconciliation runs BEFORE the capability probe, so a stale name no longer burns
+  three probe retries and emits a spurious "falling back to xml" warning — and the session
+  cannot start in the wrong tool-call mode.
+  Harness-managed servers are unaffected: they launch the model the config names, so
+  config and reality cannot drift.
+
 ### Fixed
 - **`context.compaction_threshold_pct` is now actually wired into compaction** (#147 —
   contributed by @mjdufresne). The config field was previously parsed but never
