@@ -378,14 +378,27 @@ def test_note_gen_speed_without_usage_or_engine_rate_records_nothing(tmp_path, m
 
 
 def test_gen_speed_snapshot_states(tmp_path, monkeypatch):
-    """None → live (~approximate) while a stream is active → last verified after."""
+    """None → live (~approximate) while a stream is active → last verified after.
+
+    The live leg needs a known tokens-per-delta ratio. Until one is measured the live rate is
+    SUPPRESSED rather than assuming 1.0: under speculative decoding a delta carries several
+    accepted tokens, so that assumption reads ~1/3 of the real rate. The ratio is persisted per
+    model, so the blind window is the first stream ever for a model, not every session."""
     from localharness.provider import client as client_mod
 
     c = _mk_speed_client(tmp_path, monkeypatch)
     assert c.gen_speed_snapshot() is None
     c._stream_progress = {"first_at": 10.0, "chunks": 21, "server_tps": None}
     monkeypatch.setattr(client_mod.time, "monotonic", lambda: 12.0)
+    assert c.gen_speed_snapshot() is None, "no ratio measured yet -> no live number"
+
+    c._tokens_per_chunk = 1.0  # measured: one token per delta (no speculative decoding)
     assert c.gen_speed_snapshot() == (10.0, False)  # 20 intervals / 2s, live
+
+    c._tokens_per_chunk = 3.4  # measured: MTP bundles ~3.4 accepted tokens per delta
+    live, verified = c.gen_speed_snapshot()
+    assert verified is False and 33.0 < live < 36.0, live
+
     c._stream_progress = None
     c.last_gen_tps = 16.5
     assert c.gen_speed_snapshot() == (16.5, True)

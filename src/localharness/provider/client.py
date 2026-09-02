@@ -450,6 +450,26 @@ class LLMClient:
         # race the pointer — display-only state, the per-call ledger recording stays correct.
         self._stream_progress: dict | None = None
         self.last_gen_tps: float | None = None
+        # Tokens carried per streamed delta. 1.0 without speculative decoding; WITH it (vLLM
+        # MTP / EAGLE / Medusa) a delta carries every accepted draft token — 2.8-3.4 measured on
+        # qwen3.8-27b + qwen3_5_mtp — so an unscaled chunk count understates the live rate by
+        # the acceptance length (23.6 tok/s displayed as 6.9). None = never measured for this
+        # model: the live readout is SUPPRESSED rather than guessing 1.0, because that guess is
+        # wrong by 3x on exactly the runtimes people most want a speed number from. Seeded from
+        # the ledger here (one small read at construction) so a NEW session's FIRST turn is
+        # already honest; gen_speed_snapshot stays I/O-free for the UI tick.
+        self._tokens_per_chunk: float | None = None
+        try:
+            from localharness.provider.speed_stats import (
+                default_speed_stats_path, tokens_per_chunk as _tpc,
+            )
+            if self.config.provider_type:
+                self._tokens_per_chunk = _tpc(
+                    default_speed_stats_path(self.config.config_dir),
+                    self.config.provider_type, self.config.model,
+                )
+        except Exception:  # a ledger miss must never block constructing a client
+            self._tokens_per_chunk = None
 
     def _build_client(self) -> AsyncOpenAI:
         """Construct the AsyncOpenAI bound to the CURRENT self.config (base_url/api_key/headers/
@@ -970,7 +990,7 @@ class LLMClient:
         the REPL reads back. Never raises: a stats miss must not fail a completion."""
         from localharness.provider.speed_stats import (
             MAX_PLAUSIBLE_TPS, decode_tps, default_speed_stats_path, is_substantive_sample,
-            record_tps,
+            record_tokens_per_chunk, record_tps,
         )
         try:
             tps = progress.get("server_tps")
@@ -988,6 +1008,12 @@ class LLMClient:
                                   ctokens, done_at - first_at)
                         return
                     tps = decode_tps(ctokens, first_at, done_at)
+                    # Learn tokens-per-chunk for the NEXT stream's live readout. Only from an
+                    # exact usage count over a substantive sample — the same evidence the
+                    # verified rate is built from. Clamped at >=1.0: a chunk cannot carry less
+                    # than one token, and a ratio below 1 would only ever come from counting
+                    # deltas the token accounting didn't (e.g. a trailing empty delta).
+
             if not tps or tps <= 0:
                 return
             # #130: a sub-millisecond measured window turns an exact token count into tens of
@@ -998,23 +1024,43 @@ class LLMClient:
                 log.debug("discarding implausible decode rate %.1f tok/s (degenerate window)", tps)
                 return
             self.last_gen_tps = float(tps)
+            # Learn tokens-per-delta for the live readout, but only from a sample that survived
+            # every rejection above — a run dropped as degenerate must leave the ledger (and the
+            # file itself) untouched. Clamped >=1.0: a delta cannot carry less than one token.
+            _chunks = progress.get("chunks") or 0
+            _ctokens = getattr(usage, "completion_tokens", None) if usage is not None else None
+            if _chunks > 0 and _ctokens:
+                _ratio = max(1.0, _ctokens / _chunks)
+                self._tokens_per_chunk = _ratio   # in-memory even without provider_type
+            else:
+                _ratio = None
             if self.config.provider_type:
                 record_tps(default_speed_stats_path(self.config.config_dir),
                            self.config.provider_type, self.config.model, float(tps))
+                if _ratio is not None:
+                    record_tokens_per_chunk(
+                        default_speed_stats_path(self.config.config_dir),
+                        self.config.provider_type, self.config.model, _ratio,
+                    )
         except Exception as exc:
             log.warning("speed ledger update failed (non-fatal): %s", exc)
 
     def gen_speed_snapshot(self) -> tuple[float, bool] | None:
         """(tok/s, verified) for a status line, or None when nothing is known yet.
 
-        While a stream is active: its live chunk rate — chunks≈tokens on local runtimes, so
-        approximate (verified=False); the number self-corrects to the exact rate at stream
-        end. Otherwise the last stream's verified rate. Poll-cheap (UI tick): no locks, no I/O."""
+        While a stream is active: its live chunk rate scaled by the tokens-per-chunk ratio
+        learned from the last finished stream, so approximate (verified=False); the number
+        self-corrects to the exact rate at stream end. The scale matters under speculative
+        decoding, where one delta carries every accepted draft token — counting chunks as
+        tokens there understates the rate by the acceptance length (measured 3.40x on
+        qwen3.8-27b + MTP). Without spec decode the ratio is 1.0 and this is a no-op.
+        Otherwise the last stream's verified rate. Poll-cheap (UI tick): no locks, no I/O."""
         from localharness.provider.speed_stats import decode_tps
 
         p = self._stream_progress
-        if p is not None and p.get("first_at") is not None:
-            live = decode_tps(p.get("chunks", 0), p["first_at"], time.monotonic())
+        if p is not None and p.get("first_at") is not None and self._tokens_per_chunk:
+            est_tokens = (p.get("chunks", 0) or 0) * self._tokens_per_chunk
+            live = decode_tps(est_tokens, p["first_at"], time.monotonic())
             if live is not None:
                 return (live, False)
         if self.last_gen_tps:

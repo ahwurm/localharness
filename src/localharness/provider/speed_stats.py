@@ -111,7 +111,13 @@ def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
     samples = entry.get("samples", []) if isinstance(entry, dict) else []
     samples = [s for s in samples if isinstance(s, (int, float))][-(SAMPLE_CAP - 1):]
     samples.append(round(tps, 2))
-    data[key] = {"samples": samples, "updated_at": datetime.now(timezone.utc).isoformat()}
+    # UPDATE the entry, never replace it. A wholesale `data[key] = {...}` drops every other
+    # field on that entry — it silently ate the `tokens_per_chunk` written microseconds earlier
+    # in the same _note_gen_speed call, so the ratio never survived to seed the next session.
+    entry = entry if isinstance(entry, dict) else {}
+    entry["samples"] = samples
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    data[key] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
     # Per-writer temp name: os.replace is atomic, but open+truncate+write into a name SHARED by
     # every session is not — concurrent harnesses either published a byte-mix (unreadable ledger,
@@ -123,6 +129,47 @@ def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)  # no-op after a successful replace; no litter on failure
+
+
+def record_tokens_per_chunk(path: Path, provider_type: str, model: str, ratio: float) -> None:
+    """Persist how many tokens a streamed delta carries for this model (>=1.0).
+
+    Stored on the SAME ledger entry as the tps samples, keyed by provider:model, because it is
+    a property of that model+runtime pairing — a spec-decode acceptance length, not a per-session
+    accident. Persisting it is what lets the FIRST stream of a NEW session show an honest live
+    rate; without it every session's opening turn under speculative decoding reads low by the
+    acceptance factor, which is exactly the number a user forms their first impression from.
+    Additive field: older readers ignore it, and a ledger written before this existed still loads.
+    """
+    if not isfinite(ratio) or ratio < 1.0:
+        return
+    data = _load(path)
+    key = speed_key(provider_type, model)
+    entry = data.get(key) if isinstance(data.get(key), dict) else {}
+    entry["tokens_per_chunk"] = round(float(ratio), 3)
+    entry.setdefault("samples", [])
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    data[key] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def tokens_per_chunk(path: Path, provider_type: str, model: str) -> float | None:
+    """Recorded tokens-per-delta for this model, or None when never measured.
+
+    None means "no evidence" and callers must NOT substitute 1.0 — on a spec-decode runtime that
+    guess understates the rate threefold. No number beats a wrong number.
+    """
+    entry = _load(path).get(speed_key(provider_type, model))
+    if not isinstance(entry, dict):
+        return None
+    r = entry.get("tokens_per_chunk")
+    return float(r) if isinstance(r, (int, float)) and isfinite(r) and r >= 1.0 else None
 
 
 def median_tps(path: Path, provider_type: str, model: str) -> float | None:
