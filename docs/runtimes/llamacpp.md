@@ -25,6 +25,33 @@ cmake --build build --config Release -j
 The binary lands at `build/bin/llama-server`. Flag choice is hardware-specific — follow
 llama.cpp's own build docs for your GPU/CPU combination.
 
+### AMD GPUs (ROCm/HIP)
+
+Two AMD-specific traps:
+
+- **cmake quietly prefers Vulkan.** With the Vulkan SDK installed, a plain build can come out
+  Vulkan-backed even though you meant ROCm — it still loads layers onto the GPU and *looks*
+  fine, just slower. Disable it explicitly:
+
+  ```bash
+  HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+    cmake -B build -DGGML_HIP=ON -DGGML_VULKAN=OFF -DAMDGPU_TARGETS=<your gfx, e.g. gfx1100>
+  cmake --build build --config Release -j
+  ```
+
+  `rocminfo | grep gfx` tells you the target. On older llama.cpp trees the flag was
+  `GGML_HIPBLAS`, and before that `LLAMA_HIPBLAS` — same intent, same Vulkan caveat.
+
+- **Verify what you actually built** before pointing the harness at it:
+
+  ```bash
+  ldd build/bin/llama-server | grep -iE 'hip|rocm|vulkan'
+  ```
+
+  HIP libraries (`libamdhip64`, `libhipblas`) mean a ROCm build; `libvulkan` with no HIP lines
+  is the trap above. The harness runs whatever binary you hand it and can't tell the
+  difference — `-ngl` behaves identically on both backends, so nothing errors.
+
 ## Serve a model
 
 llama.cpp serves a single GGUF file directly — no registry, no pull step:
@@ -151,6 +178,8 @@ uses:
   shell — a literal `~` is never expanded. Use a full path (`/home/you/...`), not `~/...`.
 - **Multi-slot context division** (see above) — if the served context is smaller than you
   launched with, check for multiple slots eating your `-c` and add `--parallel 1`.
+- **AMD box slower than expected** — you may have built Vulkan by accident; see the AMD
+  build section above and `ldd` the binary to check which backend it linked.
 - **400s on tool calls** — MCP/plugin tool names like `mcp:fetch` violate the OpenAI
   function-name grammar; llama.cpp 400s the *entire* request if one is sent raw. The harness
   already sanitizes names on the wire and restores them on parse, so this should be invisible —
