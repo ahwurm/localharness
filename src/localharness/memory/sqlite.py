@@ -2057,7 +2057,11 @@ class MemoryStore:
         return text
 
     async def _render_memory_index_with_ids(
-        self, max_session_history: int
+        self,
+        max_session_history: int,
+        *,
+        origin_label: str = "",
+        include_preamble: bool = True,
     ) -> tuple[str, list[int]]:
         """Render the agent-memory INDEX: fact names + one-line descriptions (not full
         bodies) and the most recent session-history entries — the latter from the sessions
@@ -2068,9 +2072,24 @@ class MemoryStore:
         in render order) — the "injected set" for the ambient-injection activation trace. `id`
         is appended to the two facts SELECTs so the rendered line (r[0]=key, r[1]=value) stays
         BYTE-IDENTICAL; the id is captured, never rendered. Session-history entries are not
-        atoms, so they contribute no ids."""
+        atoms, so they contribute no ids.
+
+        `origin_label` (v0.13 MEMS-02 / ROADMAP amendment #7): when non-empty, every rendered line
+        is prefixed with a composite origin token — `[workspace#12]`, `[global#7]`. `facts.id` is
+        AUTOINCREMENT **per database**, so a scope-merged blend showing a bare `#12` from two stores
+        would be ambiguous; the token names the store AND the row, and `memory_get` parses it back.
+        Empty (the default, every single-store caller) renders today's exact bytes.
+        `include_preamble=False` drops the leading INDEX instructions so a merged second block does
+        not repeat them; the router that merges two blocks owns the one preamble."""
         assert self._db is not None
         now = int(time.time())
+
+        # r = (key, value, id). The token is a RENDER-time decoration, never a stored property:
+        # the same row renders bare in a single-store session and labelled in a merged one.
+        def _line(r: Any) -> str:
+            prefix = f"[{origin_label}#{r[2]}] " if origin_label else ""
+            return f"- {prefix}{r[0]}: {_one_line(r[1], 180)}"
+
         # Injected-block ordering (RANK-02/04): importance + ACT-R base-level activation
         # over the FOLDED columns only (staged read-counters are invisible here), with age
         # quantized to DAYS — so the block's bytes change only at consolidation folds,
@@ -2104,7 +2123,7 @@ class MemoryStore:
             (self._agent_id, now, now),
         ) as cur:
             schema_rows = await cur.fetchall()
-        schema_lines = [f"- {r[0]}: {_one_line(r[1], 180)}" for r in schema_rows]
+        schema_lines = [_line(r) for r in schema_rows]
         # Zero bytes when absent (mirrors history_section below): an empty schemas set must
         # not change the injected block's bytes for chapter-less stores (RANK-04 byte-stability).
         schema_section = (
@@ -2129,7 +2148,7 @@ class MemoryStore:
         # path (~50 chars) plus any prefix guillotined the payload — the injected
         # line carried an error with no filename and no resolution. Lessons must
         # survive the line render with their discriminating content intact.
-        fact_lines = [f"- {r[0]}: {_one_line(r[1], 180)}" for r in rows]
+        fact_lines = [_line(r) for r in rows]
         facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
 
         # TIME-02/03: the injected shelf renders from the sessions TABLE — started_at
@@ -2174,10 +2193,13 @@ class MemoryStore:
         # Injected set (co-firing atoms) = schema chapters + persistent facts, in render order.
         # r[2] is the appended id column; session-history rows are not atoms and add none.
         injected_ids = [r[2] for r in schema_rows] + [r[2] for r in rows]
-        text = (
+        _preamble = (
             "This is an INDEX, not the full memory. Each line below is one persistent fact "
             "(name: short description). Call `memory_get(name)` for a fact's full body, or "
             "`memory_search(query)` to search fact contents.\n\n"
+        ) if include_preamble else ""
+        text = (
+            f"{_preamble}"
             f"{schema_section}### Persistent Facts ({len(fact_lines)})\n{facts_block}"
             f"{history_section}"
         )
