@@ -310,6 +310,21 @@ class ConfigLoader:
                     out.append(pattern)
         return out
 
+    def _layered_raw_org(self) -> dict:
+        """The raw `org:` section, deep-merged across all four config sources in the ruled order.
+
+        `raw_harness_dict()` is deliberately the GLOBAL config.yaml alone (it guards an overlay
+        write that always targets the global layer), so agent-level org inheritance needs its own
+        layered view — otherwise a workspace could set `org.context.max_context_tokens`, the merged
+        HarnessConfig would report it, and the agent that actually runs would use the global value.
+        """
+        out: dict = {}
+        for source in self._raw_config_sources():
+            section = source.get("org") if isinstance(source, dict) else None
+            if isinstance(section, dict):
+                out = deep_merge(out, section)
+        return out
+
     def load_harness(self) -> HarnessConfig:
         if self._harness_cache is not None:
             return self._harness_cache
@@ -407,10 +422,11 @@ class ConfigLoader:
 
     def _raw_org_context(self) -> dict:
         """Explicitly-set org-level `context:` block. The org config lives in config.yaml's
-        `org:` section — the single user-facing source of truth — so read it there first; a
+        `org:` section — the single user-facing source of truth — so read it there first, across
+        BOTH layers (v0.13: a workspace's org.context is a config.yaml key like any other); a
         standalone org.yaml is only a legacy override."""
         try:
-            org_section = self.raw_harness_dict().get("org") or {}
+            org_section = self._layered_raw_org()
         except Exception:
             org_section = {}
         ctx = org_section.get("context") if isinstance(org_section, dict) else None
@@ -500,7 +516,17 @@ class ConfigLoader:
         if division:
             div_deny = division.permissions.deny_patterns
 
-        org_deny = org.permissions.deny_patterns
+        # `org` above is load_org(): the LEGACY standalone org.yaml, or PermissionConfig's shipped
+        # defaults when that file is absent — which it is on every real install, since nothing in
+        # src/ writes one and `init` writes `org:` INSIDE config.yaml. So the org config users
+        # actually have has never reached enforcement. Add it, from BOTH layers, via the same
+        # raw-source union load_harness splices (MERG-02): safety accumulates, and a workspace can
+        # never subtract a global deny.
+        #
+        # Deliberately NOT wrapped in try/except: if a config file cannot be read this must fail
+        # loudly rather than hand the agent a silently shorter deny list. A deny list that shrinks
+        # on a parse error is a fail-open security regression.
+        org_deny = [*org.permissions.deny_patterns, *self._layered_org_deny()]
 
         # Build union preserving order, deduplicating
         seen: set[str] = set()
