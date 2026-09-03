@@ -200,16 +200,20 @@ class MCPServerClient:
     async def disconnect(self) -> None:
         """Gracefully disconnect from the MCP server."""
         self._connected = False
+        # Teardown keeps swallowing (a disconnect must never crash the exit path) but is never
+        # SILENT: a transport that refuses to close is the difference between a clean exit and a
+        # stray child process. Debug, not warning — anyio cancel-scope noise at interpreter exit
+        # is routine here and would cry wolf on every quit.
         if self._session_ctx:
             try:
                 await self._session_ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log.debug(f"MCP session close failed for '{self._config.name}': {exc}")
         if self._ctx:
             try:
                 await self._ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log.debug(f"MCP transport close failed for '{self._config.name}': {exc}")
         self._session = None
         self._tools = []
 
