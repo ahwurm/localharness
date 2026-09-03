@@ -26,6 +26,14 @@ write below goes through the store `start` itself opened.
 
 `/memory promote` (42-04) is the one verb that deliberately writes across the boundary, so these
 drives never call it — 41-05's precedent of measuring the scope rather than over-claiming it.
+
+**And one boundary that was measured rather than assumed: these drives are ZERO-TURN.** The stubbed
+loop stands in for the interactive REPL, so `AgentLoop` never takes a turn and its ambient-read site
+never executes — proven, not supposed: a hard `raise` planted at `agent/loop.py`'s
+`_recall = self._recall_router …` line leaves all four tests below GREEN (42-05 mutation (e2)). So
+nothing in this file grades where a session READS from; that is 42-03's
+`test_recall_scope_wiring.py`, which drives the read live. This file is about WRITES, and the
+sentence it can defend is exactly that one.
 """
 from __future__ import annotations
 
