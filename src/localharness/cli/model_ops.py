@@ -79,7 +79,12 @@ def _merged_available_models(harness: Any, existing_overlay: dict, model: str) -
 
 
 async def persist_default_model(
-    harness: Any, model: str, *, actor: str = "cli", config_dir: Any = None
+    harness: Any,
+    model: str,
+    *,
+    actor: str = "cli",
+    config_dir: Any = None,
+    audit_base_dir: Any = None,
 ) -> str | None:
     """Persist ``model`` as the org + provider default via the atomic USER OVERLAY — the same
     crash-safe, audited path ``components set`` uses (issue #22), replacing the prior full,
@@ -92,9 +97,23 @@ async def persist_default_model(
     in the overlay, so an ``agent:`` slice (the kill-lever layer) is preserved untouched.
     Also mutates the in-memory ``harness`` so the live session's view stays consistent.
 
-    ``config_dir`` (#35): the SAME resolved dir the harness was loaded from. The overlay write
-    target and the audit-log path resolve against it — so a persist tracks ``--config-dir``
-    instead of leaking to ``~/.localharness``. Callers thread their loader's ``_config_dir``.
+    TWO independent directory inputs, because the two writes answer to different layers (v0.13):
+
+    - ``config_dir`` (#35): the GLOBAL overlay target — machine-wide truth. The same resolved dir
+      the harness was loaded from, so a persist tracks ``--config-dir`` instead of leaking to
+      ``~/.localharness``. Callers thread their loader's ``_config_dir``. There is ONE physical GPU
+      daemon, so this value must never be a workspace layer (amendment #2, C2 invariant).
+    - ``audit_base_dir`` (MEMS-04): where the audit RECORD lands — it follows the WORK, so in a
+      workspace session callers pass the workspace dir. Defaults to ``config_dir``, which makes the
+      call byte-identical for every caller that does not pass it.
+
+    Name rationale — the name deliberately does NOT end in ``config_dir``. The structural guard
+    ``tests/unit/test_provider_carveout_workspace.py::test_model_cmd_passes_the_global_config_dir_to_persist``
+    asserts the literal ``"config_dir=loader._local_dir"`` is absent from ``model_cmd.py``, and it
+    is a plain substring scan that does not respect Python token boundaries — so ANY parameter
+    whose name ends in ``config_dir``, handed the workspace directly, would tail-match and trip a
+    guard about a DIFFERENT parameter. ``audit_base_dir`` is also the more accurate name: the value
+    is the BASE ``resolve_runtime_path`` roots a bare name under, not the audit file itself.
 
     Returns None on clean success, or a warning string (#37) when ONLY the post-write audit
     emit failed — the durable overlay write already succeeded, so callers surface this as a
@@ -135,15 +154,22 @@ async def persist_default_model(
     if harness.server is not None:
         harness.server.model = model
 
-    # Audit trail (mirrors components_cmd): one ComponentMutated per path written. The audit
-    # path resolves against the SAME config_dir (#35 — a bare default 'audit.jsonl' lands under it).
+    # Audit trail (mirrors components_cmd): one ComponentMutated per path written. A bare default
+    # 'audit.jsonl' lands under the base dir given here (#35).
     # #37: scope the emit in its OWN try/except — it runs AFTER the durable overlay write, so a
     # failure here (unwritable audit log) must NOT surface as a persist failure. Return a warning
     # the callers show as a secondary note; the switch itself already succeeded.
     try:
+        # MEMS-04 (v0.13): the audit log follows the WORK. In a workspace session this is the
+        # workspace dir; everywhere else it falls back to `config_dir` so the call is unchanged for
+        # every caller that does not pass it. Deliberately a SECOND parameter: `global_config_dir()`
+        # above returns whatever it is GIVEN — its "global" guarantee is calling discipline, not a
+        # property of the function — so widening the single `config_dir` to "workspace when present"
+        # would move the overlay write too and fork the one physical GPU daemon's server.model.
+        _audit_base = audit_base_dir if audit_base_dir is not None else config_dir
         audit_path = harness.org.audit_log_path
         bus = EventBus(
-            persist_path=resolve_runtime_path(audit_path, config_dir) if audit_path else None
+            persist_path=resolve_runtime_path(audit_path, _audit_base) if audit_path else None
         )
         for path, before in (
             ("provider.default_model", before_provider),
@@ -186,6 +212,9 @@ async def persist_active_endpoint(
     """
     from localharness.config.models import ActiveSelection
 
+    # No `audit_base_dir` sibling here ON PURPOSE (not an oversight): this function builds no
+    # EventBus and emits no audit event, so it has no audit path to root anywhere. Adding the
+    # parameter for symmetry with `persist_default_model` would be dead API surface.
     # Amendment #2 (v0.13): the model/endpoint overlay is MACHINE-WIDE truth — there is one physical
     # GPU daemon, so this write names the GLOBAL layer explicitly and never follows a workspace layer.
     # Byte-identical today (the global seam IS resolve_config_dir); load-bearing from phase 40 on.
@@ -215,7 +244,9 @@ async def persist_active_endpoint(
     return None
 
 
-def pinned_agents(config_dir: Path | None) -> list[tuple[str, str]]:
+def pinned_agents(
+    config_dir: Path | None, local_config_dir: Path | None = None
+) -> list[tuple[str, str]]:
     """Agents a persisted org/provider ``default_model`` switch will NOT reach on the next
     ``start`` — because a concrete ``model:`` pins them ABOVE the org default in the resolution
     chain ``agent -> division -> org`` (``start_cmd`` resolves that chain).
@@ -229,13 +260,19 @@ def pinned_agents(config_dir: Path | None) -> list[tuple[str, str]]:
     Reads RAW yaml via the loader's own reader (NOT ``load_agent().model``, which RESOLVES
     ``inherit`` to a concrete org default and would make every inheritor look pinned). Returns
     ``[(agent_label, pinned_model), ...]``.
+
+    ``local_config_dir`` (v0.13, closes 39-05's named carve-out): the session's workspace layer,
+    or None. Callers that have one pass it; omitting it keeps today's global-only roster.
     """
     out: list[tuple[str, str]] = []
     if config_dir is None:
         return out
     from localharness.config.loader import ConfigLoader, _load_yaml_file
 
-    loader = ConfigLoader(config_dir=Path(config_dir))
+    # v0.13 (closes 39-05's carve-out): with a workspace layer the pin warning must see the
+    # workspace's own agents too — a workspace agent pinning a concrete model traps the switch
+    # exactly like a global one, and warning about only half the roster is worse than not warning.
+    loader = ConfigLoader(config_dir=Path(config_dir), local_config_dir=local_config_dir)
     for stem in loader.list_agents():
         path = loader._find_file("agents", stem)
         if path is None:
