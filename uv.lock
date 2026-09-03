@@ -1155,7 +1155,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/c1/2f/46487e949da42b318
 
 [[package]]
 name = "localharness"
-version = "0.12.8"
+version = "0.12.10"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

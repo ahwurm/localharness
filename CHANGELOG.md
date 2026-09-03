@@ -4,6 +4,30 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.12.10] — 2026-09-02
+
+### Fixed
+- **`doctor` no longer reports a token-accounting failure that isn't happening.** Its
+  token-counting check branched on the *configured* `provider_type` and ran its own per-runtime
+  probe. `TokenCounter` treats that field as a **hint**, probes both exact shapes, and self-heals
+  when the config has drifted from the running server — doctor did not. On a box whose config
+  said `llamacpp` while the server spoke vLLM, doctor sent a llama.cpp-shaped body, got a
+  rejection, and reported "token accounting falls back to tiktoken cl100k" while counts were in
+  fact exact. The tool people run for reassurance was the one that was wrong. doctor now
+  constructs the same counter the runtime uses and reports its **resolved** mode (new public
+  `TokenCounter.mode`), so the two can no longer disagree; a stale `provider_type` is surfaced as
+  an INFO naming the drift instead of a phantom failure. Message-level checks (vLLM
+  `/tokenize` messages-mode, llama.cpp `/apply-template`) are kept and now gated on the resolved
+  mode. Whether *approximate* counting is a fault or expected is likewise decided by asking the
+  endpoint resolver, not the stored config — so Ollama/LM Studio still report INFO, and a vLLM or
+  llama.cpp server that should serve `/tokenize` but doesn't still fails.
+- **`doctor` no longer cascades one root cause into two reported issues.** Its tokenizer probe
+  reuses `default_model`, so a stale model name failed that probe *for the same reason* and
+  produced a second, phantom failure. Dependent checks are now skipped and labelled.
+- **The approximate-counting warning now quantifies its error.** Measured against a real Qwen
+  tokenizer, the inflated cl100k estimator is ~0% off on English and JSON, ~4% on code, and
+  **>100% on CJK** — content-shaped, not uniform. "approximate" alone was not actionable.
+
 ## [0.12.9] — 2026-09-02
 
 ### Fixed
