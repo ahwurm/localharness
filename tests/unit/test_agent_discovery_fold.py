@@ -146,3 +146,40 @@ def test_list_agents_returns_sorted_stem_union(layered):
     _write_agent(project / ".localharness" / "agents", "gamma")
 
     assert ConfigLoader(config_dir=global_dir).list_agents() == ["alpha", "beta", "gamma"]
+
+
+# ---------------------------------------------------------------------------
+# Plan 38-05 — ROADMAP Phase 38 criterion 4, asserted across the COMMANDS
+# ---------------------------------------------------------------------------
+
+def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
+    """`agent list`, the start roster and ConfigLoader name the SAME agents.
+
+    Criterion 4 says the three "report the same roster". After plan 38-05 that is true by
+    construction — `agent list` (agent_cmd:166) and start (start_cmd:417) both call
+    `ConfigLoader.discover_agents()` — but a construction claim is only worth the test that
+    drives the real CLI. This invokes `agent list --json` through Typer and compares its names to
+    the loader's two roster surfaces on the same layered tree (local `beta` shadowing global).
+    """
+    import json
+    from typer.testing import CliRunner
+    from localharness.cli.agent_cmd import agent_app
+
+    monkeypatch.setenv("COLUMNS", "400")  # keep Rich from wrapping the JSON line
+    global_dir, project = layered
+    _write_agent(global_dir / "agents", "alpha")
+    _write_agent(global_dir / "agents", "beta", role="global beta")
+    _write_agent(project / ".localharness" / "agents", "beta", role="local beta")
+    _write_agent(project / ".localharness" / "agents", "gamma")
+
+    result = CliRunner().invoke(agent_app, ["list", "--json", "--config-dir", str(global_dir)])
+    assert result.exit_code == 0, result.output
+    cli_agents = json.loads(result.output)
+
+    loader = ConfigLoader(config_dir=global_dir)
+    assert sorted(a["name"] for a in cli_agents) == sorted(
+        a["name"] for a in loader.discover_agents()
+    )
+    assert sorted(a["name"] for a in cli_agents) == loader.list_agents() == ["alpha", "beta", "gamma"]
+    # ...and the same shadowing decision, not just the same names
+    assert [a["role"] for a in cli_agents if a["name"] == "beta"] == ["local beta"]

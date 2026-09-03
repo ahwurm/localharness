@@ -274,3 +274,32 @@ def test_agent_list_json_output(tmp_path):
     assert isinstance(data, list)
     names = [a["name"] for a in data]
     assert "json-agent" in names
+
+
+# ---------------------------------------------------------------------------
+# agent list — malformed agent YAML (phase 38: the silent swallow is retired)
+# ---------------------------------------------------------------------------
+
+def test_agent_list_warns_and_skips_unreadable_agent_file(tmp_path, monkeypatch):
+    """Deliberate BEHAVIOR CHANGE (#150 phase 38): `agent list` used to hide a malformed agent
+    yaml behind a bare `except Exception: pass`, so a typo'd file was indistinguishable from an
+    absent one — the exact confusion that let `start`'s mint branch overwrite a tuned root agent.
+    Both commands now share `ConfigLoader.discover_agents`, so `agent list` warns once, names the
+    file, and still lists everything that parsed.
+    """
+    monkeypatch.chdir(tmp_path)  # the local layer is CWD-relative
+    global_dir = tmp_path / "global"
+    (global_dir / "agents").mkdir(parents=True)
+    (global_dir / "agents" / "healthy.yaml").write_text(
+        "name: healthy\nrole: Parses fine\n", encoding="utf-8"
+    )
+    local_agents = tmp_path / ".localharness" / "agents"
+    local_agents.mkdir(parents=True)
+    (local_agents / "broken.yaml").write_text("a: [unclosed\n", encoding="utf-8")
+
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(global_dir)])
+
+    assert result.exit_code == 0
+    assert "healthy" in result.output               # the good agent still lists
+    assert "skipping unreadable agent file" in result.output
+    assert "broken.yaml" in result.output.replace("\n", "")  # names it (Rich wraps long paths)
