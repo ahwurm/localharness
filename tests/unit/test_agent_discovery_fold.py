@@ -175,12 +175,16 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
     drives the real CLI. This invokes `agent list --json` through Typer and compares its names to
     the loader's two roster surfaces on the same tree.
 
-    Phase 39 note (honest scope): the workspace files below are on disk AND the process is chdir'd
-    into the project, and neither the CLI nor the loader sees them — `--config-dir` is a full
-    replacement now (LAYR-02), and no command names a workspace layer until plans 39-05/39-06 wire
-    `resolve_workspace_layer()` in. So "the same roster" is asserted here on the global layer, and
-    the shadowing half is asserted directly against a loader that NAMES the workspace. The CLI end
-    of shadowing gets its test when the CLI can actually do it (39-05/39-06, e2e in 39-07).
+    Phase 39 note (honest scope, updated by 39-06): the workspace files below are on disk AND the
+    process is chdir'd into the project, and neither the CLI nor the loader sees them. `agent list`
+    DOES name a workspace layer now — it passes `resolve_workspace_layer(config_dir)` as
+    `local_config_dir` — but this invocation passes an explicit `--config-dir`, which is row 1 of
+    that resolver's table: naming a config dir is a full replacement, so discovery never runs
+    (LAYR-02). The autouse `LOCALHARNESS_HOME` fixture would gate it a second time on its own.
+    So "the same roster" is asserted here on the global layer, and the shadowing half is asserted
+    directly against a loader that NAMES the workspace. The CLI end of shadowing — a workspace the
+    CLI *discovers* rather than one a test hands it — is covered by
+    `tests/unit/test_workspace_write_paths.py` (39-06) and the 39-07 e2e.
     """
     import json
     from typer.testing import CliRunner
@@ -202,7 +206,8 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
         a["name"] for a in loader.discover_agents()
     )
     assert sorted(a["name"] for a in cli_agents) == loader.list_agents() == ["alpha", "beta"]
-    # No CWD peek: standing in the project does not smuggle its files into either roster.
+    # Standing in the project does not smuggle its files into either roster: the loader has no
+    # CWD peek left, and the CLI's own discovery is gated off by the explicit --config-dir.
     assert [a["role"] for a in cli_agents if a["name"] == "beta"] == ["global beta"]
     # ...and the shadowing decision itself, once the layer is named.
     named = _layered_loader(global_dir, project).discover_agents()
