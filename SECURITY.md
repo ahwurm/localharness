@@ -26,6 +26,24 @@ the harness runs, driven by a local model. **Treat agent definitions and any
 connected MCP servers as trusted code**: review them the way you would review code,
 because they decide what the agents are allowed to do.
 
+**Workspace config from outside your project is not trusted by default.** From v0.13 the harness
+looks for a `.localharness/` directory at or above your current directory and can load agent and
+division files from it. If that directory is the one you are standing in, or it sits inside the same
+git repository you are working in, it loads straight away — it is part of the project you already
+opened, and every directory inside a project inherits that project's config. If it sits somewhere
+else — above your repository's root, or in a parent folder while you are not in a repository at all
+— the harness asks once before loading it. Your answer is recorded in your global
+`~/.localharness/trusted_workspaces.yaml`, never inside the workspace itself, so a directory can
+never vouch for itself. Edit that file to change an answer. When there is no terminal to ask — a
+script, a cron job, CI — that workspace layer is ignored and the run continues without it.
+
+**What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
+repository's `.localharness/agents/` loads with no prompt, because you are inside that project.
+Agent files decide an agent's role, model and tool permissions, so read them in an unfamiliar
+repository before you run the harness there, the same way you would read its build scripts. Plugins
+and the org-level guardrails file are never taken from a workspace in v0.13 — they load from your
+global config directory only.
+
 ## Threat model: prompt injection
 
 Agents fetch web pages and call tools, then act on what they read. The central risk
