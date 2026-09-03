@@ -29,18 +29,31 @@ from localharness.cli import memory_cmd
 from localharness.memory.router import format_origin_token
 from localharness.memory.sqlite import MemoryStore
 
-# The workspace identity a live session passes: the PROJECT ROOT, realpath'd. In these unit tests it
-# is just a string the command must carry verbatim into the provenance — the session tests below are
-# what prove the REPL computes it correctly.
+# Phase 41's drive harness, imported rather than copied (42-03's precedent) — those files stay
+# byte-untouched, and a drift between "how phase 41 drives a workspace session" and "how the
+# promote tests do" would make the two phases' claims incomparable.
+from tests.unit.test_workspace_state_landing import (
+    AGENT,
+    _drive,
+    _global_only_start,
+    _workspace_start,
+)
+
+# The workspace identity a live session passes: the PROJECT ROOT, realpath'd. In the unit tests it
+# is just a string the command must carry verbatim into the provenance — the session tests at the
+# bottom are what prove the REPL computes it correctly.
 IDENTITY = "/home/u/projects/harness"
 
 KEY = "lesson/measure-before-claiming"
 VALUE = "never report a number a finished run did not return"
 ORIG_PROV = "session-2026-09-03T21:00"
+DECOY = "GLOBAL-DECOY never trust an unmeasured claim"
 
 
 async def _open_store(root: Path) -> MemoryStore:
-    store = MemoryStore(agent_id="solo", division_id="default", org_id="default",
+    """A store on the same agent the drive harness runs as — so "the global database on disk" and
+    "the database the session promoted into" are the same file by construction, not by luck."""
+    store = MemoryStore(agent_id=AGENT, division_id="default", org_id="default",
                         base_dir=str(root), global_base_dir=str(root))
     await store.open()
     return store
@@ -329,3 +342,125 @@ async def test_a_retired_memory_cannot_be_promoted(two):
     assert "retired" in out, f"{out!r}"
     assert await gl.get_fact(KEY) is None
     assert handle.calls == 0
+
+
+# =========================================================================== the live session
+#
+# A real offline `_start_async` drive from inside a project. The interactive loop is replaced by
+# one that writes a fact into the session's OWN store and then promotes it through the REPL's own
+# `/memory` handler — so what is graded is the threading (the router's handle and the workspace
+# identity reaching `dispatch`), not the renderer, which the unit tests above already own.
+
+
+def _in_session(monkeypatch, seen: dict, *commands: str) -> None:
+    """Seed one fact, run `/memory` commands through the REPL's real handler, capture the output.
+
+    `self._send_info` is replaced on the INSTANCE so the text the user would have seen is captured
+    without a channel double — `_handle_memory_cmd` swallows every exception, so a silent
+    `/memory failed: ...` would otherwise look exactly like a promote that never ran.
+    """
+    async def _run(self):
+        fact = await self._store.store_fact(key=KEY, value=VALUE, tags=["lesson"],
+                                            confidence=0.9, provenance=ORIG_PROV)
+        seen["fact"] = fact
+        out: list[str] = []
+
+        async def _capture(text, colorize=False):
+            out.append(text)
+
+        self._send_info = _capture
+        for cmd in commands:
+            await self._handle_memory_cmd(cmd.format(id=fact.id))
+        seen["out"] = "\n".join(out)
+        return None
+
+    monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _run)
+
+
+async def _seed_global_decoy(global_dir: Path) -> None:
+    """A fact that exists ONLY in the machine-global store, before the drive."""
+    gl = await _open_store(global_dir)
+    try:
+        await gl.store_fact(key="global/own-claim", value=DECOY, confidence=0.9,
+                            provenance="written-here")
+    finally:
+        await gl.close()
+
+
+async def _global_copy(global_dir: Path, key: str = KEY):
+    """Read the global store back from DISK with a fresh handle — never trust the command's own
+    return string for a claim about what was written."""
+    gl = await _open_store(global_dir)
+    try:
+        return await gl.get_fact(key), await gl.get_fact_history(key)
+    finally:
+        await gl.close()
+
+
+async def test_a_live_workspace_session_promotes_into_the_global_store(tmp_path, monkeypatch):
+    """The end-to-end claim: `/memory promote <id> confirm` typed in a real workspace session puts
+    the fact in `<global>/agents/<AGENT>/memory.db`."""
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    seen: dict = {}
+    _in_session(monkeypatch, seen, "promote {id} confirm")
+
+    await _drive()
+
+    assert seen.get("fact") is not None, "the stubbed loop never fired"
+    assert "/memory failed" not in seen["out"], seen["out"]
+    copy, _history = await _global_copy(global_dir)
+    assert copy is not None, f"nothing reached the global store; the session said: {seen['out']!r}"
+    assert copy.value == VALUE
+    assert copy.source == "promote"
+
+
+async def test_the_promoted_provenance_names_the_project_root(tmp_path, monkeypatch):
+    """Which workspace it came from, in the ONE identity format this milestone uses: the project
+    root, realpath'd — the same string `permissions.workspace_root` carries and the trust store
+    keys on. NOT the `.localharness` dir, and not a workspace-relative name."""
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    seen: dict = {}
+    _in_session(monkeypatch, seen, "promote {id} confirm")
+
+    await _drive()
+
+    copy, _history = await _global_copy(global_dir)
+    assert copy is not None, f"nothing reached the global store: {seen.get('out')!r}"
+    prefix = memory_cmd.PROMOTE_PROVENANCE_PREFIX
+    _stamp, identity, original = copy.provenance[len(prefix):].split(";", 2)
+    assert identity == str(ws.resolve().parent), \
+        f"the copy says it came from {identity!r}, not the project root"
+    assert identity != str(ws.resolve()), "the identity is the .localharness dir, not the project"
+    assert original == ORIG_PROV, "the original provenance chain was dropped"
+
+
+async def test_the_memory_window_still_browses_only_this_projects_store(tmp_path, monkeypatch):
+    """The ruled v1 boundary, asserted so that widening it is a deliberate act: promote is the ONE
+    verb that reaches across. `search` (and the rest of the browsing family) stays primary-only."""
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    await _seed_global_decoy(global_dir)
+    seen: dict = {}
+    _in_session(monkeypatch, seen, "search never")
+
+    await _drive()
+
+    assert "GLOBAL-DECOY" not in seen["out"], \
+        f"/memory search read the machine-global store: {seen['out']!r}"
+    assert "finished run" in seen["out"], \
+        f"/memory search did not even read this project's own store: {seen['out']!r}"
+
+
+async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path, monkeypatch):
+    """With no `.localharness/` the session's memory IS the machine-global memory. The failure mode
+    this guards is a promote that "succeeds" by writing a duplicate row into the same database."""
+    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch)
+    seen: dict = {}
+    _in_session(monkeypatch, seen, "promote {id} confirm")
+
+    await _drive()
+
+    assert "Promotion needs a project layer" in seen["out"], seen["out"]
+    fact, history = await _global_copy(global_dir)
+    assert fact is not None and fact.source != "promote", \
+        f"a session with no workspace promoted into its own store: {fact}"
+    assert len(history) == 1, f"promote forked the one store it had: {history}"
