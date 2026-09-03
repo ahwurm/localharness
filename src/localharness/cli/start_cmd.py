@@ -358,8 +358,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # never blocks startup.
     _auto_migrate_deny_defaults(config_file)
 
-    # Load harness config
-    loader = ConfigLoader(config_dir=cfg_path)
+    # Load harness config.
+    # v0.13 LAYR-01: the nearest trusted `.localharness/` at or above CWD layers over the global
+    # dir. None whenever --config-dir/LOCALHARNESS_DIR/LOCALHARNESS_HOME was explicit, nothing was
+    # found, or trust was withheld — in which case this is byte-identical to v0.12 (LAYR-03).
+    # The RAW flag value, not cfg_path: "was this explicit" does not survive resolution.
+    from localharness.cli.workspace import resolve_workspace_layer
+    workspace = resolve_workspace_layer(config_dir)
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
+    if workspace is not None:
+        # markup=False, like the model list above: a folder named `[old] proj` is legal
+        # everywhere, and rich would either eat the bracket (naming a path that does not exist)
+        # or raise MarkupError on `[/]`. `style=` alone does NOT disable markup parsing (39-04).
+        console.print(f"Workspace layer: {workspace}", style="dim", markup=False)
     try:
         harness = loader.load_harness()
     except Exception as exc:
@@ -438,6 +449,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             raise typer.Exit(1)
         # No agents: mint the root agent as 'orchestrator' (ORCH-01)
         console.print("[yellow]No agents configured. Creating the orchestrator (root agent)...[/yellow]")
+        # Global on purpose: minting the machine's root agent into a project folder would surprise.
         agents_dir = cfg_path / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         root_data = _build_agent_yaml("orchestrator", "General-purpose assistant", None)

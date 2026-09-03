@@ -53,7 +53,11 @@ def validate(
         )
 
     cfg_path = resolve_config_dir(config_dir)
-    loader = ConfigLoader(config_dir=cfg_path)
+    # LAYR-01: validate checks the workspace's agent and division files too, or it would report
+    # "all valid" about a set of files the session will not actually load. The RAW `config_dir`
+    # is what the resolver needs — `cfg_path` has already lost whether it was explicit.
+    from localharness.cli.workspace import resolve_workspace_layer
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=resolve_workspace_layer(config_dir))
 
     results: list[tuple[str, ConfigError | None]] = []
 

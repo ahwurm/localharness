@@ -87,7 +87,9 @@ def model(
 
     # config_dir=None routes through the resolver's env/default chain (#35); an explicit flag or
     # LOCALHARNESS_DIR isolates the overlay to that dir.
-    loader = ConfigLoader(config_dir=config_dir)
+    # local_config_dir carries the workspace layer, or None.
+    from localharness.cli.workspace import resolve_workspace_layer
+    loader = ConfigLoader(config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir))
     try:
         harness = loader.load_harness()
     except Exception as exc:
