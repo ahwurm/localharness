@@ -12,6 +12,9 @@ Subcommands (dispatch routes on the first word):
   /memory show <id>            full detail + supersede chain + ambient-eligibility teaching line
   /memory forget <id>          preview; /memory forget <id> confirm retires it (supersede, never delete)
   /memory search <words>       the deterministic search path (query_facts), top hits with ids
+  /memory promote <id>         preview; `... confirm` copies ONE memory to the machine-global
+                               store (origin provenance, supersede-not-fork); `... revert` retires
+                               that copy and leaves this project's own memory untouched
 
 Design notes:
 - forget confirm is a two-step COMMAND form (`... <id> confirm`), not a y/n prompt: it is stateless
@@ -19,6 +22,9 @@ Design notes:
   there is no line to block on). The preview shows exactly what will be retired.
 - browsing here deliberately does NOT touch_staged / record activation traces — this is user
   inspection, not the model's retrieval; polluting ranking with it would be wrong.
+- every verb except promote reads exactly ONE store — the session's own. promote is the single
+  command that reaches across to the machine-global store, and `promote <id> revert` is the reason
+  `forget` does not have to (v0.13 MEMS-05).
 """
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ from rich.console import Group
 from rich.text import Text
 from rich.tree import Tree
 
+from localharness.memory.router import ORIGIN_GLOBAL, parse_origin_token
 from localharness.memory.sqlite import (
     AMBIENT_INJECTION_FLOOR,
     USER_FORGET_PROVENANCE_PREFIX,
@@ -41,12 +48,26 @@ _SEARCH = 10      # search hits
 _CLIP = 72        # value clip width in list/search rows
 _LEAVES = 5       # overview: most-recent memories shown per child, as tree leaves
 _CHAIN_CLIP = 56  # value clip width in supersede-chain nodes
+_PREVIEW_CLIP = 100  # value clip width in the forget/promote previews (one memory, more room)
+
+# Marker prefix on a promoted fact's provenance — the `user_forget@` (sqlite.py:177) and
+# `revert-of:` (memory/reconciliation.py:106) convention, one TEXT column, no schema change:
+#   promoted_from_workspace@<epoch>;<workspace realpath>;<the fact's own provenance>
+# "which project, when" plus the original chain. `revert` matches on this prefix so it can only
+# ever retire a copy promote itself wrote.
+PROMOTE_PROVENANCE_PREFIX = "promoted_from_workspace@"
 
 
 # --------------------------------------------------------------------------- dispatch
-async def dispatch(store: Any, arg: str) -> str:
+async def dispatch(store: Any, arg: str, *, promote_target: Any = None,
+                   workspace_identity: str = "") -> str:
     """Route a `/memory` argument string to a subcommand renderer. `store` is an opened MemoryStore
-    (or None → unavailable). Returns plain text; never raises for user input."""
+    (or None → unavailable). Returns plain text; never raises for user input.
+
+    `promote_target` is an ASYNC CALLABLE returning the machine-global store (or None) — a callable
+    and not a store precisely so the promote PREVIEW can decide not to open anything. Both promote
+    parameters default to today's behavior, so every pre-existing caller is unchanged.
+    """
     if store is None:
         return "Memory isn't available in this session (running without a persistent store)."
     arg = (arg or "").strip()
@@ -61,6 +82,9 @@ async def dispatch(store: Any, arg: str) -> str:
         return await render_forget(store, rest)
     if sub == "search":
         return await render_search(store, rest)
+    if sub == "promote":
+        return await render_promote(store, rest, promote_target=promote_target,
+                                    workspace_identity=workspace_identity)
     # Anything else is a tag path (bucket, bucket/child, or bare child), optional trailing page.
     return await render_listing(store, arg)
 
@@ -216,7 +240,7 @@ async def render_forget(store: Any, arg: str) -> str:
     if not confirmed:
         path = await _tag_path(store, fact)
         return (f"About to forget memory #{fid}:\n"
-                f"  {_clip(fact.value, 100)}  [{path}] conf {fact.confidence:.2f}\n"
+                f"  {_clip(fact.value, _PREVIEW_CLIP)}  [{path}] conf {fact.confidence:.2f}\n"
                 "This retires it — removed from the model's memory shelf and from search, but kept "
                 "in history (never hard-deleted).\n"
                 f"Confirm with:  /memory forget {fid} confirm")
@@ -225,6 +249,91 @@ async def render_forget(store: Any, arg: str) -> str:
                 f"retired. Re-check with /memory show {fid}.")
     return (f"Forgotten. Memory #{fid} retired — it no longer injects into prompts or shows in "
             f"listings/search. History kept: /memory show {fid}.")
+
+
+# --------------------------------------------------------------------------- promote
+async def render_promote(store: Any, arg: str, *, promote_target: Any,
+                         workspace_identity: str) -> str:
+    """`/memory promote <id>` — copy ONE memory from this project's store to the machine-global one.
+
+    Three forms, mirroring `render_forget`'s two-step: bare (preview, opens nothing), `confirm`
+    (the copy), `revert` (retire the copy this command wrote). Composed entirely of existing store
+    verbs — `get_fact_by_id` + `store_fact` + `forget_fact` — so `store_fact`'s own contract
+    supplies three of MEMS-05's four guarantees for free: re-promoting a name SUPERSEDES the global
+    copy (never a second active row), an identical re-promote is a corroboration touch, and every
+    write is read-back-verified. The fourth — never silent — is this command's own UX.
+
+    ONE fact per invocation, addressed by id. No bulk, no pattern, no auto-promotion, no registry.
+    """
+    parts = arg.split()
+    action = parts[-1].lower() if len(parts) >= 2 else ""
+    fid, refusal = _promote_target_id(parts[0]) if parts else (None, None)
+    if refusal is not None:
+        return refusal
+    if fid is None or (action and action not in ("confirm", "revert")):
+        return ("Usage: /memory promote <id>  — previews; /memory promote <id> confirm copies it to "
+                "the machine-global memory; /memory promote <id> revert undoes that copy.")
+    fact = await store.get_fact_by_id(fid)
+    if fact is None:
+        return f"No memory with id {fid} — nothing to promote."
+    if fact.status != "active":
+        return (f"Memory #{fid} is retired (status: {fact.status}) — only an active memory can be "
+                f"promoted. /memory show {fid} shows its history.")
+    if not action:
+        # PREVIEW — deliberately does not touch promote_target: nothing is opened, and the global
+        # store's own database is not even created until you confirm.
+        path = await _tag_path(store, fact)
+        return (f"About to promote memory #{fid} to your machine-global memory:\n"
+                f"  {_clip(fact.value, _PREVIEW_CLIP)}  [{path}] conf {fact.confidence:.2f}\n"
+                f"From: {workspace_identity or 'this session'}\n"
+                "The copy is a separate memory in the global store — this project's copy stays "
+                "exactly as it is, and future sessions in OTHER projects can recall the copy.\n"
+                f"Confirm with:  /memory promote {fid} confirm")
+    g = await promote_target() if promote_target is not None else None
+    if g is None:
+        return ("Promotion needs a project layer: with no .localharness/ workspace this session's "
+                "memory IS the machine-global memory, so there is nowhere to promote it to.")
+    if action == "revert":
+        existing = await g.get_fact(fact.key)
+        if existing is None:
+            return f"Nothing to revert: the global memory has no active '{fact.key}'."
+        if not (existing.provenance or "").startswith(PROMOTE_PROVENANCE_PREFIX):
+            return (f"Refusing: the global '{fact.key}' was not written by promote (no promotion "
+                    "marker), so this would retire a memory this command did not create. Retire it "
+                    "from a session in the global store if you meant to.")
+        if not await g.forget_fact(existing.id):
+            return f"The global '{fact.key}' changed under you — nothing retired. Try again."
+        return (f"Reverted. The promoted copy of '{fact.key}' is retired in the global memory "
+                "(kept in history, never deleted). This project's own copy is untouched.")
+    # The ORIGINAL key on purpose: renaming the copy would fork the memory instead of moving it,
+    # and would defeat supersede-on-re-promote. Two handles, ONE copy.
+    prov = f"{PROMOTE_PROVENANCE_PREFIX}{int(time.time())};{workspace_identity};{fact.provenance}"
+    promoted = await g.store_fact(
+        key=fact.key, value=fact.value, tags=[*fact.tags, "promoted"],
+        confidence=fact.confidence, source="promote", provenance=prov,
+    )
+    return (f"Promoted. '{fact.key}' is now global memory #{promoted.id} — agents in your other "
+            f"projects can recall it. This project's #{fid} is unchanged.\n"
+            f"Undo with:  /memory promote {fid} revert")
+
+
+def _promote_target_id(tok: str) -> tuple[int | None, str | None]:
+    """Resolve what promote was pointed at: a bare id in THIS session's store, or a composite
+    `[workspace#12]` origin token (the handle a `both`-scope session renders on every injected
+    line, 42-02). Returns (id, refusal) — at most one is not None.
+
+    A `[global#7]` token is refused rather than read for its number: the two stores number their
+    rows independently, so promoting `7` would move an unrelated workspace memory.
+    """
+    token = parse_origin_token(tok or "")
+    if token is None:
+        return _parse_id(tok), None
+    origin, fid = token
+    if origin == ORIGIN_GLOBAL:
+        return None, (f"{tok.strip()} names a memory that is already in the machine-global "
+                      "memory — promote moves a memory OUT of a project. The two stores number "
+                      "their rows independently, so this id means something else in each.")
+    return fid, None
 
 
 # --------------------------------------------------------------------------- search
