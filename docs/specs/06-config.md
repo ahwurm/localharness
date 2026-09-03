@@ -164,9 +164,10 @@ inside that project instead of in your global directory.
 
 The rule behind the table: **what you did in a project stays with that project; what governs the
 machine stays with the machine.** Your notes, your history and your audit trail are about the work,
-so they live with the work. The safety context, the kill switch and the model server are about the
-machine, and one of them moving into a project would break the other projects on it — two projects
-each holding their own copy of the kill switch means hunting down two files to stop two sessions.
+so each of them follows the work into the project. The safety context, the kill switch and the model
+server are about the machine, and one of them moving into a project would break the other projects
+on it — two projects each holding their own copy of the kill switch means hunting down two files to
+stop two sessions.
 
 The practical consequence: **a fresh workspace starts with an empty memory.** Nothing is copied out
 of your global memory into it, and nothing in your global memory is moved, rewritten or deleted by
