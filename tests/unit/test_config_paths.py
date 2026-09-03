@@ -36,6 +36,56 @@ def test_resolve_config_dir_default(monkeypatch):
     assert resolve_config_dir() == Path("~/.localharness").expanduser()
 
 
+def test_global_config_dir_default(monkeypatch):
+    """Nothing set: the global layer is ~/.localharness — byte-identical to today."""
+    from localharness.config.paths import global_config_dir
+
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    assert global_config_dir() == Path("~/.localharness").expanduser()
+
+
+def test_global_config_dir_honors_env_chain(monkeypatch, tmp_path):
+    """The env chain still moves the GLOBAL layer — env selects WHICH machine-wide dir,
+    it is not a workspace signal."""
+    from localharness.config.paths import global_config_dir
+
+    home_env = tmp_path / "home"
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(home_env))
+    assert global_config_dir() == home_env
+
+    dir_env = tmp_path / "dir"
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(dir_env))
+    assert global_config_dir() == dir_env
+
+
+def test_global_config_dir_explicit_arg_wins(monkeypatch, tmp_path):
+    """An explicit --config-dir is a full replacement — it replaces the global layer itself
+    (LAYR-02), so it still wins here."""
+    from localharness.config.paths import global_config_dir
+
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "dir"))
+    explicit = tmp_path / "explicit"
+    assert global_config_dir(explicit) == explicit
+    assert global_config_dir(str(explicit)) == explicit
+
+
+def test_global_config_dir_identical_to_resolve_today(monkeypatch, tmp_path):
+    """The distinction is the POINT, not a behavior change: identical for every input today.
+    From v0.13's workspace layering on, resolve_config_dir may answer with a discovered
+    workspace layer while global_config_dir keeps answering with the machine-wide one."""
+    from localharness.config.paths import global_config_dir, resolve_config_dir
+
+    for env in ({}, {"LOCALHARNESS_HOME": str(tmp_path / "h")}, {"LOCALHARNESS_DIR": str(tmp_path / "d")}):
+        monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+        monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for arg in (None, tmp_path / "explicit", "~/elsewhere"):
+            assert global_config_dir(arg) == resolve_config_dir(arg)
+
+
 def test_resolve_overlay_path_under_config_dir(tmp_path):
     from localharness.config.paths import resolve_overlay_path
 
