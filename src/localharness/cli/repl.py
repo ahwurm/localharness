@@ -181,6 +181,17 @@ class OrchestratorREPL:
         if _srv is not None and getattr(_srv, "gpu", False) and _prov is not None:
             self._active_heavy = (_srv, _prov.base_url)
 
+    @property
+    def _server_config_dir(self) -> Path | None:
+        """Where the vLLM pidfile/log/venv live: ALWAYS the global layer.
+
+        There is one physical GPU daemon per machine (C2 single-pidfile invariant), so server
+        lifecycle must never follow a workspace layer even once /model or a peer swap runs
+        inside one. None stays None — the callers below already handle an unset config dir.
+        """
+        from localharness.config.paths import global_config_dir
+        return global_config_dir(self._config_dir) if self._config_dir is not None else None
+
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
         (kill-switch: terminal.inputbox_enabled), else today's classic read_input sequencing."""
@@ -907,7 +918,7 @@ class OrchestratorREPL:
             stopped = None
             try:
                 stopped = await _lifecycle.free_accelerator(
-                    self._active_heavy, ep.lifecycle, self._config_dir
+                    self._active_heavy, ep.lifecycle, self._server_config_dir
                 )
             except (RuntimeError, TimeoutError) as exc:
                 # The incumbent would not stop → we launched NOTHING and it is still up (the
@@ -926,7 +937,7 @@ class OrchestratorREPL:
             )
             try:
                 live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
-                    ep.lifecycle, self._config_dir, ep.base_url, on_poll=_cold_progress
+                    ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress
                 )
             except (RuntimeError, TimeoutError) as exc:
                 # The peer half-started (a TimeoutError means its process is still ALIVE, per
@@ -999,7 +1010,7 @@ class OrchestratorREPL:
         # when the primary is itself the incumbent (the common restart case), whose own stop below
         # reloads the model.
         try:
-            freed = await free_accelerator(self._active_heavy, managed, self._config_dir)
+            freed = await free_accelerator(self._active_heavy, managed, self._server_config_dir)
         except (RuntimeError, TimeoutError) as exc:
             if box_note is not None:
                 box_note(None)
@@ -1015,10 +1026,10 @@ class OrchestratorREPL:
             # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
             # the old server drains. The model mutation MUST land strictly BETWEEN stop and activate:
             # activate's serve_command reads spec.model to build the launch command.
-            await strategy.stop(managed, self._config_dir)
+            await strategy.stop(managed, self._server_config_dir)
             managed.model = target
             ep = await strategy.activate(
-                managed, self._config_dir, llm.config.base_url, on_poll=_swap_progress
+                managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
@@ -1229,7 +1240,7 @@ class OrchestratorREPL:
         launch (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy."""
         from localharness.provider import lifecycle as _lifecycle
         try:
-            await _lifecycle.strategy_for(spec).stop(spec, self._config_dir)
+            await _lifecycle.strategy_for(spec).stop(spec, self._server_config_dir)
         except Exception:  # noqa: BLE001 — cleanup is best-effort
             pass
 
@@ -1243,7 +1254,7 @@ class OrchestratorREPL:
         spec, base_url = stopped
         from localharness.provider import lifecycle as _lifecycle
         try:
-            await _lifecycle.strategy_for(spec).activate(spec, self._config_dir, base_url)
+            await _lifecycle.strategy_for(spec).activate(spec, self._server_config_dir, base_url)
             self._active_heavy = (spec, base_url)
             return spec.model
         except Exception:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
