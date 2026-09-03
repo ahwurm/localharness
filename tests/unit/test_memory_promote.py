@@ -487,3 +487,27 @@ async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypa
     assert router is not None, "the REPL was constructed without the session's recall router"
     assert router is _one(rec, "loop")["recall_router"], \
         "the REPL got a DIFFERENT router than the loop — two handles on one database"
+
+
+async def test_a_promoted_memory_is_actually_recalled_by_the_store_it_landed_in(two):
+    """The point of the whole command, measured rather than assumed: a lesson promoted out of one
+    project is INJECTED into a session running on the global store. A copy that arrives but never
+    recalls is a checkmark on a lie.
+
+    The second assertion pins the known v1 gap so that closing it is a deliberate act: promote
+    copies the fact's own tag LIST (the JSON column) but not the destination's tag GRAPH edges,
+    which `add_bucket_tag`/`add_atom_tag` own and which would need tag MINTING in the other store.
+    So the copy is recalled and searchable, and `/memory`'s tag-tree browsing there shows it as
+    untagged.
+    """
+    ws, gl, handle = two
+    fact = await _seed(ws)
+
+    await _promote(ws, f"{fact.id} confirm", handle)
+
+    ctx = await gl.load_context()
+    assert VALUE in ctx.agent_memory_md, \
+        f"the promoted memory is not injected where it landed: {ctx.agent_memory_md!r}"
+    copy = await gl.get_fact(KEY)
+    assert await gl.tags_for_atom(copy.id) == [], \
+        "the copy now carries tag-graph edges — the v1 gap closed, so update this test's docstring"
