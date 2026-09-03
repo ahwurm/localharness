@@ -419,6 +419,15 @@ def _reasoning_text(obj: Any) -> str | None:
     return None
 
 
+async def _aclose_quietly(client: AsyncOpenAI) -> None:
+    """Close an AsyncOpenAI and its httpx pool, swallowing teardown errors: a failed close must
+    never crash a /model swap or the session's ordered shutdown — but is never silent (#154)."""
+    try:
+        await client.close()
+    except Exception as exc:  # noqa: BLE001 — teardown: log it, never propagate it
+        log.debug("llm client close failed: %s", exc)
+
+
 class LLMClient:
     """OpenAI-compatible async LLM client with XML fallback and local timeout handling."""
 
@@ -440,6 +449,11 @@ class LLMClient:
         # extra_body={"chat_template_kwargs": ...} param. Same sticky/per-server contract.
         self._extra_body_rejected = False
         self._client = self._build_client()
+        # #154: the AsyncOpenAI owns an httpx pool (sockets + fds). `_closed` makes aclose()
+        # idempotent; `_closing` holds the background closes of clients replaced by
+        # rebind_endpoint (a strong ref, so a fire-and-forget task is never GC'd mid-close).
+        self._closed = False
+        self._closing: set[asyncio.Task] = set()
         self._fn_converter: FnCallConverter | None = (
             FnCallConverter() if config.tool_call_mode != "native" else None
         )
@@ -492,6 +506,31 @@ class LLMClient:
             max_retries=0 if c.is_local else 2,
         )
 
+    async def aclose(self) -> None:
+        """Release the underlying AsyncOpenAI — its httpx connection pool, sockets and fds (#154).
+
+        Idempotent (a second call is a no-op) and never raises: callers close in a `finally`,
+        where a teardown error would mask the real exit reason. Also drains the background closes
+        of any endpoints this client was rebound away from, so shutdown leaves nothing in flight."""
+        if not self._closed:
+            self._closed = True
+            await _aclose_quietly(self._client)
+        if self._closing:
+            await asyncio.gather(*list(self._closing), return_exceptions=True)
+
+    def _schedule_close(self, client: AsyncOpenAI) -> None:
+        """Close a REPLACED AsyncOpenAI from a SYNC method (rebind_endpoint). With a loop running —
+        every /model swap path — the close runs as a background task kept in `_closing`; with no
+        loop there is nothing to await on, so the transport is left to GC. Logged, never raised."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            log.debug("rebind_endpoint: no running loop — replaced client left to GC")
+            return
+        task = loop.create_task(_aclose_quietly(client))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
     _REBIND_UNSET: Any = object()  # "param not passed" — None is a real value (unknown runtime)
 
     def rebind_endpoint(
@@ -535,9 +574,6 @@ class LLMClient:
             # endpoint's type and files speed samples under the wrong ledger key.
             self.config.provider_type = provider_type
         try:
-            # TODO(follow-up): the previous AsyncOpenAI (prev[3]) is not explicitly aclose()'d here —
-            # closing an async client from this sync method needs care (event-loop ownership).
-            # Acceptable for now (GC + short session lifetimes); revisit if rebinds get frequent.
             self._client = self._build_client()
         except Exception:
             (
@@ -550,6 +586,10 @@ class LLMClient:
                 self.config.provider_type,
             ) = prev
             raise
+        # #154: the rebuild took, so the endpoint we just left is unreachable through this client —
+        # close its pool. AFTER the restore path, which puts prev[3] back as the LIVE client.
+        self._schedule_close(prev[3])
+        self._closed = False  # a fresh pool: a later aclose() must still close something
         self._tools_param_rejected = False
         self._extra_body_rejected = False
         # Success only (a failed rebind still serves the OLD endpoint, whose rate is still true):
