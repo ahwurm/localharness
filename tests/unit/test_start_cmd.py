@@ -745,6 +745,72 @@ async def test_start_refuses_to_mint_over_unparseable_root_agent(tmp_path, monke
     assert any("orchestrator.yaml" in e for e in errs), "the failing file must be named"
 
 
+# ---------------------------------------------------------------------------
+# Plan 38-05 Task 2: the session's config dir reaches plugins and subagents
+#
+# Both are asserted through a REAL `_start_async` drive, not against the constructors in
+# isolation: the claim ("--config-dir /foo loads /foo/plugins") is only true if start actually
+# passes it, and a test on an unreferenced seam would prove nothing about that.
+# ---------------------------------------------------------------------------
+
+async def test_start_roots_plugins_at_the_session_config_dir(tmp_path, monkeypatch):
+    """ROADMAP Phase 38 criterion 3: `start --config-dir <D>` loads <D>/plugins.
+
+    Before this, a --config-dir session silently loaded the REAL user's ~/.localharness/plugins —
+    plan 38-03 fixed the loader's default (env-based selection); this covers the flag.
+    """
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _write_agent(tmp_path / "agents", "solo")
+
+    recorded: list[dict] = []
+
+    class _RecordingPluginLoader:
+        # start_cmd imports PluginLoader inside _start_async, so patching the MODULE attribute
+        # is what takes effect.
+        def __init__(self, registry, hook_system, plugins_dir=None):
+            recorded.append({"plugins_dir": plugins_dir})
+
+        async def discover_all(self):
+            return []
+
+    monkeypatch.setattr("localharness.plugins.loader.PluginLoader", _RecordingPluginLoader)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert recorded, "PluginLoader was never constructed — the patch did not bite"
+    assert recorded[0]["plugins_dir"] == tmp_path / "plugins"
+
+
+async def test_start_roots_subagents_at_the_session_config_dir(tmp_path, monkeypatch):
+    """ROADMAP Phase 38 criterion 2 at the wiring seam: start hands the runner ITS config dir.
+
+    Plan 38-02 threaded `config_dir` through every dispatch site but left it defaulting to None,
+    so until this wiring landed the whole pathway was unreferenced. The end-to-end consequence
+    (the child's compact.md/KILL land under that dir) is asserted in
+    tests/unit/test_subagent_config_dir.py::test_criterion_2_*.
+    """
+    import localharness.agent.subagent as _sub
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _write_agent(tmp_path / "agents", "solo")
+
+    recorded: list[dict] = []
+    real_factory = _sub.make_explore_agent_runner
+
+    def _recording_factory(**kwargs):
+        recorded.append(kwargs)
+        return real_factory(**kwargs)
+
+    # function-local import at the call site → patch the module attribute
+    monkeypatch.setattr("localharness.agent.subagent.make_explore_agent_runner", _recording_factory)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert recorded, "make_explore_agent_runner was never called — the patch did not bite"
+    assert recorded[0]["config_dir"] == tmp_path
+
+
 def test_resolve_timeout_precedence():
     """Per-agent timeout override wins when set; None falls back to the provider default.
 

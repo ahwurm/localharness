@@ -265,3 +265,43 @@ async def test_runner_default_leaves_children_on_todays_paths(
     await runner("explore", "find X")
     assert recorded_loops[0]["compact_md_path"] == Path.home() / ".localharness" / "agents" / "explore" / "compact.md"
     assert recorded_loops[0]["kill_file_path"] == Path.home() / ".localharness" / "KILL"
+
+
+# ---------------------------------------------------------------------------
+# Plan 38-05 — the criterion-2 acceptance test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_criterion_2_dispatched_child_lands_under_the_session_config_dir(
+    recorded_loops, bus, tmp_path, monkeypatch
+):
+    """ROADMAP Phase 38 criterion 2, end to end: a `--config-dir <D>` session's dispatched child
+    resolves compact.md and its kill-file under <D>.
+
+    Plan 38-02 made this *resolvable*; plan 38-05 made it *reachable* by passing
+    `config_dir=cfg_path` at start_cmd.py:1122. The runner below is built the way start_cmd now
+    builds it (same kwarg, same value shape), so this asserts a user-visible property of
+    `localharness start --config-dir <D>` rather than a hand-built runner's behavior. The env
+    overrides are unset on purpose: with them set, a leak would land in the hermetic fixture dir
+    and pass; with them unset it would land in the real ~/.localharness and fail loudly.
+    """
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    session_dir = tmp_path / "session"
+    base = await _builtin_registry()
+
+    runner = make_explore_agent_runner(
+        llm=object(), bus=bus, base_registry=base, permission_evaluator=PermissionEvaluator(),
+        get_parent_session_id=lambda: "parent-sess",
+        depth=0,
+        available_agents=["explore", "web-researcher", "cruncher", "search-verifier"],
+        config_dir=session_dir,  # start_cmd.py: config_dir=cfg_path
+    )
+    await runner("explore", "find X")
+
+    assert recorded_loops[0]["compact_md_path"] == session_dir / "agents" / "explore" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == session_dir / "KILL"
+    # nothing escaped the session dir — not the home fallback (loop.py:781), not the CWD-relative
+    # bare "KILL" (loop.py:725)
+    assert recorded_loops[0]["compact_md_path"].is_relative_to(session_dir)
+    assert recorded_loops[0]["kill_file_path"].is_relative_to(session_dir)
