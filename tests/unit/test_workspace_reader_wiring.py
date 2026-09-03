@@ -16,6 +16,11 @@ How each wiring is proven, in order of strength:
 - Every assertion in this file was mutation-checked (39-05): the `local_config_dir=` kwarg was
   deleted from each of the four command files in turn and a test here went red each time. A
   wiring assertion that cannot fail proves nothing about reachability (38-05's standing rule).
+  The first pass caught one that could not: doctor's `Workspace layer:` line is printed from
+  `resolve_workspace_layer` and stayed green with doctor's kwarg deleted, so
+  `test_doctor_checks_the_workspace_root_agent_not_just_names_the_layer` exists to make doctor's
+  actual LOAD observable. That is the second time this harness has caught a dead assertion in
+  this phase (39-03 was the first) — run it, do not eyeball a wiring test.
 
 Fixture note: the shape is 39-04's `in_repo_project` — both env overrides cleared (either one
 counts as an explicit selection and would switch discovery off), a fake `$HOME` holding the
@@ -67,6 +72,25 @@ def _write_agent(agents_dir: Path, name: str, role: str) -> Path:
     path = agents_dir / f"{name}.yaml"
     path.write_text(
         yaml.dump({"name": name, "role": role, "model": "inherit"}), encoding="utf-8"
+    )
+    return path
+
+
+def _write_root_agent_with_budget(agents_dir: Path, tokens: int) -> Path:
+    """A root agent carrying a context budget. doctor resolves that budget THROUGH its loader,
+    so the number is observable in doctor's output only if the layer was really loaded."""
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = agents_dir / "orchestrator.yaml"
+    path.write_text(
+        yaml.dump(
+            {
+                "name": "orchestrator",
+                "role": "workspace root",
+                "model": "inherit",
+                "context": {"max_context_tokens": tokens},
+            }
+        ),
+        encoding="utf-8",
     )
     return path
 
@@ -234,6 +258,22 @@ def test_doctor_prints_the_workspace_layer_when_one_applies(in_repo_project, doc
     assert _squash(str(in_repo_project.workspace)) in _squash(result.output)
     assert "Global layer:" in result.output
     assert _squash(str(in_repo_project.global_dir)) in _squash(result.output)
+
+
+def test_doctor_checks_the_workspace_root_agent_not_just_names_the_layer(
+    in_repo_project, doctor_offline
+):
+    """The mutation check's catch (39-05): printing the layer is satisfied by
+    `resolve_workspace_layer` alone and says NOTHING about the `local_config_dir=` kwarg — doctor
+    could announce a layer it never reads. Only the WORKSPACE has a root agent, and doctor
+    reconciles that agent's context budget through its loader, so the number below appears only
+    when the layer actually reached `ConfigLoader`.
+    """
+    _write_root_agent_with_budget(in_repo_project.workspace / "agents", 100_000)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert "Context budget 100,000" in result.output, result.output
 
 
 def test_doctor_prints_no_workspace_line_when_none_applies(
