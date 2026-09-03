@@ -21,12 +21,31 @@ strategy AND the `start` autostart pre-check use it without going through the st
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import server
+
+
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill a still-running child and reap it — on EVERY exit path (#153).
+
+    The timeout paths already killed; CancelledError (a BaseException — a /model swap abandoned
+    by a Ctrl+C) did not, leaving an `ollama pull` / `lms` subprocess running. kill() is a
+    synchronous signal; the reap needs an await, and an await inside a `finally` unwinding a
+    cancellation can itself be interrupted — hence the shield, with its CancelledError
+    suppressed so the ORIGINAL cancellation still propagates."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:  # raced us to exit — nothing left to signal
+        return
+    with contextlib.suppress(asyncio.CancelledError, ProcessLookupError):
+        await asyncio.shield(proc.wait())
 
 
 @dataclass
@@ -291,7 +310,10 @@ class DaemonStrategy:
             )
         except OSError as exc:  # FileNotFoundError (binary not on PATH) is an OSError
             raise RuntimeError(f"could not run `{binary} pull {spec.model}`: {exc}") from exc
-        _, err = await proc.communicate()
+        try:
+            _, err = await proc.communicate()
+        finally:
+            await _kill_and_reap(proc)  # #153: a cancelled swap must not leave the pull running
         if proc.returncode != 0:
             raise RuntimeError(
                 f"`ollama pull {spec.model}` failed: {(err or b'').decode('utf-8', 'replace')[:200]}"
@@ -465,12 +487,12 @@ class LmsStrategy:
         try:
             _, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as exc:
-            try:
-                proc.kill()          # guard BOTH kill and wait: if the proc already exited in the
-                await proc.wait()    # timeout race, either raises ProcessLookupError (an OSError)
-            except ProcessLookupError:  # that would ELSE escape the (RuntimeError|TimeoutError)
-                pass                    # activate contract and crash the session. Reap on the live loop.
             raise TimeoutError(f"`{' '.join(args)}` timed out after {timeout:.0f}s") from exc
+        finally:
+            # Timeout, cancellation, or any other escape (#153). ProcessLookupError from a proc
+            # that raced us to exit stays swallowed in there, so nothing but the activate
+            # contract's (RuntimeError|TimeoutError) ever leaves this method.
+            await _kill_and_reap(proc)
         if proc.returncode not in ok_codes:
             raise RuntimeError(
                 f"`{' '.join(args)}` failed (exit {proc.returncode}): "
