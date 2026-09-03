@@ -755,6 +755,7 @@ class AgentLoop:
         tool_registry: Any,  # ToolRegistry
         permission_evaluator: Any,  # PermissionEvaluator
         memory_loader: Any = None,
+        recall_router: Any = None,
         kill_file_path: Path | None = None,
         compact_md_path: Path | None = None,
         session_id: str | None = None,
@@ -766,6 +767,10 @@ class AgentLoop:
         self._tools = tool_registry
         self._permissions = permission_evaluator
         self._memory = memory_loader
+        # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
+        # session's own store and keeps every write and trace below; only the ambient-context
+        # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
+        self._recall_router = recall_router
         self._compact_md_path = compact_md_path
         # Type-anytime input box: user-typed nudges routed to the CURRENT turn land here and
         # are drained into durable session history at the next step boundary (same #82 seam as
@@ -1026,7 +1031,10 @@ class AgentLoop:
                 if _set_sess is not None:
                     _set_sess(session.session_id)
                 _mem_cfg = getattr(self._config, "memory", None)
-                ctx = await self._memory.load_context(
+                # The knob (agent.memory.recall_scope) is applied by the router, not here: the
+                # loop asks ONE object for context and stays ignorant of how many stores answered.
+                _recall = self._recall_router if self._recall_router is not None else self._memory
+                ctx = await _recall.load_context(
                     index_mode=getattr(_mem_cfg, "index_mode", True),
                     max_session_history=getattr(_mem_cfg, "max_session_history_entries", 8),
                 )
