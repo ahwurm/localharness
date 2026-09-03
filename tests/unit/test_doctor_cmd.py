@@ -11,6 +11,42 @@ from localharness.cli.app import app
 
 runner = CliRunner()
 
+
+class _StubCounter:
+    """Stand-in for TokenCounter in doctor tests.
+
+    doctor no longer probes /tokenize itself — it asks the counter for its RESOLVED mode, so
+    doctor tests must stub the counter rather than the transport. (These tests patch `httpx`;
+    TokenCounter talks urllib, so an httpx mock never covered it — which is why every doctor
+    test broke the moment doctor started delegating.) Default mirrors the configured
+    provider_type, i.e. "the config is accurate and the server is healthy"; individual tests
+    override `mode` to exercise drift and degradation.
+    """
+
+    mode_override: str | None = None
+
+    def __init__(self, base_url=None, model=None, provider_type=None, **_kw):
+        if self.mode_override:
+            self.mode = self.mode_override
+        elif provider_type in ("vllm", "llamacpp"):
+            self.mode = provider_type          # server-side /tokenize
+        elif provider_type in ("ollama", "lmstudio"):
+            self.mode = "exact_local"          # no /tokenize; counts from the model's GGUF vocab
+        else:
+            self.mode = "vllm"
+        self.approximate = self.mode == "approximate"
+
+
+@pytest.fixture(autouse=True)
+def _stub_token_counter(monkeypatch):
+    """Autouse: doctor asks the counter on every run, so every test needs it stubbed."""
+    import localharness.agent.context as _ctx
+
+    _StubCounter.mode_override = None
+    monkeypatch.setattr(_ctx, "TokenCounter", _StubCounter)
+    yield _StubCounter
+    _StubCounter.mode_override = None
+
 _VALID_CONFIG = """\
 version: "1"
 provider:
@@ -132,6 +168,7 @@ def _models_resp(payload: dict) -> MagicMock:
 def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, mock_resolve, tmp_path):
     """#9: Ollama serves no /tokenize — doctor must NOT probe it or count a failure; with no local
     GGUF for exact counting an INFO line explains the approximate fallback. Exit 0."""
+    _StubCounter.mode_override = "approximate"  # no /tokenize, no usable GGUF
     _write_config(tmp_path, "ollama", "http://localhost:11434", model="m")
     mock_httpx.get.return_value = _models_resp({"models": [{"name": "m"}]})
 
@@ -146,6 +183,7 @@ def test_doctor_ollama_tokenize_is_info_not_failure(mock_httpx, mock_resolve, tm
 @patch("localharness.cli.doctor_cmd.httpx")
 def test_doctor_lmstudio_tokenize_is_info_not_failure(mock_httpx, mock_resolve, tmp_path):
     """#9: LM Studio has no /tokenize — with no local GGUF, INFO (approximate), not a failure. Exit 0."""
+    _StubCounter.mode_override = "approximate"  # no /tokenize, no usable GGUF
     _write_config(tmp_path, "lmstudio", "http://localhost:1234/v1", model="m")
     mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
 
@@ -175,9 +213,12 @@ def test_doctor_llamacpp_tokenize_exact(mock_httpx, tmp_path):
     assert result.exit_code == 0, result.output
     assert "exact" in result.output.lower()
     assert "message-level" in result.output  # /apply-template capability reported
-    # probed with llama.cpp's {content} shape, not vLLM's {model,prompt}
-    first_kwargs = mock_httpx.post.call_args_list[0].kwargs
-    assert "content" in first_kwargs.get("json", {})
+    # The CONTRACT-SHAPE guarantee ({content} for llama.cpp, not vLLM's {model,prompt}) moved
+    # into TokenCounter when doctor stopped running its own probe, and is covered there —
+    # tests/unit/test_context.py rejects a body without "model" and distinguishes both shapes,
+    # incl. test_token_counter_llamacpp_router_mode_names_the_model for #141. Asserting it here
+    # would only re-test the stub. What doctor still owns is the message-level report, above.
+    assert any("/apply-template" in str(c) for c in mock_httpx.post.call_args_list)
 
 
 @patch("localharness.cli.doctor_cmd.httpx")
@@ -216,6 +257,7 @@ def test_doctor_llamacpp_router_mode_names_the_model(mock_httpx, tmp_path):
 @patch("localharness.cli.doctor_cmd.httpx")
 def test_doctor_vllm_tokenize_absent_still_fails(mock_httpx, tmp_path):
     """#9: vLLM SHOULD serve /tokenize — a 404 there stays a real FAILURE (exit 1)."""
+    _StubCounter.mode_override = "approximate"  # /tokenize 404 -> counter finds none
     _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
     mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
     tok = MagicMock()
@@ -787,3 +829,56 @@ def test_doctor_served_window_follows_the_root_agents_model(mock_httpx, tmp_path
     assert "131,072" in result.output              # judged against the ROOT model's window
     # The honest verdict for a 56k pin on a ~127k usable window is the under-use warning:
     assert "BELOW" in result.output
+
+
+# ---------------------------------------------------------------------------
+# doctor consults the RESOLVER, not the stored config (2026-09-03)
+# Found live: a box whose config said provider_type=llamacpp while the server spoke vLLM.
+# TokenCounter treats provider_type as a HINT and probes both shapes, so counting was EXACT —
+# but doctor branched on the config, sent a llama.cpp-shaped body, and reported
+# "token accounting falls back to tiktoken cl100k". The tool you run for reassurance was wrong.
+# ---------------------------------------------------------------------------
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_reports_the_resolved_mode_not_the_configured_one(mock_httpx, tmp_path):
+    """Config drifted to llamacpp; the server speaks vLLM. Counting is EXACT, so doctor must
+    pass — and must SAY the config is stale rather than inventing a token-accounting failure."""
+    _StubCounter.mode_override = "vllm"          # what the counter actually resolved
+    _write_config(tmp_path, "llamacpp", "http://localhost:8000/v1", model="m")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
+    ok = MagicMock(); ok.status_code = 200; ok.json.return_value = {"count": 1}
+    mock_httpx.post.return_value = ok
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    out = result.output
+    assert "exact" in out.lower(), out
+    assert "tiktoken" not in out.lower(), "must not claim a fallback that isn't happening"
+    assert "llamacpp" in out and "vllm" in out, "the drift itself must be surfaced"
+    assert "tokenize-unreachable" not in out
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_does_not_cascade_a_stale_model_into_a_second_failure(mock_httpx, tmp_path):
+    """A stale default_model made doctor report TWO issues that were one: the tokenize probe
+    reuses that model name, so it failed for the same reason. Dependent checks must be skipped
+    and labelled, or the user chases a phantom."""
+    _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="gone-model")
+    mock_httpx.get.return_value = _models_resp({"data": [{"id": "actually-served"}]})
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    out = result.output
+    assert "Model not found" in out
+    assert "not checked" in out.lower(), "the dependent probe must be skipped, not re-failed"
+    assert "falls back to tiktoken" not in out.lower()
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_quantifies_the_approximate_counting_error(mock_httpx, tmp_path):
+    """'approximate' alone is not actionable. Measured vs a real Qwen tokenizer: ~0% on
+    English/JSON, ~4% on code, >100% on CJK — the error is content-shaped, so say so."""
+    _StubCounter.mode_override = "approximate"
+    _write_config(tmp_path, "ollama", "http://localhost:11434", model="m")
+    mock_httpx.get.return_value = _models_resp({"models": [{"name": "m"}]})
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert "CJK" in result.output, result.output

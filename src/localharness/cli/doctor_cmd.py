@@ -276,99 +276,145 @@ def doctor(
                     f"{_INFO}  Served max_model_len not reported — can't reconcile context budget"
                 )
 
-            # 5c. Token-counting capability — aligned with #8's runtime-aware detection.
-            # vLLM serves POST /tokenize -> {count}; llama.cpp serves POST /tokenize {content}
-            # -> {tokens:[...]}; Ollama and LM Studio serve NO tokenize endpoint, so approximate
-            # (tiktoken cl100k) counting is expected there — an INFO line, NOT a failure. Branch
-            # on the detected provider_type so a healthy non-vLLM runtime does not false-fail.
-            # (root = _strip_v1(base_url) is computed once above and reused here.)
-            provider_type = harness.provider.provider_type
-            if provider_type in ("ollama", "lmstudio"):
-                # Neither serves /tokenize, so the harness counts EXACTLY from the served model's own
-                # GGUF vocab (mode exact_local). Report that when it's actually available, else the
-                # honest approximate fallback and WHY (no llama-cpp-python / no local GGUF located).
-                import importlib.util
-                from localharness.agent.gguf_tokenizer import resolve_gguf_path
-                _model = harness.provider.default_model
-                _gguf = resolve_gguf_path(_model, provider_type)
-                _have_llama = importlib.util.find_spec("llama_cpp") is not None
-                if _gguf is not None and _have_llama:
-                    console.print(
-                        f"{_PASS} Token counting: exact — {provider_type} serves no /tokenize, so the "
-                        f"harness counts from the served model's own GGUF vocab ({_gguf.name})."
-                    )
-                elif _gguf is not None:
-                    console.print(
-                        f"{_INFO}  Token counting: approximate (cl100k) — a local GGUF was found but "
-                        f"llama-cpp-python is not installed; add the 'exact-tokenizer' extra for exact."
-                    )
-                else:
-                    console.print(
-                        f"{_INFO}  Token counting: approximate (cl100k) — {provider_type} serves no "
-                        f"/tokenize and no local GGUF was located for {_model!r} (co-locate the model "
-                        f"files + install the 'exact-tokenizer' extra for exact counts)."
-                    )
-            elif provider_type == "llamacpp":
+            # 5c. Token-counting capability — ASK THE COUNTER, don't re-derive it.
+            #
+            # This block used to branch on `harness.provider.provider_type` and run its own
+            # probe per runtime. That forked the truth: `TokenCounter` treats provider_type as a
+            # HINT and probes both exact shapes, so it self-heals when the config has drifted
+            # from the running server — doctor did not, and on a box whose config said
+            # "llamacpp" while the server spoke vLLM it sent a llama.cpp-shaped body, got a
+            # rejection, and reported "token accounting falls back to tiktoken cl100k" while the
+            # counts were in fact EXACT. The tool people run for reassurance was the wrong one.
+            #
+            # So doctor now constructs the SAME counter the runtime uses and reports its
+            # RESOLVED mode. One resolver, one answer, and the two can no longer disagree.
+            if "model-not-found" in failures:
+                # Cascade guard: the counter needs a served model name. With a stale one, every
+                # downstream probe fails FOR THAT REASON and doctor invents a second, phantom
+                # problem — a user then chases two issues that are one.
+                console.print(
+                    f"{_INFO}  Token counting: not checked — fix the model above first "
+                    f"(the tokenizer probe needs a served model name)."
+                )
+            else:
+                from localharness.agent.context import TokenCounter
+
                 try:
-                    # "model" named on every llama.cpp probe (#141): ROUTER mode (one
-                    # llama-server, several models via --models-preset) 400s an unnamed body
-                    # ("model name is missing from the request"); single-model servers ignore
-                    # the field. Without it a healthy router false-failed here.
-                    tk = httpx.post(
-                        f"{root}/tokenize",
-                        json={"content": "token", "model": default_model},
-                        timeout=5.0,
+                    _tc = TokenCounter(
+                        base_url=harness.provider.base_url,
+                        model=default_model,
+                        provider_type=harness.provider.provider_type,
                     )
-                    if tk.status_code != 200:
+                    _mode = _tc.mode
+                except Exception as exc:
+                    _mode = "off"
+                    console.print(f"{_INFO}  Token counting: probe failed ({exc})")
+
+                if _mode in ("vllm", "llamacpp"):
+                    console.print(
+                        f"{_PASS} Token counting: exact — server-side /tokenize "
+                        f"({_mode} contract)."
+                    )
+                    if _mode != harness.provider.provider_type:
+                        # Not a failure: the counter already adapted. But the config is stale and
+                        # anything else reading it (including a future doctor check) will be wrong.
                         console.print(
-                            f"{_FAIL} llama.cpp /tokenize returned {tk.status_code} — token "
-                            f"accounting falls back to tiktoken cl100k (approximate)."
+                            f"{_INFO}  config says provider_type={harness.provider.provider_type!r} "
+                            f"but the server speaks {_mode!r} — counting adapted automatically; "
+                            f"run `localharness init` to persist the real one."
                         )
-                        failures.append("tokenize-unreachable")
-                    elif not isinstance(tk.json().get("tokens"), list):
+                elif _mode == "exact_local":
+                    console.print(
+                        f"{_PASS} Token counting: exact — from the served model's own GGUF vocab "
+                        f"(this runtime serves no /tokenize)."
+                    )
+                elif _mode == "approximate":
+                    # Approximate is EXPECTED on runtimes that serve no tokenizer (Ollama, LM
+                    # Studio) and a real FAULT on ones that should (vLLM, llama.cpp). That
+                    # expectation is a property of the RUNNING server, so ask the endpoint
+                    # resolver — never `harness.provider.provider_type`, which is the stale
+                    # value this whole rewrite exists to stop trusting.
+                    from localharness.cli.init_cmd import _identify_endpoint_provider
+
+                    try:
+                        _actual = _identify_endpoint_provider(harness.provider.base_url)
+                    except Exception:
+                        _actual = None
+                    # #6: quantify it. "approximate" alone is not actionable; measured against a
+                    # real Qwen tokenizer the cl100k estimator is ~0% off on English and JSON,
+                    # -3.5% on code, and +141% on CJK. The error is content-shaped, not uniform.
+                    _caveat = (
+                        "Error is content-dependent: ~0% on English/JSON, ~4% on code, "
+                        "but >100% on CJK, so context budgets can be badly wrong on non-Latin text."
+                    )
+                    if _actual in ("vllm", "llamacpp"):
                         console.print(
-                            f"{_FAIL} llama.cpp /tokenize returned 200 but no 'tokens' list in "
-                            f"body — unexpected response shape; token accounting falls back to "
-                            f"tiktoken cl100k."
+                            f"{_FAIL} Token counting: approximate (inflated cl100k) — this "
+                            f"server should serve /tokenize but none answered. {_caveat}"
                         )
                         failures.append("tokenize-unreachable")
                     else:
-                        # Message-level capability: /apply-template renders the server's own
-                        # chat template so count_messages matches usage.prompt_tokens exactly.
-                        try:
-                            at = httpx.post(
-                                f"{root}/apply-template",
-                                json={
-                                    "messages": [{"role": "user", "content": "x"}],
-                                    "model": default_model,
-                                },
-                                timeout=5.0,
-                            )
-                            msg_exact = (
-                                at.status_code == 200 and isinstance(at.json().get("prompt"), str)
-                            )
-                        except Exception:
-                            msg_exact = False
-                        if msg_exact:
-                            console.print(
-                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
-                                f"message-level via /apply-template (llama.cpp)"
-                            )
-                        else:
-                            console.print(
-                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact content "
-                                f"counts (llama.cpp)"
-                            )
-                            console.print(
-                                f"{_INFO}  /apply-template not served — whole-message counts use a "
-                                f"summed estimate; upgrade llama.cpp for template-exact message counts."
-                            )
-                except Exception:
+                        console.print(
+                            f"{_INFO}  Token counting: approximate (inflated cl100k) — this "
+                            f"runtime serves no /tokenize and no local GGUF was usable. {_caveat}"
+                        )
+                else:
                     console.print(
-                        f"{_FAIL} llama.cpp /tokenize unreachable at {root}/tokenize — token "
-                        f"accounting falls back to tiktoken cl100k (approximate)."
+                        f"{_FAIL} Token counting: no tokenizer resolved (mode={_mode!r})."
                     )
                     failures.append("tokenize-unreachable")
+
+                # MESSAGE-LEVEL exactness. Content-level exact (above) is not the same as
+                # whole-message exact: only a server that applies its own chat template makes
+                # count_messages == usage.prompt_tokens. Each runtime exposes that differently —
+                # vLLM via /tokenize messages-mode, llama.cpp via /apply-template — so the probe
+                # stays runtime-specific. It is gated on the RESOLVED mode, never the configured
+                # provider_type, which is the whole point of this rewrite.
+                if _mode == "vllm":
+                    try:
+                        mt = httpx.post(
+                            f"{root}/tokenize",
+                            json={"model": default_model,
+                                  "messages": [{"role": "user", "content": "x"}],
+                                  "add_generation_prompt": True},
+                            timeout=5.0,
+                        )
+                        msg_exact = mt.status_code == 200 and "count" in mt.json()
+                    except Exception:
+                        msg_exact = False
+                    if msg_exact:
+                        console.print(
+                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
+                            f"message-level (chat template applied server-side)"
+                        )
+                    else:
+                        console.print(
+                            f"{_INFO}  /tokenize has no messages mode — whole-message counts use "
+                            f"a summed estimate; upgrade vLLM for template-exact message counts."
+                        )
+                elif _mode == "llamacpp":
+                    try:
+                        at = httpx.post(
+                            f"{root}/apply-template",
+                            json={"messages": [{"role": "user", "content": "x"}],
+                                  "model": default_model},
+                            timeout=5.0,
+                        )
+                        msg_exact = at.status_code == 200 and isinstance(at.json().get("prompt"), str)
+                    except Exception:
+                        msg_exact = False
+                    if msg_exact:
+                        console.print(
+                            f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
+                            f"message-level via /apply-template (llama.cpp)"
+                        )
+                    else:
+                        console.print(
+                            f"{_INFO}  /apply-template not served — whole-message counts use a "
+                            f"summed estimate; upgrade llama.cpp for template-exact message counts."
+                        )
+
+            if harness.provider.provider_type == "llamacpp":
                 # Slot-window check. llama-server may run several slots, but slot COUNT alone
                 # proves nothing: with a unified KV cache (modern llama.cpp default) the slots
                 # SHARE one cache and --ctx-size is not divided, so every request still sees the
@@ -417,61 +463,6 @@ def doctor(
                             f"less-tested backend. Rebuild with -DGGML_HIP=ON -DGGML_VULKAN=OFF "
                             f"-DAMDGPU_TARGETS=<your gfx> (see docs/runtimes/llamacpp.md)."
                         )
-            else:  # vllm (and unknown): the exact /tokenize {count} contract is expected here
-                try:
-                    tk = httpx.post(
-                        f"{root}/tokenize",
-                        json={"model": default_model, "prompt": "token"},
-                        timeout=5.0,
-                    )
-                    if tk.status_code != 200:
-                        console.print(
-                            f"{_FAIL} /tokenize returned {tk.status_code} — token accounting "
-                            f"falls back to tiktoken cl100k (inaccurate for non-cl100k models)."
-                        )
-                        failures.append("tokenize-unreachable")
-                    elif "count" not in tk.json():
-                        console.print(
-                            f"{_FAIL} /tokenize returned 200 but no 'count' in body — unexpected "
-                            f"response shape; token accounting falls back to tiktoken cl100k."
-                        )
-                        failures.append("tokenize-unreachable")
-                    else:
-                        # Message-level capability: vLLM's /tokenize messages-mode applies the
-                        # chat template server-side, so count_messages == usage.prompt_tokens.
-                        try:
-                            mt = httpx.post(
-                                f"{root}/tokenize",
-                                json={
-                                    "model": default_model,
-                                    "messages": [{"role": "user", "content": "x"}],
-                                    "add_generation_prompt": True,
-                                },
-                                timeout=5.0,
-                            )
-                            msg_exact = mt.status_code == 200 and "count" in mt.json()
-                        except Exception:
-                            msg_exact = False
-                        if msg_exact:
-                            console.print(
-                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts, "
-                                f"message-level (chat template applied server-side)"
-                            )
-                        else:
-                            console.print(
-                                f"{_PASS} Tokenizer endpoint reachable (/tokenize) — exact counts"
-                            )
-                            console.print(
-                                f"{_INFO}  /tokenize has no messages mode — whole-message counts use "
-                                f"a summed estimate; upgrade vLLM for template-exact message counts."
-                            )
-                except Exception:
-                    console.print(
-                        f"{_FAIL} /tokenize unreachable at {root}/tokenize — token accounting "
-                        f"falls back to tiktoken cl100k (inaccurate for Qwen et al.)."
-                    )
-                    failures.append("tokenize-unreachable")
-
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             console.print(f"{_FAIL} LLM endpoint unreachable: {base_url}")
             console.print(f"       {exc}")

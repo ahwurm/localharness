@@ -588,6 +588,21 @@ class TokenCounter:
             )
 
     @property
+    def mode(self) -> str:
+        """The RESOLVED counting mode, after probing the live server.
+
+        One of: "vllm" | "llamacpp" (exact, server-side) | "exact_local" (exact, from the served
+        model's own GGUF vocab) | "approximate" (inflated cl100k) | "off" (no endpoint given).
+
+        Public because `doctor` must report THIS value rather than re-deriving it from the
+        configured provider_type. Those two disagree whenever the config has drifted from the
+        running server, and the counter is the one that is right — it treats provider_type as a
+        hint and probes both exact shapes. doctor previously branched on the config instead and
+        reported "token accounting falls back to tiktoken" on a box whose counts were exact.
+        """
+        return self._mode
+
+    @property
     def approximate(self) -> bool:
         """True when counting on the inflated cl100k estimator (the runtime serves no exact
         /tokenize, or an unknown runtime's probe found none) — `start` surfaces a warning."""

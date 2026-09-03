@@ -32,3 +32,5 @@ reports/
 /ARCHITECT-REVIEW.md
 # REPL dogfood outputs (subject-model-written files from live run-throughs)
 lh_test_artifacts/
+.coverage
+coverage.json
