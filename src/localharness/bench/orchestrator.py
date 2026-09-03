@@ -240,7 +240,10 @@ def _synthesize_default_entry() -> MatrixEntry:
     """
     try:
         from localharness.config.loader import ConfigLoader
-        cfg = ConfigLoader().load_harness()
+        from localharness.config.paths import global_config_dir
+        # Amendment #3: explicit dir => non-discovering by construction; a sibling worktree's
+        # .localharness/ must never steer a bench run.
+        cfg = ConfigLoader(config_dir=global_config_dir()).load_harness()
     except Exception as exc:
         raise RuntimeError(
             "_synthesize_default_entry: no HarnessConfig available — "
@@ -274,7 +277,8 @@ def _resolve_matrix(
         # instead of silently benching a model/provider the harness isn't even running.
         try:
             from localharness.config.loader import ConfigLoader
-            active_provider = ConfigLoader().load_harness().provider.provider_type
+            from localharness.config.paths import global_config_dir
+            active_provider = ConfigLoader(config_dir=global_config_dir()).load_harness().provider.provider_type
         except Exception:
             active_provider = None  # active config unavailable — keep current behavior below
         if active_provider is not None and entries[0].provider != active_provider:
