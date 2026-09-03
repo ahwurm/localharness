@@ -151,7 +151,19 @@ class RecallRouter:
     async def load_context(
         self, index_mode: bool = True, max_session_history: int = 8
     ) -> Any:
-        """The ambient-injection read. Same signature as `MemoryStore.load_context`."""
+        """The ambient-injection read. Same signature as `MemoryStore.load_context`.
+
+        In `both` mode the two indexes are composed scoped-first, each block labelled with its
+        origin token, under ONE merge preamble. Two fields are deliberately not exact:
+
+        * `fact_count`'s second term is the global store's INJECTED count, not a second COUNT
+          query — the field has no consumer in `src/` outside the dataclass itself (measured),
+          so the hot path stays one query per store rather than buying an unread number.
+        * `injected_fact_ids` carries the PRIMARY's ids ONLY (see below).
+
+        `index_mode=False` inlines each store's whole MEMORY.md under the same header. That
+        legacy dump has no per-fact lines, so it carries no origin tokens and no ids.
+        """
         if self.scope != SCOPE_BOTH:
             store = await self._read_store()
             ctx = await store.load_context(
@@ -162,13 +174,59 @@ class RecallRouter:
             # global-scope read therefore reports an EMPTY injected set — the already-supported
             # "empty shelf still records a row" shape (#96) — never ids from another database.
             return ctx if store is self._primary else replace(ctx, injected_fact_ids=[])
-        raise NotImplementedError("both-scope merge lands in 42-02 task 2")
+
+        ws_ctx = await self._primary.load_context(
+            index_mode=index_mode, max_session_history=max_session_history
+        )
+        g = await self.ensure_global()
+        if g is None:                      # unreachable while `scope` collapses; kept explicit
+            return ws_ctx
+        if index_mode:
+            # The primary's index is rendered twice here (once inside load_context above for the
+            # safety-context fields and the true fact_count, once labelled below). Two local
+            # SQLite SELECTs; the alternative — reaching past load_context for guardrails,
+            # division and the count — trades a measurable cost for an unmeasurable one.
+            ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
+                max_session_history, origin_label=ORIGIN_WORKSPACE
+            )
+            g_md, g_ids = await g._render_memory_index_with_ids(
+                _MERGED_GLOBAL_SESSION_HISTORY, origin_label=ORIGIN_GLOBAL, include_preamble=False
+            )
+        else:
+            g_ctx = await g.load_context(
+                index_mode=False, max_session_history=_MERGED_GLOBAL_SESSION_HISTORY
+            )
+            ws_md, ws_ids = ws_ctx.agent_memory_md, list(ws_ctx.injected_fact_ids)
+            g_md, g_ids = g_ctx.agent_memory_md, []
+        merged_md = f"{_MERGED_PREAMBLE}{ws_md}\n\n{_MERGED_HEADER}\n\n{g_md}"
+        # guardrails/division come from ws_ctx UNCHANGED: both stores derive them from the same
+        # global_base_dir, so concatenating would inject the org's safety voice twice (Pitfall 3).
+        return replace(
+            ws_ctx,
+            agent_memory_md=merged_md,
+            fact_count=ws_ctx.fact_count + len(g_ids),
+            token_estimate=len(merged_md + ws_ctx.division_md + ws_ctx.guardrails_md) // 4,
+            injected_fact_ids=ws_ids,
+        )
 
     async def query_facts(self, query: Any) -> list[Any]:
-        """The memory_search read."""
+        """The memory_search read. `both` is scoped-first with a key-level dedup, then the
+        caller's own limit — the cut happens AFTER the merge, so this project's facts are
+        never crowded out by the machine-global store's."""
         if self.scope != SCOPE_BOTH:
             return await (await self._read_store()).query_facts(query)
-        raise NotImplementedError("both-scope merge lands in 42-02 task 2")
+
+        primary_hits = await self._primary.query_facts(query)
+        g = await self.ensure_global()
+        if g is None:
+            return primary_hits
+        seen = {f.key for f in primary_hits}
+        merged = list(primary_hits)
+        for f in await g.query_facts(query):
+            if f.key not in seen:   # a name in both stores resolves to THIS project's version
+                merged.append(f)
+        limit = int(getattr(query, "limit", 0) or 0)
+        return merged[:limit] if limit > 0 else merged
 
     async def get_fact(self, key: str) -> Any | None:
         """The memory_get read. `key` may be a composite origin token, in which case it
@@ -180,13 +238,25 @@ class RecallRouter:
             return await store.get_fact_by_id(fact_id) if store is not None else None
         if self.scope != SCOPE_BOTH:
             return await (await self._read_store()).get_fact(key)
-        raise NotImplementedError("both-scope merge lands in 42-02 task 2")
+
+        hit = await self._primary.get_fact(key)
+        if hit is not None:
+            return hit                      # a name in both stores resolves to THIS project's
+        g = await self.ensure_global()
+        return await g.get_fact(key) if g is not None else None
 
     async def get_fact_history(self, key: str) -> list[Any]:
-        """The memory_get(history=True) read."""
+        """The memory_get(history=True) read. In `both` mode: the primary's chain when it has
+        one, otherwise the global's — NEVER spliced. A supersede chain is per-store, so a
+        merged one would describe a history that never happened."""
         if self.scope != SCOPE_BOTH:
             return await (await self._read_store()).get_fact_history(key)
-        raise NotImplementedError("both-scope merge lands in 42-02 task 2")
+
+        chain = await self._primary.get_fact_history(key)
+        if chain:
+            return chain
+        g = await self.ensure_global()
+        return await g.get_fact_history(key) if g is not None else []
 
     # ------------------------------------------------------------------
     # The optional enrichment methods memory_search / memory_get getattr() for.

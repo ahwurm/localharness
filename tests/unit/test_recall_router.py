@@ -482,15 +482,29 @@ async def test_both_merges_the_two_indexes_workspace_first(
 
 async def test_every_merged_fact_line_carries_an_origin_token(both: RecallRouter) -> None:
     """A bare `#12` would be ambiguous across two databases; an UNLABELLED line is worse —
-    the model cannot tell which store it may address."""
-    md = (await both.load_context()).agent_memory_md
-    head, sep, _shelf = md.partition("### Recent Session History")
-    assert sep, md   # the workspace shelf really is in there — see the next test
+    the model cannot tell which store it may address.
 
-    bullets = [ln for ln in head.splitlines() if ln.startswith("- ")]
-    assert len(bullets) == 5, bullets     # ws: shared-key + versioned; global: 3 facts
-    unlabelled = [ln for ln in bullets if not re.match(r"^- \[(workspace|global)#\d+\] ", ln)]
+    Records the composition's real SHAPE while it is at it: the workspace block is whole, so
+    its session shelf sits BETWEEN the two fact blocks rather than at the end. Shelf lines are
+    the one bullet kind that carries no token — they are sittings, not atoms, and have no id
+    (42-01's contract)."""
+    md = (await both.load_context()).agent_memory_md
+
+    before_shelf, sep, after_shelf = md.partition("### Recent Session History")
+    assert sep, md
+    shelf_block, header, global_block = after_shelf.partition(_MERGED_HEADER)
+    assert header, md   # the global block really does follow the workspace shelf
+
+    fact_lines = [
+        ln for ln in (before_shelf + global_block).splitlines() if ln.startswith("- ")
+    ]
+    assert len(fact_lines) == 5, fact_lines   # ws: shared-key + versioned; global: 3 facts
+    unlabelled = [ln for ln in fact_lines if not re.match(r"^- \[(workspace|global)#\d+\] ", ln)]
     assert unlabelled == [], unlabelled
+
+    shelf_lines = [ln for ln in shelf_block.splitlines() if ln.startswith("- ")]
+    assert shelf_lines, shelf_block
+    assert all(re.search(r"\[\w*#\d+\]", ln) is None for ln in shelf_lines), shelf_lines
 
     await both.close()
 
