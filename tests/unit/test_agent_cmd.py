@@ -287,15 +287,16 @@ def test_agent_list_warns_and_skips_unreadable_agent_file(tmp_path, monkeypatch)
     Both commands now share `ConfigLoader.discover_agents`, so `agent list` warns once, names the
     file, and still lists everything that parsed.
     """
-    monkeypatch.chdir(tmp_path)  # the local layer is CWD-relative
+    # The broken file lives in the dir `--config-dir` NAMES. It used to sit in a CWD-relative
+    # `./.localharness` instead, which phase 39 stopped reading (LAYR-02: --config-dir is a full
+    # replacement). Warn-and-skip is what this test is about; which layer the file sits in is not.
+    monkeypatch.chdir(tmp_path)
     global_dir = tmp_path / "global"
     (global_dir / "agents").mkdir(parents=True)
     (global_dir / "agents" / "healthy.yaml").write_text(
         "name: healthy\nrole: Parses fine\n", encoding="utf-8"
     )
-    local_agents = tmp_path / ".localharness" / "agents"
-    local_agents.mkdir(parents=True)
-    (local_agents / "broken.yaml").write_text("a: [unclosed\n", encoding="utf-8")
+    (global_dir / "agents" / "broken.yaml").write_text("a: [unclosed\n", encoding="utf-8")
 
     result = runner.invoke(agent_app, ["list", "--config-dir", str(global_dir)])
 

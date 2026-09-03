@@ -28,16 +28,28 @@ def _write_agent(agents_dir: Path, name: str, role: str = "Test role") -> Path:
 
 @pytest.fixture
 def layered(tmp_path, monkeypatch):
-    """A global config dir + a CWD-local `.localharness/` project dir.
+    """A global config dir + a project holding a `.localharness/` workspace layer.
 
-    `ConfigLoader._local_dir` defaults to the RELATIVE `.localharness`, so the local layer is
-    whatever the process CWD says it is — chdir is part of the contract under test.
+    The chdir stays, but its meaning INVERTED in phase 39: it used to BE the mechanism (the local
+    layer was whatever the process CWD said it was), and now it is a control — standing in the
+    project must change nothing unless a caller names the layer. See `_layered_loader`.
     """
     global_dir = tmp_path / "global"
     project = tmp_path / "project"
     (project / ".localharness" / "agents").mkdir(parents=True)
     monkeypatch.chdir(project)
     return global_dir, project
+
+
+def _layered_loader(global_dir: Path, project: Path) -> ConfigLoader:
+    """The two-layer loader these ordering tests are about.
+
+    Phase 39 (LAYR-02/LAYR-03) made the workspace layer opt-in: `_local_dir` is None unless a
+    caller NAMES it, so these tests name it instead of leaning on the deleted `./.localharness`
+    CWD default. What they assert — global-first paths, local-wins-by-stem, warn-and-skip — is
+    unchanged; only how the second layer gets chosen moved.
+    """
+    return ConfigLoader(config_dir=global_dir, local_config_dir=project / ".localharness")
 
 
 def test_agent_yaml_paths_orders_global_then_local(layered):
@@ -47,12 +59,12 @@ def test_agent_yaml_paths_orders_global_then_local(layered):
     _write_agent(global_dir / "agents", "alpha")
     _write_agent(project / ".localharness" / "agents", "alpha", role="local role")
 
-    paths = ConfigLoader(config_dir=global_dir).agent_yaml_paths()
+    paths = _layered_loader(global_dir, project).agent_yaml_paths()
 
     assert [str(p) for p in paths] == [
         str(global_dir / "agents" / "alpha.yaml"),
         str(global_dir / "agents" / "beta.yaml"),
-        str(Path(".localharness") / "agents" / "alpha.yaml"),
+        str(project / ".localharness" / "agents" / "alpha.yaml"),
     ]
 
 
@@ -75,7 +87,7 @@ def test_discover_agents_reproduces_the_deleted_start_cmd_helper(layered):
     _write_agent(global_dir / "agents", "beta", role="global beta")
     _write_agent(project / ".localharness" / "agents", "beta", role="local beta")
 
-    assert ConfigLoader(config_dir=global_dir).discover_agents() == [
+    assert _layered_loader(global_dir, project).discover_agents() == [
         {"name": "alpha", "role": "Test role", "model": "inherit"},
         {"name": "beta", "role": "local beta", "model": "inherit"},
     ]
@@ -87,7 +99,7 @@ def test_discover_agents_local_wins_wholesale(layered):
     _write_agent(global_dir / "agents", "shared", role="global role")
     _write_agent(project / ".localharness" / "agents", "shared", role="local role")
 
-    agents = ConfigLoader(config_dir=global_dir).discover_agents()
+    agents = _layered_loader(global_dir, project).discover_agents()
 
     assert len(agents) == 1
     assert agents[0]["role"] == "local role"
@@ -147,7 +159,7 @@ def test_list_agents_returns_sorted_stem_union(layered):
     _write_agent(project / ".localharness" / "agents", "alpha")
     _write_agent(project / ".localharness" / "agents", "gamma")
 
-    assert ConfigLoader(config_dir=global_dir).list_agents() == ["alpha", "beta", "gamma"]
+    assert _layered_loader(global_dir, project).list_agents() == ["alpha", "beta", "gamma"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +173,14 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
     construction — `agent list` (agent_cmd:166) and start (start_cmd:417) both call
     `ConfigLoader.discover_agents()` — but a construction claim is only worth the test that
     drives the real CLI. This invokes `agent list --json` through Typer and compares its names to
-    the loader's two roster surfaces on the same layered tree (local `beta` shadowing global).
+    the loader's two roster surfaces on the same tree.
+
+    Phase 39 note (honest scope): the workspace files below are on disk AND the process is chdir'd
+    into the project, and neither the CLI nor the loader sees them — `--config-dir` is a full
+    replacement now (LAYR-02), and no command names a workspace layer until plans 39-05/39-06 wire
+    `resolve_workspace_layer()` in. So "the same roster" is asserted here on the global layer, and
+    the shadowing half is asserted directly against a loader that NAMES the workspace. The CLI end
+    of shadowing gets its test when the CLI can actually do it (39-05/39-06, e2e in 39-07).
     """
     import json
     from typer.testing import CliRunner
@@ -171,7 +190,7 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
     global_dir, project = layered
     _write_agent(global_dir / "agents", "alpha")
     _write_agent(global_dir / "agents", "beta", role="global beta")
-    _write_agent(project / ".localharness" / "agents", "beta", role="local beta")
+    _write_agent(project / ".localharness" / "agents", "beta", role="workspace beta")
     _write_agent(project / ".localharness" / "agents", "gamma")
 
     result = CliRunner().invoke(agent_app, ["list", "--json", "--config-dir", str(global_dir)])
@@ -182,6 +201,10 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
     assert sorted(a["name"] for a in cli_agents) == sorted(
         a["name"] for a in loader.discover_agents()
     )
-    assert sorted(a["name"] for a in cli_agents) == loader.list_agents() == ["alpha", "beta", "gamma"]
-    # ...and the same shadowing decision, not just the same names
-    assert [a["role"] for a in cli_agents if a["name"] == "beta"] == ["local beta"]
+    assert sorted(a["name"] for a in cli_agents) == loader.list_agents() == ["alpha", "beta"]
+    # No CWD peek: standing in the project does not smuggle its files into either roster.
+    assert [a["role"] for a in cli_agents if a["name"] == "beta"] == ["global beta"]
+    # ...and the shadowing decision itself, once the layer is named.
+    named = _layered_loader(global_dir, project).discover_agents()
+    assert sorted(a["name"] for a in named) == ["alpha", "beta", "gamma"]
+    assert [a["role"] for a in named if a["name"] == "beta"] == ["workspace beta"]
