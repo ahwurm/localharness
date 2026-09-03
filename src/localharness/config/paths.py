@@ -35,6 +35,23 @@ def resolve_config_dir(config_dir: Optional[PathLike] = None) -> Path:
     return Path(chosen).expanduser()
 
 
+def global_config_dir(config_dir: Optional[PathLike] = None) -> Path:
+    """The GLOBAL (machine-wide, never-workspace) config dir.
+
+    Identical to ``resolve_config_dir`` TODAY — the distinction is the point. From v0.13's
+    workspace layering on, ``resolve_config_dir`` may answer with a discovered ``.localharness/``
+    workspace layer while THIS function keeps answering with the global one. Call it wherever the
+    target is machine-wide truth rather than project truth:
+
+    - the model / active-endpoint overlay writes (``cli/model_ops.py``) — there is ONE physical
+      GPU daemon, so a workspace must never fork ``server.model`` against it;
+    - anything that must not be reached by workspace discovery (bench's own resolution).
+
+    Explicit ``--config-dir`` still wins: a full replacement replaces the global layer itself.
+    """
+    return resolve_config_dir(config_dir)
+
+
 def resolve_overlay_path(config_dir: Optional[PathLike] = None) -> Path:
     """The user overlay lives at ``<resolved config_dir>/overrides.yaml``."""
     return resolve_config_dir(config_dir) / "overrides.yaml"
