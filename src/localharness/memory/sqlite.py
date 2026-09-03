@@ -704,8 +704,10 @@ class MemoryStore:
     """
     Three-tier persistent memory for a single agent.
 
-    Owns the agent's memory.db, history.jsonl, and MEMORY.md.
-    Reads (but never writes) division and org memory for context injection.
+    Owns the agent's memory.db, history.jsonl, and MEMORY.md under `base_dir`.
+    Reads (but never writes) division and org memory for context injection — from
+    `global_base_dir`, which defaults to `base_dir`, so per-agent state may follow a
+    workspace layer while org/division safety context stays on the global one.
     Optionally subscribes to an EventBus for auto-diary recording.
     """
 
@@ -717,11 +719,20 @@ class MemoryStore:
         base_dir: str,
         *,
         bus: Optional["EventBus"] = None,
+        global_base_dir: Optional[str] = None,
     ) -> None:
         self._agent_id = agent_id
         self._division_id = division_id
         self._org_id = org_id
         self._base_dir = Path(base_dir).expanduser()
+
+        # v0.13 MEMS-01 / ROADMAP critique amendment #4 (owner-ruled): per-agent STATE may follow a
+        # workspace layer, but org/division SAFETY CONTEXT never does. A workspace can ADD context in
+        # a later milestone; it can never silence the global voice by not having the file. Defaults
+        # to base_dir, so omitting it is a no-op (bench/runner.py relies on that).
+        self._global_base_dir = (
+            Path(global_base_dir).expanduser() if global_base_dir else self._base_dir
+        )
 
         # Agent paths
         self._agent_dir = self._base_dir / "agents" / agent_id
@@ -729,10 +740,10 @@ class MemoryStore:
         self._history_path = self._agent_dir / "history.jsonl"
         self._notes_path = self._agent_dir / "MEMORY.md"
 
-        # Division / org paths (read-only)
-        self._division_dir = self._base_dir / "divisions" / division_id
+        # Division / org paths (read-only) — GLOBAL layer, always (amendment #4)
+        self._division_dir = self._global_base_dir / "divisions" / division_id
         self._division_md_path = self._division_dir / "DIVISION.md"
-        self._org_dir = self._base_dir / "orgs" / org_id
+        self._org_dir = self._global_base_dir / "orgs" / org_id
         self._guardrails_path = self._org_dir / "GUARDRAILS.md"
 
         self._history_writer = HistoryWriter(self._history_path)
