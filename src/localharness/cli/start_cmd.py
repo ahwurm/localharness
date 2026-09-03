@@ -237,6 +237,12 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
     file carries name: default). The MemoryStore data directory migrates separately
     inside MemoryStore.open() (Phase 33.1 plan 01).
 
+    GLOBAL-ONLY, by contract: this function writes and deletes files, so it is only ever handed
+    `global_config_dir(...)/"agents"`. A workspace's own stray `agents/default.yaml` is left
+    exactly as the user wrote it — the harness does not rewrite files in a project folder it was
+    not asked to modify. There is no per-layer variant of this migration and there should not be
+    one; if a workspace ever needs migrating, that is an explicit user-invoked command.
+
     Idempotent + crash-safe by construction:
     - no default.yaml -> no-op (fresh install, or already migrated);
     - default.yaml whose name: is not 'default' -> no-op (not the minted root);
@@ -416,7 +422,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # Discover agents (migrate the legacy root-agent YAML first so discovery reads the
     # rewritten name: field, not the stale name: default — Phase 33.1 ORCH-01/03)
-    _migrate_legacy_root_agent_yaml(cfg_path / "agents")
+    # The rename WRITES (creates orchestrator.yaml, unlinks default.yaml). It migrates the
+    # mint-scaffolded ROOT agent, which stays global by phase 39's carve-out, so it names the
+    # GLOBAL layer explicitly and can never be handed a workspace agents dir — a project folder
+    # the user did not ask us to rewrite. Value-identical to `cfg_path` today by construction;
+    # the guarantee is that a future change to what `cfg_path` means cannot drag a
+    # file-deleting migration into someone's repository (39-03's pattern).
+    _migrate_legacy_root_agent_yaml(global_config_dir(config_dir) / "agents")
     agents = loader.discover_agents(on_error=_skipped_agent_file)
 
     if agent_name:
