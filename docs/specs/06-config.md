@@ -4,7 +4,7 @@
 **Component:** `config/models.py`, `config/loader.py`, `config/defaults.py`  
 **Layer:** 1 (models) + 2 (loader)  
 **Status:** Authoritative — implement against this document  
-**Last updated:** 2026-05-23
+**Last updated:** 2026-09-03 (v0.13: workspace layer search order + trust gate)
 
 ---
 
@@ -34,8 +34,10 @@ All agent configuration is **read-only at runtime**. The agent loop reads config
 └── divisions/
     └── {division-name}.yaml      # Division config files (one per division)
 
-# Project-local config (optional, takes precedence over ~/.localharness/)
-{cwd}/.localharness/
+# Workspace config (optional): the nearest .localharness/ at or above the current directory
+{project}/.localharness/
+├── config.yaml                   # not read yet — the directory is discovered in v0.13,
+│                                 # merging this file lands in a later v0.13 release
 ├── agents/
 └── divisions/
 ```
@@ -44,11 +46,37 @@ All agent configuration is **read-only at runtime**. The agent loop reads config
 
 The ConfigLoader searches for agent configs in this priority order (first found wins):
 
-1. `{cwd}/.localharness/agents/{name}.yaml` — project-local (highest priority)
+1. `{nearest workspace}/.localharness/agents/{name}.yaml` — the workspace layer (highest priority)
 2. `~/.localharness/agents/{name}.yaml` — user-global
 3. (v2) system-level configs — not implemented in v1
 
 Division configs follow the same pattern. Org config is always from `~/.localharness/org.yaml`.
+
+**Finding the workspace layer (v0.13).** At session start the harness walks up from your current
+directory looking for a `.localharness/` directory. The **first one it finds is the workspace
+layer** — exactly one layer applies, so a second `.localharness/` further up the tree has no
+effect. The walk stops at `$HOME` and never treats the global `~/.localharness/` as a workspace,
+so a user with no project workspace behaves exactly as they did before v0.13.
+
+A workspace **inside the project you are standing in** applies straight away. That means the
+`.localharness/` in your current directory, or one at or below the root of the git repository you
+are working in. Nested directories inherit their project's config: running the harness from
+`myproject/src/pkg` picks up `myproject/.localharness/`, with no prompt and nothing recorded.
+
+A workspace **from outside that project** — above your repository's root, or in a parent folder
+when you are not in a repository at all — is only loaded after you agree to it once. The harness
+asks, and stores the answer in `~/.localharness/trusted_workspaces.yaml`, globally, never inside
+the workspace itself. The answer is permanent; edit that file to change it. When there is no
+terminal to ask — a script, a cron job, CI — that workspace layer is ignored and a notice is
+printed on stderr.
+
+`--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
+and skip discovery entirely: no workspace layer applies when any of them is set.
+
+Once a workspace applies, agent and division lookup reads the workspace file first, then the
+global one. `config.yaml` and `org.yaml` are **not** read from a workspace in v0.13 — both still
+load from the global directory only, and merging them across the two layers is a later v0.13
+release.
 
 ### Environment Variable Overrides
 

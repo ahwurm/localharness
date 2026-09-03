@@ -771,6 +771,8 @@ Every configurable value follows this precedence order (highest to lowest):
 
 Implementation: Typer handles CLI flags and `envvar=` on each `Option`. The config file is loaded by `ConfigLoader` after CLI parsing. Defaults are in `ToolConfig()`, `PermissionConfig()`, etc. as Pydantic field defaults.
 
+**Workspace layer (v0.13).** `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` are a full replacement: naming a config directory also switches workspace discovery off, so no workspace layer applies. With none of them set, the harness looks for the nearest `.localharness/` directory at or above your current directory and reads agent and division files from it ahead of the global directory. It applies that layer without asking when the workspace belongs to the project you are in — your own directory, or at or below the root of the git repository containing you. A workspace from outside that project loads only after a one-time confirmation, and is ignored with a notice on stderr when there is no terminal to ask. `doctor` and `start` name the layer they chose; see spec 06 for the full search order.
+
 Precedence merging:
 
 ```python
