@@ -45,7 +45,11 @@ and the org-level guardrails file are never taken from a workspace — they load
 config directory only. For the guardrails file that is a mechanism rather than a side effect: the
 memory store is given the global directory as a separate input from the directory its own state
 lives in, so a workspace cannot silence the org's safety context by shipping its own copy of the
-file, and cannot blank it by having no copy at all.
+file, and cannot blank it by having no copy at all. One crossing does exist and it is yours to make:
+`/memory promote` copies a memory out of a project's store into your machine-global store, so a
+memory learned inside an untrusted repository can reach your global memory **if you promote it**.
+The harness never promotes anything on its own — nothing runs it, nothing suggests it — and the
+promoted copy records which project it came from, so you can see the origin and undo the copy.
 
 **Inside a workspace, file writes and commands default to the project folder.** When a workspace
 layer applies, the write and edit tools and the working directory for `bash_exec` default to the
