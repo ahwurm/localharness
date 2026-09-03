@@ -145,9 +145,12 @@ field leaks across from the global file of the same name.
 - **Microagent files resolve across both layers, but nothing injects them into a prompt yet.**
   `context.microagents` is parsed and the files are found; the keyword-triggered injection that
   would use them is not built.
-- **Which memory a workspace session RECALLS is a separate setting, and it is not built yet.**
-  This release decides where a session's memory is written. It does not yet let you choose which
-  memory is read back — a session in a project reads the store it writes to.
+- **Which memory a workspace session RECALLS is a separate setting from where it writes.** That
+  setting is `agent.memory.recall_scope` — `workspace` (the default), `global` or `both`. The
+  default means a session you start inside a project recalls that project's memory and nothing
+  else. It moves reads only: no value of it makes a project's session write into your global
+  memory. `05-memory.md` §11 has the merged mode, its origin tokens and the four things `both`
+  deliberately does not merge.
 
 ### Where your work is stored
 
@@ -173,6 +176,12 @@ The practical consequence: **a fresh workspace starts with an empty memory.** No
 of your global memory into it, and nothing in your global memory is moved, rewritten or deleted by
 a session you run inside a project. The first session in a new project starts that project's memory
 from nothing, the way the first session on a new machine did.
+
+**A session reads what it writes, by default.** Where your memory is written is the table above;
+which memory a session reads back is one setting, `agent.memory.recall_scope`, and its default
+(`workspace`) makes the two the same. Set it to `global` or `both` and the session still writes
+where the table says — the setting moves reads only. `05-memory.md` §11 covers the merged mode and
+`/memory promote`, the one command that copies a memory from a project into your global store.
 
 ### Environment Variable Overrides
 

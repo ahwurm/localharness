@@ -410,6 +410,42 @@ table: absence from the prompt is not forgetting.
   *recovery* — the agent consults what it knows once context makes it relevant. Steering the
   opening move is explicitly future work. Every new write in this tranche lands below the
   visibility line, so it changes capture, not the next action.
+- **`recall_scope: global` splits a session's reads from its writes, and that is the design.**
+  Recall scope moves reads only; every write still lands in the session's own store. So in a
+  project running under `global`, a fact you just asked the agent to remember is written to the
+  project's store and is **not** in what that same session reads back. Nothing is lost — the fact is
+  in the project's memory, and the next default-scope session there recalls it — but `global` is a
+  read-through view of the machine's memory, not a way to work in it. `/memory promote` is the
+  bridge that deliberately moves one memory the other way.
+- **A promoted memory is not filed in the destination's tag tree.** `/memory promote … confirm`
+  copies the fact's tag *list*; the tag *graph* (the edges `/memory`'s tree browsing walks) is
+  per-database and is not recreated in the destination. So in a session running on the global store,
+  a promoted memory **is** injected into the ambient index and **is** findable by search, but shows
+  as `(untagged)` and appears under no bucket in the `/memory` tree. Filing it would require minting
+  tags in the other store — a write capability promote deliberately does not have.
+
+### What `both` recall does not merge
+
+`recall_scope: both` (§11) reads two stores and prints one shelf. Four things it deliberately does
+not do, all for the same underlying reason: `facts.id` is per-database, so a row id from one store
+names a different row in the other, and a merged id list would be silent corruption rather than
+extra information.
+
+- **Activation evidence is recorded partially, or not at all.** The router's
+  `record_activation_trace` writes nothing under `both` — a merged hit list has no single store the
+  row could honestly point at. The ambient injection trace does still run, on this project's own
+  store, recording the **workspace subset** of what was injected. Nothing ever records a foreign id,
+  so the behavior is partial rather than wrong; the consequence is that facts read out of the global
+  store contribute no co-firing evidence and activation scoring under-counts them.
+- **The tag-graph enrichment on `memory_search` is off.** The neighbourhood walk that widens a hit
+  into its related records reads one database's edges; under `both` there is no single graph to
+  walk, so the enrichment returns nothing rather than walking the wrong store's edges.
+- **The global block contributes no session-history lines.** That shelf is *this* project's working
+  history. The merged render carries the workspace block whole — preamble, facts and session
+  history — and appends the global store's facts under their own heading with its history suppressed.
+- **`/memory`'s browsing verbs read this session's own store only** — the overview tree, the
+  listing, `show`, `search` and `forget`. This is a ruled boundary, not an oversight: `promote` is
+  the one verb that reaches across, and `promote <id> revert` is the reason `forget` does not have to.
 
 ---
 
@@ -430,6 +466,7 @@ All under an agent's `memory:` key (see `config/models.py`; every field auto-enu
 
 ```yaml
 memory:
+  recall_scope: workspace            # which memory this session READS: workspace | global | both
   inject_into_context: true          # inject the memory block into the system prompt
   index_mode: true                   # inline the INDEX (names + one-liners), bodies on demand
   max_session_history_entries: 8     # session-shelf lines (hard-capped at 8)
@@ -448,6 +485,78 @@ memory:
     size_weight: 0.25
     lexicon: { … }                   # zero-NLU trigger families (TriggerLexiconConfig)
 ```
+
+### Which memory a session recalls
+
+One machine runs many projects, and the previous section decides where a session's memory is
+*written*. `agent.memory.recall_scope` decides which memory it *reads*. It is a per-agent setting
+with three values and it defaults to `workspace`:
+
+```
+localharness components set agent.memory.recall_scope both
+```
+
+| Value | What the session recalls |
+|---|---|
+| `workspace` (default) | this project's memory, and nothing else |
+| `global` | the machine-global memory, and nothing else |
+| `both` | this project's memory first, then the machine-global memory, in one merged shelf |
+
+In plain English, the default means: **a session you start inside a project recalls that project's
+memory and nothing else.** A research project's recollections and a client codebase's recollections
+stop bleeding into each other, and a project's session leaves the machine's global memory
+byte-identical — writes, consolidation and the `MEMORY.md` rewrite included.
+
+**This setting moves READS only.** `remember`, the write gate and the consolidation pass always
+write to the session's own store, whatever the scope says. `recall_scope: global` does not redirect
+a single write; there is no value of this knob that makes a project's session write into your global
+memory. The one command that copies a memory across is `/memory promote`, below, and you have to
+type it.
+
+**With no workspace layer, the setting is inert.** Outside a project there is only one store, so all
+three values behave identically and no second handle is opened.
+
+Under `both`, every injected line carries an origin token so a merged shelf stays auditable and
+addressable:
+
+```
+- [workspace#12] deploy/rollback: the staging rollback needs the --force flag …
+- [global#7] editors/zed: Zed's terminal does not forward Ctrl-D on a non-empty buffer …
+```
+
+`memory_get` accepts that exact token, so an agent (or you) can fetch the full body of a line and
+know which store it came from. The token is composite because row ids are per-database: `#7` on its
+own would name a different memory in each store.
+
+### Promoting a memory to the machine
+
+A lesson learned in one project is sometimes about the machine, not the project. `/memory promote`
+is the one verb that crosses the boundary, and it is always something you typed:
+
+| Form | What it does |
+|---|---|
+| `/memory promote 12` | **preview** — shows what would be copied. Writes nothing, and does not even open the global store |
+| `/memory promote 12 confirm` | copies **one** fact into the machine-global memory |
+| `/memory promote 12 revert` | retires the copy this command wrote |
+
+The id is the one `/memory` shows you; under `both` recall the composite form works too
+(`/memory promote [workspace#12] confirm`). A `[global#N]` token is refused rather than read for its
+number — it would address an unrelated row in this project's store.
+
+The promoted copy carries its origin in its provenance, in one text field:
+
+```
+promoted_from_workspace@<epoch seconds>;<project root>;<the fact's own provenance>
+```
+
+for example `promoted_from_workspace@1757022000;/home/u/proj;session-2026-09-03T21:00`. It also
+carries `source="promote"` and the tag `promoted`.
+
+Two consequences worth knowing before you use it. **Promoting the same memory twice supersedes
+rather than duplicating** — the earlier global copy is retired and the history is kept, so you get
+one copy and two handles, never a fork. And **`revert` matches on that provenance marker, not on the
+name**, so it can only retire a row `promote` itself wrote: a global memory that happens to share a
+key with a project one is refused rather than retired.
 
 ---
 
