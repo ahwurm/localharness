@@ -1201,6 +1201,56 @@ class BatonGateConfig(BaseModel):
     )
 
 
+class RepetitionGuardConfig(BaseModel):
+    """Degenerate-repetition tripwire at the loop's tool-less acceptance seam (issue #152).
+
+    A candidate final answer that is one line repeated over and over is not an answer, but
+    the acceptance gate took any non-empty non-sentinel text verbatim and `StuckDetector`
+    structurally cannot see it (it is fed tool-call signatures only, so a zero-tool-call turn
+    never reaches it). When enabled (default), such a reply earns ONE corrective nudge; a
+    second degenerate reply in the same turn ends the turn as a failure instead of shipping the
+    repetition as the result. Distinct from `sentinel.duplicate_*` (autoresearch eval only).
+    A loop-structure mechanism, addressable as
+    `agent.repetition_guard.{enabled,min_lines,max_unique_ratio}`.
+    """
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Refuse a tool-less final answer that is one line repeated (issue #152): nudge once, "
+            "then fail the turn honestly. Set False to restore verbatim acceptance. "
+            "Mutable via `localharness components set agent.repetition_guard.enabled <true|false>`."
+        ),
+    )
+
+    min_lines: int = Field(
+        default=10,
+        ge=2,
+        le=1000,
+        description=(
+            "Minimum non-empty lines before the guard may fire — short replies are never "
+            "flagged. Anchored on the live #152 receipt (265 lines, 1 unique): 10 leaves ~26x "
+            "headroom under the observed shape while keeping every ordinary short answer, "
+            "including a deliberately repeated one, out of reach. Derive it upward for models "
+            "that legitimately emit long repetitive tables."
+        ),
+    )
+
+    max_unique_ratio: float = Field(
+        default=0.15,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "unique_lines / total_lines at or below which a reply counts as degenerate. "
+            "Anchored on the same receipt, whose ratio was 1/265 = 0.004 — 0.15 sits two orders "
+            "of magnitude above it, so the guard fires on the observed failure with enormous "
+            "margin while a legitimate answer (distinct prose, a list of distinct items: ratio "
+            "near 1.0) stays far outside. Uniqueness is exact-match, never fuzzy."
+        ),
+    )
+
+
 class RoleSectionsConfig(BaseModel):
     """Orthogonal, individually-addressable sections of the agent system prompt (MODP-01/02).
 
@@ -1421,6 +1471,15 @@ class AgentConfig(BaseModel):
         description=(
             "Deterministic baton gate at the tool-less acceptance seam (issue #84). Default ON. "
             "Addressable via `agent.baton_gate.enabled`."
+        ),
+    )
+
+    repetition_guard: RepetitionGuardConfig = Field(
+        default_factory=RepetitionGuardConfig,
+        description=(
+            "Degenerate-repetition tripwire at the tool-less acceptance seam (issue #152). "
+            "Default ON. Addressable via "
+            "`agent.repetition_guard.{enabled,min_lines,max_unique_ratio}`."
         ),
     )
 
