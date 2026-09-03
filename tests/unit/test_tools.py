@@ -786,6 +786,49 @@ async def test_bash_exec_tool_timeout():
     assert result.error_type == "timeout_error"
 
 
+async def _wait_gone(pid: int, tries: int = 300) -> bool:
+    """Poll until `pid` is neither alive NOR a zombie. os.kill(pid, 0) still succeeds for an
+    unreaped zombie, so ProcessLookupError proves killed AND reaped."""
+    import os
+    for _ in range(tries):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.01)
+    os.kill(pid, 9)  # never leak a stray sleep out of a RED run
+    return False
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_tool_cancelled_kills_process(tmp_path):
+    """#153: a cancelled turn must not abandon the child. CancelledError is a BaseException, so it
+    sailed past the tool's `except asyncio.TimeoutError` — the child kept running with its pipes
+    open, one leaked process per mid-turn Ctrl+C (shipped since v0.5.0).
+
+    `exec sleep` makes the harness's DIRECT child be the sleep itself, so the pid it writes with
+    `$$` is the one the tool holds. Identity is by pid — never a pgrep/pkill pattern match, which
+    happily matches the test runner's own cmdline."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    pidfile = tmp_path / "child.pid"
+    task = asyncio.ensure_future(
+        BashExecTool().run(command=f"echo $$ > {pidfile}; exec sleep 30", timeout_s=30)
+    )
+    for _ in range(300):  # let the child spawn and publish its pid
+        await asyncio.sleep(0.01)
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+    assert pidfile.exists() and pidfile.read_text().strip(), "the child never started"
+    pid = int(pidfile.read_text())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await _wait_gone(pid), f"cancelled bash_exec left child {pid} alive (#153)"
+
+
 class _InnerTimeoutTool(Tool):
     """Mirrors bash_exec's shape: a per-call timeout_s with the tool's OWN inner
     wait_for + cleanup path. The instance timeout_s is SMALLER than the call's."""

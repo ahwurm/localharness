@@ -609,6 +609,39 @@ async def test_lms_run_maps_native_errors():
     await strat._run("/bin/sh", "-c", "exit 0")                    # success
 
 
+async def test_lms_run_cancelled_kills_the_subprocess(tmp_path):
+    """#153 sibling of bash_exec: the timeout path killed, CancelledError (a BaseException) did
+    not — a /model swap abandoned mid-`lms load` left the subprocess running. Real subprocess,
+    pid identity via `$$` + `exec` (no orphan grandchild), never a pgrep match."""
+    import asyncio
+    import os
+    from localharness.provider import lifecycle
+
+    pidfile = tmp_path / "lms.pid"
+    task = asyncio.ensure_future(
+        lifecycle.LmsStrategy()._run("/bin/sh", "-c", f"echo $$ > {pidfile}; exec sleep 30")
+    )
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+    assert pidfile.exists() and pidfile.read_text().strip(), "the subprocess never started"
+    pid = int(pidfile.read_text())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    for _ in range(300):  # ProcessLookupError = killed AND reaped (a zombie still answers sig 0)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.01)
+    os.kill(pid, 9)
+    pytest.fail(f"cancelled _run left child {pid} alive (#153)")
+
+
 async def test_lms_activate_fails_fast_on_preexisting_server(tmp_path, monkeypatch):
     """A server already answering at v1 (one the harness didn't start) → activate raises loudly
     BEFORE running any `lms` command, rather than mis-tracking it (a later `lms daemon down` would
