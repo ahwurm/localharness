@@ -15,6 +15,11 @@ Two halves, both of them carve-outs that say "this does NOT follow the workspace
 The write-side pin itself landed in 38-03 (`model_ops` names `global_config_dir(config_dir)`); what
 this file adds is the missing proof: a swap driven from a real workspace session through the real
 Typer app, with the files that changed counted before and after.
+
+Phase 41 (MEMS-04) amended the measured set: the swap's AUDIT record now lands in the workspace,
+because the log follows the work. The OVERLAY half did not move and never will. The distinction is
+the whole point of the amendment — see
+`test_model_swap_in_a_workspace_session_writes_only_the_global_overlay`'s docstring.
 """
 from __future__ import annotations
 
@@ -134,15 +139,24 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
     the global layer and the project), so any stray write anywhere reddens this test.
 
     MEASURED FINDING — the requirement's own phrase is "exactly one file", and that is not what a
-    swap does. It touches TWO files, both of them in the GLOBAL dir:
+    swap does. It touches TWO files:
       1. `<global>/overrides.yaml` — the durable persist itself;
-      2. `<global>/audit.jsonl`   — `org.audit_log_path` defaults to the bare relative name
-         `audit.jsonl`, which `resolve_runtime_path` resolves under the config dir, and
+      2. `audit.jsonl`             — `org.audit_log_path` defaults to that bare relative name,
+         which `resolve_runtime_path` resolves under whichever base dir it is given, and
          `persist_default_model` publishes one `ComponentMutated` per written path to it.
-    The audit log follows the WORK, deliberately (38-03 left it that way; phase 41 criterion 3
-    owns where per-session state lives). So the assertion is written as the exact SET of the two,
-    not relaxed to a substring or a "no workspace file changed" weakening — a third file appearing
-    anywhere, in either layer, still fails.
+
+    AMENDED BY PHASE 41 (MEMS-04). When 40-03 measured this set, BOTH files were global. Phase 41
+    moved the audit half to the WORKSPACE deliberately — the audit log follows the work — while the
+    overlay half stays global forever, because there is one physical GPU daemon and a
+    workspace-local `server.model` would fork it. So the expected set is now
+    `{<global>/overrides.yaml, <workspace>/audit.jsonl}`.
+
+    The exact-set DISCIPLINE is unchanged, and this amendment is not a weakening: the assertion is
+    still an exact SET over an mtime snapshot of the whole fake `$HOME`, so a third file appearing
+    anywhere, in either layer, still reddens it — and the blanket "nothing under the workspace may
+    change" line below was REPLACED by a precise successor naming the one file that may, not
+    deleted. Mutation-proven: pointing the overlay write at `audit_base_dir` (the C2 violation this
+    test exists to catch) still fails it.
     """
     home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch)
 
@@ -161,13 +175,15 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
     assert not (ws_dir / "config.yaml").exists()
 
     changed = _changed(before, after)
-    assert changed == {overrides, global_dir / "audit.jsonl"}, (
-        "a model swap must touch the global overlay (+ the global audit log) and NOTHING else; "
-        f"changed={sorted(str(p) for p in changed)}"
+    assert changed == {overrides, ws_dir / "audit.jsonl"}, (
+        "a model swap must touch the global overlay (+ the audit log, which follows the work) and "
+        f"NOTHING else; changed={sorted(str(p) for p in changed)}"
     )
-    assert not any(ws_dir in p.parents or p == ws_dir for p in changed), (
-        "no file under the workspace may change — there is one physical GPU daemon, so a "
-        "workspace-local server.model would fork it"
+    ws_changed = {p for p in changed if p == ws_dir or ws_dir in p.parents}
+    assert ws_changed == {ws_dir / "audit.jsonl"}, (
+        "the audit record follows the work (MEMS-04) and is the ONLY thing a swap may write into a "
+        "workspace; an overlay or config file here would fork the one physical GPU daemon's "
+        f"server.model. changed under the workspace={sorted(str(p) for p in ws_changed)}"
     )
 
 
@@ -202,6 +218,10 @@ def test_persist_default_model_targets_the_global_overlay_given_a_workspace_dir(
 
     The unit-level half of the same guarantee: the function resolves its overlay through
     `global_config_dir(config_dir)`, so the workspace sitting right there is not a candidate.
+
+    Since phase 41 this is ALSO the default-preserving proof for `audit_base_dir`: no audit dir is
+    passed here, so the audit log must still resolve under `config_dir` exactly as it did before
+    MEMS-04 — every caller that does not opt in is byte-identical.
     """
     from localharness.config.models import HarnessConfig, ProviderConfig
 
@@ -234,6 +254,17 @@ def test_model_cmd_passes_the_global_config_dir_to_persist():
     test can tell the two apart at the callee: `persist_default_model` funnels whatever it is given
     through `global_config_dir()`, which is value-identical to `resolve_config_dir()` today — so
     the caller is where the choice is actually made, and where a regression would land.
+
+    THE SUBSTRING TRAP (phase 41, recorded because it shaped the production naming). This guard is
+    a plain string scan; it does not respect Python token boundaries. So a keyword argument whose
+    name merely ENDS in `config_dir`, bound to the workspace attribute, tail-matches the forbidden
+    literal and reddens this test even though the code is behaviorally correct. That is a FALSE
+    trip, and it was demonstrated by mutation (d) of plan 41-04: rename the audit parameter to one
+    ending in `config_dir` and pass the workspace inline, and this test fails while every
+    behavioral test stays green. The production code therefore (a) names the parameter
+    `audit_base_dir` and (b) binds the workspace to named locals `_ws` / `_audit_dir` in
+    `model_cmd.py` instead of writing the expression inline at the call sites. Both halves are
+    pinned positively below, so the naming cannot be "simplified" back into the trap.
     """
     source_path = _REPO_ROOT / "src" / "localharness" / "cli" / "model_cmd.py"
     source = source_path.read_text(encoding="utf-8")
@@ -244,6 +275,14 @@ def test_model_cmd_passes_the_global_config_dir_to_persist():
     )
     assert "config_dir=loader._local_dir" not in source, (
         "a workspace layer must never become the persist target — one GPU daemon, one server.model"
+    )
+    assert "audit_base_dir=_audit_dir" in source, (
+        "model_cmd must thread the audit dir separately — one parameter cannot serve both the "
+        "global overlay target and a workspace-following audit log"
+    )
+    assert "_audit_dir = _ws or loader._config_dir" in source, (
+        "the audit fallback must be the session's config dir, not None: passing None would "
+        "re-resolve through the env chain and leak `--config-dir D`'s audit log out of D"
     )
 
 
