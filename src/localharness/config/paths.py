@@ -93,6 +93,29 @@ def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
     return None
 
 
+ARCHIVE_DB_NAME = "archive.db"
+
+
+def resolve_archive_db_path() -> Path:
+    """Where ``propose`` / ``experiment`` / ``autoresearch`` keep their proposal history.
+
+    ONE algorithm for "find my ``.localharness``", shared by all three commands (it used to be
+    the same six lines copied three times). Precedence: ``LOCALHARNESS_DIR`` >
+    ``LOCALHARNESS_HOME`` > the nearest ``.localharness/`` up-tree > ``./.localharness`` — note
+    the default is project-local, which differs deliberately from the config dir's
+    ``~/.localharness`` default.
+
+    NOT trust-gated: this is a SQLite file the harness WRITES, not agent or config YAML the
+    harness executes, so LAYR-05's prompt does not apply — gating a storage-location choice
+    behind a security question would be unmotivated and surprising. It calls
+    ``discover_workspace_dir()`` directly rather than ``cli/workspace.resolve_workspace_layer()``.
+    """
+    override = config_dir_env_override()
+    if override:
+        return Path(override).expanduser() / ARCHIVE_DB_NAME
+    return (discover_workspace_dir() or Path.cwd() / WORKSPACE_DIR_NAME) / ARCHIVE_DB_NAME
+
+
 def _nearest_repo_root(here: Path, home: Optional[Path]) -> Optional[Path]:
     """The nearest directory at or above ``here`` holding a ``.git`` entry, or None.
 
