@@ -161,6 +161,26 @@ async def test_mcp_client_manager_shutdown_unregisters():
 
 
 @pytest.mark.asyncio
+async def test_mcp_disconnect_logs_a_failed_teardown_instead_of_swallowing_it(caplog):
+    """Teardown keeps swallowing — a disconnect must never crash the exit path — but it must not
+    be SILENT: a transport that refuses to close is the difference between a clean exit and a
+    stray child process, and `except Exception: pass` erased the only evidence."""
+    import logging
+
+    client = MCPServerClient(MCPServerConfig(name="s1", transport="stdio", command="echo"))
+    session_ctx = AsyncMock()
+    session_ctx.__aexit__.side_effect = RuntimeError("transport wedged")
+    client._session_ctx = session_ctx
+    client._connected = True
+
+    with caplog.at_level(logging.DEBUG, logger="localharness.tools.mcp"):
+        await client.disconnect()  # must not raise
+
+    assert any("transport wedged" in r.getMessage() for r in caplog.records), caplog.records
+    assert client._connected is False
+
+
+@pytest.mark.asyncio
 async def test_mcp_server_failure_non_fatal():
     """A server that fails to connect should not prevent other servers from connecting."""
     registry = ToolRegistry()
