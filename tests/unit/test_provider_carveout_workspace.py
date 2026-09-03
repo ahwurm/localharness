@@ -155,8 +155,17 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
     still an exact SET over an mtime snapshot of the whole fake `$HOME`, so a third file appearing
     anywhere, in either layer, still reddens it — and the blanket "nothing under the workspace may
     change" line below was REPLACED by a precise successor naming the one file that may, not
-    deleted. Mutation-proven: pointing the overlay write at `audit_base_dir` (the C2 violation this
-    test exists to catch) still fails it.
+    deleted.
+
+    HOW THAT WAS PROVEN, precisely (the obvious mutation does NOT prove it — 40-03's lesson, hit
+    again). Pointing the overlay write at `audit_base_dir`, the C2 violation this test exists to
+    catch, DOES redden this test — but it fails at `overrides.exists()` twenty lines above, an
+    earlier and much weaker check that would still be here even if the set assertions had been
+    gutted. So it grades nothing about the amendment. The two mutations that do:
+      * a stray file written under the WORKSPACE, invisible to every earlier check -> reddens the
+        `ws_changed` assertion (the C2 successor);
+      * the same stray under the GLOBAL dir -> reddens the exact-set assertion.
+    Both were run and restored; that pair is why these two assertions are trusted.
     """
     home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch)
 
@@ -175,15 +184,22 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
     assert not (ws_dir / "config.yaml").exists()
 
     changed = _changed(before, after)
-    assert changed == {overrides, ws_dir / "audit.jsonl"}, (
-        "a model swap must touch the global overlay (+ the audit log, which follows the work) and "
-        f"NOTHING else; changed={sorted(str(p) for p in changed)}"
-    )
+    # ORDER IS DELIBERATE. The workspace-scoped assertion goes FIRST because the exact-set
+    # assertion below it is strictly stronger: if `changed` equals the two expected files, then
+    # `ws_changed` is *necessarily* the one workspace file, so written the other way round this
+    # would be a tautology that no mutation could ever redden (40-02's "an assertion hidden behind
+    # an earlier one is unproven"). First, both are individually reachable: a stray file under the
+    # workspace reddens this one with the C2 message, a stray under the global layer reddens the
+    # exact set. Both were mutation-checked that way.
     ws_changed = {p for p in changed if p == ws_dir or ws_dir in p.parents}
     assert ws_changed == {ws_dir / "audit.jsonl"}, (
         "the audit record follows the work (MEMS-04) and is the ONLY thing a swap may write into a "
         "workspace; an overlay or config file here would fork the one physical GPU daemon's "
         f"server.model. changed under the workspace={sorted(str(p) for p in ws_changed)}"
+    )
+    assert changed == {overrides, ws_dir / "audit.jsonl"}, (
+        "a model swap must touch the global overlay (+ the audit log, which follows the work) and "
+        f"NOTHING else; changed={sorted(str(p) for p in changed)}"
     )
 
 
@@ -280,9 +296,19 @@ def test_model_cmd_passes_the_global_config_dir_to_persist():
         "model_cmd must thread the audit dir separately — one parameter cannot serve both the "
         "global overlay target and a workspace-following audit log"
     )
+    # Guarded HERE and only here, on purpose. Deleting the `or loader._config_dir` fallback is
+    # behaviorally INVISIBLE today, because `persist_default_model` applies the same fallback
+    # itself when `audit_base_dir` is None — measured, not assumed (plan 41-04 predicted a
+    # behavioral regression and there is none). The two fallbacks are belt-and-braces: only
+    # removing BOTH lets `audit_base_dir=None` reach `resolve_runtime_path`, which re-resolves
+    # through the env chain and leaks `--config-dir D`'s audit log out of D — that combined
+    # mutation reddens `test_audit_follows_work.py::test_explicit_config_dir_keeps_the_audit_inside_it`.
+    # So this line is kept as the call site's own statement of intent and pinned structurally,
+    # exactly like 40-03's `config_dir=loader._config_dir` pin above it.
     assert "_audit_dir = _ws or loader._config_dir" in source, (
-        "the audit fallback must be the session's config dir, not None: passing None would "
-        "re-resolve through the env chain and leak `--config-dir D`'s audit log out of D"
+        "the audit fallback must be the session's config dir, not None: with `persist_default_model`'s "
+        "own fallback also gone, None re-resolves through the env chain and leaks `--config-dir D`'s "
+        "audit log out of D"
     )
 
 
