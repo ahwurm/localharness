@@ -9,6 +9,7 @@ from rich.console import Console
 
 from localharness.config import migrate as _migrate
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.paths import resolve_config_dir
 
 console = Console()
 err_console = Console(stderr=True)
@@ -28,9 +29,14 @@ _NOTE = (
 @config_app.command("migrate")
 def migrate(
     config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR"),
-    ] = "~/.localharness",
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Report what would change; write nothing."),
@@ -47,7 +53,7 @@ def migrate(
     key, and (because it is revision-gated) never re-adds a default you deliberately deleted. A
     timestamped backup is written before the config is updated.
     """
-    config_file = Path(config_dir).expanduser() / "config.yaml"
+    config_file = resolve_config_dir(config_dir) / "config.yaml"
 
     try:
         original, plan = _migrate.load_plan(config_file)

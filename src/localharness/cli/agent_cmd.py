@@ -11,6 +11,8 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from localharness.config.paths import resolve_config_dir
+
 console = Console()
 err_console = Console(stderr=True)
 
@@ -72,7 +74,15 @@ def agent_create(
     project_scope: Annotated[bool, typer.Option("--project", help="Add agent to project config (./.localharness/agents/)")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print YAML without writing")] = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing agent with the same name (default refuses)")] = False,
-    config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
+    config_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
 ) -> None:
     """Create a new agent YAML config."""
     # Validate name
@@ -117,7 +127,7 @@ def agent_create(
 
     # Determine target directory
     if use_global:
-        target_dir = Path(config_dir).expanduser() / "agents"
+        target_dir = resolve_config_dir(config_dir) / "agents"
     else:
         target_dir = Path(".localharness") / "agents"
 
@@ -142,10 +152,18 @@ def agent_create(
 def agent_list(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON array")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show full details")] = False,
-    config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
+    config_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
 ) -> None:
     """List all configured agents."""
-    agents = _discover_agents(Path(config_dir).expanduser())
+    agents = _discover_agents(resolve_config_dir(config_dir))
 
     if not agents:
         console.print("No agents configured. Run: localharness agent create <name>")

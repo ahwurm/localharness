@@ -14,6 +14,7 @@ from rich.rule import Rule
 
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import HarnessConfig
+from localharness.config.paths import resolve_config_dir
 
 console = Console()
 
@@ -91,9 +92,14 @@ def _strip_v1(base_url: str) -> str:
 
 def doctor(
     config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR"),
-    ] = "~/.localharness",
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
     fix: Annotated[
         bool,
         typer.Option(
@@ -109,7 +115,7 @@ def doctor(
 
     Exit code 0 if all pass, 1 if any fail.
     """
-    cfg_path = Path(config_dir).expanduser()
+    cfg_path = resolve_config_dir(config_dir)
     failures: list[str] = []
 
     console.print()

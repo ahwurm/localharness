@@ -15,6 +15,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from localharness.agent.context import response_reserve
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
+from localharness.config.paths import resolve_config_dir
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -160,13 +161,17 @@ def init_app(
         ),
     ] = None,
     config_dir: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--config-dir",
-            help="Directory for LocalHarness config and agent data.",
+            help=(
+                "Directory for LocalHarness config and agent data. "
+                "Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness."
+            ),
             envvar="LOCALHARNESS_DIR",
+            show_default=False,
         ),
-    ] = "~/.localharness",
+    ] = None,
     force: Annotated[
         bool,
         typer.Option(
@@ -180,7 +185,7 @@ def init_app(
     Writes config to <config-dir>/config.yaml on success. The --help probe-order
     line is derived from detector.DEFAULT_PORTS (see the __doc__ assignment below).
     """
-    config_path = Path(config_dir).expanduser()
+    config_path = resolve_config_dir(config_dir)
     config_path.mkdir(parents=True, exist_ok=True)
     config_file = config_path / "config.yaml"
 

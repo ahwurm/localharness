@@ -327,7 +327,7 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     )
 
 
-async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str,
+async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
@@ -342,7 +342,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.init_cmd import init_app
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
-    from localharness.config.paths import resolve_runtime_path
+    from localharness.config.paths import resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
     from localharness.plugins.loader import PluginLoader
@@ -352,7 +352,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.tools.registry import ToolRegistry
     from localharness.tools.builtin import register_builtin_tools
 
-    cfg_path = Path(config_dir).expanduser()
+    cfg_path = resolve_config_dir(config_dir)
     config_file = cfg_path / "config.yaml"
 
     # No config → welcome message + exit
@@ -1328,7 +1328,15 @@ def start_app(
     agent: Annotated[str | None, typer.Option("--agent", "-a", help="Start specific agent")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show per-component startup detail")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
-    config_dir: Annotated[str, typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")] = "~/.localharness",
+    config_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
     channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,

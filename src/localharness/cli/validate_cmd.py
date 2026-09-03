@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.rule import Rule
 
 from localharness.config.loader import ConfigError, ConfigLoader
+from localharness.config.paths import resolve_config_dir
 
 console = Console()
 
@@ -22,9 +23,14 @@ def validate(
         typer.Argument(help="Path to specific YAML to validate. If not set, validates all."),
     ] = None,
     config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR"),
-    ] = "~/.localharness",
+        str | None,
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
     strict: Annotated[
         bool,
         typer.Option(
@@ -46,7 +52,7 @@ def validate(
             "run is identical to the default.[/dim]"
         )
 
-    cfg_path = Path(config_dir).expanduser()
+    cfg_path = resolve_config_dir(config_dir)
     loader = ConfigLoader(config_dir=cfg_path)
 
     results: list[tuple[str, ConfigError | None]] = []
