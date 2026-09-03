@@ -947,7 +947,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         plugin_loader: PluginLoader | None = None
         try:
             if hook_system is not None:
-                plugin_loader = PluginLoader(tool_registry, hook_system)
+                # #150 phase 38 criterion 3: plugins follow the SESSION's config dir; the loader's
+                # own default (chokepoint-resolved since plan 38-03) only covers env-based
+                # selection, not this --config-dir flag.
+                plugin_loader = PluginLoader(
+                    tool_registry, hook_system, plugins_dir=cfg_path / "plugins"
+                )
                 loaded_names = await plugin_loader.discover_all()
                 plugins_loaded = len(loaded_names)
         except Exception as exc:
@@ -1112,6 +1117,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             parent_store=eviction_store,
             # Cruncher exec policy (agent.cruncher.*): offered to a clean-origin cruncher iff exec_enabled.
             cruncher_config=agent_config.cruncher,
+            # criterion 2: children resolve compact.md + kill-file under THIS session's dir, not
+            # ~/.localharness or CWD.
+            config_dir=cfg_path,
         )
 
         agent_tool = AgentTool(
