@@ -24,7 +24,6 @@ globally, asserted as an exact file set.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import yaml
 from typer.testing import CliRunner
