@@ -440,6 +440,11 @@ class LLMClient:
             )
 
         self.config = config
+        # Live reasoning sink (terminal.show_reasoning / --show-reasoning / /reasoning): the
+        # channel's line-buffered printer. Called with each reasoning delta as the server
+        # streams it; None (the default) keeps thinking invisible. Content deltas are NOT
+        # sent here — those stay on the per-call on_token path.
+        self.on_reasoning: Callable[[str], Awaitable[None]] | None = None
         # Sticky per-client memory that the server rejected the `tools` param outright
         # (BadRequestError in xml OR native mode) — without it every later iteration re-sends
         # `tools=`, eats another 400 round-trip, and falls back again. Per-SERVER state:
@@ -986,7 +991,9 @@ class LLMClient:
             self._stream_progress = progress
             try:
                 response = await self._client.chat.completions.create(**kwargs)
-                message, usage = await self._consume_native_stream(response, on_token, progress)
+                message, usage = await self._consume_native_stream(
+                    response, on_token, progress, on_reasoning=self.on_reasoning,
+                )
             finally:
                 self._stream_progress = None
             # Only a cleanly finished stream reaches here — errors/cancels above skip recording.
@@ -1134,6 +1141,7 @@ class LLMClient:
         response: Any,
         on_token: Callable[[str], Awaitable[None]] | None,
         progress: dict | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[Any, Any]:
         """Assemble a chat-completions chunk stream into (message, usage).
 
@@ -1190,6 +1198,8 @@ class LLMClient:
                     progress["first_at"] = time.monotonic()
             if reasoning:
                 reasoning_parts.append(reasoning)
+                if on_reasoning is not None:
+                    await on_reasoning(reasoning)
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)

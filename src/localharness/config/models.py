@@ -2011,6 +2011,17 @@ class TerminalConfig(BaseModel):
             "Mutable via `localharness components set terminal.input_router_tier2_enabled <true|false>`."
         ),
     )
+    show_reasoning: bool = Field(
+        default=False,
+        description=(
+            "Stream the model's reasoning (thinking) into the terminal as dim lines while it "
+            "generates, so a long think is visible instead of dead air. Needs the server's "
+            "reasoning parser (vLLM --reasoning-parser, llama.cpp --reasoning-format, Ollama "
+            "think); without one the thinking arrives as inline <think> text that the harness "
+            "strips. `localharness start --show-reasoning` turns it on for one session; "
+            "/reasoning toggles it live."
+        ),
+    )
 
 
 class HarnessConfig(BaseModel):

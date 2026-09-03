@@ -264,3 +264,27 @@ async def test_search_temporal_params_optional(tmp_path: Path):
         assert "car_key" not in res.output
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_hides_operational_namespaces_unless_asked(tmp_path: Path):
+    """Live: a gate/resolved_error row quoting a file path was the TOP hit for four
+    unrelated queries in one session. Operational memory (gate/, predgate/, learned/) is
+    hidden from memory_search unless the query names it."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("sem/profile/abc", "User is drafting a customer profile note")
+        await store.store_fact(
+            "gate/resolved_error/read/x",
+            "`read` error resolved: Path is a directory: skills/draft-customer-profile",
+        )
+        tool = MemorySearchTool(store)
+        res = await tool.run(query="customer profile")
+        assert res.success
+        assert "sem/profile/abc" in res.output
+        assert "gate/resolved_error" not in res.output
+        asked = await tool.run(query="gate customer")
+        assert "gate/resolved_error" in asked.output
+    finally:
+        await store.close()

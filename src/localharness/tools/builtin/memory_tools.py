@@ -55,6 +55,25 @@ def resolve_time_expr(expr: str, *, end: bool = False) -> int:
     return int(datetime.combine(day, boundary).astimezone().timestamp())
 
 
+# Operational memory — tool lessons and gate statistics — is not the user's world (the
+# clustering pass excludes the same namespaces, memory/clustering.py). Observed live: a
+# gate/resolved_error row whose value quoted a file path was the TOP hit for four unrelated
+# queries ("customer profile", "interview notes", "draft", "customer notes interview") in one
+# 50-call session, crowding out the handful of real facts the model was searching for.
+_OPERATIONAL_PREFIXES = ("gate/", "predgate/", "learned/")
+_OPERATIONAL_WORDS = frozenset({"gate", "predgate", "learned", "lesson", "lessons"})
+
+
+def _is_operational(key: str) -> bool:
+    return key.startswith(_OPERATIONAL_PREFIXES)
+
+
+def _wants_operational(query: str) -> bool:
+    """The model asked for tool lessons by name — show them."""
+    import re
+    return any(tok in _OPERATIONAL_WORDS for tok in re.split(r"[^a-z]+", query.lower()))
+
+
 class MemorySearchTool(Tool):
     """Search persistent-fact contents. Uses the existing FTS5 table (facts_fts) via
     MemoryStore.query_facts — lower risk than a fresh LIKE scan because the schema already
@@ -127,15 +146,21 @@ class MemorySearchTool(Tool):
             # error_type must be a valid ToolResult Literal — 'invalid_params' is NOT one
             # (it raises a pydantic ValidationError); 'validation_error' is the correct fit.
             return self.err(str(exc), error_type="validation_error")
+        hide_operational = not _wants_operational(query)
         try:
             facts = await self._mem.query_facts(
                 FactQuery(
-                    text=query, min_confidence=0.0, limit=limit,
+                    text=query, min_confidence=0.0,
+                    # Over-fetch a little when filtering so a page of gate rows can't
+                    # starve the real hits below them.
+                    limit=min(limit + 10, 50) if hide_operational else limit,
                     since=since_epoch, until=until_epoch,
                 )
             )
         except Exception as exc:
             return self.err(f"Memory search failed: {exc}")
+        if hide_operational:
+            facts = [f for f in facts if not _is_operational(f.key)][:limit]
         if not facts:
             return self.ok(f"No facts matched '{query}'.")
         # Reads bump STAGED counters only (RANK-04): ranking learns from use without

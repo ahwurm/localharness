@@ -155,6 +155,13 @@ class Action(BaseEvent):
     # only for these; a tool-less llm_response is the final answer (rendered via TaskComplete)
     # and must never be echoed as narration (double-print).
     has_tool_calls: bool = False
+    # Why an llm_response looks the way it does. finish_reason "length" with empty content
+    # and no tool calls == the whole output budget went to hidden reasoning (observed live:
+    # two 3-minute empty replies, and the ledger could not say why). reasoning_chars is the
+    # size of the reasoning_content the server returned, 0 when it sent none. Optional so
+    # every existing construction and old JSONL line stays valid.
+    finish_reason: Optional[str] = None
+    reasoning_chars: Optional[int] = None
     tool_call_id: Optional[ToolCallID] = None
     tool_name: Optional[str] = None
     tool_params: Optional[dict[str, Any]] = None

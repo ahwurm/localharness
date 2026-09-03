@@ -4,6 +4,63 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Added
+- **Live reasoning stream: `start --show-reasoning`, `terminal.show_reasoning`, `/reasoning`.**
+  Thinking models were dead air: the client already assembled `reasoning_content` from the
+  stream but nothing surfaced it, so a 3-minute think looked identical to a hang (`--verbose`
+  is per-component startup detail, not this). Reasoning deltas now flow from the stream
+  consumer to the terminal channel, which prints them as dim `⋯` lines — line-buffered, with
+  a long unbroken paragraph streamed in pieces and the tail flushed when the reply lands.
+  Off by default; the sink is always wired so `/reasoning on|off` toggles it mid-session.
+  Needs the server's reasoning parser (vLLM `--reasoning-parser`, llama.cpp
+  `--reasoning-format`, Ollama think); without one the thinking is inline `<think>` text
+  the harness strips.
+
+### Fixed
+- **Windows `bash_exec` had no coreutils from a PowerShell-started harness.** Discovery
+  preferred `Git\usr\bin\bash.exe` over the `Git\bin\bash.exe` wrapper. The inner binary
+  inherits the harness's PATH as-is — no `/usr/bin` — so `mkdir`, `ls`, `cp` and friends
+  were all `command not found` (observed live: three `mkdir -p` calls in one session, every
+  one reported ✓; the only files that landed were the ones the `write` tool created
+  parents for itself). The suite never caught it because pytest under git-bash already has
+  `/usr/bin` on PATH. The wrapper, which sets PATH before exec'ing the inner bash, is now
+  searched first, and the Store `WindowsApps\bash.exe` WSL alias is rejected alongside the
+  System32 stub. A regression test strips Git entries from PATH before running
+  `command -v mkdir`.
+- **A non-zero `bash_exec` exit is now a tool failure.** It was `success=True` with the code
+  tucked in metadata: the terminal showed ✓ and the model read the result as done. Because
+  the loop forwards `.error` (not `.output`) on failure, the command's output travels inside
+  the error message (`exit code 127: …mkdir: command not found`) so the model has something
+  to react to. Commands that legitimately exit non-zero (`grep` with no match, `diff`) now
+  surface as errors — append `|| true` when that is the intent.
+- README gains a **Platform support** section (Linux / Windows) and a Git-for-Windows
+  requirement.
+- **An empty completion no longer ends the turn as a success.** Observed live
+  (qwen3.8-27b): two replies ~3 minutes apart with no text and no tool call — the whole
+  output budget spent on hidden reasoning — and the turn completed `success=True` with a
+  STALE narration line ("Now let me pull the voice anchor exemplars…") as its summary,
+  because the #91 fallback resolves the last in-turn assistant text. The loop now
+  re-prompts once with a message that names the cause (not the "only a confirmation"
+  nudge), and a second empty reply ends the turn as a failure whose summary says so. The
+  `llm_response` Action now carries `finish_reason` and `reasoning_chars`, and
+  history.jsonl records the real finish_reason instead of a hard-coded `"stop"`, so the
+  ledger can say why a reply was empty.
+- **`bash_exec` no longer inherits the harness's stdin, and a timeout kills the whole
+  process tree.** Observed live (Windows): `cmd /c "…"` under git-bash — MSYS
+  path-converts the `/c` flag, cmd starts interactive on the inherited terminal stdin and
+  sits there; the inner 60s timeout's `proc.kill()` reached bash alone, the orphaned
+  cmd.exe kept the stdout pipe open, `communicate()` blocked, and the base-class outer
+  timeout fired at 65s instead. stdin is now `DEVNULL`; on timeout the tree is killed
+  (a Windows job object — `taskkill /T` does not reach git-bash's forked children, verified;
+  the command's own process group on POSIX) and the post-kill wait is bounded.
+- **`memory_search` hides operational memory unless asked for it.** A
+  `gate/resolved_error` row whose value quoted a file path was the top hit for four
+  unrelated queries in one 50-call session, ahead of the handful of real facts. `gate/`,
+  `predgate/` and `learned/` keys are filtered out unless the query names them (e.g.
+  "gate", "lesson"); the clustering pass already excluded the same namespaces.
+
 ## [0.13.0] — 2026-09-04
 
 Workspace layering. A `.localharness/` folder in a project now carries its own

@@ -834,3 +834,26 @@ async def test_non_streaming_normalization_survives_a_message_that_rejects_new_f
     msg, _ = await c._create_and_consume({}, stream=False)
     assert msg.content == "42"
     assert getattr(msg, "reasoning_content", None) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_forwards_reasoning_deltas_to_on_reasoning():
+    """terminal.show_reasoning: reasoning deltas reach the sink as they stream, content
+    deltas do not, and the assembled message is unchanged."""
+    from localharness.provider.client import LLMClient
+
+    seen: list[str] = []
+
+    async def on_reasoning(text: str) -> None:
+        seen.append(text)
+
+    chunks = [
+        NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None, reasoning_content="think "))]),
+        NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None, reasoning_content="hard"))]),
+        _chunk(content="answer"),
+    ]
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None, None,
+                                                    on_reasoning=on_reasoning)
+    assert seen == ["think ", "hard"]
+    assert msg.reasoning_content == "think hard"
+    assert msg.content == "answer"

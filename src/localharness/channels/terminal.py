@@ -73,6 +73,8 @@ _DREAMING_LABEL = "· dreaming…"   # · dreaming…
 # llm_response IS the final answer (rendered by the TaskComplete panel) — never here.
 _NARRATE = "·"        # ·  narration line indicator
 _MAX_NARRATION = 160       # hard char cap before the ellipsis
+_REASON = "⋯"              # ⋯  streamed reasoning line (terminal.show_reasoning)
+_REASON_FLUSH_CHARS = 240  # a paragraph with no newline yet still streams in pieces
 
 # Braille spinner frames for the IN-FRAME working glyph. While the persistent input box is
 # live, the thinking/burst indicator advances inside the box's bottom border (a
@@ -697,6 +699,13 @@ class TerminalChannel(ChannelAdapter):
         # Decode-speed supplier (start_cmd wires LLMClient.gen_speed_snapshot): () -> (tok/s,
         # verified) | None. Drives the colored tok/s readout in the status row / thinking label.
         self.tps_source: Callable[[], tuple[float, bool] | None] | None = None
+        # Reasoning stream (terminal.show_reasoning / --show-reasoning / /reasoning). start_cmd
+        # points LLMClient.on_reasoning at on_reasoning below; the flag decides whether the
+        # deltas print. Line-buffered: a complete line (or _REASON_FLUSH_CHARS of one) prints
+        # as a dim ⋯ line; the tail flushes when the response's Action arrives.
+        self.show_reasoning: bool = False
+        self._reasoning_buf: str = ""
+        self._reasoning_open: bool = False       # a line printed since the last flush
         self._action_handle = None
         self._observation_handle = None
         self._task_complete_handle = None
@@ -1346,9 +1355,47 @@ class TerminalChannel(ChannelAdapter):
         the final answer (rendered by the TaskComplete panel) — the has_tool_calls
         discriminator keeps it from being echoed here (the double-print regression)."""
         if event.action_type == "llm_response":
+            await self.flush_reasoning()  # the generation is over: print its last partial line
             await self._render_narration(event)
             return
         await super().on_action(event)
+
+    async def on_reasoning(self, text: str) -> None:
+        """Print streamed reasoning as dim ⋯ lines (no-op unless show_reasoning). Complete
+        lines print as they arrive; a long unbroken paragraph prints in _REASON_FLUSH_CHARS
+        pieces so a 3-minute think is never silent. Never tears down the box's working glyph
+        (thinking continues) — only a classic-mode rich Status, which would glue lines."""
+        if not self.show_reasoning or not text:
+            return
+        self._reasoning_buf += text
+        lines: list[str] = []
+        while "\n" in self._reasoning_buf:
+            line, self._reasoning_buf = self._reasoning_buf.split("\n", 1)
+            lines.append(line)
+        if len(self._reasoning_buf) >= _REASON_FLUSH_CHARS:
+            lines.append(self._reasoning_buf)
+            self._reasoning_buf = ""
+        if lines:
+            await self._print_reasoning_lines(lines)
+
+    async def flush_reasoning(self) -> None:
+        """Print whatever reasoning is still buffered (the generation ended)."""
+        tail, self._reasoning_buf = self._reasoning_buf, ""
+        if self.show_reasoning and tail.strip():
+            await self._print_reasoning_lines([tail])
+        self._reasoning_open = False
+
+    async def _print_reasoning_lines(self, lines: list[str]) -> None:
+        async with self._output_lock:
+            if self._thinking is not None:
+                self._stop_thinking()
+            if not self._reasoning_open:
+                self._close_burst()  # freeze an open tool-burst counter before prose appears
+                self._reasoning_open = True
+            for line in lines:
+                if line.strip():
+                    self._console.print(f"  [muted]{_REASON} {escape(line.rstrip())}[/muted]",
+                                        soft_wrap=True)
 
     async def _render_narration(self, event: Action) -> None:
         """One dim line opening a chunk of tool activity. No-op unless the response also made

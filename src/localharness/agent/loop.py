@@ -51,6 +51,9 @@ class Session:
     # #91: one bounded re-prompt spent this turn when a completion is a bare sentinel with nothing
     # in-turn to confirm (flag-guarded like act_nudge_used) — provably terminates.
     sentinel_reprompt_used: bool = False
+    # One bounded re-prompt spent this turn on an EMPTY completion (no content, no tool
+    # calls) — the second empty reply ends the turn as a failure, never a stale "success".
+    empty_reprompt_used: bool = False
     # #84/FIX-4: baton-gate nudges spent this turn (announced-next-step reply), bounded by
     # config.baton_gate.max_nudges. Was a bool (one nudge, hardcoded); now a counter so the
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
@@ -348,6 +351,16 @@ _SENTINEL_REPROMPT_NUDGE = (
     "Your last reply was only a confirmation, but there is nothing in this "
     "turn to confirm. Provide your full answer to the task now."
 )
+_EMPTY_REPLY_NUDGE = (
+    "Your last reply was empty: no text and no tool call reached the user. If you were "
+    "reasoning, the output budget ran out before the answer. Reply now with your answer "
+    "or a tool call, and keep any reasoning brief."
+)
+_EMPTY_TURN_NOTICE = (
+    "No answer was produced this turn: the model returned an empty reply twice "
+    "(finish_reason={finish_reason}). 'length' means the output token budget was spent, "
+    "usually on hidden reasoning — raise the model's max output tokens or shorten the task."
+)
 # #152: NOT a member of _is_harness_nudge's exact-match set — it is a template (it names the
 # repeat count), and unlike the act-guard/self-check nudges it never asks for the CONFIRMED
 # sentinel, so it can never be half of a nudge->sentinel pair that wants stripping.
@@ -373,7 +386,7 @@ def _is_harness_nudge(message: Message) -> bool:
     below; the lookup happens at call time, so definition order does not matter."""
     return (message.get("content") or "") in {
         _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
-        _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
+        _EMPTY_REPLY_NUDGE, _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
     }
 
 
@@ -1362,6 +1375,8 @@ class AgentLoop:
                 action_type="llm_response",
                 content=content,
                 has_tool_calls=bool(tool_calls),
+                finish_reason=finish_reason,
+                reasoning_chars=len(getattr(response_message, "reasoning_content", None) or ""),
             ))
 
             # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
@@ -1454,6 +1469,36 @@ class AgentLoop:
                     tail = _clean_summary(content)
                     return (f"{_PARSE_FAILED_TURN_NOTICE}\n\nLast reply text (unparsed):\n{tail}"
                             if tail else _PARSE_FAILED_TURN_NOTICE)
+
+                # 9a. Empty completion: no content, no tool calls. Observed live
+                # (qwen3.8-27b, 2026-09-03): two replies ~3 minutes apart, both content "" —
+                # the output budget spent on hidden reasoning — and the turn completed
+                # success=True with a STALE narration line as its summary (the #91 fallback
+                # resolves the last in-turn assistant text, which was "Now let me pull the
+                # voice anchor exemplars…"). The #91 re-prompt is also the wrong message for
+                # this shape ("only a confirmation"). Name the cause to the model once; a
+                # second empty reply ends the turn through the same honest-failure pathway
+                # the parse-retry exhaustion and the #152 guard use.
+                if not content:
+                    if not session.empty_reprompt_used:
+                        session.empty_reprompt_used = True
+                        # This re-prompt already asks for an answer OR a tool call; spending
+                        # the act-guard on the very next reply too would cost a second
+                        # round-trip (3 minutes each on the live overrun) for the same ask.
+                        session.act_nudge_used = True
+                        log.warning(
+                            "Empty completion (finish_reason=%s) for %s — re-prompting once",
+                            finish_reason, self._config.name,
+                        )
+                        session.push({"role": "user", "content": _EMPTY_REPLY_NUDGE})
+                        continue
+                    log.error(
+                        "Empty completion twice (finish_reason=%s) for %s — ending the turn "
+                        "without an answer", finish_reason, self._config.name,
+                    )
+                    session.terminated_reason = "error"
+                    self._conversation = _strip_sentinel_exchanges(session.messages)
+                    return _EMPTY_TURN_NOTICE.format(finish_reason=finish_reason or "unknown")
 
                 # 9a2. Degenerate-repetition guard (#152): a candidate final answer that is one
                 # line repeated over and over is NOT an answer — the live receipt was 265
