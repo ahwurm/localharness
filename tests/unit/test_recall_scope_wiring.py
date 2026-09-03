@@ -339,9 +339,16 @@ async def test_the_global_twin_is_constructed_without_a_bus(tmp_path, monkeypatc
     assert twin.get("bus") is None, "the global twin was given a bus and can take writes"
 
 
-async def test_the_loop_and_both_read_tools_receive_the_same_router(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tool", ["search", "get"])
+async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_path, monkeypatch):
     """Criterion 4 made structural: there is no 'the tool bypassed the knob' path to test for,
-    because injection and on-demand recall read the SAME object."""
+    because injection and on-demand recall read the SAME object.
+
+    Parametrized rather than one test asserting both wires: with both in one body the first
+    assertion SHADOWS the second, so a broken `memory_get` wire is invisible whenever the
+    `memory_search` wire is broken too. One id per wire is what makes the two mutations
+    distinguishable.
+    """
     _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
     rec = _install_recorders(monkeypatch)
     seen = _record_wiring(monkeypatch)
@@ -350,14 +357,12 @@ async def test_the_loop_and_both_read_tools_receive_the_same_router(tmp_path, mo
 
     router = _one(rec, "loop")["recall_router"]
     assert router is not None, "the loop got no router"
-    assert seen["search"], "MemorySearchTool was never constructed — the patch did not bite"
-    assert seen["get"], "MemoryGetTool was never constructed — the patch did not bite"
-    assert seen["search"][0] is router, "memory_search reads a different object than injection"
-    assert seen["get"][0] is router, "memory_get reads a different object than injection"
+    assert seen[tool], f"the {tool} tool was never constructed — the patch did not bite"
+    assert seen[tool][0] is router, (
+        f"memory_{tool} reads a different object than ambient injection does"
+    )
     # Both directions: it is a router, not the store wearing the name.
-    primary = seen["instances"][0]
-    assert seen["search"][0] is not primary
-    assert seen["get"][0] is not primary
+    assert seen[tool][0] is not seen["instances"][0]
 
 
 async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch):
