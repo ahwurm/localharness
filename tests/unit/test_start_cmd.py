@@ -851,14 +851,17 @@ def test_deploy_config_writes_to_agents_subdir(tmp_path):
 def test_deploy_config_default_path(tmp_path, monkeypatch):
     """ORCH-02: default deploy path is ~/.localharness/agents/{name}.yaml.
 
-    #150 phase 38: the workflow's fallback now routes through resolve_config_dir(), so the env
-    chain (LOCALHARNESS_DIR > LOCALHARNESS_HOME > ~) outranks Path.home — including the autouse
-    hermetic LOCALHARNESS_HOME every test gets. Unset both to exercise the genuine DEFAULT, which
-    is what this test always meant to assert; the asserted path is unchanged.
+    #150 phase 38: the workflow's fallback routes through resolve_config_dir() now, which means
+    two things for this test. (1) The env chain (LOCALHARNESS_DIR > LOCALHARNESS_HOME > ~)
+    outranks the home dir — including the autouse hermetic LOCALHARNESS_HOME every test gets — so
+    unset both to exercise the genuine DEFAULT. (2) The default expands via ``expanduser()``,
+    which reads ``$HOME``; it never calls ``Path.home()``, so patching that attribute is inert.
+    Both spellings resolve identically on POSIX (``Path.home() == expanduser("~")``): the asserted
+    path is unchanged, only the way the test fakes "home" is.
     """
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     from localharness.orchestrator.workflow import AgentCreationWorkflow
     wf = AgentCreationWorkflow()  # no config_dir
     wf.set_generated_yaml("name: default-bot\nrole: Default\n")
