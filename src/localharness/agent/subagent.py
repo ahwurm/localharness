@@ -18,6 +18,7 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
@@ -136,6 +137,28 @@ def _sanitize_agent_name(name: str) -> str:
     return name.replace("_", "-")
 
 
+def _child_runtime_paths(cfg: Any, config_dir: Any = None) -> tuple[Path, Path]:
+    """(kill_file_path, compact_md_path) for a CHILD loop, resolved against the SESSION's config dir.
+
+    Mirrors the root-agent pattern (start_cmd.py:1030,1142-1143) so `--config-dir` isolates
+    children too. Before this (#150 phase 38 / v013 Risk #6) every one of the 6 AgentLoop
+    constructions below passed neither, so children hit loop.py's fallbacks: compact.md under a
+    hardcoded ~/.localharness and a bare "KILL" that resolves against the PROCESS CWD.
+
+    A child whose config declares no kill_file gets the config dir's default KILL — the SAME
+    file the root agent watches. The built-in builders' `kill_file=None` never disabled the
+    kill switch (loop.py:725 fell through to `Path.cwd()/"KILL"`); it only pointed it at an
+    unpredictable directory. ROADMAP phase-38 criterion 2 requires "not ~/.localharness or CWD".
+    """
+    from localharness.config.paths import resolve_config_dir, resolve_runtime_path
+    base = resolve_config_dir(config_dir)
+    kill_value = getattr(getattr(getattr(cfg, "permissions", None), "budget", None), "kill_file", None) or "KILL"
+    return (
+        resolve_runtime_path(kill_value, base),
+        base / "agents" / getattr(cfg, "name", "unknown") / "compact.md",
+    )
+
+
 def _child_ctx_with_store_tools(context_manager: Any, child_registry: Any) -> Any:
     """Resolve the child's ContextManager (build one if None) and bind its store-backed verb tools
     (web_fetch / web_page_query / tool_result_get) onto the child registry — so the child's verbs hit
@@ -158,8 +181,9 @@ def _child_ctx_with_store_tools(context_manager: Any, child_registry: Any) -> An
 def build_explore_config(name: str = "explore", kill_file: str | None = None) -> AgentConfig:
     """Build the read-only explore-child AgentConfig with its own bounded budget.
 
-    `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
-    pass a path to honor an external kill file.
+    `kill_file=None` leaves the child on the SESSION's default kill file (`<config-dir>/KILL`) —
+    the same switch the root watches; its own short budget is the real bound.
+    Pass a path to honor an external kill file.
     """
     return AgentConfig(
         name=_sanitize_agent_name(name),
@@ -188,8 +212,9 @@ def build_web_researcher_config(name: str = "web-researcher", kill_file: str | N
     `high` → auto-verify material claims; `fast` → plain research role; anything else
     (incl. the `on-request` default) → verify only when the task explicitly asks.
 
-    `kill_file=None` disables the kill switch for the child (its own short budget bounds it);
-    pass a path to honor an external kill file.
+    `kill_file=None` leaves the child on the SESSION's default kill file (`<config-dir>/KILL`) —
+    the same switch the root watches; its own short budget is the real bound.
+    Pass a path to honor an external kill file.
     """
     rigor = _research_rigor()
     role = WEB_RESEARCHER_ROLE_BASE
@@ -404,6 +429,7 @@ async def dispatch_config_subagent(
     context_manager: Any = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
+    config_dir: Any = None,
 ) -> str:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -431,6 +457,7 @@ async def dispatch_config_subagent(
     task = prepend_toolset(task, allowed)
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+    _kill, _compact = _child_runtime_paths(agent_config, config_dir)
     child_loop = AgentLoop(
         config=agent_config,
         llm=llm,
@@ -438,6 +465,8 @@ async def dispatch_config_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        kill_file_path=_kill,
+        compact_md_path=_compact,
     )
 
     summary = await child_loop.run_turn(task)
@@ -459,6 +488,7 @@ async def dispatch_explore_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,
     config_override: AgentConfig | None = None,
+    config_dir: Any = None,
 ) -> str:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -501,6 +531,7 @@ async def dispatch_explore_subagent(
     # Stamp parent_id on every child event while publishing on the shared bus.
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
+    _kill, _compact = _child_runtime_paths(child_config, config_dir)
     child_loop = AgentLoop(
         config=child_config,
         llm=llm,
@@ -508,6 +539,8 @@ async def dispatch_explore_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        kill_file_path=_kill,
+        compact_md_path=_compact,
     )
 
     summary = await child_loop.run_turn(task)
@@ -534,6 +567,7 @@ async def dispatch_web_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,
     config_override: AgentConfig | None = None,
+    config_dir: Any = None,
 ) -> str:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -567,6 +601,7 @@ async def dispatch_web_subagent(
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
+    _kill, _compact = _child_runtime_paths(child_config, config_dir)
     child_loop = AgentLoop(
         config=child_config,
         llm=llm,
@@ -574,6 +609,8 @@ async def dispatch_web_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        kill_file_path=_kill,
+        compact_md_path=_compact,
     )
 
     summary = await child_loop.run_turn(task)
@@ -688,6 +725,7 @@ async def dispatch_search_verifier_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     child_agent_tool: Any = None,  # accepted for a uniform dispatch signature; verifier is ALWAYS a leaf
     config_override: AgentConfig | None = None,
+    config_dir: Any = None,
 ) -> str:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -711,6 +749,7 @@ async def dispatch_search_verifier_subagent(
     child_registry = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
+    _kill, _compact = _child_runtime_paths(child_config, config_dir)
     child_loop = AgentLoop(
         config=child_config,
         llm=llm,
@@ -718,6 +757,8 @@ async def dispatch_search_verifier_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        kill_file_path=_kill,
+        compact_md_path=_compact,
     )
 
     summary = await child_loop.run_turn(task)
@@ -807,6 +848,7 @@ async def _run_chunk_summarizer(
     chunk_handle: str, question: str, cruncher_store: Any, *, llm: Any, bus: Any, base_registry: Any,
     parent_session_id: str | None, permission_evaluator: Any, token_counter: Any,
     max_context_tokens: int | None, depth: int, max_subagent_depth: int, section_label: str = "",
+    config_dir: Any = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -839,11 +881,14 @@ async def _run_chunk_summarizer(
         list(CHUNK_SUMMARIZER_TOOLS),
     )
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+    chunk_cfg = build_chunk_summarizer_config()
+    _kill, _compact = _child_runtime_paths(chunk_cfg, config_dir)
     try:
         leaf_loop = AgentLoop(
-            config=build_chunk_summarizer_config(), llm=llm, bus=child_bus,
+            config=chunk_cfg, llm=llm, bus=child_bus,
             context_manager=leaf_ctx, tool_registry=leaf_registry,
             permission_evaluator=permission_evaluator,
+            kill_file_path=_kill, compact_md_path=_compact,
         )
         answer = await leaf_loop.run_turn(leaf_task)  # raw extract (no findings-wrapper to mis-parse)
     except Exception as exc:  # noqa: BLE001 - one bad leaf must not abort the whole reduce
@@ -855,6 +900,7 @@ async def _run_chunk_summarizer(
 async def _cruncher_combine_turn(
     question: str, items: list[str], *, partial: bool, llm: Any, child_bus: Any, base_registry: Any,
     permission_evaluator: Any, ctx: Any, exec_seed: Any = None, exec_cfg: Any = None,
+    config_dir: Any = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -868,8 +914,10 @@ async def _cruncher_combine_turn(
                                             mem_limit_mb=exec_cfg.mem_limit_mb), scope="global")
     cfg = build_cruncher_config()
     cfg.tools = ToolConfig(add=[])  # reduce over inline text; exec (if any) resolves via inherited global
+    _kill, _compact = _child_runtime_paths(cfg, config_dir)
     loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
-                     tool_registry=reg, permission_evaluator=permission_evaluator)
+                     tool_registry=reg, permission_evaluator=permission_evaluator,
+                     kill_file_path=_kill, compact_md_path=_compact)
     label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
     goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
             if partial else "one accurate, grounded answer to the question")
@@ -942,6 +990,7 @@ async def dispatch_cruncher_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     cruncher_config: Any = None,
     memory_store: Any = None,
+    config_dir: Any = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -994,6 +1043,7 @@ async def dispatch_cruncher_subagent(
                 depth=depth + 1, max_subagent_depth=max_subagent_depth,
                 section_label=f"section {idx + 1} of {n_sections} of a larger document; you are reading "
                               f"ONE section, not the whole document",
+                config_dir=config_dir,
             )
     raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
@@ -1038,6 +1088,7 @@ async def dispatch_cruncher_subagent(
         return await _cruncher_combine_turn(
             question, batch, partial=True, llm=llm, child_bus=child_bus, base_registry=base_registry,
             permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+            config_dir=config_dir,
         )
 
     items, level, reduce_trace = await hierarchical_reduce(
@@ -1050,7 +1101,7 @@ async def dispatch_cruncher_subagent(
     answer = await _cruncher_combine_turn(
         question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
         permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
-        exec_seed=exec_seed, exec_cfg=cruncher_config,
+        exec_seed=exec_seed, exec_cfg=cruncher_config, config_dir=config_dir,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
     # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
@@ -1101,8 +1152,14 @@ def make_explore_agent_runner(
     parent_store: Any = None,
     cruncher_config: Any = None,
     memory_store: Any = None,
+    config_dir: Any = None,
 ) -> Callable[..., Awaitable[str]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
+
+    `config_dir`: the SESSION's config dir (the `--config-dir` value, or None for the resolved
+    default). Threaded to every child so a subagent's compact.md and kill file land under the
+    SAME root as the parent's instead of a hardcoded ~/.localharness and the process CWD
+    (v013 Risk #6). See `_child_runtime_paths`.
 
     `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
     the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
@@ -1175,6 +1232,7 @@ def make_explore_agent_runner(
             # deliberately: model-driven granting is a root-only capability by design.)
             cruncher_config=cruncher_config,
             memory_store=memory_store,
+            config_dir=config_dir,
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
@@ -1197,7 +1255,7 @@ def make_explore_agent_runner(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
-                cruncher_config=cruncher_config, memory_store=memory_store,
+                cruncher_config=cruncher_config, memory_store=memory_store, config_dir=config_dir,
             )
         if name == "explore":
             dispatch, base_builder = dispatch_explore_subagent, build_explore_config
@@ -1231,6 +1289,7 @@ def make_explore_agent_runner(
                 context_manager=child_ctx,
                 depth=depth,
                 max_subagent_depth=max_subagent_depth,
+                config_dir=config_dir,
             )
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
@@ -1254,6 +1313,7 @@ def make_explore_agent_runner(
             max_subagent_depth=max_subagent_depth,
             child_agent_tool=child_agent_tool,
             config_override=config_override,
+            config_dir=config_dir,
         )
 
     return _run_agent
