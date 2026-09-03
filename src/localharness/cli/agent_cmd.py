@@ -11,7 +11,7 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from localharness.config.paths import resolve_config_dir
+from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
 
 console = Console()
 err_console = Console(stderr=True)
@@ -108,7 +108,15 @@ def agent_create(
     if use_global:
         target_dir = resolve_config_dir(config_dir) / "agents"
     else:
-        target_dir = Path(".localharness") / "agents"
+        # --project means "this project's workspace". Route through the SAME resolution the
+        # readers use (agent list, start), or creation and discovery disagree from any
+        # subdirectory. None => nothing discovered / explicit --config-dir / trust withheld, and
+        # the literal CWD fallback reproduces v0.12 behavior exactly (LAYR-03), which is also the
+        # right bootstrap for a fresh project's first agent. The relative literal (not
+        # `Path.cwd() / ...`) keeps the success/refusal messages byte-identical to before.
+        from localharness.cli.workspace import resolve_workspace_layer
+
+        target_dir = (resolve_workspace_layer(config_dir) or Path(WORKSPACE_DIR_NAME)) / "agents"
 
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{name}.yaml"
@@ -142,11 +150,19 @@ def agent_list(
     ] = None,
 ) -> None:
     """List all configured agents."""
+    from localharness.cli.workspace import resolve_workspace_layer
     from localharness.config.loader import ConfigLoader
 
-    agents = ConfigLoader(config_dir=resolve_config_dir(config_dir)).discover_agents(
-        on_error=_skipped_agent_file
-    )
+    agents = ConfigLoader(
+        config_dir=resolve_config_dir(config_dir),
+        # `config_dir` here is the RAW flag value on purpose: resolving it first would erase the
+        # "was this explicit" signal the workspace gate is built on.
+        # --json is machine output: never stop to ask. An undecided workspace is inert here and
+        # gets its prompt from the next interactive command in this directory.
+        local_config_dir=resolve_workspace_layer(
+            config_dir, interactive=False if json_output else None
+        ),
+    ).discover_agents(on_error=_skipped_agent_file)
 
     if not agents:
         console.print("No agents configured. Run: localharness agent create <name>")
