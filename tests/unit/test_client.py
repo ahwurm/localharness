@@ -904,3 +904,34 @@ async def test_complete_xml_tools_rejection_is_sticky():
     await client._complete_xml(messages=msgs, tools=[_PROBE_TOOL], stream=False)
     assert "tools" not in calls[2]  # sticky: no third 400
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_the_underlying_client_once():
+    """#154: LLMClient never released the AsyncOpenAI's httpx pool (sockets + fds) — a session,
+    and every /model swap inside it, leaked one. aclose() closes it and is idempotent: the
+    ordered shutdown may reach the same client twice."""
+    mock_openai = MagicMock()
+    mock_openai.close = AsyncMock()
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test", timeout_seconds=600)
+
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai):
+        client = LLMClient(config)
+
+    await client.aclose()
+    await client.aclose()
+    assert mock_openai.close.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_survives_a_failing_transport_close():
+    """Teardown runs in a `finally`: a close that raises must not mask the real exit reason."""
+    mock_openai = MagicMock()
+    mock_openai.close = AsyncMock(side_effect=RuntimeError("pool wedged"))
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test", timeout_seconds=600)
+
+    with patch("localharness.provider.client.AsyncOpenAI", return_value=mock_openai):
+        client = LLMClient(config)
+
+    await client.aclose()  # must not raise
+    assert mock_openai.close.await_count == 1

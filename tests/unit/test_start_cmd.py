@@ -2476,6 +2476,36 @@ async def test_hard_fail_in_resource_window_closes_store(tmp_path, monkeypatch):
                 await real_close(s)  # hang-safety on a RED run: reap the leaked worker thread
 
 
+async def test_ordered_shutdown_closes_every_llm_client_it_opened(tmp_path, monkeypatch):
+    """#154: the ordered shutdown closed MCP, the gates and the store but never the LLM client —
+    so every session leaked its httpx pool, and the startup capability probe leaked a second one.
+    Spied at both ends: every LLMClient this drive CONSTRUCTS must be aclose()'d before it exits."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+
+    built: list = []
+    closed: list = []
+    real_init, real_aclose = LLMClient.__init__, LLMClient.aclose
+
+    def spy_init(self, *a, **kw):
+        built.append(self)
+        return real_init(self, *a, **kw)
+
+    async def spy_aclose(self):
+        closed.append(self)
+        return await real_aclose(self)
+
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+    monkeypatch.setattr(LLMClient, "aclose", spy_aclose)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert built, "no LLM client was built — the drive never reached the window under test"
+    assert [c for c in built if c not in closed] == [], "a session leaked an LLM client's pool"
+
+
 def test_hard_fail_in_resource_window_process_exits_not_hangs(tmp_path):
     """The reported symptom, faithfully: a hard startup failure after MemoryStore.open() must let
     the PROCESS exit (promptly + non-zero) instead of hanging forever on aiosqlite's non-daemon

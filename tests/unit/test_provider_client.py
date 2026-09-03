@@ -274,6 +274,51 @@ def test_rebind_endpoint_failure_restores_prior_and_reraises(monkeypatch):
     assert c._client is old_client               # restored
 
 
+async def test_rebind_endpoint_closes_the_replaced_client():
+    """#154: the AsyncOpenAI a rebind replaces owns an httpx connection pool. It used to be left
+    to GC (the resolved TODO) — one leaked pool per /model swap. The LIVE client stays open."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    c = LLMClient(LLMConfig(base_url="http://127.0.0.1:8000/v1", model="m", timeout_seconds=600))
+    old = MagicMock()
+    old.close = AsyncMock()
+    c._client = old
+    c.rebind_endpoint("http://127.0.0.1:11434/v1")
+
+    import asyncio
+    for _ in range(200):  # the close is a background task on the running loop
+        if old.close.await_count:
+            break
+        await asyncio.sleep(0.01)
+    assert old.close.await_count == 1, "the replaced client's pool was never closed"
+    assert c._client is not old and not isinstance(c._client, MagicMock)  # live client rebuilt
+    await c.aclose()
+
+
+def test_failed_rebind_does_not_close_the_still_live_client(monkeypatch):
+    """The exception-safety twin: a rebuild that raises RESTORES the previous client as the live
+    one — closing its pool there would strand the session on a dead endpoint."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from localharness.provider.client import LLMClient, LLMConfig
+
+    c = LLMClient(LLMConfig(base_url="http://127.0.0.1:8000/v1", model="m", timeout_seconds=600))
+    old = MagicMock()
+    old.close = AsyncMock()
+    c._client = old
+
+    def boom(self):
+        raise RuntimeError("cannot build client")
+
+    monkeypatch.setattr(LLMClient, "_build_client", boom)
+    with pytest.raises(RuntimeError, match="cannot build client"):
+        c.rebind_endpoint("http://127.0.0.1:11434/v1")
+    assert c._client is old
+    assert old.close.await_count == 0, "the restored (live) client must NOT be closed"
+
+
 def test_rebind_to_empty_headers_clears_previous_headers():
     """#3: rebinding to an endpoint with {} headers after one with custom headers CLEARS them —
     'leave unchanged' is only for extra_headers=None. An endpoint's identity is exactly its OWN
