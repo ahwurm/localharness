@@ -62,21 +62,23 @@ def test_agent_yaml_paths_skips_missing_dirs(tmp_path, monkeypatch):
     assert ConfigLoader(config_dir=tmp_path / "nope").agent_yaml_paths() == []
 
 
-def test_discover_agents_parity_with_start_cmd_helper(layered):
-    """The folded API returns EXACTLY what start_cmd's helper returns today.
+def test_discover_agents_reproduces_the_deleted_start_cmd_helper(layered):
+    """The roster the deleted `start_cmd._discover_agents_for_start` produced, pinned literally.
 
-    This is the whole point of the wave: plan 38-05 swaps the call sites onto ConfigLoader, and
-    this assertion is the proof that the swap is behavior-preserving. The old helper still exists
-    while this test runs.
+    Plan 38-01 asserted equality against the live helper; plan 38-05 deleted it, so the expected
+    value is inlined here instead of quietly dropped. This is the same tree that parity test used
+    (global alpha + beta, local beta shadowing) and the same expected result — the swap in
+    start_cmd:417 changes nothing observable.
     """
-    from localharness.cli.start_cmd import _discover_agents_for_start
-
     global_dir, project = layered
     _write_agent(global_dir / "agents", "alpha")
     _write_agent(global_dir / "agents", "beta", role="global beta")
     _write_agent(project / ".localharness" / "agents", "beta", role="local beta")
 
-    assert ConfigLoader(config_dir=global_dir).discover_agents() == _discover_agents_for_start(global_dir)
+    assert ConfigLoader(config_dir=global_dir).discover_agents() == [
+        {"name": "alpha", "role": "Test role", "model": "inherit"},
+        {"name": "beta", "role": "local beta", "model": "inherit"},
+    ]
 
 
 def test_discover_agents_local_wins_wholesale(layered):

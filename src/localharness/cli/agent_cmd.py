@@ -33,36 +33,15 @@ def _build_agent_yaml(name: str, role: str, model: str | None) -> dict:
     }
 
 
-def _discover_agents(config_dir: Path) -> list[dict]:
-    """Discover agents from both global and local dirs. Local overrides global by name."""
-    global_dir = config_dir / "agents"
-    local_dir = Path(".localharness") / "agents"
+# Phase 38 (#150): `agent list` reads ConfigLoader.discover_agents() — the same roster `start`
+# reads. Its own copy of discovery lived here and was the only one that dropped a malformed yaml
+# silently (a bare except that discarded the error), so a typo'd file looked exactly like an
+# absent one. It now reports what it skipped.
 
-    agents: dict[str, dict] = {}
 
-    # Load global first (lower priority)
-    if global_dir.exists():
-        for f in sorted(global_dir.glob("*.yaml")):
-            try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-                if "name" not in data:
-                    data["name"] = f.stem
-                agents[f.stem] = data
-            except Exception:
-                pass
-
-    # Local overrides global
-    if local_dir.exists():
-        for f in sorted(local_dir.glob("*.yaml")):
-            try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-                if "name" not in data:
-                    data["name"] = f.stem
-                agents[f.stem] = data
-            except Exception:
-                pass
-
-    return list(agents.values())
+def _skipped_agent_file(f: Path, exc: Exception) -> None:
+    """discover_agents' user-visible warning. config/ logs; the CLI owns the console."""
+    err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
 
 
 @agent_app.command("create")
@@ -163,7 +142,11 @@ def agent_list(
     ] = None,
 ) -> None:
     """List all configured agents."""
-    agents = _discover_agents(resolve_config_dir(config_dir))
+    from localharness.config.loader import ConfigLoader
+
+    agents = ConfigLoader(config_dir=resolve_config_dir(config_dir)).discover_agents(
+        on_error=_skipped_agent_file
+    )
 
     if not agents:
         console.print("No agents configured. Run: localharness agent create <name>")
