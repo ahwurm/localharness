@@ -84,11 +84,8 @@ def test_tool_config_inherit_string_normalizes():
     assert cfg.inherit == ["division"]
 
 
-def test_agent_config_memory_defaults_filled():
-    from localharness.config.models import AgentConfig
-    cfg = AgentConfig(name="my-agent", role="Test role")
-    assert cfg.memory.sqlite_path is not None
-    assert "my-agent" in cfg.memory.sqlite_path
+# test_agent_config_memory_defaults_filled removed in phase 38 (dead config, zero readers —
+# v013 Risk #1): the fields now stay None, and MemoryStore derives its real paths from base_dir.
 
 
 def test_harness_config_with_provider_validates():

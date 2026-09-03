@@ -199,18 +199,10 @@ def test_no_context_anywhere_uses_schema_default(config_dir: Path) -> None:
 
 
 # ------------------------------------------------------------------ #
-# 8. sqlite_path auto-filled from agent name
+# 8. (removed) sqlite_path auto-filled from agent name
+# resolve_memory_defaults removed in phase 38 (dead config, zero readers — v013 Risk #1);
+# MemoryStore derives its own paths from base_dir, so there is no backfill left to assert.
 # ------------------------------------------------------------------ #
-def test_memory_defaults_filled(config_dir: Path) -> None:
-    _write_yaml(config_dir / "agents" / "my-agent.yaml", {
-        "name": "my-agent",
-        "role": "Memory test agent",
-    })
-    loader = ConfigLoader(config_dir=config_dir)
-    cfg = loader.load_agent("my-agent")
-    assert cfg.memory.sqlite_path is not None
-    assert "my-agent" in cfg.memory.sqlite_path
-    assert "memory.db" in cfg.memory.sqlite_path
 
 
 # ------------------------------------------------------------------ #
