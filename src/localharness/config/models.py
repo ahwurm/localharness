@@ -813,6 +813,22 @@ class MemoryConfig(BaseModel):
         ),
     )
 
+    recall_scope: Literal["workspace", "global", "both"] = Field(
+        default="workspace",
+        description=(
+            "Which physical memory STORE recall reads from when a workspace layer applies: "
+            "'workspace' (default) reads only this project's own store; 'global' reads only the "
+            "machine-global store; 'both' merges them, this project's store first, with an origin "
+            "token on every injected line. READS ONLY — remember, the write gate and consolidation "
+            "always write to this session's own store whatever this says; `/memory promote <id>` is "
+            "the one way a memory crosses into the global store. Distinct from shared_read, which "
+            "is the ORG-HIERARCHY axis (division/org context files), not the workspace/global "
+            "physical-store axis. Inert with no workspace layer (LAYR-03): exactly one store exists "
+            "and all three values behave identically. Mutable via `localharness components set "
+            "agent.memory.recall_scope <workspace|global|both>`."
+        ),
+    )
+
     inject_into_context: bool = Field(
         default=True,
         description=(
