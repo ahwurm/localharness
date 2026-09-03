@@ -581,6 +581,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # on Windows a stale pidfile raises a plain OSError instead of ProcessLookupError.
             # Managed-server lifecycle is POSIX-only for now; degrade to a message, not a traceback.
             err_console.print(f"[bold red]Error:[/bold red] managed vLLM failed to start: {exc}")
+    # The probe client has done its job — the session's real client is rebuilt below with the
+    # probe-derived mode — so release its httpx pool here (#154), ahead of the `typer.Exit(1)`
+    # failure paths just after, which would else leave the sockets to GC on the way out.
+    await _probe_client.aclose()
     if not probe_ok:
         # #44: name the concrete cause instead of a generic "Cannot reach model" — an unserved
         # model and a dead endpoint are different fixes — and point at the diagnostics.
@@ -1246,13 +1250,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> PredictiveGate/UserSignals/PredictiveWriteGate -> end_session -> MemoryStore ---
+        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> PredictiveGate/UserSignals/PredictiveWriteGate -> end_session -> MemoryStore -> LLMClient ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Swallow — a teardown failure must not replace the real exit reason — but never
+                # silently: an MCP server that refuses to die is a diagnosable thing.
+                log.debug("MCP shutdown failed: %s", exc)
         if consolidation_scheduler:
             try:
                 await consolidation_scheduler.stop()
@@ -1315,6 +1321,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 await memory_store.close()
             except Exception:
                 pass
+        # LAST (#154): the LLM client's httpx pool outlives every consumer that could still issue
+        # a request through it — the REPL and its agents (repl.run() has returned), consolidation,
+        # the gates — and the close-out summary above is pure. Closing it earlier would risk
+        # pulling the pool out from under an in-flight shutdown write; closing it never leaked a
+        # pool per session (and one more per /model swap).
+        await llm.aclose()
 
 
 def start_app(
