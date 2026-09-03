@@ -198,3 +198,47 @@ async def test_broken_entry_point_skipped():
     tool_config = ToolConfig()
     tools = registry.get_tools_for_agent("agent-1", "default", tool_config)
     assert "ping" in tools
+
+
+# --- plugins dir resolution (#150 phase 38): the chokepoint, not the raw user home ---
+
+
+def test_plugins_dir_default_honors_env_chain(monkeypatch, tmp_path):
+    """A --config-dir / LOCALHARNESS_DIR session must load ITS plugins. Before phase 38 the
+    default was Path.home()/".localharness"/"plugins" unconditionally, so an isolated session
+    silently loaded the real user's plugins."""
+    home_env = tmp_path / "home"
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(home_env))
+    assert _make_loader(_make_registry(), _make_hook_system())._plugins_dir == home_env / "plugins"
+
+    dir_env = tmp_path / "dir"
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(dir_env))
+    assert _make_loader(_make_registry(), _make_hook_system())._plugins_dir == dir_env / "plugins"
+
+
+def test_plugins_dir_explicit_arg_unchanged(monkeypatch, tmp_path):
+    """An explicit plugins_dir is honored exactly — the env chain never re-roots it."""
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "ignored"))
+    explicit = tmp_path / "explicit-plugins"
+    assert _make_loader(_make_registry(), _make_hook_system(), plugins_dir=explicit)._plugins_dir == explicit
+
+
+def test_plugins_dir_default_unchanged_when_nothing_set(monkeypatch):
+    """Zero-behavior-change guarantee: with no env and no arg, byte-identical to pre-phase-38."""
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    loader = _make_loader(_make_registry(), _make_hook_system())
+    assert loader._plugins_dir == Path.home() / ".localharness" / "plugins"
+
+
+def test_plugins_dir_resolved_at_construction_not_import(monkeypatch, tmp_path):
+    """v013 Risk #3: never capture a per-invocation path at import time. Two loaders built
+    under different env must disagree."""
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(tmp_path / "first"))
+    first = _make_loader(_make_registry(), _make_hook_system())._plugins_dir
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(tmp_path / "second"))
+    second = _make_loader(_make_registry(), _make_hook_system())._plugins_dir
+    assert first == tmp_path / "first" / "plugins"
+    assert second == tmp_path / "second" / "plugins"

@@ -243,3 +243,33 @@ def test_deploy_config_refuses_to_overwrite_existing(tmp_path: Path):
     with pytest.raises(ValueError, match="exists"):
         wf2.deploy_config()
     assert path.read_text() == original  # original untouched, no silent clobber
+
+
+# --- config dir resolution (#150 phase 38): chokepoint-routed fallback ---
+
+
+def test_workflow_config_dir_honors_env_chain(monkeypatch, tmp_path: Path):
+    """The bare-construction fallback was Path.home()/".localharness", bypassing the chokepoint
+    (research §1). It now follows LOCALHARNESS_DIR > LOCALHARNESS_HOME like everything else."""
+    home_env = tmp_path / "home"
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(home_env))
+    assert AgentCreationWorkflow()._config_dir == home_env
+
+    dir_env = tmp_path / "dir"
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(dir_env))
+    assert AgentCreationWorkflow()._config_dir == dir_env
+
+
+def test_workflow_explicit_config_dir_wins(monkeypatch, tmp_path: Path):
+    """The real interactive path (repl.py -> router.py) threads a dir; it still wins."""
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "ignored"))
+    explicit = tmp_path / "explicit"
+    assert AgentCreationWorkflow(config_dir=explicit)._config_dir == explicit
+
+
+def test_workflow_config_dir_unchanged_when_nothing_set(monkeypatch):
+    """Zero-behavior-change guarantee: no env, no arg -> ~/.localharness, exactly as before."""
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    assert AgentCreationWorkflow()._config_dir == Path("~/.localharness").expanduser()
