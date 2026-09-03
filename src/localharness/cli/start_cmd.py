@@ -24,8 +24,11 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
-def _managed_server_running(strategy: Any, srv: Any, config_dir: Path) -> bool:
-    """Is the harness-managed server ALREADY serving? Asks the LIFECYCLE STRATEGY (the single
+def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
+    """Is the harness-managed server ALREADY serving? ``global_dir`` is the GLOBAL config dir, not
+    whatever layer the session is otherwise reading: the pidfile/log/venv under ``<global>/vllm/``
+    are machine-wide (one physical GPU daemon per box), so this liveness question must never be
+    asked of a workspace layer. Asks the LIFECYCLE STRATEGY (the single
     owner of how a backend is launched/stopped/checked) instead of re-deriving liveness here:
     docker reads the CONTAINER by name — never the pidfile, whose pid is the `docker run`
     sig-proxy CLIENT, the orphan-client-pid bug; binary/ollama read `server_pid()`, correct
@@ -34,7 +37,7 @@ def _managed_server_running(strategy: Any, srv: Any, config_dir: Path) -> bool:
     read False and start took the "not running" branch into LmsStrategy.activate, whose
     pre-existing-server fail-fast then raised on the server that was in fact already up.
     Called inside the autostart try, so an OSError from the pid path degrades as before."""
-    return strategy.liveness(srv, config_dir).alive
+    return strategy.liveness(srv, global_dir).alive
 
 
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
@@ -327,7 +330,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.init_cmd import init_app
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
-    from localharness.config.paths import resolve_config_dir, resolve_runtime_path
+    from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
     from localharness.plugins.loader import PluginLoader
@@ -338,6 +341,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.tools.builtin import register_builtin_tools
 
     cfg_path = resolve_config_dir(config_dir)
+    # GPU server state is machine-wide (C2 single-pidfile invariant, ROADMAP Standing Invariant):
+    # <global>/vllm/{server.pid,serve.log,venv/}. Derived from the RAW --config-dir so it stays
+    # global no matter what cfg_path comes to mean when workspace layering lands.
+    server_cfg_path = global_config_dir(config_dir)
     config_file = cfg_path / "config.yaml"
 
     # No config → welcome message + exit
@@ -565,16 +572,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.provider.lifecycle import strategy_for
         strategy = strategy_for(harness.server)
         try:
-            if not _managed_server_running(strategy, harness.server, cfg_path):
+            if not _managed_server_running(strategy, harness.server, server_cfg_path):
                 console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
                 # activate = serve_command → start_server → wait_ready (launch + readiness) via the
                 # lifecycle strategy. Byte-equivalent to the old start_server+wait_ready pair; the
                 # off-loop verified-stop wrapper lives in the strategy, not this launch path.
-                await strategy.activate(harness.server, cfg_path, provider.base_url)
+                await strategy.activate(harness.server, server_cfg_path, provider.base_url)
             else:
                 console.print("Managed vLLM is still loading — waiting...")
                 # Already launched (a live pidfile / running container) — only wait for readiness.
-                await managed_server.wait_ready(provider.base_url, config_dir=cfg_path)
+                await managed_server.wait_ready(provider.base_url, config_dir=server_cfg_path)
             probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
