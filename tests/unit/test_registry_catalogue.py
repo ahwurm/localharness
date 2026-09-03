@@ -397,3 +397,61 @@ def test_write_budgets_express_manifest_scale_via_ctor():
     cfg = MemoryConsolidationConfig(schema_write_budget=500, mining_write_budget=500)
     assert cfg.schema_write_budget == 500
     assert cfg.mining_write_budget == 500
+
+
+# ------------------------------------------------------------------ #
+# MERG-03 / v0.13: the ruled layer order (phase 40-03)
+# ------------------------------------------------------------------ #
+
+
+def test_layer_priority_records_the_ruled_order():
+    """The tuple IS the owner's ruling, pinned as a value so a reorder is a deliberate act.
+
+    Owner ruling 2026-09-03 (Option A): the workspace layer outranks the global user overlay
+    (the SPECIFIC beats the GENERAL); `experiment` stays on top.
+    """
+    from localharness.registry import catalogue
+
+    assert catalogue._LAYER_PRIORITY == ("experiment", "workspace", "user", "project"), (
+        "Owner ruling 2026-09-03 (Option A): workspace outranks the global user overlay, "
+        "experiment stays on top. Changing this tuple changes what `components list` tells a "
+        "user owns their setting — reorder it only with a new ruling."
+    )
+
+
+def test_workspace_outranks_user_when_both_declare_a_path():
+    """The ruled order proven behaviorally, not only as a tuple literal."""
+    from localharness.registry import catalogue
+
+    both = catalogue._detect_layer(
+        "org.log_level",
+        {
+            "workspace": {"org": {"log_level": "debug"}},
+            "user": {"org": {"log_level": "info"}},
+        },
+    )
+    assert both == "workspace", "workspace must win over the global user overlay (Option A)"
+
+    top = catalogue._detect_layer(
+        "org.log_level",
+        {
+            "experiment": {"org": {"log_level": "warning"}},
+            "workspace": {"org": {"log_level": "debug"}},
+        },
+    )
+    assert top == "experiment", "experiment stays on top of workspace"
+
+
+def test_absent_workspace_overlay_changes_nothing():
+    """Adding a NAME to the priority tuple is inert until something populates that key.
+
+    `_detect_layer` reads `overlays.get(layer, {})`, so an unpopulated layer name can never
+    win. Nothing builds an `overlays["workspace"]` dict in v0.13 — this asserts the claim the
+    tuple's comment makes, rather than leaving it as a comment.
+    """
+    from localharness.registry import catalogue
+
+    assert catalogue._detect_layer(
+        "org.log_level", {"project": {"org": {"log_level": "info"}}}
+    ) == "project"
+    assert catalogue._detect_layer("org.log_level", {}) == "default"
