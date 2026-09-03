@@ -20,7 +20,7 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
-from localharness.config.paths import resolve_runtime_path
+from localharness.config.paths import global_config_dir, resolve_runtime_path
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import set_value_in_dict
@@ -103,7 +103,10 @@ async def persist_default_model(
     before_provider = harness.provider.default_model
     before_org = harness.org.default_model
 
-    overlay_path = _resolve_user_overlay_path(config_dir)
+    # Amendment #2 (v0.13): the model/endpoint overlay is MACHINE-WIDE truth — there is one physical
+    # GPU daemon, so this write names the GLOBAL layer explicitly and never follows a workspace layer.
+    # Byte-identical today (the global seam IS resolve_config_dir); load-bearing from phase 40 on.
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
     existing = load_overlay(overlay_path)
     merged_avail = _merged_available_models(harness, existing, model)
 
@@ -183,7 +186,10 @@ async def persist_active_endpoint(
     """
     from localharness.config.models import ActiveSelection
 
-    overlay_path = _resolve_user_overlay_path(config_dir)
+    # Amendment #2 (v0.13): the model/endpoint overlay is MACHINE-WIDE truth — there is one physical
+    # GPU daemon, so this write names the GLOBAL layer explicitly and never follows a workspace layer.
+    # Byte-identical today (the global seam IS resolve_config_dir); load-bearing from phase 40 on.
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
     existing = load_overlay(overlay_path)
     new_overlay = dict(existing)
     set_value_in_dict(new_overlay, "active_endpoint.name", getattr(endpoint, "name", ""))
