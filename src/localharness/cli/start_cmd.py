@@ -212,34 +212,19 @@ def _ensure_packaged_tools(config_dir: Path) -> None:
         err_console.print(f"[yellow]⚠ could not install design-screenshot.js: {exc}[/yellow]")
 
 
-def _agent_yaml_paths(config_dir: Path) -> list[Path]:
-    """Every agent yaml discovery reads, global dir first so local .localharness/ wins."""
-    return [
-        f
-        for d in (config_dir / "agents", Path(".localharness") / "agents")
-        if d.exists()
-        for f in sorted(d.glob("*.yaml"))
-    ]
+# Agent discovery lives in ConfigLoader (agent_yaml_paths / discover_agents) — phase 38 (#150)
+# folded start's own copy into it. start, `agent list` and the loader had three implementations
+# with three different malformed-YAML behaviors; the roster below reads the only one that remains.
 
 
-def _discover_agents_for_start(config_dir: Path) -> list[dict]:
-    """Return agents from global config dir and local .localharness/agents/, local overrides.
+def _skipped_agent_file(f: Path, exc: Exception) -> None:
+    """The user-visible half of discover_agents' warn-and-skip.
 
-    An unparseable file is SKIPPED but never SILENTLY: swallowing the parse error made a typo'd
-    agents/orchestrator.yaml indistinguishable from a fresh install, and the caller's mint branch
-    then overwrote it with the default template (role/tools/mcp_servers/permissions lost, no backup).
+    ConfigLoader logs, but config/ must never import a rich console from cli/ — so the caller
+    supplies the printer. This warning is load-bearing: the mint-refusal below points at it
+    ("see the warnings above") before it refuses to overwrite an unparseable root agent.
     """
-    agents: dict[str, dict] = {}
-    for f in _agent_yaml_paths(config_dir):
-        try:
-            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-            if "name" not in data:
-                data["name"] = f.stem
-            agents[f.stem] = data
-        except Exception as exc:  # noqa: BLE001
-            err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
-
-    return list(agents.values())
+    err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
 
 
 def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
@@ -414,7 +399,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # Discover agents (migrate the legacy root-agent YAML first so discovery reads the
     # rewritten name: field, not the stale name: default — Phase 33.1 ORCH-01/03)
     _migrate_legacy_root_agent_yaml(cfg_path / "agents")
-    agents = _discover_agents_for_start(cfg_path)
+    agents = loader.discover_agents(on_error=_skipped_agent_file)
 
     if agent_name:
         # --agent flag: find by name
@@ -436,7 +421,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # Zero agents is NOT proof of a fresh install: discovery skips files it cannot parse, so a
         # one-character YAML typo in agents/orchestrator.yaml lands here too — and the mint below
         # used to write the 3-line default straight over it. Mint only when there is nothing to lose.
-        unparsed = _agent_yaml_paths(cfg_path)
+        unparsed = loader.agent_yaml_paths()
         if unparsed:
             err_console.print(
                 "[bold red]Error:[/bold red] no agent could be loaded, but agent files exist: "
