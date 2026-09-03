@@ -10,6 +10,7 @@ from typing import Annotated
 import httpx
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.rule import Rule
 
 from localharness.config.loader import ConfigLoader
@@ -150,8 +151,12 @@ def doctor(
     # a layer applies — with none, doctor's output stays byte-identical to v0.12 (LAYR-03).
     # Phase 43 (CLI-02) is where doctor grows the full both-layers/per-key provenance report.
     if workspace is not None:
-        console.print(f"{_PASS} Workspace layer: {workspace}")
-        console.print(f"       Global layer:    {cfg_path}")
+        # escape() around the path halves, glyph outside it: `_PASS` needs markup, a filesystem
+        # path must not have it. Measured, not theoretical — a folder named `[old] proj` printed
+        # as `/tmp/ proj/...` here, i.e. doctor reporting a path that does not exist, in the one
+        # command people run to find out where their config comes from. (`[/]` raises outright.)
+        console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"))
+        console.print(escape(f"       Global layer:    {cfg_path}"))
     try:
         harness = loader.load_harness()
         console.print(f"{_PASS} Config valid")

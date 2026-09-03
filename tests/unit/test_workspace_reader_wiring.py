@@ -109,6 +109,12 @@ def in_repo_project(tmp_path, monkeypatch):
     Returns the workspace, the global dir and the deep CWD. The workspace holds `ws-agent` (only
     it has one) and a colliding `global-agent` with a different role, so both "the workspace adds"
     and "the workspace wins" are observable.
+
+    The project folder is deliberately named `[old] proj`: legal on every filesystem, and rich
+    markup. Any command that prints this path without escaping it either eats the bracket (naming
+    a directory that does not exist) or raises. Measured in 39-04 and hit AGAIN in 39-05 — doctor
+    printed `/tmp/ proj/...` — so the hostile name lives in the fixture where every path
+    assertion in this file has to survive it.
     """
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
@@ -120,14 +126,14 @@ def in_repo_project(tmp_path, monkeypatch):
     _write_agent(global_dir / "agents", "global-agent", "global role")
     monkeypatch.setenv("HOME", str(home))
 
-    workspace = tmp_path / "proj" / ".localharness"
+    workspace = tmp_path / "[old] proj" / ".localharness"
     _write_agent(workspace / "agents", "ws-agent", "workspace role")
     _write_agent(workspace / "agents", "global-agent", "workspace override role")
     # A `.git` DIRECTORY by hand: the boundary check reads the marker off the filesystem and
     # never shells out, so no repository has to be created for real.
-    (tmp_path / "proj" / ".git").mkdir()
+    (tmp_path / "[old] proj" / ".git").mkdir()
 
-    deep = tmp_path / "proj" / "src" / "pkg"
+    deep = tmp_path / "[old] proj" / "src" / "pkg"
     deep.mkdir(parents=True)
     monkeypatch.chdir(deep)
     _prompt_must_not_fire(monkeypatch)
