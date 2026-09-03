@@ -418,7 +418,13 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     effective_max_context_tokens = scenario.budget.max_context_tokens
     try:
         from localharness.config.loader import ConfigLoader
-        org_ceiling = ConfigLoader().load_harness().org.context.max_context_tokens
+        from localharness.config.paths import global_config_dir
+        # Amendment #3: explicit dir => non-discovering by construction; a sibling worktree's
+        # .localharness/ must never steer a bench run.
+        org_ceiling = (
+            ConfigLoader(config_dir=global_config_dir())
+            .load_harness().org.context.max_context_tokens
+        )
     except Exception:
         org_ceiling = None
     if org_ceiling is not None and org_ceiling < effective_max_context_tokens:
@@ -474,6 +480,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # every "faithful over-window" claim rested on mocked unit tests with no scored regression signal.
     if "agent" in scenario.tools_allowed:
         from localharness.agent.subagent import make_explore_agent_runner
+        from localharness.config.paths import global_config_dir
         from localharness.tools.builtin.agent_tool import AgentTool
 
         # Advertise ONLY what this runner can dispatch: the four built-ins. No load_agent is
@@ -498,6 +505,9 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             parent_store=bench_store,
             # cruncher exec policy (default off): the faithful reduce never needs host exec.
             cruncher_config=agent_config.cruncher,
+            # Amendment #3: bench resolves the GLOBAL dir explicitly — a sibling worktree's
+            # .localharness/ must never steer a bench run.
+            config_dir=global_config_dir(),
         )
         tool_registry._tools["global"]["agent"] = AgentTool(
             agent_runner=_agent_runner, available_agents=_bench_agents)
