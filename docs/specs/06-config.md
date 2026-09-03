@@ -4,7 +4,7 @@
 **Component:** `config/models.py`, `config/loader.py`, `config/defaults.py`  
 **Layer:** 1 (models) + 2 (loader)  
 **Status:** Authoritative — implement against this document  
-**Last updated:** 2026-09-03 (v0.13: workspace layer search order + trust gate)
+**Last updated:** 2026-09-03 (v0.13: workspace layer search order, trust gate, and config merge)
 
 ---
 
@@ -36,10 +36,11 @@ All agent configuration is **read-only at runtime**. The agent loop reads config
 
 # Workspace config (optional): the nearest .localharness/ at or above the current directory
 {project}/.localharness/
-├── config.yaml                   # not read yet — the directory is discovered in v0.13,
-│                                 # merging this file lands in a later v0.13 release
+├── config.yaml                   # merged over the global config.yaml (workspace wins per key)
+├── overrides.yaml                # merged last — the highest-priority layer
 ├── agents/
-└── divisions/
+├── divisions/
+└── microagents/
 ```
 
 ### Search Order for Config Files
@@ -50,7 +51,9 @@ The ConfigLoader searches for agent configs in this priority order (first found 
 2. `~/.localharness/agents/{name}.yaml` — user-global
 3. (v2) system-level configs — not implemented in v1
 
-Division configs follow the same pattern. Org config is always from `~/.localharness/org.yaml`.
+Division configs follow the same pattern. Org settings live in the `org:` section of `config.yaml`
+and are merged across both layers like any other key. A standalone `~/.localharness/org.yaml` is an
+older, optional file — it still works, and it is read from the global directory only.
 
 **Finding the workspace layer (v0.13).** At session start the harness walks up from your current
 directory looking for a `.localharness/` directory. The **first one it finds is the workspace
@@ -73,10 +76,71 @@ printed on stderr.
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
 
-Once a workspace applies, agent and division lookup reads the workspace file first, then the
-global one. `config.yaml` and `org.yaml` are **not** read from a workspace in v0.13 — both still
-load from the global directory only, and merging them across the two layers is a later v0.13
-release.
+### How the two layers combine
+
+When a workspace applies, four files can contribute to one config. Lowest priority first:
+
+1. `~/.localharness/config.yaml` — the global config `localharness init` writes
+2. `~/.localharness/overrides.yaml` — the global overlay `localharness components set` writes
+3. `{workspace}/.localharness/config.yaml`
+4. `{workspace}/.localharness/overrides.yaml`
+
+Each one wins any key an earlier one also set. In one line: **the specific beats the general — the
+workspace's word wins wherever the two conflict, and the global layer still governs everything the
+workspace is silent about.**
+
+Notice what that means for a value you set globally with `components set`. If a workspace sets the
+same key, the workspace wins, and your global value no longer applies while you are working inside
+that project. That is deliberate, and it is the cost of the workspace owning its own behavior: a
+global default that a project could not override would not be a default, it would be a rule. Your
+global value is untouched and still applies everywhere else.
+
+**Nested blocks merge key by key.** A workspace that sets only:
+
+```yaml
+provider:
+  default_model: qwen3.8-27b
+```
+
+keeps the global `base_url`, `provider_type` and every other field under `provider:`. You never
+have to restate a whole block to change one field inside it.
+
+**Lists are replaced, not combined.** A workspace that sets `provider.available_models` replaces
+the global list rather than adding to it. There is exactly one exception:
+`org.permissions.deny_patterns` accumulates across the layers. A workspace can add deny rules and
+can never remove one the global layer set, because safety rules only ever add up.
+
+**Provider.** A workspace that says nothing about `provider:` uses the global one, which is the
+normal case. A workspace may override it, but nothing ever writes a provider block into a
+workspace, and `localharness model` always edits the global file. There is one model server on the
+machine, and where it lives is a fact about the machine rather than about the folder you happen to
+be standing in.
+
+**Agents, divisions and microagents** are a union by name across both layers. A name defined in
+only one layer is available either way; a name defined in both resolves to the workspace's file,
+and that file replaces the global one entirely instead of being merged into it field by field. So a
+workspace's `agents/deployer.yaml` is the whole definition of `deployer` inside that project — no
+field leaks across from the global file of the same name.
+
+#### What this does NOT cover
+
+- **`localharness components list / get / set` read and write the global layer only** —
+  `~/.localharness/config.yaml` and `~/.localharness/overrides.yaml`. Inside a workspace they can
+  show you a value the running harness is not using. A merged view that names the layer each value
+  came from is the next piece of work.
+- **`localharness validate` validates the MERGED config**, so a mistake in a workspace
+  `config.yaml` is caught — but it is reported against the name `config.yaml` without saying which
+  layer the bad line came from. If validate reports a config error you cannot find in the global
+  file, look in the workspace one.
+- **An `agent:` section in a workspace `overrides.yaml` is not read.** That section is the
+  per-agent default layer `components set agent.*` writes, and every writer of that layer is global
+  in this release.
+- **A standalone `org.yaml` is read from the global directory only** and is not layered. Put org
+  settings in the `org:` section of `config.yaml` if you want a workspace to be able to override
+  them.
+- **Microagent files resolve across both layers, but nothing injects them into a prompt yet.**
+  `context.microagents` is parsed and the files are found; the keyword-triggered injection that
+  would use them is not built.
 
 ### Environment Variable Overrides
 
