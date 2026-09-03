@@ -569,6 +569,22 @@ class ConfigLoader:
         if isinstance(overlay_agent, dict) and overlay_agent:
             merged = deep_merge(overlay_agent, merged)
 
+        # 5c. CONF-01 (v0.13): the confinement leash comes free with the workspace layer. When a
+        # workspace applies and nothing else set a root, default it to the folder CONTAINING
+        # `.localharness/` — the project you are standing in, not the dotdir. Placed AFTER 5b so it
+        # sees the fully resolved value: an explicit `workspace_root` from the agent's own yaml OR
+        # from the overlay's `agent:` section still wins, and this only fills the gap. Nothing is
+        # written to any file — the default exists only in the effective AgentConfig. With no
+        # workspace layer this is inert and `None` still means UNCONFINED (models.py's contract).
+        #
+        # Both halves of the guard are load-bearing. `self._local_dir is not None` keeps a
+        # workspace-less session byte-identical (LAYR-03) and is what makes `.parent` safe. The
+        # falsy check is what makes explicit config win; falsy-not-None is deliberate, since an
+        # empty-string root is a mistake rather than a confinement and the project root is the
+        # better answer than a leash around "".
+        if self._local_dir is not None and not merged.get("permissions", {}).get("workspace_root"):
+            merged.setdefault("permissions", {})["workspace_root"] = str(self._local_dir.parent)
+
         # 6. Validate merged dict
         line_map = _build_line_map(text)
         try:
