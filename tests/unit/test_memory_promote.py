@@ -36,6 +36,8 @@ from tests.unit.test_workspace_state_landing import (
     AGENT,
     _drive,
     _global_only_start,
+    _install_recorders,
+    _one,
     _workspace_start,
 )
 
@@ -464,3 +466,24 @@ async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path
     assert fact is not None and fact.source != "promote", \
         f"a session with no workspace promoted into its own store: {fact}"
     assert len(history) == 1, f"promote forked the one store it had: {history}"
+
+
+async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypatch):
+    """The discrimination the behavioral tests cannot make.
+
+    "start never passed the router to the REPL" and "the REPL never used it" both leave promote
+    silently inert, and the mutation audit measured them as INDISTINGUISHABLE by red set — the two
+    session tests above redden identically under either. So the construction is pinned separately,
+    and pinned as IDENTITY rather than presence: a second `RecallRouter` over the same two
+    databases would behave correctly here and would open a second aiosqlite connection to one file
+    (Pitfall 6), which is exactly the lifecycle `ensure_global` exists to keep single-owner.
+    """
+    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()
+
+    router = _one(rec, "repl").get("recall_router")
+    assert router is not None, "the REPL was constructed without the session's recall router"
+    assert router is _one(rec, "loop")["recall_router"], \
+        "the REPL got a DIFFERENT router than the loop — two handles on one database"
