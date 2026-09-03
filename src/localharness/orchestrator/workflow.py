@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from localharness.config.paths import resolve_config_dir
+
 
 # #59: deterministic, leading-anchored cancellation. The old escape was 4 undocumented
 # exact-matches (cancel/quit/exit/nevermind), so "actually, never mind, forget it" became
@@ -133,7 +135,9 @@ class AgentCreationWorkflow:
 
     def __init__(self, config_dir: Path | None = None) -> None:
         self._state = WorkflowState.DISCUSS
-        self._config_dir = config_dir or Path.home() / ".localharness"
+        # #150 phase 38: chokepoint-routed. Explicit arg (repl.py -> router.py threads one) still
+        # wins; the bare fallback now honors LOCALHARNESS_DIR/HOME instead of the raw user home.
+        self._config_dir = resolve_config_dir(config_dir)
         self._gathered: dict[str, Any] = {}
         self._generated_yaml: str = ""
         self._agent_name: str = ""
