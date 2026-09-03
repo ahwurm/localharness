@@ -27,10 +27,16 @@ class ComponentEntry:
     type_name: str             # human-readable: "int", "float", "str", "Literal['debug',...]"
     current_value: Any         # resolved-cascade value (what `get` returns)
     default_value: Any         # the Pydantic-baked default
-    winning_layer: str         # "default" | "project" | "user" | "experiment"
+    winning_layer: str         # "default" | "project" | "user" | "workspace" | "experiment"
 
 
-_LAYER_PRIORITY = ("experiment", "user", "project")  # highest-priority first
+# Owner ruling 2026-09-03 (Option A): the workspace layer outranks the global user overlay — the
+# SPECIFIC beats the GENERAL. `experiment` stays on top. This tuple is the ORDER; nothing populates
+# an `overlays["workspace"]` dict in v0.13 (components_cmd._build_overlays ships project + user
+# only), and `_detect_layer`'s `overlays.get(layer, {})` makes an unpopulated name inert — so every
+# existing attribution is unchanged. Wiring a real workspace dict in is CLI-03 (phase 43), together
+# with the still-open question of renaming "project" (which means config.yaml, not a project folder).
+_LAYER_PRIORITY = ("experiment", "workspace", "user", "project")  # highest-priority first
 
 
 def _path_exists_in_dict(d: dict, path: str) -> bool:
@@ -44,7 +50,7 @@ def _path_exists_in_dict(d: dict, path: str) -> bool:
 
 
 def _detect_layer(path: str, overlays: dict[str, dict]) -> str:
-    """Scan overlays top-down ('experiment' -> 'user' -> 'project'); first hit wins.
+    """Scan overlays top-down ('experiment' -> 'workspace' -> 'user' -> 'project'); first hit wins.
     Returns 'default' if no overlay contains the path.
     """
     for layer in _LAYER_PRIORITY:
