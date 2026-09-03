@@ -842,6 +842,35 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"memory: {exc} (in-memory mode)")
         memory_store = None
 
+    # v0.13 MEMS-02: scope-aware recall. The router owns the READ side; every write path below
+    # keeps `memory_store` itself, so `recall_scope` can never redirect a write (that is what
+    # `/memory promote` is for). Bound BEFORE the resource-owning window so its `finally` can
+    # always close what this opened.
+    recall_router = None
+    if memory_store is not None:
+        from localharness.memory.router import RecallRouter
+        _global_twin = None
+        if workspace is not None:
+            # CONSTRUCTED, NOT OPENED — MemoryStore.__init__ only derives paths; open() creates
+            # and migrates a database, and a default-scope session must not create anything under
+            # the global agents tree (MEMS-03). The router opens this lazily, only if the knob
+            # asks. No `bus=`: a bus subscription would let auto-diary WRITE into the global store.
+            # Gated on `workspace is not None`, NOT on recall_scope's value: with no workspace,
+            # `state_dir == cfg_path` and a second handle would be a second aiosqlite connection
+            # to the SAME file.
+            _global_twin = MemoryStore(
+                agent_id=agent_name_str,
+                division_id=agent_config.division or "default",
+                org_id="default",
+                base_dir=str(cfg_path),
+                global_base_dir=str(cfg_path),
+            )
+        recall_router = RecallRouter(
+            memory_store,
+            _global_twin,
+            scope=getattr(agent_config.memory, "recall_scope", "workspace"),
+        )
+
     # --- Resource-owning window (#43) ---
     # Everything constructed AFTER the store opens must be torn down by the finally below. A hard
     # failure in this window (e.g. the TokenCounter fail-loud) otherwise skips cleanup and leaks
@@ -976,8 +1005,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     MemoryRememberTool,
                     MemorySearchTool,
                 )
-                await tool_registry.register(MemorySearchTool(memory_store), scope="global")
-                await tool_registry.register(MemoryGetTool(memory_store), scope="global")
+                # Both READ tools take the router, so the scope knob applies to on-demand recall
+                # exactly as it applies to injection (criterion 4 — one object, not per-tool
+                # checks).
+                await tool_registry.register(MemorySearchTool(recall_router), scope="global")
+                await tool_registry.register(MemoryGetTool(recall_router), scope="global")
+                # remember() WRITES — it keeps the session's own store whatever recall_scope says.
                 # #87: wire the bridged LLM so remember() files its atom (bucket + child) at save
                 # time through the same cancellable, char-bounded idle path as mint-time tagging.
                 await tool_registry.register(
@@ -1201,6 +1234,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             tool_registry=tool_registry,
             permission_evaluator=perm_eval,
             memory_loader=memory_store,
+            recall_router=recall_router,
             kill_file_path=kill_file_path,
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
@@ -1376,6 +1410,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # Never silent (2026-07-03 live-test rule): a skipped close-out is the
                 # amnesia class. Match the surrounding swallow but leave a one-line trace.
                 err_console.print(f"[yellow]⚠ session close-out skipped: {exc}[/yellow]")
+        # The router's global handle (workspace sessions that opted into global/both recall) —
+        # closed before the primary, same reason every close above is ordered: aiosqlite's worker
+        # thread is NON-DAEMON and a leaked handle hangs interpreter shutdown (#43). Closes ONLY
+        # what the router itself opened; the primary belongs to this function.
+        if recall_router is not None:
+            try:
+                await recall_router.close()
+            except Exception:
+                pass
         if memory_store:
             try:
                 await memory_store.close()

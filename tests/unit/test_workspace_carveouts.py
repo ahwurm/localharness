@@ -455,7 +455,16 @@ async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_pa
         f"the live session's division context came from somewhere else: {ctx.division_md!r}"
     )
 
-    store = _only(stores, "the MemoryStore")
+    # v0.13 MEMS-02 (42-03): a workspace session now builds TWO stores — the session's own, and
+    # the CONSTRUCTED-NOT-OPENED global twin the recall router opens only if `recall_scope` asks
+    # for it. The assertions below are about the store the SESSION reads and writes through, which
+    # is the first one built. The count stays pinned so a THIRD construction still trips this test
+    # (that is what `_only` was buying, and it is not given up here).
+    assert stores, "the MemoryStore was never recorded — the patch did not bite"
+    assert len(stores) == 2, (
+        f"expected the primary + the global recall twin, got {len(stores)}: {stores}"
+    )
+    store = stores[0]
     assert store._db_path == ws / "agents" / AGENT / "memory.db", (
         f"the running store's database is at {store._db_path}, not in the workspace"
     )
