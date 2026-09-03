@@ -137,8 +137,8 @@ def _sanitize_agent_name(name: str) -> str:
     return name.replace("_", "-")
 
 
-def _child_runtime_paths(cfg: Any, config_dir: Any = None) -> tuple[Path, Path]:
-    """(kill_file_path, compact_md_path) for a CHILD loop, resolved against the SESSION's config dir.
+def _child_runtime_paths(cfg: Any, config_dir: Any = None, *, state_dir: Any = None) -> tuple[Path, Path]:
+    """(kill_file_path, compact_md_path) for a CHILD loop — resolved against TWO layers, not one.
 
     Mirrors the root-agent pattern (start_cmd.py:1030,1142-1143) so `--config-dir` isolates
     children too. Before this (#150 phase 38 / v013 Risk #6) every one of the 6 AgentLoop
@@ -149,13 +149,25 @@ def _child_runtime_paths(cfg: Any, config_dir: Any = None) -> tuple[Path, Path]:
     file the root agent watches. The built-in builders' `kill_file=None` never disabled the
     kill switch (loop.py:725 fell through to `Path.cwd()/"KILL"`); it only pointed it at an
     unpredictable directory. ROADMAP phase-38 criterion 2 requires "not ~/.localharness or CWD".
+
+    `config_dir`: the machine-global layer. The kill file is a machine-global CONTROL artifact — it
+    stops the one daemon's sessions — so it resolves here and NEVER follows a workspace (v0.13
+    CONTEXT.md ruling, ROADMAP criterion 2's carve-out).
+    `state_dir`: where this session's WORK artifacts live — the workspace layer when one applies,
+    else the same value as `config_dir` (the default, so omitting it is a no-op). compact.md is a
+    per-session work artifact and follows it.
+
+    The two are separate parameters on purpose. Deriving both from one value is the v0.13 phase-41
+    bug this signature exists to make unrepresentable: widening a single `config_dir` to "workspace
+    when present" would move every child's kill switch into a project folder.
     """
     from localharness.config.paths import resolve_config_dir, resolve_runtime_path
-    base = resolve_config_dir(config_dir)
+    kill_base = resolve_config_dir(config_dir)
+    compact_base = resolve_config_dir(state_dir if state_dir is not None else config_dir)
     kill_value = getattr(getattr(getattr(cfg, "permissions", None), "budget", None), "kill_file", None) or "KILL"
     return (
-        resolve_runtime_path(kill_value, base),
-        base / "agents" / getattr(cfg, "name", "unknown") / "compact.md",
+        resolve_runtime_path(kill_value, kill_base),
+        compact_base / "agents" / getattr(cfg, "name", "unknown") / "compact.md",
     )
 
 
