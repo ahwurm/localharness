@@ -663,37 +663,52 @@ def test_repl_creation_cancel_clears_workflow():
 
 
 # ---------------------------------------------------------------------------
-# start_app smart routing (via _discover_agents_for_start helper)
+# start_app smart routing (via the folded ConfigLoader.discover_agents)
+#
+# Plan 38-05 deleted start_cmd's private `_discover_agents_for_start` / `_agent_yaml_paths`:
+# start, `agent list` and the loader now read ONE implementation. These three tests keep their
+# original assertions and only change entry point — a roster that differs would mean the fold
+# is wrong, so nothing here is weakened to make it pass.
 # ---------------------------------------------------------------------------
 
-def test_start_discovers_agents_from_config_dir(tmp_path):
-    """_discover_agents_for_start returns agents from the config_dir."""
-    from localharness.cli.start_cmd import _discover_agents_for_start
+def test_start_discovers_agents_from_config_dir(tmp_path, monkeypatch):
+    """The start roster returns agents from the config_dir."""
+    from localharness.config.loader import ConfigLoader
 
+    # The local layer is CWD-relative, so chdir off the repo before asserting on a roster.
+    monkeypatch.chdir(tmp_path)
     _write_agent(tmp_path / "agents", "alpha")
     _write_agent(tmp_path / "agents", "beta")
 
-    agents = _discover_agents_for_start(tmp_path)
+    agents = ConfigLoader(config_dir=tmp_path).discover_agents()
     names = [a["name"] for a in agents]
     assert "alpha" in names
     assert "beta" in names
 
 
-def test_start_single_agent_no_picker(tmp_path):
-    """With one agent configured, _discover_agents_for_start returns it."""
-    from localharness.cli.start_cmd import _discover_agents_for_start
+def test_start_single_agent_no_picker(tmp_path, monkeypatch):
+    """With one agent configured, the start roster returns it (len == 1 → no picker)."""
+    from localharness.config.loader import ConfigLoader
 
+    monkeypatch.chdir(tmp_path)
     _write_agent(tmp_path / "agents", "solo")
 
-    agents = _discover_agents_for_start(tmp_path)
+    agents = ConfigLoader(config_dir=tmp_path).discover_agents()
     assert len(agents) == 1
     assert agents[0]["name"] == "solo"
 
 
-def test_discovery_surfaces_unparseable_agent_file(tmp_path, monkeypatch):
+async def test_discovery_surfaces_unparseable_agent_file(tmp_path, monkeypatch):
     """A YAML that will not parse is skipped but NAMED. Swallowing it (`except Exception: pass`)
-    made a typo'd root agent look exactly like a fresh install to the caller."""
-    from localharness.cli.start_cmd import _discover_agents_for_start
+    made a typo'd root agent look exactly like a fresh install to the caller.
+
+    The fold moved the warning onto `ConfigLoader`'s logger plus an `on_error` printer hook.
+    Asserting against the loader here would prove nothing about what a USER sees, so this drives
+    the real `_start_async`: it is the proof that start still passes its printer. `good` being
+    selected and started (no mint, no refusal) is the surviving "roster == [good]" assertion.
+    """
+    from localharness.cli.start_cmd import _start_async
+    _stub_start_boundaries(tmp_path, monkeypatch)
     errs = _capture_err_console(monkeypatch)
 
     _write_agent(tmp_path / "agents", "good")
@@ -701,9 +716,12 @@ def test_discovery_surfaces_unparseable_agent_file(tmp_path, monkeypatch):
         "name: orchestrator\nrole: My tuned assistant\ntools:\n   builtin:\n  - bash\n"
     )
 
-    agents = _discover_agents_for_start(tmp_path)
-    assert [a["name"] for a in agents] == ["good"]
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert any("skipping unreadable agent file" in e for e in errs), errs
     assert any("orchestrator.yaml" in e for e in errs), errs
+    # the good agent was the one selected and started: its memory dir exists, the broken root's does not
+    assert (tmp_path / "agents" / "good").is_dir()
 
 
 async def test_start_refuses_to_mint_over_unparseable_root_agent(tmp_path, monkeypatch):
