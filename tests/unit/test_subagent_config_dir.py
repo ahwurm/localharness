@@ -13,8 +13,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from localharness.agent.subagent import _child_runtime_paths, build_explore_config
+import pytest
+
+from localharness.agent.permissions import PermissionEvaluator
+from localharness.agent.subagent import (
+    _child_runtime_paths,
+    _cruncher_combine_turn,
+    _run_chunk_summarizer,
+    build_explore_config,
+    dispatch_config_subagent,
+    dispatch_explore_subagent,
+    dispatch_search_verifier_subagent,
+    dispatch_web_subagent,
+    make_explore_agent_runner,
+)
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
+from localharness.tools.builtin import register_builtin_tools
+from localharness.tools.registry import ToolRegistry
 
 
 def _cfg(name: str = "explore", kill_file: str | None = None) -> AgentConfig:
@@ -23,6 +38,35 @@ def _cfg(name: str = "explore", kill_file: str | None = None) -> AgentConfig:
         role="test child",
         permissions=PermissionConfig(budget=BudgetConfig(kill_file=kill_file)),
     )
+
+
+async def _builtin_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    return reg
+
+
+@pytest.fixture
+def recorded_loops(monkeypatch):
+    """Record the kwargs every AgentLoop construction receives; no-op the turn.
+
+    The 6 sites import AgentLoop INSIDE their functions
+    (``from localharness.agent.loop import AgentLoop``), so patching the attribute on the
+    ``localharness.agent.loop`` MODULE is what takes effect — the first Layer-2 test asserts
+    a recording actually happened, which is the proof the patch bites.
+    """
+    calls: list[dict] = []
+
+    class _RecordingLoop:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.current_session_id = None
+
+        async def run_turn(self, task, *a, **k):
+            return ""
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _RecordingLoop)
+    return calls
 
 
 # ---------------------------------------------------------------------------
@@ -81,3 +125,143 @@ def test_no_path_resolves_against_the_process_cwd(tmp_path):
     assert not str(kill).startswith(cwd)
     assert not str(compact).startswith(cwd)
     assert kill.is_absolute() and compact.is_absolute()
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 — every one of the 6 AgentLoop construction sites
+# ---------------------------------------------------------------------------
+
+# Each site asserts its own concrete pair inline rather than through a shared helper: a reader
+# should see exactly what a given construction site is expected to produce without a hop.
+
+@pytest.mark.asyncio
+async def test_config_child_loop_is_rooted_at_config_dir(recorded_loops, bus, tmp_path):
+    """Site 1 (dispatch_config_subagent) — also the proof the AgentLoop patch takes effect."""
+    base = await _builtin_registry()
+    await dispatch_config_subagent(
+        "look at the repo",
+        agent_config=_cfg("yaml-child"),
+        llm=object(),
+        bus=bus,
+        base_registry=base,
+        parent_session_id="parent-sess",
+        permission_evaluator=PermissionEvaluator(),
+        config_dir=tmp_path,
+    )
+    assert len(recorded_loops) == 1, "AgentLoop patch did not take effect at the call site"
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "yaml-child" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_explore_child_loop_is_rooted_at_config_dir(recorded_loops, bus, tmp_path):
+    """Site 2 (dispatch_explore_subagent)."""
+    base = await _builtin_registry()
+    await dispatch_explore_subagent(
+        "find X", llm=object(), bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+        config_dir=tmp_path,
+    )
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "explore" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_web_child_loop_is_rooted_at_config_dir(recorded_loops, bus, tmp_path):
+    """Site 3 (dispatch_web_subagent)."""
+    base = await _builtin_registry()
+    await dispatch_web_subagent(
+        "research X", llm=object(), bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+        config_dir=tmp_path,
+    )
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "web-researcher" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_search_verifier_child_loop_is_rooted_at_config_dir(
+    recorded_loops, bus, tmp_path, monkeypatch
+):
+    """Site 4 (dispatch_search_verifier_subagent). The ledger write is redirected off the repo."""
+    monkeypatch.setenv("LOCALHARNESS_VERIFICATION_LEDGER_DIR", str(tmp_path / "ledger"))
+    base = await _builtin_registry()
+    await dispatch_search_verifier_subagent(
+        "claim: X\nentity: X\nsource_url: https://news.test/x",
+        llm=object(), bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+        config_dir=tmp_path,
+    )
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "search-verifier" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_chunk_summarizer_leaf_is_rooted_at_config_dir(recorded_loops, bus, tmp_path):
+    """Site 5 (_run_chunk_summarizer) — the cruncher's map leaf, tested directly."""
+    from localharness.agent.context import ContentStore
+
+    base = await _builtin_registry()
+    store = ContentStore()
+    handle = store.put("a section of the granted document")
+    await _run_chunk_summarizer(
+        handle, "what does it say?", store, llm=object(), bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+        token_counter=None, max_context_tokens=None, depth=1, max_subagent_depth=2,
+        config_dir=tmp_path,
+    )
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "chunk-summarizer" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_cruncher_combine_turn_is_rooted_at_config_dir(recorded_loops, bus, tmp_path):
+    """Site 6 (_cruncher_combine_turn) — the cruncher's reduce turn, tested directly."""
+    from localharness.agent.context import ContextManager
+
+    base = await _builtin_registry()
+    await _cruncher_combine_turn(
+        "what does it say?", ["[section 1]\nsome extract"], partial=False, llm=object(),
+        child_bus=bus, base_registry=base, permission_evaluator=PermissionEvaluator(),
+        ctx=ContextManager(), config_dir=tmp_path,
+    )
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "cruncher" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_runner_threads_config_dir_into_the_child(recorded_loops, bus, tmp_path):
+    """The RUNNER threads it — not just the dispatch functions called by hand.
+
+    This is the seam start_cmd/bench wire in plan 38-05; without it the config_dir parameters
+    would be dead weight nothing reaches.
+    """
+    base = await _builtin_registry()
+    runner = make_explore_agent_runner(
+        llm=object(), bus=bus, base_registry=base, permission_evaluator=PermissionEvaluator(),
+        get_parent_session_id=lambda: "parent-sess", config_dir=tmp_path,
+    )
+    await runner("explore", "find X")
+    assert recorded_loops[0]["compact_md_path"] == tmp_path / "agents" / "explore" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == tmp_path / "KILL"
+
+
+@pytest.mark.asyncio
+async def test_runner_default_leaves_children_on_todays_paths(
+    recorded_loops, bus, tmp_path, monkeypatch
+):
+    """Zero-behavior-change backstop: no config_dir anywhere == today's ~/.localharness compact.md.
+
+    Every EXISTING caller is in exactly this state until plan 38-05 wires them, so this is the
+    regression that would fire if the threading silently moved anyone's files.
+    """
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    base = await _builtin_registry()
+    runner = make_explore_agent_runner(
+        llm=object(), bus=bus, base_registry=base, permission_evaluator=PermissionEvaluator(),
+        get_parent_session_id=lambda: "parent-sess",
+    )
+    await runner("explore", "find X")
+    assert recorded_loops[0]["compact_md_path"] == Path.home() / ".localharness" / "agents" / "explore" / "compact.md"
+    assert recorded_loops[0]["kill_file_path"] == Path.home() / ".localharness" / "KILL"
