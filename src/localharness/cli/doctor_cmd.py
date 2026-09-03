@@ -143,7 +143,15 @@ def doctor(
 
     # 3. Config file valid
     harness: HarnessConfig | None = None
-    loader = ConfigLoader(config_dir=cfg_path)
+    from localharness.cli.workspace import resolve_workspace_layer
+    workspace = resolve_workspace_layer(config_dir)
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
+    # Success criterion 2: the chosen layer is stated, never silently applied. Printed only when
+    # a layer applies — with none, doctor's output stays byte-identical to v0.12 (LAYR-03).
+    # Phase 43 (CLI-02) is where doctor grows the full both-layers/per-key provenance report.
+    if workspace is not None:
+        console.print(f"{_PASS} Workspace layer: {workspace}")
+        console.print(f"       Global layer:    {cfg_path}")
     try:
         harness = loader.load_harness()
         console.print(f"{_PASS} Config valid")
