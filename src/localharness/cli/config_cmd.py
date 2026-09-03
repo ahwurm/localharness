@@ -1,7 +1,6 @@
 """localharness config commands — post-install configuration maintenance."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
