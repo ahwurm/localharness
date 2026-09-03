@@ -23,7 +23,7 @@ from rich.table import Table
 
 from localharness.autoresearch.adoption import AdoptionRefused
 from localharness.autoresearch.adoption import adopt as _adopt
-from localharness.config.paths import config_dir_env_override
+from localharness.config.paths import resolve_archive_db_path
 from localharness.autoresearch.archive import ArchiveEntry, ArchiveQuery, ArchiveStore
 from localharness.autoresearch.loop import RunSummary, run_loop
 
@@ -49,16 +49,8 @@ err_console = Console(stderr=True)
 
 
 def _archive_db_path() -> Path:
-    """Resolve .localharness/archive.db, honoring the config-dir env chain (#35).
-
-    LOCALHARNESS_DIR (canonical) or LOCALHARNESS_HOME (legacy — the components_home fixture
-    sets it to a ``.localharness/`` dir) puts the db at ``<dir>/archive.db``, exactly where the
-    test's ArchiveStore writes. When neither is set, default to ``./.localharness/archive.db``
-    (project-local per CONTEXT — note this differs from the config dir's ~/.localharness default).
-    """
-    override = config_dir_env_override()
-    base = Path(override).expanduser() if override else Path.cwd() / ".localharness"
-    return base / "archive.db"
+    """The proposal archive db — see config.paths.resolve_archive_db_path (one shared algorithm)."""
+    return resolve_archive_db_path()
 
 
 def _err(json_output: bool, message: str, exit_code: int = 2) -> None:

@@ -22,7 +22,7 @@ import typer
 from rich.console import Console
 
 from localharness.autoresearch.proposer import ProposerError
-from localharness.config.paths import config_dir_env_override
+from localharness.config.paths import resolve_archive_db_path
 from localharness.autoresearch.proposer import propose as propose_pipeline
 
 console = Console()
@@ -35,11 +35,8 @@ err_console = Console(stderr=True)
 
 
 def _archive_db_path() -> Path:
-    """Resolve .localharness/archive.db, honoring the config-dir env chain (LOCALHARNESS_DIR >
-    LOCALHARNESS_HOME); CWD/.localharness when neither is set (#35)."""
-    override = config_dir_env_override()
-    base = Path(override).expanduser() if override else Path.cwd() / ".localharness"
-    return base / "archive.db"
+    """The proposal archive db — see config.paths.resolve_archive_db_path (one shared algorithm)."""
+    return resolve_archive_db_path()
 
 
 def _err(json_output: bool, message: str, exit_code: int = 2) -> None:
