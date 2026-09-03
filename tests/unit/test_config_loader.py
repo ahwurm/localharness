@@ -77,6 +77,13 @@ def test_inherit_sentinel_resolved(config_dir: Path) -> None:
 # 4. deny_patterns are unioned across org + division + agent
 # ------------------------------------------------------------------ #
 def test_deny_patterns_union(config_dir: Path) -> None:
+    """org + division + agent union, via the LEGACY standalone org.yaml.
+
+    This test authors `org.yaml` by hand. That path still works and this test keeps it working —
+    but it is NOT evidence that a real installation's org-level denies are enforced: nothing in
+    src/ writes a standalone org.yaml, and `init` writes `org:` inside config.yaml. The test
+    directly below covers what users actually have.
+    """
     _write_yaml(config_dir / "org.yaml", {
         "name": "myorg",
         "permissions": {
@@ -103,6 +110,60 @@ def test_deny_patterns_union(config_dir: Path) -> None:
     assert "bash(curl:*)" in patterns
     assert "bash(wget:*)" in patterns
     assert "bash(rm:*)" in patterns
+
+
+# ------------------------------------------------------------------ #
+# 4b. The same union, authored the way `init` actually writes org config
+# ------------------------------------------------------------------ #
+def test_deny_patterns_union_from_config_yaml_org_section(config_dir: Path) -> None:
+    """The SAME union, authored via config.yaml's `org:` section and NO standalone org.yaml.
+
+    `init` has only ever written org config as `HarnessConfig(org=OrgConfig(...))` embedded in
+    config.yaml (init_cmd.py:377) — nothing in src/ writes a standalone org.yaml at all. So this,
+    not the test above, is the test that decides whether an org-level deny pattern reaches
+    enforcement for a real installation.
+
+    The last assertion is the other half: inheritance ADDS to PermissionConfig's shipped
+    baseline, it does not replace it.
+    """
+    _write_yaml(config_dir / "config.yaml", {
+        "version": "1",
+        "provider": {
+            "provider_type": "vllm",
+            "base_url": "http://localhost:8000/v1",
+            "default_model": "test-model",
+        },
+        "org": {
+            "name": "myorg",
+            "permissions": {
+                "deny_patterns": ["bash_exec(*curl *)"],
+            },
+        },
+    })
+    # The absence of the legacy file is a claim this test MAKES, not one it inherits: with an
+    # org.yaml present it would pass through the mechanism the test above already covers.
+    assert not (config_dir / "org.yaml").exists()
+
+    _write_yaml(config_dir / "divisions" / "infra.yaml", {
+        "name": "infra",
+        "permissions": {
+            "deny_patterns": ["bash_exec(*wget *)"],
+        },
+    })
+    _write_yaml(config_dir / "agents" / "deployer.yaml", {
+        "name": "deployer",
+        "role": "Deploy agent",
+        "division": "infra",
+        "permissions": {
+            "deny_patterns": ["bash_exec(*rsync *)"],
+        },
+    })
+
+    patterns = ConfigLoader(config_dir=config_dir).load_agent("deployer").permissions.deny_patterns
+    assert "bash_exec(*curl *)" in patterns, "org deny from config.yaml never reached the agent"
+    assert "bash_exec(*wget *)" in patterns
+    assert "bash_exec(*rsync *)" in patterns
+    assert "bash_exec(*sudo *)" in patterns, "inheritance replaced the shipped security baseline"
 
 
 # ------------------------------------------------------------------ #
