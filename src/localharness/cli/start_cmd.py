@@ -377,6 +377,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # everywhere, and rich would either eat the bracket (naming a path that does not exist)
         # or raise MarkupError on `[/]`. `style=` alone does NOT disable markup parsing (39-04).
         console.print(f"Workspace layer: {workspace}", style="dim", markup=False)
+    # v0.13 MEMS-01: WHERE THIS SESSION'S STATE LIVES. `cfg_path` keeps meaning the always-global
+    # config layer — the kill file, plugins, packaged tools, the root-agent mint and the GPU daemon
+    # all keep naming it. `state_dir` is where this session's WORK lands: the workspace layer when one
+    # applies, else exactly `cfg_path`, so a workspace-less session is byte-identical (LAYR-03). Two
+    # locals rather than one widened value: everything that must stay global says so by name, and a
+    # future change to what one means cannot silently drag the other.
+    state_dir = workspace if workspace is not None else cfg_path
     try:
         harness = loader.load_harness()
     except Exception as exc:
@@ -783,8 +790,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # bus's persist_path.parent.mkdir would create it first — stranding the old memories in
     # agents/default/. Doing it here preserves the single-adoption contract (open()'s call
     # then no-ops on the existing dir, while its SQL row re-key still runs).
-    _migrate_legacy_root_agent_dir(cfg_path, agent_name_str)
-    agent_dir = cfg_path / "agents" / agent_name_str
+    # `state_dir`, not `cfg_path`: this migrates the DATA tree, so it must operate on the same tree
+    # the MemoryStore below opens. Do NOT confuse it with `_migrate_legacy_root_agent_yaml` (local to
+    # this module), which renames a CONFIG file and is GLOBAL-ONLY by 40-02's ruling.
+    _migrate_legacy_root_agent_dir(state_dir, agent_name_str)
+    # One edit, five artifacts: bus-events.jsonl (below), `sessions/` (derived inside
+    # EventBus.__init__ as persist_path.parent / "sessions"), memory.log (_route_memory_logs_to_file),
+    # and compact.md (~line 1060). All per-agent WORK, so all follow the workspace. Anyone tempted to
+    # "tidy" this back to cfg_path would silently move all five back to the global dir.
+    agent_dir = state_dir / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
     # #20: keep background consolidation/mining logs off the interactive terminal (file only)
@@ -816,7 +830,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             agent_id=agent_name_str,
             division_id=agent_config.division or "default",
             org_id="default",
-            base_dir=str(cfg_path),
+            # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md and
+            # GUARDRAILS.md never do — the safety voice is the org's, and a workspace must not be
+            # able to rewrite or blank it (ROADMAP amendment #4, owner-ruled; 41-01's split).
+            base_dir=str(state_dir),
+            global_base_dir=str(cfg_path),
             bus=bus,
         )
         await memory_store.open()
@@ -1153,8 +1171,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # Cruncher exec policy (agent.cruncher.*): offered to a clean-origin cruncher iff exec_enabled.
             cruncher_config=agent_config.cruncher,
             # criterion 2: children resolve compact.md + kill-file under THIS session's dir, not
-            # ~/.localharness or CWD.
+            # ~/.localharness or CWD. Two dirs since 41-02: the child's KILL file stays on
+            # `config_dir` (a machine-global control artifact — one file must stop every agent on
+            # the box), and only compact.md follows `state_dir` into the workspace.
             config_dir=cfg_path,
+            state_dir=state_dir,
         )
 
         agent_tool = AgentTool(
@@ -1168,6 +1189,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # <cfg_path>/KILL — i.e. ~/.localharness/KILL in a default setup). None = kill switch off,
         # left for AgentLoop's own fallback. Passing it here keeps agent/loop.py config-dir-agnostic.
         _kill_value = getattr(getattr(agent_config.permissions, "budget", None), "kill_file", None)
+        # `cfg_path` ON PURPOSE, two lines from a `state_dir` user: the kill switch is a
+        # machine-global CONTROL artifact — one file stops every agent on the box — so it must not
+        # move into a project folder where a per-workspace copy would be needed to halt each one.
         kill_file_path = resolve_runtime_path(_kill_value, cfg_path) if _kill_value else None
         agent_loop = AgentLoop(
             config=agent_config,
@@ -1186,9 +1210,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel = DiscordChannel(bus=bus, config=discord_config_from_env())
             console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
         else:
-            # #35: REPL history resolves under this config dir too (default ~/.localharness/.repl_history).
+            # #35: REPL history resolves under this session's state dir (default
+            # ~/.localharness/.repl_history). The transcript records what you typed while working in
+            # THIS project, so it follows the work (ruled); the kill file above deliberately does not.
             channel = TerminalChannel(
-                bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", cfg_path))
+                bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir))
             )
 
         # --- Determine returning user ---
@@ -1268,6 +1294,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel=channel,
             bus=bus,
             config_dir=cfg_path,
+            # 41-04: the raw Optional[Path], NOT state_dir. The REPL's _audit_base_dir does its own
+            # `or self._config_dir` fallback, so a None here IS the signal "no workspace applies".
+            workspace=workspace,
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             memory_store=memory_store,
