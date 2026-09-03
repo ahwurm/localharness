@@ -15,7 +15,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from localharness.agent.context import response_reserve
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
-from localharness.config.paths import resolve_config_dir
+from localharness.config.paths import global_config_dir, resolve_config_dir
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -398,6 +398,10 @@ def _guided_setup(
     Returns (detection-equivalent result, served model, server config) so the caller
     falls into the normal capability-probe/config-write path, or None if declined or
     non-interactive (caller keeps the manual-instructions exit)."""
+    # The managed vLLM install/pidfile/log/venv are machine-wide (C2 single-pidfile invariant):
+    # always the global layer, never a workspace one. `init` never discovers a workspace, so this
+    # is the same value today — the point is that the site says which layer it means.
+    server_config_path = global_config_dir(config_path)
     if not sys.stdin.isatty():
         return None
     if not Confirm.ask("\nSet up vLLM and a model now?", default=True):
@@ -420,7 +424,7 @@ def _guided_setup(
         )
 
     # --- Runtime: existing binary > profile's install route ----------------- #
-    binary = managed_server.find_vllm(config_path)
+    binary = managed_server.find_vllm(server_config_path)
     launch, image = "binary", None
     if binary:
         console.print(f"  [green]✓[/green] vLLM found: {binary}")
@@ -436,12 +440,12 @@ def _guided_setup(
             f"  vLLM will run via Docker image [bold]{image}[/bold] (pulled on first launch; needs the NVIDIA container toolkit)."
         )
     else:
-        venv = managed_server.server_dir(config_path) / "venv"
+        venv = managed_server.server_dir(server_config_path) / "venv"
         if not Confirm.ask(f"  Install [bold]{ra.pip_package}[/bold] into {venv}?", default=True):
             console.print(f"  Install it yourself, then re-run init — see {ra.doc}.")
             raise typer.Exit(1)
         try:
-            binary = managed_server.install_vllm_venv(config_path, str(ra.pip_package))
+            binary = managed_server.install_vllm_venv(server_config_path, str(ra.pip_package))
         except RuntimeError as exc:
             err_console.print(f"[bold red]Error:[/bold red] {exc}\nSee {ra.doc} for the manual route.")
             raise typer.Exit(1)
@@ -477,11 +481,11 @@ def _guided_setup(
     cmd = managed_server.serve_command(srv)
     base_url = f"http://localhost:{srv.port}/v1"
     console.print(f"\n  Launching: [dim]{' '.join(cmd)}[/dim]")
-    console.print(f"  Log: {managed_server.log_path(config_path)}")
-    managed_server.start_server(config_path, cmd)
+    console.print(f"  Log: {managed_server.log_path(server_config_path)}")
+    managed_server.start_server(server_config_path, cmd)
     console.print("  Waiting for the server — model load can take several minutes...")
     try:
-        models = asyncio.run(managed_server.wait_ready(base_url, config_dir=config_path))
+        models = asyncio.run(managed_server.wait_ready(base_url, config_dir=server_config_path))
     except (RuntimeError, TimeoutError) as exc:
         err_console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)
