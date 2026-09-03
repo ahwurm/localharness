@@ -179,7 +179,8 @@ async def test_degenerate_reply_is_nudged_then_the_healthy_answer_completes(bus,
         summary = await loop._execute_loop(session, "get the news", None)
 
     assert len(_rep_nudges(session)) == 1
-    assert str(_LIVE_REPEATS) in _rep_nudges(session)[0], "the nudge must name the repeat count"
+    assert str(_LIVE_REPEATS) in _rep_nudges(session)[0]["content"], \
+        "the nudge must name the repeat count"
     assert session.iteration == 2
     assert session.terminated_reason == "complete"
     assert summary == "The top story is the port strike."

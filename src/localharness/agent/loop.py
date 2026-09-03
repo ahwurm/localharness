@@ -16,7 +16,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, NamedTuple
 
 from localharness.core.types import Message
 from localharness.tools.capabilities import CoResidenceError
@@ -56,6 +56,9 @@ class Session:
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
     baton_nudges_used: int = 0
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
+    # #152: one corrective nudge per turn is spent on a degenerate (one-line-repeated) candidate
+    # answer; the next degenerate reply fails the turn instead of shipping the repetition.
+    repetition_nudge_used: bool = False
 
     @property
     def baton_nudge_used(self) -> bool:
@@ -156,6 +159,46 @@ class StuckDetector:
             "Consider a fundamentally different strategy: try different arguments, "
             "use a different tool, or conclude that the information is not available this way."
         )
+
+
+# ---------------------------------------------------------------------------
+# Degenerate-repetition detector (issue #152)
+# ---------------------------------------------------------------------------
+
+class RepetitionStats(NamedTuple):
+    """Verdict + the counts behind it, so the gate can log WHY it fired."""
+    degenerate: bool
+    total_lines: int
+    unique_lines: int
+    ratio: float
+
+
+def detect_degenerate_repetition(
+    content: str | None, *, min_lines: int, max_unique_ratio: float,
+) -> RepetitionStats:
+    """True when a candidate final answer is one line repeated over and over (issue #152).
+
+    Live receipt (2026-09-02): one narration line, 265 times, "\\n\\n"-separated, zero tool
+    calls — accepted as a finished task. StuckDetector cannot see this shape (it is fed
+    tool-call signatures only), so the check lives at the acceptance seam instead.
+
+    Line-based and EXACT-match by design: normalize to non-empty stripped lines, then flag
+    only `total >= min_lines` AND `unique/total <= max_unique_ratio`. Conservative on purpose
+    — legitimate lists, tables and code have distinct lines (ratio near 1.0), and a false
+    positive costs a real answer.
+
+    Known misses (accepted): repetition with NO newlines (one long run-on paragraph repeating a
+    clause) — it is one line, so the ratio is 1.0; and near-duplicate lines that differ by a
+    counter or timestamp, which exact matching treats as distinct. Both are deliberate: fuzzy
+    similarity at this seam would start eating real answers. Pure text, no I/O.
+    """
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    total = len(lines)
+    if total == 0:
+        return RepetitionStats(False, 0, 0, 0.0)
+    unique = len(set(lines))
+    ratio = unique / total
+    return RepetitionStats(total >= min_lines and ratio <= max_unique_ratio, total, unique, ratio)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +347,14 @@ _SELF_CHECK_NUDGE = (
 _SENTINEL_REPROMPT_NUDGE = (
     "Your last reply was only a confirmation, but there is nothing in this "
     "turn to confirm. Provide your full answer to the task now."
+)
+# #152: NOT a member of _is_harness_nudge's exact-match set — it is a template (it names the
+# repeat count), and unlike the act-guard/self-check nudges it never asks for the CONFIRMED
+# sentinel, so it can never be half of a nudge->sentinel pair that wants stripping.
+_REPETITION_NUDGE_TEMPLATE = (
+    "Your last reply was the same line repeated {total} times — that is not an answer. "
+    "Do not repeat yourself. Either make the tool call this task needs, or write the actual "
+    "answer once, in your own words."
 )
 _PARSE_FAILURE_NUDGE = (
     "Your tool call could not be parsed. Please use the correct format "
@@ -650,6 +701,18 @@ _PARSE_FAILED_TURN_NOTICE = (
     "or switch tool_call_mode."
 )
 
+# #152: same contract as _PARSE_FAILED_TURN_NOTICE one seam over — the model's text is
+# unusable, so the turn ends without an answer instead of shipping the repetition as one.
+# Carries ONE instance of the repeated line as labelled evidence (never the whole ~15 KB).
+_DEGENERATE_REPETITION_TURN_NOTICE = (
+    "The model's reply degenerated into one line repeated over and over — twice in this turn, "
+    "with a correction spent in between. Ending the turn without an answer rather than "
+    "delivering the repetition as the result. Re-run the task; if it recurs, check this "
+    "model's sampling settings (temperature / repetition penalty)."
+)
+# Preview slice for the evidence line, matching this module's existing *_preview idiom.
+_REPETITION_SAMPLE_CHARS = 200
+
 # #77: fed back (tool-role) when a completion is cut at the output-token ceiling
 # mid-tool-call. Names the cause AND the remedy so the model retries INFORMED instead of
 # re-emitting the identical truncated call (the live 2M-token turn: same write retried 4×,
@@ -926,6 +989,7 @@ class AgentLoop:
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
         bg_cfg = self._config.baton_gate
+        rg_cfg = self._config.repetition_guard
 
         # Build system prompt
         tool_call_mode = getattr(
@@ -1357,6 +1421,47 @@ class AgentLoop:
                     tail = _clean_summary(content)
                     return (f"{_PARSE_FAILED_TURN_NOTICE}\n\nLast reply text (unparsed):\n{tail}"
                             if tail else _PARSE_FAILED_TURN_NOTICE)
+
+                # 9a2. Degenerate-repetition guard (#152): a candidate final answer that is one
+                # line repeated over and over is NOT an answer — the live receipt was 265
+                # identical lines, zero tool calls, published as TaskComplete. StuckDetector is
+                # structurally blind here (it only ever sees tool-call signatures). Runs FIRST
+                # among the tool-less gates: no downstream gate should spend a round-trip
+                # reasoning about garbage. One corrective nudge, then the turn ends through the
+                # same honest-failure pathway the parse-retry exhaustion above uses.
+                if rg_cfg.enabled:
+                    rep = detect_degenerate_repetition(
+                        content,
+                        min_lines=rg_cfg.min_lines,
+                        max_unique_ratio=rg_cfg.max_unique_ratio,
+                    )
+                    if rep.degenerate and not session.repetition_nudge_used:
+                        session.repetition_nudge_used = True
+                        log.warning(
+                            "Degenerate repetition in %s's reply (%d lines, %d unique, ratio "
+                            "%.4f) — not an answer; nudging once",
+                            self._config.name, rep.total_lines, rep.unique_lines, rep.ratio,
+                        )
+                        session.push({
+                            "role": "user",
+                            "content": _REPETITION_NUDGE_TEMPLATE.format(total=rep.total_lines),
+                        })
+                        continue
+                    if rep.degenerate:
+                        log.error(
+                            "Degenerate repetition again for %s after a correction (%d lines, "
+                            "%d unique) — failing the turn instead of delivering it as an answer",
+                            self._config.name, rep.total_lines, rep.unique_lines,
+                        )
+                        session.terminated_reason = "error"
+                        self._conversation = _strip_sentinel_exchanges(session.messages)
+                        sample = next(
+                            (ln.strip() for ln in (content or "").splitlines() if ln.strip()), ""
+                        )[:_REPETITION_SAMPLE_CHARS]
+                        return (
+                            f"{_DEGENERATE_REPETITION_TURN_NOTICE}\n\nRepeated text (first of "
+                            f"{rep.total_lines} lines, {rep.unique_lines} unique): {sample}"
+                        )
 
                 # 9b. Act-guard: a first response that would END the turn with ZERO
                 # actions taken is, empirically, usually announce-then-halt ("I'll
