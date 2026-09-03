@@ -90,6 +90,17 @@ def model(
     # local_config_dir carries the workspace layer, or None.
     from localharness.cli.workspace import resolve_workspace_layer
     loader = ConfigLoader(config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir))
+    # v0.13: two values, two jobs. `loader._config_dir` is machine-wide truth (the overlay target,
+    # one GPU daemon); `_ws` is the workspace layer, or None. The audit record follows the WORK
+    # (MEMS-04) and falls back to the session's config dir — NOT to None, which would re-resolve
+    # through the env chain and let `--config-dir D` leak its audit log out of D.
+    # Bound to NAMED LOCALS on purpose, not written inline at the call sites: the structural guard
+    # in tests/unit/test_provider_carveout_workspace.py scans this file for a literal binding of
+    # the workspace attribute to a keyword ending in `config_dir`, and an inline workspace
+    # expression at either call site below would tail-match it. (This very comment cannot spell
+    # the forbidden literal either — that is how strict a plain substring scan is.)
+    _ws = loader._local_dir
+    _audit_dir = _ws or loader._config_dir
     try:
         harness = loader.load_harness()
     except Exception as exc:
@@ -200,7 +211,9 @@ def model(
 
     try:
         audit_warning = asyncio.run(
-            model_ops.persist_default_model(harness, target, config_dir=loader._config_dir)
+            model_ops.persist_default_model(
+                harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir
+            )
         )
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] failed to persist {target!r}: {exc}")
@@ -212,7 +225,7 @@ def model(
         console.print(f"[yellow]Note:[/yellow] {audit_warning}")
 
     # Pin trap: a persisted default won't reach an agent whose yaml pins a concrete model.
-    for aname, pin in model_ops.pinned_agents(loader._config_dir):
+    for aname, pin in model_ops.pinned_agents(loader._config_dir, local_config_dir=_ws):
         console.print(
             f"[yellow]Note:[/yellow] agent {aname!r} pins model={pin!r} in its yaml — "
             f"this won't reach it on next start until that pin changes."

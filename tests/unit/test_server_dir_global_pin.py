@@ -101,8 +101,10 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     """
     text = (SRC / "repl.py").read_text(encoding="utf-8")
     assert text.count("self._server_config_dir") == 7
-    # assignment + the property's own two reads on one line + 6 deliberately-untouched uses
-    assert text.count("self._config_dir") == 9
+    # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
+    # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
+    # FALLBACK when the session has no workspace layer. MEASURED at 10, not assumed.
+    assert text.count("self._config_dir") == 10
     for raw in (
         "free_accelerator(self._active_heavy, ep.lifecycle, self._config_dir)",
         "strategy.stop(managed, self._config_dir)",
@@ -110,7 +112,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     ):
         assert raw not in text, f"lifecycle call still on the raw attribute: {raw}"
     # ...and the non-lifecycle writes are untouched: agent creation, endpoint + default-model
-    # persistence keep following whatever layer the session reads (phase 41 owns that question).
+    # persistence keep handing the OVERLAY the session's config dir. Still 3 after phase 41: the
+    # audit log moved to its own `audit_base_dir=` argument rather than re-pointing this one, and
+    # `self._server_config_dir` is still 7 because the GPU daemon did not move either.
     assert text.count("config_dir=self._config_dir") == 3
 
 

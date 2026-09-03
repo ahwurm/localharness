@@ -130,6 +130,7 @@ class OrchestratorREPL:
         channel: Any,
         bus: Any,
         config_dir: Path | None = None,
+        workspace: Path | None = None,
         harness_config: Any = None,
         on_agent_deployed: Any = None,
         memory_store: Any = None,
@@ -139,6 +140,11 @@ class OrchestratorREPL:
         self._channel = channel
         self._bus = bus
         self._config_dir = config_dir
+        # The workspace layer that applies to this session, or None. Resolved ONCE by the caller at
+        # session start and carried for the session LIFETIME — never re-walked mid-session, even if
+        # the user cd's elsewhere in a tool call (39-04's contract). Design D: the REPL never
+        # discovers anything itself; the answer arrives here as an argument.
+        self._workspace = workspace
         self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
         # The agent's opened MemoryStore — the /memory window reads/retires through it. None in
         # tests / in-memory sessions (no persistence) → /memory reports it's unavailable.
@@ -191,6 +197,17 @@ class OrchestratorREPL:
         """
         from localharness.config.paths import global_config_dir
         return global_config_dir(self._config_dir) if self._config_dir is not None else None
+
+    @property
+    def _audit_base_dir(self) -> Path | None:
+        """Where this session's audit records land: the WORKSPACE when one applies, else the
+        session's config dir. The log follows the work (MEMS-04).
+
+        Deliberately NOT `_server_config_dir`'s sibling — the GPU daemon's state is machine-wide
+        and never follows a workspace (C2), so the two properties answer opposite questions from
+        the same session and must stay textually distinct.
+        """
+        return self._workspace if self._workspace is not None else self._config_dir
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
@@ -1550,7 +1567,8 @@ class OrchestratorREPL:
         from localharness.cli import model_ops
         try:
             audit_warning = await model_ops.persist_default_model(
-                self._harness, model, config_dir=self._config_dir
+                self._harness, model,
+                config_dir=self._config_dir, audit_base_dir=self._audit_base_dir,
             )
         except Exception as exc:  # noqa: BLE001 — the in-session swap already succeeded
             await self._channel.send_message(
@@ -1564,7 +1582,7 @@ class OrchestratorREPL:
             await self._send_info(audit_warning)
         # Pin trap: name any agent whose yaml pins a concrete model — the persisted default
         # won't reach it next start (per-agent pin wins by design; this only warns).
-        pinned = model_ops.pinned_agents(self._config_dir)
+        pinned = model_ops.pinned_agents(self._config_dir, local_config_dir=self._workspace)
         if pinned:
             lines = ["Note: this new default won't reach these agents until their yaml model pin changes:"]
             lines += [f"  - {name} (pinned to {pin!r})" for name, pin in pinned]
