@@ -309,6 +309,40 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
         assert ws not in path.parents and path != ws, f"{path} followed the workspace"
 
 
+async def test_a_model_swap_inside_a_workspace_session_audits_in_the_project(tmp_path, monkeypatch):
+    """MEMS-04 end to end: the swap is recorded where the work is, the overlay is written globally.
+
+    The previous plan proved this in three pieces — that `start` hands the REPL its workspace, that
+    the REPL's audit directory is that workspace, and that the persist function honours the
+    directory it is given. This drives the REPL's OWN `_persist_default_model` inside a live
+    session instead, so the three pieces are joined by the harness rather than by a summary.
+
+    Both directions again: a swap that wrote its overlay into the project would fork the machine's
+    one model server, and a swap that audited globally would put this project's history in another
+    project's log.
+    """
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    swapped: dict = {}
+
+    async def _swap_the_model(self):
+        swapped["ok"] = await self._persist_default_model("swapped-model")
+        return None
+
+    monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _swap_the_model)
+
+    await _drive()
+
+    assert swapped.get("ok") is True, f"the in-session swap did not persist: {swapped}"
+    assert (ws / "audit.jsonl").exists(), "the swap was not recorded in the project"
+    assert not (global_dir / "audit.jsonl").exists(), (
+        "the swap was recorded in the global log — this project's history went somewhere else"
+    )
+    assert (global_dir / "overrides.yaml").exists(), "the overlay did not land in the global dir"
+    assert not (ws / "overrides.yaml").exists(), (
+        "the overlay followed the work into the project — there is one model server per machine"
+    )
+
+
 async def test_one_repl_answers_two_questions_about_one_session(tmp_path, monkeypatch):
     """The same object, two directories, on purpose.
 
