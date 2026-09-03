@@ -627,6 +627,32 @@ class ConfigLoader:
     def list_agents(self) -> list[str]:
         return sorted({f.stem for f in self.agent_yaml_paths()})
 
+    def microagent_paths(self) -> list[Path]:
+        """Every `microagents/*.md` file across both layers, GLOBAL dir first.
+
+        Same order contract as `agent_yaml_paths`, for the same reason: `discover_microagents`
+        keys by file stem, so the workspace file must be listed LAST to win by overwrite.
+
+        AGNT-02 ships RESOLUTION only. `ContextConfig.microagents` is declared-only today (zero
+        readers in src), and the keyword-triggered injection mechanism is deliberately out of
+        scope for v0.13 — phase 43's effective-config view is what makes this visible.
+        """
+        return [
+            f
+            for d in (b / "microagents" for b in reversed(self._search_bases()))
+            if d.exists()
+            for f in sorted(d.glob("*.md"))
+        ]
+
+    def discover_microagents(self) -> dict[str, Path]:
+        """Microagent files by stem, the workspace layer overriding the global one on a collision.
+
+        Wholesale nearest-wins: a workspace `microagents/style.md` REPLACES the global file of the
+        same stem rather than being appended to it, matching how a same-named agent resolves.
+        Global-only microagents stay resolvable.
+        """
+        return {f.stem: f for f in self.microagent_paths()}
+
     def list_divisions(self) -> list[str]:
         names: set[str] = set()
         for base in self._search_bases():
