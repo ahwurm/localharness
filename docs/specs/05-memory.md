@@ -415,6 +415,16 @@ table: absence from the prompt is not forgetting.
 
 ## 11. Configuration
 
+### Where a store's files live
+
+A store's own files — `memory.db`, `MEMORY.md` and `history.jsonl` — live under
+`<config dir>/agents/<agent-id>/`. That config dir is the workspace `.localharness/` when a
+workspace layer applies to the session, and the global `~/.localharness/` otherwise (see
+`06-config.md`). The org and division context files, `GUARDRAILS.md` and `DIVISION.md`, are read
+from the **global** directory in either case: `MemoryStore` takes that directory as its own
+argument (`global_base_dir`) rather than deriving it from the state directory, so a project can add
+its own memory but cannot replace — or blank by omission — the safety context.
+
 All under an agent's `memory:` key (see `config/models.py`; every field auto-enumerates as a
 `agent.memory.*` component-registry axis, tunable with no code edit):
 

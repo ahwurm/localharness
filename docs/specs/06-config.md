@@ -38,7 +38,11 @@ All agent configuration is **read-only at runtime**. The agent loop reads config
 {project}/.localharness/
 ├── config.yaml                   # merged over the global config.yaml (workspace wins per key)
 ├── overrides.yaml                # merged last — the highest-priority layer
+├── audit.jsonl                   # this project's audit records
 ├── agents/
+│   ├── {agent-name}.yaml         # agent config
+│   └── {agent-name}/             # ...and that agent's state: memory.db, MEMORY.md,
+│       └── sessions/             #    history.jsonl, bus-events.jsonl, compact.md
 ├── divisions/
 └── microagents/
 ```
@@ -141,6 +145,33 @@ field leaks across from the global file of the same name.
 - **Microagent files resolve across both layers, but nothing injects them into a prompt yet.**
   `context.microagents` is parsed and the files are found; the keyword-triggered injection that
   would use them is not built.
+- **Which memory a workspace session RECALLS is a separate setting, and it is not built yet.**
+  This release decides where a session's memory is written. It does not yet let you choose which
+  memory is read back — a session in a project reads the store it writes to.
+
+### Where your work is stored
+
+A workspace layer moves more than config. When one applies, the session's own state is written
+inside that project instead of in your global directory.
+
+| Follows the workspace | Stays in your global directory, always |
+|---|---|
+| `memory.db`, `MEMORY.md`, `history.jsonl` | `GUARDRAILS.md` and `DIVISION.md` (the org/division safety context) |
+| `bus-events.jsonl` and `sessions/` | the `KILL` file (it stops the machine's sessions, not one project's) |
+| `compact.md` and the memory log | `vllm/server.pid`, `serve.log`, `venv/` (one accelerator, one daemon) |
+| `.repl_history` | `plugins/`, packaged `tools/`, the root agent's own file |
+| `audit.jsonl` | `overrides.yaml` — a model swap always edits the global file |
+
+The rule behind the table: **what you did in a project stays with that project; what governs the
+machine stays with the machine.** Your notes, your history and your audit trail are about the work,
+so they live with the work. The safety context, the kill switch and the model server are about the
+machine, and one of them moving into a project would break the other projects on it — two projects
+each holding their own copy of the kill switch means hunting down two files to stop two sessions.
+
+The practical consequence: **a fresh workspace starts with an empty memory.** Nothing is copied out
+of your global memory into it, and nothing in your global memory is moved, rewritten or deleted by
+a session you run inside a project. The first session in a new project starts that project's memory
+from nothing, the way the first session on a new machine did.
 
 ### Environment Variable Overrides
 
