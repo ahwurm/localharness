@@ -1,9 +1,10 @@
 """ConfigLoader: YAML parse, validate, inheritance resolve, write."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 from pydantic import ValidationError
@@ -16,6 +17,8 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
+
+log = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ #
@@ -475,14 +478,49 @@ class ConfigLoader:
         merged = deep_merge(base.model_dump(), raw)  # base = the defaults; yaml fields win
         return self._validate_dict(AgentConfig, merged, str(path), text)
 
+    def agent_yaml_paths(self) -> list[Path]:
+        """Every agent yaml discovery reads, GLOBAL dir first so the local layer wins by stem.
+
+        The ONE discovery order for the whole harness (#150 phase 38): `agent list`, the start
+        menu and this loader all read exactly these files in exactly this order. `self._local_dir`
+        is the `local_config_dir` constructor hook — literal `./.localharness` today, the
+        discovered workspace layer from phase 39 on.
+        """
+        return [
+            f
+            for d in (self._config_dir / "agents", self._local_dir / "agents")
+            if d.exists()
+            for f in sorted(d.glob("*.yaml"))
+        ]
+
+    def discover_agents(
+        self, *, on_error: Optional[Callable[[Path, Exception], None]] = None
+    ) -> list[dict]:
+        """Raw agent dicts across both layers, local overriding global by file stem.
+
+        An unparseable file is SKIPPED but never SILENTLY: swallowing the parse error made a
+        typo'd agents/orchestrator.yaml indistinguishable from a fresh install, and start's mint
+        branch then overwrote it with the default template. Warn-and-skip is the ONE malformed-YAML
+        behavior (it replaces agent_cmd's `except Exception: pass`).
+
+        `on_error` is the CLI's channel for the user-visible warning: config/ must never import a
+        rich console from cli/, so the caller supplies the printer and the default stays a log line.
+        """
+        agents: dict[str, dict] = {}
+        for f in self.agent_yaml_paths():
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+                if "name" not in data:
+                    data["name"] = f.stem
+                agents[f.stem] = data
+            except Exception as exc:  # noqa: BLE001
+                log.warning("skipping unreadable agent file %s: %s", f, exc)
+                if on_error is not None:
+                    on_error(f, exc)
+        return list(agents.values())
+
     def list_agents(self) -> list[str]:
-        names: set[str] = set()
-        for base in (self._local_dir, self._config_dir):
-            agents_dir = base / "agents"
-            if agents_dir.exists():
-                for f in agents_dir.glob("*.yaml"):
-                    names.add(f.stem)
-        return sorted(names)
+        return sorted({f.stem for f in self.agent_yaml_paths()})
 
     def list_divisions(self) -> list[str]:
         names: set[str] = set()
