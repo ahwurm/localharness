@@ -163,6 +163,21 @@ def _resolve_scalar(
     return default
 
 
+def _org_deny_patterns(raw: object) -> list[str]:
+    """The `org.permissions.deny_patterns` list declared by ONE raw config source.
+
+    Reads raw YAML, never a validated model: this feeds the enforcement union, and a deny list
+    must not shrink because some unrelated key in the same file failed validation. Anything that
+    is not a list of strings contributes nothing.
+    """
+    org = raw.get("org") if isinstance(raw, dict) else None
+    perms = org.get("permissions") if isinstance(org, dict) else None
+    patterns = perms.get("deny_patterns") if isinstance(perms, dict) else None
+    if not isinstance(patterns, list):
+        return []
+    return [p for p in patterns if isinstance(p, str)]
+
+
 # ------------------------------------------------------------------ #
 # ConfigLoader
 # ------------------------------------------------------------------ #
@@ -197,6 +212,7 @@ class ConfigLoader:
         self._harness_cache: Optional[HarnessConfig] = None
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
+        self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
 
     # ---------------------------------------------------------------- #
     # Internal helpers
@@ -229,6 +245,71 @@ class ConfigLoader:
     # Public API
     # ---------------------------------------------------------------- #
 
+    def _raw_config_sources(self) -> tuple[dict, dict, dict, dict]:
+        """The four raw config sources, in the owner-ruled merge order (2026-09-03, Option A):
+
+            1. global config.yaml
+            2. global overrides.yaml   (`agent:` section excluded)
+            3. workspace config.yaml
+            4. workspace overrides.yaml (`agent:` section excluded)
+
+        The SPECIFIC beats the GENERAL: a later source wins any key an earlier one also sets, and
+        the global layer still governs every key the workspace is silent about. Every source is
+        OPTIONAL here and absent ones are `{}` — only the global config.yaml is required, and
+        `load_harness` is what enforces that. A workspace never makes a file mandatory.
+
+        The `agent:` section is stripped from BOTH overlays: it is an agent-scope default layer
+        (issue #22) consumed by `load_agent`, not a `HarnessConfig` field (extra="forbid"), so it
+        must not reach harness merge/validation from any of the four sources.
+
+        Workspace overlay path is built with plain path arithmetic, and deliberately NOT by
+        handing the workspace dir to `_resolve_user_overlay_path`: that helper's contract is the
+        GLOBAL env chain (explicit arg > LOCALHARNESS_DIR > LOCALHARNESS_HOME > ~/.localharness).
+        Passing it a workspace dir short-circuits correctly today by accident of the explicit-arg
+        branch, and would silently break if that chain's precedence ever changed.
+        """
+        if self._raw_sources_cache is not None:
+            return self._raw_sources_cache
+
+        global_cfg_path = self._config_dir / "config.yaml"
+        global_cfg = _load_yaml_file(global_cfg_path) if global_cfg_path.exists() else {}
+
+        global_overlay = load_overlay(_resolve_user_overlay_path(self._config_dir))
+        global_overlay = {k: v for k, v in global_overlay.items() if k != "agent"}
+
+        ws_cfg: dict = {}
+        ws_overlay: dict = {}
+        if self._local_dir is not None:
+            ws_cfg_path = self._local_dir / "config.yaml"
+            if ws_cfg_path.exists():
+                ws_cfg = _load_yaml_file(ws_cfg_path)
+            ws_overlay = load_overlay(self._local_dir / "overrides.yaml")
+            ws_overlay = {k: v for k, v in ws_overlay.items() if k != "agent"}
+
+        self._raw_sources_cache = (global_cfg, global_overlay, ws_cfg, ws_overlay)
+        return self._raw_sources_cache
+
+    def _layered_org_deny(self) -> list[str]:
+        """`org.permissions.deny_patterns` unioned across all four config sources.
+
+        Order-preserving and deduplicating, the same shape as load_agent's org→division→agent
+        union: safety ACCUMULATES across layers and a workspace can never subtract a global deny
+        (MERG-02). `deep_merge` REPLACES lists wholesale, which is the right default for every
+        other key and exactly wrong for this one — a workspace `org:` block that declared its own
+        deny list would otherwise DELETE the global org's denials.
+
+        An explicit `deny_patterns: []` in any layer therefore contributes nothing and removes
+        nothing. That is the contract, not an oversight.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for source in self._raw_config_sources():
+            for pattern in _org_deny_patterns(source):
+                if pattern not in seen:
+                    seen.add(pattern)
+                    out.append(pattern)
+        return out
+
     def load_harness(self) -> HarnessConfig:
         if self._harness_cache is not None:
             return self._harness_cache
@@ -236,17 +317,28 @@ class ConfigLoader:
         if not cfg_path.exists():
             raise ConfigNotFoundError("config.yaml", [str(cfg_path)])
         text = cfg_path.read_text(encoding="utf-8")
-        project_data = _load_yaml_file(cfg_path)
-        # Cache raw project dict so callers (e.g. components_cmd) can rebuild merged config
-        self._raw_harness_dict = project_data
+        sources = self._raw_config_sources()
+        # The GLOBAL config.yaml only. `components set` validates a new GLOBAL overlay against
+        # this before writing, and every overlay writer stays global in v0.13 — so folding
+        # workspace data in here would widen a write-time check with data the write can never
+        # target. Deliberate scope choice, not an oversight (phase 43 owns the effective view).
+        self._raw_harness_dict = sources[0]
 
-        # Apply user overlay cascade (Phase 14). The `agent:` section is an agent-scope default
-        # layer (issue #22) consumed by load_agent — NOT a HarnessConfig field (extra="forbid"),
-        # so it must be excluded from the harness merge/validation.
-        overlay_path = _resolve_user_overlay_path(self._config_dir)
-        user_overlay = load_overlay(overlay_path)
-        harness_overlay = {k: v for k, v in user_overlay.items() if k != "agent"}
-        merged = deep_merge(project_data, harness_overlay) if harness_overlay else project_data
+        # Ruled order (owner, 2026-09-03 — Option A): global config < global overrides <
+        # workspace config < workspace overrides. Folding from {} rather than from the raw global
+        # dict guarantees `merged` is never an alias of self._raw_harness_dict, so the deny splice
+        # below cannot reach back and mutate the raw dict components_cmd reads.
+        merged: dict = {}
+        for source in sources:
+            merged = deep_merge(merged, source)
+
+        # deny_patterns carve-out (MERG-02): see _layered_org_deny. Spliced with deep_merge rather
+        # than assigned in place for the same non-aliasing reason. Guarded on non-empty: writing an
+        # empty list here would REPLACE PermissionConfig's 25 shipped security defaults with
+        # nothing, which is a fail-open regression in a file whose whole job is denying things.
+        union_deny = self._layered_org_deny()
+        if union_deny:
+            merged = deep_merge(merged, {"org": {"permissions": {"deny_patterns": union_deny}}})
 
         result = self._validate_dict(HarnessConfig, merged, str(cfg_path), text)
         self._harness_cache = result
@@ -254,6 +346,12 @@ class ConfigLoader:
 
     def raw_harness_dict(self) -> dict:
         """Return the parsed project YAML dict (NO overlay applied).
+
+        This is the GLOBAL `config.yaml` ONLY — it never includes workspace data, even when a
+        workspace layer applies. Its consumer (`localharness components set`) validates a
+        candidate overlay before writing it, and every overlay writer targets the global layer in
+        v0.13, so folding workspace data in here would widen a write-time check with data the
+        write can never target.
 
         Used by `localharness components set` to rebuild the merged config for
         validation BEFORE writing the overlay. Side-effect: triggers load_harness
@@ -279,6 +377,7 @@ class ConfigLoader:
         """
         self._harness_cache = None
         self._raw_harness_dict = None
+        self._raw_sources_cache = None
 
     def load_org(self) -> OrgConfig:
         if self._org_cache is not None:
@@ -554,6 +653,7 @@ class ConfigLoader:
         self._division_cache.clear()
         self._harness_cache = None
         self._org_cache = None
+        self._raw_sources_cache = None
 
     def validate_all(self) -> list[tuple[str, Optional[ConfigError]]]:
         results: list[tuple[str, Optional[ConfigError]]] = []
