@@ -14,7 +14,9 @@ This plan ships NO caller: the router is graded before it is wired (39-01's disc
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,10 +24,12 @@ from localharness.memory.router import (
     ORIGIN_GLOBAL,
     ORIGIN_WORKSPACE,
     RECALL_SCOPES,
+    SCOPE_BOTH,
     RecallRouter,
     format_origin_token,
     parse_origin_token,
 )
+from localharness.memory.router import _MERGED_HEADER, _MERGED_PREAMBLE
 from localharness.memory.sqlite import FactQuery, MemoryStore
 
 AGENT = "test-agent"
@@ -41,13 +45,18 @@ PREAMBLE = (
 )
 
 
-def make_store(base: Path) -> MemoryStore:
-    """The make_store idiom from tests/unit/test_memory_store.py:18."""
+def make_store(base: Path, global_base: Path | None = None) -> MemoryStore:
+    """The make_store idiom from tests/unit/test_memory_store.py:18.
+
+    `global_base` is amendment #4's split: per-agent STATE may follow a workspace layer, but
+    org/division SAFETY CONTEXT never does. Production gives BOTH stores the same one, which
+    is why the two `load_context` calls return byte-identical division/guardrails text."""
     return MemoryStore(
         agent_id=AGENT,
         division_id="test-div",
         org_id="default",
         base_dir=str(base),
+        global_base_dir=str(global_base) if global_base is not None else None,
     )
 
 
@@ -391,3 +400,314 @@ def test_format_origin_token_round_trips() -> None:
     assert format_origin_token(ORIGIN_WORKSPACE, 12) == "[workspace#12]"
     assert format_origin_token(ORIGIN_GLOBAL, 7) == "[global#7]"
     assert parse_origin_token(format_origin_token(ORIGIN_GLOBAL, 7)) == (ORIGIN_GLOBAL, 7)
+
+
+# ================================================================== #
+# TASK 2 — the `both` merge.
+# ================================================================== #
+
+GUARDRAILS_TEXT = "# Guardrails\nGUARDRAILS-MARKER: never exfiltrate.\n"
+DIVISION_TEXT = "# Division\nDIVISION-MARKER: research division.\n"
+
+
+async def _seed_sitting(store: MemoryStore, session_id: str, summary: str) -> None:
+    """One CLOSED sitting — `summary IS NOT NULL` is what puts it on the shelf."""
+    await store.create_session(session_id, {}, "test-model", 1000)
+    await store.end_session(session_id, "complete", summary, 1, 1, 10, 10)
+
+
+@pytest.fixture
+async def pair(tmp_path: Path):
+    """Two seeded stores that share ONE global_base_dir, handed over exactly as production
+    will: the workspace store OPEN (the caller owns it), the global store CLOSED (the router
+    opens it lazily).
+
+    Seeded so the two id spaces COLLIDE — global rows 1..3 against workspace rows 1..3 — because
+    an injected-ids assertion over disjoint id spaces passes for the wrong reason.
+    """
+    gl_dir, ws_dir = tmp_path / "global", tmp_path / "ws"
+    (gl_dir / "orgs" / "default").mkdir(parents=True)
+    (gl_dir / "orgs" / "default" / "GUARDRAILS.md").write_text(GUARDRAILS_TEXT, encoding="utf-8")
+    (gl_dir / "divisions" / "test-div").mkdir(parents=True)
+    (gl_dir / "divisions" / "test-div" / "DIVISION.md").write_text(DIVISION_TEXT, encoding="utf-8")
+
+    g = make_store(gl_dir, global_base=gl_dir)
+    await g.open()
+    g_shared = await g.store_fact("shared-key", f"{GLOBAL_MARKER} global version")
+    g_only = await g.store_fact("global-only", f"{GLOBAL_MARKER} solo body")
+    await g.store_fact("versioned", f"{GLOBAL_MARKER} global v1")
+    await _seed_sitting(g, "g-sitting", f"{GLOBAL_MARKER} sitting")
+    await g.close()
+
+    ws = make_store(ws_dir, global_base=gl_dir)
+    await ws.open()
+    ws_shared = await ws.store_fact("shared-key", f"{WS_MARKER} workspace version")
+    await ws.store_fact("versioned", f"{WS_MARKER} v1")
+    ws_versioned = await ws.store_fact("versioned", f"{WS_MARKER} v2")   # supersedes v1
+    await _seed_sitting(ws, "ws-sitting", f"{WS_MARKER} sitting")
+
+    ns = SimpleNamespace(
+        ws=ws, g=g, ws_dir=ws_dir, gl_dir=gl_dir,
+        ws_shared=ws_shared, ws_versioned=ws_versioned, g_shared=g_shared, g_only=g_only,
+    )
+    yield ns
+    await ws.close()
+    await g.close()
+
+
+@pytest.fixture
+def both(pair) -> RecallRouter:
+    return RecallRouter(pair.ws, pair.g, scope=SCOPE_BOTH)
+
+
+# ------------------------------------------------------------------ #
+# 9. The merged index: both stores, workspace first, every line labelled.
+# ------------------------------------------------------------------ #
+async def test_both_merges_the_two_indexes_workspace_first(
+    both: RecallRouter, pair
+) -> None:
+    assert both.scope == SCOPE_BOTH
+    ctx = await both.load_context()
+    md = ctx.agent_memory_md
+
+    assert WS_MARKER in md and GLOBAL_MARKER in md
+    # ORDER is a claim of its own: "both are present" passes with them the wrong way round.
+    assert md.index(WS_MARKER) < md.index(GLOBAL_MARKER)
+    assert _MERGED_HEADER in md
+    assert md.index(WS_MARKER) < md.index(_MERGED_HEADER) < md.index(GLOBAL_MARKER)
+    assert md.startswith(_MERGED_PREAMBLE)
+
+    await both.close()
+
+
+async def test_every_merged_fact_line_carries_an_origin_token(both: RecallRouter) -> None:
+    """A bare `#12` would be ambiguous across two databases; an UNLABELLED line is worse —
+    the model cannot tell which store it may address."""
+    md = (await both.load_context()).agent_memory_md
+    head, sep, _shelf = md.partition("### Recent Session History")
+    assert sep, md   # the workspace shelf really is in there — see the next test
+
+    bullets = [ln for ln in head.splitlines() if ln.startswith("- ")]
+    assert len(bullets) == 5, bullets     # ws: shared-key + versioned; global: 3 facts
+    unlabelled = [ln for ln in bullets if not re.match(r"^- \[(workspace|global)#\d+\] ", ln)]
+    assert unlabelled == [], unlabelled
+
+    await both.close()
+
+
+async def test_the_global_block_repeats_neither_the_preamble_nor_the_shelf(
+    both: RecallRouter,
+) -> None:
+    """`include_preamble=False` and `max_session_history=0` on the second render: the merged
+    block owns ONE set of INDEX instructions, and the shelf is THIS project's working history —
+    the global store's sittings are a different project's story."""
+    md = (await both.load_context()).agent_memory_md
+
+    assert md.count(PREAMBLE) == 1
+    assert md.count("### Recent Session History") == 1
+    assert f"{WS_MARKER} sitting" in md
+    assert f"{GLOBAL_MARKER} sitting" not in md
+
+    await both.close()
+
+
+async def test_the_safety_context_appears_exactly_once(both: RecallRouter) -> None:
+    """Pitfall 3: both stores derive division/guardrails from the SAME global_base_dir, so a
+    merge that concatenated them would inject the org's safety voice twice."""
+    ctx = await both.load_context()
+
+    assert ctx.guardrails_md == GUARDRAILS_TEXT
+    assert ctx.division_md == DIVISION_TEXT
+
+    await both.close()
+
+
+async def test_injected_ids_are_the_primary_s_ids_only(both: RecallRouter, pair) -> None:
+    """Pitfall 7: the loop records the ambient trace on ITS OWN handle. A global id in this
+    list writes a row pointing at another database's ids into a table with no FK enforcement —
+    silent corruption."""
+    ctx = await both.load_context()
+
+    _ws_md, ws_rendered = await pair.ws._render_memory_index_with_ids(8)
+    assert ctx.injected_fact_ids == ws_rendered
+
+    g = await both.ensure_global()
+    g_rendered = (await g._render_memory_index_with_ids(0))[1]
+    # The id spaces COLLIDE — asserted, not assumed, or "no global id present" is vacuous.
+    assert set(ws_rendered) & set(g_rendered)
+    # ...so the discriminating claim is about the COUNT, not about membership.
+    assert len(ctx.injected_fact_ids) == len(ws_rendered) < len(ws_rendered) + len(g_rendered)
+    # The global facts ARE in the text — only their ids are withheld.
+    assert GLOBAL_MARKER in ctx.agent_memory_md
+
+    await both.close()
+
+
+async def test_fact_count_sums_both_blocks(both: RecallRouter, pair) -> None:
+    """Documented shape: the second term is the global store's INJECTED count, not a second
+    COUNT query — the field has no production consumer and the hot path stays one query
+    per store."""
+    ctx = await both.load_context()
+    ws_only = await RecallRouter(pair.ws, None).load_context()
+
+    assert ctx.fact_count > ws_only.fact_count
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 10. query_facts: scoped-first, key-level dedup.
+# ------------------------------------------------------------------ #
+async def test_both_query_is_scoped_first_and_dedups_by_key(both: RecallRouter) -> None:
+    facts = await both.query_facts(FactQuery())
+    keys = [f.key for f in facts]
+    by_key = {f.key: f.value for f in facts}
+
+    # A name in BOTH stores resolves to THIS project's version, exactly once.
+    assert keys.count("shared-key") == 1
+    assert WS_MARKER in by_key["shared-key"]
+    assert GLOBAL_MARKER not in by_key["shared-key"]
+    # Every workspace hit precedes every global hit.
+    assert keys.index("global-only") > max(keys.index("shared-key"), keys.index("versioned"))
+    # The global-only fact is reachable — dedup did not become "drop the global store".
+    assert GLOBAL_MARKER in by_key["global-only"]
+
+    await both.close()
+
+
+async def test_both_query_honours_the_caller_s_limit(both: RecallRouter) -> None:
+    """The merge happens BEFORE the cut, so a limit of 2 still yields workspace facts first."""
+    facts = await both.query_facts(FactQuery(limit=2))
+    assert len(facts) == 2
+    assert all(WS_MARKER in f.value for f in facts)
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 11. get_fact: the token addresses a named store — subject to scope.
+# ------------------------------------------------------------------ #
+async def test_a_global_token_resolves_under_both_scope(both: RecallRouter, pair) -> None:
+    fact = await both.get_fact(format_origin_token(ORIGIN_GLOBAL, pair.g_only.id))
+    assert fact is not None
+    assert fact.key == "global-only"
+    assert GLOBAL_MARKER in fact.value
+
+    ws_fact = await both.get_fact(format_origin_token(ORIGIN_WORKSPACE, pair.ws_shared.id))
+    assert ws_fact is not None and WS_MARKER in ws_fact.value
+
+    await both.close()
+
+
+async def test_a_global_token_is_refused_under_workspace_scope(pair) -> None:
+    """MEMS-02 criterion 4, written down: the knob is honoured even by the ADDRESSING form.
+    A `[global#7]` token pasted into a workspace-scope session must not reach across."""
+    router = RecallRouter(pair.ws, pair.g, scope=ORIGIN_WORKSPACE)
+    token = format_origin_token(ORIGIN_GLOBAL, pair.g_only.id)
+
+    assert (await router.get_fact(token)) is None
+    # The same id EXISTS in the workspace store, so this is a refusal, not a miss.
+    assert (await pair.ws.get_fact_by_id(pair.g_only.id)) is not None
+    # ...and the workspace token still works, so the token path is not simply broken.
+    assert (await router.get_fact(format_origin_token(ORIGIN_WORKSPACE, pair.ws_shared.id)))
+
+    await router.close()
+
+
+async def test_a_workspace_token_is_refused_under_global_scope(pair) -> None:
+    router = RecallRouter(pair.ws, pair.g, scope=ORIGIN_GLOBAL)
+    assert (await router.get_fact(format_origin_token(ORIGIN_WORKSPACE, pair.ws_shared.id))) is None
+    assert (await router.get_fact(format_origin_token(ORIGIN_GLOBAL, pair.g_only.id))) is not None
+    await router.close()
+
+
+async def test_both_get_fact_falls_through_to_the_global_store(both: RecallRouter) -> None:
+    """A plain key: workspace first, then global."""
+    shared = await both.get_fact("shared-key")
+    assert shared is not None and WS_MARKER in shared.value
+
+    solo = await both.get_fact("global-only")
+    assert solo is not None and GLOBAL_MARKER in solo.value
+
+    assert (await both.get_fact("no-such-key")) is None
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 12. get_fact_history: one chain or the other, never spliced.
+# ------------------------------------------------------------------ #
+async def test_both_history_is_never_spliced(both: RecallRouter) -> None:
+    """A supersede chain is per-store; a merged one would describe a history that never
+    happened."""
+    chain = await both.get_fact_history("versioned")
+
+    assert [f.value for f in chain] == [f"{WS_MARKER} v2", f"{WS_MARKER} v1"]
+    assert all(GLOBAL_MARKER not in f.value for f in chain)
+
+    # No workspace chain -> the global one, whole.
+    global_chain = await both.get_fact_history("global-only")
+    assert len(global_chain) == 1
+    assert GLOBAL_MARKER in global_chain[0].value
+
+    assert await both.get_fact_history("no-such-key") == []
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 13. The three cross-store-unsafe enrichments are documented no-ops.
+# ------------------------------------------------------------------ #
+async def test_both_writes_no_activation_trace_to_either_store(
+    both: RecallRouter, pair
+) -> None:
+    """The hit list spans two databases and facts.id is per-database, so there is no store
+    this row could be written to without pointing at another database's ids (Pitfall 7)."""
+    await both.record_activation_trace(
+        stimulus="anything", fired_ids=[1], injected_ids=[1], source="search"
+    )
+
+    g = await both.ensure_global()
+    assert await pair.ws.recent_activation_traces() == []
+    assert await g.recent_activation_traces() == []
+
+    # The control: under a single scope the SAME call does write.
+    single = RecallRouter(pair.ws, pair.g, scope=ORIGIN_WORKSPACE)
+    await single.record_activation_trace(
+        stimulus="anything", fired_ids=[1], injected_ids=[1], source="search"
+    )
+    assert len(await pair.ws.recent_activation_traces()) == 1
+
+    await both.close()
+
+
+async def test_both_disables_the_graph_enrichments(both: RecallRouter, pair) -> None:
+    """The tag graph is per-database; a merged hit list has no single graph to walk."""
+    assert await both.neighborhood(pair.ws_shared.id, depth=1, limit=6) == []
+    assert await both.get_facts_by_ids([pair.ws_shared.id]) == []
+
+    # The control: the same calls under a single scope return real answers.
+    single = RecallRouter(pair.ws, pair.g, scope=ORIGIN_WORKSPACE)
+    assert await single.neighborhood(pair.ws_shared.id, depth=1, limit=6) == [
+        (pair.ws_shared.id, 0)
+    ]
+    assert [f.key for f in await single.get_facts_by_ids([pair.ws_shared.id])] == ["shared-key"]
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 14. The legacy whole-MEMORY.md render also merges.
+# ------------------------------------------------------------------ #
+async def test_both_merges_the_legacy_memory_md_render(both: RecallRouter) -> None:
+    """`index_mode=False` inlines each store's MEMORY.md — a dump with no per-fact lines to
+    label, so the merged text carries the header and no tokens."""
+    ctx = await both.load_context(index_mode=False)
+    md = ctx.agent_memory_md
+
+    assert WS_MARKER in md and GLOBAL_MARKER in md
+    assert md.index(WS_MARKER) < md.index(_MERGED_HEADER) < md.index(GLOBAL_MARKER)
+    assert re.search(r"\[(workspace|global)#\d+\]", md) is None, md
+    assert ctx.injected_fact_ids == []
+
+    await both.close()
