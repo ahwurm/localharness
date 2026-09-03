@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import (
@@ -768,11 +767,13 @@ class MemoryConfig(BaseModel):
     """Memory backend configuration for an agent."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
+    # Paths here are declarative only — MemoryStore derives its real paths from base_dir
+    # (memory/sqlite.py:712-740). Left unset they stay None; nothing in src/ reads them.
     sqlite_path: Optional[str] = Field(
         default=None,
         description=(
             "Path to the SQLite facts store for this agent. "
-            "Defaults to ~/.localharness/agents/{agent_name}/memory.db if not set."
+            "Unset: MemoryStore derives it from its base_dir (<config dir>/agents/{name}/memory.db)."
         ),
     )
 
@@ -780,7 +781,7 @@ class MemoryConfig(BaseModel):
         default=None,
         description=(
             "Path to the JSONL chat history file. "
-            "Defaults to ~/.localharness/agents/{agent_name}/events.jsonl."
+            "Unset: MemoryStore derives it from its base_dir (<config dir>/agents/{name}/history.jsonl)."
         ),
     )
 
@@ -788,7 +789,7 @@ class MemoryConfig(BaseModel):
         default=None,
         description=(
             "Path to the MEMORY.md persistent notes file. "
-            "Defaults to ~/.localharness/agents/{agent_name}/MEMORY.md."
+            "Unset: MemoryStore derives it from its base_dir (<config dir>/agents/{name}/MEMORY.md)."
         ),
     )
 
@@ -1487,17 +1488,10 @@ class AgentConfig(BaseModel):
             raise ValueError("model cannot be empty. Use 'inherit' to inherit from division/org.")
         return v
 
-    @model_validator(mode="after")
-    def resolve_memory_defaults(self) -> "AgentConfig":
-        """Fill in default memory paths based on agent name if not set."""
-        base = Path(f"~/.localharness/agents/{self.name}").expanduser()
-        if self.memory.sqlite_path is None:
-            object.__setattr__(self.memory, "sqlite_path", str(base / "memory.db"))
-        if self.memory.history_path is None:
-            object.__setattr__(self.memory, "history_path", str(base / "events.jsonl"))
-        if self.memory.notes_path is None:
-            object.__setattr__(self.memory, "notes_path", str(base / "MEMORY.md"))
-        return self
+    # resolve_memory_defaults removed in phase 38 (dead config, zero readers — v013 Risk #1):
+    # it backfilled memory.{sqlite,history,notes}_path with a HARDCODED ~/.localharness/agents/
+    # {name}/... that no code ever read, so --config-dir and the coming workspace layer would
+    # both have been contradicted by a config object that looked authoritative.
 
 
 class DivisionConfig(BaseModel):
