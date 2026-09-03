@@ -1334,6 +1334,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             memory_store=memory_store,
+            # 42-04: `/memory promote` borrows the router's global handle. The SAME router the
+            # loop and the read tools got — one owner, one connection, closed by the finally below.
+            recall_router=recall_router,
         )
 
         await repl.run()
