@@ -187,7 +187,11 @@ class ConfigLoader:
         # > LOCALHARNESS_HOME (legacy) > ~/.localharness. The overlay + runtime paths resolve
         # against THIS dir, so --config-dir now actually isolates.
         self._config_dir = resolve_config_dir(config_dir)
-        self._local_dir = Path(local_config_dir or ".localharness")
+        # None = no workspace layer applies. Phase 39: the old literal `./.localharness` default
+        # made a stray CWD directory outrank an explicit --config-dir (LAYR-02 said "full
+        # replacement"; it wasn't). Callers now NAME their workspace layer — cli/workspace.py's
+        # resolve_workspace_layer() is the only thing that computes one.
+        self._local_dir = Path(local_config_dir) if local_config_dir is not None else None
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
@@ -198,9 +202,15 @@ class ConfigLoader:
     # Internal helpers
     # ---------------------------------------------------------------- #
 
+    def _search_bases(self) -> tuple[Path, ...]:
+        """Config bases in FIRST-WINS order: the workspace layer (when one applies), then global."""
+        if self._local_dir is None:
+            return (self._config_dir,)
+        return (self._local_dir, self._config_dir)
+
     def _find_file(self, subdir: str, name: str) -> Optional[Path]:
         """Return path to first existing {name}.yaml in local_dir or config_dir."""
-        for base in (self._local_dir, self._config_dir):
+        for base in self._search_bases():
             candidate = base / subdir / f"{name}.yaml"
             if candidate.exists():
                 return candidate
@@ -288,10 +298,7 @@ class ConfigLoader:
             return self._division_cache[name]
         path = self._find_file("divisions", name)
         if path is None:
-            searched = [
-                str(self._local_dir / "divisions" / f"{name}.yaml"),
-                str(self._config_dir / "divisions" / f"{name}.yaml"),
-            ]
+            searched = [str(b / "divisions" / f"{name}.yaml") for b in self._search_bases()]
             raise ConfigNotFoundError(name, searched)
         text = path.read_text(encoding="utf-8")
         data = _load_yaml_file(path)
@@ -331,10 +338,7 @@ class ConfigLoader:
         # 1. Find and load raw YAML
         path = self._find_file("agents", name)
         if path is None:
-            searched = [
-                str(self._local_dir / "agents" / f"{name}.yaml"),
-                str(self._config_dir / "agents" / f"{name}.yaml"),
-            ]
+            searched = [str(b / "agents" / f"{name}.yaml") for b in self._search_bases()]
             raise ConfigNotFoundError(name, searched)
         text = path.read_text(encoding="utf-8")
         raw = _load_yaml_file(path)
@@ -483,12 +487,14 @@ class ConfigLoader:
 
         The ONE discovery order for the whole harness (#150 phase 38): `agent list`, the start
         menu and this loader all read exactly these files in exactly this order. `self._local_dir`
-        is the `local_config_dir` constructor hook — literal `./.localharness` today, the
-        discovered workspace layer from phase 39 on.
+        is the `local_config_dir` constructor hook: the discovered workspace layer when a caller
+        named one, else None (no second layer).
         """
+        # reversed(): _search_bases is first-wins order, but discover_agents keys a dict by file
+        # stem, so the workspace file must be listed LAST to win by overwrite. Global first.
         return [
             f
-            for d in (self._config_dir / "agents", self._local_dir / "agents")
+            for d in (b / "agents" for b in reversed(self._search_bases()))
             if d.exists()
             for f in sorted(d.glob("*.yaml"))
         ]
@@ -524,7 +530,7 @@ class ConfigLoader:
 
     def list_divisions(self) -> list[str]:
         names: set[str] = set()
-        for base in (self._local_dir, self._config_dir):
+        for base in self._search_bases():
             div_dir = base / "divisions"
             if div_dir.exists():
                 for f in div_dir.glob("*.yaml"):
@@ -572,7 +578,7 @@ class ConfigLoader:
                 results.append((str(org_path), e))
 
         # divisions
-        for base in (self._local_dir, self._config_dir):
+        for base in self._search_bases():
             div_dir = base / "divisions"
             if div_dir.exists():
                 for f in sorted(div_dir.glob("*.yaml")):
@@ -583,7 +589,7 @@ class ConfigLoader:
                         results.append((str(f), e))
 
         # agents
-        for base in (self._local_dir, self._config_dir):
+        for base in self._search_bases():
             agents_dir = base / "agents"
             if agents_dir.exists():
                 for f in sorted(agents_dir.glob("*.yaml")):
