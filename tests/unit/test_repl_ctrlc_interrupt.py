@@ -123,6 +123,54 @@ def test_second_ctrl_c_restores_default_sigint_escape_hatch():
     assert signal.SIGINT in removed  # the handler was removed (default restored)
 
 
+def test_ctrl_c_during_turn_reaps_the_turns_bash_child(tmp_path):
+    """#153, end to end: the mid-turn Ctrl+C cancels the turn — and the bash_exec child that turn
+    had in flight must die with it. Before the fix the CancelledError travelled from here, through
+    the turn task and the tool registry, straight past bash_exec's timeout-only cleanup, and the
+    process outlived the turn. Pid identity (`$$` + `exec`), never a pgrep pattern match."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    pidfile = tmp_path / "child.pid"
+    turn_started = asyncio.Event()
+
+    async def bash_turn(task, on_token=None):
+        turn_started.set()
+        await BashExecTool().run(command=f"echo $$ > {pidfile}; exec sleep 30", timeout_s=30)
+
+    channel = RecordingChannel(["run something long"])
+    repl, agent, bus = _build_repl(channel, bash_turn)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        captured: dict = {}
+        loop.add_signal_handler = lambda sig, cb, *a: captured.__setitem__("cb", cb)
+        loop.remove_signal_handler = lambda sig: None
+
+        run_task = asyncio.ensure_future(repl.run())
+        await asyncio.wait_for(turn_started.wait(), timeout=2.0)
+        for _ in range(300):  # wait for the child to publish its pid
+            await asyncio.sleep(0.01)
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+        assert pidfile.exists() and pidfile.read_text().strip(), "the tool's child never started"
+        pid = int(pidfile.read_text())
+        captured["cb"]()  # the mid-turn Ctrl+C
+        await asyncio.wait_for(run_task, timeout=5.0)  # session survives → EOF → returns
+
+        import os
+        for _ in range(300):  # poll on the LIVE loop: a reap may still be finishing
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return pid
+            await asyncio.sleep(0.01)
+        os.kill(pid, 9)
+        raise AssertionError(f"the cancelled turn left its bash child {pid} alive (#153)")
+
+    assert asyncio.run(scenario()) > 0
+    assert any("Turn cancelled" in t for t, _ in channel.sent), channel.sent
+
+
 @pytest.mark.asyncio
 async def test_normal_turn_completes_without_cancel_message():
     # Sanity: with no interrupt the turn completes and no 'Turn cancelled.' is emitted.
