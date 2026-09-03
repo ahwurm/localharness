@@ -849,7 +849,15 @@ def test_deploy_config_writes_to_agents_subdir(tmp_path):
 
 
 def test_deploy_config_default_path(tmp_path, monkeypatch):
-    """ORCH-02: default deploy path is ~/.localharness/agents/{name}.yaml."""
+    """ORCH-02: default deploy path is ~/.localharness/agents/{name}.yaml.
+
+    #150 phase 38: the workflow's fallback now routes through resolve_config_dir(), so the env
+    chain (LOCALHARNESS_DIR > LOCALHARNESS_HOME > ~) outranks Path.home — including the autouse
+    hermetic LOCALHARNESS_HOME every test gets. Unset both to exercise the genuine DEFAULT, which
+    is what this test always meant to assert; the asserted path is unchanged.
+    """
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     from localharness.orchestrator.workflow import AgentCreationWorkflow
     wf = AgentCreationWorkflow()  # no config_dir
