@@ -1,5 +1,6 @@
 """BashExecTool: Execute bash commands."""
 import asyncio
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -56,6 +57,30 @@ def _decode_output(raw: bytes) -> str:
             except UnicodeDecodeError:
                 continue
     return raw.decode("utf-8", errors="replace")
+
+
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill a still-running child and reap it — on EVERY exit path (#153).
+
+    `communicate()` is cancellable, and CancelledError is a BaseException: a mid-turn Ctrl+C
+    (the REPL's turn cancel, box-mode interrupt, or the exit drain) sails straight past an
+    `except asyncio.TimeoutError`, so before this the child kept running with its pipes open —
+    one leaked process per cancelled turn.
+
+    kill() is a synchronous SIGNAL (the child is doomed the moment it returns), but the reap —
+    which is what closes the transport's pipes — needs an await, and an await inside a `finally`
+    that is unwinding a cancellation can itself be interrupted. So the wait is SHIELDED (it
+    survives as a task on the still-running loop) and its CancelledError suppressed, leaving the
+    ORIGINAL cancellation to propagate untouched.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:  # raced us to exit — nothing left to signal
+        return
+    with contextlib.suppress(asyncio.CancelledError, ProcessLookupError):
+        await asyncio.shield(proc.wait())
 
 
 class BashExecTool(Tool):
@@ -140,14 +165,15 @@ class BashExecTool(Tool):
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
                 return ToolResult(
                     output=f"Command timed out after {timeout}s: {command}",
                     success=False,
                     error=f"Timeout after {timeout}s",
                     error_type="timeout_error",
                 )
+            finally:
+                # Timeout, cancellation, or any other escape: the child never outlives this call.
+                await _kill_and_reap(proc)
         except OSError as exc:
             return self.err(str(exc))
 
