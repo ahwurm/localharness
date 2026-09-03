@@ -41,8 +41,19 @@ script, a cron job, CI — that workspace layer is ignored and the run continues
 repository's `.localharness/agents/` loads with no prompt, because you are inside that project.
 Agent files decide an agent's role, model and tool permissions, so read them in an unfamiliar
 repository before you run the harness there, the same way you would read its build scripts. Plugins
-and the org-level guardrails file are never taken from a workspace in v0.13 — they load from your
-global config directory only.
+and the org-level guardrails file are never taken from a workspace — they load from your global
+config directory only. For the guardrails file that is a mechanism rather than a side effect: the
+memory store is given the global directory as a separate input from the directory its own state
+lives in, so a workspace cannot silence the org's safety context by shipping its own copy of the
+file, and cannot blank it by having no copy at all.
+
+**Inside a workspace, file writes and commands default to the project folder.** When a workspace
+layer applies, the write and edit tools and the working directory for `bash_exec` default to the
+folder that contains `.localharness/` — the project you are standing in. Outside a workspace the
+default is unchanged and those tools are unconfined, exactly as before. A `workspace_root` you set
+in your own config still wins either way. Read this honestly: it is a default that narrows what the
+tools reach by accident, not a sandbox. A command run through `bash_exec` can still leave that
+folder, and the deny patterns remain the mechanism that stops specific actions.
 
 ## Threat model: prompt injection
 
