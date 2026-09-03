@@ -2504,3 +2504,52 @@ async def test_dropped_native_tool_calls_publish_parse_failed(mock_llm_client, b
     assert parse_failed[0].parse_retry_count == 1
     assert "write_file" in parse_failed[0].raw_content_preview
     assert summary == "Answered without the tool."
+
+
+# ---------------------------------------------------------------------------
+# Empty completion (no content, no tool calls). Live 2026-09-03 with qwen3.8-27b: two
+# empty replies ~3 minutes apart (the output budget spent on hidden reasoning), and the
+# turn completed success=True with a STALE narration line as its summary.
+# ---------------------------------------------------------------------------
+
+def _no_self_check_config():
+    from localharness.config.models import AgentConfig, SelfCheckConfig
+    return AgentConfig(name="test-agent", role="Test agent.",
+                       self_check=SelfCheckConfig(enabled=False))
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_reprompts_once_then_fails_loudly(mock_llm_client, bus):
+    from localharness.core.events import Action, TaskComplete
+    Response = mock_llm_client.Response
+    responses = [
+        Response(content="", finish_reason="length"),
+        Response(content="", finish_reason="length"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    summary = await loop.run_turn("write the report")
+
+    # Honest-failure pathway (same as parse-retry exhaustion and #152): no TaskComplete is
+    # published, the returned notice names the cause.
+    assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
+    assert "empty reply" in summary
+    assert "length" in summary
+    replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
+    assert len(replies) == 2                         # exactly one re-prompt, then stop
+    assert all(e.finish_reason == "length" for e in replies)  # the ledger now says why
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_then_real_answer_completes_normally(mock_llm_client, bus):
+    from localharness.core.events import TaskComplete
+    Response = mock_llm_client.Response
+    responses = [
+        Response(content="", finish_reason="length"),
+        Response(content="Here is the answer.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    summary = await loop.run_turn("write the report")
+
+    assert summary == "Here is the answer."
+    completions = bus.history(event_types=[TaskComplete])
+    assert len(completions) == 1 and completions[0].success is True

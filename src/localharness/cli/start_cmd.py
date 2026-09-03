@@ -336,7 +336,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
 
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
-                       model_override: str | None = None, list_models: bool = False) -> None:
+                       model_override: str | None = None, list_models: bool = False,
+                       show_reasoning: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
     import uuid
@@ -1344,6 +1345,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if name not in available_agent_names:
                 available_agent_names.append(name)
 
+        if isinstance(channel, TerminalChannel):
+            # Reasoning stream: the sink is always wired (it no-ops while the flag is off) so
+            # /reasoning can toggle it mid-session; the flag comes from --show-reasoning or
+            # terminal.show_reasoning in config.yaml.
+            term_cfg = getattr(harness, "terminal", None)
+            channel.show_reasoning = show_reasoning or bool(
+                getattr(term_cfg, "show_reasoning", False)
+            )
+            if llm is not None:
+                llm.on_reasoning = channel.on_reasoning
+
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -1474,9 +1486,15 @@ def start_app(
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,
     list_models: Annotated[bool, typer.Option("--list-models", help="List models available at the configured provider, then exit")] = False,
+    show_reasoning: Annotated[bool, typer.Option(
+        "--show-reasoning",
+        help="Stream the model's reasoning (thinking) into the terminal as it generates "
+             "(same as terminal.show_reasoning: true; /reasoning toggles it live)",
+    )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model, list_models))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model,
+                                 list_models, show_reasoning=show_reasoning))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")

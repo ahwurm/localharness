@@ -666,6 +666,33 @@ class OrchestratorREPL:
                 except (NotImplementedError, RuntimeError, ValueError):
                     pass
 
+    async def _handle_reasoning_cmd(self, arg: str) -> None:
+        """/reasoning [on|off] — toggle the live reasoning stream on the terminal channel."""
+        from localharness.channels.terminal import TerminalChannel
+
+        if not isinstance(self._channel, TerminalChannel):
+            await self._channel.send_message(
+                "/reasoning is a terminal-channel setting.", metadata={"style": "system.info"},
+            )
+            return
+        if arg in ("on", "off"):
+            state = arg == "on"
+        elif not arg:
+            state = not self._channel.show_reasoning
+        else:
+            await self._channel.send_message(
+                "Usage: /reasoning [on|off]", metadata={"style": "system.info"},
+            )
+            return
+        self._channel.show_reasoning = state
+        note = (
+            "Reasoning stream: on — the model's thinking prints as dim ⋯ lines while it "
+            "generates (needs the server's reasoning parser; persist with "
+            "terminal.show_reasoning: true)."
+            if state else "Reasoning stream: off."
+        )
+        await self._channel.send_message(note, metadata={"style": "system.info"})
+
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
         cmd_lower = cmd.lower().strip()
@@ -694,6 +721,10 @@ class OrchestratorREPL:
         if cmd_lower == "/model" or cmd_lower.startswith("/model "):
             # Slice the ORIGINAL string — model ids are case-sensitive.
             await self._handle_model_cmd(cmd.strip()[len("/model"):].strip())
+            return True
+
+        if cmd_lower == "/reasoning" or cmd_lower.startswith("/reasoning "):
+            await self._handle_reasoning_cmd(cmd_lower[len("/reasoning"):].strip())
             return True
 
         if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):

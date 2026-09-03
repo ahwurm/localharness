@@ -2460,7 +2460,7 @@ class MemoryStore:
                 "role": "assistant",
                 "content": event.content,
                 "tool_calls": [],
-                "finish_reason": "stop",
+                "finish_reason": getattr(event, "finish_reason", None) or "stop",
                 "tokens_in": 0,
                 "tokens_out": 0,
                 "model": "",

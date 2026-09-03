@@ -1,5 +1,6 @@
 """Unit tests for tools package: base types, registry, Pydantic dispatch, and built-ins."""
 import asyncio
+import os
 import pytest
 from pathlib import Path
 from typing import Any
@@ -788,15 +789,25 @@ async def test_bash_exec_tool_timeout():
 
 async def _wait_gone(pid: int, tries: int = 300) -> bool:
     """Poll until `pid` is neither alive NOR a zombie. os.kill(pid, 0) still succeeds for an
-    unreaped zombie, so ProcessLookupError proves killed AND reaped."""
+    unreaped zombie, so ProcessLookupError proves killed AND reaped. On Windows os.kill(pid, 0)
+    is NOT a probe — any signal but CTRL_* events TerminateProcess-es the target — so the
+    liveness check goes through tasklist there (_pid_alive below)."""
     import os
+    import subprocess
     for _ in range(tries):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
+        if os.name == "nt":
+            if not _pid_alive(pid):
+                return True
+        else:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
         await asyncio.sleep(0.01)
-    os.kill(pid, 9)  # never leak a stray sleep out of a RED run
+    if os.name == "nt":  # never leak a stray sleep out of a RED run
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        os.kill(pid, 9)
     return False
 
 
@@ -812,8 +823,14 @@ async def test_bash_exec_tool_cancelled_kills_process(tmp_path):
     from localharness.tools.builtin.bash_tool import BashExecTool
 
     pidfile = tmp_path / "child.pid"
+    # as_posix(): bash strips the backslashes of a raw Windows path (see the dash test above).
+    # /proc/$$/winpid is the Windows pid under MSYS; POSIX falls back to $$ itself.
     task = asyncio.ensure_future(
-        BashExecTool().run(command=f"echo $$ > {pidfile}; exec sleep 30", timeout_s=30)
+        BashExecTool().run(
+            command=f"(cat /proc/$$/winpid 2>/dev/null || echo $$) > {pidfile.as_posix()}; "
+                    "exec sleep 30",
+            timeout_s=30,
+        )
     )
     for _ in range(300):  # let the child spawn and publish its pid
         await asyncio.sleep(0.01)
@@ -892,6 +909,116 @@ async def test_bash_exec_runs_under_bash_not_dash(tmp_path: Path):
     assert (tmp_path / "b").is_dir()
     # dash leaves a literal brace directory ('{a,b}'); bash expands it away.
     assert not any("{" in p.name for p in tmp_path.iterdir())
+
+
+def test_find_bash_prefers_git_bin_wrapper_and_skips_wsl_stubs(monkeypatch, tmp_path: Path):
+    """Windows discovery order. `Git\\usr\\bin\\bash.exe` launched directly inherits the
+    harness PATH (no /usr/bin from PowerShell) so coreutils vanish; the `Git\\bin\\bash.exe`
+    wrapper sets PATH itself and must win. Both WSL stubs (System32, Store WindowsApps
+    alias) are rejected even when `which` returns them. Simulated on every OS."""
+    from localharness.tools.builtin import bash_tool
+
+    wrapper = tmp_path / "Git" / "bin" / "bash.exe"
+    inner = tmp_path / "Git" / "usr" / "bin" / "bash.exe"
+    for exe in (wrapper, inner):
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"")
+    monkeypatch.setattr(bash_tool.os, "name", "nt")
+    monkeypatch.delenv("LOCALHARNESS_BASH", raising=False)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.setenv("LocalAppData", str(tmp_path / "absent"))
+    stub = str(tmp_path / "WindowsApps" / "bash.exe")
+    monkeypatch.setattr(bash_tool.shutil, "which", lambda _name: stub)
+
+    assert bash_tool._find_bash() == str(wrapper)
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_coreutils_resolve_without_git_on_path(monkeypatch):
+    """Live regression: from a PowerShell-started harness every `mkdir -p` came back
+    '/usr/bin/bash: line 1: mkdir: command not found' — and was reported ✓. Strip Git
+    entries from PATH so discovery (not the caller's shell) has to supply coreutils; a
+    no-op on POSIX, where the test still pins that coreutils resolve under bash_exec."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    monkeypatch.delenv("LOCALHARNESS_BASH", raising=False)
+    stripped = [p for p in os.environ.get("PATH", "").split(os.pathsep) if "git" not in p.lower()]
+    monkeypatch.setenv("PATH", os.pathsep.join(stripped))
+
+    result = await BashExecTool().run(command="command -v mkdir")
+    assert result.success is True, result.error
+    assert "mkdir" in result.output
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_nonzero_exit_is_failure_and_keeps_output():
+    """A non-zero exit used to be success=True with the code tucked in metadata: the
+    terminal showed ✓ and the model read the result as done. It is a failure now, and
+    because the loop forwards .error (not .output) on failure, the command's own output
+    must travel inside the error message."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command="echo boom >&2; exit 3")
+    assert result.success is False
+    assert result.error_type == "execution_error"
+    assert result.metadata.get("exit_code") == 3
+    assert "boom" in result.output
+    assert "exit code 3" in (result.error or "")
+    assert "boom" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_stdin_is_never_the_terminal():
+    """A command that reads stdin gets EOF at once (stdin=DEVNULL) — never the harness's
+    own terminal. Observed live: `cmd /c "…"` under git-bash opened an interactive cmd on
+    the inherited stdin and sat there for the full 65s timeout."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command="cat; echo done", timeout_s=10)
+    assert result.success is True, result.error
+    assert "done" in result.output
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import subprocess
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_timeout_kills_process_tree_promptly(tmp_path: Path):
+    """The inner timeout must kill the whole tree and return on ITS path. A grandchild
+    holding the stdout pipe (`sleep 30 &`) kept the post-kill communicate() blocked, so
+    the base-class outer timeout fired instead (the inversion) and the grandchild lived on.
+    On Windows `taskkill /T` does not reach git-bash's forked children (verified), hence the
+    job object — so the test checks the grandchild is really dead, not just that we returned."""
+    import time
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    pidfile = (tmp_path / "child.pid").as_posix()
+    # /proc/<pid>/winpid is the Windows pid under MSYS; POSIX falls back to $! itself.
+    command = f'sleep 30 & (cat /proc/$!/winpid 2>/dev/null || echo $!) > "{pidfile}"; wait'
+    t0 = time.monotonic()
+    result = await BashExecTool().run(command=command, timeout_s=1)
+    elapsed = time.monotonic() - t0
+    assert result.success is False
+    assert result.error_type == "timeout_error"
+    assert "Command timed out" in result.output  # the inner path, not base.run's outer one
+    assert elapsed < 10, f"took {elapsed:.1f}s — the tree was not killed"
+    child = int((tmp_path / "child.pid").read_text().strip())
+    for _ in range(20):
+        if not _pid_alive(child):
+            break
+        await asyncio.sleep(0.25)
+    assert not _pid_alive(child), f"grandchild {child} survived the timeout"
 
 
 @pytest.mark.asyncio
@@ -995,7 +1122,6 @@ async def test_web_fetch_start_index_past_end_errors(monkeypatch):
 @pytest.mark.asyncio
 async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
     """Models routinely pass ~ paths (observed live: read + glob both failed on them)."""
-    import os
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' Path.expanduser() prefers this over HOME
     (tmp_path / "notes").mkdir()
