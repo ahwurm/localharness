@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from localharness.config.paths import resolve_config_dir
 from localharness.tools.base import ToolProtocol
 
 if TYPE_CHECKING:
@@ -52,7 +53,10 @@ class PluginLoader:
     ) -> None:
         self._registry = registry
         self._hook_system = hook_system
-        self._plugins_dir = plugins_dir or Path.home() / ".localharness" / "plugins"
+        # #150 phase 38: the chokepoint, not the raw home — a --config-dir / LOCALHARNESS_DIR
+        # session must load ITS plugins. Resolved HERE at construction, never at import (Risk #3).
+        # (Callers that know their session dir pass plugins_dir explicitly; start_cmd does.)
+        self._plugins_dir = Path(plugins_dir) if plugins_dir else resolve_config_dir() / "plugins"
         self._loaded: list[str] = []
 
     async def discover_all(self) -> list[str]:
