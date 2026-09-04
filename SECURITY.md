@@ -43,9 +43,11 @@ permanent trust question on your behalf — hooks, CI, anything scheduled.
 **Three edges of that gate, as it behaves today.** Each is a case where the "inside your project"
 test lands narrower or wider than you might guess. Know which before you rely on it.
 
-- A **linked git worktree** reads as outside its parent project. The repository-root walk stops at
-  the worktree's own root, so a `.localharness/` in the main checkout is treated as external and you
-  are asked about your own repository.
+- A **linked git worktree counts as inside the checkout it was cut from**. Its `.git` is a file
+  naming the parent repository (`gitdir: …`), which the walk reads — so the main checkout's
+  `.localharness/` loads with no prompt while you work in a worktree of it, exactly as it would in
+  the checkout itself. A submodule reads the same way about its superproject. The exposure is the
+  one below it: config in a repository you cloned loads because you opened that repository.
 - A **folder that is not in a git repository** counts as in-project only at the exact directory that
   holds `.localharness/`. From a subdirectory of it, the workspace is external — asked about if there
   is a terminal, skipped if there is not.
