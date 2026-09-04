@@ -37,7 +37,8 @@ All agent configuration is **read-only at runtime**. The agent loop reads config
 # Workspace config (optional): the nearest .localharness/ at or above the current directory
 {project}/.localharness/
 ├── config.yaml                   # merged over the global config.yaml (workspace wins per key)
-├── overrides.yaml                # merged last — the highest-priority layer
+├── overrides.yaml                # merged last — highest priority, EXCEPT its `agent:` section,
+│                                 #   which nothing reads (see "What this does NOT cover")
 ├── audit.jsonl                   # this project's audit records
 ├── agents/
 │   ├── {agent-name}.yaml         # agent config
@@ -79,6 +80,37 @@ printed on stderr.
 
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
+
+### Creating a workspace
+
+```
+localharness init --workspace
+```
+
+Run it in the directory you want to be the project root. It creates `./.localharness/` with exactly
+two things in it: an `agents/` directory, and a `config.yaml` that is **entirely comments** — the
+merge order, the two rules that do not follow "workspace wins", and the settings people reach for
+first, all written out and none of them switched on. An all-comment file parses to nothing and
+contributes nothing to the merge, so a freshly scaffolded workspace changes no value you had before
+you ran the command. That is the intended starting state, not an unfinished one: the workspace
+already scopes this project's memory, sessions and logs without a single setting in the file.
+
+It creates nothing else. No `overrides.yaml`, no `divisions/`, no `microagents/`, no state
+directory — those appear when something writes them. It never writes a `provider:` block, because
+where the model server lives is a fact about the machine.
+
+Two properties worth relying on:
+
+- **It never overwrites a workspace you already have.** If `./.localharness/` exists, the command
+  refuses, changes nothing, and exits **1** — deliberately different from plain `localharness init`,
+  whose "config already exists" path is an interactive question that exits 0. A script can tell
+  "created" from "already there" by the exit code alone.
+- **It never prompts.** No question, at any point, so it works in a `Dockerfile`, a setup script or
+  CI, where an unanswerable prompt would abort the run.
+
+`--workspace` cannot be combined with the flags that point `init` at a machine or a directory —
+`--endpoint`, `--model`, `--config-dir`. That combination exits 2 and names the flag that
+conflicted. `--force` is accepted and does not help: the refusal above holds under it too.
 
 ### How the two layers combine
 
@@ -126,16 +158,65 @@ and that file replaces the global one entirely instead of being merged into it f
 workspace's `agents/deployer.yaml` is the whole definition of `deployer` inside that project — no
 field leaks across from the global file of the same name.
 
+#### Finding out which file set a key
+
+Four files can set the same key, so "what is this value, and who set it?" is one question with one
+answer. Three commands give it, and all three name the layer using the same five words:
+`global-config`, `global-overrides`, `workspace-config`, `workspace-overrides` — and `default` for a
+value no file set at all.
+
+**`localharness config show`** is the whole picture in one page. It prints the four files in merge
+order, lowest priority first, each marked `present` or `missing`, then a table — `key`, `value`,
+`set by` — of every key some file actually sets:
+
+```
+Config layers, lowest priority first — each one wins any key the ones above it set:
+  global-config        present  /home/you/.localharness/config.yaml
+  global-overrides     missing  /home/you/.localharness/overrides.yaml
+  workspace-config     present  /home/you/proj/.localharness/config.yaml
+  workspace-overrides  missing  /home/you/proj/.localharness/overrides.yaml
+                           Effective config
+┃ key                    ┃ value                   ┃ set by           ┃
+│ org.log_level          │ 'info'                  │ global-config    │
+│ org.name               │ 'THIS-PROJECT'          │ workspace-config │
+Showing the 7 key(s) some file sets, of 182 total. Run with --all to include the 175 compiled-in defaults.
+```
+
+`--all` adds the compiled-in defaults; `--json` emits the same thing as `{"layers": [...],
+"keys": [...]}` for scripts. With no workspace there are two layer rows, not four with two marked
+missing — nothing about the feature appears for someone who never made a workspace.
+
+**`localharness doctor`** answers the narrower question you usually have: what does this project
+change? Inside a workspace it prints both layer paths and then one row per key the workspace
+actually moves, with the value it displaced:
+
+```
+       1 key(s) overridden by this workspace:
+         org.name = 'THIS-PROJECT'  [workspace-config]  (global: 'MACHINE-DEFAULT-ORG')
+```
+
+It is a comparison of values, not of files: a workspace that restates a key with the same value the
+global layer already had produces no row, because nothing changed for you. A workspace that
+overrides nothing says so in one line.
+
+**`localharness components list / get / set`** read the workspace layer too, so a value they show
+you is the value the running harness is using. `list` takes `--layer` to filter by winning layer,
+`get` prints one path with its layer, and all three take `--config-dir` (which, like everywhere
+else, switches workspace discovery off).
+
+**`components set` still writes the global `overrides.yaml`, in every project — and now says so in
+its own output.** A setting you make inside a project applies on the whole machine; the command
+prints the file it wrote, warns that the setting is machine-wide, and tells you where a per-project
+value would go instead. If the workspace already sets that key, it also tells you the value you just
+wrote is not the one in force here.
+
+**Config errors name the file that actually set them.** A bad value in a workspace `config.yaml` is
+reported against that file's path and that file's own line number, not against the global file —
+`validate` and `doctor` both. And a malformed `overrides.yaml`, in either layer, is reported as a
+parse error with its line and column instead of ending the command in a traceback.
+
 #### What this does NOT cover
 
-- **`localharness components list / get / set` read and write the global layer only** —
-  `~/.localharness/config.yaml` and `~/.localharness/overrides.yaml`. Inside a workspace they can
-  show you a value the running harness is not using. A merged view that names the layer each value
-  came from is the next piece of work.
-- **`localharness validate` validates the MERGED config**, so a mistake in a workspace
-  `config.yaml` is caught — but it is reported against the name `config.yaml` without saying which
-  layer the bad line came from. If validate reports a config error you cannot find in the global
-  file, look in the workspace one.
 - **An `agent:` section in a workspace `overrides.yaml` is not read.** That section is the
   per-agent default layer `components set agent.*` writes, and every writer of that layer is global
   in this release.

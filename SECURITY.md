@@ -59,6 +59,33 @@ in your own config still wins either way. Read this honestly: it is a default th
 tools reach by accident, not a sandbox. A command run through `bash_exec` can still leave that
 folder, and the deny patterns remain the mechanism that stops specific actions.
 
+## What `localharness start` writes without asking
+
+Two things happen on a start that are worth knowing about, because both write into your config
+directory and neither stops to ask.
+
+**Your `config.yaml` gains any newly-shipped default deny patterns.** New releases add to the
+default deny list, but `localharness init` baked the list into your `config.yaml` when you first set
+up, so a later addition would never reach you. On the first start after an upgrade the harness folds
+the missing ones in. It is additive only — it never removes or reorders an entry you wrote, touches
+no other key, and is gated on the `defaults_revision` stamp your config carries, so a default you
+deliberately deleted is not re-added. A
+timestamped `config.yaml.bak-<stamp>` is written before the change, and the change is announced:
+`i  Security defaults updated (revision 0 → 1): added 24 deny pattern(s) — additive only; backup at
+…`. State it plainly: **this happens without asking you.** The reason it is not a prompt is that the
+change only ever tightens the deny list and a start that blocks on a question is a start that fails
+in a script. The reason it is not invisible is `localharness doctor`, which prints the revision your
+config carries, the revision shipped, and the backup path — so you can see the change after the
+announcement has scrolled away. `localharness config migrate --dry-run` prints exactly what a start
+would add, and writes nothing. Whether this should stay automatic is an open question for the
+project owner; the behavior above is what ships today, not a settled ruling.
+
+**`start` also seeds `<config-dir>/tools/design-screenshot.js`.** The frontend-designer builtin
+shells out to that script by path, so the package copies it into your config directory's `tools/`
+folder on first run. It is idempotent — present means untouched — it is written to your global
+config directory and never into a workspace, and a failure to copy it is a warning rather than a
+blocked start. It is the only file `start` installs from the package.
+
 ## Threat model: prompt injection
 
 Agents fetch web pages and call tools, then act on what they read. The central risk

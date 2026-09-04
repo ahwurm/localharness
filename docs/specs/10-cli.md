@@ -157,6 +157,21 @@ Start your LLM server and run 'localharness init' again, or use:
 
 Exit code 1 on failure.
 
+**`--workspace` (v0.13): a different command in the same name.** `localharness init --workspace`
+does not configure the machine. It scaffolds `./.localharness/` for the project you are standing in
+— an `agents/` directory and an all-comments `config.yaml`, nothing else, and never a `provider:`
+block. It probes nothing, asks nothing, and refuses an existing workspace with **exit 1** rather
+than plain `init`'s interactive exit 0, so a script can tell "created" from "already there" by the
+exit code. It cannot be combined with `--endpoint`, `--model` or `--config-dir` (exit 2, naming the
+flag). Spec 06 §2 has what the scaffolded file says and why it is empty.
+
+```
+✓ Workspace created at /home/you/proj/.localharness
+  Config:  /home/you/proj/.localharness/config.yaml (all comments — nothing is set yet)
+  Agents:  /home/you/proj/.localharness/agents
+  Next:    run `localharness start` from anywhere in this project — its memory, sessions and logs now stay here.
+```
+
 ---
 
 ### `localharness start`
@@ -387,6 +402,13 @@ def agent_list(
 └─────────────────────┴──────────────┴──────────────────────┴────────┴──────────────┴─────────────────────┘
 ```
 
+**`--json` is machine output.** It is written with `typer.echo`, not through the Rich console, so
+the payload is emitted without markup interpretation and without wrapping — a name containing
+`[brackets]` survives intact, and no newline is injected mid-string at any terminal width. Pipe it
+to `jq` directly. Inside a workspace the roster is the union of both layers, and `--json` never
+stops to ask about an untrusted workspace: an undecided one is simply left out, so a scripted run
+cannot spend your one-time answer for you.
+
 #### Editing or removing an agent (today)
 
 `agent run` and `agent delete` below are **planned** and not yet implemented. Until they
@@ -565,6 +587,40 @@ Agents (2):
 
 **`--fix` behavior:** Attempts to repair each detected issue. Repairable: corrupted SQLite (delete and recreate empty), missing directories (create). Non-repairable: LLM unreachable (report only), config parse error (report with line number).
 
+**Two v0.13 additions to the output.**
+
+*The layer report, printed only inside a workspace.* After the config-file line, `doctor` names both
+layer directories and then lists every key this workspace actually changes, with the value it
+displaced:
+
+```
+✓ Workspace layer: /home/you/proj/.localharness
+       Global layer:    /home/you/.localharness
+       1 key(s) overridden by this workspace:
+         org.name = 'THIS-PROJECT'  [workspace-config]  (global: 'MACHINE-DEFAULT-ORG')
+```
+
+It compares values, not files: a workspace that restates a key with the value the global layer
+already had produces no row. A workspace that changes nothing prints
+`No overrides — the global config governs every key.` instead of an empty section. None of these
+lines appears at all when no workspace applies. A config error here names the file that set the
+offending key and that file's own line number, so an error you cannot find in the global config
+tells you which workspace file to open.
+
+*The security-defaults state, printed on every run.* One informational line — never a failure, and
+it counts toward no issue total:
+
+```
+i Security defaults: revision 1 (current)
+       Last migrated 2026-02-14 15:30; backup at /home/you/.localharness/config.yaml.bak-20260214-153000
+```
+
+When the config is behind the shipped revision it says so and names the two ways forward
+(`localharness start` will fold them in on its next run, or `localharness config migrate` now). The
+backup line is omitted entirely when no `config.yaml.bak-*` file exists — no invented date. This
+exists because `start` performs that fold-in automatically and its announcement scrolls away in a
+long session; see SECURITY.md.
+
 ---
 
 ### `localharness validate`
@@ -617,6 +673,147 @@ Validating agent configs...
 ──────────────────────────────
 2 configs valid, 1 invalid.
 ```
+
+---
+
+### `localharness config`
+
+Two subcommands: `show` (v0.13) and `migrate`.
+
+#### `localharness config show`
+
+`Print the effective config and the file that set each key.` One command for the question four
+config files make hard to answer. It prints a header naming every file in the merge order, lowest
+priority first, each marked `present` or `missing`, then a table of the values in force:
+
+```
+Config layers, lowest priority first — each one wins any key the ones above it set:
+  global-config        present  /home/you/.localharness/config.yaml
+  global-overrides     present  /home/you/.localharness/overrides.yaml
+  workspace-config     present  /home/you/proj/.localharness/config.yaml
+  workspace-overrides  present  /home/you/proj/.localharness/overrides.yaml
+                             Effective config
+┏━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
+┃ key                     ┃ value                   ┃ set by              ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
+│ org.default_temperature │ 0.3                     │ global-overrides    │
+│ org.log_level           │ 'debug'                 │ workspace-overrides │
+│ org.name                │ 'payments-platform'     │ workspace-config    │
+│ provider.base_url       │ 'http://127.0.0.1:9/v1' │ global-config       │
+└─────────────────────────┴─────────────────────────┴─────────────────────┘
+Showing the 7 key(s) some file sets, of 182 total. Run with --all to include the 175 compiled-in defaults.
+```
+
+The three columns are `key`, `value` and `set by`; values are shown as `repr()`, so strings arrive
+quoted — the same convention `components list` uses.
+
+| Option | Effect |
+|---|---|
+| (none) | only the keys some file sets, plus the footer counting the rest |
+| `--all` | the whole catalogue, compiled-in defaults included; no footer |
+| `--json` | `{"layers": [...], "keys": [...]}`, `indent=2` |
+| `--config-dir` | read that directory instead, and switch workspace discovery off with it |
+
+`--json` has exactly two top-level keys. `layers` is ordered lowest-priority-first with
+`layer` / `path` / `exists` per entry; `keys` carries `path` / `value` / `type` / `layer` /
+`default`:
+
+```json
+{
+  "layers": [
+    { "layer": "global-config", "path": "/home/you/.localharness/config.yaml", "exists": true },
+    { "layer": "workspace-config", "path": "/home/you/proj/.localharness/config.yaml", "exists": true }
+  ],
+  "keys": [
+    { "path": "org.default_temperature", "value": 0.3, "type": "float", "layer": "global-overrides", "default": 0.6 }
+  ]
+}
+```
+
+With no workspace there are **two** layer rows, not four with two marked missing: someone who never
+made a workspace sees no trace of the feature. Exit 2 if no config can be loaded at all.
+
+#### `localharness config migrate`
+
+`Additively sync the shipped default deny patterns into your config.yaml.` `init` bakes the resolved
+`org.permissions.deny_patterns` into `config.yaml`, so a later growth of the shipped default list
+never reaches an existing install. This appends the missing ones and stamps the config's defaults
+revision. Additive only: it never removes or reorders your own entries, touches no other key, and —
+because it is revision-gated — never re-adds a default you deliberately deleted. A timestamped
+backup is written before the config is updated.
+
+`--dry-run` reports what would change and writes nothing:
+
+```
+24 shipped default deny pattern(s) missing from /home/you/.localharness/config.yaml (defaults revision 0 → 1):
+  + write(*/.env)
+  + bash_exec(*sudo *)
+  ...
+Additive only — if you deliberately removed a default, re-remove it after migrating.
+
+i --dry-run: nothing written.
+```
+
+`localharness start` runs this same engine automatically on the first start after an upgrade — see
+SECURITY.md, and `doctor` for the state it leaves behind.
+
+---
+
+### `localharness components`
+
+Read and change any registered config value by dot-path, without opening a YAML file.
+
+#### `localharness components list`
+
+`List every mutable component with its current value and winning layer.` Columns: `path`, `type`,
+`current value`, `layer`.
+
+`--layer <band>` filters to the entries a given layer won. The accepted names are the merge bands
+plus `default`:
+
+| Band | Means |
+|---|---|
+| `default` | no file set it; the compiled-in value is in force |
+| `global-config` | `~/.localharness/config.yaml` |
+| `global-overrides` | `~/.localharness/overrides.yaml` |
+| `workspace-config` | `{project}/.localharness/config.yaml` |
+| `workspace-overrides` | `{project}/.localharness/overrides.yaml` |
+| `experiment` | an in-memory overlay a running gate applies; it has no file of its own, so nothing on disk sets it and `--layer experiment` normally matches nothing |
+
+`--json` emits the same rows with the field names `path` / `type` / `current_value` / `layer`.
+
+#### `localharness components get <path>`
+
+Prints one path's value, its type, the layer that won it, and its compiled-in default:
+
+```
+org.name = 'THIS-PROJECT'
+  type:    str
+  layer:   workspace-config
+  default: 'default'
+```
+
+`--json` gives `path` / `value` / `type` / `layer` / `default`.
+
+#### `localharness components set <path> <value>`
+
+One path at a time; the value is coerced to the path's declared type.
+
+**`set` always writes the global `~/.localharness/overrides.yaml`, in every project.** There is no
+per-project write target in v0.13, so the command says what it did rather than leaving you to find
+out: it prints the file it wrote, warns that the setting applies machine-wide, and points at the
+workspace `config.yaml` as the place a per-project value belongs. If the workspace already sets that
+key, it also tells you the value you just wrote is not the one in force where you are standing:
+
+```
+set org.log_level = 'debug' (was: 'info')
+  wrote: /home/you/.localharness/overrides.yaml  (the global overrides.yaml)
+  note: this is a MACHINE-WIDE setting. It applies in every project, including this one.
+        A per-project value goes in /home/you/proj/.localharness/config.yaml.
+```
+
+All three subcommands take `--config-dir`, which — as everywhere else — replaces the config
+directory outright and switches workspace discovery off with it.
 
 ---
 
@@ -772,6 +969,21 @@ Every configurable value follows this precedence order (highest to lowest):
 Implementation: Typer handles CLI flags and `envvar=` on each `Option`. The config file is loaded by `ConfigLoader` after CLI parsing. Defaults are in `ToolConfig()`, `PermissionConfig()`, etc. as Pydantic field defaults.
 
 **Workspace layer (v0.13).** `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` are a full replacement: naming a config directory also switches workspace discovery off, so no workspace layer applies. With none of them set, the harness looks for the nearest `.localharness/` directory at or above your current directory and reads agent and division files from it ahead of the global directory. It applies that layer without asking when the workspace belongs to the project you are in — your own directory, or at or below the root of the git repository containing you. A workspace from outside that project loads only after a one-time confirmation, and is ignored with a notice on stderr when there is no terminal to ask. `doctor` and `start` name the layer they chose; see spec 06 for the full search order.
+
+When a workspace applies, the config file at step 3 above is four files, merged in this order —
+lowest priority first, each winning any key the ones before it also set:
+
+```
+1. ~/.localharness/config.yaml         global-config       (written by `localharness init`)
+2. ~/.localharness/overrides.yaml      global-overrides    (written by `components set`)
+3. {project}/.localharness/config.yaml    workspace-config
+4. {project}/.localharness/overrides.yaml workspace-overrides
+```
+
+Spec 06 §"How the two layers combine" states the rule this order encodes, and the exceptions to it
+(`deny_patterns` accumulate; a workspace `overrides.yaml`'s `agent:` section is not read).
+`localharness config show` prints these four files, in this order, with the layer that set each
+effective key.
 
 Precedence merging:
 
