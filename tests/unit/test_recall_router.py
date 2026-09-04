@@ -500,7 +500,9 @@ async def test_every_merged_fact_line_carries_an_origin_token(both: RecallRouter
     fact_lines = [
         ln for ln in (before_shelf + global_block).splitlines() if ln.startswith("- ")
     ]
-    assert len(fact_lines) == 5, fact_lines   # ws: shared-key + versioned; global: 3 facts
+    # ws: shared-key + versioned; global: global-only ALONE — its own `shared-key` and
+    # `versioned` are the workspace's names, and B5's dedup leaves those to the workspace block.
+    assert len(fact_lines) == 3, fact_lines
     unlabelled = [ln for ln in fact_lines if not re.match(r"^- \[(workspace|global)#\d+\] ", ln)]
     assert unlabelled == [], unlabelled
 
@@ -725,5 +727,113 @@ async def test_both_merges_the_legacy_memory_md_render(both: RecallRouter) -> No
     assert md.index(WS_MARKER) < md.index(_MERGED_HEADER) < md.index(GLOBAL_MARKER)
     assert re.search(r"\[(workspace|global)#\d+\]", md) is None, md
     assert ctx.injected_fact_ids == []
+
+    await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 15. A broken machine-global store degrades the turn; it never ends it (B4).
+# ------------------------------------------------------------------ #
+def _corrupt(gl_dir: Path) -> Path:
+    """Garbage where the global database was — the shape a half-written file, a bad restore or
+    a filesystem fault leaves behind. `file is not a database` is raised at open, mid-read."""
+    db = gl_dir / "agents" / AGENT / "memory.db"
+    db.write_bytes(b"NOT A SQLITE FILE" * 40)
+    for sidecar in ("memory.db-wal", "memory.db-shm"):
+        (db.parent / sidecar).unlink(missing_ok=True)
+    return db
+
+
+async def test_a_corrupt_global_store_does_not_take_the_workspace_context_with_it(
+    pair, caplog
+) -> None:
+    """Blast radius, new in 0.13: before the second store existed, no memory failure could
+    strip a healthy project session of its own memory — or of the org guardrails riding in the
+    same context object. `both` must degrade to the workspace half plus a visible line."""
+    _corrupt(pair.gl_dir)
+    router = RecallRouter(pair.ws, make_store(pair.gl_dir, global_base=pair.gl_dir),
+                          scope=SCOPE_BOTH)
+
+    with caplog.at_level("WARNING"):
+        ctx = await router.load_context()
+
+    assert WS_MARKER in ctx.agent_memory_md, "the healthy workspace memory was discarded"
+    assert ctx.guardrails_md == GUARDRAILS_TEXT, "the org's safety context was discarded"
+    assert ctx.division_md == DIVISION_TEXT
+    assert ctx.injected_fact_ids, "the workspace's injected ids went missing"
+    # Visible to the model, not just to the log: silence would read as "there is no global
+    # memory", which is a different and false statement.
+    assert "unavailable" in ctx.agent_memory_md.lower(), ctx.agent_memory_md
+    assert ctx.agent_memory_md.count("unavailable") == 1, "more than one warning line"
+    assert any("global" in r.message.lower() for r in caplog.records), caplog.records
+
+    await router.close()
+
+
+async def test_a_corrupt_global_store_under_global_scope_substitutes_nothing(pair) -> None:
+    """The other half of honesty: `recall_scope: global` says do not read this project's own
+    facts, so the degraded context carries the warning and NO facts — never the workspace's,
+    which would be the knob quietly reversing itself."""
+    _corrupt(pair.gl_dir)
+    router = RecallRouter(pair.ws, make_store(pair.gl_dir, global_base=pair.gl_dir),
+                          scope=ORIGIN_GLOBAL)
+
+    ctx = await router.load_context()
+
+    assert "unavailable" in ctx.agent_memory_md.lower(), ctx.agent_memory_md
+    assert WS_MARKER not in ctx.agent_memory_md, "a global-scope session was fed workspace facts"
+    assert ctx.fact_count == 0
+    assert ctx.injected_fact_ids == []
+    assert ctx.guardrails_md == GUARDRAILS_TEXT, "the safety context went down with the store"
+
+    await router.close()
+
+
+async def test_a_healthy_workspace_failure_still_raises(pair) -> None:
+    """The degradation is scoped to the store this session does not own. The PRIMARY failing is
+    not a degradation — it is this session's own memory, and swallowing that would hide it."""
+    await pair.ws.close()      # every read on the primary now trips its own assert
+    router = RecallRouter(pair.ws, pair.g, scope=SCOPE_BOTH)
+
+    with pytest.raises(BaseException):
+        await router.load_context()
+
+    await router.close()
+
+
+# ------------------------------------------------------------------ #
+# 16. The ambient shelf dedups by key, workspace-wins — like the tools (B5).
+# ------------------------------------------------------------------ #
+async def test_the_merged_shelf_injects_one_version_of_a_contradicted_key(
+    both: RecallRouter, pair
+) -> None:
+    """`shared-key` exists in both stores with different bodies. `query_facts` and `get_fact`
+    already resolve it to THIS project's version; the every-turn injected block did not, so the
+    model was handed both sides of a contradiction with no way to tell which one its own tools
+    would return."""
+    md = (await both.load_context()).agent_memory_md
+
+    assert md.count("shared-key") == 1, md
+    assert f"{WS_MARKER} workspace version" in md
+    assert f"{GLOBAL_MARKER} global version" not in md, "the global version was injected too"
+    # Dedup is not "drop the global block": a key only the global store has still arrives.
+    assert f"{GLOBAL_MARKER} solo body" in md, md
+    # And the ONE that is injected is the one the tools resolve to — the point of the fix.
+    assert (await both.get_fact("shared-key")).value == f"{WS_MARKER} workspace version"
+
+    await both.close()
+
+
+async def test_the_deduped_shelf_does_not_double_count_facts(both: RecallRouter) -> None:
+    """`fact_count`'s second term is the global block's injected count; a suppressed line must
+    not still be counted, or the number describes text nobody was shown."""
+    ctx = await both.load_context()
+    global_lines = [
+        ln for ln in ctx.agent_memory_md.partition(_MERGED_HEADER)[2].splitlines()
+        if ln.startswith("- ")
+    ]
+
+    ws_only = await RecallRouter(both._primary, None).load_context()
+    assert ctx.fact_count == ws_only.fact_count + len(global_lines)
 
     await both.close()

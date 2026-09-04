@@ -26,9 +26,12 @@ store's access counts and traces un-updated by its reads.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import replace
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 ORIGIN_WORKSPACE = "workspace"
 ORIGIN_GLOBAL = "global"
@@ -69,6 +72,15 @@ _MERGED_PREAMBLE = (
 # The global block's session shelf is suppressed: the shelf is THIS project's working history,
 # and the global store's own sittings are a different project's story.
 _MERGED_GLOBAL_SESSION_HISTORY = 0
+
+# What the model is told when the second store cannot be read (v0.13 B4). ONE line, and it says
+# which half is missing: silence would read as "there is no global memory", a different and
+# false statement, and a raised exception would take a healthy session's own memory — and the
+# org guardrails riding in the same context object — down with a store it does not own.
+_GLOBAL_UNAVAILABLE = (
+    "## Global Memory unavailable this turn (it could not be read) — nothing from the "
+    "machine-global store is included below."
+)
 
 
 class RecallRouter:
@@ -183,12 +195,26 @@ class RecallRouter:
 
         `index_mode=False` inlines each store's whole MEMORY.md under the same header. That
         legacy dump has no per-fact lines, so it carries no origin tokens and no ids.
+
+        A machine-global store that cannot be read (corrupt file, bad restore, a tree awaiting
+        adoption) DEGRADES rather than raising: the workspace half is returned with one visible
+        unavailable line. The primary failing is not degraded — that is this session's own
+        memory, and swallowing it would hide it (B4).
         """
         if self.scope != SCOPE_BOTH:
-            store = await self._read_store()
-            ctx = await store.load_context(
-                index_mode=index_mode, max_session_history=max_session_history
-            )
+            if self.scope == ORIGIN_GLOBAL:
+                try:
+                    store = await self._read_store()
+                    ctx = await store.load_context(
+                        index_mode=index_mode, max_session_history=max_session_history
+                    )
+                except Exception as exc:
+                    return await self._degraded_global_only(exc, index_mode, max_session_history)
+            else:
+                store = await self._read_store()
+                ctx = await store.load_context(
+                    index_mode=index_mode, max_session_history=max_session_history
+                )
             # `injected_fact_ids` may only ever carry ids the PRIMARY owns: the loop records
             # the ambient trace on its own store handle, and facts.id is per-database. A
             # global-scope read therefore reports an EMPTY injected set — the already-supported
@@ -198,26 +224,38 @@ class RecallRouter:
         ws_ctx = await self._primary.load_context(
             index_mode=index_mode, max_session_history=max_session_history
         )
-        g = await self.ensure_global()
-        if g is None:                      # unreachable while `scope` collapses; kept explicit
-            return ws_ctx
-        if index_mode:
-            # The primary's index is rendered twice here (once inside load_context above for the
-            # safety-context fields and the true fact_count, once labelled below). Two local
-            # SQLite SELECTs; the alternative — reaching past load_context for guardrails,
-            # division and the count — trades a measurable cost for an unmeasurable one.
-            ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
-                max_session_history, origin_label=ORIGIN_WORKSPACE
-            )
-            g_md, g_ids = await g._render_memory_index_with_ids(
-                _MERGED_GLOBAL_SESSION_HISTORY, origin_label=ORIGIN_GLOBAL, include_preamble=False
-            )
-        else:
-            g_ctx = await g.load_context(
-                index_mode=False, max_session_history=_MERGED_GLOBAL_SESSION_HISTORY
-            )
-            ws_md, ws_ids = ws_ctx.agent_memory_md, list(ws_ctx.injected_fact_ids)
-            g_md, g_ids = g_ctx.agent_memory_md, []
+        try:
+            g = await self.ensure_global()
+            if g is None:                  # unreachable while `scope` collapses; kept explicit
+                return ws_ctx
+            if index_mode:
+                # The primary's index is rendered twice here (once inside load_context above for
+                # the safety-context fields and the true fact_count, once labelled below). Two
+                # local SQLite SELECTs; the alternative — reaching past load_context for
+                # guardrails, division and the count — trades a measurable cost for an
+                # unmeasurable one.
+                ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
+                    max_session_history, origin_label=ORIGIN_WORKSPACE
+                )
+                # Key-level dedup, workspace-wins — the same answer `query_facts` and
+                # `get_fact` already give (B5). Without it the every-turn block handed the
+                # model both sides of a contradiction while its own tools resolved one of
+                # them. The exclusion set is what the WORKSPACE BLOCK actually rendered (one
+                # id-keyed SELECT), not every active workspace key: a global fact must be
+                # suppressed by a line the model can see, never by an invisible one.
+                ws_keys = {f.key for f in await self._primary.get_facts_by_ids(ws_ids)}
+                g_md, g_ids = await g._render_memory_index_with_ids(
+                    _MERGED_GLOBAL_SESSION_HISTORY, origin_label=ORIGIN_GLOBAL,
+                    include_preamble=False, exclude_keys=ws_keys,
+                )
+            else:
+                g_ctx = await g.load_context(
+                    index_mode=False, max_session_history=_MERGED_GLOBAL_SESSION_HISTORY
+                )
+                ws_md, ws_ids = ws_ctx.agent_memory_md, list(ws_ctx.injected_fact_ids)
+                g_md, g_ids = g_ctx.agent_memory_md, []
+        except Exception as exc:
+            return self._degraded_merge(ws_ctx, exc)
         merged_md = f"{_MERGED_PREAMBLE}{ws_md}\n\n{_MERGED_HEADER}\n\n{g_md}"
         # guardrails/division come from ws_ctx UNCHANGED: both stores derive them from the same
         # global_base_dir, so concatenating would inject the org's safety voice twice (Pitfall 3).
@@ -227,6 +265,38 @@ class RecallRouter:
             fact_count=ws_ctx.fact_count + len(g_ids),
             token_estimate=len(merged_md + ws_ctx.division_md + ws_ctx.guardrails_md) // 4,
             injected_fact_ids=ws_ids,
+        )
+
+    def _degraded_merge(self, ws_ctx: Any, exc: Exception) -> Any:
+        """`both`, minus the half that failed: this project's own memory, its own injected ids
+        and the org safety context, plus the one line that says the rest is missing."""
+        log.warning("machine-global memory unavailable, reading this project's only: %r", exc)
+        md = f"{ws_ctx.agent_memory_md}\n\n{_GLOBAL_UNAVAILABLE}"
+        return replace(
+            ws_ctx,
+            agent_memory_md=md,
+            token_estimate=len(md + ws_ctx.division_md + ws_ctx.guardrails_md) // 4,
+        )
+
+    async def _degraded_global_only(
+        self, exc: Exception, index_mode: bool, max_session_history: int
+    ) -> Any:
+        """`global` scope, minus the only store it may read. The primary's context supplies the
+        SAFETY fields — both stores derive division/guardrails from the same global_base_dir,
+        so this is the same text the global store would have returned — and nothing else:
+        substituting this project's facts would be the knob quietly reversing itself."""
+        log.warning("machine-global memory unavailable under recall_scope: global: %r", exc)
+        ws_ctx = await self._primary.load_context(
+            index_mode=index_mode, max_session_history=max_session_history
+        )
+        return replace(
+            ws_ctx,
+            agent_memory_md=_GLOBAL_UNAVAILABLE,
+            fact_count=0,
+            injected_fact_ids=[],
+            token_estimate=len(
+                _GLOBAL_UNAVAILABLE + ws_ctx.division_md + ws_ctx.guardrails_md
+            ) // 4,
         )
 
     async def query_facts(self, query: Any) -> list[Any]:
