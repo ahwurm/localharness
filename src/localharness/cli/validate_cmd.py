@@ -11,7 +11,7 @@ from rich.rule import Rule
 
 from localharness.cli.errors import polite_filesystem_errors
 from localharness.cli.workspace import NO_INPUT_HELP
-from localharness.config.loader import ConfigError, ConfigLoader, ConfigValidationError
+from localharness.config.loader import ConfigError, ConfigLoader
 from localharness.config.paths import resolve_config_dir
 
 console = Console()
@@ -125,9 +125,14 @@ def validate(
         # workspace the value that failed can live in one of three other files. Where the error
         # names its own owner, THAT is what the row shows — otherwise the row blames a file that is
         # fine and the "in ..." line below has to walk it back.
+        # ...and EVERY error class that carries its owner, not just the validation one. A
+        # ConfigParseError has a `.path` too, and it is the one class that can only have come from
+        # one specific file — so it was the one class whose file was never named: a syntax error in
+        # the workspace config.yaml was reported against the global config.yaml, which is fine.
+        # getattr, not `.path`: ConfigNotFoundError names what it SEARCHED for, and has no `.path`.
         label_path = file_path
-        if workspace is not None and isinstance(error, ConfigValidationError):
-            label_path = error.path
+        if workspace is not None and isinstance(error, ConfigError):
+            label_path = getattr(error, "path", file_path)
         name = escape(label_path) if workspace is not None else Path(label_path).name
         if error is None:
             console.print(f"  {name:<35} {_PASS} valid", soft_wrap=True)

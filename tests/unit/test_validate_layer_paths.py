@@ -125,3 +125,58 @@ def test_validate_rows_print_the_full_path(tmp_path, monkeypatch):
 
     assert str(global_dir / "agents" / "twin.yaml") in result.output
     assert str(ws / "agents" / "twin.yaml") in result.output
+
+
+def _two_layer_home(tmp_path, monkeypatch):
+    """A configured machine + an in-project workspace, reached through the default HOME chain.
+
+    An explicit --config-dir is a full replacement and skips discovery (LAYR-02), so the
+    two-layer behaviour can only be driven this way.
+    """
+    home = tmp_path / "home"
+    global_dir = home / ".localharness"
+    (global_dir / "agents").mkdir(parents=True)
+    (global_dir / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider": {
+                    "provider_type": "vllm",
+                    "base_url": "http://localhost:8000/v1",
+                    "default_model": "m",
+                },
+                "org": {"name": "o"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    proj = home / "proj"
+    ws = proj / ".localharness"
+    ws.mkdir(parents=True)
+    (proj / ".git").mkdir()  # in-project workspace = loads silently (LAYR-05)
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COLUMNS", "300")  # else rich crops the row and the path is uncopyable
+    monkeypatch.chdir(proj)
+    return global_dir, ws
+
+
+def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch):
+    """A syntax error in the WORKSPACE config.yaml must not be reported against the global one.
+
+    The harness row is keyed under the global config.yaml by `validate_all`, and the row only
+    deferred to `error.path` for ConfigValidationError — a ConfigParseError carries `.path` too,
+    so the one error class that can ONLY come from a specific file was the one class whose file
+    was never named. The user was told to fix a config.yaml that is fine.
+    """
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    global_dir, ws = _two_layer_home(tmp_path, monkeypatch)
+    (ws / "config.yaml").write_text("org:\n  name: [unclosed\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate"])
+
+    assert result.exit_code == 1, result.output
+    assert str(ws / "config.yaml") in result.output, result.output
