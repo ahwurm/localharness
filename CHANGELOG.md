@@ -4,6 +4,107 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.13.0] — 2026-09-04
+
+Workspace layering. A `.localharness/` folder in a project now carries its own
+agents, config, and memory, layered over the machine-wide `~/.localharness/` —
+so the many projects on one machine stop pouring their lessons into each
+other's context (#150).
+
+### Added
+- **Workspace layers: a `.localharness/` folder in your project, over the global
+  one.** At session start the harness walks up from the current directory and
+  the first `.localharness/` it finds becomes the workspace layer; the nearest
+  one wins. The walk stops at `$HOME` and never treats the global
+  `~/.localharness/` as a workspace, so a session in your home directory is
+  unchanged. With no workspace up-tree — or an explicit
+  `--config-dir`/`LOCALHARNESS_DIR`, which still skips discovery entirely —
+  behavior is identical to 0.12.
+- **A trust prompt for config reaching in from outside your project.** A
+  workspace at or under the directory you are working in loads silently; you are
+  inside that project. One found anywhere else asks once, and the answer is
+  stored globally, so it is one prompt per directory, ever. With no terminal
+  attached the layer is skipped with a notice on stderr instead of prompting or
+  loading — an unattended run cannot be talked into adopting a stranger's config.
+- **Config deep-merges, with two rules that do not bend.** The workspace value
+  wins per key. `permissions.deny_patterns` is the exception: the two layers
+  *union*, so a workspace can add a deny and can never remove one the global
+  config set. Provider settings stay where the hardware is — nothing ever writes
+  a provider block into a workspace, and `localharness model` always edits the
+  global file.
+- **Agents union by name; a collision goes to the workspace, wholesale.** The
+  delegation registry sees both layers. A name defined in both resolves to the
+  workspace's file, and that file replaces the global one entirely rather than
+  being merged into it field by field — so a project-local agent is exactly the
+  file you can read, not a blend of two.
+- **Per-project memory and state.** Where a workspace applies, `memory.db`,
+  `MEMORY.md`, history, sessions, bus events, and the audit log all live under
+  the project's `.localharness/`, subagents included. This is the sharpest half
+  of the feature: memory was the most context-polluting thing to share.
+- **`agent.memory.recall_scope`** — `workspace` (the default), `global`, or
+  `both`; under `both` every injected line carries an origin token, so you can
+  see which store a fact came from. It moves *reads* only: `remember`, the write
+  gate and the consolidation pass always write to the session's own store. There
+  is no value of this knob that makes a project's session write into your global
+  memory.
+- **`/memory promote <id>`** — the one deliberate bridge across that line, one
+  fact at a time. Bare, it previews and writes nothing (it does not even open the
+  global store); `/memory promote <id> confirm` copies the fact across with its
+  provenance recorded, and `revert` retires that copy.
+- **`init --workspace`** scaffolds `./.localharness/` for the project you are
+  standing in instead of configuring the machine.
+- **`doctor` reports the layering**: both layer paths, the winning layer for
+  every key the workspace overrides, and which revision of the shipped security
+  defaults your config is on — with the date it last migrated and where the
+  backup was written.
+- **`localharness config show`** prints the effective merged config together with
+  the file that set each key.
+- **`components` reads the workspace layer too**, and `set` prints the file it
+  wrote to.
+- **Filesystem confinement defaults to the project root** in a workspace session
+  — the leash comes free with the layer. Read honestly: a default that narrows
+  what the tools reach by accident, not a sandbox. See Known limitations.
+
+### Changed
+- **`agent list --json` emits plain, valid JSON.** It was printed through the
+  Rich console, which wraps at the terminal width: at width 80 a newline landed
+  mid-string and the output would not parse, and wider it parsed but Rich had
+  eaten the markup-looking substrings out of the data itself. It now goes through
+  a plain writer, so piping it into `jq` works at any width.
+- **Registry layer names say which layer they mean.** `global-config`,
+  `global-overrides`, `workspace-config` and `workspace-overrides` replace the
+  old `project` and `user` — where `project` in fact meant the *global*
+  `config.yaml`, and the word "global" appeared in neither. The rename covers the
+  registry and CLI vocabulary; the persisted `ComponentMutated.layer` audit field
+  keeps its historical value so old event logs stay readable.
+- **`org:` deny patterns written in `config.yaml` now reach enforcement.**
+  Tool-call enforcement read only a standalone `org.yaml` — a file `init` has
+  never written, because it writes the `org:` section inside `config.yaml`. The
+  org policy people actually have was therefore never enforced. Both layers'
+  `org:` sections are now read and enforced.
+- **A config error names the file that set the offending key.** A bad value in a
+  workspace `config.yaml` is reported against that file's path and that file's
+  own line number, not against the global file — in `validate` and `doctor` both.
+
+### Fixed
+- A malformed `overrides.yaml` reports a clean config error instead of a
+  traceback, in either layer.
+- A model swap made inside a workspace session writes only global files (the
+  audited user overlay), so changing models in one project cannot fork the
+  machine's provider config. The audit *record* of that swap lands in the
+  workspace — the log follows the work.
+
+### Known limitations (named, not hidden)
+- **The trust prompt does not cover a repository you cloned and then worked
+  inside.** That repository's `.localharness/agents/` loads with no prompt,
+  because you are inside that project. The gate is for config reaching in from
+  outside the directory you are working in.
+- **Workspace confinement is a default, not a sandbox.** A command run through
+  `bash_exec` can still leave that folder; the deny patterns remain the mechanism
+  that stops specific actions.
+- A workspace *may* override `provider:` if you write one there by hand. Nothing
+  in the harness ever puts one there, and no command edits one.
+
 ## [0.12.10] — 2026-09-02
 
 ### Fixed

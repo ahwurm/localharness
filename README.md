@@ -40,6 +40,8 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
 - **Memory that learns from use** — per-agent SQLite memory with an automatic write gate (lessons captured from failure→recovery signals, zero extra model calls), activation-ranked recall in pure SQL, cancellable idle consolidation, and a persisted gist/schema hierarchy over document analyses; conflicting facts supersede, never overwrite
+- **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` and `doctor` name the file behind every effective key
+- **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
 - **Deny-first permissions** — policies inherit down the hierarchy and can only narrow
 - **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
 - **MCP support** — connect Model Context Protocol servers and expose their tools to agents
@@ -117,7 +119,7 @@ uv run localharness init    # probes vLLM :8081/:8000, Ollama :11434, LM Studio 
 uv run localharness start   # interactive session
 ```
 
-`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them; `localharness start --model <name>` picks one for a single session without touching config, and `--list-models` lists without starting a session. `localharness model --download <repo_id>` (optionally `--file <name>` for one GGUF quant out of a multi-quant repo) pulls a model from Hugging Face ahead of time. Non-standard setup: `localharness init --endpoint http://host:port/v1`. A repo-local `.localharness/` directory overlays the global config.
+`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them; `localharness start --model <name>` picks one for a single session without touching config, and `--list-models` lists without starting a session. `localharness model --download <repo_id>` (optionally `--file <name>` for one GGUF quant out of a multi-quant repo) pulls a model from Hugging Face ahead of time. Non-standard setup: `localharness init --endpoint http://host:port/v1`. To give one project its own agents, config, and memory, run `localharness init --workspace` inside it — the resulting `.localharness/` directory is discovered by walking up from wherever you start, and layers over the global config.
 
 > Got it running? If LocalHarness saved you an API bill, a [star](https://github.com/ahwurm/localharness/stargazers) helps other local-LLM folks find it.
 
@@ -139,9 +141,10 @@ share a machine. A laptop can run agents against a model served elsewhere on you
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Detect endpoint/model, write config |
+| `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
 | `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit) |
-| `doctor` | Diagnose config/endpoint issues |
+| `doctor` | Diagnose config/endpoint issues; report both config layers and which one won each key |
+| `config show` | Print the effective merged config and the file that set each key |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
 | `model` | List served/downloaded models, switch the persisted default, or `--download <repo_id>` (optionally `--file <name>`) a model from Hugging Face |
@@ -183,7 +186,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.12.10, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.13.0, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
