@@ -400,8 +400,10 @@ def test_layr05_workspace_above_the_repo_root_is_inert_without_a_tty(
     # contract surviving a stderr notice IS this test's claim.
     assert [a["name"] for a in json.loads(result.stdout)] == ["global-agent"]
     assert _names(result) == ["global-agent"]  # ...and the workspace stayed out
-    assert "no terminal to ask" in result.stderr
-    assert "no terminal to ask" not in result.stdout
+    # "non-interactive", not the old "no terminal to ask": there IS a terminal on a --json run
+    # with a tty, and the honest reason nothing was asked is that this is machine output (F11).
+    assert "non-interactive" in result.stderr
+    assert "non-interactive" not in result.stdout
     assert trust.is_trusted(workspace_above_repo.ws_dir) is None
     assert not trust.trust_store_path().exists()
 

@@ -10,6 +10,7 @@ from rich.markup import escape
 from rich.rule import Rule
 
 from localharness.cli.errors import polite_filesystem_errors
+from localharness.cli.workspace import NO_INPUT_HELP
 from localharness.config.loader import ConfigError, ConfigLoader, ConfigValidationError
 from localharness.config.paths import resolve_config_dir
 
@@ -40,6 +41,10 @@ def validate(
             help="Reserved. No warning-level checks exist yet; currently identical to the default.",
         ),
     ] = False,
+    no_input: Annotated[
+        bool,
+        typer.Option("--no-input", help=NO_INPUT_HELP),
+    ] = False,
 ) -> None:
     """Validate agent YAML configuration files.
 
@@ -59,7 +64,7 @@ def validate(
     # "all valid" about a set of files the session will not actually load. The RAW `config_dir`
     # is what the resolver needs — `cfg_path` has already lost whether it was explicit.
     from localharness.cli.workspace import resolve_workspace_layer
-    workspace = resolve_workspace_layer(config_dir)
+    workspace = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
 
     results: list[tuple[str, ConfigError | None]] = []

@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.rule import Rule
 
+from localharness.cli.workspace import NO_INPUT_HELP
 from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
@@ -203,6 +204,10 @@ def doctor(
             help="Create a missing agents directory (doctor's only auto-fix today).",
         ),
     ] = False,
+    no_input: Annotated[
+        bool,
+        typer.Option("--no-input", help=NO_INPUT_HELP),
+    ] = False,
 ) -> None:
     """Run prerequisite checks and report system health.
 
@@ -244,7 +249,7 @@ def doctor(
     # 3. Config file valid
     harness: HarnessConfig | None = None
     from localharness.cli.workspace import resolve_workspace_layer
-    workspace = resolve_workspace_layer(config_dir)
+    workspace = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
     if not configured and workspace is None:
         # Nothing to report and nothing that can be checked without a config: stop exactly where
         # doctor always stopped (LAYR-03 — a machine with no workspace sees v0.12 behavior).
