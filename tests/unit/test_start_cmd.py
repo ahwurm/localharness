@@ -3106,3 +3106,67 @@ async def test_list_models_nothing_live_shows_none(tmp_path, monkeypatch):
 
     out = "\n".join(printed)
     assert "(none)" in out
+
+
+# --------------------------------------------------------------------------- #
+# Markup guards: `start` prints PATHS, and a path is data (see test_cli_markup_guards.py).
+# Both shapes in one fixture name: `[old]` is silently deleted, `[/red]` raises MarkupError.
+# --------------------------------------------------------------------------- #
+_HOSTILE = "[old] [/red]proj"
+
+
+def _real_consoles(monkeypatch):
+    """Swap start_cmd's consoles for REAL rich Consoles writing to a buffer.
+
+    `_capture_err_console` replaces `print` itself, so nothing is ever handed to the markup
+    parser and a MarkupError could not surface. These tests need the actual render.
+    """
+    import io
+
+    from rich.console import Console
+
+    import localharness.cli.start_cmd as _sc
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(_sc, "console", Console(file=out, width=400))
+    monkeypatch.setattr(_sc, "err_console", Console(file=err, width=400))
+    return out, err
+
+
+async def test_start_skip_warning_survives_a_markup_named_agent_file(tmp_path, monkeypatch):
+    """start's copy of the discover_agents warning was the unescaped twin of agent_cmd's.
+
+    A project folder legally named `[/red]proj` turned the one message whose job is naming the
+    broken file into a MarkupError — the skip warning killed the session instead of reporting it.
+    """
+    from localharness.cli.start_cmd import _start_async
+
+    hostile = tmp_path / _HOSTILE
+    hostile.mkdir(parents=True)  # `[/red]` splits into two segments; the path STRING is the fixture
+    _stub_start_boundaries(hostile, monkeypatch)
+    out, err = _real_consoles(monkeypatch)
+
+    _write_agent(hostile / "agents", "good")
+    (hostile / "agents" / "orchestrator.yaml").write_text(
+        "name: orchestrator\nrole: broken\ntools:\n   builtin:\n  - bash\n"
+    )
+
+    await _start_async(None, False, False, str(hostile))
+
+    assert str(hostile / "agents" / "orchestrator.yaml") in err.getvalue(), err.getvalue()
+
+
+async def test_start_verbose_banner_names_the_memory_db_it_opened(tmp_path, monkeypatch):
+    """The verbose banner prints the agent's memory.db path — under a markup-named project it
+    crashed the whole start AFTER the session was already wired."""
+    from localharness.cli.start_cmd import _start_async
+
+    hostile = tmp_path / _HOSTILE
+    hostile.mkdir(parents=True)  # `[/red]` splits into two segments; the path STRING is the fixture
+    _stub_start_boundaries(hostile, monkeypatch)
+    out, err = _real_consoles(monkeypatch)
+
+    _write_agent(hostile / "agents", "good")
+
+    await _start_async(None, True, False, str(hostile))
+
+    assert str(hostile / "agents" / "good" / "memory.db") in out.getvalue(), out.getvalue()

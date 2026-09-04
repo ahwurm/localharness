@@ -9,6 +9,7 @@ from typing import Annotated, Any
 import typer
 import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import IntPrompt
 from rich.table import Table
 
@@ -226,8 +227,15 @@ def _skipped_agent_file(f: Path, exc: Exception) -> None:
     ConfigLoader logs, but config/ must never import a rich console from cli/ — so the caller
     supplies the printer. This warning is load-bearing: the mint-refusal below points at it
     ("see the warnings above") before it refuses to overwrite an unparseable root agent.
+
+    escape() around the path and the reason, markup outside — agent_cmd's twin of this function
+    carries the same fix and the same reason: a project folder legally named `[/red]proj` made
+    the one message whose job is naming the broken file raise MarkupError and kill the session.
     """
-    err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
+    err_console.print(
+        "[yellow]⚠ " + escape(f"skipping unreadable agent file {f}: {exc}") + "[/yellow]",
+        soft_wrap=True,
+    )
 
 
 def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
@@ -309,15 +317,20 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
         backup = _migrate.apply(config_file, original, plan)
     except Exception as exc:
         err_console.print(
-            f"[yellow]⚠[/yellow]  Could not auto-update security defaults: {exc}. "
-            "Run 'localharness config migrate' to apply them; continuing with the current config."
+            "[yellow]⚠[/yellow]  " + escape(f"Could not auto-update security defaults: {exc}. ")
+            + "Run 'localharness config migrate' to apply them; continuing with the current config.",
+            soft_wrap=True,
         )
         return
 
+    # escape(): `backup` is a path under the user's config dir and the exception text above quotes
+    # one too. Both reach rich as data — this receipt fires on the FIRST start after an upgrade,
+    # so under a markup-named config dir it crashed every session until the config was hand-edited.
     console.print(
         f"[cyan]i[/cyan]  Security defaults updated (revision {plan.from_revision} → "
         f"{plan.to_revision}): added {len(plan.added)} deny pattern(s) — additive only; "
-        f"backup at {backup}"
+        + escape(f"backup at {backup}"),
+        soft_wrap=True,
     )
 
 
@@ -1305,7 +1318,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
             console.print(f"  Tools: {tool_count} total")
             if memory_store:
-                console.print(f"  Memory: {agent_dir / 'memory.db'} (WAL)")
+                # escape(): the agent's state dir is derived from the config dir, which is a path
+                # the user chose. Unescaped it crashed the banner AFTER the session was wired.
+                console.print("  " + escape(f"Memory: {agent_dir / 'memory.db'} (WAL)"), soft_wrap=True)
             else:
                 console.print("  Memory: in-memory (no persistence)")
 
