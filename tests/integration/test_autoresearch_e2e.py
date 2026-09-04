@@ -16,7 +16,6 @@ tree only, and the overlay is gitignored (see _resolve_worktree_agent_cfg's docs
 
 The loop (18-05) is shipped, so `run_loop` imports unconditionally (the Wave-0 guard is gone).
 """
-import json
 
 from localharness.autoresearch.loop import run_loop
 

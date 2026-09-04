@@ -652,11 +652,13 @@ def autoresearch_adopt(
     id: str = typer.Argument(..., help="8-char hex prefix or full UUID of a held item"),
     json_output: bool = typer.Option(False, "--json", help="Emit the adoption result as JSON"),
 ) -> None:
-    """Adopt a HELD item into LIVE config (overlay write + git commit in the MAIN repo).
+    """Adopt a HELD item into LIVE config (a write to the GLOBAL user overlay — no git commit).
 
     A ``adoption_rejected`` row is kept as parent material and never re-offered (refused, exit 2);
-    an already-``adopted`` row is a no-op (exit 0). On a successful adopt the commit sha is printed
-    and the row's status flips to ``adopted``.
+    an already-``adopted`` row is a no-op (exit 0). On a successful adopt the row's status flips to
+    ``adopted`` and the repo HEAD the win was measured at is printed as provenance. Undo an
+    adoption with ``localharness components set <path> <before>`` (the archive row keeps both
+    values); the repo itself is never modified.
     """
     try:
         from localharness.cli.components_cmd import _build_loader
@@ -738,5 +740,9 @@ def autoresearch_adopt(
     if json_output:
         typer.echo(_json.dumps({"id": entry.id, "status": "adopted", "sha": sha}))
     else:
-        console.print(f"[green]adopted[/green] {entry.id[:8]} {entry.component} -> {sha[:8]}")
+        measured_at = f" (measured at {sha[:8]})" if sha else ""
+        console.print(
+            f"[green]adopted[/green] {entry.id[:8]} {entry.component} "
+            f"-> user overlay{measured_at}"
+        )
     raise typer.Exit(code=0)
