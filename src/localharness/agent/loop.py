@@ -370,11 +370,14 @@ def _is_harness_nudge(message: Message) -> bool:
     """True only for a message the harness itself pushed as a nudge (act-guard, baton gate,
     self-check, #91 re-prompt, parse-failure retry) — never the user's own task, a type-anytime
     user nudge, or the configurable stuck-recovery message. _BATON_NUDGE_MESSAGE is defined
-    below; the lookup happens at call time, so definition order does not matter."""
-    return (message.get("content") or "") in {
+    below; the lookup happens at call time, so definition order does not matter. The escalated
+    baton nudge quotes the model's clause, so it is matched by prefix rather than by identity —
+    same standing as the generic message it escalates from."""
+    content = message.get("content") or ""
+    return content in {
         _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
         _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
-    }
+    } or content.startswith(_BATON_ESCALATION_PREFIX)
 
 
 def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
@@ -413,6 +416,16 @@ def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
 # baton — an intention shipped as the result. This detector flags exactly that closing move so the
 # gate can nudge once. HIGH PRECISION: it looks at the FINAL sentence only and start-anchors an
 # announce opener, so a false positive (a wasted round-trip on a good turn) stays rare.
+#
+# Tight action-verb whitelist shared by the BARE (anchor-free) intent branches below — "I will
+# <verb>" and "let me <verb>". One list, not two copies: they are the same announced act in two
+# grammars, so they widen together or they drift. `confirm` joined the list on the 2026-09-04 live
+# receipt (qwen3.8-27b, long multi-tool task, actions_taken > 0, tool-less final "Let me confirm
+# the lint script's interface so I can run it on my draft, and check the content.json format
+# expectations.") — the same act as the already-listed `verify`.
+_BATON_ACTION_VERBS = (
+    "search|check|look|read|fetch|find|pull|execute|run|query|verify|investigate|retrieve|confirm"
+)
 _BATON_ANNOUNCE_RE = re.compile(
     r"(?:"
     r"now\s*,?\s+let\s+me"          # now let me / now, let me
@@ -431,41 +444,86 @@ _BATON_ANNOUNCE_RE = re.compile(
     # idioms stay out. Deliberate misses, precision over recall: "finding" (…this confusing),
     # "working on" (…the assumption that), bare "please wait for" (instructions to the USER
     # legitimately say that); "running" carries a lookahead for out/low/late/behind.
-    r"|i\s+(?:will|am\s+going\s+to)\s+(?:search|check|look|read|fetch|find|pull|execute|run|query|verify|investigate|retrieve)\b"
+    rf"|i\s+(?:will|am\s+going\s+to)\s+(?:{_BATON_ACTION_VERBS})\b"
     r"|i\s+am\s+(?:now\s+)?(?:searching|checking|looking|reading|fetching|pulling|executing|querying|verifying|investigating|retrieving|about\s+to)\b"
     r"|i\s+am\s+(?:now\s+)?running(?!\s+(?:out|low|late|behind)\b)"
+    # The bare "let me <verb>" form. The 2026-07-16 widen gave "I will / I am" an anchor-free
+    # alternative but left "let me" anchored to now/next, so the 2026-09-04 receipt above was
+    # accepted verbatim as a final answer — same shape, same fix, the branch that was missed.
+    # Precision is unchanged and comes from the same two places: the FINAL sentence only, and
+    # this whitelist — so the closing courtesy "let me know if…" (a HANDBACK, not an announce),
+    # "let me think about…" and "let me summarize…" all stay out.
+    rf"|let\s+me\s+(?:{_BATON_ACTION_VERBS})\b"
     r"|please\s+wait\s+(?:a\s+moment|while\s+i)\b"
     r"|one\s+moment\s+(?:please|while\s+i)\b"
     r")\b",
     re.IGNORECASE,
 )
-_BATON_SENTENCE_SPLIT_RE = re.compile(r"[.!?\n]+")
+# A sentence break is terminal punctuation followed by whitespace or end-of-text, or a newline.
+# The 2026-09-04 receipt made the lookahead load-bearing: the plain `[.!?\n]+` split cut the
+# specimen at the dot inside `content.json`, so the "closing sentence" the detector judged was the
+# fragment "json format expectations" — no announce opener, no fire, however wide the regex above
+# gets. Any in-token dot (a filename, a version, a decimal) forged a fake final sentence the same
+# way. Splitting only at a real boundary keeps the "final sentence only" precision contract intact.
+_BATON_SENTENCE_SPLIT_RE = re.compile(r"[.!?]+(?=\s|$)|\n+")
 
 _BATON_NUDGE_MESSAGE = (
     "Your reply ends by announcing further work instead of completing it. "
     "Do that work now, or state your final answer."
 )
+# Escalated nudge (2026-09-04). NOT a member of _is_harness_nudge's exact-match set — it is a
+# template; _is_harness_nudge matches it by this prefix instead (same standing as the generic
+# message it escalates from).
+_BATON_ESCALATION_PREFIX = "You already said you would: "
+_BATON_ESCALATION_TEMPLATE = (
+    _BATON_ESCALATION_PREFIX + '"{clause}" — and then ended the turn again without doing it. '
+    "Do it with a tool call now, or state plainly that you are done or blocked."
+)
 
 
-def detect_dropped_baton(content: str) -> bool:
-    """True when a tool-less reply's CLOSING move is a first-person announced next-step
-    ("Now let me read X", "Next I'll check Y") rather than the work itself or a final answer —
-    the 'dropped baton' (issue #84).
+def _baton_closing_announce(content: str) -> str | None:
+    """The CLOSING sentence of a tool-less reply when that closing move is a first-person
+    announced next-step ("Now let me read X", "Next I'll check Y", "Let me confirm Z") rather
+    than the work itself or a final answer — the 'dropped baton' (issue #84). None otherwise.
 
     High-precision by design: evaluates only the FINAL sentence, start-anchored to an announce
     opener. So a mid-reply announce followed by real content, a closing courtesy ('let me know
     if…'), a handback question ('Should I proceed?'), and 'I now understand…' (not an announce)
-    all return False — a false positive costs a wasted round-trip on an otherwise good turn.
-    Pure text, no I/O. Only meaningful on the no-tool-calls branch (its only caller)."""
+    all return None — a false positive costs a wasted round-trip on an otherwise good turn.
+    Pure text, no I/O. Only meaningful on the no-tool-calls branch."""
     text = (content or "").strip()
     if not text or text.endswith("?"):
-        return False  # empty, or ends by asking the user (a legitimate handback)
+        return None  # empty, or ends by asking the user (a legitimate handback)
     # Closing move = the last non-empty sentence/line; strip any leading bullet/quote chars.
     segments = [s.strip() for s in _BATON_SENTENCE_SPLIT_RE.split(text) if s.strip()]
     if not segments:
-        return False
+        return None
     closing = re.sub(r"^\W+", "", segments[-1])
-    return bool(_BATON_ANNOUNCE_RE.match(closing))
+    return closing if _BATON_ANNOUNCE_RE.match(closing) else None
+
+
+def detect_dropped_baton(content: str) -> bool:
+    """True when a tool-less reply drops the baton (see _baton_closing_announce). The gate's
+    boolean face, kept as the public seam — subagent.py's no-conclusion note is the other
+    caller."""
+    return _baton_closing_announce(content) is not None
+
+
+def _baton_nudge_message(closing: str, nudge_number: int) -> str:
+    """The text for baton nudge #`nudge_number` (1-based) against the matched announce `closing`.
+
+    Escalating CONTENT, not count — the bound is still baton_gate.max_nudges (1-3). Nudge 1 is
+    the generic #84 message byte-for-byte, so the default (max_nudges=1) path is unchanged; a
+    second nudge exists only where a user raised the knob, and by then the generic ask has
+    demonstrably failed, so re-spending it verbatim is the weakest available move. Instead quote
+    the model's own announced intent back at it and name the two acceptable exits (act, or say
+    you are done/blocked) — the same ladder shape StuckDetector.classify() already uses:
+    escalate on a repeat of an already-warned signature rather than repeat the warning. The echo
+    is the model's own words verbatim (deterministic, no summarizing), sliced to the module's
+    existing evidence-preview width so a runaway closing sentence cannot bloat the nudge."""
+    if nudge_number <= 1:
+        return _BATON_NUDGE_MESSAGE
+    return _BATON_ESCALATION_TEMPLATE.format(clause=closing[:_REPETITION_SAMPLE_CHARS].strip())
 
 
 def _format_budget_summary(session: Session, violation: BudgetViolation) -> str:
@@ -1524,15 +1582,17 @@ class AgentLoop:
                 # continue. Bounded by baton_gate.max_nudges per turn (default 1, i.e. the
                 # original #84 behavior): once every nudge is spent, a further announced
                 # intention is accepted (no loop). Runs BEFORE self_check so a genuinely-final
-                # reply still gets its review.
-                if (bg_cfg.enabled and session.baton_nudges_used < bg_cfg.max_nudges
-                        and detect_dropped_baton(content)):
+                # reply still gets its review. The nudge CONTENT escalates with the count
+                # (_baton_nudge_message) — the count itself does not.
+                if bg_cfg.enabled and session.baton_nudges_used < bg_cfg.max_nudges and (
+                        announced := _baton_closing_announce(content)):
                     session.baton_nudges_used += 1
                     log.info(
                         "Baton gate: reply announces further work — nudging (%d/%d)",
                         session.baton_nudges_used, bg_cfg.max_nudges,
                     )
-                    session.push({"role": "user", "content": _BATON_NUDGE_MESSAGE})
+                    session.push({"role": "user", "content": _baton_nudge_message(
+                        announced, session.baton_nudges_used)})
                     continue
 
                 # Self-check (MECH-01): one bounded review pass before finalizing.

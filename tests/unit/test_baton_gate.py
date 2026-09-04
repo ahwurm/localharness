@@ -34,6 +34,27 @@ _POSITIVES = [
     "I apologize for the confusion. I am executing the search now.",
     "I am pulling the data to find the official trading hours for the KRX.",
     "One moment please, gathering the schedule data.",
+    # Live receipt (qwen3.8-27b, 2026-09-04): a long multi-tool turn (actions_taken > 0, so the
+    # act-guard could not arm) shipped this bare "let me <verb>" as its final answer. The
+    # now/next anchors missed it exactly as they missed the 2026-07-16 "I will / I am" receipts
+    # — hence the same anchor-free widen, now applied to the "let me" branch.
+    "Let me confirm the lint script's interface so I can run it on my draft, "
+    "and check the content.json format expectations.",
+    "Let me check the logs.",   # was a NEGATIVE ("bare 'let me X' is not a target shape") until
+                                # the 2026-09-04 receipt above superseded that call: the bare
+                                # form IS the live shape. Precision now rests where it does for
+                                # the "I will" branch — final sentence + the verb whitelist.
+    # The same receipt's second lesson: `content.json`'s dot is not a sentence break. An in-token
+    # dot must not forge a fake closing sentence out of the tail fragment.
+    "Let me read config.json to see the expected keys.",
+    "I will verify the pinned version is 1.2.3 in the lockfile.",
+    # Second live receipt (owner dogfood, 0.13.0, 2026-09-04): an ANCHORED announce mid-task —
+    # already a target shape, and it detects. It is pinned here because the session still ended
+    # on it: detection was never the problem there, the per-turn BOUND was (the default single
+    # nudge had been spent earlier in the turn, so the re-announce was accepted verbatim — see
+    # test_baton_gate_relives_the_dogfood_re_announce).
+    "I have the z230 customer details. Now let me pull the 3PL detail from x75 (the third "
+    "profile) so all three profiles carry measured outcomes and deployment timelines.",
 ]
 
 
@@ -49,7 +70,16 @@ _NEGATIVES = [
     "no tool result",                                # FaithfulFakeLLM's empty-plan final answer
     "",
     "   ",
-    "Let me check the logs.",                        # bare 'let me X' is not a target shape
+    # Precision guards for the bare "let me" widen (2026-09-04). The whitelist is the guard: a
+    # HANDBACK ("let me know…") and non-action verbs are not announced work.
+    "Let me know how you would like to proceed.",      # handback, not an announce
+    "Let me know once the build finishes.",            # handback
+    "Let me think about this differently: the answer is 42.",   # 'think' deliberately unmatched
+    "Let me summarize: the cause is a stale lock.",              # 'summarize' unmatched
+    "Let me be clear: the config was already correct.",          # 'be' unmatched
+    "Let me check the notebooks. They contain the training outputs showing 92% accuracy.",
+    # ^ bare form mid-reply with real content after — the final-sentence-only contract, which the
+    #   anchored form already proves above, must hold for the bare form too.
     # Precision guards for the widened families — idioms and user-directed instructions
     # that share surface forms with announces MUST stay accepted:
     "I am running out of options.",                   # idiom, not an announced run
@@ -74,7 +104,9 @@ def test_detect_dropped_baton_negative(text):
 
 # --- gate behaviour at the acceptance seam -------------------------------------------------
 from localharness.agent.context import ContextManager
-from localharness.agent.loop import AgentLoop, Session
+from localharness.agent.loop import (
+    _BATON_ESCALATION_PREFIX, _BATON_NUDGE_MESSAGE, AgentLoop, Session,
+)
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig
 
@@ -109,8 +141,11 @@ def _make_loop(llm, bus, *, self_check=None, baton_gate=None):
 
 
 def _baton_nudges(session):
-    return [m for m in session.messages if m.get("role") == "user"
-            and "announcing further work" in (m.get("content") or "")]
+    """Every baton nudge pushed this turn — the generic first one and the escalated ones, which
+    quote the model's clause and so are matched by prefix (mirrors _is_harness_nudge)."""
+    return [m.get("content") or "" for m in session.messages if m.get("role") == "user"
+            and ((m.get("content") or "") == _BATON_NUDGE_MESSAGE
+                 or (m.get("content") or "").startswith(_BATON_ESCALATION_PREFIX))]
 
 
 @pytest.mark.asyncio
@@ -233,6 +268,102 @@ async def test_baton_gate_max_nudges_2_announces_nudge_nudge_then_accepts(bus):
     session = Session(agent_id="baton-agent", session_id="s-max2", messages=[])
     summary = await loop._execute_loop(session, "analyze", None)
     assert session.baton_nudges_used == 2
-    assert len(_baton_nudges(session)) == 2      # exactly two nudges, then accept (no loop)
+    nudges = _baton_nudges(session)
+    assert len(nudges) == 2                      # exactly two nudges, then accept (no loop)
     assert session.iteration == 3
     assert summary == "Now let me check one more thing."  # 3rd announce accepted verbatim
+    # 2026-09-04: the CONTENT escalates even though the count is bounded exactly as before —
+    # nudge 1 is the generic #84 message, nudge 2 quotes the model's own second announce back.
+    assert nudges[0] == _BATON_NUDGE_MESSAGE
+    assert nudges[1].startswith(_BATON_ESCALATION_PREFIX)
+    assert "Now let me also read the configs" in nudges[1]
+    assert nudges[1] != _BATON_NUDGE_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_baton_gate_fires_on_the_live_specimen_end_to_end(bus):
+    """2026-09-04 receipt, driven through the real loop (not just the detector): the bare
+    "Let me confirm …content.json…" final now gets its nudge instead of shipping as the answer."""
+    specimen = ("Let me confirm the lint script's interface so I can run it on my draft, "
+                "and check the content.json format expectations.")
+    llm = _ScriptedNoToolLLM([specimen, "The lint script takes a path and reads content.json."])
+    loop = _make_loop(llm, bus)
+    session = Session(agent_id="baton-agent", session_id="s-specimen", messages=[])
+    summary = await loop._execute_loop(session, "lint my draft", None)
+    assert session.baton_nudge_used is True
+    assert _baton_nudges(session) == [_BATON_NUDGE_MESSAGE]   # default max_nudges=1: generic only
+    assert summary == "The lint script takes a path and reads content.json."
+
+
+_SPECIMEN_1 = ("Let me confirm the lint script's interface so I can run it on my draft, "
+               "and check the content.json format expectations.")
+_SPECIMEN_2 = ("I have the z230 customer details. Now let me pull the 3PL detail from x75 "
+               "(the third profile) so all three profiles carry measured outcomes and "
+               "deployment timelines.")
+
+
+@pytest.mark.asyncio
+async def test_baton_gate_relives_the_dogfood_re_announce_default_bound(bus):
+    """The 0.13.0 dogfood shape at the DEFAULT bound (max_nudges=1): announce -> one nudge ->
+    the model announces AGAIN -> accepted verbatim. This is the designed bound, and it is what
+    the owner saw end the session on 'Now let me pull the 3PL detail…'. Pinned so the escalation
+    below is read as what it is — a fix for the SECOND nudge, not for this default."""
+    llm = _ScriptedNoToolLLM([_SPECIMEN_1, _SPECIMEN_2])
+    loop = _make_loop(llm, bus)
+    session = Session(agent_id="baton-agent", session_id="s-dogfood-1", messages=[])
+    summary = await loop._execute_loop(session, "profile three customers", None)
+    assert _baton_nudges(session) == [_BATON_NUDGE_MESSAGE]   # one generic nudge, then accept
+    assert summary == _SPECIMEN_2
+
+
+@pytest.mark.asyncio
+async def test_baton_gate_relives_the_dogfood_re_announce(bus):
+    """Same two live specimens, max_nudges=2: nudge 1 is generic, the model re-announces, and
+    nudge 2 quotes THAT promise back verbatim instead of re-spending the identical generic ask."""
+    llm = _ScriptedNoToolLLM([_SPECIMEN_1, _SPECIMEN_2, "All three profiles are complete."])
+    loop = _make_loop(llm, bus, baton_gate={"max_nudges": 2})
+    session = Session(agent_id="baton-agent", session_id="s-dogfood-2", messages=[])
+    summary = await loop._execute_loop(session, "profile three customers", None)
+    nudges = _baton_nudges(session)
+    assert nudges[0] == _BATON_NUDGE_MESSAGE
+    assert nudges[1].startswith(_BATON_ESCALATION_PREFIX)
+    # The echo is the model's own re-announced clause — the closing sentence, not the whole reply.
+    assert "Now let me pull the 3PL detail from x75 (the third profile)" in nudges[1]
+    assert "I have the z230 customer details" not in nudges[1]
+    assert len(nudges) == 2 and session.iteration == 3
+    assert summary == "All three profiles are complete."
+
+
+def test_baton_nudge_content_ladder():
+    """The escalation is deterministic text built from the model's own matched clause — no
+    summarizing, no model call — and the FIRST nudge is the shipped #84 message byte-for-byte
+    (so the default max_nudges=1 path is unchanged by this feature)."""
+    from localharness.agent.loop import (
+        _REPETITION_SAMPLE_CHARS, _baton_closing_announce, _baton_nudge_message,
+    )
+    clause = _baton_closing_announce("I read the files. Now let me read the notebooks.")
+    assert clause == "Now let me read the notebooks"
+    assert _baton_nudge_message(clause, 1) == _BATON_NUDGE_MESSAGE
+    escalated = _baton_nudge_message(clause, 2)
+    assert escalated.startswith(_BATON_ESCALATION_PREFIX) and clause in escalated
+    assert _baton_nudge_message(clause, 3) == escalated       # stays escalated, never re-generic
+    # A runaway closing sentence cannot bloat the nudge: the echo is sliced to the module's
+    # existing evidence-preview width rather than a new magic number.
+    long_clause = "Now let me read " + ("x" * 5000)
+    assert len(_baton_nudge_message(long_clause, 2)) < len(_BATON_ESCALATION_PREFIX) + \
+        _REPETITION_SAMPLE_CHARS + 200
+
+
+def test_escalated_nudge_counts_as_a_harness_nudge():
+    """#91b: the escalated nudge is a harness nudge like the generic one, so a bare-CONFIRMED
+    reply to it is stripped from the persisted history together with its inducing nudge."""
+    from localharness.agent.loop import _is_harness_nudge, _strip_sentinel_exchanges
+    escalated = _BATON_ESCALATION_PREFIX + '"Now let me read the notebooks" — and so on.'
+    assert _is_harness_nudge({"role": "user", "content": escalated}) is True
+    kept = _strip_sentinel_exchanges([
+        {"role": "user", "content": "analyze"},
+        {"role": "assistant", "content": "Now let me read the notebooks."},
+        {"role": "user", "content": escalated},
+        {"role": "assistant", "content": "CONFIRMED"},
+    ])
+    assert [m["content"] for m in kept] == ["analyze", "Now let me read the notebooks."]
