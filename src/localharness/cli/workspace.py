@@ -56,7 +56,13 @@ log = logging.getLogger(__name__)
 
 # Notices AND the prompt go to stderr: `agent list --json` writes machine-readable JSON on
 # stdout, and a trust banner there would corrupt it.
-_notice_console = Console(stderr=True)
+#
+# soft_wrap on the CONSOLE, not per-call (F12): every line this module emits carries a workspace
+# path, and rich hard-wraps at the terminal width — a deep project path arrives with a newline
+# folded into it and the user copies half of it. Setting it here also covers the trust PROMPT,
+# which renders through `Console.input` and takes no soft_wrap argument of its own. The question
+# a person is answering must show them the whole path they are answering about.
+_notice_console = Console(stderr=True, soft_wrap=True)
 
 
 def resolve_workspace_layer(

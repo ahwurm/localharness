@@ -14,6 +14,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from localharness.cli import model_ops
 from localharness.config.loader import ConfigLoader
@@ -37,15 +38,22 @@ def _download(repo_id: str, filename: Optional[str]) -> None:
             console.print(f"Downloading {repo_id} (full snapshot)...")
             path = managed_server.download_model(repo_id)
     except Exception as exc:
-        err_console.print(f"[bold red]Error:[/bold red] download failed: {exc}")
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"download failed: {exc}"), soft_wrap=True
+        )
         raise typer.Exit(2)
 
-    console.print(f"[green]✓[/green] Downloaded to {path}")
+    # escape() around every path and repo id, markup outside it: a checkpoint under a folder
+    # named `[old] models` is legal, and rich would silently delete `[old]` — printing a path
+    # that does not exist right where the user is told what to copy (39-05). soft_wrap keeps a
+    # deep path on one line for the copy.
+    console.print("[green]✓[/green] " + escape(f"Downloaded to {path}"), soft_wrap=True)
     console.print(
         "To use it: point a llama.cpp profile's `server.model` at this path in config.yaml "
         "(single-model managed server), or run `localharness model "
-        f"{path}`" + ("" if filename else f" or `localharness model {repo_id}`") +
-        " once it's being served, to set it as the default."
+        + escape(f"{path}`") + ("" if filename else escape(f" or `localharness model {repo_id}`"))
+        + " once it's being served, to set it as the default.",
+        soft_wrap=True,
     )
 
 
@@ -152,8 +160,10 @@ def model(
         # (checking in on an unverified degrade-persist) gets none. State it plainly.
         if reachable and current not in choices:
             console.print(
-                f"[yellow]⚠[/yellow]  configured default {current!r} is not among the served "
-                f"models — switch with `localharness model <name|number>` or check the server."
+                "[yellow]⚠[/yellow]  " + escape(f"configured default {current!r}")
+                + " is not among the served models — switch with "
+                "`localharness model <name|number>` or check the server.",
+                soft_wrap=True,
             )
         return
 
@@ -180,33 +190,39 @@ def model(
             if name.isdigit():
                 # A number that didn't resolve is out of range — say how many are listed.
                 err_console.print(
-                    f"[bold red]Error:[/bold red] {name} is out of range — {len(choices)} "
-                    f"model(s) listed. Run `localharness model` to see them."
+                    "[bold red]Error:[/bold red] " + escape(f"{name} is out of range")
+                    + f" — {len(choices)} model(s) listed. Run `localharness model` to see them.",
+                    soft_wrap=True,
                 )
                 raise typer.Exit(2)
             # Fat-finger hint: a case-insensitive exact match is almost certainly the intent.
             ci = next((m for m in choices if m.lower() == name.lower()), None)
             if ci is not None:
                 err_console.print(
-                    f"[bold red]Error:[/bold red] unknown model {name!r} — did you mean {ci!r}? "
-                    f"Available: {avail}."
+                    "[bold red]Error:[/bold red] "
+                    + escape(f"unknown model {name!r} — did you mean {ci!r}? Available: {avail}."),
+                    soft_wrap=True,
                 )
             else:
                 err_console.print(
-                    f"[bold red]Error:[/bold red] unknown model {name!r}. Available: {avail}."
+                    "[bold red]Error:[/bold red] "
+                    + escape(f"unknown model {name!r}. Available: {avail}."),
+                    soft_wrap=True,
                 )
             raise typer.Exit(2)
         # Runtime unreachable → can't verify. Degrade with an explicit disclosure (mirrors the
         # TokenCounter `.approximate` convention: proceed, but label it clearly).
         target = name
         console.print(
-            f"[yellow]⚠[/yellow]  Could not reach {provider.base_url} to verify {name!r} is "
-            f"served — persisting it as the default UNVERIFIED. Run `localharness doctor` once the "
-            f"server is up."
+            "[yellow]⚠[/yellow]  "
+            + escape(f"Could not reach {provider.base_url} to verify {name!r} is served")
+            + " — persisting it as the default UNVERIFIED. Run `localharness doctor` once the "
+            "server is up.",
+            soft_wrap=True,
         )
 
     if target == current:
-        console.print(f"{target} is already the default.")
+        console.print(escape(f"{target} is already the default."), soft_wrap=True)
         return
 
     try:
@@ -216,17 +232,28 @@ def model(
             )
         )
     except Exception as exc:
-        err_console.print(f"[bold red]Error:[/bold red] failed to persist {target!r}: {exc}")
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"failed to persist {target!r}: {exc}"),
+            soft_wrap=True,
+        )
         raise typer.Exit(2)
 
-    console.print(f"[green]Default model set to[/green] {target}. `localharness start` will use it.")
+    # A model name is data — served ids and checkpoint PATHS both arrive here, and `repr` does
+    # not neutralize markup: `'[old]/gguf'` still parses. escape() it, markup outside.
+    console.print(
+        "[green]Default model set to[/green] " + escape(str(target))
+        + ". `localharness start` will use it.",
+        soft_wrap=True,
+    )
     # #37: the switch is durably persisted; a post-write audit-emit failure is a secondary note.
     if audit_warning:
-        console.print(f"[yellow]Note:[/yellow] {audit_warning}")
+        console.print("[yellow]Note:[/yellow] " + escape(str(audit_warning)), soft_wrap=True)
 
     # Pin trap: a persisted default won't reach an agent whose yaml pins a concrete model.
     for aname, pin in model_ops.pinned_agents(loader._config_dir, local_config_dir=_ws):
         console.print(
-            f"[yellow]Note:[/yellow] agent {aname!r} pins model={pin!r} in its yaml — "
-            f"this won't reach it on next start until that pin changes."
+            "[yellow]Note:[/yellow] "
+            + escape(f"agent {aname!r} pins model={pin!r} in its yaml")
+            + " — this won't reach it on next start until that pin changes.",
+            soft_wrap=True,
         )

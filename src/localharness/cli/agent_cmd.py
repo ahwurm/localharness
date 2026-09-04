@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
@@ -40,8 +41,17 @@ def _build_agent_yaml(name: str, role: str, model: str | None) -> dict:
 
 
 def _skipped_agent_file(f: Path, exc: Exception) -> None:
-    """discover_agents' user-visible warning. config/ logs; the CLI owns the console."""
-    err_console.print(f"[yellow]⚠ skipping unreadable agent file {f}: {exc}[/yellow]")
+    """discover_agents' user-visible warning. config/ logs; the CLI owns the console.
+
+    escape() around the path and the reason, markup outside: a folder legally named `[old] proj`
+    is data, and rich would silently delete `[old]` from it — this line would then name a file
+    that does not exist, in the message whose entire job is naming the file that went wrong
+    (39-05's measured lesson). soft_wrap so a deep path is handed to the terminal whole.
+    """
+    err_console.print(
+        "[yellow]⚠ " + escape(f"skipping unreadable agent file {f}: {exc}") + "[/yellow]",
+        soft_wrap=True,
+    )
 
 
 @agent_app.command("create")
@@ -125,13 +135,19 @@ def agent_create(
     # workflow.deploy_config); enforce the same invariant here. --force is the escape hatch.
     if target_path.exists() and not force:
         err_console.print(
-            f"[bold red]Error:[/bold red] Agent '{name}' already exists at {target_path}. "
-            "Choose a different name, edit the file directly, or pass --force to overwrite."
+            "[bold red]Error:[/bold red] "
+            + escape(f"Agent '{name}' already exists at {target_path}. ")
+            + "Choose a different name, edit the file directly, or pass --force to overwrite.",
+            soft_wrap=True,
         )
         raise typer.Exit(code=1)
     target_path.write_text(yaml_text, encoding="utf-8")
 
-    console.print(f"[green]✓[/green] Agent '{name}' created at {target_path}")
+    # escape() around the path, markup outside it: the target lives under the user's own
+    # directory names, and a project folder named `[old] proj` would otherwise print as a path
+    # that does not exist — under a green checkmark saying the file is there (39-05).
+    console.print("[green]✓[/green] " + escape(f"Agent '{name}' created at {target_path}"),
+                  soft_wrap=True)
     console.print("  Edit the YAML to customize role, tools, and permissions.")
 
 

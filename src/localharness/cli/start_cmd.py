@@ -376,7 +376,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # markup=False, like the model list above: a folder named `[old] proj` is legal
         # everywhere, and rich would either eat the bracket (naming a path that does not exist)
         # or raise MarkupError on `[/]`. `style=` alone does NOT disable markup parsing (39-04).
-        console.print(f"Workspace layer: {workspace}", style="dim", markup=False)
+        # soft_wrap: rich otherwise folds a deep project path at the console width and the user
+        # copies half a path out of the one line that says where their config came from (43-04).
+        console.print(
+            f"Workspace layer: {workspace}", style="dim", markup=False, soft_wrap=True
+        )
     # v0.13 MEMS-01: WHERE THIS SESSION'S STATE LIVES. `cfg_path` keeps meaning the always-global
     # config layer — the kill file, plugins, packaged tools, the root-agent mint and the GPU daemon
     # all keep naming it. `state_dir` is where this session's WORK lands: the workspace layer when one
