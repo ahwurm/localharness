@@ -15,7 +15,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from localharness.agent.context import response_reserve
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
-from localharness.config.paths import global_config_dir, resolve_config_dir
+from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -143,6 +143,87 @@ def _identify_endpoint_provider(base_url: str) -> ProviderType:
     return "lmstudio" if ptype == "vllm" and _detect_lmstudio_ctx(base_url) is not None else ptype
 
 
+_WORKSPACE_CONFIG_TEMPLATE = """\
+# LocalHarness workspace config — this project's own layer.
+#
+# The specific beats the general: any key you set here wins over your machine-wide
+# ~/.localharness/config.yaml, and the machine-wide layer still governs everything this
+# file is silent about. Empty is a valid, useful state — the workspace already scopes
+# this project's memory, sessions and logs without a single setting below.
+#
+# The full merge order, lowest priority first:
+#   ~/.localharness/config.yaml  <  ~/.localharness/overrides.yaml
+#     <  .localharness/config.yaml  <  .localharness/overrides.yaml
+#
+# Two rules that do NOT follow "workspace wins", on purpose:
+#   * org.permissions.deny_patterns UNIONS across layers. Safety accumulates; a workspace
+#     can add a denial but can never remove one your machine set.
+#   * provider: is hardware truth and belongs to the machine. Leave it out of this file;
+#     `localharness init` and `/model` always write the global layer.
+#
+# Uncomment what you need.
+#
+# org:
+#   log_level: debug
+#   context:
+#     compaction_threshold_pct: 85.0
+#
+# Per-agent settings live in .localharness/agents/<name>.yaml, not here. The one people
+# look for first:
+#   memory:
+#     recall_scope: workspace   # workspace (default) | global | both
+#   ...controls which memory store a session in this project RECALLS from. It moves reads
+#   only — a session always writes to this project's own store whatever it says.
+"""
+
+
+def _scaffold_workspace(
+    *, endpoint: str | None, model: str | None, config_dir: str | None
+) -> None:
+    """`localharness init --workspace`: create ./.localharness/ for the project you are in.
+
+    Deliberately NOT `discover_workspace_dir()`. Creating a workspace is an explicit act at an
+    explicit place; discovery is for FINDING one. Walking up-tree here would silently scaffold
+    into a parent project when you meant to start a new one.
+
+    Prompt-free by design (dogfood F3: EOF-aborts break scripts) and never destructive: an
+    existing workspace is refused with exit 1 even under --force, so this command cannot lose
+    a config you wrote. Exit 1, not plain init's interactive exit 0 — this path is script-facing
+    and "already there" must be distinguishable from "created" (orchestrator ruling, phase 43).
+    """
+    conflicts = [
+        name
+        for name, given in (("--endpoint", endpoint), ("--model", model), ("--config-dir", config_dir))
+        if given is not None
+    ]
+    if conflicts:
+        err_console.print(
+            f"[bold red]Error:[/bold red] --workspace cannot be combined with "
+            f"{', '.join(conflicts)}. A workspace layer never carries a provider block, and it is "
+            f"always created in the current directory."
+        )
+        raise typer.Exit(2)
+
+    target = Path.cwd() / WORKSPACE_DIR_NAME
+    if target.exists():
+        err_console.print(
+            f"[bold red]Error:[/bold red] A workspace already exists at {target}. "
+            f"Edit {target / 'config.yaml'} directly — this command never overwrites one."
+        )
+        raise typer.Exit(1)
+
+    (target / "agents").mkdir(parents=True)
+    (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
+
+    console.print(f"[green]✓[/green] Workspace created at {target}")
+    console.print(f"  Config:  {target / 'config.yaml'} (all comments — nothing is set yet)")
+    console.print(f"  Agents:  {target / 'agents'}")
+    console.print(
+        "  Next:    run `localharness start` from anywhere in this project — its memory, "
+        "sessions and logs now stay here."
+    )
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -179,12 +260,27 @@ def init_app(
             help="Overwrite existing config without prompting.",
         ),
     ] = False,
+    workspace: Annotated[
+        bool,
+        typer.Option(
+            "--workspace",
+            help="Scaffold ./.localharness/ for THIS project instead of configuring the machine. "
+                 "Non-interactive; never writes a provider block; never overwrites an existing one.",
+        ),
+    ] = False,
 ) -> None:
     """Auto-detect local LLM and write initial configuration.
 
     Writes config to <config-dir>/config.yaml on success. The --help probe-order
     line is derived from detector.DEFAULT_PORTS (see the __doc__ assignment below).
     """
+    # Fork BEFORE the line below: `resolve_config_dir` answers with the machine-GLOBAL dir, and a
+    # workspace branch placed after it (or reusing `config_path`) scaffolds a perfectly shaped tree
+    # into ~/.localharness while passing every "the files exist" assertion.
+    if workspace:
+        _scaffold_workspace(endpoint=endpoint, model=model, config_dir=config_dir)
+        return
+
     config_path = resolve_config_dir(config_dir)
     config_path.mkdir(parents=True, exist_ok=True)
     config_file = config_path / "config.yaml"
