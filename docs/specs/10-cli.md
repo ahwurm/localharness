@@ -611,7 +611,7 @@ i Security defaults: revision 1 (current)
 ✓ Tokenizer endpoint reachable (/tokenize) — exact counts, message-level (chat template applied server-side)
 ✓ Config directory writable
 ✓ Agents directory exists
-✓ Tool calling: native
+i  Tool calling: native
 ✓ Web search ready (ddgs installed)
 
 ───────────────────────────────────────────────────────────────────────────
