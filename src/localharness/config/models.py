@@ -161,7 +161,8 @@ class BudgetConfig(BaseModel):
         default="KILL",
         description=(
             "Path to the kill switch file. Agent checks for this file before each iteration. "
-            "If it exists, the agent stops immediately and the file is removed. "
+            "If it exists, the agent stops immediately. The harness never removes the file — "
+            "delete it yourself, or the next session stops at its first iteration too. "
             "A bare relative name (the default) resolves UNDER the config dir "
             "(default ~/.localharness/KILL); an absolute or ~ path is honored as-is. "
             "Set to null to disable the kill switch."
