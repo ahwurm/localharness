@@ -89,6 +89,41 @@ def cwd_workspace(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def symlinked_cwd_workspace(tmp_path, monkeypatch):
+    """`./.localharness` is a SYMLINK whose target lives in a completely different tree.
+
+    The dotdir's NAME is in your current directory; what it points at is not. `is_dir()` follows
+    links, so the walk returns the link itself — and a gate that compared the link's own parent
+    against the cwd would read "this is your own directory" and load config from anywhere on the
+    machine, ungated, in any session. Returns the real directory the link points at.
+    """
+    _fake_home(tmp_path, monkeypatch)
+    outside = tmp_path / "elsewhere" / "planted"
+    (outside / "agents").mkdir(parents=True)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".localharness").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(proj)
+    return outside.resolve()
+
+
+@pytest.fixture
+def symlinked_workspace_inside_the_repo(tmp_path, monkeypatch):
+    """The same shape, pointing at a folder INSIDE the repository you are standing in.
+
+    Resolving before the comparison must not turn a legitimate in-project link into a prompt: the
+    target is below the repo root, so the second clause still says "yours". Returns the link.
+    """
+    _fake_home(tmp_path, monkeypatch)
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (proj / "sub" / "cfg" / "agents").mkdir(parents=True)
+    (proj / ".localharness").symlink_to(proj / "sub" / "cfg", target_is_directory=True)
+    monkeypatch.chdir(proj)
+    return proj.resolve() / ".localharness"
+
+
+@pytest.fixture
 def workspace_above_repo(tmp_path, monkeypatch):
     """The nearest `.localharness/` sits ABOVE the repository root: you are inside a project,
     but this config comes from a tree outside it, so the gate still applies."""
@@ -226,6 +261,41 @@ def test_in_project_workspace_records_nothing_in_the_trust_store(in_repo_project
 
 
 # ------------------------------------------------------- rows 6-8: outside your project
+
+
+def test_a_symlinked_workspace_pointing_outside_the_project_is_trust_gated(
+    symlinked_cwd_workspace, capsys
+):
+    """"Its folder is your current directory" has to mean the REAL folder.
+
+    A `.localharness` symlink is the cheapest way to smuggle agent files past the gate: the link
+    sits in the cwd, so an unresolved comparison classifies it as in-project and loads role, model
+    and tool-permission YAML from another tree with no prompt — in a scripted run too, where there
+    is no terminal to ask at. Refused, and nothing is recorded: the answer is still unspent.
+    """
+    from localharness.cli.workspace import resolve_workspace_layer
+    from localharness.config import trust
+
+    assert resolve_workspace_layer(interactive=False) is None
+    assert _squash(str(symlinked_cwd_workspace)) in _squash(capsys.readouterr().err)
+    assert trust.is_trusted(symlinked_cwd_workspace) is None
+
+
+def test_a_symlinked_workspace_inside_the_repo_still_loads_without_prompting(
+    symlinked_workspace_inside_the_repo, monkeypatch, capsys
+):
+    """The control for the line above: resolving must not over-refuse.
+
+    Pointing `.localharness` at a folder deeper in the same repository is an ordinary layout
+    choice, not config from elsewhere, so it stays ungated and silent.
+    """
+    _prompt_must_not_fire(monkeypatch)
+    from localharness.cli.workspace import resolve_workspace_layer
+
+    assert resolve_workspace_layer(interactive=True) == symlinked_workspace_inside_the_repo
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_workspace_above_the_repo_root_is_trust_gated(workspace_above_repo, capsys):

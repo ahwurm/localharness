@@ -93,6 +93,9 @@ other's context (#150).
   audited user overlay), so changing models in one project cannot fork the
   machine's provider config. The audit *record* of that swap lands in the
   workspace — the log follows the work.
+- The trust gate resolves symlinks before deciding a workspace is inside your
+  project — a symlinked `.localharness/` pointing outside the repository now gets
+  the same prompt (or non-interactive skip) as any other outside-project config.
 
 ### Known limitations (named, not hidden)
 - **The trust prompt does not cover a repository you cloned and then worked
