@@ -1387,9 +1387,20 @@ class OrchestratorREPL:
         # #132: an explicit per-model pin OUTRANKS the probe — it is configuration, not discovery.
         # It is also the only answer when a runtime's window is undiscoverable (the probe path below
         # can only disclose and keep a budget that belongs to the model we just left).
-        _pins = getattr(getattr(self._agent, "_config", None), "context", None)
-        pin = _pins.model_context_overrides.get(model) if _pins is not None else None
-        if getattr(ctx, "max_context_tokens", None) and pin is not None:
+        #
+        # Resolved through ContextConfig.resolve_budget — the SAME call `start` and `doctor` make
+        # (#137) — rather than by reading `model_context_overrides` here. A second hand-rolled copy
+        # of the pin lookup is exactly how doctor once blessed a 61,440 scalar for a session running
+        # on a 40,000 pin.
+        #
+        # HONEST SCOPE: this binds the PINNED half. When resolve_budget says UNPINNED, the branch
+        # below still refits to the served window, so the live budget can differ from the scalar in
+        # config.yaml that start_cmd calls the single source of truth. That is deliberate — a stale
+        # budget on a newly-swapped model 400s mid-session and the probe is the only evidence of the
+        # new model's real window — and it is disclosed in the note the user gets.
+        _cfg_ctx = getattr(getattr(self._agent, "_config", None), "context", None)
+        pin, pinned = _cfg_ctx.resolve_budget(model) if _cfg_ctx is not None else (None, False)
+        if getattr(ctx, "max_context_tokens", None) and pinned:
             if pin != ctx.max_context_tokens:
                 ctx.max_context_tokens = pin
                 notes.append(f"context budget pinned to {pin:,} tokens for {model}.")
