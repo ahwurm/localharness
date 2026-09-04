@@ -233,8 +233,14 @@ def show(
         # escape() around the path, markup outside it: a folder legally named `[old] proj` printed
         # as ` proj` here would be this command reporting a path that does not exist, in the one
         # command whose whole job is saying where your config comes from (39-05's measured lesson).
+        #
+        # soft_wrap=True for the same reason, found by the real-binary drive and not by a test:
+        # Rich hard-wraps at the console width, so a deep project path arrives with a newline
+        # folded into it and the user copies half a path. Soft-wrapping hands the line to the
+        # TERMINAL intact — it still looks wrapped on screen, and it is one line in the data.
         console.print(
-            f"  [cyan]{band:<{width}}[/cyan]  [dim]{mark}[/dim]  {escape(str(path))}"
+            f"  [cyan]{band:<{width}}[/cyan]  [dim]{mark}[/dim]  {escape(str(path))}",
+            soft_wrap=True,
         )
 
     if not rows:

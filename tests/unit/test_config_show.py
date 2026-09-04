@@ -324,6 +324,26 @@ def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatc
     assert _key(payload, "org.name")["layer"] == "workspace-config"
 
 
+def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch):
+    """A path with a newline folded into it is not a path you can copy, or read.
+
+    Found by the real binary at COLUMNS=120, not by any assertion here — every other test in this
+    file runs at 400 to keep the table on one line, and a project path long enough to wrap is the
+    normal case on a real machine, not the exotic one. `_line_with` is the assertion: it fails if
+    the path appears on zero lines (folded) as loudly as if it appeared on two.
+    """
+    layout = _layout(
+        tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}}, columns="80"
+    )
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0, _combined(result)
+    for path in (layout.global_cfg, layout.global_ovl, layout.ws_cfg, layout.ws_ovl):
+        assert len(str(path)) > 80, "the fixture path is too short to test wrapping at all"
+        _line_with(result.output, str(path))
+
+
 def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch):
     """The payload shape `docs/specs/10-cli.md` quotes — pinned as an exact dict, not a subset.
 
