@@ -81,6 +81,36 @@ printed on stderr.
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
 
+**`--no-input`, for runs with nobody watching.** `doctor`, `validate` and `agent create` take
+`--no-input`: never ask about an untrusted workspace, skip that layer, say on stderr that it was
+skipped, and **record nothing**. The reason it exists is that the trust answer is permanent. A git
+hook, a CI job or a scheduled run that happens to inherit a terminal would otherwise be able to
+answer that question on your behalf, once, forever — a decision about trust made by whatever process
+happened to run first. `--no-input` makes the run declare that it is not the right process to be
+asked. It is also the honest way to script these commands: the run still works, it just works
+without that layer. (`agent create --no-input` additionally refuses to guess a target layer: pass
+`--global` or `--project`.)
+
+**Three current behaviors worth knowing before you rely on the walk.** These are what the code does
+today, described plainly rather than promised:
+
+- **A linked git worktree reads as outside its parent project.** The walk stops at the worktree's
+  own root, so a `.localharness/` in the main checkout is "somewhere else" from inside the worktree
+  and you get the one-time trust question about your own repository.
+- **A non-git folder gets the workspace layer only at the project root.** For a directory that is
+  not in a git repository, only standing exactly in the folder that holds `.localharness/` counts as
+  in-project. A subdirectory of it is treated as outside, which means the trust question — and in a
+  non-interactive run, the layer is simply skipped.
+- **A recorded "no" does not apply from inside that project.** The in-project check runs before the
+  recorded answer is consulted, so a workspace you declined from outside still loads silently when
+  you `cd` into its own directory. Declining is about loading someone else's config from a distance,
+  not about disabling a project's own config for yourself.
+
+**A project can have a workspace and no machine config.** `doctor`, `config show` and `agent list`
+all work before `localharness init` has ever run: they report the machine as unconfigured in one
+line and then show the workspace layer anyway, rather than exiting on the missing global
+`config.yaml`.
+
 ### Creating a workspace
 
 ```
@@ -271,20 +301,29 @@ which memory a session reads back is one setting, `agent.memory.recall_scope`, a
 where the table says — the setting moves reads only. `05-memory.md` §11 covers the merged mode and
 `/memory promote`, the one command that copies a memory from a project into your global store.
 
-### Environment Variable Overrides
+### Environment variables
 
-Config values can be overridden via environment variables. The pattern is:
+**There is no environment override for config values.** Nothing in `config/` reads the environment
+except `config/paths.py`, and what it reads is where the configuration lives, not what is in it. Two
+variables do that:
 
-```
-LOCALHARNESS_{SECTION}_{FIELD}
-```
+| Variable | What it does |
+|---|---|
+| `LOCALHARNESS_DIR` | Use this directory as the config directory instead of `~/.localharness`. |
+| `LOCALHARNESS_HOME` | The same thing, consulted only when `LOCALHARNESS_DIR` is unset. |
 
-Examples:
-- `LOCALHARNESS_PROVIDER_BASE_URL=http://localhost:8000/v1`
-- `LOCALHARNESS_AGENT_MAX_CONTEXT_TOKENS=200000`
-- `LOCALHARNESS_LOG_LEVEL=debug`
+Both behave exactly like passing `--config-dir`, including the consequence that matters most:
+naming a config directory switches workspace discovery off entirely (see "Search Order for Config
+Files" above).
 
-Environment variables override config file values but are not validated by Pydantic until `ConfigLoader.load()` is called.
+Two further variables exist, but they belong to `localharness init` rather than to the config
+system — `LOCALHARNESS_ENDPOINT` and `LOCALHARNESS_MODEL` are the environment spellings of its
+`--endpoint` and `--model` flags, read by Typer's `envvar=`, and they do nothing for any other
+command.
+
+To change a config value from a script, write it: `localharness components set <path> <value>`
+edits the global `overrides.yaml`, and a project's `.localharness/config.yaml` is a plain file you
+can generate.
 
 ---
 
@@ -451,20 +490,18 @@ class PermissionConfig(BaseModel):
     )
 
     deny_patterns: list[str] = Field(
+        # 24 shipped defaults, in four groups — see the table below.
         default_factory=lambda: [
             "write(*/.env)",
             "write(*/secrets*)",
-            "write(*/config.yaml)",
-            "write(*/agents/*.yaml)",
-            "bash(sudo:*)",
-            "bash(rm -rf *)",
-            "bash(chmod 777 *)",
+            # … 22 more; config/models.py is the list
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
             "'{tool_name}({argument_glob})'. "
             "A tool call is denied if its name and any argument matches a pattern. "
-            "Pattern matching uses fnmatch semantics. "
+            "Pattern matching uses fnmatch semantics over the RAW pre-expansion argument "
+            "strings (no shell parsing). "
             "The deny list is evaluated after inheritance resolution — "
             "an agent's deny list is the UNION of its own list and all inherited lists. "
             "Agents can add to the deny list but never remove inherited entries."
@@ -476,6 +513,17 @@ class PermissionConfig(BaseModel):
         description=(
             "Explicit allow list for 'manual' mode (v2). "
             "In 'auto' mode, this field is ignored."
+        ),
+    )
+
+    workspace_root: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opt-in filesystem confinement. When set, write/edit target paths and bash_exec "
+            "working_dir must resolve (symlink-safe, expanduser'd) INSIDE this directory or "
+            "the tool returns a permission_denied error. Default None = UNCONFINED: "
+            "file-write capability is a core product feature and stays fully enabled by "
+            "default. Harness-run evals set this to an isolated per-run scratch dir."
         ),
     )
 
@@ -500,6 +548,41 @@ class PermissionConfig(BaseModel):
                 )
         return patterns
 ```
+
+**The 24 shipped deny defaults**, by what they stop:
+
+| Group | Patterns |
+|---|---|
+| Credential and config writes | `write(*/.env)`, `write(*/secrets*)`, `write(*/config.yaml)`, `write(*/agents/*.yaml)` |
+| Privilege escalation, recursive delete, world-writable | `bash_exec(*sudo *)`, `bash_exec(rm -rf *)`, `bash_exec(*rm -rf *)`, `bash_exec(chmod 777 *)` |
+| Destructive container / service ops | `bash_exec(*docker stop*)`, `*docker kill*`, `*docker rm*`, `*docker compose down*`, `*docker-compose down*`, `*systemctl stop*`, `*systemctl disable*`, `*systemctl kill*`, `*systemctl mask*` |
+| Process and machine control | `bash_exec(*pkill*)`, `*killall*`, `kill *`, `* kill *`, `*shutdown*`, `*reboot*`, `*poweroff*` |
+
+Read-only equivalents stay allowed on purpose — `docker ps`, `docker logs`, `systemctl status`,
+`journalctl`.
+
+Because these are unioned into every agent at resolution time, a config that declares
+`deny_patterns: []` is not an agent with nothing denied. `config show`, `components get` and
+`components list` say so where it would otherwise mislead, appending
+`(+24 shipped defaults always enforced)` to an empty value. The count is read off the model, so it
+cannot drift from what ships.
+
+**`workspace_root` confines where files are written.** Set it and every `write`/`edit` target path
+and every `bash_exec` working directory must resolve inside that directory — symlinks followed
+first — or the tool returns `permission_denied`.
+
+Its resolved value depends on whether a workspace layer applies:
+
+- **No workspace** — unset means **unconfined**, and that is the shipped default. LocalHarness is a
+  local agent harness whose whole point is acting on your machine, so writing files is a feature,
+  not an escape.
+- **Inside a workspace** — an agent that sets nothing gets the project folder (the directory holding
+  `.localharness/`) filled in by the loader. A value you write yourself always wins, in either case.
+
+Read it at its own size: it is **not a sandbox**. It constrains those tool arguments, not the
+process — a command run through `bash_exec` can still leave the folder, and the deny patterns remain
+the mechanism that stops specific actions. The harness's own eval runs set it to an isolated per-run
+scratch directory. See SECURITY.md for what the trust boundary does and does not cover.
 
 ### 3.4 BudgetConfig
 
@@ -539,29 +622,8 @@ class MemoryConfig(BaseModel):
     """Memory backend configuration for an agent."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    sqlite_path: Optional[str] = Field(
-        default=None,
-        description=(
-            "Path to the SQLite facts store for this agent. "
-            "Defaults to ~/.localharness/agents/{agent_name}/memory.db if not set."
-        ),
-    )
-
-    history_path: Optional[str] = Field(
-        default=None,
-        description=(
-            "Path to the JSONL chat history file. "
-            "Defaults to ~/.localharness/agents/{agent_name}/events.jsonl."
-        ),
-    )
-
-    notes_path: Optional[str] = Field(
-        default=None,
-        description=(
-            "Path to the MEMORY.md persistent notes file. "
-            "Defaults to ~/.localharness/agents/{agent_name}/MEMORY.md."
-        ),
-    )
+    # sqlite_path / history_path / notes_path are declared here and read by nothing: the memory
+    # store derives all three from its own base_dir. See the note under §4.1.
 
     max_notes_chars: int = Field(
         default=16_000,
@@ -928,18 +990,6 @@ class AgentConfig(BaseModel):
         if v.strip() == "":
             raise ValueError("model cannot be empty. Use 'inherit' to inherit from division/org.")
         return v
-
-    @model_validator(mode="after")
-    def resolve_memory_defaults(self) -> "AgentConfig":
-        """Fill in default memory paths based on agent name if not set."""
-        base = Path(f"~/.localharness/agents/{self.name}").expanduser()
-        if self.memory.sqlite_path is None:
-            object.__setattr__(self.memory, "sqlite_path", str(base / "memory.db"))
-        if self.memory.history_path is None:
-            object.__setattr__(self.memory, "history_path", str(base / "events.jsonl"))
-        if self.memory.notes_path is None:
-            object.__setattr__(self.memory, "notes_path", str(base / "MEMORY.md"))
-        return self
 ```
 
 ### 3.9 DivisionConfig
@@ -1111,7 +1161,11 @@ class HarnessConfig(BaseModel):
 
 ### 4.1 Field Reference
 
-Every field, its type, default, and constraints.
+The keys you are most likely to write by hand, with type, default, and constraints. This is not the
+whole schema: `agent.yaml` also accepts the nested blocks `stuck_detector`, `recovery_injection`,
+`self_check`, `baton_gate`, `repetition_guard`, `role_sections` and `cruncher`, each a model of its
+own in `config/models.py` with its own defaults. `config/models.py` is the complete, authoritative
+list — every field is declared there with its own description.
 
 #### agent.yaml fields
 
@@ -1123,6 +1177,8 @@ Every field, its type, default, and constraints.
 | `model` | string | `"inherit"` | non-empty | LLM model name |
 | `temperature` | float | `0.6` | 0.0–2.0 | Sampling temperature |
 | `max_tokens` | int | `4096` | 1–128000 | Max response tokens |
+| `timeout_seconds` | float or null | null | 30.0–3600.0 | Per-agent HTTP timeout; null uses the provider's |
+| `max_subagent_depth` | int | `2` | 1–4 | How deep delegation may nest (1 disables nesting) |
 | `channel` | string | `"terminal"` | — | Output channel |
 | `capabilities` | list[string] | `[]` | — | Routing keywords |
 | `tags` | list[string] | `[]` | — | Organizational tags |
@@ -1131,16 +1187,22 @@ Every field, its type, default, and constraints.
 | `tools.deny` | list[string] | `[]` | tool names or globs | Tools to deny |
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
 | `permissions.mode` | string | `"auto"` | auto or manual | Permission mode |
-| `permissions.deny_patterns` | list[string] | see defaults | format: `tool(arg_glob)` | Deny patterns |
+| `permissions.deny_patterns` | list[string] | 24 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
+| `permissions.workspace_root` | string or null | null, or the project folder inside a workspace | abs or `~/…` path | Filesystem confinement for write/edit/bash_exec. Null and no workspace = unconfined |
 | `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
 | `permissions.budget.max_duration_minutes` | float | `30.0` | 0.1–1440 | Max duration |
-| `permissions.budget.kill_file` | string or null | `"~/.localharness/KILL"` | abs path | Kill switch path |
-| `memory.sqlite_path` | string or null | auto | abs or ~/… path | SQLite facts path |
-| `memory.history_path` | string or null | auto | abs or ~/… path | JSONL history path |
-| `memory.notes_path` | string or null | auto | abs or ~/… path | MEMORY.md path |
-| `memory.max_notes_chars` | int | `16000` | 0–200000 | Notes injection limit |
-| `memory.shared_read` | list[string] | `[]` | division, org | Shared memory scopes |
-| `memory.inject_into_context` | bool | `true` | — | Auto-inject memory |
+| `permissions.budget.max_tool_calls` | int or null | null | 0+ | Separate ceiling on dispatched tool calls; null = `max_actions` alone governs |
+| `permissions.budget.kill_file` | string or null | `"KILL"` | bare name, abs, or `~/…` path | Kill switch file. A bare name resolves under the config directory (`~/.localharness/KILL` by default); null disables the kill switch. Read from the global layer only — see "The kill switch" below |
+| `memory.max_notes_chars` | int | `16000` | 0–200000 | Chars of `MEMORY.md` injected per turn |
+| `memory.shared_read` | list[string] | `[]` | division, org | Extra org-hierarchy scopes this agent may read |
+| `memory.recall_scope` | string | `"workspace"` | workspace, global, both | Which STORE recall reads from when a workspace applies. Reads only — writes always go to this session's own store |
+| `memory.inject_into_context` | bool | `true` | — | Inject `MEMORY.md` + recent facts into the system prompt each turn |
+| `memory.index_mode` | bool | `true` | — | Inline a memory INDEX (name + one line each) and fetch bodies via tools, instead of inlining all of `MEMORY.md` |
+| `memory.max_session_history_entries` | int | `8` | 0–200 | Recent session-history lines inlined in index mode |
+| `memory.write_gate_enabled` | bool | `true` | — | Auto-capture memory candidates from bus signals (no extra model calls). False leaves the `remember` tool unaffected |
+| `memory.trace_ambient_injection` | bool | `true` | — | Record an activation trace for the every-turn ambient injection |
+| `memory.consolidation` | map | see `MemoryConsolidationConfig` | — | Idle-time consolidation pass |
+| `memory.predictive_gate` | map | see `PredictiveGateConfig` | — | Prediction-error write gate |
 | `context.max_context_tokens` | int | `131072` | 1000–2000000 | The FULL served window (init writes it verbatim; the reply reserve is held back inside it) |
 | `context.model_context_overrides` | map[string, int] | `{}` | keys match the served model name EXACTLY | Per-model context budget; outranks `max_context_tokens` for that model |
 | `context.compaction_threshold_pct` | float | `80.0` | 50.0–99.0 | Compaction trigger |
@@ -1152,6 +1214,19 @@ Every field, its type, default, and constraints.
 | `schedule.cron` | string or null | null | 5-field cron | Schedule expression |
 | `schedule.timezone` | string | `"UTC"` | IANA timezone | Schedule timezone |
 | `schedule.task` | string or null | null | — | Task to run |
+
+**Three memory keys the schema still accepts but nothing reads.** `memory.sqlite_path`,
+`memory.history_path` and `memory.notes_path` parse without error and are then ignored: the memory
+store derives all three paths from the agent's own directory (`memory.db`, `history.jsonl`,
+`MEMORY.md` under `<config-dir>/agents/<name>/`, or under the workspace when one applies). Setting
+them moves nothing. They are declarative leftovers, kept only so an older config still loads.
+
+**The kill switch.** `permissions.budget.kill_file` names one file; while that file exists, every
+agent session stops at its next iteration boundary. Two things about it are deliberate. It resolves
+under the **global** config directory, never a workspace's — one file has to stop every session on
+the machine, so a project cannot move it. And since v0.13 its **value** is read from the global
+layer alone: a workspace agent or division file that sets `kill_file` is ignored, with a line in the
+log saying so. The harness only ever reads the file; removing it again is yours to do.
 
 ---
 
@@ -1178,10 +1253,16 @@ resolve(agent_name: str) → AgentConfig:
      merged = merge(OrgConfig_as_partial_AgentConfig, DivisionConfig_as_partial_AgentConfig, raw_agent_yaml)
 
      Merge semantics (field-by-field):
-       - Scalar fields (model, temperature, max_tokens, etc.):
+       - Scalar fields (model, temperature, max_tokens):
            If agent sets "inherit" or omits → use division value
            If division sets "inherit" or omits → use org value
-           If org omits → use field default
+           If org omits → use the global overlay's `agent:` section
+           If the overlay says nothing → use the field default
+         In one line: agent yaml > division > org > overlay > schema default.
+         The overlay rung is what `localharness components set agent.temperature 0.2`
+         writes; "org omits" is read from the fields the org file actually set, not from
+         OrgConfig's own schema defaults, or the org rung would shadow the overlay on
+         every install.
        - ToolConfig.inherit, ToolConfig.add, ToolConfig.deny:
            These are ADDITIVE. Agent's tools = union of inherited tools + agent additions, minus denials.
            Denial always wins. See Section 5.2 for tool resolution details.
@@ -1198,10 +1279,7 @@ resolve(agent_name: str) → AgentConfig:
   4. Validate the merged AgentConfig via Pydantic (model_validate)
      On validation failure: raise ConfigValidationError with structured errors (see Section 6)
 
-  5. Resolve memory path defaults:
-     Fill in sqlite_path, history_path, notes_path from agent name if still None
-
-  6. Return merged, validated AgentConfig
+  5. Return merged, validated AgentConfig
 ```
 
 ### 5.2 Tool Resolution Details
@@ -1412,16 +1490,20 @@ class ConfigLoader:
         Initialize the ConfigLoader.
 
         Args:
-            config_dir: Base config directory. Defaults to ~/.localharness/.
-                        Override for testing or per-project configs.
-            local_config_dir: Project-local config directory. Defaults to {cwd}/.localharness/.
-                              If set (and the directory exists), local configs take precedence
-                              over config_dir.
+            config_dir: Base config directory. Resolved through one precedence chain:
+                        this argument, else $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                        else ~/.localharness.
+            local_config_dir: The workspace layer, or None for "no workspace applies".
+                              The loader NEVER discovers one itself — callers name it, and
+                              cli/workspace.py's resolve_workspace_layer() is the only thing
+                              that computes one. A literal default here would let a stray
+                              ./.localharness outrank an explicit config directory, which is
+                              the opposite of "an explicit directory is a full replacement".
 
         Does not read any files at construction time.
         """
-        self._config_dir = Path(config_dir or "~/.localharness").expanduser()
-        self._local_dir = Path(local_config_dir or ".localharness")
+        self._config_dir = resolve_config_dir(config_dir)
+        self._local_dir = Path(local_config_dir) if local_config_dir is not None else None
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
@@ -1609,7 +1691,7 @@ division: financial
 role: >
   Generate a daily morning market intelligence report covering portfolio positions,
   overnight news, and key macro indicators. Deliver as structured markdown.
-  Target length: 1000-1500 words. Use the Sherwood News style guide.
+  Target length: 1000-1500 words.
 
 model: qwen2.5:72b
 temperature: 0.4
@@ -1659,9 +1741,6 @@ permissions:
     kill_file: ~/.localharness/KILL
 
 memory:
-  sqlite_path: ~/.localharness/agents/morning-briefing/memory.db
-  history_path: ~/.localharness/agents/morning-briefing/events.jsonl
-  notes_path: ~/.localharness/agents/morning-briefing/MEMORY.md
   max_notes_chars: 20000
   shared_read:
     - division
@@ -1779,7 +1858,8 @@ provider:
     - llama3.3:70b
     - nomic-embed-text
   supports_function_calling: true
-  timeout_seconds: 300.0
+  timeout_seconds: 600.0
+  inference_queue_wait_seconds: 600.0
 
 org:
   name: default
@@ -1787,6 +1867,14 @@ org:
   log_level: info
   audit_log_path: ~/.localharness/audit.jsonl
 ```
+
+`init` serializes the whole validated `HarnessConfig`, so the file it writes contains every
+field of every model with its resolved value — including a `server:` block for a
+harness-managed runtime — not just the keys shown here. This example is the shape, not a
+transcript. Two values above are the ones people most often expect to differ from what
+`init` actually writes: `timeout_seconds` is `600.0`, chosen for slow local single-stream
+decode, and `inference_queue_wait_seconds` bounds the wait for the local inference gate
+rather than generation itself.
 
 ### 8.6 Multi-Agent Hierarchy Example
 
@@ -1852,7 +1940,7 @@ After inheritance resolution for `model-research`:
 
 ## 9. `localharness validate` Contract
 
-The `validate` command is implemented in `cli/validate.py`. It must satisfy these requirements (CFG-04):
+The `validate` command is implemented in `cli/validate_cmd.py`. It must satisfy these requirements (CFG-04):
 
 ### 9.1 Exit Codes
 
@@ -1865,70 +1953,40 @@ The `validate` command is implemented in `cli/validate.py`. It must satisfy thes
 ### 9.2 Behavior
 
 ```
-localharness validate [--path PATH] [--agent NAME] [--verbose]
+localharness validate [OPTIONS] [PATH]
+
+Arguments:
+  PATH            Path to specific YAML to validate. If not set, validates all.
 
 Options:
-  --path PATH     Validate a specific YAML file instead of all configs
-  --agent NAME    Validate a single named agent (plus its division and org)
-  --verbose       Show full config dump for each valid file (useful for debugging inheritance)
-  --json          Output results as JSON (for CI integration)
+  --config-dir TEXT  Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                     else ~/.localharness.  [env var: LOCALHARNESS_DIR]
+  --strict           Reserved. No warning-level checks exist yet; currently identical to
+                     the default.
+  --no-input         Never ask about an untrusted workspace: skip its config layer, say so,
+                     and record nothing. For hooks, CI, and any run with no one watching.
 ```
+
+That is the whole surface. There is no `--json`, no `--agent`, no `--verbose`. `--strict` is
+declared and currently does nothing but say so: the command has no warning level for it to promote.
 
 ### 9.3 What Is Validated
 
-For each config file found:
+`ConfigLoader.validate_all()` walks, across both layers: the global `config.yaml`, the global
+`org.yaml`, every `divisions/*.yaml`, and every `agents/*.yaml`. Each file is loaded **at its own
+path**, so a workspace file and a global file with the same name are two independent verdicts.
+
+For each file:
 
 1. YAML parses without error
 2. All required fields are present (`name`, `role` for agents)
 3. All field values satisfy type and constraint rules
-4. `division` reference exists (if set)
-5. `system_prompt_file` path exists (if set) — warning, not error
-6. `mcp_servers[*].command` is executable (if transport=stdio) — warning, not error
-7. Inheritance resolution completes without errors
-8. After resolution, `model` is not `"inherit"` (must resolve to a concrete model name)
+4. Inheritance resolution completes without errors — a `division` that does not exist is a
+   resolution error here
 
-### 9.4 JSON Output Format (`--json`)
-
-```json
-{
-  "valid": false,
-  "checked": 3,
-  "errors": 1,
-  "warnings": 1,
-  "results": [
-    {
-      "path": "/home/user/.localharness/agents/hn-monitor.yaml",
-      "valid": false,
-      "errors": [
-        {
-          "field": "permissions.budget.max_actions",
-          "line": 14,
-          "message": "value must be >= 1",
-          "value": 0
-        }
-      ],
-      "warnings": []
-    },
-    {
-      "path": "/home/user/.localharness/agents/morning-briefing.yaml",
-      "valid": true,
-      "errors": [],
-      "warnings": [
-        {
-          "field": "context.system_prompt_file",
-          "message": "File not found: /home/user/.localharness/prompts/morning-briefing.md"
-        }
-      ]
-    },
-    {
-      "path": "/home/user/.localharness/org.yaml",
-      "valid": true,
-      "errors": [],
-      "warnings": []
-    }
-  ]
-}
-```
+Everything validate reports is an error. It does not check that `system_prompt_file` exists, that an
+MCP `command` is executable, or that a tool name is registered — those are runtime concerns, and no
+warning level exists to carry them.
 
 ---
 
@@ -1946,7 +2004,7 @@ extend-select = ["S506"]  # Probable use of unsafe loader
 
 ### 10.2 Path Expansion
 
-All path fields support `~` expansion and must be expanded via `Path(v).expanduser()` before use. This is done in the `AgentConfig.resolve_memory_defaults()` model validator and in `ConfigLoader.load_agent()` post-resolution. Paths are stored as strings in the model (not Path objects) for YAML round-trip compatibility.
+All path fields support `~` expansion and must be expanded via `Path(v).expanduser()` before use, at the point of use rather than at load time. Paths are stored as strings in the model (not Path objects) for YAML round-trip compatibility.
 
 ### 10.3 pydantic-yaml for Round-Trip
 
@@ -1981,16 +2039,17 @@ from localharness.config.models import AgentConfig, OrgConfig
 
 @pytest.fixture
 def minimal_agent_config() -> AgentConfig:
-    """Minimal valid AgentConfig for testing."""
     return AgentConfig(name="test-agent", role="Test agent for unit tests.")
 
 @pytest.fixture
-def config_loader(tmp_path: Path):
-    """ConfigLoader pointed at a temporary directory for isolation."""
-    from localharness.config.loader import ConfigLoader
+def config_dir(tmp_path: Path) -> Path:
+    """A temporary config directory with the expected subdirectories.
+
+    Tests build their own ConfigLoader on it, so a test that needs a workspace
+    layer can pass `local_config_dir=` too."""
     (tmp_path / "agents").mkdir()
     (tmp_path / "divisions").mkdir()
-    return ConfigLoader(config_dir=tmp_path)
+    return tmp_path
 ```
 
 ### 10.7 Mandatory Unit Tests (`tests/unit/test_config_loader.py`)
@@ -2004,7 +2063,6 @@ def config_loader(tmp_path: Path):
 | `test_tool_deny_wins_over_add` | Tool in both add and deny results in tool being denied |
 | `test_division_not_found_raises` | division: nonexistent raises ConfigReferenceError |
 | `test_budget_agent_wins` | Agent's max_actions overrides division's |
-| `test_memory_defaults_filled` | sqlite_path auto-filled from agent name |
 | `test_write_agent_creates_file` | write_agent() creates YAML on disk |
 | `test_write_agent_backup_on_overwrite` | overwrite=True creates .yaml.bak |
 | `test_validate_all_returns_results` | validate_all() returns one tuple per config file |
