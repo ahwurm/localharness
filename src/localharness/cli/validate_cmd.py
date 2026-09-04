@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.rule import Rule
 
-from localharness.config.loader import ConfigError, ConfigLoader
+from localharness.config.loader import ConfigError, ConfigLoader, ConfigValidationError
 from localharness.config.paths import resolve_config_dir
 
 console = Console()
@@ -58,7 +58,8 @@ def validate(
     # "all valid" about a set of files the session will not actually load. The RAW `config_dir`
     # is what the resolver needs — `cfg_path` has already lost whether it was explicit.
     from localharness.cli.workspace import resolve_workspace_layer
-    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=resolve_workspace_layer(config_dir))
+    workspace = resolve_workspace_layer(config_dir)
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
 
     results: list[tuple[str, ConfigError | None]] = []
 
@@ -88,19 +89,28 @@ def validate(
     invalid_count = 0
 
     for file_path, error in results:
-        # The FULL path, not the basename: with a workspace layer there are two `config.yaml`s and
-        # two `agents/foo.yaml`s, and a bare name cannot say which one this verdict is about
-        # (CLI-02's lesson, applied to the row rather than only to the error detail). escape():
-        # a path is data — a folder named `[old] proj` must not be read as a markup tag.
-        # soft_wrap: a full path is longer than the 80-col default, and rich would otherwise fold
-        # it mid-path and crop it with an ellipsis — a path a user cannot copy is not a path.
-        name = escape(file_path)
+        # WITH a workspace layer there are two `config.yaml`s and two `agents/foo.yaml`s, and a bare
+        # basename cannot say which one a verdict is about (CLI-02's lesson, applied to the row and
+        # not only to the error detail). So the row carries the full path — escape()d, because a
+        # folder named `[old] proj` is data and not a markup tag, and soft-wrapped, because rich
+        # would otherwise fold a long path mid-string and crop it with an ellipsis. WITHOUT a
+        # workspace there is nothing to disambiguate and the row stays the pre-v0.13 basename,
+        # byte for byte (LAYR-03).
+        #
+        # The harness row is keyed under the GLOBAL config.yaml by `validate_all`, but with a
+        # workspace the value that failed can live in one of three other files. Where the error
+        # names its own owner, THAT is what the row shows — otherwise the row blames a file that is
+        # fine and the "in ..." line below has to walk it back.
+        label_path = file_path
+        if workspace is not None and isinstance(error, ConfigValidationError):
+            label_path = error.path
+        name = escape(label_path) if workspace is not None else Path(label_path).name
         if error is None:
             console.print(f"  {name:<35} {_PASS} valid", soft_wrap=True)
             valid_count += 1
         else:
             console.print(f"  {name:<35} {_FAIL} invalid", soft_wrap=True)
-            _print_error_details(error, file_path)
+            _print_error_details(error, label_path)
             invalid_count += 1
 
     console.print()
