@@ -5,7 +5,7 @@ import asyncio
 import shutil
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 import typer
@@ -179,6 +179,29 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 """
 
 
+def _is_the_global_config_dir(target: Path) -> bool:
+    """Would scaffolding here write the machine's own config directory?
+
+    Two answers count, because two things can be "the global dir": whatever the env chain resolves
+    to right now, and the literal `~/.localharness` that the chain falls back to. Compared by
+    realpath so a symlinked `$HOME` (or a `~` that is itself a link) does not read as a different
+    directory — the same identity rule the trust store uses.
+
+    Never raises: a path that cannot be resolved is, by definition, not the config dir we are
+    standing in, and this check must not become the thing that breaks the command.
+    """
+    def _real(path: Path) -> Optional[Path]:
+        try:
+            return path.resolve()
+        except OSError:  # pragma: no cover - exotic filesystems only
+            return None
+
+    here = _real(target)
+    if here is None:
+        return False
+    return here in {_real(global_config_dir()), _real(Path.home() / WORKSPACE_DIR_NAME)}
+
+
 def _refuse_existing(target: Path) -> None:
     """"There is already a workspace here" — from the pre-check and from losing the mkdir race.
 
@@ -243,6 +266,21 @@ def _scaffold_workspace(
         # except which call failed.
         report_filesystem_error(exc, "find the current directory", console=err_console)
         raise  # pragma: no cover - report_filesystem_error always exits
+
+    # E-M4. Standing in $HOME, `./.localharness` IS the machine's global config dir — so the
+    # refusal below fired with "a workspace already exists", which is a true sentence about the
+    # wrong thing: that directory is not a workspace, and the user has not made a mistake this
+    # command can undo by pointing them at their own config.yaml. Checked before the existence
+    # test, because otherwise the more specific case never gets to speak.
+    if _is_the_global_config_dir(target):
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"{target} is your machine-wide config directory, not a project workspace.")
+            + " --workspace creates a layer for one project — run it from that project's "
+            "directory. Use 'localharness init' (no --workspace) to set up this machine.",
+            soft_wrap=True,
+        )
+        raise typer.Exit(2)
 
     # `is_symlink()` as well as `exists()` (H2): `exists()` FOLLOWS symlinks, so a `.localharness`
     # pointing at a deleted tree answered False, sailed past this refusal, and died in mkdir with
