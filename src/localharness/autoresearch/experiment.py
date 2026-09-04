@@ -47,12 +47,17 @@ EXIT_REFUSE_UNKNOWN_ID = 5
 EXIT_REFUSE_OFFREGISTRY = 6
 EXIT_REFUSE_MALFORMED = 7
 
-# Belt-and-suspenders prefixes for the anti-reward-hacking seal (Pitfall 3). The
-# registry already excludes these by omission; this is defense-in-depth.
+# Prefixes the anti-reward-hacking seal refuses outright (Pitfall 3), and what each actually seals:
+#   bench./scenario/grader/success_criteria/holdout — BENCH-side paths, not HarnessConfig fields, so
+#     they never appear in the catalogue and the `cat_entry is None` check already refuses them.
+#     These entries are belt-and-suspenders against a future config merge, and nothing more.
+#   sentinel.*, org.enforce_capability_floor, active_endpoint*, extra_endpoints — REAL registry
+#     entries (12 of them today). For these the tuple is the ONLY thing holding them out of the
+#     mutable surface: the loop's own overfit tripwires, the capability floor, and the subject's
+#     backend selection (session-state start-resume reads back — a proposal must never silently
+#     switch the model it is being measured on mid-experiment).
 _OFFREGISTRY_PREFIXES = ("bench.", "scenario", "grader", "success_criteria", "holdout", "sentinel",
                          "org.enforce_capability_floor",
-                         # 0.10.0 model tree: session-state that start-resume reads back — a proposal
-                         # must never silently switch the subject's backend mid-experiment.
                          "active_endpoint", "extra_endpoints")
 
 # A component path encoding >1 dot-path (mirrors components_cmd._MULTI_PATH_PATTERN).
@@ -205,15 +210,44 @@ async def _load_and_validate(store, proposal_id: str, cfg) -> tuple[Any, str, An
 # Worktree config-cascade → AgentConfig resolver (BLOCKER-1 fix)
 # ---------------------------------------------------------------------------
 
+# The org.* subtrees the arm extraction pulls (below) — also valid AgentConfig fields, so agents
+# inherit them. The reachability predicate DERIVES from this tuple; the extraction loop uses the
+# same one, so the two can never drift apart.
+_ARM_ORG_FIELDS = ("context", "permissions")
+_ARM_AGENT_PREFIX = "agent."
+
+
+def reaches_gate_arm(component: str) -> bool:
+    """True iff mutating this registry path can change either gate arm's resolved AgentConfig.
+
+    The arms differ ONLY in their AgentConfig (`_make_run_slice` passes everything else through
+    identically), and that config is built by `_resolve_worktree_agent_cfg` from exactly two
+    subtrees: `agent.*` and the org fields above. A mutation anywhere else — provider.*, server.*,
+    terminal.*, version — is written into the experiment overlay and then read by nobody: both arms
+    resolve to the same config, and the gate grades pure sampling noise on a target it cannot move.
+    """
+    if component.startswith(_ARM_AGENT_PREFIX):
+        return True
+    return any(component == f"org.{f}" or component.startswith(f"org.{f}.") for f in _ARM_ORG_FIELDS)
+
 
 def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     """Build the per-scenario AgentConfig from the worktree config cascade.
 
-    Cascade: base ({}) -> <root>/.localharness/overrides.yaml (adopted mutations, BOTH arms)
+    Cascade: base ({}) -> <root>/.localharness/overrides.yaml (the project overlay, BOTH arms —
+             but see WHAT THE WORKTREE CARRIES below)
              -> <root>/.localharness/experiment-overlay.yaml (the candidate, PROPOSAL arm ONLY).
-    Mirrors adoption.py:83-103 (the agent.* -> AgentConfig validate precedent) but RETURNS the
-    built runtime config. The `agent` subtree is the registry addressing namespace; scenario
-    identity (name) is synthesized, role/everything-else comes from the overlay when present.
+    Mirrors adoption.py's `agent.* -> AgentConfig validate` precedent but RETURNS the built runtime
+    config. The `agent` subtree is the registry addressing namespace; scenario identity (name) is
+    synthesized, role/everything-else comes from the overlay when present.
+
+    WHAT THE WORKTREE CARRIES: `root` is a throwaway `git worktree` checkout, so it holds the
+    COMMITTED tree and nothing else. Where the project dotdir is gitignored — this repo, and the
+    common case — `.localharness/overrides.yaml` is simply ABSENT there and that layer is empty.
+    Adoptions therefore do NOT compound into later gate arms through this cascade: adoption writes
+    the GLOBAL user overlay, which is what the next proposal reads for its `before` value
+    (adoption.py / `_provenance_agent_cfg`), while every arm starts from the committed tree. A
+    project that does commit its overlay gets that committed content in both arms.
 
     ARM-01: widened to the FULL config cascade so non-agent.* mutations (org.*, provider.*,
     compaction.*) also reach the resolved per-arm AgentConfig. Cascade priority (low→high):
@@ -226,9 +260,11 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     agent_overlay = merged.get("agent", {})
     # ARM-01: extract org-level subtrees that are also valid AgentConfig fields (agents inherit
     # from org by default). Only pull AgentConfig-compatible keys to avoid extra="forbid" rejects.
+    # THIS extraction (plus `agent` above) is the whole surface an arm can see — `reaches_gate_arm`
+    # is derived from it, and the loop uses that to avoid proposing invisible mutations.
     org_overlay = merged.get("org", {})
     org_base: dict = {}
-    for field in ("context", "permissions"):
+    for field in _ARM_ORG_FIELDS:
         if field in org_overlay:
             org_base[field] = org_overlay[field]
     # Sanitize scenario name for the AgentConfig name validator (mirror runner.py:246 —

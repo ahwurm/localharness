@@ -54,6 +54,7 @@ from localharness.autoresearch.experiment import (
     EXIT_REJECT_HOLDOUT,
     EXIT_REJECT_TRAIN,
     _provenance_agent_cfg,
+    reaches_gate_arm,
 )
 from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
 from localharness.autoresearch.budget import BudgetController, WindowMeter
@@ -258,8 +259,14 @@ async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
     proposer reads (derived from the latest failed train traces in production); in tests
     ``propose_fn`` is injected so run_ids is a passthrough. The proposer's PROP-03 seal validates
     run_ids, so an empty/garbage list is refused there (not here).
+
+    Every target is filtered through ``reaches_gate_arm``: a component neither arm's AgentConfig
+    can see (provider.*, server.*, version, …) would have the gate compare a config against itself
+    and grade sampling noise — on a cold start that was the FIRST catalogue entry every time. A
+    parent row carrying such a component (only rows written before this filter can) falls through
+    to a fresh reachable pick rather than repeating a mutation nothing can measure.
     """
-    if parent is not BASELINE_ROOT and parent is not None:
+    if parent is not BASELINE_ROOT and parent is not None and reaches_gate_arm(parent.component):
         return parent.component, [], "sampled"
     _user_ov = load_overlay(_resolve_user_overlay_path())
     catalogue = build_catalogue(
@@ -268,8 +275,9 @@ async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
         overlays={LAYER_GLOBAL_OVERRIDES: _user_ov},
     )
     touched = {e.component for e in await store.query(ArchiveQuery(limit=10_000))}
-    untouched = [p for p in catalogue if p not in touched]
-    component = untouched[0] if untouched else next(iter(catalogue))
+    reachable = [p for p in catalogue if reaches_gate_arm(p)] or list(catalogue)
+    untouched = [p for p in reachable if p not in touched]
+    component = untouched[0] if untouched else reachable[0]
     return component, [], "cold_start"
 
 

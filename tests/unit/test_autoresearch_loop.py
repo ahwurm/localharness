@@ -2,7 +2,7 @@
 
 The autoresearch orchestrator wires four net-new pieces: a ParentSampler (ε-greedy
 over the GEPA per-fixture front), a BudgetController (token-window + wallclock pre-flight
-gate + per-proposal timeout), an adoption mechanism (a git-committed config-overlay write),
+gate + per-proposal timeout), an adoption mechanism (a global-overlay write),
 and the loop driver (sample → propose → run_experiment → interpret-exit → adopt/hold →
 journal). Every test name below is BINDING: 18-RESEARCH §"Phase Requirements → Test Map"
 names each one verbatim. Each test asserts REAL behavior (never placeholder data).
@@ -146,6 +146,60 @@ async def test_cold_start_always_explore_root(archive_store):
     cold_hi = ParentSampler(archive_store, epsilon=1.0, rng=random.Random(0))
     assert (await cold_lo.sample()) is BASELINE_ROOT
     assert (await cold_hi.sample()) is BASELINE_ROOT
+
+
+def test_reaches_gate_arm_truth_table():
+    """The reachability predicate matches the arm extraction: agent.* and org.context/permissions only."""
+    from localharness.autoresearch.experiment import reaches_gate_arm
+
+    assert reaches_gate_arm("agent.role")
+    assert reaches_gate_arm("agent.stuck_detector.repeated_threshold")
+    assert reaches_gate_arm("org.context")                     # the whole subtree counts
+    assert reaches_gate_arm("org.permissions.budget.max_actions")
+    assert not reaches_gate_arm("version")                     # a real catalogue entry, invisible to both arms
+    assert not reaches_gate_arm("provider.default_model")
+    assert not reaches_gate_arm("org.enforce_capability_floor")  # org, but not an extracted field
+    assert not reaches_gate_arm("agentless.thing")             # prefix must be the `agent.` segment
+
+
+async def test_cold_start_target_is_visible_to_a_gate_arm(archive_store, components_home, monkeypatch):
+    """F4: the cold-start pick SKIPS components no arm can see and takes the next one that is visible.
+
+    The unfiltered policy took the first untouched catalogue entry whatever it was; on a real
+    catalogue that is an unreachable path (``version``, ``provider.*``), where both arms resolve to
+    the same AgentConfig and the gate grades sampling noise on a target it cannot move. The stub
+    catalogue below puts two unreachable entries ahead of the reachable one to pin the skip order.
+    """
+    from localharness.autoresearch import loop as loop_mod
+    from localharness.autoresearch.experiment import reaches_gate_arm
+
+    monkeypatch.setattr(
+        loop_mod, "build_catalogue",
+        lambda *a, **k: {"version": None, "provider.default_model": None, "agent.role": None},
+    )
+    component, _run_ids, branch = await loop_mod._derive_target(BASELINE_ROOT, archive_store, None)
+    assert (component, branch) == ("agent.role", "cold_start")  # both unreachable entries skipped
+
+    # And on the REAL catalogue the pick is reachable too (the filter has something to skip there).
+    monkeypatch.undo()
+    real_component, _ids, _branch = await loop_mod._derive_target(BASELINE_ROOT, archive_store, None)
+    assert reaches_gate_arm(real_component), real_component
+
+
+async def test_unreachable_parent_falls_through_to_a_reachable_target(archive_store, seeded_archive,
+                                                                      components_home):
+    """A parent row whose component no arm can see is not re-run — the loop picks a reachable target."""
+    from localharness.autoresearch.experiment import reaches_gate_arm
+    from localharness.autoresearch.loop import _derive_target
+
+    [legacy] = await seeded_archive(
+        archive_store,
+        [dict(id="legacy-unreachable", component="version", status="promoted",
+              diff=json.dumps({"before": "0.13.0", "after": "0.13.1"}))],
+    )
+    component, _run_ids, branch = await _derive_target(legacy, archive_store, None)
+    assert reaches_gate_arm(component)
+    assert branch == "cold_start"  # honestly labeled: it is a fresh pick, not the parent's component
 
 
 async def test_sampler_holdout_blind(archive_store, seeded_archive):

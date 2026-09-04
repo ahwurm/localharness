@@ -49,13 +49,13 @@ from localharness.registry import (
     set_value_in_dict,
 )
 
-# Defense-in-depth: re-assert the gate's anti-reward-hacking seal before committing to LIVE
-# config (mirror experiment.py verbatim — the seal must hold at THIS boundary independently).
+# Defense-in-depth: re-assert the gate's anti-reward-hacking seal before writing LIVE config
+# (mirror experiment.py verbatim — the seal must hold at THIS boundary independently, and must not
+# drift). See experiment.py's copy for which of these name real registry entries (sentinel.*,
+# org.enforce_capability_floor, active_endpoint*, extra_endpoints — sealed ONLY by this tuple) and
+# which are bench-side paths the catalogue lookup already refuses by omission.
 _OFFREGISTRY_PREFIXES = ("bench.", "scenario", "grader", "success_criteria", "holdout", "sentinel",
                          "org.enforce_capability_floor",
-                         # 0.10.0 model tree: session-state that start-resume reads back — a proposal
-                         # must never silently switch the subject's backend mid-experiment. (Kept in
-                         # lockstep with experiment.py — the seal must not drift at this boundary.)
                          "active_endpoint", "extra_endpoints")
 _MULTI_PATH_PATTERN = re.compile(r"[,\s;]")
 
