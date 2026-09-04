@@ -90,8 +90,8 @@ _MERGED_GLOBAL_SESSION_HISTORY = 0
 # false statement, and a raised exception would take a healthy session's own memory — and the
 # org guardrails riding in the same context object — down with a store it does not own.
 _GLOBAL_UNAVAILABLE = (
-    "## Global Memory unavailable this turn (it could not be read) — nothing from the "
-    "machine-global store is included below."
+    "## Global Memory unavailable this turn — it could not be read, so nothing from the "
+    "machine-global store is included."
 )
 
 
