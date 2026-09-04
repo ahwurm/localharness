@@ -184,6 +184,21 @@ def honest_attribution(
     return catalogue
 
 
+def display_note(path: str, value: Any) -> str:
+    """A parenthetical the CLI appends when the VALUE ALONE would mislead, else "".
+
+    One case today. `org.permissions.deny_patterns` displays as `[]` for a config that declares an
+    empty list, while enforcement unions PermissionConfig's SHIPPED defaults into every agent's
+    deny list (`load_agent` step 5) — so the screen says nothing is denied while two dozen patterns
+    are. The count is read from the model, never typed here, so it cannot drift from what ships.
+    """
+    if path in _UNION_PATHS and not value:
+        from localharness.config.models import PermissionConfig
+
+        return f"  (+{len(PermissionConfig().deny_patterns)} shipped defaults always enforced)"
+    return ""
+
+
 def layered_catalogue(
     config_dir: Path,
     workspace: Optional[Path],

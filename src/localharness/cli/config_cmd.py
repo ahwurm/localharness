@@ -22,7 +22,7 @@ from localharness.registry.catalogue import (
     LAYER_WORKSPACE_OVERRIDES,
     _LAYER_PRIORITY,
 )
-from localharness.registry.provenance import layered_catalogue
+from localharness.registry.provenance import display_note, layered_catalogue
 
 console = Console()
 err_console = Console(stderr=True)
@@ -258,7 +258,12 @@ def show(
     table.add_column("value", overflow="fold")
     table.add_column("set by", style="green")
     for e in rows:
-        table.add_row(e.path, escape(repr(e.current_value)), e.winning_layer)
+        # display_note: `[]` in this column does not mean nothing is enforced (see provenance).
+        table.add_row(
+            e.path,
+            escape(repr(e.current_value) + display_note(e.path, e.current_value)),
+            e.winning_layer,
+        )
     console.print(table)
 
     if not show_all:
