@@ -666,6 +666,33 @@ class OrchestratorREPL:
                 except (NotImplementedError, RuntimeError, ValueError):
                     pass
 
+    async def _handle_reasoning_cmd(self, arg: str) -> None:
+        """/reasoning [on|off] — toggle the live reasoning stream on the terminal channel."""
+        from localharness.channels.terminal import TerminalChannel
+
+        if not isinstance(self._channel, TerminalChannel):
+            await self._channel.send_message(
+                "/reasoning is a terminal-channel setting.", metadata={"style": "system.info"},
+            )
+            return
+        if arg in ("on", "off"):
+            state = arg == "on"
+        elif not arg:
+            state = not self._channel.show_reasoning
+        else:
+            await self._channel.send_message(
+                "Usage: /reasoning [on|off]", metadata={"style": "system.info"},
+            )
+            return
+        self._channel.show_reasoning = state
+        note = (
+            "Reasoning stream: on — the model's thinking prints as dim ⋯ lines while it "
+            "generates (needs the server's reasoning parser; persist with "
+            "terminal.show_reasoning: true)."
+            if state else "Reasoning stream: off."
+        )
+        await self._channel.send_message(note, metadata={"style": "system.info"})
+
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
         cmd_lower = cmd.lower().strip()
@@ -694,6 +721,10 @@ class OrchestratorREPL:
         if cmd_lower == "/model" or cmd_lower.startswith("/model "):
             # Slice the ORIGINAL string — model ids are case-sensitive.
             await self._handle_model_cmd(cmd.strip()[len("/model"):].strip())
+            return True
+
+        if cmd_lower == "/reasoning" or cmd_lower.startswith("/reasoning "):
+            await self._handle_reasoning_cmd(cmd_lower[len("/reasoning"):].strip())
             return True
 
         if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):
@@ -1425,13 +1456,16 @@ class OrchestratorREPL:
 
         # #145: the output cap must fit the reserve inside the (possibly new) budget, or prompt +
         # max_tokens overruns the served window and a strict server 400s mid-session. Re-derived
-        # from DEFAULT_MAX_TOKENS rather than the live value, so a swap DOWN to a small window and
-        # back UP restores the full allotment instead of ratcheting the cap down for the session.
-        # (Baseline must match start_cmd's — see the note at its LLMConfig construction.)
+        # from the agent's configured max_tokens rather than the live value, so a swap DOWN to a
+        # small window and back UP restores the full allotment instead of ratcheting the cap down
+        # for the session. (Baseline must match start_cmd's — see its LLMConfig construction.)
         _budget = getattr(ctx, "max_context_tokens", None)
         _llm_cfg = getattr(self._agent._llm, "config", None)
+        _configured_cap = (
+            getattr(getattr(self._agent, "_config", None), "max_tokens", None) or DEFAULT_MAX_TOKENS
+        )
         if _budget and _llm_cfg is not None:
-            _cap = context_mod.clamp_response_tokens(_budget, DEFAULT_MAX_TOKENS)
+            _cap = context_mod.clamp_response_tokens(_budget, _configured_cap)
             if _cap != getattr(_llm_cfg, "max_tokens", None):
                 _llm_cfg.max_tokens = _cap
                 notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")

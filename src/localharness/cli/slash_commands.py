@@ -10,6 +10,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "Show this help message"),
     ("/agents", "List configured agents"),
     ("/model", "List available models; /model <name|number> to switch"),
+    ("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off"),
     ("/memory", "Browse the agent's memory by tag; show/forget/search a memory"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),

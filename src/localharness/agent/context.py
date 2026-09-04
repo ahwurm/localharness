@@ -23,8 +23,13 @@ _EXACT_SHAPES = ("vllm", "llamacpp")
 RESPONSE_RESERVE_TOKENS: int = 4096
 
 
-def response_reserve(max_context_tokens: int) -> int:
+def response_reserve(max_context_tokens: int, max_response_tokens: int | None = None) -> int:
     """Output room held back from the window — the ONE place the harness reserves it.
+
+    `max_response_tokens` is the configured per-reply output cap (agent/org `max_tokens`). On a
+    normal window the reserve grows to hold it — a reply the model is allowed to produce must
+    have room in the window it is produced into — bounded at half the window so history always
+    keeps at least as much room as the reply. None keeps the flat RESPONSE_RESERVE_TOKENS floor.
 
     `max_context_tokens` MEANS the full served window (config/defaults.py): init writes the
     window the server serves, and the reply reserve is subtracted here, once. No other site
@@ -47,7 +52,8 @@ def response_reserve(max_context_tokens: int) -> int:
     if max_context_tokens <= 0:
         return 0
     if max_context_tokens - RESPONSE_RESERVE_TOKENS >= 8_192:
-        return RESPONSE_RESERVE_TOKENS
+        wanted = max(RESPONSE_RESERVE_TOKENS, max_response_tokens or 0)
+        return min(wanted, max_context_tokens // 2)
     return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
 
 
@@ -66,7 +72,7 @@ def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -
     """
     if max_context_tokens <= 0:
         return configured_max_tokens
-    reserve = response_reserve(max_context_tokens)
+    reserve = response_reserve(max_context_tokens, configured_max_tokens)
     return min(configured_max_tokens, reserve) if reserve > 0 else configured_max_tokens
 
 # Stale-web-result eviction (OpenHands BrowserOutputCondenser pattern): cheap first
@@ -891,6 +897,10 @@ class TokenBudget:
     current_usage: int
     tool_schema_tokens: int
     headroom: int = 0
+    # The configured per-reply output cap the reserve must hold (see response_reserve); None
+    # keeps the flat floor. Threaded from ContextManager so every budget this pass computes
+    # measures history against the same effective limit.
+    max_response_tokens: int | None = None
 
     def __post_init__(self) -> None:
         self.headroom = self.effective_limit - self.current_usage - self.tool_schema_tokens
@@ -900,7 +910,7 @@ class TokenBudget:
         """The window minus the shared output reserve — what history may actually occupy.
         Every fraction below is denominated against THIS, not the raw window, so the 0.80/0.95
         triggers and the emergency floor measure the same budget and cannot invert."""
-        return self.total_limit - response_reserve(self.total_limit)
+        return self.total_limit - response_reserve(self.total_limit, self.max_response_tokens)
 
     @property
     def usage_fraction(self) -> float:
@@ -1145,11 +1155,11 @@ class FullAutoCompactStage:
         # inner stage's own `usage_fraction < trigger_usage_fraction` gate for any trigger the
         # schema allows (50–99; capped at 0.999 so it's never itself an invalid usage_fraction).
         forced_fraction = min(0.999, self._summary_stage.trigger_usage_fraction + 0.01)
-        effective_limit = budget.total_limit - response_reserve(budget.total_limit)
         forced_budget = TokenBudget(
             total_limit=budget.total_limit,
-            current_usage=int(effective_limit * forced_fraction),
+            current_usage=int(budget.effective_limit * forced_fraction),
             tool_schema_tokens=0,
+            max_response_tokens=budget.max_response_tokens,
         )
         return await self._summary_stage.apply(messages, forced_budget, token_counter)
 
@@ -1216,6 +1226,7 @@ class CompactionPipeline:
                     total_limit=budget.total_limit,
                     current_usage=new_usage,
                     tool_schema_tokens=budget.tool_schema_tokens,
+                    max_response_tokens=budget.max_response_tokens,
                 )
         return working, any_modified
 
@@ -1417,8 +1428,11 @@ class ContextManager:
         tool_evict_enabled: bool = True,
         token_counter: "TokenCounter | None" = None,
         compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
+        max_response_tokens: int | None = None,
     ) -> None:
         self.max_context_tokens = max_context_tokens
+        # The configured per-reply output cap; sizes the shared reply reserve (response_reserve).
+        self.max_response_tokens = max_response_tokens
         self.preserve_first_n = preserve_first_n
         self.preserve_last_n = preserve_last_n
         self._pipeline = pipeline
@@ -1523,6 +1537,7 @@ class ContextManager:
             total_limit=self.max_context_tokens,
             current_usage=self._token_counter.estimate_messages(repaired),
             tool_schema_tokens=tool_tokens,
+            max_response_tokens=self.max_response_tokens,
         )
         if evict_check.usage_fraction >= WEB_EVICT_USAGE_FRACTION:
             repaired, evicted = _evict_stale_web_results(repaired)
@@ -1559,6 +1574,7 @@ class ContextManager:
                 total_limit=self.max_context_tokens,
                 current_usage=pre_usage,
                 tool_schema_tokens=tool_tokens,
+                max_response_tokens=self.max_response_tokens,
             )
             if pre_budget.usage_fraction >= self._compaction_trigger_fraction:
                 pre_frac = pre_budget.usage_fraction  # before any compaction this pass
@@ -1571,6 +1587,7 @@ class ContextManager:
                         total_limit=self.max_context_tokens,
                         current_usage=self._token_counter.estimate_messages(repaired),
                         tool_schema_tokens=tool_tokens,
+                        max_response_tokens=self.max_response_tokens,
                     )
                 # Only the LLM-calling stages consume the fire budget. MOVE 0c: compaction is NEVER
                 # latched off — a fire that fails to shrink is the stage's compact-to-target problem
@@ -1590,6 +1607,7 @@ class ContextManager:
                                 total_limit=self.max_context_tokens,
                                 current_usage=self._token_counter.estimate_messages(repaired),
                                 tool_schema_tokens=tool_tokens,
+                                max_response_tokens=self.max_response_tokens,
                             )
                             from localharness.core.events import CompactionTriggered
                             await self._bus.publish(CompactionTriggered(
@@ -1609,7 +1627,7 @@ class ContextManager:
         # FIX 3 (reserve): compare against the budget minus the SHARED reply reserve, not the full
         # budget, so a "fits" verdict still leaves room for the model's reply. Same function the
         # 0.80/0.95 triggers use, so the floor can never fire before the stage designed to prevent it.
-        reserve = response_reserve(self.max_context_tokens)
+        reserve = response_reserve(self.max_context_tokens, self.max_response_tokens)
         effective_limit = self.max_context_tokens - reserve
         floor_usage = self._token_counter.estimate_messages(repaired)
         # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
@@ -1672,6 +1690,7 @@ class ContextManager:
             total_limit=self.max_context_tokens,
             current_usage=post_usage,
             tool_schema_tokens=tool_tokens,
+            max_response_tokens=self.max_response_tokens,
         )
         # A silent cut is exactly what CompactionTriggered exists to record — publish it here too,
         # not just from the LLM summary stages above, so the emergency floor never hides mechanism

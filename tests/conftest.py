@@ -177,6 +177,8 @@ class MockLLMClient:
         self._responses = list(responses)
         self._index = 0
         self._return_tuple = return_tuple
+        # Per-call kwargs the loop passed (e.g. the dynamic max_tokens override), in order.
+        self.calls: list[dict] = []
 
         class _Config:
             tool_call_mode = "native"
@@ -184,7 +186,8 @@ class MockLLMClient:
 
         self.config = _Config()
 
-    async def stream_complete(self, messages=None, tools=None, on_token=None):
+    async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
+        self.calls.append(dict(kwargs))
         if self._index >= len(self._responses):
             resp = FakeLLMResponse(content="Done.")
         else:

@@ -1975,3 +1975,49 @@ async def test_emergency_floor_survives_empty_history_with_oversized_tools():
     out, budget = await cm.build_messages([], tool_schemas=schemas)
     assert out == []
     assert budget.tool_schema_tokens > 0
+
+
+# ---------------------------------------------------------------------------
+# Dynamic reply reserve (2026-09-04): the reserve grows to hold the configured output cap.
+# Before, start_cmd sent a flat 4,096 whatever config said, and the reserve was the same
+# flat number, so `default_max_tokens: 8192` in config.yaml changed nothing.
+# ---------------------------------------------------------------------------
+
+def test_response_reserve_grows_to_the_configured_cap_on_a_normal_window():
+    from localharness.agent.context import RESPONSE_RESERVE_TOKENS, response_reserve
+    assert response_reserve(126_976) == RESPONSE_RESERVE_TOKENS          # flat floor, unchanged
+    assert response_reserve(126_976, 2_048) == RESPONSE_RESERVE_TOKENS   # never below the floor
+    assert response_reserve(126_976, 16_384) == 16_384                   # holds the configured cap
+    assert response_reserve(20_000, 16_384) == 10_000                    # at most half the window
+    assert response_reserve(8_192, 16_384) == 1_024                      # small-window curve untouched
+
+
+def test_clamp_response_tokens_honors_a_configured_cap_the_window_can_hold():
+    from localharness.agent.context import clamp_response_tokens
+    assert clamp_response_tokens(131_072, 16_384) == 16_384
+    assert clamp_response_tokens(131_072, 4_096) == 4_096
+    assert clamp_response_tokens(8_192, 16_384) == 1_024
+    # the invariant the reserve exists for: history allowance + requested output fits the window
+    from localharness.agent.context import response_reserve
+    for window, cap in ((131_072, 16_384), (131_072, 4_096), (8_192, 16_384), (20_000, 16_384)):
+        got = clamp_response_tokens(window, cap)
+        assert (window - response_reserve(window, cap)) + got <= window
+
+
+def test_token_budget_effective_limit_reserves_the_configured_cap():
+    from localharness.agent.context import TokenBudget
+    flat = TokenBudget(total_limit=131_072, current_usage=0, tool_schema_tokens=0)
+    grown = TokenBudget(
+        total_limit=131_072, current_usage=0, tool_schema_tokens=0, max_response_tokens=16_384
+    )
+    assert flat.effective_limit == 131_072 - 4_096
+    assert grown.effective_limit == 131_072 - 16_384
+    assert grown.headroom == grown.effective_limit
+
+
+@pytest.mark.asyncio
+async def test_context_manager_threads_the_cap_into_the_budget_it_returns():
+    cm = ContextManager(max_context_tokens=131_072, max_response_tokens=16_384)
+    _, budget = await cm.build_messages([{"role": "user", "content": "hi"}], None)
+    assert budget.max_response_tokens == 16_384
+    assert budget.effective_limit == 131_072 - 16_384
