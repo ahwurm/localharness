@@ -229,11 +229,13 @@ def test_header_names_all_four_files_in_ruled_order_marking_which_exist(tmp_path
     assert "missing" in _line_with(out, str(layout.global_ovl))
 
 
-def test_a_bracketed_directory_name_is_not_parsed_as_markup(tmp_path, monkeypatch):
-    """39-05's `[old] proj` lesson: a legal folder name must survive the header verbatim.
+def test_bracketed_text_survives_both_the_header_path_and_the_value_cell(tmp_path, monkeypatch):
+    """39-05's `[old] proj` lesson, applied to BOTH places this command prints untrusted text.
 
-    Rich would eat `[dim]` here and print a path that does not exist — in the one command whose
-    entire job is to tell you where your config comes from.
+    Rich would eat `[dim]` from the path and `[bold]` from the value — the first makes the command
+    report a path that does not exist, in the one command whose entire job is to say where your
+    config comes from; the second silently rewrites the value you came here to read. Two separate
+    `escape()` sites, so they are asserted separately.
     """
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
@@ -241,14 +243,18 @@ def test_a_bracketed_directory_name_is_not_parsed_as_markup(tmp_path, monkeypatc
     home = tmp_path / "[dim] home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
-    (global_dir / "config.yaml").write_text(yaml.safe_dump(_GLOBAL_CONFIG), encoding="utf-8")
+    bracketed = dict(_GLOBAL_CONFIG, org={"name": _BRACKETED_NAME, "log_level": "info"})
+    (global_dir / "config.yaml").write_text(yaml.safe_dump(bracketed), encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(home)
 
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0, _combined(result)
-    assert str(global_dir / "config.yaml") in result.output
+    assert str(global_dir / "config.yaml") in result.output, "the header path lost its markup"
+    assert _BRACKETED_NAME in _line_with(result.output, "org.name"), (
+        "the table ate the value's brackets"
+    )
 
 
 # ------------------------------------------------------------------ #
