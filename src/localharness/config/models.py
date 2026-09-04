@@ -824,8 +824,11 @@ class MemoryConfig(BaseModel):
             "the one way a memory crosses into the global store. Distinct from shared_read, which "
             "is the ORG-HIERARCHY axis (division/org context files), not the workspace/global "
             "physical-store axis. Inert with no workspace layer (LAYR-03): exactly one store exists "
-            "and all three values behave identically. Mutable via `localharness components set "
-            "agent.memory.recall_scope <workspace|global|both>`."
+            "and all three values behave identically. `localharness components set "
+            "agent.memory.recall_scope <workspace|global|both>` sets this MACHINE-WIDE, in the "
+            "global overrides.yaml — every project on this machine, not just the one you are "
+            "standing in. For one project only, put `memory: {recall_scope: ...}` in that "
+            "project's `.localharness/agents/<name>.yaml`."
         ),
     )
 
