@@ -7,6 +7,11 @@ is long enough that people don't run it. `update` is the short, memorable form.
 Deliberately NOT a self-mutating in-process upgrade: it detects how this copy was installed
 and shells out to that installer. Anything cleverer (patching a running interpreter's own
 site-packages) is how you get a half-upgraded install.
+
+Windows is the one platform where that shell-out cannot finish while this process lives: the
+file the installer replaces at the end is the running `localharness.exe` itself, and Windows
+locks a running executable (#156). There the upgrade is handed to a detached process instead
+and this one returns immediately.
 """
 from __future__ import annotations
 
@@ -30,6 +35,19 @@ err_console = Console(stderr=True)
 
 PYPI_JSON_URL = "https://pypi.org/pypi/localharness/json"
 _TIMEOUT_SECONDS = 10.0
+
+# Windows process-creation flags (winbase.h, via CPython's `subprocess` docs). Named here with
+# their documented values as the fallback because `subprocess` only defines these attributes on
+# Windows — this module has to import, and be testable, on every platform.
+_WIN_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+_WIN_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
+# The two halves of "only the shim was locked" (#156). uv prints the install line when the package
+# itself went in, and the copy of the entrypoint fails with the Win32 sharing violation, whose
+# message and error number are both stable enough to match on. BOTH are required: either alone is
+# an ordinary failure, and forgiving an ordinary failure would be the worse bug.
+_UPGRADED_MARKERS = ("+ localharness==", "updated localharness", "installed localharness")
+_FILE_IN_USE_MARKERS = ("os error 32", "being used by another process")
 
 
 def _latest_pypi_version(timeout: float = _TIMEOUT_SECONDS) -> str | None:
@@ -67,6 +85,58 @@ def _upgrade_command() -> list[str] | None:
         uv = shutil.which("uv")
         return [uv, "tool", "upgrade", "localharness"] if uv else None
     return [sys.executable, "-m", "pip", "install", "--upgrade", "localharness"]
+
+
+def _is_windows() -> bool:
+    """Read at call time, never at import: the tests fake the platform, and a module-level
+    constant would freeze whichever machine built the wheel."""
+    return sys.platform.startswith("win")
+
+
+def _spawn_detached(cmd: list[str]) -> bool:
+    """Start the upgrade in a process that outlives this one. True when it started.
+
+    The fix for #156. Windows locks a running executable, and the file uv has to replace at the
+    end of the upgrade IS the `localharness.exe` performing it — so the copy can only succeed
+    after this process is gone. DETACHED_PROCESS gives the child no console to be killed with,
+    CREATE_NEW_PROCESS_GROUP keeps a Ctrl-C in this shell from reaching it, and `update` returns
+    within milliseconds while uv is still resolving — long before it reaches the shim.
+
+    False, rather than a traceback, when the spawn is refused: the caller falls back to running
+    the upgrade here and reporting what happened.
+    """
+    try:
+        subprocess.Popen(  # noqa: S603 - cmd is built by _upgrade_command, never user input
+            cmd,
+            close_fds=True,
+            creationflags=_WIN_DETACHED_PROCESS | _WIN_CREATE_NEW_PROCESS_GROUP,
+        )
+    except OSError:
+        return False
+    return True
+
+
+def _only_the_shim_was_locked(output: str) -> bool:
+    """Did the package upgrade and only the entrypoint copy fail on a file in use?
+
+    That is a success with a note, not the bare exit 1 this used to be: the new version is
+    installed in the tool environment, and the `localharness` command catches up the moment
+    something replaces the shim. Both signals required — see the marker constants.
+    """
+    lowered = output.lower()
+    return any(m in lowered for m in _UPGRADED_MARKERS) and any(
+        m in lowered for m in _FILE_IN_USE_MARKERS
+    )
+
+
+def _run_captured(cmd: list[str]) -> tuple[int, str]:
+    """Run the upgrade here, keeping its output so the verdict above can be reached.
+
+    Only the Windows fallback path uses this. Capturing costs the live progress display, which is
+    why the ordinary path does not: on POSIX there is no locked shim to diagnose.
+    """
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    return result.returncode, f"{result.stdout or ''}{result.stderr or ''}"
 
 
 def update(
@@ -122,11 +192,36 @@ def update(
         raise typer.Exit(1)
 
     console.print(f"Running: [dim]{' '.join(cmd)}[/dim]")
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
+
+    if _is_windows() and _spawn_detached(cmd):
+        console.print(
+            f"Upgrading to [bold green]{latest}[/bold green] in the background — the "
+            "`localharness` command will be updated when this process exits (Windows cannot "
+            "replace a running program). Run `localharness --version` to confirm."
+        )
+        return
+
+    if _is_windows():
+        # The spawn was refused, so the upgrade runs here after all — and hits the locked shim
+        # this command was trying to get out of the way of. Captured, so the two outcomes can be
+        # told apart, and echoed, so nothing uv said is swallowed.
+        returncode, output = _run_captured(cmd)
+        if output.strip():
+            console.print(output.rstrip(), markup=False, soft_wrap=True)
+        if returncode != 0 and _only_the_shim_was_locked(output):
+            console.print(
+                f"[green]✓[/green] LocalHarness {latest} is installed, but the `localharness` "
+                "command could not be replaced while it is running. Close this shell and run "
+                "`uv tool upgrade localharness` once to finish, then `localharness --version`."
+            )
+            return
+    else:
+        returncode = subprocess.run(cmd, check=False).returncode
+
+    if returncode != 0:
         err_console.print(
-            f"[bold red]Error:[/bold red] upgrade command failed (exit {result.returncode}). "
+            f"[bold red]Error:[/bold red] upgrade command failed (exit {returncode}). "
             "Run it by hand to see the full output."
         )
-        raise typer.Exit(result.returncode)
+        raise typer.Exit(returncode)
     console.print(f"[green]✓[/green] Upgraded to {latest}. Run `localharness doctor` to verify.")
