@@ -177,9 +177,15 @@ def test_create_project_without_any_workspace_still_writes_to_local_dir(no_works
     assert (no_workspace / ".localharness" / "agents" / "boot-agent.yaml").exists()
 
 
-def test_create_project_with_explicit_config_dir_writes_to_local_dir(project, tmp_path):
-    """Documented behavior for the combination: an explicit `--config-dir` is a full replacement
-    (LAYR-02), so discovery never runs and `--project` falls back to the relative literal."""
+def test_create_project_with_explicit_config_dir_refuses(project, tmp_path):
+    """A-B3, and a reversal of what this file used to call documented behavior.
+
+    An explicit `--config-dir` is a full replacement, so discovery never runs (LAYR-02) — which
+    left `--project` with no project to resolve. It fell back to the relative literal, wrote the
+    file, and printed a checkmark for an agent that the SAME options cannot read back: `agent list
+    --config-dir X` and `start --config-dir X` skip discovery too. Writing somewhere nothing reads
+    is worse than refusing, so it refuses; the trusted workspace is left untouched either way.
+    """
     record_trust(project, True)
 
     result = runner.invoke(agent_app, [
@@ -187,8 +193,8 @@ def test_create_project_with_explicit_config_dir_writes_to_local_dir(project, tm
         "--config-dir", str(tmp_path / "elsewhere"),
     ])
 
-    assert result.exit_code == 0, result.output
-    assert (Path.cwd() / ".localharness" / "agents" / "explicit-agent.yaml").exists()
+    assert result.exit_code != 0, result.output
+    assert not (Path.cwd() / ".localharness").exists()
     assert not (project / "agents" / "explicit-agent.yaml").exists()
 
 

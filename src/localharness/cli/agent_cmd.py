@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Annotated
@@ -60,7 +61,7 @@ def agent_create(
     role: Annotated[str, typer.Option("--role", "-r", help="Agent role description")] = "General-purpose agent",
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model name. Inherits org default if not set.")] = None,
     global_scope: Annotated[bool, typer.Option("--global", help="Add agent to global config (~/.localharness/agents/)")] = False,
-    project_scope: Annotated[bool, typer.Option("--project", help="Add agent to this project's workspace (nearest .localharness/agents/ up-tree, else ./.localharness/agents/)")] = False,
+    project_scope: Annotated[bool, typer.Option("--project", help="Add agent to this project's workspace (nearest .localharness/agents/ up-tree, else ./.localharness/agents/). Not available with an explicit config directory.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print YAML without writing")] = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing agent with the same name (default refuses)")] = False,
     config_dir: Annotated[
@@ -120,19 +121,64 @@ def agent_create(
     else:
         # --project means "this project's workspace". Route through the SAME resolution the
         # readers use (agent list, start), or creation and discovery disagree from any
-        # subdirectory. None => nothing discovered / explicit --config-dir / trust withheld, and
-        # the literal CWD fallback reproduces v0.12 behavior exactly (LAYR-03), which is also the
-        # right bootstrap for a fresh project's first agent. The relative literal (not
-        # `Path.cwd() / ...`) keeps the success/refusal messages byte-identical to before.
+        # subdirectory. The relative literal (not `Path.cwd() / ...`) keeps the success/refusal
+        # messages byte-identical to before.
         from localharness.cli.workspace import resolve_workspace_layer
+        from localharness.config.paths import config_dir_env_override, discover_workspace_dir
 
-        target_dir = (resolve_workspace_layer(config_dir) or Path(WORKSPACE_DIR_NAME)) / "agents"
+        # A-B3. An explicit config dir SKIPS discovery entirely — that is LAYR-02, and it is not
+        # negotiable: an explicit dir is a full replacement, not a base to layer on. So `--project`
+        # here has no project to resolve, and the old fallback wrote `./.localharness/agents/x.yaml`
+        # under a green checkmark — a file this same invocation's readers cannot see, because
+        # `agent list --config-dir X` and `start --config-dir X` skip discovery too. Refuse instead
+        # of writing somewhere nothing reads. Exit 2 (usage error), matching `init --workspace`'s
+        # conflicting-flags guard rather than this command's name/scope validation.
+        chosen = config_dir if config_dir is not None else config_dir_env_override()
+        if chosen is not None:
+            source = "--config-dir" if config_dir is not None else (
+                "LOCALHARNESS_DIR" if os.environ.get("LOCALHARNESS_DIR") else "LOCALHARNESS_HOME"
+            )
+            err_console.print(
+                "[bold red]Error:[/bold red] "
+                + escape(f"--project cannot be used with an explicit config directory "
+                         f"({source}={chosen}).")
+                + " An explicit config directory replaces the whole configuration — nothing "
+                "layers a project on top of it, so an agent written to this project would be "
+                "invisible to every command run the same way. Drop that setting to use this "
+                "project's workspace, or pass --global to write into the config directory you "
+                "named.",
+                soft_wrap=True,
+            )
+            raise typer.Exit(code=2)
 
-    target_dir.mkdir(parents=True, exist_ok=True)
+        layer = resolve_workspace_layer(config_dir)
+        if layer is None:
+            # B5/B6: None here is one of two very different situations. Nothing found at all is
+            # the BOOTSTRAP case — a fresh project's first agent creates the workspace, silently,
+            # exactly as v0.12 did (LAYR-03). Found-but-not-in-use (outside the project and
+            # untrusted, or undecided with no terminal to ask) is not: falling back silently mints
+            # a SECOND dotdir beside the one the user already has, and the receipt below would
+            # name a path that looks like the workspace they meant. Announce it and name both.
+            skipped = discover_workspace_dir()
+            if skipped is not None:
+                err_console.print(
+                    escape(f"Note: the workspace at {skipped.resolve()} is not in use for this "
+                           f"command, so --project is creating a new one at "
+                           f"{Path(WORKSPACE_DIR_NAME)} instead."),
+                    style="dim",
+                    soft_wrap=True,
+                )
+            target_dir = Path(WORKSPACE_DIR_NAME) / "agents"
+        else:
+            target_dir = layer / "agents"
+
     target_path = target_dir / f"{name}.yaml"
     # #55: never silently overwrite an existing agent — a live receipt erased a user's
     # tools.deny restriction under a "✓ created". The chat flow already refuses (#28
     # workflow.deploy_config); enforce the same invariant here. --force is the escape hatch.
+    #
+    # Decided BEFORE the mkdir, not after: a command that has already refused must not have
+    # created anything on its way to refusing (E's "crash after write").
     if target_path.exists() and not force:
         err_console.print(
             "[bold red]Error:[/bold red] "
@@ -141,7 +187,21 @@ def agent_create(
             soft_wrap=True,
         )
         raise typer.Exit(code=1)
-    target_path.write_text(yaml_text, encoding="utf-8")
+
+    # The target is validated before anything is written, so a failure cannot leave a half-made
+    # tree behind an error message. `agents` as a FILE (H4), a dangling symlink (H2), a symlink
+    # loop (H3) and an unwritable parent (H5) all land here as OSError subclasses; each one is
+    # something the user can fix once they are told which path is wrong.
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(yaml_text, encoding="utf-8")
+    except OSError as exc:
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"cannot write {target_path}: {exc.strerror or exc}"),
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1)
 
     # escape() around the path, markup outside it: the target lives under the user's own
     # directory names, and a project folder named `[old] proj` would otherwise print as a path
