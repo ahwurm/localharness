@@ -35,9 +35,9 @@ else — above your repository's root, or in a parent folder while you are not i
 — the harness asks once before loading it. Your answer is recorded in your global
 `~/.localharness/trusted_workspaces.yaml`, never inside the workspace itself, so a directory can
 never vouch for itself. Edit that file to change an answer. When there is no terminal to ask — a
-script, a cron job, CI — that workspace layer is ignored and the run continues without it. `doctor`,
-`validate` and `agent create` also take `--no-input`, which declines to be asked at all: the layer is
-skipped, the run says so, and nothing is recorded. Use it wherever a process might otherwise answer a
+script, a cron job, CI — that workspace layer is ignored and the run continues without it. `start`,
+`doctor`, `validate` and `agent create` also take `--no-input`, which declines to be asked at all:
+the layer is skipped, the run says so, and nothing is recorded. Use it wherever a process might otherwise answer a
 permanent trust question on your behalf — hooks, CI, anything scheduled.
 
 **Three edges of that gate, as it behaves today.** Each is a case where the "inside your project"

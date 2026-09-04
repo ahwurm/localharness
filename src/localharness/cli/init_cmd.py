@@ -236,9 +236,18 @@ def _remove_partial_workspace(target: Path) -> None:
 
 
 def _scaffold_workspace(
-    *, endpoint: str | None, model: str | None, config_dir: str | None
+    *,
+    endpoint: str | None,
+    model: str | None,
+    config_dir: str | None,
+    next_steps: bool = True,
 ) -> None:
     """`localharness init --workspace`: create ./.localharness/ for the project you are in.
+
+    `next_steps=False` for the one other caller: `start` offering to create a workspace mid-
+    startup (`cli/workspace.offer_workspace_creation`). Telling a user who is already starting the
+    harness to "run `localharness start`" reads as a command that did not notice what it was doing;
+    that session says what it does instead, which is carry on with the new layer already active.
 
     Deliberately NOT `discover_workspace_dir()`. Creating a workspace is an explicit act at an
     explicit place; discovery is for FINDING one. Walking up-tree here would silently scaffold
@@ -337,10 +346,11 @@ def _scaffold_workspace(
         soft_wrap=True,
     )
     console.print(escape(f"  Agents:  {target / 'agents'}"), soft_wrap=True)
-    console.print(
-        "  Next:    run `localharness start` from anywhere in this project — its memory, "
-        "sessions and logs now stay here."
-    )
+    if next_steps:
+        console.print(
+            "  Next:    run `localharness start` from anywhere in this project — its memory, "
+            "sessions and logs now stay here."
+        )
 
 
 def init_app(

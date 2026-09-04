@@ -123,8 +123,7 @@ def resolve_workspace_layer(
         return None
 
     if interactive is None:
-        # `sys.stdin` is None in a detached process; no stdin at all is no terminal either.
-        interactive = sys.stdin is not None and sys.stdin.isatty()
+        interactive = _stdin_is_a_terminal()
     if not interactive:
         # Fail closed (SECURITY.md: deny on doubt) but do NOT record — a later interactive
         # session in this directory still gets asked once.
@@ -142,6 +141,98 @@ def resolve_workspace_layer(
         return found
     _notice(f"Workspace {real} recorded as not trusted — its config layer is ignored.")
     return None
+
+
+def _stdin_is_a_terminal() -> bool:
+    """Is there a person to ask? `sys.stdin` is None in a detached process, and no stdin at all is
+    no terminal either. One definition for both questions this module asks."""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+# The offer `start` makes when a project has no workspace at all (owner ruling 2026-09-04). The
+# missing step users hit is not "how do I create a workspace" — it is not knowing they could —
+# and the moment they would want one is the moment they start the harness inside a project.
+# One question, default no, asked only where a person is there to answer it.
+OFFER_PROMPT = "No workspace here — create ./.localharness for this project?"
+
+
+def offer_workspace_creation(
+    config_dir: Optional[Union[str, Path]] = None,
+    *,
+    interactive: Optional[bool] = None,
+) -> Optional[Path]:
+    """Offer to scaffold `./.localharness` for this project; return the new layer, or None.
+
+    Every guard below is a case where the offer would be wrong, not merely unhelpful:
+
+    1. An explicit `--config-dir` or either env var is a FULL replacement (LAYR-02) — that run
+       asked for one specific directory and a project layer is not what it wants.
+    2. A workspace already found up-tree means the answer to "is there a workspace here" is yes,
+       whatever the trust gate then decided about loading it. Offering to create a second one
+       beside a declined first is how you end up with two.
+    3. No terminal, or a caller that said `--no-input`: silence. A prompt that fires in a script,
+       a hook or CI is a hang, and this one WRITES — it must never fire where nobody is watching.
+       EOF answers no for the same reason.
+    4. `$HOME` and the machine's global config dir are not projects. `./.localharness` standing in
+       home IS the global layer, and "create a workspace" there means overwrite your machine.
+
+    Refusals cost nothing and say nothing — a user who says no must not be asked to read a
+    paragraph about it. The creation itself is `init --workspace`'s scaffolder, not a second
+    implementation of it: one directory shape, one set of race and error guarantees.
+    """
+    import typer
+
+    from localharness.config.paths import (
+        WORKSPACE_DIR_NAME,
+        config_dir_env_override,
+        discover_workspace_dir,
+    )
+
+    if config_dir is not None or config_dir_env_override() is not None:
+        return None
+    if discover_workspace_dir() is not None:
+        return None
+    if interactive is None:
+        interactive = _stdin_is_a_terminal()
+    if not interactive:
+        return None
+    try:
+        target = Path.cwd().resolve() / WORKSPACE_DIR_NAME
+    except OSError:  # the directory was deleted under this process — nowhere to create anything
+        return None
+
+    # Both privates deliberately: `_is_the_global_config_dir` is the ONE realpath-keyed answer to
+    # "is this the machine's own dir" (init_cmd) and `_home_stop` is the ONE home the walks stop
+    # at (paths). Re-deriving either here is how two guards that must agree start disagreeing.
+    from localharness.cli.init_cmd import _is_the_global_config_dir, _scaffold_workspace
+    from localharness.config.paths import _home_stop
+
+    home = _home_stop()
+    if _is_the_global_config_dir(target) or (home is not None and target.parent == home):
+        return None
+
+    if not _ask_create():
+        return None
+    try:
+        _scaffold_workspace(endpoint=None, model=None, config_dir=None, next_steps=False)
+    except typer.Exit:
+        # The scaffolder already printed what went wrong (it owns every filesystem message on this
+        # path). Startup continues on the global layer rather than dying halfway into a session
+        # the user asked for — a workspace that could not be created is not a reason not to work.
+        return None
+    return target
+
+
+def _ask_create() -> bool:
+    """The offer itself. `Text` so a project path in the rendered line can never be read as rich
+    markup, and EOF is a plain no — a closed stdin is not consent to write to the filesystem."""
+    from rich.prompt import Confirm
+    from rich.text import Text
+
+    try:
+        return bool(Confirm.ask(Text(OFFER_PROMPT), console=_notice_console, default=False))
+    except EOFError:
+        return False
 
 
 def _notice(message: str) -> None:
