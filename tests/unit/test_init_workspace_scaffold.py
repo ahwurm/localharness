@@ -208,3 +208,36 @@ def test_plain_init_is_untouched_by_this_phase(project):
     assert result.exit_code == 1, result.output
     assert not (project / WORKSPACE_DIR_NAME).exists(), "plain init created a workspace"
     assert not (_global_dir(project) / "config.yaml").exists()
+
+
+# --------------------------------------------------------------------------- E-M4: $HOME
+
+
+def test_workspace_in_the_home_directory_says_what_that_directory_is(project, monkeypatch):
+    """`init --workspace` in $HOME targets `~/.localharness` — the MACHINE's config dir.
+
+    The refusal used to be "a workspace already exists there", which is a true sentence about the
+    wrong thing: that directory is not a workspace, and the advice it gave (edit its config.yaml)
+    describes the global config, not a project layer. Naming what the directory actually is, and
+    which command sets it up, is the whole fix (E-M4).
+    """
+    monkeypatch.chdir(Path.home())
+
+    result = runner.invoke(app, ["init", "--workspace"])
+
+    assert result.exit_code == 2, result.output
+    assert "machine-wide config directory" in result.output
+    assert "already exists" not in result.output
+
+
+def test_the_home_check_does_not_fire_one_directory_over(tmp_path, monkeypatch):
+    """The control: a project that merely SITS in $HOME is an ordinary project."""
+    monkeypatch.chdir(Path.home())
+    sibling = Path.home() / "some-project"
+    sibling.mkdir()
+    monkeypatch.chdir(sibling)
+
+    result = runner.invoke(app, ["init", "--workspace"])
+
+    assert result.exit_code == 0, result.output
+    assert (sibling / WORKSPACE_DIR_NAME / "config.yaml").exists()
