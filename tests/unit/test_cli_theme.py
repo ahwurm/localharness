@@ -18,6 +18,7 @@ from localharness.cli.theme import (
     ENTITY_STYLES,
     SITE_ACCENT,
     SITE_AMBER,
+    SITE_INK,
     SITE_MEM,
     SITE_TOOL,
     entity,
@@ -139,3 +140,79 @@ def test_tool_and_memory_are_not_the_same_green_they_replaced():
     assert ENTITY_STYLES["memory"] != SITE_ACCENT
     assert ENTITY_STYLES["tool"] == SITE_TOOL
     assert ENTITY_STYLES["warning"] == SITE_AMBER
+
+
+# --------------------------------------------------------------------------- #
+# The per-turn session surface (channels/terminal.py TERMINAL_THEME) draws from the same
+# map, so a tool call in a turn is the same purple as a tool count at startup.
+# --------------------------------------------------------------------------- #
+def _terminal_theme() -> dict[str, str]:
+    """Rendered style strings, lowercased: Rich's Style.__str__ lowercases hex, so a
+    case-sensitive `in` would pass vacuously on the negative assertions below."""
+    from localharness.channels.terminal import TERMINAL_THEME
+
+    return {k: str(v).lower() for k, v in TERMINAL_THEME.styles.items()}
+
+
+def _hue(name: str) -> str:
+    return ENTITY_STYLES[name].lower()
+
+
+def test_session_theme_entities_come_from_the_entity_map():
+    """agent/tool/system keys are wired to ENTITY_STYLES, not re-picked per key."""
+    styles = _terminal_theme()
+    assert _hue("agent") in styles["agent.name"]
+    assert _hue("tool") in styles["tool.call"]
+    assert _hue("tool") in styles["tool.result"]
+    assert _hue("infra") in styles["system.info"]
+    assert _hue("warning") in styles["warning"]
+
+
+def test_session_verdict_styles_stay_green_and_red():
+    """success/failure keep their verdict vocabulary — entity color never lands here."""
+    styles = _terminal_theme()
+    assert "green" in styles["success"]
+    assert "red" in styles["tool.error"]
+    assert "red" in styles["system.error"]
+    for verdict in ("success", "tool.error", "system.error"):
+        for name in ENTITY_STYLES:
+            assert _hue(name) not in styles[verdict], f"{verdict} was entity-colored"
+
+
+def test_user_and_agent_are_still_tellable_apart():
+    """The scrollback's color language: the agent took the accent green the plates give
+    the runtime, so the user must NOT also be green."""
+    styles = _terminal_theme()
+    assert _hue("agent") not in styles["user.input"]
+    assert SITE_INK.lower() in styles["user.input"]
+
+
+def test_tool_call_and_result_share_a_hue_but_not_a_weight():
+    """Same entity, different emphasis: the call leads, the result trails."""
+    styles = _terminal_theme()
+    assert styles["tool.call"] != styles["tool.result"]
+    assert "dim" in styles["tool.result"]
+
+
+def test_body_text_keeps_no_hue():
+    """Names take the entity color; bodies stay neutral."""
+    styles = _terminal_theme()
+    for name in ENTITY_STYLES:
+        assert _hue(name) not in styles["agent.text"]
+        assert _hue(name) not in styles["muted"]
+
+
+def test_a_markup_named_agent_renders_literally_through_the_session_theme():
+    """The live path: agent_id goes into an [agent.name] panel title. `[/red]` there would
+    raise MarkupError and take the turn down; the style tag must stay live while the NAME
+    stays literal."""
+    from rich.markup import escape as _escape
+
+    from localharness.channels.terminal import TERMINAL_THEME
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=200, no_color=True, theme=TERMINAL_THEME)
+    console.print(f"[agent.name]{_escape(HOSTILE)}[/agent.name]")
+    console.print(f"  [tool.call]◆ {_escape(HOSTILE)}[/tool.call]")
+
+    assert buf.getvalue().count(HOSTILE) == 2, buf.getvalue()

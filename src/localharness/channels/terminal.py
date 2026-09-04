@@ -32,6 +32,7 @@ from rich.theme import Theme
 
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import ChannelStartError
+from localharness.cli.theme import ENTITY_STYLES, SITE_INK
 from localharness.core.bus import EventBus
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
@@ -58,8 +59,10 @@ _CROSS = "\u2717"     # ✗  tool result error
 # Echo glyph for a type-anytime box submission printed into the scrollback (FIX 1). The
 # persistent box resets its buffer on submit, so without a permanent echo the user's own
 # prompt would vanish from the transcript. Rendered at column 0 (vs the 2-space tool indent)
-# in the user.input style — green-user / cyan-agent gives the scrolled-back log a color
-# language, so a conversation still shows what the user said and when.
+# in the user.input style — ink-user / green-agent gives the scrolled-back log a color
+# language, so a conversation still shows what the user said and when. (The user used to
+# be the green half; the agent took the accent green when the palette moved to the
+# architecture-plate hues, and the user moved to primary ink to stay distinguishable.)
 _PROMPT_GLYPH = "❯"  # ❯
 
 # Official label for the background-memory ("dreaming") status (#20): middle-dot + ellipsis.
@@ -535,18 +538,32 @@ def _build_persistent_input_app(
     return app
 
 
+# Per-turn session colors, sourced from the ONE entity palette in cli/theme.py (the
+# localharness.dev architecture-plate hues) rather than picked per key here. Before this,
+# every entity in a turn arrived in the same handful of ANSI colors, so a tool call, an
+# agent and a system notice were told apart by their glyph alone.
+#
+# Two rules hold the map together:
+#   - NAMES take the entity color; BODIES stay neutral. agent.text and muted are body
+#     text and deliberately keep no hue.
+#   - VERDICTS keep green/red and are never entity-colored: success, tool.error and
+#     system.error are the vocabulary for "it worked / it did not", not a type.
+#
+# The user is the one speaker who is NOT on the architecture plates, so user.input takes
+# the site's primary INK rather than an entity hue — the agent now owns the accent green
+# the plates give the runtime, and the two must stay tellable apart.
 TERMINAL_THEME = Theme({
-    "agent.name":   "bold cyan",
+    "agent.name":   f"bold {ENTITY_STYLES['agent']}",
     "agent.text":   "white",
-    "tool.call":    "dim cyan",
-    "tool.result":  "dim white",
+    "tool.call":    ENTITY_STYLES["tool"],
+    "tool.result":  f"dim {ENTITY_STYLES['tool']}",
     "tool.error":   "bold red",
-    "system.info":  "dim yellow",
+    "system.info":  f"dim {ENTITY_STYLES['infra']}",
     "system.error": "bold red",
-    "user.input":   "bold green",
+    "user.input":   f"bold {SITE_INK}",
     "highlight":    "bold yellow",
     "success":      "bold green",
-    "warning":      "bold yellow",
+    "warning":      f"bold {ENTITY_STYLES['warning']}",
     "muted":        "dim",
 })
 
