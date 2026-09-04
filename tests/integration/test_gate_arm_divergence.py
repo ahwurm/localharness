@@ -304,26 +304,35 @@ def test_provenance_bare_sites_use_model_construct_default(components_home):
 
 
 def test_winning_layer_default_at_gate_sites(components_home):
-    """ARM-02 post-fix: non-CLI sites pass overlays={"user": ...} — winning_layer is truthful.
+    """ARM-02 post-fix: the non-CLI sites pass the global-overrides band — attribution is truthful.
 
-    After ARM-02, the bare sites (adoption/loop/propose_cmd) pass overlays={"user": user_dict}
-    so winning_layer correctly attributes the override layer when a user overlay exists.
-    With a staged agent.role in the user overlay, the winning_layer is "user", not "default".
+    After ARM-02, the bare sites (adoption/loop/propose_cmd) pass
+    ``overlays={LAYER_GLOBAL_OVERRIDES: user_dict}`` so winning_layer correctly attributes the
+    override layer when a global overrides.yaml exists. With a staged agent.role in that file,
+    the winning_layer is "global-overrides", not "default".
+
+    Band name corrected in 43-03 (`user` → `global-overrides`). This is a rename, not a
+    loosening: the dict those four sites pass is `load_overlay(_resolve_user_overlay_path())`,
+    i.e. the machine-global overrides.yaml, and a key that matches no band would make
+    `_detect_layer` fall through to `default` — the exact collapse the second assertion below
+    exists to catch.
     """
     _stage_live_agent_role(components_home)
     cfg = _cfg()
 
     from localharness.config.overlay import _resolve_user_overlay_path, load_overlay as _load
+    from localharness.registry.catalogue import LAYER_DEFAULT, LAYER_GLOBAL_OVERRIDES
 
     user_dict = _load(_resolve_user_overlay_path())
-    # Mirroring what adoption/loop/propose_cmd now do: pass overlays={"user": user_dict}.
-    entry = build_catalogue(cfg, overlays={"user": user_dict}).get("agent.role")
+    # Mirroring what adoption/loop/propose_cmd now do: overlays={LAYER_GLOBAL_OVERRIDES: ...}.
+    entry = build_catalogue(cfg, overlays={LAYER_GLOBAL_OVERRIDES: user_dict}).get("agent.role")
     assert entry is not None
-    assert entry.winning_layer == "user", (
-        "winning_layer must be 'user' when overlays={'user': ...} is passed and agent.role is in "
-        "the user overlay — ARM-02 wires overlays= at the non-CLI provenance sites"
+    assert entry.winning_layer == LAYER_GLOBAL_OVERRIDES, (
+        "winning_layer must be 'global-overrides' when overlays={LAYER_GLOBAL_OVERRIDES: ...} is "
+        "passed and agent.role is in the global overrides.yaml — ARM-02 wires overlays= at the "
+        "non-CLI provenance sites"
     )
-    assert entry.winning_layer != "default", (
+    assert entry.winning_layer != LAYER_DEFAULT, (
         "winning_layer collapsed to 'default' — overlays= is not being passed at the sites "
         "(adoption.py/loop.py/propose_cmd.py) after ARM-02"
     )
