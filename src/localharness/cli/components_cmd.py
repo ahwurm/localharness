@@ -30,6 +30,8 @@ from localharness.config.paths import resolve_runtime_path
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
+    LAYER_GLOBAL_CONFIG,
+    LAYER_GLOBAL_OVERRIDES,
     SURFACE_FAMILIES,
     build_catalogue,
     coerce_value,
@@ -60,11 +62,13 @@ def _build_loader() -> ConfigLoader:
 
 def _build_overlays(loader: ConfigLoader) -> dict[str, dict]:
     """Assemble overlays dict for build_catalogue's layer attribution.
-    Phase 14 ships project + user layers; experiment layer added in Phase 17.
+    The two GLOBAL files only; the workspace bands arrive in 43-03 task 3 via
+    registry.provenance.build_layer_overlays.
     """
-    project_dict = loader.raw_harness_dict()
-    user_dict = load_overlay(loader.user_overlay_path)
-    return {"project": project_dict, "user": user_dict}
+    return {
+        LAYER_GLOBAL_CONFIG: loader.raw_harness_dict(),
+        LAYER_GLOBAL_OVERRIDES: load_overlay(loader.user_overlay_path),
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -192,7 +196,10 @@ def components_list(
     layer: Optional[str] = typer.Option(
         None,
         "--layer",
-        help="Filter to entries with this winning layer (default|project|user|experiment)",
+        help=(
+            "Filter to entries with this winning layer (default|global-config|"
+            "global-overrides|workspace-config|workspace-overrides|experiment)"
+        ),
     ),
 ) -> None:
     """List every mutable component with its current value and winning layer."""
@@ -206,7 +213,7 @@ def components_list(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
+    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
 
     entries = list(catalogue.values())
     if layer is not None:
@@ -261,7 +268,7 @@ def components_get(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
+    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
     entry = catalogue.get(path)
     if entry is None:
         _err(
@@ -330,7 +337,7 @@ def components_set(
     overlays = _build_overlays(loader)
     tool_registry = _build_tool_registry()
     catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays["user"])
+    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
     entry = catalogue.get(path)
     if entry is None:
         _err(json_output, f"Unknown path: {path!r}", exit_code=2)

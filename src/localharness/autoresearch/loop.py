@@ -58,7 +58,7 @@ from localharness.autoresearch.experiment import (
 from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
 from localharness.autoresearch.budget import BudgetController, WindowMeter
 from localharness.autoresearch.sampler import BASELINE_ROOT, ParentSampler
-from localharness.registry import build_catalogue
+from localharness.registry import LAYER_GLOBAL_OVERRIDES, build_catalogue
 
 # Loop-level decisions (distinct from the gate's exit codes).
 ADOPT, HOLD, REJECT, SKIP = "adopt", "hold", "reject", "skip"
@@ -234,7 +234,7 @@ def _diff_blob(proposal, cfg) -> str:
         type_name = build_catalogue(
             cfg,
             agent_cfg=_provenance_agent_cfg(),
-            overlays={"user": _user_ov},
+            overlays={LAYER_GLOBAL_OVERRIDES: _user_ov},
         )[proposal.component].type_name
     except Exception:
         type_name = ""
@@ -265,7 +265,7 @@ async def _derive_target(parent, store, cfg) -> tuple[str, list, str]:
     catalogue = build_catalogue(
         cfg,
         agent_cfg=_provenance_agent_cfg(),
-        overlays={"user": _user_ov},
+        overlays={LAYER_GLOBAL_OVERRIDES: _user_ov},
     )
     touched = {e.component for e in await store.query(ArchiveQuery(limit=10_000))}
     untouched = [p for p in catalogue if p not in touched]

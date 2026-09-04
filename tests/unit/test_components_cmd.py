@@ -157,7 +157,12 @@ def test_get_resolves_cascade(components_home):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["value"] == 85.0
-    assert payload["layer"] == "user"
+    # Band renamed in 43-03: `user` never said WHICH global file, and the word `project` meant the
+    # global config.yaml. Asserted as the literal string on purpose — this is the word `components
+    # get` prints, so the pin belongs on the vocabulary, not on the constant. NOTE the deliberate
+    # asymmetry with the ComponentMutated audit event below (`layer == "user"`): that is a
+    # different, older vocabulary written into a persisted log, and 43-03 does NOT rename it.
+    assert payload["layer"] == "global-overrides"
 
 
 def test_get_unknown_path_exits_2(components_home):
@@ -193,7 +198,7 @@ def test_set_round_trip(components_home):
     assert get_result.exit_code == 0, get_result.output
     payload = json.loads(get_result.stdout)
     assert payload["value"] == 85.0
-    assert payload["layer"] == "user"
+    assert payload["layer"] == "global-overrides"
 
 
 def test_set_emits_component_mutated(components_home):
@@ -325,7 +330,7 @@ def test_set_agent_axis_round_trip(components_home):
     assert get_result.exit_code == 0, get_result.output
     payload = json.loads(get_result.stdout)
     assert payload["value"] is False
-    assert payload["layer"] == "user"
+    assert payload["layer"] == "global-overrides"
 
 
 def test_set_agent_axis_writes_agent_section_to_overlay(components_home):
@@ -396,7 +401,7 @@ def test_set_org_axis_after_agent_axis_still_validates(components_home):
         g = runner.invoke(app, ["components", "get", dotpath, "--json"])
         assert g.exit_code == 0, g.output
         payload = json.loads(g.stdout)
-        assert payload["value"] == expected and payload["layer"] == "user", (dotpath, payload)
+        assert payload["value"] == expected and payload["layer"] == "global-overrides", (dotpath, payload)
 
 
 def test_set_invalid_agent_key_fails_clearly(components_home):
