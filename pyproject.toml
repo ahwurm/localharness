@@ -37,6 +37,14 @@ dependencies = [
     # installs crash on `start` (ImportError in tools/mcp.py). Raise only with a compat shim.
     "mcp>=1.27.1,<2",
     "huggingface_hub>=0.26",
+    # Directly imported, previously only present because something else happened to pull them in:
+    # numpy (bench/aggregator.py, via scipy today), anyio (core/bus.py + memory/history.py, via
+    # httpx today) and packaging (cli/update_cmd.py, via the build stack today). A transitive
+    # dependency is not a promise — any of those three could drop or re-pin it and break an
+    # install that looks fine here.
+    "numpy>=1.26,<3",
+    "anyio>=4.0,<5",
+    "packaging>=23.2",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +62,14 @@ embeddings = [
 # approximate estimate. No prebuilt aarch64 wheel — installs as a source build on ARM64.
 exact-tokenizer = [
     "llama-cpp-python>=0.3",
+]
+# Last-resort repair of malformed JSON from a local model — a truncated tool call
+# (provider/fn_call.py) or a garbled proposal (autoresearch/proposer.py). OPTIONAL: both sites
+# guard the import and skip the repair step without it, which is what they have always done —
+# one of them spelled the package `jsonrepair`, which does not exist on PyPI, so that step could
+# never run at all. ONE spelling now: `json-repair`, imported as `json_repair`.
+json-repair = [
+    "json-repair>=0.30,<1",
 ]
 dev = [
     "pytest>=8",
