@@ -111,3 +111,18 @@ def test_layered_catalogue_reuses_a_supplied_loader(tmp_path):
         ConfigLoader.load_harness = original
 
     assert len(reads) == 1  # the cached loader answered; no second parse of the same files
+
+
+def test_an_empty_deny_list_says_the_shipped_defaults_still_enforce(tmp_path):
+    """A-M3: `[]` on screen while two dozen patterns enforce is a display that lies by omission."""
+    from localharness.config.models import PermissionConfig
+    from localharness.registry.provenance import display_note
+
+    shipped = len(PermissionConfig().deny_patterns)
+    assert shipped > 0  # premise
+
+    note = display_note("org.permissions.deny_patterns", [])
+
+    assert f"+{shipped} shipped defaults always enforced" in note
+    assert display_note("org.permissions.deny_patterns", ["rm -rf /"]) == ""
+    assert display_note("provider.base_url", "") == ""

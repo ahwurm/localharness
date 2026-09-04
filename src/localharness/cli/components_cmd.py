@@ -36,7 +36,7 @@ from localharness.registry import (
     coerce_value,
     set_value_in_dict,
 )
-from localharness.registry.provenance import layered_catalogue
+from localharness.registry.provenance import display_note, layered_catalogue
 
 components_app = typer.Typer(
     name="components",
@@ -253,7 +253,8 @@ def components_list(
     table.add_column("current value", overflow="fold")
     table.add_column("layer", style="green")
     for e in entries:
-        table.add_row(e.path, e.type_name, repr(e.current_value), e.winning_layer)
+        # display_note: an empty deny list on screen is not an empty deny list at runtime.
+        table.add_row(e.path, e.type_name, repr(e.current_value) + display_note(e.path, e.current_value), e.winning_layer)
     console.print(table)
 
 
@@ -310,7 +311,7 @@ def components_get(
         typer.echo(_json.dumps(payload))
         return
 
-    console.print(f"{entry.path} = {entry.current_value!r}")
+    console.print(f"{entry.path} = {entry.current_value!r}{display_note(entry.path, entry.current_value)}")
     console.print(f"  type:    {entry.type_name}")
     console.print(f"  layer:   {entry.winning_layer}")
     console.print(f"  default: {entry.default_value!r}")
