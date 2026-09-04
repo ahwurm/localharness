@@ -408,9 +408,11 @@ class FnCallConverter:
         except json.JSONDecodeError:
             pass
 
-        # 5. jsonrepair if available
+        # 5. json-repair if available (the `json-repair` extra; proposer.py uses the same one).
+        # Spelled `jsonrepair` here until now — no such package exists on PyPI, so this step could
+        # never run whatever the user installed. One package, one spelling.
         try:
-            from jsonrepair import repair_json  # type: ignore[import-untyped]
+            from json_repair import repair_json  # type: ignore[import-untyped]
             return json.loads(repair_json(raw))
         except (ImportError, Exception):
             pass
