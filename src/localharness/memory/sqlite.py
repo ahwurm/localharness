@@ -199,6 +199,27 @@ _LEGACY_ROOT_AGENT_ID = "default"
 _ROOT_AGENT_ID = "orchestrator"
 
 
+class LegacyStoreAwaitingAdoption(RuntimeError):
+    """A non-owner open found a pre-rename `agents/default/` tree that nobody has adopted yet.
+
+    Raised INSTEAD of creating the destination directory (v0.13 B1). The adoption below refuses
+    whenever the destination exists, so a reader that mkdir'd `agents/orchestrator/` on its way
+    to an empty database would orphan that tree for good — a worse outcome than the write the
+    reader was avoiding. The owner's next open adopts it; until then this session reads no
+    global memory and says so.
+    """
+
+
+def _legacy_adoption_is_pending(base_dir: Path, agent_id: str) -> bool:
+    """True when `_migrate_legacy_root_agent_dir` would adopt on the owner's next open."""
+    if (base_dir / "agents" / f"{_LEGACY_ROOT_AGENT_ID}.yaml").exists():
+        return False        # the ORCH-03 collision marker — see below
+    if agent_id != _ROOT_AGENT_ID:
+        return False
+    agents = base_dir / "agents"
+    return (agents / _LEGACY_ROOT_AGENT_ID).is_dir() and not (agents / _ROOT_AGENT_ID).exists()
+
+
 def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
     """One-time, idempotent adoption of a pre-rename root store (Phase 33.1, ORCH-02).
 
@@ -212,20 +233,17 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
     real 'orchestrator' agent's data — the legacy store then simply keeps opening
     under its old name (ORCH-03 collision rule). No-op for every non-root agent_id.
     """
-    if (base_dir / "agents" / f"{_LEGACY_ROOT_AGENT_ID}.yaml").exists():
-        # The YAML rename deletes default.yaml BEFORE any store opens; its lingering
-        # presence means that rename REFUSED (the user owns an 'orchestrator' agent —
-        # ORCH-03 collision) and the legacy root still lives under its old 'default'
-        # name. Adopting its dir would graft the legacy root's memories into that
-        # unrelated agent, falsifying the released "nothing is merged or overwritten"
-        # guarantee. Never adopt while the collision-refusal marker is on disk.
-        return
-    if agent_id != _ROOT_AGENT_ID:
+    # The guards live in `_legacy_adoption_is_pending` so the non-owner open path can ask the
+    # same question without performing the rename. The `default.yaml` guard among them: the
+    # YAML rename deletes default.yaml BEFORE any store opens; its lingering presence means
+    # that rename REFUSED (the user owns an 'orchestrator' agent — ORCH-03 collision) and the
+    # legacy root still lives under its old 'default' name. Adopting its dir would graft the
+    # legacy root's memories into that unrelated agent, falsifying the released "nothing is
+    # merged or overwritten" guarantee. Never adopt while that marker is on disk.
+    if not _legacy_adoption_is_pending(base_dir, agent_id):
         return
     legacy_dir = base_dir / "agents" / _LEGACY_ROOT_AGENT_ID
     new_dir = base_dir / "agents" / _ROOT_AGENT_ID
-    if not legacy_dir.is_dir() or new_dir.exists():
-        return
     legacy_dir.rename(new_dir)
     # Honest paper trail for whoever debugs this store later (CLAUDE.md: docs for the
     # adversary): one schema-conformant session_event breadcrumb in the adopted
@@ -755,15 +773,44 @@ class MemoryStore:
         self._current_session_id: str | None = None
 
     # ------------------------------------------------------------------
+    # Identity (read-only accessors — the two facts a caller outside this module
+    # legitimately needs about a store handle without reaching for an underscore)
+    # ------------------------------------------------------------------
+
+    @property
+    def agent_id(self) -> str:
+        return self._agent_id
+
+    @property
+    def base_dir(self) -> Path:
+        """The config dir this store's `agents/` tree lives under."""
+        return self._base_dir
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def open(self) -> None:
+    async def open(self, *, owner_init: bool = True) -> None:
         """Open SQLite connection, enable WAL mode, apply pending migrations.
 
         Phase 33.1 (ORCH-02): performs a one-time, idempotent root-rename migration
         first — a pre-rename 'default' store is adopted (directory + facts/sessions
         rows re-keyed) the first time it opens as 'orchestrator'.
+
+        `owner_init=False` opens a store this session does NOT own — the recall router's
+        machine-global twin, held by a project session that only reads it (v0.13 B1). It
+        skips the two open-time writes that belong to the store's owner: the Phase-33.1
+        legacy adoption (renaming another install's `agents/default/` tree, and re-keying
+        its rows, is not a reader's call to make) and `_seed_tags` (INSERTing the seeded
+        tag spine into a database this session does not own).
+
+        HONEST REMAINDER — `owner_init=False` is not a zero-write open. It still mkdirs the
+        agent directory, creates `memory.db` when absent, and applies pending SCHEMA
+        migrations. Neither is separable from being able to query at all: aiosqlite cannot
+        connect through a missing directory, and a SELECT against an unmigrated schema is an
+        error rather than a read. What a non-owner open leaves untouched is the row-level
+        state a session can observe — facts, tags, activation traces, staged counters — which
+        is what "a project session never writes global memory" is a claim about.
 
         Critic M2: any failure after connect closes the connection before re-raising —
         aiosqlite's worker thread is non-daemon, and a leaked handle hangs process exit.
@@ -771,11 +818,21 @@ class MemoryStore:
         # Phase 33.1: must run before mkdir — mkdir would create an empty
         # agents/orchestrator/ first and the adoption rename would then refuse
         # (destination exists), silently orphaning the legacy store.
-        _migrate_legacy_root_agent_dir(self._base_dir, self._agent_id)
+        if owner_init:
+            _migrate_legacy_root_agent_dir(self._base_dir, self._agent_id)
+        elif _legacy_adoption_is_pending(self._base_dir, self._agent_id):
+            # Creating the destination here would make the owner's adoption refuse FOREVER
+            # (it never merges into an existing directory), orphaning the tree this open was
+            # only trying to read. Refuse instead: no rename, no directory, no data lost.
+            raise LegacyStoreAwaitingAdoption(
+                f"{self._base_dir / 'agents' / _LEGACY_ROOT_AGENT_ID} is a pre-rename memory "
+                f"tree that no session has adopted yet. Start one session outside a project "
+                f"(the adoption is the store owner's to make), then this session can read it."
+            )
         self._agent_dir.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
         try:
-            await self._open_inner()
+            await self._open_inner(owner_init=owner_init)
         except BaseException:
             db, self._db = self._db, None
             try:
@@ -784,7 +841,7 @@ class MemoryStore:
                 pass
             raise
 
-    async def _open_inner(self) -> None:
+    async def _open_inner(self, *, owner_init: bool = True) -> None:
         assert self._db is not None
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode = WAL")
@@ -798,8 +855,9 @@ class MemoryStore:
         # without depending on SQLite being compiled with math functions.
         await self._db.create_function("lh_slow_score", 5, _slow_score, deterministic=True)
         await self._db.create_function("lh_fused_score", 7, _fused_score, deterministic=True)
-        await self._apply_migrations()
-        await self._seed_tags()
+        await self._apply_migrations(owner_init=owner_init)
+        if owner_init:
+            await self._seed_tags()
 
         if self._bus is not None:
             from localharness.core.events import Action, Observation, UserMessage
@@ -813,10 +871,14 @@ class MemoryStore:
                 self._bus.subscribe(UserMessage, self._on_user_message, agent_id=self._agent_id)
             )
 
-    async def _apply_migrations(self) -> None:
+    async def _apply_migrations(self, *, owner_init: bool = True) -> None:
         """Stepwise ladder; each rewrite script is a single transaction that stamps
         user_version itself (critic M1: crash → rollback → clean retry; never a
-        half-migrated DB, never a double-run)."""
+        half-migrated DB, never a double-run).
+
+        `owner_init=False` (a non-owner open) still runs the SCHEMA ladder — a query against
+        an unmigrated schema is an error, not a read — but skips the Phase-33.1 identity
+        re-key below, which is data adoption rather than schema and belongs to the owner."""
         assert self._db is not None
 
         async def _version() -> int:
@@ -861,7 +923,7 @@ class MemoryStore:
         # transaction (critic M1: crash -> rollback -> clean retry, never a half-migrated
         # identity). No unique-index conflict is possible: a store directory only ever
         # contains its own agent's rows, so 'default' and 'orchestrator' rows never coexist.
-        if self._agent_id == _ROOT_AGENT_ID:
+        if self._agent_id == _ROOT_AGENT_ID and owner_init:
             await self._db.execute(
                 "UPDATE facts SET agent_id = ? WHERE agent_id = ?",
                 (_ROOT_AGENT_ID, _LEGACY_ROOT_AGENT_ID),
