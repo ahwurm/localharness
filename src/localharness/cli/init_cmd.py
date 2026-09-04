@@ -193,7 +193,11 @@ def _is_the_global_config_dir(target: Path) -> bool:
     def _real(path: Path) -> Optional[Path]:
         try:
             return path.resolve()
-        except OSError:  # pragma: no cover - exotic filesystems only
+        except (OSError, RuntimeError):
+            # RuntimeError is pathlib's OWN spelling of a symlink loop ("Symlink loop from ..."),
+            # not an OSError — so catching only OSError turned `.localharness -> .localharness`
+            # into a traceback here, in a check that exists to make a message clearer. Caught by
+            # the full suite; the targeted run had been written before this function existed.
             return None
 
     here = _real(target)
