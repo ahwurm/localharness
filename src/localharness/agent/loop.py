@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -54,6 +55,9 @@ class Session:
     # One bounded re-prompt spent this turn on an EMPTY completion (no content, no tool
     # calls) — the second empty reply ends the turn as a failure, never a stale "success".
     empty_reprompt_used: bool = False
+    # One bounded re-prompt spent this turn on a FINAL answer cut at the output ceiling
+    # (finish_reason="length", text, no tool calls) once the cap could be grown for the retry.
+    truncated_reply_reprompt_used: bool = False
     # #84/FIX-4: baton-gate nudges spent this turn (announced-next-step reply), bounded by
     # config.baton_gate.max_nudges. Was a bool (one nudge, hardcoded); now a counter so the
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
@@ -351,6 +355,11 @@ _SENTINEL_REPROMPT_NUDGE = (
     "Your last reply was only a confirmation, but there is nothing in this "
     "turn to confirm. Provide your full answer to the task now."
 )
+_TRUNCATED_REPLY_NUDGE = (
+    "Your last reply was cut off at the output-token limit, so it did not reach the user in "
+    "full. The limit has been raised for your next reply. Send the complete reply again, and "
+    "keep any reasoning brief."
+)
 _EMPTY_REPLY_NUDGE = (
     "Your last reply was empty: no text and no tool call reached the user. If you were "
     "reasoning, the output budget ran out before the answer. Reply now with your answer "
@@ -386,7 +395,7 @@ def _is_harness_nudge(message: Message) -> bool:
     below; the lookup happens at call time, so definition order does not matter."""
     return (message.get("content") or "") in {
         _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
-        _EMPTY_REPLY_NUDGE, _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
+        _EMPTY_REPLY_NUDGE, _TRUNCATED_REPLY_NUDGE, _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
     }
 
 
@@ -737,6 +746,22 @@ _TRUNCATED_TOOL_CALL_FEEDBACK = (
 )
 
 
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """True when `fn` can take keyword `name` — a named parameter or **kwargs. False for None or
+    an unsignaturable callable, so a client without the parameter is never called with it: the
+    dynamic output cap simply cannot reach such a client (older or test-double clients keep
+    working exactly as before)."""
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def _assemble_role(cfg) -> str:
     """Assemble the agent system prompt from `role` + optional orthogonal sections (MODP-01).
 
@@ -778,6 +803,20 @@ class AgentLoop:
         self._llm = llm
         self._bus = bus
         self._ctx = context_manager
+        # Dynamic per-call output cap. None = the client's configured max_tokens. Raised by
+        # _grow_output_cap after an output-ceiling cut (finish_reason="length") and kept for the
+        # agent's life (a model that overran once will overrun again); every request is still
+        # fitted to the window's real headroom by _request_output_cap, so a raised cap can never
+        # push prompt + max_tokens past the served window.
+        self._output_cap: int | None = None
+        # prompt_tokens the server reported for the previous request — exact, one step stale;
+        # a lower bound on this request's prompt that the estimate-based count may sit under.
+        self._last_prompt_tokens: int | None = None
+        # Whether the client's stream_complete takes a per-call max_tokens (LLMClient does); a
+        # client without it is called exactly as before and the cap stays at its configured value.
+        self._llm_takes_max_tokens = _accepts_kwarg(
+            getattr(llm, "stream_complete", None), "max_tokens"
+        )
         self._tools = tool_registry
         self._permissions = permission_evaluator
         self._memory = memory_loader
@@ -1245,11 +1284,19 @@ class AgentLoop:
             tool_call_mode = getattr(
                 getattr(self._llm, "config", None), "tool_call_mode", "native"
             )
+            # Only override when it differs from the client's own cap (the configured value is
+            # the common case and the wire request stays byte-identical to before), and only for
+            # a client that can take the keyword.
+            request_cap = (
+                self._request_output_cap(ctx_budget) if self._llm_takes_max_tokens else None
+            )
+            _cap_kwargs = {"max_tokens": request_cap} if request_cap is not None else {}
             try:
                 response_message, usage = await self._llm.stream_complete(
                     messages=request_messages,
                     tools=tool_schemas if tool_call_mode != "text" else None,
                     on_token=on_token,
+                    **_cap_kwargs,
                 )
             except ProviderConnectionError as exc:
                 log.warning(
@@ -1264,6 +1311,7 @@ class AgentLoop:
                         messages=request_messages,
                         tools=tool_schemas if tool_call_mode != "text" else None,
                         on_token=on_token,
+                        **_cap_kwargs,
                     )
                 except ProviderConnectionError as exc2:
                     session.terminated_reason = "error"
@@ -1290,6 +1338,7 @@ class AgentLoop:
 
             # Accumulate per-turn token usage (TELEM-02)
             if usage is not None:
+                self._last_prompt_tokens = getattr(usage, "prompt_tokens", None) or None
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
                 session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
             else:
@@ -1377,6 +1426,7 @@ class AgentLoop:
                 has_tool_calls=bool(tool_calls),
                 finish_reason=finish_reason,
                 reasoning_chars=len(getattr(response_message, "reasoning_content", None) or ""),
+                output_cap=request_cap,
             ))
 
             # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
@@ -1418,6 +1468,7 @@ class AgentLoop:
             # the embedded call text, but finish_reason rides the same stream chunk.
             if finish_reason == "length" and tool_calls:
                 session.truncated_tool_calls += 1
+                self._grow_output_cap(request_cap, usage, ctx_budget)
                 log.warning(
                     "Output-token-ceiling truncation mid-tool-call for %s — suppressed %d "
                     "call(s), feeding remedy",
@@ -1480,6 +1531,8 @@ class AgentLoop:
                 # second empty reply ends the turn through the same honest-failure pathway
                 # the parse-retry exhaustion and the #152 guard use.
                 if not content:
+                    if finish_reason == "length":
+                        self._grow_output_cap(request_cap, usage, ctx_budget)
                     if not session.empty_reprompt_used:
                         session.empty_reprompt_used = True
                         # This re-prompt already asks for an answer OR a tool call; spending
@@ -1499,6 +1552,22 @@ class AgentLoop:
                     session.terminated_reason = "error"
                     self._conversation = _strip_sentinel_exchanges(session.messages)
                     return _EMPTY_TURN_NOTICE.format(finish_reason=finish_reason or "unknown")
+
+                # 9a-bis. A FINAL answer cut at the output ceiling (text, no tool calls,
+                # finish_reason="length") used to ship as the answer with its tail missing — a
+                # draft that ends mid-sentence while the turn reports done. If the cap can grow
+                # (headroom in the window), re-prompt once with the bigger cap; otherwise the
+                # cut reply is still the best answer available and ships as before.
+                if (finish_reason == "length" and not session.truncated_reply_reprompt_used
+                        and self._grow_output_cap(request_cap, usage, ctx_budget) is not None):
+                    session.truncated_reply_reprompt_used = True
+                    session.act_nudge_used = True  # this re-prompt already asks for the answer
+                    log.warning(
+                        "Final answer cut at the output ceiling for %s — re-prompting once with "
+                        "the raised cap", self._config.name,
+                    )
+                    session.push({"role": "user", "content": _TRUNCATED_REPLY_NUDGE})
+                    continue
 
                 # 9a2. Degenerate-repetition guard (#152): a candidate final answer that is one
                 # line repeated over and over is NOT an answer — the live receipt was 265
@@ -1871,6 +1940,78 @@ class AgentLoop:
         except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
             log.warning("final-summary-on-stuck failed (%s); returning plain notice", exc)
             return _format_stuck_summary(session)
+
+    # --- Dynamic output cap -------------------------------------------------------------
+    # Two numbers used to be magic here: the 4,096 DEFAULT_MAX_TOKENS baseline start_cmd sent
+    # regardless of config, and the flat reserve it was clamped into. Live 2026-09-04
+    # (qwen3.8-27b, reasoning parser on): every drafting step spent the whole 4,096 on hidden
+    # reasoning — five empty replies of ~170s each, and no draft. The cap is now (a) the
+    # configured value, (b) fitted per request to the window's REAL headroom, and (c) grown
+    # (doubled, within that headroom) whenever a reply is cut at the ceiling.
+
+    def _configured_output_cap(self) -> int:
+        """The client's own per-request cap — the value a request carries when nothing overrides it."""
+        return (
+            getattr(getattr(self._llm, "config", None), "max_tokens", None)
+            or self._config.max_tokens
+        )
+
+    def _window_headroom(self, ctx_budget: Any) -> int | None:
+        """Tokens left in the served window for THIS request's output, or None when unknown.
+
+        prompt = the larger of the counter's estimate for the request just built and the exact
+        prompt_tokens the server reported one request ago (a lower bound: history only grows
+        between requests unless compaction ran, in which case the stale count over-estimates and
+        the cap comes out smaller — the safe direction). A window/64 margin absorbs chat-template
+        overhead the estimate cannot see (2,048 on a 131K window, 128 on 8K)."""
+        window = getattr(self._ctx, "max_context_tokens", None)
+        if not window or window <= 0:
+            return None
+        estimate = 0
+        if ctx_budget is not None:
+            estimate = (getattr(ctx_budget, "current_usage", 0) or 0) + (
+                getattr(ctx_budget, "tool_schema_tokens", 0) or 0
+            )
+        prompt = max(estimate, self._last_prompt_tokens or 0)
+        return window - prompt - max(1, window // 64)
+
+    def _request_output_cap(self, ctx_budget: Any) -> int | None:
+        """The max_tokens THIS request should carry, or None to leave the client's cap alone.
+
+        Target = the grown cap if one is set, else the configured cap. Fitted to the window's
+        headroom so a grown cap never pushes prompt + max_tokens past the served window (vLLM
+        400s on that); never below 1 token. Returns None whenever the result equals the
+        configured cap so the common request stays byte-identical."""
+        configured = self._configured_output_cap()
+        target = self._output_cap or configured
+        headroom = self._window_headroom(ctx_budget)
+        if headroom is not None:
+            target = min(target, max(headroom, 1))
+        return None if target == configured else target
+
+    def _grow_output_cap(self, sent_cap: int | None, usage: Any, ctx_budget: Any) -> int | None:
+        """Raise the cap for the next request after a reply was cut at the ceiling: double the
+        cap that was sent, bounded by the window's headroom (from the exact prompt_tokens this
+        very reply reported when the server sent usage). Returns the new cap, or None when there
+        is no room to grow — the caller then falls through to its bounded remedy."""
+        current = sent_cap or self._configured_output_cap()
+        exact_prompt = getattr(usage, "prompt_tokens", None) if usage is not None else None
+        if exact_prompt:
+            self._last_prompt_tokens = exact_prompt
+        headroom = self._window_headroom(ctx_budget)
+        new_cap = current * 2 if headroom is None else min(current * 2, headroom)
+        if new_cap <= current:
+            log.warning(
+                "Output cap %d hit for %s and the window has no room to grow it (headroom %s)",
+                current, self._config.name, headroom,
+            )
+            return None
+        self._output_cap = new_cap
+        log.warning(
+            "Output cap hit for %s — raising max_tokens %d -> %d for the retry",
+            self._config.name, current, new_cap,
+        )
+        return new_cap
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
         """Single iteration for testing/debugging."""

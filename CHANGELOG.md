@@ -4,7 +4,34 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.13.1] — 2026-09-04
+
+The output-token cap stops being a magic number. Forensics of the 2026-09-04
+drafting session (qwen3.8-27b behind vLLM's reasoning parser): every step that
+had to compose text spent the whole cap on hidden reasoning, came back empty,
+and the turn closed as a success.
+
+### Changed
+- **The per-reply output cap is the configured value, fitted to the window, and
+  grows when a reply is cut off.** `start` sent `DEFAULT_MAX_TOKENS` (4,096)
+  whatever `default_max_tokens` or the agent's `max_tokens` said, and the reply
+  reserve it was clamped into was the same flat number — so raising the value in
+  `config.yaml` changed nothing (the live session carried `default_max_tokens:
+  8192` and still asked for 4,096; five empty replies of ~170 s each, no draft,
+  and the cruncher's extracts cut mid-sentence for the same reason). Now the
+  agent's resolved `max_tokens` (agent yaml → division → org `default_max_tokens`
+  → 4,096) is what the session and the `/model` swap refit send; the shared reply
+  reserve grows to hold it (bounded at half the window; the small-window curve is
+  unchanged); every request is fitted to the window's real headroom
+  (`window − prompt − window/64`, prompt taken from the server's own
+  `prompt_tokens` when it reports usage) so a larger cap can never push
+  `prompt + max_tokens` past the served window; and a reply that ends with
+  `finish_reason="length"` doubles the cap for the retry within that headroom —
+  for an empty reply, for a truncated tool call, and for a truncated final
+  answer, which used to ship with its tail missing and is now re-prompted once.
+  The raised cap is kept for the agent's life. `LLMClient.complete` /
+  `stream_complete` take a per-call `max_tokens`, and the `llm_response` Action
+  carries `output_cap`, so the ledger says what each request asked for.
 
 ### Added
 - **Live reasoning stream: `start --show-reasoning`, `terminal.show_reasoning`, `/reasoning`.**

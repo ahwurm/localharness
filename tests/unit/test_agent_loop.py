@@ -2553,3 +2553,101 @@ async def test_empty_completion_then_real_answer_completes_normally(mock_llm_cli
     assert summary == "Here is the answer."
     completions = bus.history(event_types=[TaskComplete])
     assert len(completions) == 1 and completions[0].success is True
+
+
+# ---------------------------------------------------------------------------
+# Dynamic output cap (2026-09-04). Live: qwen3.8-27b under a reasoning parser spent the whole
+# 4,096-token cap on hidden reasoning at every drafting step — five empty replies of ~170s.
+# A reply cut at the ceiling now grows the cap for the retry (doubled, within the window's
+# real headroom); the common request carries no override at all.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_plain_requests_carry_no_output_cap_override(mock_llm_client, bus):
+    Response = mock_llm_client.Response
+    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus,
+                            config=_no_self_check_config())
+    await loop.run_turn("hello")
+    assert loop._llm.calls and all("max_tokens" not in c for c in loop._llm.calls)
+
+
+@pytest.mark.asyncio
+async def test_empty_length_reply_doubles_the_cap_for_the_retry(mock_llm_client, bus):
+    from localharness.core.events import Action, TaskComplete
+    Response, Usage = mock_llm_client.Response, mock_llm_client.Usage
+    responses = [
+        Response(content="", finish_reason="length",
+                 usage=Usage(prompt_tokens=1_000, completion_tokens=4_096, total_tokens=5_096)),
+        Response(content="Here is the answer.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    summary = await loop.run_turn("write the report")
+
+    assert summary == "Here is the answer."
+    calls = loop._llm.calls
+    assert "max_tokens" not in calls[0]            # the configured cap, untouched
+    assert calls[1]["max_tokens"] == 8_192          # doubled for the retry
+    assert loop._output_cap == 8_192                # and kept: the next overrun starts from here
+    replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
+    assert [e.output_cap for e in replies] == [None, 8_192]   # the ledger records the cap used
+    completions = bus.history(event_types=[TaskComplete])
+    assert len(completions) == 1 and completions[0].success is True
+
+
+@pytest.mark.asyncio
+async def test_cap_growth_is_bounded_by_the_window_headroom(mock_llm_client, bus):
+    """A near-full window cannot double the cap: the retry asks for exactly what still fits, so
+    prompt + max_tokens never crosses the served window (vLLM 400s on that)."""
+    Response, Usage = mock_llm_client.Response, mock_llm_client.Usage
+    ctx = ContextManager(max_context_tokens=12_288)
+    responses = [
+        Response(content="", finish_reason="length",
+                 usage=Usage(prompt_tokens=9_000, completion_tokens=2_000, total_tokens=11_000)),
+        Response(content="Short answer.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config(),
+                            context_manager=ctx)
+    summary = await loop.run_turn("write the report")
+
+    assert summary == "Short answer."
+    assert loop._output_cap is None                  # nothing to grow into
+    fitted = loop._llm.calls[1]["max_tokens"]
+    assert fitted == 12_288 - 9_000 - (12_288 // 64)  # window - exact prompt - margin
+    assert 9_000 + fitted <= 12_288
+
+
+@pytest.mark.asyncio
+async def test_truncated_final_answer_is_retried_once_with_a_bigger_cap(mock_llm_client, bus):
+    """Text cut at the ceiling with no tool call used to ship as the answer, tail missing."""
+    from localharness.core.events import Action, TaskComplete
+    Response, Usage = mock_llm_client.Response, mock_llm_client.Usage
+    responses = [
+        Response(content="The draft begins and then", finish_reason="length",
+                 usage=Usage(prompt_tokens=2_000, completion_tokens=4_096, total_tokens=6_096)),
+        Response(content="The complete draft.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    summary = await loop.run_turn("write the report")
+
+    assert summary == "The complete draft."
+    assert loop._llm.calls[1]["max_tokens"] == 8_192
+    replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
+    assert len(replies) == 2
+    completions = bus.history(event_types=[TaskComplete])
+    assert len(completions) == 1 and completions[0].success is True
+
+
+@pytest.mark.asyncio
+async def test_truncated_final_answer_ships_when_the_cap_cannot_grow(mock_llm_client, bus):
+    """No headroom, no retry: the cut reply is still the best answer available (bounded)."""
+    Response, Usage = mock_llm_client.Response, mock_llm_client.Usage
+    ctx = ContextManager(max_context_tokens=12_288)
+    responses = [
+        Response(content="The draft begins and then", finish_reason="length",
+                 usage=Usage(prompt_tokens=9_000, completion_tokens=3_000, total_tokens=12_000)),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config(),
+                            context_manager=ctx)
+    summary = await loop.run_turn("write the report")
+    assert summary == "The draft begins and then"
+    assert len(loop._llm.calls) == 1
