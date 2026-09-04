@@ -324,6 +324,28 @@ def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatc
     assert _key(payload, "org.name")["layer"] == "workspace-config"
 
 
+def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch):
+    """The payload shape `docs/specs/10-cli.md` quotes — pinned as an exact dict, not a subset.
+
+    `default` is the field that answers "is this value mine or the shipped one?", and it was
+    invisible to every other assertion in this file: dropping it from the payload reddened NOTHING
+    until this test existed (measured, mutation k). `type` was in the same position. An exact-dict
+    comparison pins the field NAMES too, which is what a published payload contract needs.
+    """
+    _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+
+    result = runner.invoke(app, ["config", "show", "--json"])
+
+    assert result.exit_code == 0, _combined(result)
+    assert _key(json.loads(result.stdout), "org.name") == {
+        "path": "org.name",
+        "value": _WORKSPACE_NAME,
+        "type": "str",
+        "layer": "workspace-config",
+        "default": "default",
+    }
+
+
 def test_json_layers_carry_the_paths_and_their_existence(tmp_path, monkeypatch):
     """The machine-readable half of the header: four entries, absolute paths, honest `exists`."""
     layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
