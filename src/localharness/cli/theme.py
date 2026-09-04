@@ -37,6 +37,7 @@ SITE_TOOL = "#BDA8FC"      # --color-tool     tool system (registry, MCP, plugin
 SITE_MEM = "#47D2E8"       # --color-mem      memory
 SITE_BENCH = "#F7857D"     # --color-bench    bench substrate / corpus split
 SITE_RESEARCH = "#FB9D59"  # --color-research autoresearch loop + component registry
+SITE_INK = "#E9EBEF"       # --color-ink      primary text — the reader's own voice
 SITE_DIM = "#9B9EA6"       # --color-dim      secondary text
 
 # The site paints the CONFIG group in --color-edge (#272B34), a near-black BORDER neutral.
