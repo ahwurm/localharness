@@ -644,3 +644,31 @@ async def test_shared_slug_alone_does_not_cluster(store):
     together = any({a.key, b.key} <= {m.key for m in c.members} for c in clusters)
     assert not together, "same-slug atoms grouped without a shared tag/graph/embedding edge"
     assert clusters == []  # in fact neither forms any multi-member component at all
+
+
+class _RaisingEmbedder:
+    """An embedder that fails the way a down/OOM embedding server does."""
+
+    def embed(self, texts):
+        raise RuntimeError("embedding backend unavailable")
+
+
+@pytest.mark.asyncio
+async def test_embedder_failure_degrades_to_the_structural_legs(store):
+    """The comment above the handler promises "Embedder failure degrades to the two structural
+    legs, never raises" — and the handler itself raised NameError, because the module had no
+    logger. Every embedder exception became a NameError from inside `except Exception`, taking
+    down the consolidation cycle the fallback existed to protect.
+
+    Same fixture as the co-tag test: the pair shares a child tag, so the structural legs still
+    cluster it with the embedding leg gone.
+    """
+    a = await _seed_sem(store, "the pottery workshop trip in marrakech", "s1", topic="travel",
+                        child_tag="shared-x")
+    b = await _seed_sem(store, "a woodworking workshop plan for the garage", "s2", topic="hobby",
+                        child_tag="shared-x")
+
+    clusters = await find_stable_clusters(store, embedder=_RaisingEmbedder())
+
+    assert len(clusters) == 1, f"the structural legs stopped working, got {clusters}"
+    assert {m.id for m in clusters[0].members} == {a.id, b.id}
