@@ -9,7 +9,9 @@ The one composition point for v0.13 workspace discovery. Four rules, in order:
 2. The nearest `.localharness/` at or above CWD is the candidate (LAYR-01/LAYR-04).
 3. A candidate INSIDE the project you are standing in loads silently. "Inside" means its folder is
    your current directory, or it sits at or below the root of the git repository containing your
-   current directory. Nested directories inherit their project's config — that is what every other
+   current directory — its RESOLVED folder, so a symlinked `.localharness/` counts as the tree it
+   points at rather than the one holding the link. Nested directories inherit their project's
+   config — that is what every other
    project-scoped tool does and what users already expect, and a prompt that fires on every project
    is a prompt everybody clicks through (owner ruling 2026-09-03).
 4. A candidate from OUTSIDE that project is trust-gated (LAYR-05): above your repository root, or
@@ -78,7 +80,13 @@ def resolve_workspace_layer(
         return None
 
     here = Path.cwd().resolve()
-    if found.parent == here or workspace_is_within_repo(found, here):
+    # BOTH sides resolved, or `.localharness` being a SYMLINK to another tree would read as "your
+    # own directory" and load agent files from anywhere on the machine with no prompt at all. The
+    # trust store already keys on the realpath (config/trust.py), so this is also what makes the
+    # two halves of the gate agree on what a workspace IS. `real` is identical to `found` for
+    # every ordinary directory — the walk builds it from an already-resolved ancestor.
+    real = found.resolve()
+    if real.parent == here or workspace_is_within_repo(found, here):
         # In project: your own directory, or the same repository you are working in. Nested
         # inherits — no prompt, and nothing is written to the trust store.
         log.info("workspace layer: %s (in project)", found)
@@ -89,7 +97,7 @@ def resolve_workspace_layer(
         log.info("workspace layer: %s (trusted)", found)
         return found
     if decision is False:
-        _notice(f"Workspace {found} is not trusted — its config layer is ignored.")
+        _notice(f"Workspace {real} is not trusted — its config layer is ignored.")
         return None
 
     if interactive is None:
@@ -99,17 +107,17 @@ def resolve_workspace_layer(
         # Fail closed (SECURITY.md: deny on doubt) but do NOT record — a later interactive
         # session in this directory still gets asked once.
         _notice(
-            f"Found a workspace at {found} from outside this project — ignoring its config "
+            f"Found a workspace at {real} from outside this project — ignoring its config "
             "layer (no terminal to ask). Run an interactive localharness command here to decide."
         )
         return None
 
-    trusted = _ask(found)
+    trusted = _ask(real)
     trust.record_trust(found, trusted)
     if trusted:
         log.info("workspace layer: %s (trusted just now)", found)
         return found
-    _notice(f"Workspace {found} recorded as not trusted — its config layer is ignored.")
+    _notice(f"Workspace {real} recorded as not trusted — its config layer is ignored.")
     return None
 
 
@@ -122,7 +130,9 @@ def _notice(message: str) -> None:
 
 def _ask(found: Path) -> bool:
     """The one-time question. Names what is at stake AND why this workspace is being asked about,
-    since the ones inside your own project never are."""
+    since the ones inside your own project never are. Takes the RESOLVED workspace so a symlinked
+    dotdir names the tree the files actually come from — "the workspace at ./" is not a question
+    anyone can answer."""
     from rich.prompt import Confirm
     from rich.text import Text
 
