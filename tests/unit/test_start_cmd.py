@@ -942,10 +942,21 @@ def test_deploy_config_default_path(tmp_path, monkeypatch):
     which reads ``$HOME``; it never calls ``Path.home()``, so patching that attribute is inert.
     Both spellings resolve identically on POSIX (``Path.home() == expanduser("~")``): the asserted
     path is unchanged, only the way the test fakes "home" is.
+
+    This test unsets the ONE env var that keeps every other test off the real config directory,
+    so its fake home has to hold on every platform. ``ntpath.expanduser`` never consults ``HOME``
+    — it takes ``USERPROFILE``, else ``HOMEDRIVE`` + ``HOMEPATH`` — so on Windows the HOME
+    monkeypatch alone was inert and this test deployed an agent into the developer's REAL
+    ``~/.localharness/agents/`` (observed: a leftover ``default-bot.yaml`` there). Every var
+    either expanduser consults is pointed at tmp_path, so the write lands in the tmp dir on
+    POSIX and on Windows alike.
     """
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))            # posixpath.expanduser
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))     # ntpath.expanduser, first choice
+    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive or "")  # ntpath.expanduser, fallback pair
+    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):])
     from localharness.orchestrator.workflow import AgentCreationWorkflow
     wf = AgentCreationWorkflow()  # no config_dir
     wf.set_generated_yaml("name: default-bot\nrole: Default\n")
