@@ -547,7 +547,7 @@ async def test_loop_survives_adoption_in_gitignored_repo(archive_store, seeded_i
         propose_fn=_propose, experiment_fn=_experiment,
     )
     assert summary.adopted == 1
-    assert summary.halt_reason in (None, "max_iterations")  # finished, not crashed
+    assert (summary.iterations, summary.failures) == (1, 0)  # ran its iteration out, no crash
     assert (await archive_store.get(pid)).status == "adopted"
     data = yaml.safe_load(_global_overlay(components_home).read_text())
     assert data["agent"]["role"] == "evolved"  # the win is live where the next run reads it

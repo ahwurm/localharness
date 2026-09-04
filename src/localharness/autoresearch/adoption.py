@@ -1,19 +1,28 @@
-"""AUTO-04 (AMENDED — auto-adopt, NOT a blocking human gate): commit a clean win into LIVE config.
+"""AUTO-04 (AMENDED — auto-adopt, NOT a blocking human gate): write a clean win into LIVE config.
 
-A clean win is adopted by writing the after-value into the project-local
-``{repo_root}/.localharness/overrides.yaml`` (the config cascade's highest-priority
-layer, inside the git tree) using the EXACT ``components set`` overlay primitives, then
-``git add`` + ``git commit`` in the MAIN repo. Reverting an adoption is literally
-``git revert <sha>``. The human reviews ASYNCHRONOUSLY via the Phase 19 daily report;
-nothing here blocks on human input.
+A clean win is adopted by writing the after-value into the GLOBAL user overlay
+(``<config_dir>/overrides.yaml``, resolved by ``_resolve_user_overlay_path``) using the EXACT
+``components set`` overlay primitives. That is the file this module, ``experiment.py`` and
+``proposer.py`` all READ for `before` provenance, so an adoption is visible to the next
+proposal — the write and the reads are the same layer. The human reviews ASYNCHRONOUSLY via
+the Phase 19 daily report; nothing here blocks on human input.
 
-Compound-live works for free: the next experiment's throwaway checkout opens at the new
-HEAD, so the single-component overlay composes on prior adoptions automatically (no replay).
+Adoption used to write ``{repo_root}/.localharness/overrides.yaml`` and ``git add`` + commit it.
+Two things were wrong with that: the project dotdir is gitignored in most checkouts (this repo
+included), so the add exited non-zero and killed the loop at its first success with the overlay
+already written; and no reader ever looked at that file — the gate's arms are built from the
+worktree checkout, which carries the committed tree only, and every provenance reader looks at
+the global overlay. REVERSIBILITY: an adoption is no longer a git commit, so it is undone with
+``localharness components set <path> <before>`` (or by editing the global overlay); the archive
+row keeps the exact before/after and the audit log keeps the ComponentMutated event.
+
+Git is now touched ONLY to stamp the HEAD the win was measured at, and never fatally: any git
+failure logs and yields an empty sha, because the adoption (overlay + archive row + audit) has
+already completed and the loop must not die on bookkeeping.
 
 Defense-in-depth: ``adopt`` re-asserts the gate's anti-reward-hacking seal AND re-validates
-the merged config BEFORE committing to live config. A sealed/off-registry/multi-component
-row, or an after-value that produces an invalid config, raises ``AdoptionRefused`` with NO
-overlay write and NO commit.
+the merged config BEFORE writing live config. A sealed/off-registry/multi-component row, or an
+after-value that produces an invalid config, raises ``AdoptionRefused`` with NO overlay write.
 
 Reused primitives (the verified components-set path + the experiment-seal helpers):
   - 14: set_value_in_dict / coerce_value / build_catalogue   (registry)
@@ -25,6 +34,7 @@ Reused primitives (the verified components-set path + the experiment-seal helper
 """
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -55,6 +65,8 @@ _MULTI_PATH_PATTERN = re.compile(r"[,\s;]")
 _AGENT_PREFIX = "agent."
 _AGENT_VALIDATE_BASE = {"name": "adopt-validate", "role": "adopt-validate"}
 
+logger = logging.getLogger(__name__)
+
 
 class AdoptionRefused(Exception):
     """Raised when a row fails the seal/validation re-check at adoption time (status -> adoption_rejected)."""
@@ -69,12 +81,23 @@ def _is_multi_component(component: str, after: Any) -> bool:
     return False
 
 
-def _git(repo_root: Path, *args: str) -> str:
-    """Run `git -C <repo_root> <args>` (check=True) and return trimmed stdout. Mirrors experiment.py."""
-    out = subprocess.run(
-        ["git", "-C", str(repo_root), *args], check=True, capture_output=True, text=True
-    )
-    return out.stdout.strip()
+def _head_sha(repo_root: Path) -> str:
+    """The repo's HEAD sha — provenance for WHICH revision of the code the win was measured on.
+
+    NEVER fatal. The adoption (overlay write + archive row + audit event) is already complete when
+    this runs, so a missing repo / missing git / unborn HEAD logs a warning and yields "" rather
+    than raising into the loop, which only catches AdoptionRefused (F1: a raise here abandoned a
+    successful adoption mid-flight).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        return out.stdout.strip()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("adoption provenance sha unavailable for %s: %s", repo_root, exc)
+        return ""
 
 
 def _resolve_cfg(cfg):
@@ -114,12 +137,13 @@ def _validate_merged(cfg, component: str, new_overlay: dict) -> None:
 
 
 async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
-    """Adopt a clean win into the LIVE project-local overlay + git commit. Returns the 40-char commit sha.
+    """Adopt a clean win into the LIVE global user overlay. Returns ``repo_root``'s HEAD sha ("" if git fails).
 
-    Reuses the components-set overlay primitives + subprocess git. Re-asserts the seal
-    (off-registry / multi-component / not-in-registry) and validates the merged config BEFORE
-    writing — a failure marks the row ``adoption_rejected`` and raises ``AdoptionRefused`` with
-    NO commit. Commits in the MAIN repo (``repo_root``), NOT the gate's throwaway checkout.
+    Reuses the components-set overlay primitives. Re-asserts the seal (off-registry /
+    multi-component / not-in-registry) and validates the merged config BEFORE writing — a failure
+    marks the row ``adoption_rejected`` and raises ``AdoptionRefused`` with NO write. The overlay
+    written is the one every provenance reader reads (see the module docstring); ``repo_root`` is
+    only read, for the returned sha — nothing is staged, committed, or written into the repo.
 
     NOTE: adopt() does NOT set status="adopted" on success — it returns the sha. The LOOP (18-05) /
     CLI (18-06) calls ``store.update_verdict(status="adopted")`` after a successful adopt(), mirroring
@@ -146,7 +170,9 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
     #    MUST run BEFORE any overlay write: adoption can NEVER widen the mutable surface to the
     #    grader/bench/holdout/multi-component surface.
     from localharness.autoresearch.experiment import _provenance_agent_cfg
-    _user_overlay = load_overlay(_resolve_user_overlay_path())
+    # ONE path for the layer this module reads AND writes (the F3 coherence fix lives here).
+    overlay_path = _resolve_user_overlay_path()
+    _user_overlay = load_overlay(overlay_path)
     catalogue = build_catalogue(
         cfg,
         agent_cfg=_provenance_agent_cfg(),
@@ -168,10 +194,8 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
         else coerce_value(str(after_raw), cat_entry.annotation)
     )
 
-    # 3. Build the LIVE project-local overlay; validate the MERGED config BEFORE any write.
-    overlay_path = repo_root / ".localharness" / "overrides.yaml"
-    existing = load_overlay(overlay_path)
-    new_overlay = set_value_in_dict(dict(existing), component, after)
+    # 3. Build the LIVE global overlay (same file read above); validate the MERGE BEFORE any write.
+    new_overlay = set_value_in_dict(dict(_user_overlay), component, after)
     try:
         _validate_merged(cfg, component, new_overlay)
     except AdoptionRefused:
@@ -184,13 +208,11 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
     # 5. Audit event (layer='user', actor='orchestrator', actor_detail=proposal_id).
     await _emit_component_mutated(bus, cfg, component, decoded.get("before"), after, proposal_id)
 
-    # 6. git add + commit IN THE MAIN REPO (repo_root, NOT the gate's throwaway checkout) ->
-    #    compound-live: the next experiment opens at this new HEAD, so overlays compose automatically.
-    _git(repo_root, "add", str(overlay_path))
-    tscore = f"{entry.train_score:.3f}" if entry.train_score is not None else "n/a"
-    msg = f"autoresearch: adopt {component} ({proposal_id[:8]}) train={tscore}"
-    _git(repo_root, "commit", "-m", msg)
-    return _git(repo_root, "rev-parse", "HEAD")
+    # 6. Provenance ONLY: the HEAD the win was measured at. The adoption is complete at step 5 —
+    #    nothing is staged or committed (the overlay lives outside the repo; in most checkouts the
+    #    project dotdir is gitignored, so the old `git add` here exited 1 and killed the loop).
+    #    Adopted values reach the NEXT proposal through this overlay, not through the git tree.
+    return _head_sha(repo_root)
 
 
 async def _emit_component_mutated(bus, cfg, component, before, after, proposal_id) -> None:
