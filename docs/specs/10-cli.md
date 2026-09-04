@@ -8,15 +8,16 @@
 
 ## Purpose
 
-The CLI is the user's entry point to LocalHarness. It provides:
+The CLI is the user's entry point to LocalHarness. The everyday path is four commands:
 
 1. `localharness init` — one-time setup (auto-detect LLM, write config)
 2. `localharness start` — launch the orchestrator REPL
-3. `localharness agent create|list` — agent management (`run`, `delete`: **planned**, not yet implemented — see below)
-4. `localharness doctor` — prerequisite checks
-5. `localharness validate` — config validation
+3. `localharness doctor` — prerequisite checks
+4. `localharness validate` — config validation
 
-Built with Typer 0.25.1 (commands + subcommand groups), Rich 15.0.0 (formatted output, streaming), prompt_toolkit 3.0.52 (REPL input, history, completion).
+The full command list is under [App Structure](#app-structure).
+
+Built with Typer (commands + subcommand groups), Rich (formatted output, streaming) and prompt_toolkit (REPL input, history, completion). `pyproject.toml` holds the supported ranges — `typer>=0.25,<1`, `rich>=15.0,<16`, `prompt-toolkit>=3.0,<4`.
 
 The CLI does not contain business logic. It parses arguments, sets up the event bus and orchestrator, and delegates. All heavy work happens in the orchestrator and agent loop components.
 
@@ -24,15 +25,31 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 
 ## App Structure
 
-```python
-# src/localharness/cli/app.py
+`src/localharness/cli/app.py` builds one Typer app and registers thirteen top-level commands —
+seven flat commands and six subcommand groups. `localharness --help` prints exactly this list:
 
-import typer
-from localharness.cli.init_cmd import init_app
-from localharness.cli.start_cmd import start_app
-from localharness.cli.agent_cmd import agent_app
-from localharness.cli.doctor_cmd import doctor
-from localharness.cli.validate_cmd import validate
+| Command | What it does |
+|---|---|
+| `init` | Auto-detect local LLM and write initial configuration. |
+| `start` | Launch the agent REPL. Zero to chatting in one command. |
+| `doctor` | Run prerequisite checks and report system health. |
+| `validate` | Validate agent YAML configuration files. |
+| `model` | List available models, or switch the persisted default with `localharness model <name>`. |
+| `propose` | Generate ONE typed mutation `{diff, rationale}` for ONE component from failed TRAIN traces. |
+| `update` | Upgrade LocalHarness to the latest release on PyPI. |
+| `agent` *(group)* | Manage LocalHarness agents — `create`, `list`. |
+| `bench` *(group)* | Run scenario benchmarks; compare runs for regressions. Matrix is opt-in (`--matrix`). Subcommands: `compare`, `pack`. |
+| `components` *(group)* | List, inspect, and mutate harness components (registry) — `list`, `get`, `set`. |
+| `config` *(group)* | Inspect and maintain your LocalHarness configuration — `show`, `migrate`. |
+| `autoresearch` *(group)* | Autoresearch loop tools. |
+| `experiment` *(group)* | Run a proposal through the promotion gate (train Welch → holdout Bonferroni). |
+
+Sections below document `init`, `start`, `agent`, `doctor`, `validate`, `config` and `components`
+in detail. `bench`, `autoresearch`, `experiment`, `propose`, `model` and `update` are documented by
+their own `--help`, which is generated from the same source that defines them.
+
+```python
+# src/localharness/cli/app.py (abridged — the registrations)
 
 app = typer.Typer(
     name="localharness",
@@ -43,16 +60,26 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
+app.command("init")(init_app)
+app.command("start")(start_app)
+app.command("doctor")(doctor)
+app.command("validate")(validate)
+app.command("model")(model)
+app.command("propose")(propose)
+app.command("update")(update)
 app.add_typer(agent_app, name="agent")
-app.command()(init_app)  # localharness init → flat command (not subgroup)
-app.command()(start_app)  # localharness start
-app.command()(doctor)     # localharness doctor
-app.command()(validate)   # localharness validate
+app.add_typer(bench_app, name="bench")
+app.add_typer(components_app, name="components")
+app.add_typer(config_app, name="config")
+app.add_typer(autoresearch_app, name="autoresearch")
+app.add_typer(experiment_app, name="experiment")
 
 def main() -> None:
     """Entry point registered in pyproject.toml."""
     app()
 ```
+
+A root callback adds `--version`, which prints the in-source version and exits.
 
 ```toml
 # pyproject.toml entry point
@@ -91,13 +118,14 @@ def init_app(
         )
     ] = None,
     config_dir: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--config-dir",
-            help="Directory for LocalHarness config and agent data.",
+            help="Directory for LocalHarness config and agent data. Default: "
+                 "$LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
             envvar="LOCALHARNESS_DIR",
         )
-    ] = "~/.localharness",
+    ] = None,
     force: Annotated[
         bool,
         typer.Option(
@@ -105,23 +133,40 @@ def init_app(
             help="Overwrite existing config without prompting.",
         )
     ] = False,
+    workspace: Annotated[
+        bool,
+        typer.Option(
+            "--workspace",
+            help="Scaffold ./.localharness/ for THIS project instead of configuring the "
+                 "machine. Non-interactive; never writes a provider block; never overwrites "
+                 "an existing one.",
+        )
+    ] = False,
 ) -> None:
     """
     Auto-detect local LLM and write initial configuration.
-    
-    Probes known ports in order: vLLM (:8000), Ollama (:11434),
+
+    Probes known ports in order: vLLM (:8081), vLLM (:8000), Ollama (:11434),
     LM Studio (:1234), llama.cpp (:8080). Writes config to
-    ~/.localharness/config.yaml on success.
-    
-    Must complete in under 5 seconds (SETUP-03). Uses 1s timeout per probe.
+    <config-dir>/config.yaml on success.
     """
     ...
 ```
 
+The probe order is one list, `DEFAULT_PORTS` in `provider/detector.py` — `[8081, 8000, 11434, 1234,
+8080]`. Both the `--help` text and the "no server detected" message are derived from it, so all
+three cannot drift apart.
+
+**`--workspace` is a different command in the same skin.** It configures a *project*, not the
+machine: it creates `./.localharness/`, `./.localharness/agents/`, and a `./.localharness/config.yaml`
+that is entirely comments — nothing set. It probes nothing, prompts for nothing, never writes a
+`provider:` block, and refuses (rather than overwriting) if `./.localharness/` already exists or if
+you are standing in the machine's own global config directory.
+
 **Behavior:**
 
 1. If `~/.localharness/config.yaml` already exists and `--force` not set, print a warning and ask: "Config already exists. Re-run init? [y/N]". Default N.
-2. Run `AutoDetector.probe()` — probes all known ports with 1s timeout each. Total timeout: 4s maximum (4 ports × 1s, parallel with `asyncio.gather`).
+2. Run `AutoDetector.probe()` — probes the five ports above, in parallel, with a short timeout each.
 3. If `--endpoint` is provided, skip probing and use that endpoint directly.
 4. Display detected provider and model list using Rich table.
 5. If multiple models found, prompt user to select one (Rich prompt, numbered list).
@@ -283,7 +328,7 @@ class OrchestratorREPL:
 
 **Input handling during agent execution:**
 
-When an agent is running, `PromptSession.prompt_async()` is not called. Instead, the REPL displays streaming output. If the user presses Ctrl-C during execution, a `KeyboardInterrupt` is caught, the REPL creates the KILL file for the current agent (`~/.localharness/agents/{agent_id}/KILL`), and prints: `Interrupt signal sent. Agent will stop at the next tool boundary.`
+When an agent is running, `PromptSession.prompt_async()` is not called. Instead, the REPL displays streaming output. Ctrl-C during a turn does not touch the KILL file: the REPL installs its own SIGINT handler for the turn's duration that **cancels the turn task**, which propagates cancellation through the loop and closes the in-flight streaming HTTP call, so the server aborts generation too. The session itself survives, and you are back at the prompt. A second Ctrl-C while the turn is already cancelling restores the default handler, so pressing it again hard-exits.
 
 ---
 
@@ -304,105 +349,91 @@ agent_app = typer.Typer(
 
 #### `localharness agent create`
 
-```python
-@agent_app.command("create")
-def agent_create(
-    name: Annotated[
-        str,
-        typer.Argument(help="Agent name (alphanumeric and hyphens, max 32 chars).")
-    ],
-    role: Annotated[
-        str,
-        typer.Option("--role", "-r", help="Agent role description (what does it do).")
-    ],
-    model: Annotated[
-        str | None,
-        typer.Option("--model", "-m", help="Model to use. Inherits org default if not set.")
-    ] = None,
-    division: Annotated[
-        str,
-        typer.Option("--division", "-d", help="Division ID for this agent.")
-    ] = "default",
-    tools: Annotated[
-        list[str] | None,
-        typer.Option("--tool", "-t", help="Tool to add (repeat for multiple). E.g. --tool glob --tool bash")
-    ] = None,
-    output: Annotated[
-        str | None,
-        typer.Option("--output", "-o", help="Write YAML to this path instead of default location.")
-    ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="Print generated YAML without writing.")
-    ] = False,
-    config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")
-    ] = "~/.localharness",
-) -> None:
-    """
-    Create a new agent from CLI arguments (non-conversational path).
-    
-    Generates YAML config from provided arguments and writes to
-    ~/.localharness/agents/{name}.yaml (or --output path).
-    
-    For the conversational creation path, use 'localharness start'
-    and ask the orchestrator to create an agent.
-    
-    Exit codes:
-      0: Agent created successfully
-      1: Name validation failed (invalid characters, name already exists)
-      2: Config write failed
-    """
-    ...
 ```
+Usage: localharness agent create [OPTIONS] NAME
+
+  Create a new agent YAML config.
+
+Arguments:
+  NAME                  Agent name (lowercase alphanumeric + hyphens)  [required]
+
+Options:
+  --role, -r    TEXT    Agent role description  [default: General-purpose agent]
+  --model, -m   TEXT    Model name. Inherits org default if not set.
+  --global              Add agent to global config (~/.localharness/agents/)
+  --project             Add agent to this project's workspace (nearest .localharness/agents/
+                        up-tree, else ./.localharness/agents/). Not available with an explicit
+                        config directory.
+  --dry-run             Print YAML without writing
+  --force               Overwrite an existing agent with the same name (default refuses)
+  --no-input            Never ask about an untrusted workspace: skip its config layer, say so,
+                        and record nothing. For hooks, CI, and any run with no one watching.
+  --config-dir  TEXT    Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                        else ~/.localharness.  [env var: LOCALHARNESS_DIR]
+```
+
+There is a conversational path too: run `localharness start` and ask the orchestrator to create an
+agent.
+
+**Which layer it writes to.** `--global` writes `<config-dir>/agents/<name>.yaml`. `--project`
+writes into this project's workspace — the nearest `.localharness/agents/` at or above your current
+directory, creating `./.localharness/agents/` if there is none yet. Passing both is an error. With
+neither, the command asks ("Add globally or to this project?", default `global`) — unless
+`--no-input` is set, which refuses instead of guessing, because writing an agent to the wrong layer
+is precisely the mistake that flag exists to prevent.
+
+**`--project` refuses an explicit config directory.** If `--config-dir`, `$LOCALHARNESS_DIR` or
+`$LOCALHARNESS_HOME` is set, naming a config directory switches workspace discovery off entirely
+(spec 06, "Search Order for Config Files") — an explicit directory is a full replacement, not a base
+to layer on. So there is no project for `--project` to resolve, and an agent written to one would be
+invisible to every command run the same way. The command exits 2 with a message that names the
+setting you actually used, and points at the two ways forward: drop that setting, or pass `--global`.
+
+**It never silently overwrites.** An existing `<name>.yaml` is refused (exit 1) unless `--force` is
+passed. The refusal happens before anything is created, so a command that refuses has written
+nothing. If a workspace exists but is not in use for this command (outside your project and
+untrusted, or undecided with no terminal to ask), `--project` says so on stderr and names both paths
+rather than quietly minting a second `.localharness/` beside the one you already have.
+
+**Exit codes:** 0 created (or `--dry-run` printed); 1 invalid name, both scope flags, an invalid
+answer to the prompt, an existing agent without `--force`, or a write failure; 2 `--no-input` with
+no scope, or `--project` with an explicit config directory.
 
 #### `localharness agent list`
 
-```python
-@agent_app.command("list")
-def agent_list(
-    division: Annotated[
-        str | None,
-        typer.Option("--division", "-d", help="Filter by division.")
-    ] = None,
-    status: Annotated[
-        str | None,
-        typer.Option("--status", "-s", help="Filter by status: active|inactive|error")
-    ] = None,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json", help="Output as JSON array instead of table.")
-    ] = False,
-    config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")
-    ] = "~/.localharness",
-) -> None:
-    """
-    List all configured agents.
-    
-    Reads Agent Cards from ~/.localharness/agents/*/agent_card.json.
-    Displays as a Rich table by default.
-    
-    Table columns: Name | Division | Model | Status | Success Rate | Last Run
-    """
-    ...
+```
+Usage: localharness agent list [OPTIONS]
+
+  List all configured agents.
+
+Options:
+  --json                Output as JSON array
+  --verbose, -v         Show full details
+  --config-dir  TEXT    Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                        else ~/.localharness.  [env var: LOCALHARNESS_DIR]
 ```
 
-**Rich table output:**
+It reads the agent YAML files themselves, across both layers, keyed by filename — so a workspace
+`agents/foo.yaml` replaces a global one of the same name, and everything else from both layers is
+listed. An unparseable file is skipped with a warning naming it, never silently.
+
+**Rich table output.** Two columns by default, three with `--verbose`:
 
 ```
-┌─────────────────────┬──────────────┬──────────────────────┬────────┬──────────────┬─────────────────────┐
-│ Name                │ Division     │ Model                │ Status │ Success Rate │ Last Run            │
-├─────────────────────┼──────────────┼──────────────────────┼────────┼──────────────┼─────────────────────┤
-│ morning-briefing    │ financial    │ qwen3.5-122b-a10b    │ active │ 95%          │ 2026-05-23 05:30    │
-│ portfolio           │ financial    │ qwen3.5-122b-a10b    │ active │ 88%          │ 2026-05-22 16:00    │
-│ hn-monitor          │ research     │ qwen3.5-122b-a10b    │ error  │ 72%          │ 2026-05-23 14:12    │
-└─────────────────────┴──────────────┴──────────────────────┴────────┴──────────────┴─────────────────────┘
+                Agents
+┌──────────────────┬───────────────────────────┐
+│ Name             │ Role                      │
+├──────────────────┼───────────────────────────┤
+│ orchestrator     │ General-purpose agent     │
+│ morning-briefing │ Generate a daily report…  │
+└──────────────────┴───────────────────────────┘
 ```
 
-**`--json` is machine output.** It is written with `typer.echo`, not through the Rich console, so
+`--verbose` adds a `Model` column, showing `inherit` where the agent does not pin one.
+
+**`--json` is machine output.** It emits the raw agent dictionaries — whatever keys each YAML file
+declares, plus `name` filled in from the filename when the file omits it. An empty roster emits `[]`,
+not prose, so a caller's `json.loads` always has an answer. It is written with `typer.echo`, not through the Rich console, so
 the payload is emitted without markup interpretation and without wrapping — a name containing
 `[brackets]` survives intact, and no newline is injected mid-string at any terminal width. Pipe it
 to `jq` directly. Inside a workspace the roster is the union of both layers, and `--json` never
@@ -417,7 +448,8 @@ ship, manage an existing agent directly on disk:
 - **Edit:** open `<config-dir>/agents/<name>.yaml` (global) or `./.localharness/agents/<name>.yaml`
   (project) and change `role`, `tools`, `permissions`, etc.
 - **Remove:** delete that YAML file (and, if you also want its memory gone,
-  `<config-dir>/agents/<name>/` which holds `memory.db`, `events.jsonl`, `MEMORY.md`).
+  `<config-dir>/agents/<name>/` which holds `memory.db`, `history.jsonl`, `bus-events.jsonl`
+  and `MEMORY.md`).
 - **Pick up changes:** restart the session (`localharness start`). Edits and deletions of an
   *existing* agent are read at startup. (A newly *created* agent — via `localharness start`'s
   conversational flow — is registered into the running session immediately and needs no restart;
@@ -525,67 +557,73 @@ def agent_delete(
 
 ### `localharness doctor`
 
-```python
-# src/localharness/cli/doctor_cmd.py
+Implemented in `localharness.cli.doctor_cmd.doctor`.
 
-import typer
-from typing import Annotated
-
-def doctor(
-    config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")
-    ] = "~/.localharness",
-    fix: Annotated[
-        bool,
-        typer.Option("--fix", help="Attempt to auto-fix detected issues.")
-    ] = False,
-) -> None:
-    """
-    Run prerequisite checks and report system health.
-    
-    Checks (in order):
-      1. Python version >= 3.12
-      2. Required packages installed (pydantic, typer, rich, aiosqlite, etc.)
-      3. Config file exists and is valid YAML
-      4. LLM endpoint reachable (HTTP GET /v1/models, 5s timeout)
-      5. Model name in config matches available models
-      6. Config directory writable
-      7. Agents directory exists and is writable
-      8. SQLite available (Python built-in, should always pass)
-      9. For each agent: YAML config parseable, memory.db integrity check
-    
-    Each check is PASS/FAIL with a one-line description.
-    Exit code 0 if all pass, 1 if any fail.
-    """
-    ...
 ```
+Usage: localharness doctor [OPTIONS]
+
+Options:
+  --config-dir  TEXT    Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                        else ~/.localharness.  [env var: LOCALHARNESS_DIR]
+  --fix                 Create a missing agents directory (doctor's only auto-fix today).
+  --no-input            Never ask about an untrusted workspace: skip its config layer, say so,
+                        and record nothing. For hooks, CI, and any run with no one watching.
+```
+
+**What it checks, in the order it prints them:**
+
+1. **Python version** — `>=3.12`.
+2. **Config file** — that `<config-dir>/config.yaml` exists. If it does not *and* no workspace layer
+   applies, doctor stops here and reports the machine as unconfigured.
+3. **The layer report** — workspace directory, global directory, and the keys this workspace
+   overrides. Printed only inside a workspace; see below.
+4. **Config valid** — the merged config parses and validates.
+5. **Security defaults** — an informational line, always printed, never a failure. See below.
+6. **LLM endpoint reachable** — the configured `base_url`.
+7. **Model available** — the configured default model is in the endpoint's model list.
+8. **Context budget vs. served window** — whether the configured context budget exceeds, badly
+   undershoots, or fits the window the server actually reports.
+9. **Token counting** — which counting mode this runtime resolves to (exact server-side, exact from
+   a local GGUF vocab, or a labeled approximation), plus whether the tokenizer endpoint supports
+   message-level counting.
+10. **Runtime advisories** — llama.cpp only, informational: slot-window and AMD Vulkan-vs-HIP notes.
+11. **Config directory writable.**
+12. **Agents directory exists** — the one check `--fix` acts on.
+13. **Workspace agents** — the workspace's own `agents/` directory and the names in it. Workspace
+    only.
+14. **Tool calling** — native, XML fallback, or not yet probed.
+15. **Web search** — whether `ddgs` is installed.
+
+It does **not** check individual agents' memory databases, and there is no per-agent health table.
 
 **Output format:**
 
 ```
-LocalHarness Doctor
-──────────────────────────────────────────────
+─────────────────────────── LocalHarness Doctor ───────────────────────────
 ✓ Python 3.12.3 (required: >=3.12)
-✓ All packages installed
-✓ Config file: ~/.localharness/config.yaml
-✓ LLM endpoint reachable: http://localhost:8000/v1
-✓ Model available: Qwen/Qwen3.5-122B-A10B
+✓ Config file: /home/you/.localharness/config.yaml
+✓ Config valid
+i Security defaults: revision 1 (current)
+✓ LLM endpoint reachable: http://localhost:8081/v1
+✓ Model available: Qwen/Qwen3-32B
+✓ Context budget 131,072 fits served window 131,072
+✓ Token counting: exact — server-side /tokenize (vllm contract).
+✓ Tokenizer endpoint reachable (/tokenize) — exact counts, message-level (chat template applied server-side)
 ✓ Config directory writable
-✓ Agents directory exists and writable
-✓ SQLite available
+✓ Agents directory exists
+✓ Tool calling: native
+✓ Web search ready (ddgs installed)
 
-Agents (2):
-  ✓ morning-briefing     config OK | memory OK
-  ✗ hn-monitor           config OK | memory CORRUPT
-    → Run: localharness doctor --fix to attempt repair
-    → Or: delete ~/.localharness/agents/hn-monitor/memory.db (loses facts)
-
-──────────────────────────────────────────────
-1 issue found. Run with --fix to attempt repair.
+───────────────────────────────────────────────────────────────────────────
+All checks passed.
 ```
 
-**`--fix` behavior:** Attempts to repair each detected issue. Repairable: corrupted SQLite (delete and recreate empty), missing directories (create). Non-repairable: LLM unreachable (report only), config parse error (report with line number).
+A failing run ends with `N issue(s) found.` and exits 1.
+
+**`--fix` creates a missing agents directory. That is all it does.** There is no repair for a
+corrupt database, an unreachable endpoint, or an invalid config — those are reported and left to
+you. The flag's help string says the same thing, and both are the implementation: two `mkdir`
+calls on the agents directory.
 
 **Two v0.13 additions to the output.**
 
@@ -625,54 +663,60 @@ long session; see SECURITY.md.
 
 ### `localharness validate`
 
-```python
-# src/localharness/cli/validate_cmd.py
-
-import typer
-from typing import Annotated
-
-def validate(
-    path: Annotated[
-        str | None,
-        typer.Argument(help="Path to a specific agent YAML to validate. If not set, validates all.")
-    ] = None,
-    config_dir: Annotated[
-        str,
-        typer.Option("--config-dir", envvar="LOCALHARNESS_DIR")
-    ] = "~/.localharness",
-    strict: Annotated[
-        bool,
-        typer.Option("--strict", help="Treat warnings as errors.")
-    ] = False,
-) -> None:
-    """
-    Validate agent YAML configuration files.
-    
-    Loads each YAML file through the Pydantic config loader.
-    Reports: parse errors (line number, field name, error message),
-    inheritance resolution failures (division/org config not found),
-    unknown tool names (warn if tool not in registry).
-    
-    Exit code 0 if all pass, 1 if any errors (or warnings with --strict).
-    """
-    ...
-```
-
-**Output format:**
+Implemented in `localharness.cli.validate_cmd.validate`.
 
 ```
-Validating agent configs...
+Usage: localharness validate [OPTIONS] [PATH]
 
-  morning-briefing.yaml    ✓ valid
-  portfolio.yaml           ✓ valid
-  hn-monitor.yaml          ✗ invalid
-    Line 7: tools.add[0]: 'exa_search_v2' is not a registered tool
-             (did you mean 'exa_search'?)
-    Line 12: permissions.budget.max_actions: value 0 is not allowed (must be >= 1)
+  Validate agent YAML configuration files.
 
-──────────────────────────────
-2 configs valid, 1 invalid.
+  Reports parse errors, field validation failures with line numbers.
+  Exit code 0 if all valid, 1 if any invalid, 2 if no config files found.
+
+Arguments:
+  PATH                  Path to specific YAML to validate. If not set, validates all.
+
+Options:
+  --config-dir  TEXT    Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME,
+                        else ~/.localharness.  [env var: LOCALHARNESS_DIR]
+  --strict              Reserved. No warning-level checks exist yet; currently identical to
+                        the default.
+  --no-input            Never ask about an untrusted workspace: skip its config layer, say so,
+                        and record nothing. For hooks, CI, and any run with no one watching.
 ```
+
+That is the whole flag surface — **there is no `--json`, `--agent` or `--verbose`**, and `--strict`
+does nothing today beyond printing a note saying so. It is reserved for warning-level checks that
+have not been written yet; when they exist, `--strict` will promote them to errors.
+
+With no `PATH`, it validates every config file across both layers — the global directory and, when
+one applies, the project workspace. Each file is validated **at its own path**: a workspace
+`agents/foo.yaml` and a global `agents/foo.yaml` are two files and get two verdicts, rather than one
+of them being checked twice. With a `PATH`, only that file is validated, and the model used is
+chosen from the filename and its parent directory (`config.yaml` → harness, `org.yaml` → org,
+anything under `divisions/` → division, otherwise → agent).
+
+**Output format.** With no workspace layer, rows show the bare filename, exactly as before v0.13:
+
+```
+Validating configs...
+
+  config.yaml                         ✓ valid
+  morning-briefing.yaml               ✓ valid
+  hn-monitor.yaml                     ✗ invalid
+    Line 12: permissions.budget.max_actions: Input should be greater than or equal to 1
+      value: 0
+
+──────────────────────────────────────────────────────────────────────────
+2 config(s) valid, 1 invalid.
+```
+
+Inside a workspace, where two files can share a name, rows show the **full path** instead, and an
+error's row is keyed to the file that actually owns the error. Where that differs from the file the
+walk was iterating, the detail lines name it explicitly (`in <path>`).
+
+**Exit codes:** 0 all valid; 1 one or more invalid, a `PATH` that does not exist, or an unreadable
+config file; 2 no configuration files found at all.
 
 ---
 
@@ -815,6 +859,14 @@ set org.log_level = 'debug' (was: 'info')
 All three subcommands take `--config-dir`, which — as everywhere else — replaces the config
 directory outright and switches workspace discovery off with it.
 
+**This is also where autoresearch adoptions land.** When the loop adopts a mutation that cleared the
+promotion gate, it writes the new value into that same global `overrides.yaml`, through the same
+primitives `set` uses, and emits a `ComponentMutated` audit event. It does not touch git — nothing
+is staged, committed, or written into your project. Two consequences worth knowing before you run
+the loop: the change is **machine-wide**, applying in every project on the box; and undoing one is
+`localharness components set <path> <old value>` (the archive keeps the previous value on the
+adoption record), or editing `overrides.yaml` directly.
+
 ---
 
 ## REPL Interface
@@ -894,17 +946,29 @@ For tasks that run longer than 10 seconds without new output, the REPL displays 
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Configuration error / agent not found / init failed |
-| 2 | Agent completed with error or budget exhausted |
-| 3 | Agent stuck (stuck detection triggered) |
-| 4 | Provider unreachable (LLM server not responding) |
-| 5 | Delegation timeout |
-| 130 | Interrupted by Ctrl-C (standard SIGINT convention) |
+There is no single exit-code table for the whole CLI, and a doc that claimed one would misdescribe
+half of it. `0` always means success. Everything else is per command, and the research commands use
+the exit code as *structured output* rather than as a pass/fail flag.
 
-Typer does not set exit codes automatically — use `raise typer.Exit(code=N)` to exit with a specific code. Use `typer.echo(message, err=True)` for error messages (writes to stderr, not stdout, so they don't pollute piped output).
+| Command | Codes |
+|---|---|
+| `doctor` | 0 all checks passed; 1 one or more failed |
+| `validate` | 0 all valid; 1 one or more invalid, or a named path that cannot be read; 2 no config files found |
+| `init` | 0 written (or an overwrite you declined); 1 detection, prompt or write failure; 2 conflicting flags, or `--workspace` in the global config directory |
+| `start` | 0 normal exit; 1 config/startup failure; 2 usage error |
+| `agent create` / `agent list` | 0 done; 1 invalid input or write failure; 2 usage error (see `agent create` above) |
+| `config show` / `config migrate` | 0 done; 1 failure; 2 usage error |
+| `model`, `propose` | 0 done; 2 any error |
+| `components` | 0 done; 2 any error |
+| `bench` | 0 success; 2 infrastructure failure |
+| `bench compare` | 0 stable; 1 regressed; 2 infrastructure failure; 3 unstable |
+| `experiment` | **the code is the gate verdict** — 0 promote, 1 reject-train, 2 reject-holdout, 3 inconclusive; ≥4 a structural refusal (the experiment did not run) |
+| `autoresearch` | 0 done; 2 any error |
+| `update` | passes through the exit code of the upgrade subprocess it runs |
+
+Typer does not set exit codes automatically — use `raise typer.Exit(code=N)`. Use
+`typer.echo(message, err=True)`, or a stderr Rich console, for error messages, so they don't pollute
+piped output.
 
 ---
 
@@ -961,12 +1025,19 @@ Every configurable value follows this precedence order (highest to lowest):
 
 ```
 1. CLI flag (--endpoint, --model, --config-dir, etc.)
-2. Environment variable (LOCALHARNESS_ENDPOINT, LOCALHARNESS_MODEL, LOCALHARNESS_DIR)
-3. Config file (~/.localharness/config.yaml)
-4. Built-in defaults (hardcoded in config/defaults.py)
+2. Config file (~/.localharness/config.yaml)
+3. Built-in defaults (Pydantic field defaults in config/models.py)
 ```
 
-Implementation: Typer handles CLI flags and `envvar=` on each `Option`. The config file is loaded by `ConfigLoader` after CLI parsing. Defaults are in `ToolConfig()`, `PermissionConfig()`, etc. as Pydantic field defaults.
+Implementation: Typer handles CLI flags. The config file is loaded by `ConfigLoader` after CLI
+parsing. Defaults live on the models themselves — `ToolConfig()`, `PermissionConfig()` and the rest.
+
+**Environment variables are not a general precedence layer.** Four env vars exist, and each one is
+tied to a specific flag or to the config directory: `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME`
+choose the config directory, and `LOCALHARNESS_ENDPOINT` and `LOCALHARNESS_MODEL` are `init`'s two
+overrides. Typer's `envvar=` is what reads them, which is why they behave exactly like typing the
+flag. There is no environment override for arbitrary config keys — see spec 06 §"Environment
+variables".
 
 **Workspace layer (v0.13).** `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` are a full replacement: naming a config directory also switches workspace discovery off, so no workspace layer applies. With none of them set, the harness looks for the nearest `.localharness/` directory at or above your current directory and reads agent and division files from it ahead of the global directory. It applies that layer without asking when the workspace belongs to the project you are in — your own directory, or at or below the root of the git repository containing you. A workspace from outside that project loads only after a one-time confirmation, and is ignored with a notice on stderr when there is no terminal to ask. `doctor` and `start` name the layer they chose; see spec 06 for the full search order.
 
@@ -985,24 +1056,18 @@ Spec 06 §"How the two layers combine" states the rule this order encodes, and t
 `localharness config show` prints these four files, in this order, with the layer that set each
 effective key.
 
-Precedence merging:
+**How the merge actually happens.** `ConfigLoader.load_harness()` reads those files as raw
+dictionaries in that order and folds them together with a recursive `deep_merge`, so a later file
+wins any key it sets and inherits every key it does not mention. The merged dictionary is then
+validated once, by `HarnessConfig.model_validate` — which is where the compiled-in defaults come
+from, as Pydantic field defaults, not as a separate defaults dictionary. `deny_patterns` is the one
+exception to "later wins": it is unioned across all four files first, so a workspace can add deny
+patterns but never drop one. Environment variables are not a merge layer at all — see the note
+above.
 
-```python
-def resolve_config(
-    cli_overrides: dict[str, Any],
-    env_overrides: dict[str, Any],
-    file_config: dict[str, Any],
-    defaults: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Merge configs in precedence order. CLI > env > file > defaults.
-    None values in CLI/env do not override lower-precedence values.
-    """
-    result = {**defaults}
-    for overrides in [file_config, env_overrides, cli_overrides]:
-        result.update({k: v for k, v in overrides.items() if v is not None})
-    return result
-```
+When validation fails, the loader maps the failing field back to the file that set it and reports
+that file's own line numbers, so an error you cannot find in the global config tells you which
+workspace file to open.
 
 ---
 
@@ -1011,6 +1076,6 @@ def resolve_config(
 - All async CLI functions use `asyncio.run()` at the top level. Typer callbacks are synchronous; the async entry point is wrapped with `asyncio.run(_async_main(...))`.
 - `rich.console.Console()` is instantiated once at CLI startup and passed to all components. Never create multiple Console instances — it causes formatting conflicts.
 - `prompt_toolkit` and `rich` do not share terminal state automatically. The REPL must pause `rich.Live` before calling `PromptSession.prompt_async()` and resume it afterward. Pattern: `with Live(...) as live: ... live.stop() ... await session.prompt_async() ... live.start()`.
-- `localharness start` checks for the KILL file (`~/.localharness/KILL`) on startup and removes it if present (cleanup from a previous interrupted session).
+- The KILL file is one flat file in the **global** config directory — `~/.localharness/KILL` in a default setup — not one per agent, and never inside a workspace: it exists to stop every session on the machine. Its value comes from `permissions.budget.kill_file`, read from the global config layer only; a workspace that sets it is ignored, with a line in the log. The harness only reads that file. It does not create it and does not remove it — creating it is how you stop a session, and deleting it again is yours to do.
 - The `--config-dir` option is repeated on every command rather than being a top-level app option. This is intentional — Typer's callback mechanism for top-level options has edge cases with subcommand groups. Repetition is the safer pattern.
 - (Planned) `agent run` with `--task-file` will read the file and pass the path (not the contents) to the orchestrator delegation call. This is the lean context pattern applied at the CLI level.
