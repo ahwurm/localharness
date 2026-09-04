@@ -450,7 +450,8 @@ def archive_approve(
 
 
 def _repo_root() -> Path:
-    """Resolve the git toplevel of the cwd (the MAIN repo adoptions commit into)."""
+    """Resolve the git toplevel of the cwd — read-only, for the provenance HEAD sha an
+    adoption is stamped with. Adoptions write the global overlay; nothing is committed."""
     import subprocess
 
     out = subprocess.run(
@@ -476,7 +477,7 @@ def autoresearch_run(
     checkpoint_every: int = typer.Option(
         5,
         "--checkpoint-every",
-        help="reserved for AUTO-01 literal compliance (held items surface via the Phase 19 report; this loop is fire-and-forget)",
+        help="reserved (held items surface in the report; this loop is fire-and-forget)",
     ),
     epsilon: float = typer.Option(
         0.2, "--epsilon", help="explore probability for the parent sampler"

@@ -277,7 +277,7 @@ class ArchiveStore:
     #   holdout_rejected  — passed TRAIN but regressed on HOLDOUT (Bonferroni)       (Phase 17)
     #   promoted          — passed both gates; archive-only, NOT yet live            (Phase 17)
     #   superseded        — an older row eclipsed by a newer adoption                (Phases 15-17)
-    #   adopted           — committed into the live project-local overlay            (Phase 18 AUTO-04)
+    #   adopted           — written into the live GLOBAL user overlay (no git)       (Phase 18 AUTO-04)
     #   held              — clean-or-inconclusive but not auto-adopted (awaiting async review)
     #   adoption_rejected — a held item the human declined; valid parent material, never re-offered
     async def update_verdict(
