@@ -801,6 +801,22 @@ async def test_a_healthy_workspace_failure_still_raises(pair) -> None:
     await router.close()
 
 
+async def test_the_degradation_does_not_cover_the_primary_s_labelled_render(pair) -> None:
+    """The merge calls the PRIMARY twice — `load_context`, then the labelled index render. The
+    second call sits outside the try on purpose; a catch drawn one line wider would swallow this
+    project's own render fault and blame the global store for it."""
+    async def boom(*_a, **_k):
+        raise RuntimeError("the workspace render itself broke")
+
+    pair.ws._render_memory_index_with_ids = boom     # type: ignore[method-assign]
+    router = RecallRouter(pair.ws, pair.g, scope=SCOPE_BOTH)
+
+    with pytest.raises(RuntimeError, match="workspace render"):
+        await router.load_context()
+
+    await router.close()
+
+
 # ------------------------------------------------------------------ #
 # 16. The ambient shelf dedups by key, workspace-wins — like the tools (B5).
 # ------------------------------------------------------------------ #
