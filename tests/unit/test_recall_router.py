@@ -837,3 +837,28 @@ async def test_the_deduped_shelf_does_not_double_count_facts(both: RecallRouter)
     assert ctx.fact_count == ws_only.fact_count + len(global_lines)
 
     await both.close()
+
+
+# ------------------------------------------------------------------ #
+# 17. A composite token naming an impossible row is a miss, not a crash (B8).
+# ------------------------------------------------------------------ #
+@pytest.mark.parametrize("token", ["[workspace#99999999999999999999999]",
+                                   "[global#99999999999999999999999]"])
+async def test_an_out_of_range_origin_token_is_a_clean_miss(
+    both: RecallRouter, token: str
+) -> None:
+    """`facts.id` is a SQLite INTEGER — signed 64-bit. A token past that width reached the
+    driver and came back as `OverflowError: Python int too large to convert to SQLite
+    INTEGER`, which `memory_get` then handed to the model as its answer."""
+    assert await both.get_fact(token) is None
+    assert parse_origin_token(token) is None, "an unaddressable id is not a token"
+
+    await both.close()
+
+
+async def test_the_largest_addressable_origin_token_is_still_a_token() -> None:
+    """The clamp is at the storage width, not at some smaller round number: the boundary id
+    itself still parses, so the fix cannot quietly shrink the addressable space."""
+    biggest = 2**63 - 1
+    assert parse_origin_token(f"[global#{biggest}]") == (ORIGIN_GLOBAL, biggest)
+    assert parse_origin_token(f"[global#{biggest + 1}]") is None
