@@ -86,6 +86,7 @@ def _layout(
     *,
     workspace: bool = True,
     global_config: str | None = None,
+    home_name: str = "home",
 ) -> SimpleNamespace:
     """A fake `$HOME` holding the GLOBAL layer, plus a project with the CWD two levels down.
 
@@ -101,7 +102,7 @@ def _layout(
     """
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    home = tmp_path / "home"
+    home = tmp_path / home_name
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(
@@ -408,3 +409,29 @@ def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypa
 
     assert "Config invalid:" in out, out
     assert "Security defaults:" not in out, out
+
+
+# --------------------------------------------------- the markup discipline, on the OTHER paths
+
+
+def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monkeypatch):
+    """A folder named `[old] home` must not turn doctor into a liar.
+
+    Rich reads `[old]` as a style tag and, measured, does not raise — it silently DELETES it, so
+    doctor prints a path that does not exist while looking perfectly healthy (the 43-02 F1 failure
+    mode, in the one command people run to find out where their config comes from). 39-05 escaped
+    the two lines it added; the `Config file:` line three rows above and the `Config invalid:`
+    error — the two that name the file a user is about to OPEN — were left unescaped, which this
+    grades. Both are asserted from one layout because a fix to one and not the other still leaves
+    doctor naming a nonexistent file.
+    """
+    layout = _layout(tmp_path, monkeypatch, home_name="[old] home")
+    ws_config = _write_workspace(layout, "org:\n  name: WS\n  log_level: not-a-level\n")
+    global_config = layout.global_dir / "config.yaml"
+
+    out = _run_doctor()
+    squashed = _squash(out)
+
+    assert _squash(f"Config file: {global_config}") in squashed, out
+    assert _squash(f"Workspace layer: {layout.ws_dir}") in squashed, out
+    assert _squash(str(ws_config)) in squashed, out
