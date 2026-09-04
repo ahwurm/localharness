@@ -714,10 +714,22 @@ class ConfigLoader:
         # on a parse error is a fail-open security regression.
         org_deny = [*org.permissions.deny_patterns, *self._layered_org_deny()]
 
+        # The overlay's own `agent.permissions.deny_patterns`. Step 5b layers the overlay UNDER
+        # `merged`, and `merged["permissions"]["deny_patterns"]` is always set below — so a list
+        # written here through `components set` was stored, read back, and then replaced wholesale
+        # at load. Unioned like every other layer: deny accumulates in the restrictive direction
+        # only, so an overlay can ADD a rule and can never drop one (MERG-02).
+        overlay_perms = overlay_agent.get("permissions")
+        overlay_deny = (
+            overlay_perms.get("deny_patterns", []) if isinstance(overlay_perms, dict) else []
+        )
+        if not isinstance(overlay_deny, list):
+            overlay_deny = []
+
         # Build union preserving order, deduplicating
         seen: set[str] = set()
         union_deny: list[str] = []
-        for pat in (*org_deny, *div_deny, *agent_deny):
+        for pat in (*org_deny, *overlay_deny, *div_deny, *agent_deny):
             if pat not in seen:
                 seen.add(pat)
                 union_deny.append(pat)
