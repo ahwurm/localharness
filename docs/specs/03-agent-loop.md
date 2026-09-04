@@ -187,11 +187,14 @@ class KillWatcher:
     kill_file_path: Path
     """Path to watch — required, no default.
 
-    Every real caller passes one. `AgentLoop` resolves it in this order: an explicit
-    `kill_file_path` argument, else `permissions.budget.kill_file` resolved against the GLOBAL
-    config directory (the shipped default `KILL` lands at `~/.localharness/KILL`), else, only when
-    a config carries no kill file at all, `Path.cwd() / 'KILL'`. One file for the machine, so
-    every agent watches the same one."""
+    `AgentLoop` picks it in this order: an explicit `kill_file_path` argument, else
+    `Path(config.permissions.budget.kill_file).expanduser()`, else `Path.cwd() / 'KILL'`.
+
+    In a real session the FIRST branch is the one that fires. `start_cmd` resolves
+    `permissions.budget.kill_file` against the GLOBAL config directory itself — the shipped default
+    `KILL` lands at `~/.localharness/KILL` — and passes the result in. The second and third branches
+    are fallbacks for direct construction (bench, tests). One file for the machine, so every agent
+    watches the same one."""
 
     def is_killed(self) -> bool:
         """Return True if the KILL file exists at kill_file_path.

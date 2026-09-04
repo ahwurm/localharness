@@ -765,13 +765,18 @@ When a `TaskComplete` event arrives with `exit_reason='error'`, the orchestrator
 2. The escalation surfaces to the user with the error message and options.
 3. Options offered: retry (re-delegates same task), debug (shows the last N tool calls from the agent's history.jsonl), abandon (marks task as failed).
 
-### Delegation Timeout
+### Delegation Timeout — **not implemented**
 
-`DelegationTimeoutError` is raised by `delegate()` if `TaskComplete` does not arrive within `budget_max_duration_minutes * 60 + 60` seconds. The orchestrator:
-1. Publishes a kill signal (via the machine's one KILL file, `~/.localharness/KILL` by default).
-2. Waits 5 seconds for clean shutdown.
-3. Surfaces `DelegationTimeoutError` to the user.
-4. Updates the Agent Card's `success_rate` (counts as a failure).
+This section describes a design, not shipped behavior. Neither `delegate()` nor
+`DelegationTimeoutError` exists in `src/localharness/`. What bounds a delegated run today is the
+child's own budget (`permissions.budget.max_actions`, `max_duration_minutes`) plus the KILL file,
+which the harness only ever reads — nothing in the harness writes or removes it, so no component
+"publishes a kill signal" by creating one.
+
+The design, if it is built: a `TaskComplete` that does not arrive within
+`budget_max_duration_minutes * 60 + 60` seconds raises `DelegationTimeoutError`, the orchestrator
+waits briefly for a clean shutdown, surfaces the error, and counts it against the Agent Card's
+`success_rate`.
 
 ---
 

@@ -626,8 +626,9 @@ orchestrator/workflow.py  — imports orchestrator/router.py, provider/client.py
 cli/app.py             — top-level Typer app
 cli/init_cmd.py        — imports provider/detector.py, config/loader.py
 cli/start_cmd.py       — imports orchestrator/router.py, channels/terminal.py, core/bus.py
-cli/agent_cmd.py       — imports config/loader.py, orchestrator/workflow.py
-cli/doctor_cmd.py      — imports provider/detector.py, config/loader.py
+cli/agent_cmd.py       — imports cli/workspace.py, config/loader.py (deferred)
+cli/doctor_cmd.py      — imports config/loader.py, cli/workspace.py; reaches provider
+                          identification through cli/init_cmd.py, not provider/ directly
 cli/validate_cmd.py    — imports config/loader.py
 ```
 

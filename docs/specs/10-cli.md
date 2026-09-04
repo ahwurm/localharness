@@ -166,7 +166,8 @@ you are standing in the machine's own global config directory.
 **Behavior:**
 
 1. If `~/.localharness/config.yaml` already exists and `--force` not set, print a warning and ask: "Config already exists. Re-run init? [y/N]". Default N.
-2. Run `AutoDetector.probe()` — probes the five ports above, in parallel, with a short timeout each.
+2. Run `detect_provider()` (`provider/detector.py`) — probes the five ports above with a short
+   timeout each.
 3. If `--endpoint` is provided, skip probing and use that endpoint directly.
 4. Display detected provider and model list using Rich table.
 5. If multiple models found, prompt user to select one (Rich prompt, numbered list).
@@ -328,7 +329,7 @@ class OrchestratorREPL:
 
 **Input handling during agent execution:**
 
-When an agent is running, `PromptSession.prompt_async()` is not called. Instead, the REPL displays streaming output. Ctrl-C during a turn does not touch the KILL file: the REPL installs its own SIGINT handler for the turn's duration that **cancels the turn task**, which propagates cancellation through the loop and closes the in-flight streaming HTTP call, so the server aborts generation too. The session itself survives, and you are back at the prompt. A second Ctrl-C while the turn is already cancelling restores the default handler, so pressing it again hard-exits.
+When an agent is running, `PromptSession.prompt_async()` is not called. Instead, the REPL displays streaming output. Ctrl-C during a turn does not touch the KILL file: the REPL installs its own SIGINT handler for the turn's duration that **cancels the turn task**, which propagates cancellation through the loop and closes the in-flight streaming HTTP call. On vLLM that disconnect aborts generation engine-side, so no ghost request is left running; other runtimes end the stream on their own terms. The session itself survives, and you are back at the prompt. A second Ctrl-C while the turn is already cancelling restores the default handler, so pressing it again hard-exits.
 
 ---
 
@@ -578,7 +579,9 @@ Options:
 3. **The layer report** — workspace directory, global directory, and the keys this workspace
    overrides. Printed only inside a workspace; see below.
 4. **Config valid** — the merged config parses and validates.
-5. **Security defaults** — an informational line, always printed, never a failure. See below.
+5. **Security defaults** — an informational line, never a failure. Printed whenever the config
+   loaded; a missing or invalid config skips it, because there is nothing to report a revision for.
+   See below.
 6. **LLM endpoint reachable** — the configured `base_url`.
 7. **Model available** — the configured default model is in the endpoint's model list.
 8. **Context budget vs. served window** — whether the configured context budget exceeds, badly
@@ -965,7 +968,7 @@ the exit code as *structured output* rather than as a pass/fail flag.
 | `bench pack` | 0 built; 1 the pack failed to build |
 | `experiment` | **the code is the gate verdict** — 0 promote, 1 reject-train, 2 reject-holdout, 3 inconclusive; ≥4 a structural refusal (the experiment did not run) |
 | `autoresearch` | 0 done; 2 any error |
-| `update` | passes through the exit code of the upgrade subprocess it runs |
+| `update` | 1 if PyPI is unreachable or `uv` is missing from PATH; otherwise the exit code of the upgrade subprocess it runs |
 
 Typer does not set exit codes automatically — use `raise typer.Exit(code=N)`. Use
 `typer.echo(message, err=True)`, or a stderr Rich console, for error messages, so they don't pollute
@@ -1036,9 +1039,10 @@ parsing. Defaults live on the models themselves — `ToolConfig()`, `PermissionC
 **Environment variables are not a general precedence layer.** Four env vars exist, and each one is
 tied to a specific flag or to the config directory: `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME`
 choose the config directory, and `LOCALHARNESS_ENDPOINT` and `LOCALHARNESS_MODEL` are `init`'s two
-overrides. Typer's `envvar=` is what reads them, which is why they behave exactly like typing the
-flag. There is no environment override for arbitrary config keys — see spec 06 §"Environment
-variables".
+overrides. Three of them are read by Typer's `envvar=`, which is why they behave exactly like
+typing the flag; `LOCALHARNESS_HOME` is read instead by `config_dir_env_override()` in
+`config/paths.py`, as the legacy alias consulted only when `LOCALHARNESS_DIR` is unset. There is no
+environment override for arbitrary config keys — see spec 06 §"Environment variables".
 
 **Workspace layer (v0.13).** `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` are a full replacement: naming a config directory also switches workspace discovery off, so no workspace layer applies. With none of them set, the harness looks for the nearest `.localharness/` directory at or above your current directory and reads agent and division files from it ahead of the global directory. It applies that layer without asking when the workspace belongs to the project you are in — your own directory, or at or below the root of the git repository containing you. A workspace from outside that project loads only after a one-time confirmation, and is ignored with a notice on stderr when there is no terminal to ask. `doctor` and `start` name the layer they chose; see spec 06 for the full search order.
 
