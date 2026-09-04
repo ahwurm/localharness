@@ -60,6 +60,48 @@ def global_config_dir(config_dir: Optional[PathLike] = None) -> Path:
     return resolve_config_dir(config_dir)
 
 
+def _walk_start(start: Optional[PathLike]) -> Optional[Path]:
+    """The resolved directory a walk begins at, or None when there isn't one any more.
+
+    ``Path.cwd()`` raises FileNotFoundError when the directory the process is sitting in has been
+    deleted under it (a `git worktree remove`, a cleaned tmpdir). v0.12 read a literal
+    ``./.localharness`` there and simply found nothing, so "no workspace" is the answer that keeps
+    that behavior — a walk cannot be the thing that turns a deleted CWD into a traceback.
+    """
+    try:
+        return Path(start).resolve() if start is not None else Path.cwd().resolve()
+    except OSError:
+        return None
+
+
+def _home_stop() -> Optional[Path]:
+    """The home directory the up-walks stop at, or None when there is no trustworthy answer.
+
+    ``Path.home()`` falls back to the passwd database when ``$HOME`` is unset, which is a DIFFERENT
+    directory than the one ``~`` expanded to for the config dir in some environments (hooks, cron,
+    containers). A stop that points somewhere else is not a stop, so it is not claimed: with no
+    HOME in the environment the walk relies on the global-config-dir guard below instead.
+    """
+    if not (os.environ.get("HOME") or os.environ.get("USERPROFILE")):
+        return None
+    try:
+        return Path.home().resolve()
+    except (RuntimeError, OSError):  # no home resolvable (rare, e.g. some container users)
+        return None
+
+
+def _is_dir(path: Path) -> bool:
+    """``path.is_dir()`` that answers False instead of raising on a directory we may not read.
+
+    A chmod-000 directory ANYWHERE between the CWD and the root made every command that walks up
+    die with a PermissionError traceback — on a directory that is merely in the way, not the one
+    being asked about."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
     """The nearest ``.localharness/`` at or above ``start`` (default: CWD), or None.
 
@@ -79,16 +121,24 @@ def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
     moment a command runs, NEVER bound to a module-level name (the workspace root varies per
     CWD; ``config/overlay.py:32-35``'s frozen ``USER_OVERLAY_PATH`` is the trap to avoid).
     """
-    here = Path(start).resolve() if start is not None else Path.cwd().resolve()
+    here = _walk_start(start)
+    if here is None:
+        return None
+    home = _home_stop()
+    # The GLOBAL config dir is never a workspace. The home-stop is the usual way that holds, but it
+    # is not available when $HOME is unset — and the dir the walk must not return is exactly the
+    # one `resolve_config_dir` names, so name it and check it directly (A-L2).
     try:
-        home = Path.home().resolve()
-    except RuntimeError:  # no home resolvable (rare, e.g. some container users)
-        home = None
+        global_dir = resolve_config_dir().resolve()
+    except OSError:
+        global_dir = None
     for ancestor in (here, *here.parents):
         if home is not None and ancestor == home:
             return None
         candidate = ancestor / WORKSPACE_DIR_NAME
-        if candidate.is_dir():
+        if global_dir is not None and candidate == global_dir:
+            return None
+        if _is_dir(candidate):
             return candidate
     return None
 
@@ -126,8 +176,11 @@ def _nearest_repo_root(here: Path, home: Optional[Path]) -> Optional[Path]:
         if home is not None and ancestor == home:
             return None
         marker = ancestor / GIT_DIR_NAME
-        if marker.is_dir() or marker.is_file():
-            return ancestor
+        try:
+            if marker.is_dir() or marker.is_file():
+                return ancestor
+        except OSError:  # unreadable ancestor: not the repo root we can see, keep walking
+            continue
     return None
 
 
@@ -148,12 +201,10 @@ def workspace_is_within_repo(
     filesystem and never shells out, so it works with no git binary installed and adds no child
     process to every command's startup.
     """
-    here = Path(start).resolve() if start is not None else Path.cwd().resolve()
-    try:
-        home = Path.home().resolve()
-    except RuntimeError:
-        home = None
-    repo_root = _nearest_repo_root(here, home)
+    here = _walk_start(start)
+    if here is None:
+        return False  # no CWD left to be inside of — treat as "not in a project" (A-M2)
+    repo_root = _nearest_repo_root(here, _home_stop())
     if repo_root is None:
         return False
     project = Path(workspace_dir).resolve().parent
