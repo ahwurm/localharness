@@ -50,7 +50,7 @@ def agent_create(
     role: Annotated[str, typer.Option("--role", "-r", help="Agent role description")] = "General-purpose agent",
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model name. Inherits org default if not set.")] = None,
     global_scope: Annotated[bool, typer.Option("--global", help="Add agent to global config (~/.localharness/agents/)")] = False,
-    project_scope: Annotated[bool, typer.Option("--project", help="Add agent to project config (./.localharness/agents/)")] = False,
+    project_scope: Annotated[bool, typer.Option("--project", help="Add agent to this project's workspace (nearest .localharness/agents/ up-tree, else ./.localharness/agents/)")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print YAML without writing")] = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing agent with the same name (default refuses)")] = False,
     config_dir: Annotated[
