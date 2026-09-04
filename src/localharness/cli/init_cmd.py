@@ -179,6 +179,22 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 """
 
 
+def _refuse_existing(target: Path) -> None:
+    """"There is already a workspace here" — from the pre-check and from losing the mkdir race.
+
+    One function because the two callers must give the SAME answer: which one fires is a matter of
+    microseconds, and a user watching ten parallel runs must not be able to tell them apart.
+    """
+    err_console.print(
+        "[bold red]Error:[/bold red] "
+        + escape(f"A workspace already exists at {target}. "
+                 f"Edit {target / 'config.yaml'} directly")
+        + " — this command never overwrites one.",
+        soft_wrap=True,
+    )
+    raise typer.Exit(1)
+
+
 def _remove_partial_workspace(target: Path) -> None:
     """Undo a scaffold that failed halfway, best effort.
 
@@ -228,24 +244,40 @@ def _scaffold_workspace(
         report_filesystem_error(exc, "find the current directory", console=err_console)
         raise  # pragma: no cover - report_filesystem_error always exits
 
-    # `lexists`, not `exists` (H2): `exists()` FOLLOWS symlinks, so a `.localharness` pointing at
-    # a deleted tree answered False, sailed past this refusal, and died in mkdir with
+    # `is_symlink()` as well as `exists()` (H2): `exists()` FOLLOWS symlinks, so a `.localharness`
+    # pointing at a deleted tree answered False, sailed past this refusal, and died in mkdir with
     # FileExistsError. A link that is there is there, whatever it points at.
+    #
+    # This is the friendly answer, not the guarantee — see the claim below.
     if target.is_symlink() or target.exists():
-        err_console.print(
-            "[bold red]Error:[/bold red] "
-            + escape(f"A workspace already exists at {target}. "
-                     f"Edit {target / 'config.yaml'} directly")
-            + " — this command never overwrites one.",
-            soft_wrap=True,
-        )
-        raise typer.Exit(1)
+        _refuse_existing(target)
 
-    # Validated before anything is written, and every remaining failure caught: a symlink loop
-    # (ELOOP), an unwritable project directory, a full disk. A half-made workspace left behind an
-    # error message is the worst outcome here — the next run would refuse to touch it (E cluster).
+    # THE CLAIM, and the one operation this command's correctness rests on. A bare `mkdir()` is
+    # atomic in the kernel: run ten of these at once in one directory and exactly one succeeds,
+    # the other nine get EEXIST. Checking `exists()` first and then creating is a race with a
+    # window between the two calls, and losing it used to mean a traceback (E cluster (d)) — nine
+    # processes crashing over a workspace that was created perfectly well.
+    #
+    # `parents=False` on purpose: the parent is the current directory, which exists by definition
+    # unless it was deleted underneath us — and that is a different message, not a silent mkdir -p.
     try:
-        (target / "agents").mkdir(parents=True)
+        target.mkdir()
+    except FileExistsError:
+        # Lost the race, or the directory appeared between the check above and here. Same answer
+        # either way, and the same answer the check gives: somebody else's workspace is there.
+        _refuse_existing(target)
+    except _HANDLED as exc:
+        # Nothing was created, so nothing is cleaned up.
+        report_filesystem_error(
+            exc, f"create a workspace in {Path.cwd()}", console=err_console, paths=[target]
+        )
+
+    # Past the claim this process OWNS `target`, which is what makes the cleanup below safe: a
+    # failure here removes a tree we just made, never one a concurrent winner is filling in. A
+    # half-made workspace left behind an error message is the worst outcome available — the next
+    # run would refuse to touch it.
+    try:
+        (target / "agents").mkdir()
         (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
     except _HANDLED as exc:
         _remove_partial_workspace(target)
