@@ -442,3 +442,33 @@ def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monke
     assert _squash(f"Config file: {global_config}") in squashed, out
     assert _squash(f"Workspace layer: {layout.ws_dir}") in squashed, out
     assert _squash(str(ws_config)) in _squash(error_text), out
+
+
+def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path, monkeypatch):
+    """A path Rich folded across two lines is not the path it names — you cannot copy it.
+
+    Every other test here runs at COLUMNS=400 so a long row stays intact for the assertions; that
+    width is a testing convenience and hides the failure a user actually hits. 43-04 found this
+    with the real binary at COLUMNS=120 and fixed `config show` with `soft_wrap=True`, which hands
+    the line to the TERMINAL whole — it still looks wrapped on screen, and it is one line in the
+    data. Both lines this plan adds are asserted here, at a width narrower than the paths.
+    """
+    layout = _layout(
+        tmp_path,
+        monkeypatch,
+        home_name="a-deliberately-long-project-home-directory-name",
+        global_config=_stamped(CURRENT_DEFAULTS_REVISION),
+    )
+    _write_workspace(layout, {"org": {"name": "a-long-workspace-organisation-name-for-this-row"}})
+    backup = layout.global_dir / f"{BACKUP_PREFIX}20260214-153000"
+    backup.write_text("old", encoding="utf-8")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    lines = _run_doctor().splitlines()
+
+    assert any(str(backup) in line for line in lines), (
+        f"the backup path is on no single line at width 100:\n" + "\n".join(lines)
+    )
+    assert any("a-long-workspace-organisation-name-for-this-row" in line for line in lines), (
+        f"the overridden row folded mid-value at width 100:\n" + "\n".join(lines)
+    )
