@@ -91,6 +91,47 @@ def _strip_v1(base_url: str) -> str:
     return root
 
 
+def _print_overridden_keys(cfg_path: Path, workspace: Path) -> None:
+    """Name the winning layer for every key this workspace actually CHANGES.
+
+    Two catalogue builds — this session's layering, and the same machine with the workspace
+    switched off — diffed by resolved VALUE. A workspace that restates a key with the value the
+    global layer already had has overridden nothing, and listing it would make this section noise
+    on exactly the configs people copy between projects.
+
+    Value-diffed rather than presence-filtered on purpose; `registry.provenance.overridden_paths`
+    owns that definition and `config show` reads the same function, so the two commands can never
+    disagree about what "overridden" means.
+
+    Kept out of doctor's command body: that function is already ~420 lines, and a section which
+    prints nothing at all outside a workspace should be readable as one unit.
+    """
+    from localharness.registry.provenance import layered_catalogue, overridden_paths
+
+    try:
+        effective, _ = layered_catalogue(cfg_path, workspace)
+        global_only, _ = layered_catalogue(cfg_path, None)
+    except Exception as exc:  # noqa: BLE001
+        # A broken config already fails loudly two lines below; this section must never be the
+        # thing that crashes doctor, the one command people run when things are already wrong.
+        console.print(f"       {escape(f'(layer report unavailable: {exc})')}")
+        return
+
+    rows = overridden_paths(effective, global_only)
+    if not rows:
+        console.print("       No overrides — the global config governs every key.")
+        return
+    console.print(f"       {len(rows)} key(s) overridden by this workspace:")
+    for path, entry, before in rows:
+        # The whole row goes through escape(): a band renders as `[workspace-config]`, which rich
+        # would otherwise parse as a style tag and fail on, and a config VALUE can be any string
+        # a user typed. (41-06's `[old] proj` lesson, applied to values as well as paths.)
+        console.print(
+            escape(f"         {path} = {entry.current_value!r}  [{entry.winning_layer}]"
+                   f"  (global: {before!r})")
+        )
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -157,6 +198,7 @@ def doctor(
         # command people run to find out where their config comes from. (`[/]` raises outright.)
         console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"))
         console.print(escape(f"       Global layer:    {cfg_path}"))
+        _print_overridden_keys(cfg_path, workspace)
     try:
         harness = loader.load_harness()
         console.print(f"{_PASS} Config valid")
