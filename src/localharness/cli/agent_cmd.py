@@ -144,9 +144,19 @@ def agent_create(
         # conflicting-flags guard rather than this command's name/scope validation.
         chosen = config_dir if config_dir is not None else config_dir_env_override()
         if chosen is not None:
-            source = "--config-dir" if config_dir is not None else (
-                "LOCALHARNESS_DIR" if os.environ.get("LOCALHARNESS_DIR") else "LOCALHARNESS_HOME"
-            )
+            # Naming the right one matters: a message that says "--config-dir" to somebody who
+            # never typed it sends them looking for a flag that is not on their command line.
+            # `config_dir` is not the flag — typer fills it from LOCALHARNESS_DIR too (its
+            # `envvar=`), so the parameter alone cannot tell the two apart; matching the env value
+            # can. Measured on the real binary: the first version of this message got it wrong.
+            if config_dir is not None and os.environ.get("LOCALHARNESS_DIR") == config_dir:
+                source = "$LOCALHARNESS_DIR"
+            elif config_dir is not None:
+                source = "--config-dir"
+            elif os.environ.get("LOCALHARNESS_DIR"):
+                source = "$LOCALHARNESS_DIR"
+            else:
+                source = "$LOCALHARNESS_HOME"
             err_console.print(
                 "[bold red]Error:[/bold red] "
                 + escape(f"--project cannot be used with an explicit config directory "
