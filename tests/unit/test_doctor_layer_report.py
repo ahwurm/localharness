@@ -33,6 +33,8 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.migrate import BACKUP_PREFIX
 from localharness.config.paths import discover_workspace_dir
 
 runner = CliRunner()
@@ -271,3 +273,139 @@ def test_f5_a_bad_workspace_value_is_reported_against_the_workspace_file(tmp_pat
     assert "(line 3)" in error_text, error_text
     assert _squash(str(global_config)) not in _squash(error_text), error_text
     assert f"(line {global_line})" not in error_text, error_text
+
+
+# ---------------------------------------------- F6: which defaults revision, migrated when, backup where
+
+
+def _issue_count(out: str) -> int:
+    """Doctor's own closing tally. Compared BETWEEN runs so "being behind is information, not a
+    health failure" is graded as a number rather than as the absence of a string."""
+    for line in out.splitlines():
+        if "issue(s) found." in line:
+            return int(line.split()[0])
+    return 0
+
+
+def _stamped(revision: int) -> str:
+    text = _global_config()
+    data = yaml.safe_load(text)
+    data["org"]["permissions"] = {"defaults_revision": revision}
+    return yaml.dump(data, sort_keys=False)
+
+
+def test_a_current_config_says_which_revision_it_carries(tmp_path, monkeypatch):
+    """`start`'s one-shot migration announcement scrolls away; doctor is where that fact lives."""
+    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
+
+    out = _run_doctor()
+
+    assert f"Security defaults: revision {CURRENT_DEFAULTS_REVISION}" in out, out
+    assert "(current)" in out, out
+
+
+def test_a_stale_config_names_both_revisions_and_is_not_a_failure(tmp_path, monkeypatch):
+    """Being behind the shipped revision is INFORMATION, and the difference is measured, not argued.
+
+    The same layout runs twice, changing exactly one byte of config — the stamp — so the issue
+    count can only move if the stale branch itself moved it. An assertion that merely looked for
+    the absence of the word "failure" would pass under an implementation that appends a failure id
+    silently.
+    """
+    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(0))
+    global_config = layout.global_dir / "config.yaml"
+
+    stale_out = _run_doctor()
+    stale_issues = _issue_count(stale_out)
+
+    global_config.write_text(_stamped(CURRENT_DEFAULTS_REVISION), encoding="utf-8")
+    current_issues = _issue_count(_run_doctor())
+
+    assert "revision 0" in stale_out, stale_out
+    assert f"shipped revision is {CURRENT_DEFAULTS_REVISION}" in stale_out, stale_out
+    assert "config migrate" in stale_out, stale_out
+    assert stale_issues == current_issues, (
+        f"being behind a defaults revision changed doctor's verdict "
+        f"({stale_issues} vs {current_issues}) — it is information, not a health failure"
+        f"\n{stale_out}"
+    )
+
+
+def test_the_most_recent_backup_is_the_one_named(tmp_path, monkeypatch):
+    """The backup FILE is the record — no new state is written to support this block, and its own
+    filename carries the timestamp. Two backups exist; only the later one is an answer to "when was
+    my config last migrated"."""
+    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+    older = layout.global_dir / f"{BACKUP_PREFIX}20250101-010203"
+    newer = layout.global_dir / f"{BACKUP_PREFIX}20260214-153000"
+    older.write_text("old", encoding="utf-8")
+    newer.write_text("new", encoding="utf-8")
+
+    out = _run_doctor()
+    squashed = _squash(out)
+
+    assert _squash(f"backup at {newer}") in squashed, out
+    assert "2026-02-14 15:30" in out, out
+    assert _squash(str(older)) not in squashed, out
+
+
+def test_no_backup_file_means_no_backup_line(tmp_path, monkeypatch):
+    """A config that has never been migrated gets no invented date and no "unknown" — the absence
+    of the line IS the answer."""
+    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+
+    out = _run_doctor()
+
+    assert "Last migrated" not in out, out
+    assert "backup at" not in out, out
+
+
+def test_an_unparseable_backup_stamp_degrades_and_stays_escaped(tmp_path, monkeypatch):
+    """Two claims in one body, because both are about the same printed line surviving hostile input.
+
+    A backup filename that is not a timestamp must not crash doctor (the command people run when
+    things are already wrong) — it falls back to the raw stamp. And the line goes through
+    `rich.markup.escape`, so a stamp containing `[old]` is not silently EATEN: measured, rich does
+    not raise on an unknown tag here, it DELETES it, which is the 43-02 F1 failure mode — output
+    that still looks fine while the data in it is gone.
+    """
+    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+    odd = layout.global_dir / f"{BACKUP_PREFIX}[old]"
+    odd.write_text("hand-copied backup", encoding="utf-8")
+
+    out = _run_doctor()
+
+    assert _squash(f"backup at {odd}") in _squash(out), out
+    assert "[old]" in out, out
+
+
+def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monkeypatch):
+    """The one v0.13 output change that prints for EVERYONE, asserted rather than left implicit.
+
+    LAYR-03 constrains workspace-CONDITIONAL behavior: with nothing up-tree, nothing about layering
+    may change. This block is a product decision, not layering behavior, and it is owner-vetoable
+    until release — which is why it ships as one function with one call site. This test and
+    `test_layr03_no_workspace_prints_no_workspace_vocabulary` are the two halves of that split:
+    with no workspace, the migration block is the ONLY new text.
+    """
+    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
+
+    out = _run_doctor()
+
+    assert "Security defaults:" in out, out
+    assert "workspace" not in out.lower(), out
+
+
+def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypatch):
+    """The `harness is not None` guard, graded.
+
+    An AttributeError raised inside doctor's own health check — on the exact configs doctor exists
+    to diagnose — would be the worst regression this file could ship, so the crash path is a test
+    rather than a code review note. `_run_doctor` asserts no exception escaped.
+    """
+    _layout(tmp_path, monkeypatch, workspace=False, global_config="version: '1'\norg:\n  log_level: not-a-level\n")
+
+    out = _run_doctor()
+
+    assert "Config invalid:" in out, out
+    assert "Security defaults:" not in out, out
