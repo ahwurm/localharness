@@ -10,7 +10,9 @@ The one composition point for v0.13 workspace discovery. Four rules, in order:
 3. A candidate INSIDE the project you are standing in loads silently. "Inside" means its folder is
    your current directory, or it sits at or below the root of the git repository containing your
    current directory — its RESOLVED folder, so a symlinked `.localharness/` counts as the tree it
-   points at rather than the one holding the link. Nested directories inherit their project's
+   points at rather than the one holding the link. From a linked worktree that root includes the
+   checkout the worktree was cut from (owner ruling R1): a worktree is your own project, and the
+   harness must not ask you about your own repository. Nested directories inherit their project's
    config — that is what every other
    project-scoped tool does and what users already expect, and a prompt that fires on every project
    is a prompt everybody clicks through (owner ruling 2026-09-03).

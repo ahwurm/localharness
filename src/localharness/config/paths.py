@@ -184,6 +184,77 @@ def _nearest_repo_root(here: Path, home: Optional[Path]) -> Optional[Path]:
     return None
 
 
+# A linked worktree's (or submodule's) `.git` is a one-line FILE naming the real git dir:
+# `gitdir: <parent>/.git/worktrees/<name>`. Both halves are named so the parse and the read cap
+# below are readable rather than magic (git's gitrepository-layout(5) documents the line).
+GITDIR_PREFIX = "gitdir:"
+_GITFILE_READ_LIMIT = len(GITDIR_PREFIX) + 4096  # one short line; never slurp a mislabeled blob
+
+
+def _linked_worktree_parent_root(marker: Path) -> Optional[Path]:
+    """The root of the repository a linked-worktree ``.git`` FILE points back at, or None.
+
+    ``git worktree add`` writes ``gitdir: <parent>/.git/worktrees/<name>`` (a submodule's says
+    ``<super>/.git/modules/<name>``), so the parent project's root is the directory holding that
+    ``.git`` — a string parse and a walk up to the ``.git`` component, no subprocess. This module
+    never shells out: the harness must work with no git binary installed and must not add a child
+    process to every command's startup.
+
+    Fails closed on anything it cannot read as that one line — a wrong answer here WIDENS what
+    loads ungated, so "not sure" has to mean "no". The pointed-at git dir must exist, too: a stale
+    file left by a deleted parent names a project that is not there.
+    """
+    try:
+        with marker.open("r", encoding="utf-8", errors="replace") as handle:
+            line = handle.readline(_GITFILE_READ_LIMIT).strip()
+    except OSError:
+        return None
+    if not line.lower().startswith(GITDIR_PREFIX):
+        return None
+    target = line[len(GITDIR_PREFIX):].strip()
+    if not target:
+        return None
+    git_dir = Path(target).expanduser()
+    if not git_dir.is_absolute():
+        # Relative to the directory holding the `.git` file (git's own rule for this line).
+        git_dir = marker.parent / git_dir
+    for ancestor in (git_dir, *git_dir.parents):
+        if ancestor.name != GIT_DIR_NAME or not _is_dir(ancestor):
+            continue
+        try:
+            return ancestor.parent.resolve()
+        except OSError:
+            return None
+    return None
+
+
+def _repo_roots(here: Path, home: Optional[Path]) -> tuple[Path, ...]:
+    """Every repository root ``here`` is inside: the nearest one, plus the parent repository when
+    that nearest root is a linked worktree or a submodule (owner ruling R1, 2026-09-04).
+
+    A worktree is a checkout OF your project, not a different project: before this, standing in
+    ``git worktree add ./wt`` and finding the main checkout's ``.localharness/`` one directory up
+    produced the one-time trust question about your own repository (F8).
+
+    The parent root is dropped when it is ``$HOME`` — the same rule the plain walk keeps, so a
+    home-directory dotfiles repository cannot turn every folder under home into one project.
+    """
+    root = _nearest_repo_root(here, home)
+    if root is None:
+        return ()
+    marker = root / GIT_DIR_NAME
+    try:
+        linked = marker.is_file()
+    except OSError:
+        linked = False
+    if not linked:
+        return (root,)
+    parent = _linked_worktree_parent_root(marker)
+    if parent is None or parent == root or parent == home:
+        return (root,)
+    return (root, parent)
+
+
 def workspace_is_within_repo(
     workspace_dir: PathLike, start: Optional[PathLike] = None
 ) -> bool:
@@ -191,7 +262,8 @@ def workspace_is_within_repo(
 
     True when a repository contains ``start`` AND the workspace's project folder (the parent of
     ``.localharness/``) sits at or below that repository's root. This is the "nested inherits"
-    case: you are already inside the project, so its config is not config from elsewhere.
+    case: you are already inside the project, so its config is not config from elsewhere. From a
+    linked worktree, the PARENT checkout counts as that project too (``_repo_roots``).
 
     False when no repository contains ``start``, or when the workspace's folder sits ABOVE the
     repository root — config reaching in from outside the tree you opened. Only that case is
@@ -204,11 +276,11 @@ def workspace_is_within_repo(
     here = _walk_start(start)
     if here is None:
         return False  # no CWD left to be inside of — treat as "not in a project" (A-M2)
-    repo_root = _nearest_repo_root(here, _home_stop())
-    if repo_root is None:
+    roots = _repo_roots(here, _home_stop())
+    if not roots:
         return False
     project = Path(workspace_dir).resolve().parent
-    return project == repo_root or repo_root in project.parents
+    return any(project == root or root in project.parents for root in roots)
 
 
 def resolve_overlay_path(config_dir: Optional[PathLike] = None) -> Path:

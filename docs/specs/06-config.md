@@ -94,9 +94,13 @@ without that layer. (`agent create --no-input` additionally refuses to guess a t
 **Three current behaviors worth knowing before you rely on the walk.** These are what the code does
 today, described plainly rather than promised:
 
-- **A linked git worktree reads as outside its parent project.** The walk stops at the worktree's
-  own root, so a `.localharness/` in the main checkout is "somewhere else" from inside the worktree
-  and you get the one-time trust question about your own repository.
+- **A linked git worktree is inside the checkout it was cut from.** A worktree's `.git` is a file
+  holding one line — `gitdir: <parent>/.git/worktrees/<name>` — and the walk reads it (a parse, not
+  a `git` call), so the parent repository's root counts as your project root too. The main
+  checkout's `.localharness/` therefore loads silently from inside a worktree of it. A submodule's
+  `.git` file is read the same way, naming its superproject. A file that does not parse, or that
+  points at a `.git` directory that is no longer there, fails closed: the worktree root stays the
+  only root, and a workspace above it is trust-gated as before.
 - **A non-git folder gets the workspace layer only at the project root.** For a directory that is
   not in a git repository, only standing exactly in the folder that holds `.localharness/` counts as
   in-project. A subdirectory of it is treated as outside, which means the trust question — and in a
