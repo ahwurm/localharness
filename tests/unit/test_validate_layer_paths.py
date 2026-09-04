@@ -180,3 +180,60 @@ def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch):
 
     assert result.exit_code == 1, result.output
     assert str(ws / "config.yaml") in result.output, result.output
+
+
+def _workspace_only_home(tmp_path, monkeypatch):
+    """A project with a workspace layer on a machine that was never `init`ed (D1's shape)."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)  # no ~/.localharness at all
+    proj = home / "proj"
+    ws = proj / ".localharness"
+    ws.mkdir(parents=True)
+    (proj / ".git").mkdir()
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COLUMNS", "300")
+    monkeypatch.chdir(proj)
+    return ws
+
+
+def test_workspace_only_broken_config_is_reported_not_called_absent(tmp_path, monkeypatch):
+    """`validate_all` keys the harness row under the GLOBAL config.yaml and skips the block
+    entirely when that file is absent — so on an un-`init`ed machine a workspace config.yaml
+    that cannot be parsed produced no row at all, and `validate` answered "No configuration
+    files found" about the very file it had just been pointed at. Reporting the file's error
+    is the whole job of this command.
+    """
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    ws = _workspace_only_home(tmp_path, monkeypatch)
+    (ws / "config.yaml").write_text("org:\n  name: [unclosed\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate"])
+
+    assert "No configuration files found" not in result.output, result.output
+    assert str(ws / "config.yaml") in result.output, result.output
+    assert result.exit_code == 1, result.output
+
+
+def test_workspace_only_valid_config_still_says_the_machine_needs_init(tmp_path, monkeypatch):
+    """The other half of the contract: a workspace config.yaml that PARSES gets no verdict row.
+
+    It is an overlay — partial by design — and `load_harness` still requires the global
+    config.yaml, so calling it "valid" would green-light a machine that cannot start a session.
+    The honest answer there is the unchanged one: nothing to validate yet, run init.
+    """
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    ws = _workspace_only_home(tmp_path, monkeypatch)
+    (ws / "config.yaml").write_text(yaml.safe_dump({"org": {"name": "o"}}), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate"])
+
+    assert result.exit_code == 2, result.output
+    assert "localharness init" in result.output

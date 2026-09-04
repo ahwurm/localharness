@@ -988,6 +988,21 @@ class ConfigLoader:
                 results.append((str(harness_path), None))
             except ConfigError as e:
                 results.append((str(harness_path), e))
+        elif self._local_dir is not None:
+            # The block above keys the harness row under the GLOBAL config.yaml and is skipped
+            # entirely when that file is absent — so on a machine that was never `init`ed, a
+            # workspace config.yaml that cannot be parsed produced NO ROW, and `validate` answered
+            # "No configuration files found" about the very file it had just been pointed at.
+            #
+            # Only the ERROR is reported here. A workspace config.yaml is an overlay, partial by
+            # design, and `load_harness` still requires the global one — so a row calling it valid
+            # would green-light a machine that cannot start a session.
+            ws_harness = self._local_dir / "config.yaml"
+            if ws_harness.exists():
+                try:
+                    _load_yaml_file(ws_harness)
+                except ConfigError as e:
+                    results.append((str(ws_harness), e))
 
         # org config
         org_path = self._config_dir / "org.yaml"
