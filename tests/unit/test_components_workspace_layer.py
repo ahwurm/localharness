@@ -178,6 +178,9 @@ def test_set_names_the_global_file_it_wrote_and_says_it_is_machine_wide(tmp_path
     assert "MACHINE-WIDE" in result.stdout, result.stdout
     assert _listing(layout.ws_dir) == before, "set wrote into the workspace"
     assert yaml.safe_load(layout.global_ovl.read_text())["org"]["name"] == "SET-BY-CLI"
+    # F2 on this command's own output: no band a user reads may be one of the retired names.
+    # `user` survives ONLY in the JSON payload and the audit event (a persisted schema).
+    assert "layer: user" not in result.stdout, result.stdout
 
 
 def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_path, monkeypatch):
