@@ -7,10 +7,12 @@ from rich.console import Group, RenderableType
 from rich.text import Text
 
 from localharness import resolved_version
+from localharness.cli.theme import SITE_ACCENT
 
-# Accent = site token oklch(80% 0.17 152). Wordmark is figlet "ANSI Shadow" for
-# "local_" / "harness", hardcoded so the banner needs no figlet dep at runtime.
-_GREEN = "#56dc85"
+# Accent = the site's --color-accent token, now sourced from cli/theme.py rather than
+# re-pasted here. Wordmark is figlet "ANSI Shadow" for "local_" / "harness", hardcoded so
+# the banner needs no figlet dep at runtime.
+_GREEN = SITE_ACCENT
 _WORDMARK = '██╗      ██████╗  ██████╗ █████╗ ██╗             \n██║     ██╔═══██╗██╔════╝██╔══██╗██║             \n██║     ██║   ██║██║     ███████║██║             \n██║     ██║   ██║██║     ██╔══██║██║             \n███████╗╚██████╔╝╚██████╗██║  ██║███████╗███████╗\n╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝\n                                                 \n██╗  ██╗ █████╗ ██████╗ ███╗   ██╗███████╗███████╗███████╗\n██║  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝██╔════╝\n███████║███████║██████╔╝██╔██╗ ██║█████╗  ███████╗███████╗\n██╔══██║██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ╚════██║╚════██║\n██║  ██║██║  ██║██║  ██║██║ ╚████║███████╗███████║███████║\n╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝\n                                                          '
 
 
