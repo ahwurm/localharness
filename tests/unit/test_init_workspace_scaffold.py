@@ -230,9 +230,13 @@ def test_workspace_in_the_home_directory_says_what_that_directory_is(project, mo
     assert "already exists" not in result.output
 
 
-def test_the_home_check_does_not_fire_one_directory_over(tmp_path, monkeypatch):
-    """The control: a project that merely SITS in $HOME is an ordinary project."""
-    monkeypatch.chdir(Path.home())
+def test_the_home_check_does_not_fire_one_directory_over(project, monkeypatch):
+    """The control: a project that merely SITS in $HOME is an ordinary project.
+
+    Takes the `project` fixture for its hermetic `$HOME`, not just for the cwd. Without it
+    `Path.home()` is the DEVELOPER'S home and this test scaffolds a real directory there — which
+    is exactly what it did once, in the run that caught it.
+    """
     sibling = Path.home() / "some-project"
     sibling.mkdir()
     monkeypatch.chdir(sibling)
