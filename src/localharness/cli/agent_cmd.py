@@ -56,6 +56,30 @@ def _skipped_agent_file(f: Path, exc: Exception) -> None:
     )
 
 
+def _warn_unreadable_workspace_files(workspace: Path | None) -> None:
+    """Name the workspace files this command could not read, the way `config show` does.
+
+    `agent list` reads the workspace layer, so a file in that layer that will not parse is news —
+    and the roster was silent about it: a broken workspace config.yaml gave the same
+    "No agents configured" as an empty project, exit 0, nothing anywhere. Stderr and exit 0 are
+    both deliberate: the roster itself is unaffected (discovery reads agents/, not config.yaml),
+    so this is a notice beside a valid answer, and --json's stdout stays parseable.
+    """
+    from localharness.config.loader import _load_yaml_file
+
+    if workspace is None:
+        return
+    for path in (workspace / "config.yaml", workspace / "overrides.yaml"):
+        if not path.exists():
+            continue
+        try:
+            _load_yaml_file(path)
+        except Exception:
+            err_console.print(
+                "[bold red]✗[/bold red] " + escape(f"unreadable, skipped: {path}"), soft_wrap=True
+            )
+
+
 @agent_app.command("create")
 def agent_create(
     name: Annotated[str, typer.Argument(help="Agent name (lowercase alphanumeric + hyphens)")],
@@ -248,15 +272,15 @@ def agent_list(
     from localharness.cli.workspace import resolve_workspace_layer
     from localharness.config.loader import ConfigLoader
 
+    # `config_dir` here is the RAW flag value on purpose: resolving it first would erase the
+    # "was this explicit" signal the workspace gate is built on.
+    # --json is machine output: never stop to ask. An undecided workspace is inert here and
+    # gets its prompt from the next interactive command in this directory.
+    workspace = resolve_workspace_layer(config_dir, interactive=False if json_output else None)
+    _warn_unreadable_workspace_files(workspace)
     agents = ConfigLoader(
         config_dir=resolve_config_dir(config_dir),
-        # `config_dir` here is the RAW flag value on purpose: resolving it first would erase the
-        # "was this explicit" signal the workspace gate is built on.
-        # --json is machine output: never stop to ask. An undecided workspace is inert here and
-        # gets its prompt from the next interactive command in this directory.
-        local_config_dir=resolve_workspace_layer(
-            config_dir, interactive=False if json_output else None
-        ),
+        local_config_dir=workspace,
     ).discover_agents(on_error=_skipped_agent_file)
 
     if not agents:

@@ -235,3 +235,24 @@ def test_init_guided_setup_names_the_launch_command_and_log(hostile_project, tmp
     printed = buf.getvalue()
     assert str(managed_server.log_path(cfg_dir)) in printed, printed
     assert str(cfg_dir / "server" / "venv" / "vllm") in printed, printed
+
+
+def test_agent_list_names_an_unparseable_workspace_config(hostile_project, monkeypatch):
+    """`agent list` reads the workspace layer, so a file in that layer it could not parse is
+    news — and it was silent about it: a broken workspace config.yaml produced the same
+    "No agents configured" as an empty project, exit 0, nothing on stderr.
+
+    Same line `config show` prints for the same condition, and the path is escaped for the same
+    reason every other path in cli/ is.
+    """
+    ws = hostile_project / WORKSPACE_DIR_NAME
+    ws.mkdir(parents=True)
+    (hostile_project / ".git").mkdir()  # in-project workspace = loads silently (LAYR-05)
+    broken = ws / "config.yaml"
+    broken.write_text("org:\n  name: [unclosed\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["agent", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "unreadable, skipped" in result.output, result.output
+    assert str(broken) in result.output, result.output
