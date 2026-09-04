@@ -236,26 +236,30 @@ class RecallRouter:
         ws_ctx = await self._primary.load_context(
             index_mode=index_mode, max_session_history=max_session_history
         )
+        if index_mode:
+            # The primary's index is rendered twice here (once inside load_context above for the
+            # safety-context fields and the true fact_count, once labelled below). Two local
+            # SQLite SELECTs; the alternative — reaching past load_context for guardrails,
+            # division and the count — trades a measurable cost for an unmeasurable one.
+            ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
+                max_session_history, origin_label=ORIGIN_WORKSPACE
+            )
+            # Key-level dedup, workspace-wins — the same answer `query_facts` and `get_fact`
+            # already give (B5). Without it the every-turn block handed the model both sides of
+            # a contradiction while its own tools resolved one of them. The exclusion set is
+            # what the WORKSPACE BLOCK actually rendered (one id-keyed SELECT), not every
+            # active workspace key: a global fact must be suppressed by a line the model can
+            # see, never by an invisible one.
+            ws_keys = {f.key for f in await self._primary.get_facts_by_ids(ws_ids)}
+        else:
+            ws_md, ws_ids, ws_keys = ws_ctx.agent_memory_md, list(ws_ctx.injected_fact_ids), set()
+        # EVERY primary call is above this line on purpose: the catch below is scoped to the
+        # store this session does not own, so a fault in this project's own memory still raises.
         try:
             g = await self.ensure_global()
             if g is None:                  # unreachable while `scope` collapses; kept explicit
                 return ws_ctx
             if index_mode:
-                # The primary's index is rendered twice here (once inside load_context above for
-                # the safety-context fields and the true fact_count, once labelled below). Two
-                # local SQLite SELECTs; the alternative — reaching past load_context for
-                # guardrails, division and the count — trades a measurable cost for an
-                # unmeasurable one.
-                ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
-                    max_session_history, origin_label=ORIGIN_WORKSPACE
-                )
-                # Key-level dedup, workspace-wins — the same answer `query_facts` and
-                # `get_fact` already give (B5). Without it the every-turn block handed the
-                # model both sides of a contradiction while its own tools resolved one of
-                # them. The exclusion set is what the WORKSPACE BLOCK actually rendered (one
-                # id-keyed SELECT), not every active workspace key: a global fact must be
-                # suppressed by a line the model can see, never by an invisible one.
-                ws_keys = {f.key for f in await self._primary.get_facts_by_ids(ws_ids)}
                 g_md, g_ids = await g._render_memory_index_with_ids(
                     _MERGED_GLOBAL_SESSION_HISTORY, origin_label=ORIGIN_GLOBAL,
                     include_preamble=False, exclude_keys=ws_keys,
@@ -264,7 +268,6 @@ class RecallRouter:
                 g_ctx = await g.load_context(
                     index_mode=False, max_session_history=_MERGED_GLOBAL_SESSION_HISTORY
                 )
-                ws_md, ws_ids = ws_ctx.agent_memory_md, list(ws_ctx.injected_fact_ids)
                 g_md, g_ids = g_ctx.agent_memory_md, []
         except Exception as exc:
             return self._degraded_merge(ws_ctx, exc)
