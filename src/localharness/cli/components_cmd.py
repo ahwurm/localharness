@@ -463,10 +463,11 @@ def components_set(
             )
         )
     else:
-        console.print(
-            f"[green]set[/green] {path} = {typed_value!r} "
-            f"(was: {before!r}, layer: user)"
-        )
+        # `layer: user` used to close this line. It is dropped, not renamed: `user` is the audit
+        # EVENT's vocabulary (kept in the JSON and in ComponentMutated), and as a band name shown
+        # to a human it says neither which layer nor which file — the exact ambiguity F2 removes.
+        # The next line names the actual file, which is strictly more informative.
+        console.print(f"[green]set[/green] {path} = {typed_value!r} (was: {before!r})")
         # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
         # (41-06's measured lesson, same reason doctor and validate escape theirs).
         console.print(
