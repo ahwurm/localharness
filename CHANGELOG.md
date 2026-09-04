@@ -4,6 +4,98 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.13.1] — 2026-09-04
+
+A fix train from running 0.13.0 on real work. A long task that promised a next
+step and then stopped, a startup that quietly deleted its own warnings, a picker
+that crashed on an agent's name, and a Windows upgrade that reported failure
+after succeeding — plus the workspace layer offering itself to projects that do
+not have one yet.
+
+### Added
+- **`start` offers to make a workspace when your project has none.** The layer
+  has always been there — almost nobody finds `init --workspace` before reading
+  the docs, and the moment you want one is the moment you start the harness
+  inside a project. So a `start` that finds no `.localharness/` anywhere above it
+  now asks once: create `./.localharness` for this project? Default no. Yes
+  scaffolds it and the session continues with that layer already active, so there
+  is no "now run it again". This is the only prompt in the harness that writes to
+  disk, so it stays silent and creates nothing when there is no terminal, when
+  `--no-input` is passed (`start` takes the flag now), when `--config-dir`,
+  `LOCALHARNESS_DIR` or `LOCALHARNESS_HOME` named a directory, when a workspace
+  was already found up-tree, and in `$HOME` or the global config directory —
+  none of which are a project. A closed stdin answers no.
+- **A declined offer is remembered, once per directory, ever.** The answer goes
+  in `declined_workspace_offers.yaml` next to your global config — never in the
+  project — and only an answered prompt records anything, so a session that could
+  not ask has not spent your decision. Nothing else reads that file: `init
+  --workspace`, or simply making the directory yourself, still gives you a
+  workspace whatever you once answered. If the file is unreadable you get the
+  question again rather than a silently skipped one.
+- **A repeated stuck-nudge now says something new.** Where you have raised
+  `agent.baton_gate.max_nudges` above its default of 1, the second and later
+  nudges quote the model's own announcing words back to it and name the two ways
+  out — do it with a tool call, or say plainly that you are done or blocked —
+  instead of repeating the first nudge verbatim. At the default bound nothing
+  changes: the single nudge is the same message as before.
+- **Terminal colors from the architecture diagrams.** The entity hues on
+  localharness.dev's architecture plates — memory cyan, tool purple, provider
+  amber — are now the terminal's, at startup and inside every turn, so a tool
+  call in the scrollback is the same color as the tool box in the diagram. Names
+  take the color; message bodies stay neutral, and success/error keep green and
+  red, because a verdict is not a type. One knock-on you will see: the agent has
+  taken the accent green, so your own input is now the site's ink rather than
+  green.
+
+### Changed
+- **A linked git worktree counts as inside the project it was cut from.** `git
+  worktree add` leaves a `.git` *file*, not a directory, and the repository walk
+  stopped there — so the main checkout's `.localharness/` one level up read as
+  config from outside your tree, and the harness asked the one-time trust
+  question about your own repository. The file names its parent repository, and a
+  workspace at or below that parent is now inside. A submodule's `.git` file has
+  the same shape and reads the same way. SECURITY.md documents the rule.
+
+### Fixed
+- **A long task that ends on "Let me check the config…" gets nudged instead of
+  accepted.** The gate that catches a reply announcing work it never did was
+  missing the plainest form of it. "Now let me confirm…" was caught; a bare "Let
+  me confirm…" — the same announcement in different grammar — was not, so the
+  promise was delivered as the answer and the turn ended. Both forms now share
+  one list of action verbs. Separately, and worse, the detector split the reply
+  into sentences on every `.`, so a closing sentence containing a filename was cut
+  at the dot: for "…check the content.json format expectations" it judged the
+  fragment "json format expectations" and found nothing to catch. Any filename,
+  version or decimal in a final sentence did that. A sentence now ends at
+  punctuation followed by a space or the end of the text. Closing courtesies like
+  "let me know if…" are still accepted, and a subagent that ends this way is
+  reported to its parent as having produced no result rather than passed off as a
+  finding.
+- **`start`'s startup summary no longer deletes its own warnings** (#157). The
+  warnings were appended inside square brackets and printed through Rich, which
+  read the whole group as one formatting tag and removed it. Every degraded
+  startup — memory fallen back to in-memory, a hook that failed to load — printed
+  a clean-looking summary and told you nothing.
+- **An agent named `[old] proj` no longer breaks the agent picker** (#158). Agent
+  names were rendered as markup in the roster table, so a bracketed name lost the
+  bracketed part, and a name that looked like a closing tag crashed the picker
+  outright. Names are now literal text.
+- **`localharness update` on Windows stops reporting a failed upgrade that
+  worked** (#156). `uv` installs the new package and then copies the launcher over
+  `localharness.exe` — which on Windows is the running program, and is locked, so
+  the copy failed and `update` printed "upgrade command failed" to someone whose
+  package had just been upgraded. The upgrade is now handed to a detached process
+  that finishes after `update` exits. macOS and Linux are untouched, and a genuine
+  failure still fails.
+- **`autoresearch report` prints an undo that works.** The adopted-mutation inbox
+  offered a `git revert` line for a commit that has not existed since adoption
+  moved to the config overlay in 0.13.0. It now prints the `localharness
+  components set <path> <old value>` that actually reverses the change, taken from
+  the value the archive already stores.
+- **The `kill_file` setting no longer claims the harness deletes the file.** It
+  never has: the kill switch is checked by existence and left in place, so it has
+  to be removed by hand or the next session stops at its first step too.
+
 ## [0.13.0] — 2026-09-04
 
 Workspace layering. A `.localharness/` folder in a project now carries its own
