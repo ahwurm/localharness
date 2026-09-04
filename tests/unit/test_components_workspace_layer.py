@@ -196,6 +196,32 @@ def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_
     assert json.loads(after.stdout)["value"] == _WORKSPACE_NAME
 
 
+def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatch):
+    """`set`'s own loader must be workspace-aware too, not just the catalogue.
+
+    Written because the prescribed mutation for that wire measured ZERO red: the loader
+    `_build_layered_loader` returns feeds exactly one thing — `cfg.org.audit_log_path` — and no
+    test set that key in a workspace. A wiring line no assertion can see is a wiring line that
+    can be deleted, so this grades it: the project says where its audit trail goes.
+
+    (The BASE stays the global config dir — `resolve_runtime_path(value, loader._config_dir)` —
+    so what the workspace controls here is the name, not the root. Asserted as it behaves.)
+    """
+    layout = _layout(
+        tmp_path,
+        monkeypatch,
+        ws_config={"org": {"log_level": "debug", "audit_log_path": "ws-audit.jsonl"}},
+    )
+
+    result = runner.invoke(app, ["components", "set", "org.name", "SET-BY-CLI"])
+
+    assert result.exit_code == 0, result.output
+    assert (layout.global_dir / "ws-audit.jsonl").exists(), _listing(layout.global_dir)
+    assert not (layout.global_dir / "audit.jsonl").exists(), (
+        "the audit landed at the compiled-in default — set's loader never read the workspace"
+    )
+
+
 def test_set_json_carries_the_write_target_and_keeps_the_audit_vocabulary(tmp_path, monkeypatch):
     """`target` is new; `layer` is NOT renamed. It mirrors the ComponentMutated audit event's own
     vocabulary, which this phase deliberately leaves alone (a persisted log's schema)."""
