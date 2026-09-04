@@ -32,7 +32,12 @@ from typing import Any
 
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay, _resolve_user_overlay_path
-from localharness.registry import build_catalogue, coerce_value, set_value_in_dict
+from localharness.registry import (
+    LAYER_GLOBAL_OVERRIDES,
+    build_catalogue,
+    coerce_value,
+    set_value_in_dict,
+)
 
 # Defense-in-depth: re-assert the gate's anti-reward-hacking seal before committing to LIVE
 # config (mirror experiment.py verbatim — the seal must hold at THIS boundary independently).
@@ -145,7 +150,7 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
     catalogue = build_catalogue(
         cfg,
         agent_cfg=_provenance_agent_cfg(),
-        overlays={"user": _user_overlay},
+        overlays={LAYER_GLOBAL_OVERRIDES: _user_overlay},
     )
     cat_entry = catalogue.get(component)
     if (

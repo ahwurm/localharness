@@ -131,14 +131,15 @@ def _diff_blob(proposal, cfg) -> str:
 
     from localharness.autoresearch.experiment import _provenance_agent_cfg
     from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
-    from localharness.registry.catalogue import build_catalogue
+    from localharness.registry.catalogue import LAYER_GLOBAL_OVERRIDES, build_catalogue
 
     try:
         _user_ov = load_overlay(_resolve_user_overlay_path())
+        # The band is the GLOBAL overrides.yaml — that is literally the file just loaded.
         type_name = build_catalogue(
             cfg,
             agent_cfg=_provenance_agent_cfg(),
-            overlays={"user": _user_ov},
+            overlays={LAYER_GLOBAL_OVERRIDES: _user_ov},
         )[proposal.component].type_name
     except Exception:
         type_name = ""

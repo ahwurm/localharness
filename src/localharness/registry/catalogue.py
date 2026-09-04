@@ -6,8 +6,10 @@ Enumerates every mutable component for `localharness components list`. Merges:
   - Dynamic tools.<name>.description from ToolRegistry._schemas
   - Dynamic hooks.<name>.config from HookSystem.loaded_plugin_names
 
-Layer attribution: pass overlays={"project": {...}, "user": {...}, "experiment": {...}};
-catalogue records the highest-priority layer that owns each path.
+Layer attribution: pass overlays={"global-config": {...}, "global-overrides": {...},
+"workspace-config": {...}, "workspace-overrides": {...}, "experiment": {...}}; catalogue records
+the highest-priority band that owns each path. `registry/provenance.build_layer_overlays` builds
+that dict for the CLI; every caller should use it rather than assembling one by hand.
 
 See 14-RESEARCH.md Example B for the reference implementation.
 """
@@ -27,16 +29,33 @@ class ComponentEntry:
     type_name: str             # human-readable: "int", "float", "str", "Literal['debug',...]"
     current_value: Any         # resolved-cascade value (what `get` returns)
     default_value: Any         # the Pydantic-baked default
-    winning_layer: str         # "default" | "project" | "user" | "workspace" | "experiment"
+    winning_layer: str         # one of the LAYER_* constants below, or LAYER_DEFAULT
 
 
-# Owner ruling 2026-09-03 (Option A): the workspace layer outranks the global user overlay — the
-# SPECIFIC beats the GENERAL. `experiment` stays on top. This tuple is the ORDER; nothing populates
-# an `overlays["workspace"]` dict in v0.13 (components_cmd._build_overlays ships project + user
-# only), and `_detect_layer`'s `overlays.get(layer, {})` makes an unpopulated name inert — so every
-# existing attribution is unchanged. Wiring a real workspace dict in is CLI-03 (phase 43), together
-# with the still-open question of renaming "project" (which means config.yaml, not a project folder).
-_LAYER_PRIORITY = ("experiment", "workspace", "user", "project")  # highest-priority first
+# The four config FILES the owner's 2026-09-03 ruling merges, named for what they are. Until v0.13
+# these were `project` (which meant the global config.yaml, not a project folder) and `user` (which
+# meant the global overrides.yaml) — two names that became actively misleading the moment a real
+# workspace layer existed. Every band now says WHICH LAYER and WHICH FILE.
+LAYER_GLOBAL_CONFIG = "global-config"
+LAYER_GLOBAL_OVERRIDES = "global-overrides"
+LAYER_WORKSPACE_CONFIG = "workspace-config"
+LAYER_WORKSPACE_OVERRIDES = "workspace-overrides"
+LAYER_EXPERIMENT = "experiment"
+LAYER_DEFAULT = "default"
+
+# Highest-priority FIRST. The order IS the owner's ruled merge order read backwards:
+# global config < global overrides < workspace config < workspace overrides, with `experiment`
+# (the gate's throwaway worktree overlay) on top of all of it. `_detect_layer`'s
+# `overlays.get(layer, {})` makes an unpopulated band inert, which is what keeps a no-workspace
+# session's attribution identical to pre-v0.13 (LAYR-03): `build_layer_overlays` returns the two
+# global keys only when no workspace applies.
+_LAYER_PRIORITY = (
+    LAYER_EXPERIMENT,
+    LAYER_WORKSPACE_OVERRIDES,
+    LAYER_WORKSPACE_CONFIG,
+    LAYER_GLOBAL_OVERRIDES,
+    LAYER_GLOBAL_CONFIG,
+)
 
 
 def _path_exists_in_dict(d: dict, path: str) -> bool:
@@ -50,14 +69,14 @@ def _path_exists_in_dict(d: dict, path: str) -> bool:
 
 
 def _detect_layer(path: str, overlays: dict[str, dict]) -> str:
-    """Scan overlays top-down ('experiment' -> 'workspace' -> 'user' -> 'project'); first hit wins.
-    Returns 'default' if no overlay contains the path.
+    """Scan overlays top-down in _LAYER_PRIORITY order; first hit wins.
+    Returns LAYER_DEFAULT if no overlay contains the path.
     """
     for layer in _LAYER_PRIORITY:
         layer_dict = overlays.get(layer, {})
         if _path_exists_in_dict(layer_dict, path):
             return layer
-    return "default"
+    return LAYER_DEFAULT
 
 
 def _type_name(ann: Any) -> str:
@@ -123,8 +142,9 @@ def build_catalogue(
 
     Args:
         cfg: resolved HarnessConfig (post-cascade).
-        overlays: layer dicts keyed "project" | "user" | "experiment" for layer attribution.
-                  Pass {} for default-only attribution.
+        overlays: layer dicts keyed by the LAYER_* band names for layer attribution
+                  (registry.provenance.build_layer_overlays builds this). Pass {} for
+                  default-only attribution.
         agent_cfg: optional AgentConfig to enumerate `agent.*` paths against the live agent;
                    if None, uses AgentConfig.model_construct() defaults (REG-04 always exposes
                    agent surfaces in list).
