@@ -93,7 +93,7 @@ def _strip_v1(base_url: str) -> str:
     return root
 
 
-def _print_overridden_keys(cfg_path: Path, workspace: Path) -> None:
+def _print_overridden_keys(cfg_path: Path, workspace: Path, loader) -> None:
     """Name the winning layer for every key this workspace actually CHANGES.
 
     Two catalogue builds — this session's layering, and the same machine with the workspace
@@ -111,12 +111,20 @@ def _print_overridden_keys(cfg_path: Path, workspace: Path) -> None:
     from localharness.registry.provenance import layered_catalogue, overridden_paths
 
     try:
-        effective, _ = layered_catalogue(cfg_path, workspace)
+        # `loader` is doctor's own — the SAME layering, already parsed. Handing it over makes this
+        # section free instead of a second full read of every config file. The workspace-off view
+        # below is a genuinely different layering and needs its own loader; two reads is the floor,
+        # and it used to be three.
+        effective, _ = layered_catalogue(cfg_path, workspace, loader=loader)
         global_only, _ = layered_catalogue(cfg_path, None)
     except Exception as exc:  # noqa: BLE001
         # A broken config already fails loudly two lines below; this section must never be the
         # thing that crashes doctor, the one command people run when things are already wrong.
-        console.print(f"       {escape(f'(layer report unavailable: {exc})')}")
+        # ONE line, and only the reason's first line: the full message (owning file, line number)
+        # is what the config-invalid branch prints, and printing the whole multi-line error inside
+        # this parenthetical printed it twice and cropped the copy.
+        reason = str(exc).splitlines()[0] if str(exc).strip() else type(exc).__name__
+        console.print(escape(f"       (layer report unavailable: {reason})"), soft_wrap=True)
         return
 
     rows = overridden_paths(effective, global_only)
@@ -249,7 +257,7 @@ def doctor(
         # command people run to find out where their config comes from. (`[/]` raises outright.)
         console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"), soft_wrap=True)
         console.print(escape(f"       Global layer:    {cfg_path}"), soft_wrap=True)
-        _print_overridden_keys(cfg_path, workspace)
+        _print_overridden_keys(cfg_path, workspace, loader)
     try:
         harness = loader.load_harness()
         console.print(f"{_PASS} Config valid")

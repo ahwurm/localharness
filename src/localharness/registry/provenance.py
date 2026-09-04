@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, get_origin
 
 from localharness.config.loader import ConfigLoader, _load_yaml_file
 from localharness.config.overlay import load_overlay
@@ -30,12 +30,19 @@ from localharness.registry.catalogue import (
     LAYER_GLOBAL_OVERRIDES,
     LAYER_WORKSPACE_CONFIG,
     LAYER_WORKSPACE_OVERRIDES,
+    _LAYER_PRIORITY,
     ComponentEntry,
     build_catalogue,
 )
+from localharness.registry.paths import _unwrap_optional
 
 _AGENT_KEY = "agent"
 _AGENT_PREFIX = _AGENT_KEY + "."
+
+# Fields whose resolved value is a UNION across layers rather than one layer's value. The deny
+# list is the only one: `ConfigLoader._layered_org_deny` accumulates it so a workspace can never
+# subtract a global denial (MERG-02). Every other list is replaced wholesale by `deep_merge`.
+_UNION_PATHS = frozenset({"org.permissions.deny_patterns"})
 
 
 def build_layer_overlays(
@@ -105,19 +112,99 @@ def apply_agent_overlay_values(
     return catalogue
 
 
+def _contributing_layers(path: str, overlays: dict[str, dict]) -> list[str]:
+    """Every band that sets this exact dot-path, in MERGE order (lowest priority first)."""
+    return [
+        layer
+        for layer in reversed(_LAYER_PRIORITY)
+        if _dig_dict(overlays.get(layer, {}), path)[1]
+    ]
+
+
+def _attributing_layer(path: str, overlays: dict[str, dict]) -> Optional[str]:
+    """The band whose value the merge actually took for this path, including BLOCK CLOBBERS.
+
+    `_detect_layer` asks only "does this band carry the full dot-path". A workspace that writes
+    `server: null` carries no `server.runtime` key, so every leaf under the nulled block was
+    credited to the global layer that no longer supplies it — the display said `global-config`
+    beside a value of None the global file does not contain. Walking the PREFIXES catches it: a
+    band that replaces an ancestor with a non-dict has replaced the whole subtree.
+
+    Scanned highest-priority first, so a full-path hit above a clobber still wins — the same order
+    the merge itself resolves in.
+    """
+    parts = path.split(".")
+    for layer in _LAYER_PRIORITY:
+        cur: Any = overlays.get(layer, {})
+        for i, part in enumerate(parts):
+            if not isinstance(cur, dict) or part not in cur:
+                break
+            cur = cur[part]
+            if i == len(parts) - 1 or not isinstance(cur, dict):
+                return layer  # the leaf itself, or an ancestor this band replaced wholesale
+    return None
+
+
+def _accumulated(layers: list[str]) -> str:
+    """The honest winning_layer for a value no single band produced."""
+    return f"accumulated ({' + '.join(layers)})"
+
+
+def _is_dict_leaf(entry: ComponentEntry) -> bool:
+    """A `dict[K, V]` leaf, which `deep_merge` MERGES key-wise rather than replacing."""
+    return get_origin(_unwrap_optional(entry.annotation)) is dict
+
+
+def honest_attribution(
+    catalogue: dict[str, ComponentEntry], overlays: dict[str, dict]
+) -> dict[str, ComponentEntry]:
+    """Repair the two attributions `_detect_layer` cannot express on its own.
+
+    ACCUMULATED values. `org.permissions.deny_patterns` is unioned across layers (MERG-02) and a
+    `dict[K, V]` leaf is deep-merged key-wise, so when two bands contribute, the resolved value
+    came from BOTH and naming one of them is a fabrication — the display said `workspace-config`
+    beside a list holding the global layer's patterns. Such an entry is labelled
+    `accumulated (global-config + workspace-config)` instead.
+
+    CLOBBERED blocks: see `_attributing_layer`.
+
+    KNOWN LIMIT, stated rather than hidden: a dict leaf's attribution is per-FIELD, never per-KEY.
+    With one band setting `model_context_overrides.modelA` and another `modelB`, this says both
+    contributed; it cannot say which band owns which key, because `walk_model_fields` stops at
+    dict leaves and the catalogue has no entry below them. `config show` prints what this returns.
+    """
+    for path, entry in list(catalogue.items()):
+        contributors = _contributing_layers(path, overlays)
+        if len(contributors) > 1 and (path in _UNION_PATHS or _is_dict_leaf(entry)):
+            catalogue[path] = replace(entry, winning_layer=_accumulated(contributors))
+            continue
+        layer = _attributing_layer(path, overlays)
+        if layer is not None and layer != entry.winning_layer:
+            catalogue[path] = replace(entry, winning_layer=layer)
+    return catalogue
+
+
 def layered_catalogue(
     config_dir: Path,
     workspace: Optional[Path],
     *,
     tool_registry: Any = None,
+    loader: Optional[ConfigLoader] = None,
 ) -> tuple[dict[str, ComponentEntry], dict[str, dict]]:
     """(catalogue, overlays) for exactly one layering. Callers that need BOTH the workspace-on and
-    the workspace-off view (doctor's diff) call this twice with different `workspace` values."""
-    loader = ConfigLoader(config_dir=config_dir, local_config_dir=workspace)
+    the workspace-off view (doctor's diff) call this twice with different `workspace` values.
+
+    `loader` lets a caller that ALREADY built the loader for this layering hand it over instead of
+    paying for a second parse of the same files (doctor). It must be a loader for exactly this
+    `config_dir`/`workspace` pair — the catalogue would otherwise describe a layering the caller
+    never asked for.
+    """
+    if loader is None:
+        loader = ConfigLoader(config_dir=config_dir, local_config_dir=workspace)
     cfg = loader.load_harness()
     overlays = build_layer_overlays(loader, workspace)
     cat = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    return apply_agent_overlay_values(cat, overlays), overlays
+    return honest_attribution(apply_agent_overlay_values(cat, overlays), overlays), overlays
 
 
 def overridden_paths(
