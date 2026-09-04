@@ -85,6 +85,21 @@ other's context (#150).
 - **A config error names the file that set the offending key.** A bad value in a
   workspace `config.yaml` is reported against that file's path and that file's
   own line number, not against the global file — in `validate` and `doctor` both.
+- **An adopted autoresearch mutation is written to your global overlay, not
+  committed to git.** Adoption used to `git add` a project file, which died
+  outright when that file was git-ignored — the loop stopped at its first
+  success, half applied. It now writes `overrides.yaml` through the same
+  primitives `localharness components set` uses, which is also the file the
+  loop's own readers read, so an adoption is visible to the next proposal. Two
+  things follow: the change is machine-wide, and undoing one is `localharness
+  components set <path> <old value>` (the archive keeps the previous value) or an
+  edit of `overrides.yaml` — not `git revert`.
+- **`doctor`, `validate` and `agent create` take `--no-input`.** They skip an
+  untrusted workspace layer, say on stderr that they skipped it, and record
+  nothing. The trust answer is permanent, and a hook or CI job that happens to
+  inherit a terminal could otherwise spend it on your behalf. `agent create
+  --no-input` also refuses to guess a target layer — pass `--global` or
+  `--project`.
 
 ### Fixed
 - A malformed `overrides.yaml` reports a clean config error instead of a
@@ -96,6 +111,86 @@ other's context (#150).
 - The trust gate resolves symlinks before deciding a workspace is inside your
   project — a symlinked `.localharness/` pointing outside the repository now gets
   the same prompt (or non-interactive skip) as any other outside-project config.
+- **`recall_scope: global` no longer writes to the store it only reads.** The
+  recall router sent a session's reads to the other store, and two enrichment
+  writes — the staged read-counter and the activation trace — followed them
+  there, so a `memory_search` in one project touched another project's database.
+  The guarantee above ("no value of this knob makes a project's session write
+  into your global memory") is now enforced rather than asserted: a store that is
+  not this session's own is a read-only view, and the second handle is opened as
+  a non-owner, with no legacy adoption, no tag seeding and no identity re-key.
+  The honest residue, stated in the router's own docstring: such an open still
+  creates the database file and applies schema migrations if it is missing or
+  behind, and a `global` session leaves the global store's access counts and
+  traces un-updated.
+- **A project with a workspace layer and no machine config is no longer
+  invisible.** `doctor`, `config show` and `agent list` each stopped at a missing
+  global `config.yaml` and exited before reaching their own workspace-aware
+  loader — so a project set up with `init --workspace` alone showed nothing.
+  They now say the machine is unconfigured in one line and show the workspace
+  layer anyway. `agent list --json` on an empty roster emits `[]` instead of
+  prose.
+- **`validate` checks every file, at its own path.** It iterated both layers but
+  re-resolved each file by name, which returns the *winning* layer's file — so a
+  shadowed file was never opened and its verdict was really the other file's,
+  filed under the wrong name (proven in both directions: a broken global file
+  reported valid, a valid one reported with a workspace file's error). Each file
+  is now validated where it lives. Inside a workspace, rows print the full path
+  instead of a bare basename, and an error's row is keyed to the file that owns
+  it. With no workspace the output is unchanged.
+- **`components set agent.temperature|max_tokens|model` now reaches the agent
+  that runs.** The value was stored, `components get` confirmed it, and the
+  session ignored it: resolution wrote its own answer into the merged config
+  before the overlay was layered underneath, so an overlay scalar could never
+  win. Precedence is now what it always claimed to be — agent yaml > division >
+  org > overlay > schema default. Pre-existing since 0.12.5 and surfaced by
+  `recall_scope`, whose documentation sends people through this command.
+- **Deny patterns in an `overrides.yaml` are enforced, not just stored**, and
+  they union across layers like every other org-level deny list.
+- **An empty deny list on screen is no longer an empty deny list at runtime.**
+  A config declaring `deny_patterns: []` displayed as `[]` while enforcement
+  unioned the shipped defaults into every agent. `config show`, `components get`
+  and `components list` now append `(+24 shipped defaults always enforced)`, with
+  the count read off the model so it cannot drift from what ships.
+- **The kill switch resolves from the global config layer only.** Its *directory*
+  was already pinned there — one file has to stop every session on the machine —
+  but its *value* came off the resolved agent config, so a workspace agent or
+  division file carrying an absolute `kill_file` could silently detach a session
+  from the operator's KILL, with nothing about the session looking unusual. A
+  workspace value is now ignored and logged.
+- **The REPL's `/model` refit reads the shared budget resolution** instead of
+  hand-reading `context.model_context_overrides`, so it can no longer disagree
+  with the resolver that the rest of the harness uses.
+- **A hostile filesystem gets a message, not a traceback.** Paths, values and
+  error strings are printed as data rather than as Rich markup, so a folder named
+  `[old] proj` prints as itself; the workspace walk survives unreadable
+  directories, dangling and looped symlinks, and a deleted working directory; a
+  rejected value's repr is bounded, so a YAML alias bomb no longer prints
+  gigabytes from the command you run when something is already wrong; and
+  `config show`, `validate`, `init --workspace` and `agent create` all handle the
+  filesystem errors `doctor` already handled.
+- **`agent create --project` refuses an explicit config directory** instead of
+  writing an agent that nothing can see. An explicit `--config-dir` /
+  `LOCALHARNESS_DIR` / `LOCALHARNESS_HOME` switches workspace discovery off, so
+  `--project` had no project to resolve and fell back to `./.localharness/` — a
+  file the same invocation's readers skip, reported under a success checkmark.
+  The refusal names the setting you actually used.
+- **`init --workspace` in your home directory says which directory that is**, and
+  claims the directory rather than asking about it.
+- `numpy`, `anyio` and `packaging` are declared dependencies rather than
+  inherited ones, and the optional JSON-repair fallback has one spelling —
+  `json-repair`. One import spelled a package that does not exist on PyPI, so
+  that repair step could never run.
+- Memory: a corrupt global store degrades the turn with a visible warning instead
+  of silently stripping the org safety context from a healthy workspace session;
+  the merged shelf deduplicates by key, workspace-wins, matching the tools; a
+  promotion records whose copy it is and what it replaces, so a revert cannot
+  retire another project's copy; and an origin token wider than the id field
+  misses rather than overflowing.
+- Provenance display no longer fabricates single-layer credit for a value two
+  layers produced, and `doctor` loads the config once instead of three times.
+- `bench` says "no compact.md" explicitly rather than meaning two things by
+  `None`, so a bench run can no longer inherit the operator's home session state.
 
 ### Known limitations (named, not hidden)
 - **The trust prompt does not cover a repository you cloned and then worked
@@ -107,6 +202,17 @@ other's context (#150).
   that stops specific actions.
 - A workspace *may* override `provider:` if you write one there by hand. Nothing
   in the harness ever puts one there, and no command edits one.
+- **Plugins and the org guardrails file are global-only.** They load from your
+  global config directory and never from a workspace. That is deliberate for
+  guardrails — a project must not be able to silence the org's safety context by
+  shipping its own copy, or blank it by having none — but it does mean a project
+  cannot ship its own plugin, and everything `components set` writes (autoresearch
+  adoptions included) is machine-wide.
+- A linked git worktree reads as *outside* its parent project, so you get the
+  trust prompt about your own repository; and a folder that is not in a git
+  repository counts as in-project only at the exact directory holding
+  `.localharness/`. A recorded "no" is not consulted from inside the project
+  itself — the in-project test runs first.
 
 ## [0.12.10] — 2026-09-02
 
