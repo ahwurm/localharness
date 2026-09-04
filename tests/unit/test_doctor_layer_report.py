@@ -452,6 +452,11 @@ def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path,
     with the real binary at COLUMNS=120 and fixed `config show` with `soft_wrap=True`, which hands
     the line to the TERMINAL whole — it still looks wrapped on screen, and it is one line in the
     data. Both lines this plan adds are asserted here, at a width narrower than the paths.
+
+    The row assertion is the WHOLE row, key through losing value: a substring that happens to sit
+    BEFORE the fold point measured GREEN under the mutation that drops the row's `soft_wrap`, so
+    "the value appears somewhere" grades nothing. What is claimed is that the row arrives as ONE
+    line, so that is what is asserted.
     """
     layout = _layout(
         tmp_path,
@@ -469,6 +474,10 @@ def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path,
     assert any(str(backup) in line for line in lines), (
         f"the backup path is on no single line at width 100:\n" + "\n".join(lines)
     )
-    assert any("a-long-workspace-organisation-name-for-this-row" in line for line in lines), (
-        f"the overridden row folded mid-value at width 100:\n" + "\n".join(lines)
+    row = (
+        "org.name = 'a-long-workspace-organisation-name-for-this-row'  "
+        "[workspace-config]  (global: 'GLOBAL-ORG')"
+    )
+    assert any(row in line for line in lines), (
+        "the overridden row is on no single line at width 100:\n" + "\n".join(lines)
     )
