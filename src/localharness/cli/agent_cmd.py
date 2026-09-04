@@ -169,7 +169,11 @@ def agent_list(
         return
 
     if json_output:
-        console.print(json.dumps(agents))
+        # typer.echo, never console.print: Rich interprets `[...]` in the DATA as markup and
+        # silently drops it, and hard-wraps at the terminal width, injecting newlines mid-JSON.
+        # Both were reproduced on the shipped 0.12.x wheel (v0.13 dogfood F1) at every width
+        # tested. Every other machine-output emitter in cli/ already does it this way.
+        typer.echo(json.dumps(agents))
         return
 
     table = Table(title="Agents")
