@@ -597,7 +597,9 @@ def init_app(
     # for a missing agents dir, so init must actually create it (previously only `start` and
     # `doctor --fix` did, which left that remedy non-functional).
     (config_path / "agents").mkdir(parents=True, exist_ok=True)
-    console.print(f"\n[green]✓[/green] LocalHarness configured at {config_file}.")
+    # escape(): the receipt runs AFTER config.yaml is on disk, so an unescaped markup-named config
+    # dir crashed here and exited 1 — init reporting failure for a setup that had just succeeded.
+    console.print("\n[green]✓[/green] " + escape(f"LocalHarness configured at {config_file}."), soft_wrap=True)
     console.print("  Run 'localharness start' to begin.")
     console.print(
         "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
@@ -642,7 +644,7 @@ def _guided_setup(
     binary = managed_server.find_vllm(server_config_path)
     launch, image = "binary", None
     if binary:
-        console.print(f"  [green]✓[/green] vLLM found: {binary}")
+        console.print("  [green]✓[/green] " + escape(f"vLLM found: {binary}"), soft_wrap=True)
     elif ra.launch == "docker":
         if shutil.which("docker") is None:
             err_console.print(
@@ -656,15 +658,22 @@ def _guided_setup(
         )
     else:
         venv = managed_server.server_dir(server_config_path) / "venv"
-        if not Confirm.ask(f"  Install [bold]{ra.pip_package}[/bold] into {venv}?", default=True):
+        # Confirm.ask renders through the same markup parser: an unescaped venv path crashed the
+        # PROMPT, so guided setup died before the user could answer it.
+        if not Confirm.ask(
+            f"  Install [bold]{ra.pip_package}[/bold] into " + escape(str(venv)) + "?", default=True
+        ):
             console.print(f"  Install it yourself, then re-run init — see {ra.doc}.")
             raise typer.Exit(1)
         try:
             binary = managed_server.install_vllm_venv(server_config_path, str(ra.pip_package))
         except RuntimeError as exc:
-            err_console.print(f"[bold red]Error:[/bold red] {exc}\nSee {ra.doc} for the manual route.")
+            err_console.print(
+                "[bold red]Error:[/bold red] " + escape(f"{exc}\nSee {ra.doc} for the manual route."),
+                soft_wrap=True,
+            )
             raise typer.Exit(1)
-        console.print(f"  [green]✓[/green] Installed: {binary}")
+        console.print("  [green]✓[/green] " + escape(f"Installed: {binary}"), soft_wrap=True)
 
     # --- Model -------------------------------------------------------------- #
     console.print(f"\n  Reference model: [bold]{ra.default_model}[/bold]")
@@ -674,12 +683,14 @@ def _guided_setup(
         if managed_server.is_model_cached(model):
             console.print("  [green]✓[/green] Already downloaded (Hugging Face cache).")
         else:
-            if not Confirm.ask(f"  Download [bold]{model}[/bold] now?", default=True):
+            if not Confirm.ask("  Download [bold]" + escape(model) + "[/bold] now?", default=True):
                 raise typer.Exit(1)
             try:
                 managed_server.download_model(model)
             except Exception as exc:
-                err_console.print(f"[bold red]Error:[/bold red] download failed: {exc}")
+                err_console.print(
+                    "[bold red]Error:[/bold red] " + escape(f"download failed: {exc}"), soft_wrap=True
+                )
                 raise typer.Exit(1)
             console.print("  [green]✓[/green] Download complete.")
 
@@ -695,17 +706,24 @@ def _guided_setup(
     )
     cmd = managed_server.serve_command(srv)
     base_url = f"http://localhost:{srv.port}/v1"
-    console.print(f"\n  Launching: [dim]{' '.join(cmd)}[/dim]")
-    console.print(f"  Log: {managed_server.log_path(server_config_path)}")
+    # escape(): both lines print paths derived from the config dir — the managed venv's vllm
+    # binary and the server log — so a markup-named config dir killed guided setup at the launch
+    # step. The [dim] tag stays outside the escaped data, as everywhere else in cli/.
+    console.print("\n  Launching: [dim]" + escape(" ".join(cmd)) + "[/dim]", soft_wrap=True)
+    console.print("  " + escape(f"Log: {managed_server.log_path(server_config_path)}"), soft_wrap=True)
     managed_server.start_server(server_config_path, cmd)
     console.print("  Waiting for the server — model load can take several minutes...")
     try:
         models = asyncio.run(managed_server.wait_ready(base_url, config_dir=server_config_path))
     except (RuntimeError, TimeoutError) as exc:
-        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        err_console.print("[bold red]Error:[/bold red] " + escape(str(exc)), soft_wrap=True)
         raise typer.Exit(1)
     served = models[0] if models else model
-    console.print(f"  [green]✓[/green] vLLM serving [bold]{served}[/bold] on :{srv.port} (managed — `localharness start` restarts it after reboots)")
+    console.print(
+        "  [green]✓[/green] vLLM serving [bold]" + escape(served) + "[/bold] "
+        + f"on :{srv.port} (managed — `localharness start` restarts it after reboots)",
+        soft_wrap=True,
+    )
     result = DetectorResult(
         found=True,
         provider_type="vllm",

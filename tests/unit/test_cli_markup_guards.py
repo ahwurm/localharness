@@ -164,3 +164,74 @@ def test_doctor_names_the_workspace_it_found(hostile_project):
     result = runner.invoke(app, ["doctor"])
 
     assert str(hostile_project / WORKSPACE_DIR_NAME) in result.output
+
+
+def test_init_receipt_names_the_config_it_wrote(hostile_project, tmp_path, monkeypatch):
+    """The receipt prints AFTER config.yaml is on disk, so this crash exited 1 on a SUCCESS.
+
+    A user with a markup-named config dir was told init had failed by the very line that proves
+    it worked — and `doctor` then found the config the receipt said was never written.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import localharness.cli.init_cmd as init_cmd
+    from localharness.provider.client import CapabilityResult
+    from localharness.provider.detector import DetectorResult
+
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
+    monkeypatch.setattr(init_cmd, "_identify_endpoint_provider", lambda *_: "unknown")
+    cfg_dir = tmp_path / HOSTILE / "cfg"
+    cfg_dir.mkdir(parents=True)
+
+    with patch.object(init_cmd, "detect_provider") as detect, \
+            patch.object(init_cmd, "LLMClient") as client_cls:
+        detect.return_value = DetectorResult(
+            found=True, provider_type="vllm", base_url="http://localhost:8000/v1",
+            models=["m"], suggested_model="m", probe_duration_ms=1.0,
+        )
+        client = MagicMock()
+        client.detect_capabilities = AsyncMock(return_value=CapabilityResult(
+            tool_call_mode="native", context_window=128_000, supports_streaming=True,
+            probe_duration_ms=10.0, probe_error=None, server_reached=True,
+        ))
+        client_cls.return_value = client
+        result = runner.invoke(app, ["init", "--config-dir", str(cfg_dir), "--force"])
+
+    assert (cfg_dir / "config.yaml").exists(), "the write itself never happened"
+    assert result.exit_code == 0, result.output
+    assert str(cfg_dir / "config.yaml") in result.output
+
+
+def test_init_guided_setup_names_the_launch_command_and_log(hostile_project, tmp_path, monkeypatch):
+    """Guided setup prints the launch command and the server log path — both derived from the
+    config dir, so both died on a markup-named one, after the model had already been downloaded."""
+    import io
+    import sys
+
+    from rich.console import Console
+
+    import localharness.cli.init_cmd as init_cmd
+    from localharness.provider import server as managed_server
+
+    buf = io.StringIO()
+    monkeypatch.setattr(init_cmd, "console", Console(file=buf, width=400))
+    cfg_dir = tmp_path / HOSTILE / "cfg"
+    cfg_dir.mkdir(parents=True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(init_cmd.Confirm, "ask", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(init_cmd.IntPrompt, "ask", staticmethod(lambda *a, **k: 1))
+    # An existing local path as the model: skips the HF-cache/download branch entirely.
+    monkeypatch.setattr(init_cmd.Prompt, "ask", staticmethod(lambda *a, **k: str(tmp_path)))
+    # The one real path that matters is log_path(); find_vllm is stubbed only to skip the install.
+    monkeypatch.setattr(managed_server, "find_vllm", lambda d: str(d / "server" / "venv" / "vllm"))
+    monkeypatch.setattr(managed_server, "start_server", lambda d, cmd: None)
+
+    async def _ready(base_url, config_dir=None):
+        return ["m"]
+    monkeypatch.setattr(managed_server, "wait_ready", _ready)
+
+    init_cmd._guided_setup(cfg_dir)
+
+    printed = buf.getvalue()
+    assert str(managed_server.log_path(cfg_dir)) in printed, printed
+    assert str(cfg_dir / "server" / "venv" / "vllm") in printed, printed
