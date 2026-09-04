@@ -143,8 +143,15 @@ have to restate a whole block to change one field inside it.
 
 **Lists are replaced, not combined.** A workspace that sets `provider.available_models` replaces
 the global list rather than adding to it. There is exactly one exception:
-`org.permissions.deny_patterns` accumulates across the layers. A workspace can add deny rules and
-can never remove one the global layer set, because safety rules only ever add up.
+`org.permissions.deny_patterns` accumulates across the layers. Every layer's org-level deny rules
+are unioned, so a workspace can add deny rules there and can never remove one the global layer set.
+
+Read that guarantee at exactly its own size: it is about the **org-level** list. Deny patterns
+written inside an individual agent file travel with that file, and a workspace agent file replaces
+the global one of the same name whole — its `permissions.deny_patterns` along with everything else
+(see **Agents, divisions and microagents** below). The org-level union still applies on top of
+whichever agent file ends up in effect, so the org's rules reach the agent either way; a rule
+written into one agent file only survives while that file is the one being used.
 
 **Provider.** A workspace that says nothing about `provider:` uses the global one, which is the
 normal case. A workspace may override it, but nothing ever writes a provider block into a

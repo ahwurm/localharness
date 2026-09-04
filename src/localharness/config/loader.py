@@ -389,9 +389,13 @@ class ConfigLoader:
             merged = deep_merge(merged, source)
 
         # deny_patterns carve-out (MERG-02): see _layered_org_deny. Spliced with deep_merge rather
-        # than assigned in place for the same non-aliasing reason. Guarded on non-empty: writing an
-        # empty list here would REPLACE PermissionConfig's 25 shipped security defaults with
-        # nothing, which is a fail-open regression in a file whose whole job is denying things.
+        # than assigned in place for the same non-aliasing reason. Guarded on non-empty so a config
+        # that declares no deny rules anywhere does not GAIN an explicit empty list here, which
+        # would displace PermissionConfig's shipped defaults in this view. That is all the guard
+        # does: a layer's own explicit `deny_patterns: []` still arrives through `merged` and still
+        # reports as empty on the returned HarnessConfig. Enforcement does not read this list —
+        # `load_agent` unions load_org()'s shipped defaults with the same layered union (step 5
+        # there), so the evaluator's list stays complete whatever this merged view says.
         union_deny = self._layered_org_deny()
         if union_deny:
             merged = deep_merge(merged, {"org": {"permissions": {"deny_patterns": union_deny}}})

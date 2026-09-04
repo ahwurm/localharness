@@ -102,7 +102,7 @@ def test_a_workspace_deny_declaration_does_not_drop_the_shipped_defaults(layers)
     """The fail-open case that matters most: the global layer declares NO org permissions.
 
     The baseline here comes from `load_org()` — with no standalone `org.yaml` it returns
-    `OrgConfig()`, whose `PermissionConfig` carries the 25 shipped security defaults, and the
+    `OrgConfig()`, whose `PermissionConfig` carries the shipped security defaults, and the
     layered union is added ON TOP of those rather than replacing them. Under a plain
     `deep_merge`, the workspace's one-element list would have become the WHOLE deny list and
     `bash_exec(*sudo *)` would have silently stopped being denied.
