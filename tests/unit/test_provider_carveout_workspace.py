@@ -23,6 +23,7 @@ the whole point of the amendment — see
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 from pathlib import Path
 
@@ -312,12 +313,50 @@ def test_model_cmd_passes_the_global_config_dir_to_persist():
     )
 
 
-def test_init_never_reaches_a_workspace_layer():
-    """`init` is the only command that scaffolds a `provider:` block, and it cannot name a workspace.
+def _code_without_prose(source: str) -> str:
+    """`source` with every docstring and every comment removed — the CODE, not what it says.
 
-    A source scan, because the claim is about what the file CANNOT do: none of the four workspace
-    -addressing symbols appear in it, so there is no path by which guided setup could write a
-    provider block (or a `server:` block) into a project folder.
+    Corrected in 43-02, and the reason is worth keeping. This scan used to run against the raw
+    file, so it could not tell a call from a sentence about a call. CLI-01's `_scaffold_workspace`
+    docstring says, in prose, that it is "deliberately NOT `discover_workspace_dir()`" — the
+    rationale a reader grepping that symbol most needs to find — and the substring scan read that
+    sentence as the very call it denies. Third occurrence of this shape in the project (42-02's
+    router `store_fact` docstrings, 42-03's prescribed `self._memory` comment); the standing
+    resolution is to keep the prose and make the assertion discriminating, never the reverse.
+
+    `ast.unparse` drops comments (they are not in the tree) and the loop drops docstrings.
+    Every other string literal SURVIVES on purpose: a config template or a `getattr(loader,
+    "_local_dir")` naming one of these symbols is exactly what this test should still catch.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                node.body.pop(0)
+    return ast.unparse(tree)
+
+
+def test_init_never_reaches_a_workspace_layer():
+    """`init` is the only command that scaffolds a `provider:` block, and it never DISCOVERS a
+    workspace to put one in.
+
+    A source scan, because the claim is about what the file CANNOT do: none of the four
+    workspace-addressing symbols appear in its CODE, so there is no path by which guided setup
+    could write a provider block (or a `server:` block) into a project folder it walked up-tree to
+    find.
+
+    43-02 narrowed the claim from "init cannot name a workspace", which is no longer true and
+    should not be pretended otherwise: `init --workspace` names one deliberately. What keeps
+    MERG-03 intact is the SHAPE of that command — its target is `Path.cwd() / WORKSPACE_DIR_NAME`,
+    the directory the user is standing in, never a discovered one; it refuses `--endpoint` and
+    `--model` outright; and it writes a comment-only config with no `provider:` key at all. The
+    second assertion below pins the target, and the behavioral proofs live in
+    `tests/unit/test_init_workspace_scaffold.py`.
     """
     source_path = _REPO_ROOT / "src" / "localharness" / "cli" / "init_cmd.py"
     source = source_path.read_text(encoding="utf-8")
@@ -329,8 +368,13 @@ def test_init_never_reaches_a_workspace_layer():
         "local_config_dir",
         "_local_dir",
     ]
-    found = [sym for sym in forbidden if sym in source]
+    code = _code_without_prose(source)
+    found = [sym for sym in forbidden if sym in code]
     assert not found, (
         f"init_cmd.py names workspace-addressing symbol(s) {found} — init writes the config that "
         "declares the provider and the managed server, and both are machine-wide truth"
+    )
+    assert "Path.cwd() / WORKSPACE_DIR_NAME" in code, (
+        "the one workspace `init` may name is the CWD it was run in; resolving the target any other "
+        "way (a discovered dir, or the global config dir) is what this carve-out exists to prevent"
     )
