@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import re
-from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from localharness.config.loader import ConfigLoader, ConfigNotFoundError
@@ -26,17 +26,17 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
-from localharness.config.paths import resolve_runtime_path
+from localharness.config.paths import resolve_config_dir, resolve_runtime_path
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
-    LAYER_GLOBAL_CONFIG,
-    LAYER_GLOBAL_OVERRIDES,
+    LAYER_WORKSPACE_CONFIG,
+    LAYER_WORKSPACE_OVERRIDES,
     SURFACE_FAMILIES,
-    build_catalogue,
     coerce_value,
     set_value_in_dict,
 )
+from localharness.registry.provenance import layered_catalogue
 
 components_app = typer.Typer(
     name="components",
@@ -56,19 +56,53 @@ err_console = Console(stderr=True)
 def _build_loader() -> ConfigLoader:
     """ConfigLoader honoring the config-dir env chain (LOCALHARNESS_DIR > LOCALHARNESS_HOME >
     ~/.localharness). The precedence now lives in config/paths (#35), so no explicit env read
-    here — a bare ConfigLoader() picks up the hermetic-test LOCALHARNESS_HOME just the same."""
+    here — a bare ConfigLoader() picks up the hermetic-test LOCALHARNESS_HOME just the same.
+
+    NOT workspace-aware, deliberately, and it must stay that way. Six callers OUTSIDE this module
+    use it for the GLOBAL harness config — autoresearch adoption/experiment/loop, propose_cmd and
+    autoresearch_cmd (x2) — and making them workspace-aware is a behavior change no requirement
+    asks for, in the gate/experiment path of all places. The three `components` commands use
+    `_build_layered_loader` below instead."""
     return ConfigLoader()
 
 
-def _build_overlays(loader: ConfigLoader) -> dict[str, dict]:
-    """Assemble overlays dict for build_catalogue's layer attribution.
-    The two GLOBAL files only; the workspace bands arrive in 43-03 task 3 via
-    registry.provenance.build_layer_overlays.
+def _workspace_for(config_dir: Optional[str], *, json_output: bool) -> Optional[Path]:
+    """The workspace layer for THIS `components` invocation, or None.
+
+    `config_dir` is the RAW flag value. Resolving it first would erase the "was this explicit"
+    signal the workspace gate is built on (39-04): an explicit --config-dir is a full replacement
+    and must skip discovery entirely (LAYR-02).
+
+    `--json` means machine output, so an undecided outside-the-project workspace stays inert
+    rather than stopping to prompt on a payload stream.
+
+    Called ONCE per invocation and its result passed around, never re-derived: for an untrusted
+    or undecided workspace `resolve_workspace_layer` PRINTS a notice (and may prompt and record),
+    so a second call in the same command prints that notice twice.
     """
-    return {
-        LAYER_GLOBAL_CONFIG: loader.raw_harness_dict(),
-        LAYER_GLOBAL_OVERRIDES: load_overlay(loader.user_overlay_path),
-    }
+    from localharness.cli.workspace import resolve_workspace_layer
+
+    return resolve_workspace_layer(config_dir, interactive=False if json_output else None)
+
+
+def _build_layered_loader(
+    config_dir: Optional[str], *, json_output: bool
+) -> tuple[ConfigLoader, Optional[Path]]:
+    """(loader, workspace) for the `components` commands: global layer + the workspace layer, if
+    one applies. The sibling pattern doctor/validate/agent have used since 39-05.
+
+    Returns the workspace alongside the loader because the caller needs the same value — `set`
+    tells the user which project it is standing in — and re-deriving it would double the notice
+    (see `_workspace_for`).
+    """
+    workspace = _workspace_for(config_dir, json_output=json_output)
+    return (
+        ConfigLoader(
+            config_dir=resolve_config_dir(config_dir),
+            local_config_dir=workspace,
+        ),
+        workspace,
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -104,34 +138,6 @@ def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict) -> Non
     else:
         harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
         HarnessConfig.model_validate(deep_merge(loader.raw_harness_dict(), harness_overlay))
-
-
-def _dig_dict(d: dict, dotpath: str) -> tuple[Any, bool]:
-    """Walk a dot-path through a nested dict. Returns (value, True) if present, else (None, False)."""
-    cur: Any = d
-    for part in dotpath.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            return None, False
-        cur = cur[part]
-    return cur, True
-
-
-def _apply_agent_overlay_values(catalogue: dict, user_overlay: dict) -> dict:
-    """Reflect the user overlay's agent.* leaves in `current_value` so `get`/`list` read back
-    exactly what `set agent.*` wrote (the round-trip). Winning_layer is already resolved by
-    build_catalogue from the same overlay. Only paths EXPLICITLY present in the overlay are
-    patched — every other agent.* axis keeps its compiled-in default (so we never leak the
-    name-derived memory paths that model-validating a placeholder agent would introduce)."""
-    agent_overlay = user_overlay.get(_AGENT_KEY) if isinstance(user_overlay, dict) else None
-    if not isinstance(agent_overlay, dict):
-        return catalogue
-    for cat_path, entry in list(catalogue.items()):
-        if not cat_path.startswith(_AGENT_PREFIX):
-            continue
-        value, found = _dig_dict(agent_overlay, cat_path[len(_AGENT_PREFIX):])
-        if found:
-            catalogue[cat_path] = replace(entry, current_value=value)
-    return catalogue
 
 
 def _build_tool_registry() -> Any:
@@ -201,19 +207,26 @@ def components_list(
             "global-overrides|workspace-config|workspace-overrides|experiment)"
         ),
     ),
+    config_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
 ) -> None:
     """List every mutable component with its current value and winning layer."""
+    workspace = _workspace_for(config_dir, json_output=json_output)
+    tool_registry = _build_tool_registry()
     try:
-        loader = _build_loader()
-        cfg = loader.load_harness()
+        catalogue, _overlays = layered_catalogue(
+            resolve_config_dir(config_dir), workspace, tool_registry=tool_registry
+        )
     except Exception as exc:
         _err_config(json_output, exc)
         return  # unreachable but satisfies type checker
-
-    overlays = _build_overlays(loader)
-    tool_registry = _build_tool_registry()
-    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
 
     entries = list(catalogue.values())
     if layer is not None:
@@ -256,19 +269,27 @@ def components_get(
         help="Dot-path of the component (e.g. agent.stuck_detector.window_size)",
     ),
     json_output: bool = typer.Option(False, "--json"),
+    config_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
 ) -> None:
     """Print the resolved value of one component + its winning layer."""
+    workspace = _workspace_for(config_dir, json_output=json_output)
+    tool_registry = _build_tool_registry()
     try:
-        loader = _build_loader()
-        cfg = loader.load_harness()
+        catalogue, _overlays = layered_catalogue(
+            resolve_config_dir(config_dir), workspace, tool_registry=tool_registry
+        )
     except Exception as exc:
         _err_config(json_output, exc)
         return
 
-    overlays = _build_overlays(loader)
-    tool_registry = _build_tool_registry()
-    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
     entry = catalogue.get(path)
     if entry is None:
         _err(
@@ -313,8 +334,18 @@ def components_set(
         help="New value as a string. Coerced to the path's target type.",
     ),
     json_output: bool = typer.Option(False, "--json"),
+    config_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            "--config-dir",
+            envvar="LOCALHARNESS_DIR",
+            show_default=False,
+            help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
+        ),
+    ] = None,
 ) -> None:
-    """Mutate one component. Writes user overlay atomically; emits ComponentMutated audit event."""
+    """Mutate one component. Writes the GLOBAL overrides.yaml atomically (v0.13 policy: every
+    overlay writer targets the machine layer); emits a ComponentMutated audit event."""
 
     # 1. Refuse multi-path syntax (atomicity per CONTEXT.md + EXP-02 forward-compat)
     if _MULTI_PATH_PATTERN.search(path):
@@ -327,17 +358,18 @@ def components_set(
         return
 
     try:
-        loader = _build_loader()
+        loader, workspace = _build_layered_loader(config_dir, json_output=json_output)
         cfg = loader.load_harness()
     except Exception as exc:
         _err_config(json_output, exc)
         return
 
-    # 2. Build catalogue, resolve entry
-    overlays = _build_overlays(loader)
+    # 2. Build catalogue, resolve entry. Workspace-aware so the reported `was:` is the value the
+    #    user can actually see — and so a workspace-owned path can be named as such below.
     tool_registry = _build_tool_registry()
-    catalogue = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    catalogue = _apply_agent_overlay_values(catalogue, overlays[LAYER_GLOBAL_OVERRIDES])
+    catalogue, _overlays = layered_catalogue(
+        resolve_config_dir(config_dir), workspace, tool_registry=tool_registry
+    )
     entry = catalogue.get(path)
     if entry is None:
         _err(json_output, f"Unknown path: {path!r}", exit_code=2)
@@ -412,7 +444,9 @@ def components_set(
         finally:
             loop.close()
 
-    # 8. Confirm
+    # 8. Confirm, and SAY WHERE IT WENT. The write target has always been the global
+    #    overrides.yaml; F4 is that nothing said so at the moment it happened, so a user standing
+    #    in a project could reconfigure the whole machine believing they had touched this project.
     if json_output:
         typer.echo(
             _json.dumps(
@@ -420,7 +454,11 @@ def components_set(
                     "path": path,
                     "before": _serialize_value(before),
                     "after": _serialize_value(typed_value),
+                    # `layer` is the ComponentMutated audit event's own, older vocabulary and is
+                    # NOT the registry band — renaming it would change a persisted log's schema.
+                    # `target` is the honest addition: the file that was actually written.
                     "layer": "user",
+                    "target": str(overlay_path),
                 }
             )
         )
@@ -429,6 +467,26 @@ def components_set(
             f"[green]set[/green] {path} = {typed_value!r} "
             f"(was: {before!r}, layer: user)"
         )
+        # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
+        # (41-06's measured lesson, same reason doctor and validate escape theirs).
+        console.print(
+            f"  wrote: {escape(str(overlay_path))}  [dim](the global overrides.yaml)[/dim]"
+        )
+        if workspace is not None:
+            console.print(
+                "  [yellow]note:[/yellow] this is a MACHINE-WIDE setting. It applies in every "
+                "project, including this one. A per-project value goes in "
+                f"{escape(str(workspace / 'config.yaml'))}."
+            )
+            if entry.winning_layer in (LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES):
+                # Without this the command reports success and the value a user reads back does
+                # not move — the same class of silence F4 exists to remove.
+                console.print(
+                    f"  [yellow]note:[/yellow] {path} is set by this project "
+                    f"({entry.winning_layer}), which still WINS here. The value above is now the "
+                    "machine default for every other project; to change it here, edit "
+                    f"{escape(str(workspace / 'config.yaml'))}."
+                )
 
     # Reference SURFACE_FAMILIES to keep the import live (avoids unused-warning if linted)
     _ = SURFACE_FAMILIES
