@@ -31,6 +31,16 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 
 
+# The backup file IS the durable record of a migration — no separate state is written, and its own
+# filename carries the timestamp. Both halves are module-level constants because `doctor` reads
+# them back (cli/doctor_cmd._print_migration_state): a name typed in two places is a name that
+# drifts, and the drift would be SILENT — doctor's glob would simply stop matching and quietly
+# print no backup line at all. Lexicographic order on this format is also chronological, which is
+# what lets a reader sort the glob instead of stat-ing every file for its mtime.
+BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+BACKUP_PREFIX = "config.yaml.bak-"
+
+
 class MigrationError(Exception):
     """Config could not be read, parsed, or (post-merge) validated."""
 
@@ -106,8 +116,8 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> Path:
     except Exception as exc:
         raise MigrationError(f"migrated config fails validation: {exc}") from exc
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = config_file.with_name(f"config.yaml.bak-{stamp}")
+    stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
+    backup = config_file.with_name(f"{BACKUP_PREFIX}{stamp}")
     backup.write_bytes(original)
     config_file.write_text(
         yaml.safe_dump(migration.updated, default_flow_style=False, sort_keys=False),
