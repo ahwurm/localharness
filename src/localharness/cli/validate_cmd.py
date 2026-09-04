@@ -88,12 +88,18 @@ def validate(
     invalid_count = 0
 
     for file_path, error in results:
-        name = Path(file_path).name
+        # The FULL path, not the basename: with a workspace layer there are two `config.yaml`s and
+        # two `agents/foo.yaml`s, and a bare name cannot say which one this verdict is about
+        # (CLI-02's lesson, applied to the row rather than only to the error detail). escape():
+        # a path is data — a folder named `[old] proj` must not be read as a markup tag.
+        # soft_wrap: a full path is longer than the 80-col default, and rich would otherwise fold
+        # it mid-path and crop it with an ellipsis — a path a user cannot copy is not a path.
+        name = escape(file_path)
         if error is None:
-            console.print(f"  {name:<35} {_PASS} valid")
+            console.print(f"  {name:<35} {_PASS} valid", soft_wrap=True)
             valid_count += 1
         else:
-            console.print(f"  {name:<35} {_FAIL} invalid")
+            console.print(f"  {name:<35} {_FAIL} invalid", soft_wrap=True)
             _print_error_details(error, file_path)
             invalid_count += 1
 

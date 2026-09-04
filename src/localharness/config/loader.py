@@ -506,11 +506,21 @@ class ConfigLoader:
         if path is None:
             searched = [str(b / "divisions" / f"{name}.yaml") for b in self._search_bases()]
             raise ConfigNotFoundError(name, searched)
-        text = path.read_text(encoding="utf-8")
-        data = _load_yaml_file(path)
-        result = self._validate_dict(DivisionConfig, data, str(path), text)
+        result = self.load_division_file(path)
         self._division_cache[name] = result
         return result
+
+    def load_division_file(self, path: Path) -> DivisionConfig:
+        """Load and validate the division yaml AT THIS PATH — no stem re-resolution.
+
+        `load_division` answers "which file wins for this name"; this one answers "is THIS file
+        valid". `validate_all` needs the second question: with a workspace file shadowing a global
+        file of the same stem, resolving by stem validated the winner twice and never opened the
+        shadowed file at all.
+        """
+        text = path.read_text(encoding="utf-8")
+        data = _load_yaml_file(path)
+        return self._validate_dict(DivisionConfig, data, str(path), text)
 
     def _raw_org_context(self) -> dict:
         """Explicitly-set org-level `context:` block. The org config lives in config.yaml's
@@ -547,6 +557,17 @@ class ConfigLoader:
         if path is None:
             searched = [str(b / "agents" / f"{name}.yaml") for b in self._search_bases()]
             raise ConfigNotFoundError(name, searched)
+        result = self.load_agent_file(path)
+        self._agent_cache[name] = result
+        return result
+
+    def load_agent_file(self, path: Path) -> AgentConfig:
+        """Resolve and validate the agent yaml AT THIS PATH — no stem re-resolution, no cache.
+
+        Same split as `load_division_file`, for the same reason: `validate_all` must open the file
+        it is reporting on. Inheritance (division, org, overlay, workspace_root) resolves exactly
+        as it would for a session, so a file that validates here is a file that loads.
+        """
         text = path.read_text(encoding="utf-8")
         raw = _load_yaml_file(path)
 
@@ -685,7 +706,6 @@ class ConfigLoader:
             errors = _pydantic_error_to_field_errors(exc, str(path), line_map)
             raise ConfigValidationError(str(path), errors) from exc
 
-        self._agent_cache[name] = result
         return result
 
     def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
@@ -816,6 +836,14 @@ class ConfigLoader:
         self._raw_sources_cache = None
 
     def validate_all(self) -> list[tuple[str, Optional[ConfigError]]]:
+        """Every config file of every layer, each validated AT ITS OWN PATH.
+
+        The agent/division rows go through `load_agent_file`/`load_division_file` rather than the
+        by-name loaders on purpose: resolving a file's own stem back through `_find_file` returns
+        the layer WINNER, so a shadowed same-stem file was never opened — its verdict was the
+        winner's, filed under its path (both directions proven: a broken global file reported
+        valid, a valid global file reported with the workspace file's error).
+        """
         results: list[tuple[str, Optional[ConfigError]]] = []
 
         # harness config
@@ -843,7 +871,7 @@ class ConfigLoader:
             if div_dir.exists():
                 for f in sorted(div_dir.glob("*.yaml")):
                     try:
-                        self.load_division(f.stem, bypass_cache=True)
+                        self.load_division_file(f)
                         results.append((str(f), None))
                     except ConfigError as e:
                         results.append((str(f), e))
@@ -854,7 +882,7 @@ class ConfigLoader:
             if agents_dir.exists():
                 for f in sorted(agents_dir.glob("*.yaml")):
                     try:
-                        self.load_agent(f.stem, bypass_cache=True)
+                        self.load_agent_file(f)
                         results.append((str(f), None))
                     except ConfigError as e:
                         results.append((str(f), e))
