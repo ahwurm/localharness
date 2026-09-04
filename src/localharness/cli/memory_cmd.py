@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from rich.console import Group
@@ -54,8 +55,45 @@ _PREVIEW_CLIP = 100  # value clip width in the forget/promote previews (one memo
 # `revert-of:` (memory/reconciliation.py:106) convention, one TEXT column, no schema change:
 #   promoted_from_workspace@<epoch>;<workspace realpath>;<the fact's own provenance>
 # "which project, when" plus the original chain. `revert` matches on this prefix so it can only
-# ever retire a copy promote itself wrote.
+# ever retire a copy promote itself wrote — and, since v0.13 B2, only one THIS workspace wrote.
 PROMOTE_PROVENANCE_PREFIX = "promoted_from_workspace@"
+
+
+def _esc_workspace(path: str) -> str:
+    """Percent-escape the one field that sits in the MIDDLE of the marker. A POSIX project path
+    may contain ';', which would otherwise make the three fields unparseable — and the workspace
+    is exactly the field an identity check must read back exactly."""
+    return (path or "").replace("%", "%25").replace(";", "%3B")
+
+
+def _promoted_origin(provenance: str) -> tuple[int, str] | None:
+    """(when, which workspace) for a copy PROMOTE wrote; None for anything else — a fact authored
+    in the global store, or one whose marker this command did not write."""
+    if not (provenance or "").startswith(PROMOTE_PROVENANCE_PREFIX):
+        return None
+    stamp, _, tail = provenance[len(PROMOTE_PROVENANCE_PREFIX):].partition(";")
+    workspace, _, _original = tail.partition(";")
+    return (int(stamp) if stamp.isdigit() else 0,
+            workspace.replace("%3B", ";").replace("%25", "%"))
+
+
+def _global_roster_note(g: Any) -> str:
+    """The honest note for a promotion whose agent exists only in this project (v0.13 B7).
+
+    The global handle is keyed by the WORKSPACE agent's name, so promoting from a project-only
+    agent writes `<global>/agents/<name>/` — a store no session reads until an agent of that name
+    exists on the machine. The roster is `<global config dir>/agents/<name>.yaml` (`start` mints
+    the root agent's there on purpose), so this is one local `exists()`: no model, no network, no
+    config load. Any surprise about the handle means no note — a disclosure is not worth raising.
+    """
+    base, name = getattr(g, "base_dir", None), getattr(g, "agent_id", "")
+    try:
+        if base is None or (Path(base) / "agents" / f"{name}.yaml").exists():
+            return ""
+    except OSError:
+        return ""
+    return (f"note: there is no global agent '{name}' yet — the memory is stored, and a session "
+            f"running as that agent anywhere on this machine will see it.")
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -264,6 +302,12 @@ async def render_promote(store: Any, arg: str, *, promote_target: Any,
     write is read-back-verified. The fourth — never silent — is this command's own UX.
 
     ONE fact per invocation, addressed by id. No bulk, no pattern, no auto-promotion, no registry.
+
+    The global store is shared by every project on the machine, so both cross-project cases are
+    handled by the marker this command writes (v0.13 B2/B3): `revert` retires only a copy THIS
+    workspace promoted, and `confirm` says so out loud when it supersedes one that came from a
+    different project. `confirm` also discloses when the agent it is promoting for has no entry in
+    the machine's agent roster — the copy is real, but nothing reads it until such an agent exists.
     """
     parts = arg.split()
     action = parts[-1].lower() if len(parts) >= 2 else ""
@@ -293,28 +337,51 @@ async def render_promote(store: Any, arg: str, *, promote_target: Any,
     if g is None:
         return ("Promotion needs a project layer: with no .localharness/ workspace this session's "
                 "memory IS the machine-global memory, so there is nowhere to promote it to.")
+    existing = await g.get_fact(fact.key)
+    origin = _promoted_origin(existing.provenance) if existing is not None else None
     if action == "revert":
-        existing = await g.get_fact(fact.key)
         if existing is None:
             return f"Nothing to revert: the global memory has no active '{fact.key}'."
-        if not (existing.provenance or "").startswith(PROMOTE_PROVENANCE_PREFIX):
+        if origin is None:
             return (f"Refusing: the global '{fact.key}' was not written by promote (no promotion "
                     "marker), so this would retire a memory this command did not create. Retire it "
                     "from a session in the global store if you meant to.")
+        # The global store is ONE store shared by every project on this machine, and a general
+        # lesson's NAME is exactly what two projects collide on. Without this check, `revert`
+        # retires whichever project's copy is currently active — including one this session
+        # never wrote (v0.13 B2).
+        when, from_workspace = origin
+        if from_workspace != workspace_identity:
+            return (f"Refusing: the global '{fact.key}' was promoted from {from_workspace} on "
+                    f"{_stamp(when)}, not from this project "
+                    f"({workspace_identity or 'this session'}) — reverting it here would undo "
+                    "another project's promotion. Revert it from there, or retire it from a "
+                    "session in the global store.")
         if not await g.forget_fact(existing.id):
             return f"The global '{fact.key}' changed under you — nothing retired. Try again."
         return (f"Reverted. The promoted copy of '{fact.key}' is retired in the global memory "
                 "(kept in history, never deleted). This project's own copy is untouched.")
     # The ORIGINAL key on purpose: renaming the copy would fork the memory instead of moving it,
     # and would defeat supersede-on-re-promote. Two handles, ONE copy.
-    prov = f"{PROMOTE_PROVENANCE_PREFIX}{int(time.time())};{workspace_identity};{fact.provenance}"
+    prov = (f"{PROMOTE_PROVENANCE_PREFIX}{int(time.time())};"
+            f"{_esc_workspace(workspace_identity)};{fact.provenance}")
     promoted = await g.store_fact(
         key=fact.key, value=fact.value, tags=[*fact.tags, "promoted"],
         confidence=fact.confidence, source="promote", provenance=prov,
     )
-    return (f"Promoted. '{fact.key}' is now global memory #{promoted.id} — agents in your other "
-            f"projects can recall it. This project's #{fid} is unchanged.\n"
-            f"Undo with:  /memory promote {fid} revert")
+    lines = [f"Promoted. '{fact.key}' is now global memory #{promoted.id} — agents in your other "
+             f"projects can recall it. This project's #{fid} is unchanged."]
+    # `store_fact` supersedes by key, so this just changed the machine's answer for every project
+    # — silently, until now (v0.13 B3). Only when the copy came from somewhere else: a line on
+    # every confirm is noise, and noise is what teaches people to skip the line that matters.
+    if origin is not None and origin[1] != workspace_identity:
+        lines.append(f"This replaces a memory promoted from {origin[1]} on {_stamp(origin[0])} — "
+                     "that project's own copy is untouched.")
+    roster_note = _global_roster_note(g)
+    if roster_note:
+        lines.append(roster_note)
+    lines.append(f"Undo with:  /memory promote {fid} revert")
+    return "\n".join(lines)
 
 
 def _promote_target_id(tok: str) -> tuple[int | None, str | None]:
