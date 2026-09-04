@@ -51,12 +51,29 @@ def deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def load_overlay(path: Path) -> dict:
-    """Load YAML overlay file. Missing file → empty dict. Invalid YAML raises."""
+    """Load YAML overlay file. Missing file → empty dict.
+
+    A malformed overlay raises ConfigParseError — the SAME error type `_load_yaml_file` raises for
+    config.yaml, so `validate_all`'s `except ConfigError` catches it and the user gets a clean
+    report instead of a raw yaml.ParserError traceback. Phase 40 measured this crash on BOTH
+    overlay layers and deferred it (deferred-items.md); phase 43 owns it because it is the same
+    config-error-honesty spine F5 rebuilds.
+    """
     path = Path(path).expanduser()
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    data = yaml.safe_load(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        # Function-local import: loader.py imports THIS module at module level, so a
+        # module-level back-import would be circular. Deferred to the raise path only.
+        from localharness.config.loader import ConfigParseError
+
+        mark = getattr(e, "problem_mark", None)
+        line = (mark.line + 1) if mark else 0
+        column = (mark.column + 1) if mark else 0
+        raise ConfigParseError(str(path), line, column, str(e)) from e
     return data or {}
 
 
