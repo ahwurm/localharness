@@ -1,7 +1,8 @@
 """Scope-aware recall routing — the ONE read gate above scope-naive memory stores.
 
-Implements ROADMAP amendment #6's ruled shape (v0.13 MEMS-02): a CALLER-LEVEL router that
-answers every read according to `agent.memory.recall_scope`, while `MemoryStore` itself stays
+The ruled shape (v0.13 MEMS-02): a CALLER-LEVEL router holding two store handles, answering every
+read according to `agent.memory.recall_scope` as a scoped-first labeled merge — the scoped store's
+hits first, each line carrying which store it came from — while `MemoryStore` itself stays
 single-store. No store learns about a second store; the router composes two of them.
 
 READ-SIDE ONLY. There is no write verb on this object and no `__getattr__` passthrough — see

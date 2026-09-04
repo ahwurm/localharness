@@ -4,21 +4,21 @@ Two artifacts, two layers, one helper — and the whole point of this file is th
 stay textually and behaviorally independent:
 
 - The KILL file is a machine-global CONTROL artifact. It stops the one daemon's sessions, so it
-  resolves against `config_dir` and can never be relocated into a project folder
-  (v0.13 41-CONTEXT.md ruling; ROADMAP criterion 2's carve-out).
+  resolves against `config_dir` and can never be relocated into a project folder — a kill switch a
+  workspace could move is not a kill switch.
 - compact.md is a per-session WORK artifact. It follows `state_dir` — the discovered workspace
   layer when one applies, otherwise the same value as `config_dir`.
 
-The bug this file exists to prevent (41-RESEARCH "Pitfall 1"): before phase 41 both paths were
-derived from ONE `base` inside `_child_runtime_paths`, so widening that single parameter to
+The bug this file exists to prevent: before the split, both paths were derived from ONE `base`
+inside `_child_runtime_paths`, so widening that single parameter to
 "the workspace when present" — the obvious way to make compact.md follow the work — would have
 silently moved every subagent's kill switch into the user's repository. A test that only asserted
 "subagent state is workspace-local" would have shipped that regression green. Test 2 and test 5
 are the ones that cannot.
 
-The tests here were written AFTER the code (the plan's task order) and are therefore graded by a
-mutation harness rather than by a RED-first commit that never happened — see 41-02-SUMMARY.md for
-the table, including which of the 13 threading sites a live drive actually reaches.
+The tests here were written AFTER the code, so they are graded by mutation rather than by a
+RED-first commit that never happened: each was checked to fail against a deliberately broken
+`_child_runtime_paths` before it was trusted.
 """
 from __future__ import annotations
 
