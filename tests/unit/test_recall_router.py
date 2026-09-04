@@ -241,12 +241,12 @@ async def test_the_global_handle_opens_exactly_once(
     """Open-once under concurrency: `ensure_global` holds a lock, so five reads racing on
     one event loop still produce ONE `open()`. Two opens would mean two aiosqlite worker
     threads on one database file (Pitfall 6)."""
-    calls: list[int] = []
+    calls: list[bool] = []
     real_open = global_store.open
 
-    async def counting_open() -> None:
-        calls.append(1)
-        await real_open()
+    async def counting_open(*, owner_init: bool = True) -> None:
+        calls.append(owner_init)
+        await real_open(owner_init=owner_init)
 
     global_store.open = counting_open  # type: ignore[method-assign]
 
@@ -259,7 +259,9 @@ async def test_the_global_handle_opens_exactly_once(
         router.load_context(),
     )
 
-    assert calls == [1]
+    # ONE open, and a NON-OWNER one (v0.13 B1): the session that only reads this store performs
+    # neither the legacy adoption nor the tag seeding on it.
+    assert calls == [False]
     await router.close()
 
 

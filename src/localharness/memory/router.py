@@ -13,6 +13,14 @@ most once. `MemoryStore.open()` mkdirs, connects and MIGRATES — it WRITES — 
 session must never call it. That laziness is MEMS-03's precondition ("the global store is
 byte-identical after a workspace session"), and it is why `ensure_global()` exists at all
 instead of the handle simply being opened by whoever constructs the router.
+
+When the knob DOES ask for the second store, the boundary is still one-way, and this is the
+whole of it (v0.13 B1): the twin is opened with `owner_init=False` (no legacy adoption, no tag
+seeding — `MemoryStore.open`'s docstring lists exactly what such an open does and does not
+write), and the enrichment verbs below write ONLY when the store they would write to is the
+primary. The honest residue: a non-owner open still creates the database file and applies
+schema migrations if it is missing or behind, and a scope:global session leaves the global
+store's access counts and traces un-updated by its reads.
 """
 
 from __future__ import annotations
@@ -78,6 +86,11 @@ class RecallRouter:
     (42-RESEARCH Pitfall 2). A stray write call against this object raises AttributeError
     loudly instead of landing silently in the wrong database.
 
+    The two verbs that DO write — `touch_staged` and `record_activation_trace`, the enrichment
+    memory_search/memory_get look up by `getattr` — are the exception that proves it: they
+    write only when the store they would write to is the primary (`_enrichment_target`). A
+    non-primary store is a read-only VIEW here.
+
     The global handle arrives CONSTRUCTED BUT NOT OPENED and is opened lazily, at most once:
     `MemoryStore.open()` creates and migrates its memory.db, so a default-scope session must
     never call it — that is exactly MEMS-03's "the global store is byte-identical afterwards".
@@ -111,12 +124,18 @@ class RecallRouter:
     async def ensure_global(self) -> Any | None:
         """Open (once) and return the global handle, or None when this session has no second
         store. Public because `/memory promote` needs the same single handle (42-04) — one
-        owner, one lifecycle, never two connections to one database file (Pitfall 6)."""
+        owner, one lifecycle, never two connections to one database file (Pitfall 6).
+
+        Opened with `owner_init=False`: this session is not that store's owner, so the open
+        performs neither the Phase-33.1 legacy adoption (a RENAME of another install's memory
+        directory) nor the tag seeding. It still creates the file and applies pending schema
+        migrations if the database is missing or behind — see `MemoryStore.open`'s docstring
+        for exactly what a non-owner open does and does not write."""
         if self._global_store is None:
             return None
         async with self._open_lock:
             if not self._global_opened:
-                await self._global_store.open()
+                await self._global_store.open(owner_init=False)
                 self._global_opened = True
         return self._global_store
 
@@ -265,19 +284,39 @@ class RecallRouter:
     # DEFAULT path quietly stops bumping staged counters and writing activation traces.
     # ------------------------------------------------------------------
 
+    async def _enrichment_target(self) -> Any | None:
+        """The ONE store an enrichment write may land on: the primary, and only the primary.
+
+        Enrichment (staged read-counters, activation traces) is a WRITE, and the second handle
+        is a store this session does not own — a read-only VIEW of another project's memory.
+        Routing enrichment through `_read_store()` meant a `recall_scope: global` project
+        session bumped counters and appended traces in the machine-global database (v0.13 B1),
+        falsifying "no value of this knob makes a project session write global memory". None
+        here means: this scope reads a store it may not write, so the enrichment is skipped.
+
+        The honest cost, stated rather than hidden: in a scope:global session the global
+        store's access counts and traces do not learn from those reads. Staleness in another
+        store's ranking signal is the price of the boundary being structural.
+        """
+        return None if self.scope == ORIGIN_GLOBAL else self._primary
+
     async def touch_staged(self, keys: list[str]) -> None:
-        # Reads bump staged counters on the store that was actually read. In `both` mode that
-        # is the primary: keys are store-agnostic strings, and a key that lives only in the
-        # global store simply matches no row here.
-        await (await self._read_store()).touch_staged(keys)
+        # Keys are store-agnostic strings, so a key that lives only in the global store simply
+        # matches no row on the primary.
+        store = await self._enrichment_target()
+        if store is not None:
+            await store.touch_staged(keys)
 
     async def record_activation_trace(self, **kwargs: Any) -> None:
         # `both` mode is skipped deliberately: the hit list spans two databases and facts.id is
         # per-database, so there is no store this row could be written to without pointing at
-        # another database's ids (Pitfall 7). Single-scope sessions trace exactly as before.
+        # another database's ids (Pitfall 7). `global` scope is skipped because the store that
+        # was read is not this session's to write.
         if self.scope == SCOPE_BOTH:
             return
-        await (await self._read_store()).record_activation_trace(**kwargs)
+        store = await self._enrichment_target()
+        if store is not None:
+            await store.record_activation_trace(**kwargs)
 
     async def neighborhood(self, *args: Any, **kwargs: Any) -> list:
         # The tag graph is per-database; a merged hit list has no single graph to walk, so the

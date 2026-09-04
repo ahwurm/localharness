@@ -855,7 +855,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # CONSTRUCTED, NOT OPENED — MemoryStore.__init__ only derives paths; open() creates
             # and migrates a database, and a default-scope session must not create anything under
             # the global agents tree (MEMS-03). The router opens this lazily, only if the knob
-            # asks. No `bus=`: a bus subscription would let auto-diary WRITE into the global store.
+            # asks, and then as a NON-OWNER (`owner_init=False`: no legacy adoption, no tag
+            # seeding) whose staged counters and activation traces it never writes (v0.13 B1).
+            # No `bus=`: a bus subscription would let auto-diary WRITE into the global store.
             # Gated on `workspace is not None`, NOT on recall_scope's value: with no workspace,
             # `state_dir == cfg_path` and a second handle would be a second aiosqlite connection
             # to the SAME file.
