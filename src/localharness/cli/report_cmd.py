@@ -6,7 +6,7 @@ it must be actionable at a glance. The overview renders the signed-off mockup (1
 
     1. Trajectory sparklines (train vs holdout + overfit gap)   — REP-01
     2. Pareto top-mutations table (id/component/train/hold/gap/p/cost/status)  — REP-02
-    3. Adopted / Held / Rejected inbox (status enum → review buckets, git-revert one-liner)  — decision 2
+    3. Adopted / Held / Rejected inbox (status enum → review buckets, undo one-liner)  — decision 2
     4. Sentinel alerts (overfit gap / near-duplicate collapse / saturation)  — REP-03/04
 
 ``report --show <id>`` drills into one mutation: change diff + hypothesis (rationale, or the exact
@@ -21,14 +21,14 @@ the remote/async reviewer has a copy.
 ~80% of this is wiring existing read APIs into a renderer (19-RESEARCH key insight): it consumes
 ``run_sentinel``/``sparkline``/``alerts_from_report`` (19-03) + ``pareto_front_*``/``lineage``/``query``
 (15) verbatim, and reuses the ``autoresearch_cmd`` helpers (``_archive_db_path``/``_run``/``_err``/
-``_render_diff``/``_resolve``/``_repo_root``/``_fmt_float``/``_fmt_ts``). The report is a terminal/markdown
+``_render_diff``/``_resolve``/``_fmt_float``/``_fmt_ts``). The report is a terminal/markdown
 sink with NO proposer import and NO write-back to the archive's train/holdout columns (Pitfall 6 — seal intact).
 """
 from __future__ import annotations
 
 import datetime as _dt
 import json as _json
-import subprocess
+import shlex
 from io import StringIO
 from pathlib import Path
 from typing import Optional
@@ -48,7 +48,6 @@ from localharness.cli.autoresearch_cmd import (
     _err,
     _fmt_float,
     _render_diff,
-    _repo_root,
     _resolve,
     _run,
     autoresearch_app,
@@ -113,26 +112,21 @@ def _fmt_gap(e: ArchiveEntry) -> str:
     return f"{e.train_score - e.holdout_score:.3f}"
 
 
-def _revert_oneliner(e: ArchiveEntry) -> str:
-    """The `git revert <sha>` one-liner for an adopted mutation (Phase 18 adoptions are git commits).
+def _undo_oneliner(e: ArchiveEntry) -> str:
+    """The one-liner that undoes an adopted mutation: write the recorded `before` value back.
 
-    Best-effort: find the adoption commit by its conventional ``autoresearch: adopt <component>``
-    subject in the main repo; if not recoverable, fall back to the documented template form so the
-    reviewer always has the revert shape (the row id + component identify the change).
+    NOT a `git revert`. An adoption is an overlay write, not a commit — ``adoption.py`` puts the
+    after-value into the GLOBAL ``overrides.yaml`` through the ``components set`` primitives, and
+    git is touched only to stamp the HEAD the win was measured at. So the undo is the same
+    primitive in reverse, and the archive row carries the `before` it needs.
+
+    Best-effort: a row whose diff will not decode still gets the shape, with the value to look up.
     """
     try:
-        repo = _repo_root()
-        out = subprocess.run(
-            ["git", "-C", str(repo), "log", "--format=%H",
-             "--grep", f"autoresearch: adopt {e.component}", "-n", "1"],
-            check=True, capture_output=True, text=True,
-        )
-        sha = out.stdout.strip().splitlines()[0] if out.stdout.strip() else ""
-        if sha:
-            return f"git revert {sha}"
+        before = e.diff_decoded["before"]
     except Exception:
-        pass
-    return f"git revert <commit for 'autoresearch: adopt {e.component}'>"
+        return f"localharness components set {e.component} <this row's 'before' value>"
+    return f"localharness components set {e.component} {shlex.quote(str(before))}"
 
 
 # ------------------------------------------------------------------ #
@@ -215,11 +209,11 @@ def _render_overview(data: dict, *, to: Console) -> None:
     held = [e for e in all_rows if e.status in _HELD]
     rejected = [e for e in all_rows if e.status in _REJECTED]
 
-    to.print("[bold green]Adopted[/bold green] (live changes — revert with the one-liner)")
+    to.print("[bold green]Adopted[/bold green] (live changes — undo with the one-liner)")
     if adopted:
         for e in adopted:
             to.print(f"  {e.id[:8]} {e.component}  train={_fmt_float(e.train_score)}")
-            to.print(f"      {_revert_oneliner(e)}")
+            to.print(f"      {_undo_oneliner(e)}")
     else:
         to.print("  [dim]none[/dim]")
 
@@ -294,7 +288,7 @@ def _overview_markdown(data: dict) -> str:
     out.append("## Adopted\n")
     if adopted:
         for e in adopted:
-            out.append(f"- `{e.id[:8]}` {e.component} — `{_revert_oneliner(e)}`")
+            out.append(f"- `{e.id[:8]}` {e.component} — `{_undo_oneliner(e)}`")
     else:
         out.append("_none_")
     out.append("")
