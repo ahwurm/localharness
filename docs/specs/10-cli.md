@@ -695,7 +695,10 @@ have not been written yet; when they exist, `--strict` will promote them to erro
 With no `PATH`, it validates every config file across both layers — the global directory and, when
 one applies, the project workspace. Each file is validated **at its own path**: a workspace
 `agents/foo.yaml` and a global `agents/foo.yaml` are two files and get two verdicts, rather than one
-of them being checked twice. With a `PATH`, only that file is validated, and the model used is
+of them being checked twice. One asymmetry is deliberate: on a machine that was never `init`ed, a
+workspace `config.yaml` is reported only when it fails to parse. It is an overlay, partial by
+design, and the global file is still required to start a session — so calling it valid would
+green-light a machine that cannot run. With a `PATH`, only that file is validated, and the model used is
 chosen from the filename and its parent directory (`config.yaml` → harness, `org.yaml` → org,
 anything under `divisions/` → division, otherwise → agent).
 
