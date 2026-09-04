@@ -249,14 +249,21 @@ async def test_only_proposer_tokens_metered(tmp_path, FakeClock):
 
 
 # ---------------------------------------------------------------------------
-# AUTO-04 — adoption (a git-committed config-overlay write reusing components-set)
+# AUTO-04 — adoption (a config-overlay write reusing components-set)
 #
-# Adoption is the human-checkpoint live write: a held/promoted mutation's after-value
-# is merged into {repo}/.localharness/overrides.yaml, validated, atomically written, and
-# git-committed in the MAIN repo (never a worktree). It re-asserts the anti-reward-hacking
-# seal and emits ComponentMutated(layer="user", actor="orchestrator", actor_detail=pid).
-# These use the real tmp_git_repo fixture (Task 3) — overrides.yaml + git log are the asserts.
+# Adoption is the human-checkpoint live write: a held/promoted mutation's after-value is
+# merged into the GLOBAL user overlay (<config_dir>/overrides.yaml — the same file
+# experiment.py/proposer.py READ for `before` provenance), validated, and atomically written.
+# It re-asserts the anti-reward-hacking seal and emits ComponentMutated(layer="user",
+# actor="orchestrator", actor_detail=pid). It writes NOTHING into the repo: the project dotdir
+# is gitignored in production (tmp_git_repo's shape), where a `git add` on it fails outright.
+# The asserts are the global overlay's content + the repo staying untouched.
 # ---------------------------------------------------------------------------
+
+
+def _global_overlay(components_home):
+    """The file adoption writes: <config_dir>/overrides.yaml under the hermetic home."""
+    return components_home / "overrides.yaml"
 
 
 def _git_log_lines(repo):
@@ -280,28 +287,36 @@ def _git_head_sha(repo):
     return out.stdout.strip()
 
 
-async def test_adopt_commits_and_sets_status(archive_store, seeded_archive, tmp_git_repo, components_home):
-    """adopt() writes the after-value into {repo}/.localharness/overrides.yaml, git-commits, returns a 40-char sha.
+async def test_adopt_writes_global_overlay_and_sets_status(archive_store, seeded_archive, tmp_git_repo,
+                                                           components_home):
+    """adopt() writes the after-value into the GLOBAL user overlay and returns the repo's HEAD sha.
 
-    adopt() returns the sha; the LOOP (18-05)/CLI (18-06) flips status→adopted after a successful adopt
-    (mirrors the experiment runner's separation of run vs verdict). The status flip is asserted here via
-    the same update_verdict the caller invokes, to lock the end-to-end adopted contract.
+    The global overlay is the file experiment.py/proposer.py read for `before` provenance, so an
+    adoption is measurable by the next iteration (F3). The project overlay is NOT touched — it is
+    gitignored in production and nothing reads it back. adopt() returns the repo HEAD it was
+    measured against; the LOOP (18-05)/CLI (18-06) flips status→adopted after a successful adopt
+    (mirrors the experiment runner's separation of run vs verdict).
     """
     import yaml
+    from localharness.config.overlay import _resolve_user_overlay_path
 
     [row] = await seeded_archive(
         archive_store,
         [dict(id="adopt-ok", component="agent.role", status="promoted",
               diff=json.dumps({"before": "initial", "after": "evolved role"}))],
     )
+    project_overlay = tmp_git_repo / ".localharness" / "overrides.yaml"
+    project_before = project_overlay.read_text()
     before_commits = len(_git_log_lines(tmp_git_repo))
     sha = await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
 
-    overrides = tmp_git_repo / ".localharness" / "overrides.yaml"
+    overrides = _global_overlay(components_home)
+    assert overrides == _resolve_user_overlay_path()      # the readers' path, not a test guess
     data = yaml.safe_load(overrides.read_text())
     assert data["agent"]["role"] == "evolved role"        # the after-value is now live
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits + 1  # exactly one new commit
-    assert isinstance(sha, str) and len(sha) == 40        # full git sha returned
+    assert project_overlay.read_text() == project_before  # the repo's own overlay is untouched
+    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # a global write is not a commit
+    assert isinstance(sha, str) and len(sha) == 40        # the HEAD the adoption was measured at
 
     # The caller (loop/CLI) records the adopted verdict after a successful adopt().
     await archive_store.update_verdict(row.id, status="adopted")
@@ -310,9 +325,8 @@ async def test_adopt_commits_and_sets_status(archive_store, seeded_archive, tmp_
 
 async def test_thin_lift_holds(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                FakeClock, FakeWindowMeter, FakeExperimentFn):
-    """Gate exit 0 but lift < min_lift → status 'held', NO commit (loop-level decision)."""
+    """Gate exit 0 but lift < min_lift → status 'held', NO live overlay write (loop-level decision)."""
     pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
-    before_commits = len(_git_log_lines(tmp_git_repo))
     # A gate that promotes (exit 0) but whose measured lift is below the floor.
     summary = await run_loop(
         store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
@@ -322,7 +336,7 @@ async def test_thin_lift_holds(archive_store, seeded_inflight, tmp_git_repo, com
         experiment_fn=FakeExperimentFn(exit_code=0),  # promotes, but thin lift
     )
     assert (await archive_store.get(pid)).status == "held"
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # no commit on a held row
+    assert not _global_overlay(components_home).exists()  # a held row never reaches live config
     assert summary.held >= 1
 
 
@@ -330,7 +344,6 @@ async def test_inconclusive_holds(archive_store, seeded_inflight, tmp_git_repo, 
                                   FakeClock, FakeWindowMeter, FakeExperimentFn):
     """Gate exit 3 (inconclusive) → status 'held'."""
     pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
-    before_commits = len(_git_log_lines(tmp_git_repo))
     await run_loop(
         store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
         max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
@@ -339,14 +352,13 @@ async def test_inconclusive_holds(archive_store, seeded_inflight, tmp_git_repo, 
         experiment_fn=FakeExperimentFn(exit_code=3),  # inconclusive
     )
     assert (await archive_store.get(pid)).status == "held"
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # inconclusive never commits
+    assert not _global_overlay(components_home).exists()  # inconclusive never writes live config
 
 
 async def test_reject_no_commit(archive_store, seeded_inflight, tmp_git_repo, components_home,
                                 FakeClock, FakeWindowMeter, FakeExperimentFn):
-    """Gate exit 1 or 2 → no adoption, no commit; row keeps train_rejected/holdout_rejected."""
+    """Gate exit 1 or 2 → no adoption, no live write; row keeps train_rejected/holdout_rejected."""
     pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="x")
-    before_commits = len(_git_log_lines(tmp_git_repo))
     await run_loop(
         store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
         max_iterations=1, max_cost=None, epsilon=0.0, min_lift=0.0, proposal_timeout=10,
@@ -356,11 +368,15 @@ async def test_reject_no_commit(archive_store, seeded_inflight, tmp_git_repo, co
     )
     status = (await archive_store.get(pid)).status
     assert status in ("train_rejected", "holdout_rejected")  # the gate's own verdict, not adopted/held
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # a reject never commits
+    assert not _global_overlay(components_home).exists()  # a reject never writes live config
 
 
-async def test_adopt_commits_main_repo_not_worktree(archive_store, seeded_archive, tmp_git_repo, components_home):
-    """The adoption commit lands in repo_root HEAD (HEAD sha advances) — NOT in any lh-exp-* worktree."""
+async def test_adopt_leaves_the_repo_untouched(archive_store, seeded_archive, tmp_git_repo, components_home):
+    """An adoption changes NO git state: HEAD stands, the tree is clean, no lh-exp-* worktree.
+
+    The live write is the global user overlay; the repo is only read (HEAD, for the returned
+    provenance sha). Nothing is staged or committed, in repo_root or in any worktree.
+    """
     import subprocess
 
     [row] = await seeded_archive(
@@ -369,17 +385,19 @@ async def test_adopt_commits_main_repo_not_worktree(archive_store, seeded_archiv
               diff=json.dumps({"before": "initial", "after": "mainline"}))],
     )
     head_before = _git_head_sha(tmp_git_repo)
-    await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
-    head_after = _git_head_sha(tmp_git_repo)
-    assert head_after != head_before  # MAIN repo HEAD advanced
-    # No lingering experiment worktree carries the commit (adoption is not a worktree write).
+    sha = await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
+    assert _git_head_sha(tmp_git_repo) == head_before == sha  # HEAD stands; it IS the returned sha
+    status = subprocess.run(["git", "-C", str(tmp_git_repo), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True).stdout
+    assert status.strip() == ""  # nothing staged, nothing modified, nothing to commit
+    # No lingering experiment worktree either (adoption is not a worktree write).
     wt = subprocess.run(["git", "-C", str(tmp_git_repo), "worktree", "list"],
                         capture_output=True, text=True)
     assert "lh-exp-" not in wt.stdout
 
 
 async def test_adopt_refuses_sealed_surface(archive_store, seeded_archive, tmp_git_repo, components_home):
-    """adopt() on a sealed-prefix OR multi-component row raises AdoptionRefused, sets status 'adoption_rejected', NO commit.
+    """adopt() on a sealed-prefix OR multi-component row raises AdoptionRefused, sets status 'adoption_rejected', NO write.
 
     Mirrors experiment.py _OFFREGISTRY_PREFIXES (grader/bench./holdout/success_criteria/scenario)
     + _is_multi_component (a.b,c.d) — the seal is re-asserted at the live-write boundary.
@@ -394,31 +412,24 @@ async def test_adopt_refuses_sealed_surface(archive_store, seeded_archive, tmp_g
         [dict(id="adopt-multi", component="agent.role,tools.bash.description", status="promoted",
               diff=json.dumps({"before": "a", "after": "b"}))],
     )
-    before_commits = len(_git_log_lines(tmp_git_repo))
     for row in (sealed, multi):
         with pytest.raises(AdoptionRefused):
             await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
         assert (await archive_store.get(row.id)).status == "adoption_rejected"
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # refused before any commit
+    assert not _global_overlay(components_home).exists()  # refused before any overlay write
 
 
 async def test_adopt_refuses_invalid_config(archive_store, seeded_archive, tmp_git_repo, components_home):
-    """An after-value that makes HarnessConfig.model_validate(merged) fail → no write, no commit."""
-    import yaml
-
+    """An after-value that makes HarnessConfig.model_validate(merged) fail → no overlay write."""
     # agent.stuck_detector.threshold has a numeric constraint; a non-coercible after fails validation.
     [bad] = await seeded_archive(
         archive_store,
         [dict(id="adopt-bad", component="agents.main.stuck_detector.repeated_threshold", status="promoted",
               diff=json.dumps({"before": 3, "after": "not-an-int"}))],
     )
-    overrides = tmp_git_repo / ".localharness" / "overrides.yaml"
-    before_text = overrides.read_text()
-    before_commits = len(_git_log_lines(tmp_git_repo))
     with pytest.raises(Exception):  # AdoptionRefused or a validation error — either way no write
         await adopt(bad.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
-    assert overrides.read_text() == before_text  # overlay untouched on validation failure
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits
+    assert not _global_overlay(components_home).exists()  # live overlay untouched on validation failure
 
 
 async def test_rejected_not_reoffered(archive_store, seeded_archive, tmp_git_repo, components_home):
@@ -428,10 +439,9 @@ async def test_rejected_not_reoffered(archive_store, seeded_archive, tmp_git_rep
         [dict(id="adopt-declined", component="agent.role", status="adoption_rejected",
               diff=json.dumps({"before": "a", "after": "b"}))],
     )
-    before_commits = len(_git_log_lines(tmp_git_repo))
     with pytest.raises(AdoptionRefused):
         await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)
-    assert len(_git_log_lines(tmp_git_repo)) == before_commits  # a declined row never re-commits
+    assert not _global_overlay(components_home).exists()  # a declined row never re-writes live config
     # And it is not surfaced as a held candidate for re-offer.
     from localharness.autoresearch.archive import ArchiveQuery
 
@@ -458,6 +468,89 @@ async def test_adoption_emits_component_mutated(archive_store, seeded_archive, t
     mutated = [e for e in received
                if e.layer == "user" and e.actor == "orchestrator" and e.actor_detail == row.id]
     assert len(mutated) >= 1  # the loop (not the gate) is recorded as the live-overlay author
+
+
+async def test_adopt_in_gitignored_overlay_repo_does_not_raise(archive_store, seeded_archive,
+                                                               tmp_git_repo, components_home):
+    """F1: in production's repo shape (.localharness/ gitignored) an adoption completes, no exception.
+
+    The old adoption staged the project overlay with `git add`, which exits non-zero on an ignored
+    path — a CalledProcessError AFTER the overlay was already written (half-applied state) that the
+    loop does not catch. The fixture's shape is asserted here so this can never silently drift back.
+    """
+    import subprocess
+
+    import yaml
+
+    ignored = subprocess.run(
+        ["git", "-C", str(tmp_git_repo), "check-ignore", ".localharness/overrides.yaml"],
+        capture_output=True, text=True,
+    )
+    assert ignored.returncode == 0  # the fixture really is production's shape
+
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-ignored", component="agent.role", status="promoted",
+              diff=json.dumps({"before": "initial", "after": "survives"}))],
+    )
+    await adopt(row.id, store=archive_store, cfg=None, repo_root=tmp_git_repo)  # must not raise
+    data = yaml.safe_load(_global_overlay(components_home).read_text())
+    assert data["agent"]["role"] == "survives"
+
+
+async def test_adopt_survives_a_git_failure(archive_store, seeded_archive, tmp_path, components_home):
+    """Git can NEVER kill an adoption: with repo_root outside any git repo the overlay still lands.
+
+    The remaining git call is provenance only (the HEAD the win was measured at). A failure logs
+    and yields an empty sha — the overlay write, the archive row and the audit event all complete.
+    """
+    import yaml
+
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    [row] = await seeded_archive(
+        archive_store,
+        [dict(id="adopt-nogit", component="agent.role", status="promoted",
+              diff=json.dumps({"before": "initial", "after": "no git here"}))],
+    )
+    sha = await adopt(row.id, store=archive_store, cfg=None, repo_root=not_a_repo)
+    assert sha == ""  # no provenance sha available, and that is not an error
+    data = yaml.safe_load(_global_overlay(components_home).read_text())
+    assert data["agent"]["role"] == "no git here"
+
+
+async def test_loop_survives_adoption_in_gitignored_repo(archive_store, seeded_inflight, tmp_git_repo,
+                                                         components_home, FakeClock, FakeWindowMeter):
+    """F1 end shape: the REAL adopt() inside run_loop — a clean win adopts and the loop finishes.
+
+    No adopt_fn injection: this is the path that killed the loop at its first success in the real
+    repo (the crash escaped run_loop entirely, leaving a half-applied overlay and an in_flight row).
+    """
+    import yaml
+
+    pid = await seeded_inflight(archive_store, component="agent.role", before="initial", after="evolved")
+
+    async def _propose(*args, **kwargs):
+        return pid
+
+    async def _experiment(proposal_id, **kwargs):
+        await archive_store.update_verdict(
+            proposal_id, status="promoted", train_score=0.9,
+            train_scores_per_fixture={"f1": 0.9}, holdout_score=0.8, p_value=0.01,
+        )
+        return 0  # clean PROMOTE -> adopt
+
+    summary = await run_loop(
+        store=archive_store, cfg=None, repo_root=tmp_git_repo, budget=None,
+        max_iterations=1, max_cost=None, epsilon=0.0, min_lift=None, proposal_timeout=10,
+        window_tokens=10_000, clock=FakeClock(), meter=FakeWindowMeter(),
+        propose_fn=_propose, experiment_fn=_experiment,
+    )
+    assert summary.adopted == 1
+    assert summary.halt_reason in (None, "max_iterations")  # finished, not crashed
+    assert (await archive_store.get(pid)).status == "adopted"
+    data = yaml.safe_load(_global_overlay(components_home).read_text())
+    assert data["agent"]["role"] == "evolved"  # the win is live where the next run reads it
 
 
 # ---------------------------------------------------------------------------
