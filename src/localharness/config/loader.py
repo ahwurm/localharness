@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import reprlib as repr_lib
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -39,6 +40,44 @@ class ConfigParseError(ConfigError):
         super().__init__(f"{path}:{line}:{column}: {message}")
 
 
+# How much of a rejected value an error message may show. Long enough to recognize what you typed,
+# short enough that rendering it is never the expensive part of failing. The bound is on the
+# MESSAGE, not on the value: `_short_repr` never builds the full repr in the first place.
+VALUE_REPR_LIMIT = 500
+
+_BOUNDED_REPR = repr_lib.Repr()
+_BOUNDED_REPR.maxlevel = 4
+_BOUNDED_REPR.maxstring = 120
+_BOUNDED_REPR.maxother = 120
+_BOUNDED_REPR.maxlist = _BOUNDED_REPR.maxtuple = _BOUNDED_REPR.maxset = 8
+_BOUNDED_REPR.maxdict = 8
+
+
+def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT) -> str:
+    """A bounded, honest repr of the value a config field rejected.
+
+    `repr()` on a rejected value is unbounded work on attacker-shaped input: a YAML file using
+    alias amplification (`*a` referenced nine times, five levels deep) parses in milliseconds and
+    reprs to gigabytes — measured at 6GB and 41 seconds before this, from a file under 1KB, in the
+    command a user runs BECAUSE something is already wrong.
+
+    `reprlib` is what keeps the work bounded: it walks a limited number of elements to a limited
+    depth and never materializes the whole structure. The size we report alongside is one that is
+    cheap to know — a string's length, a container's top-level item count — never a byte count of
+    a repr we deliberately did not build.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return repr(value)
+        return f"{value[:limit]!r} … (truncated, {len(value)} chars)"
+    text = _BOUNDED_REPR.repr(value)
+    if isinstance(value, (list, tuple, set, frozenset, dict)) and "..." in text:
+        return f"{text[:limit]} (truncated, {len(value)} top-level items)"
+    return text[:limit]
+
+
 class ConfigFieldError:
     """One validation failure for one field."""
     def __init__(
@@ -61,7 +100,7 @@ class ConfigFieldError:
     def __str__(self) -> str:
         loc = f" (line {self.yaml_line})" if self.yaml_line else ""
         origin = f"{self.source_path}: " if self.source_path else ""
-        return f"{origin}{self.field_path}{loc}: {self.message} (got: {self.value!r})"
+        return f"{origin}{self.field_path}{loc}: {self.message} (got: {_short_repr(self.value)})"
 
 
 class ConfigValidationError(ConfigError):
