@@ -130,7 +130,11 @@ def _print_overridden_keys(cfg_path: Path, workspace: Path) -> None:
         # a user typed. (41-06's `[old] proj` lesson, applied to values as well as paths.)
         console.print(
             escape(f"         {path} = {entry.current_value!r}  [{entry.winning_layer}]"
-                   f"  (global: {before!r})")
+                   f"  (global: {before!r})"),
+            # soft_wrap so a long value is handed to the TERMINAL whole instead of arriving with
+            # a newline folded into it — it still looks wrapped on screen, and it is one line in
+            # the data. 43-04's measured lesson from the real binary, same wave, same class.
+            soft_wrap=True,
         )
 
 
@@ -170,7 +174,8 @@ def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
         when = datetime.strptime(stamp, BACKUP_STAMP_FORMAT).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         when = stamp
-    console.print(escape(f"       Last migrated {when}; backup at {latest}"))
+    # soft_wrap: a backup path folded across two lines is a path the user cannot copy (43-04).
+    console.print(escape(f"       Last migrated {when}; backup at {latest}"), soft_wrap=True)
 
 
 def doctor(
