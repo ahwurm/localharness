@@ -27,6 +27,7 @@ it did before phase 43 existed, including creating nothing in the current direct
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -111,8 +112,14 @@ def test_fresh_scaffold_lands_in_cwd_and_leaves_the_machine_alone(project):
     assert (workspace / "agents").is_dir()
 
     text = config_file.read_text(encoding="utf-8")
-    assert yaml.safe_load(text) in (None, {}), "the scaffolded config must set nothing at all"
-    assert "provider" not in text, "provider is hardware truth and belongs to the global layer"
+    # The claim is "no provider KEY", not "the word never appears": the template deliberately
+    # SAYS in a comment why provider belongs to the machine, and a bare `"provider" not in text`
+    # grades that sentence rather than the scaffold. An anchored, comment-excluding match is the
+    # form that a real `provider:` block would trip.
+    assert not re.search(r"^\s*provider:", text, re.M), "a workspace layer never carries provider"
+    uncommented = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert uncommented == [], f"the scaffolded config must set nothing at all, got {uncommented}"
+    assert yaml.safe_load(text) in (None, {})
 
 
 def test_scaffold_creates_agents_but_no_overrides_and_no_state_dirs(project):
