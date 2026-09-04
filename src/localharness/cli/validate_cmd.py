@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.rule import Rule
 
 from localharness.config.loader import ConfigError, ConfigLoader
@@ -93,7 +94,7 @@ def validate(
             valid_count += 1
         else:
             console.print(f"  {name:<35} {_FAIL} invalid")
-            _print_error_details(error)
+            _print_error_details(error, file_path)
             invalid_count += 1
 
     console.print()
@@ -128,14 +129,33 @@ def _validate_single_file(loader: ConfigLoader, path: Path) -> None:
         loader._validate_dict(AgentConfig, data, str(path), text)
 
 
-def _print_error_details(error: ConfigError) -> None:
-    """Print structured error details with field path and line number."""
+def _print_error_details(error: ConfigError, reported_path: str | None = None) -> None:
+    """Print structured error details with field path and line number.
+
+    `reported_path` is the file this row is LISTED under. The harness row is always listed under
+    the global `config.yaml` (validate_all's key), but with a workspace layer the error can belong
+    to one of three other files — and the row prints a bare basename, which is the same
+    `config.yaml` in either layer. So when the report's own owning file differs from the row's, it
+    is printed: without it a user reading `validate` would be told the right LINE of a file they
+    have no way to identify (CLI-02 / dogfood F5). `doctor` gets this for free — it renders the
+    whole `str(exc)`, header included.
+
+    Both clauses are inert when no workspace applies: the paths agree and `source_path` is None, so
+    the output is byte-identical to pre-43 (LAYR-03).
+    """
     from localharness.config.loader import ConfigFieldError, ConfigValidationError, ConfigParseError
 
     if isinstance(error, ConfigValidationError):
+        if reported_path is not None and error.path != reported_path:
+            # escape(): a path is data, not markup. A folder named `[old] proj` otherwise prints as
+            # a path that does not exist, in the command people run to find out what is wrong.
+            console.print(f"    [dim]in {escape(error.path)}[/dim]")
         for field_err in error.errors:
             line_info = f"Line {field_err.yaml_line}: " if field_err.yaml_line else ""
-            console.print(f"    [red]{line_info}{field_err.field_path}:[/red] {field_err.message}")
+            origin = f"{escape(field_err.source_path)} " if field_err.source_path else ""
+            console.print(
+                f"    [red]{origin}{line_info}{field_err.field_path}:[/red] {field_err.message}"
+            )
             if field_err.value is not None:
                 console.print(f"    [dim]  value: {field_err.value!r}[/dim]")
     elif isinstance(error, ConfigParseError):

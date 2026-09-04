@@ -47,15 +47,21 @@ class ConfigFieldError:
         value: Any,
         message: str,
         yaml_line: Optional[int] = None,
+        source_path: Optional[str] = None,
     ) -> None:
         self.field_path = field_path
         self.value = value
         self.message = message
         self.yaml_line = yaml_line
+        # The file that actually SET this field, when it is not the file the surrounding
+        # ConfigValidationError is headed with. None whenever the two agree — which keeps every
+        # pre-43 message (agent yamls, org.yaml, a global-only harness error) byte-identical.
+        self.source_path = source_path
 
     def __str__(self) -> str:
         loc = f" (line {self.yaml_line})" if self.yaml_line else ""
-        return f"{self.field_path}{loc}: {self.message} (got: {self.value!r})"
+        origin = f"{self.source_path}: " if self.source_path else ""
+        return f"{origin}{self.field_path}{loc}: {self.message} (got: {self.value!r})"
 
 
 class ConfigValidationError(ConfigError):
@@ -113,6 +119,41 @@ def _build_line_map(yaml_text: str) -> dict[str, int]:
         indent_stack.append((indent, path))
 
     return line_map
+
+
+def _dotpath_in(raw: object, dotpath: str) -> bool:
+    """True iff `raw` is a nested dict carrying this dot-path as a key chain."""
+    cur: Any = raw
+    for part in dotpath.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
+def _owning_source(
+    loc: str,
+    sources: list[tuple[Path, dict]],
+) -> Optional[tuple[Path, dict]]:
+    """The HIGHEST-priority source that actually sets `loc`, or None.
+
+    `sources` arrives highest-priority-FIRST — the reverse of _raw_config_sources()'s ruled
+    order — because the winner of the merge is the file whose value Pydantic actually rejected.
+
+    A Pydantic `loc` can end in a list index or a discriminator that is not a YAML key
+    (`provider.available_models.0`). Progressively dropping the last segment attributes such an
+    error to its owning BLOCK rather than dropping to the global fallback. A model-level validator
+    has an EMPTY loc — no file sets it, because the error is about a relationship between values
+    rather than about one line — and that falls through to None on purpose.
+    """
+    parts = loc.split(".")
+    while parts:
+        probe = ".".join(parts)
+        for path, raw in sources:
+            if _dotpath_in(raw, probe):
+                return path, raw
+        parts.pop()
+    return None
 
 
 def _load_yaml_file(path: Path) -> dict:
@@ -355,7 +396,54 @@ class ConfigLoader:
         if union_deny:
             merged = deep_merge(merged, {"org": {"permissions": {"deny_patterns": union_deny}}})
 
-        result = self._validate_dict(HarnessConfig, merged, str(cfg_path), text)
+        # NOT `_validate_dict`: that helper serves the genuinely single-file configs (agent,
+        # division, org yamls) and must keep reporting exactly one path. The harness config is the
+        # only MERGED one, so each of its errors is attributed to the source that actually set the
+        # field — before this, every error was hardcoded to `cfg_path` and given a line number read
+        # off the GLOBAL file's text, so a bad value on line 3 of a workspace config.yaml was
+        # reported as a line of the global file where a valid value sat (dogfood F5, CLI-02).
+        try:
+            result = HarnessConfig.model_validate(merged)
+        except ValidationError as exc:
+            # Highest priority FIRST: the file whose value survived the merge is the one Pydantic
+            # rejected. `sources` is (global_cfg, global_overlay, ws_cfg, ws_overlay) in ruled order.
+            ranked: list[tuple[Path, dict]] = []
+            if self._local_dir is not None:
+                ranked.append((self._local_dir / "overrides.yaml", sources[3]))
+                ranked.append((self._local_dir / "config.yaml", sources[2]))
+            ranked.append((_resolve_user_overlay_path(self._config_dir), sources[1]))
+            ranked.append((cfg_path, sources[0]))
+
+            line_maps: dict[Path, dict[str, int]] = {str(cfg_path): _build_line_map(text)}
+            errors: list[ConfigFieldError] = []
+            owners: list[Path] = []
+            for err in exc.errors():
+                loc = ".".join(str(p) for p in err["loc"])
+                owner = _owning_source(loc, ranked)
+                # No source sets it (a cross-field validator, a pure-default field): fall back to
+                # the global config.yaml, exactly as every harness error did before phase 43.
+                owner_path = owner[0] if owner is not None else cfg_path
+                key = str(owner_path)
+                if key not in line_maps:
+                    try:
+                        line_maps[key] = _build_line_map(owner_path.read_text(encoding="utf-8"))
+                    except OSError:
+                        line_maps[key] = {}
+                owners.append(owner_path)
+                errors.append(
+                    ConfigFieldError(loc, err.get("input"), err["msg"], line_maps[key].get(loc))
+                )
+
+            # If every error came from ONE file, that file heads the report and no error repeats
+            # it — so a workspace-only mistake reads exactly like a global-only one always has,
+            # just pointing at the right file. Mixed sources keep the global header and name each
+            # owner on its own line.
+            header = owners[0] if len(set(owners)) == 1 else cfg_path
+            for field_err, owner_path in zip(errors, owners):
+                if owner_path != header:
+                    field_err.source_path = str(owner_path)
+            raise ConfigValidationError(str(header), errors) from exc
+
         self._harness_cache = result
         return result
 
