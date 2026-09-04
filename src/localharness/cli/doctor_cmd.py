@@ -224,9 +224,11 @@ def doctor(
         # Glyph outside escape(), path inside — the same split 39-05's layer lines use, and for
         # the same measured reason: rich silently DELETES `[old]` from a folder named `[old] proj`,
         # so an unescaped path here names a file that does not exist.
-        console.print(_PASS + " " + escape(f"Config file: {config_file}"))
+        console.print(_PASS + " " + escape(f"Config file: {config_file}"), soft_wrap=True)
     else:
-        console.print(_FAIL + " " + escape(f"Config file not found: {config_file}"))
+        console.print(
+            _FAIL + " " + escape(f"Config file not found: {config_file}"), soft_wrap=True
+        )
         console.print(f"       Run 'localharness init' to create it.")
         failures.append("config-missing")
         # Can't continue without config
@@ -245,8 +247,8 @@ def doctor(
         # path must not have it. Measured, not theoretical — a folder named `[old] proj` printed
         # as `/tmp/ proj/...` here, i.e. doctor reporting a path that does not exist, in the one
         # command people run to find out where their config comes from. (`[/]` raises outright.)
-        console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"))
-        console.print(escape(f"       Global layer:    {cfg_path}"))
+        console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"), soft_wrap=True)
+        console.print(escape(f"       Global layer:    {cfg_path}"), soft_wrap=True)
         _print_overridden_keys(cfg_path, workspace)
     try:
         harness = loader.load_harness()
