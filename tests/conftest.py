@@ -523,7 +523,7 @@ def proposer_results(tmp_path: Path) -> dict:
 # Phase 18 autoresearch-loop fixtures
 #
 # Hermetic seams for the loop driver / budget / adoption tests: a REAL tmp git repo
-# (adoption commits land in it), a monotonic-style FakeClock (budget wallclock + the 5h
+# (production's shape — .localharness/ gitignored), a monotonic-style FakeClock (budget wallclock + the 5h
 # window boundary), a FakeWindowMeter (force token-window exhaustion without real math),
 # and a FakeExperimentFn (returns a chosen gate exit code; a slow variant for the timeout
 # test). Mirrors test_experiment.py's _make_git_repo + test_experiment_cmd.py's _fake seam.
@@ -532,12 +532,18 @@ def proposer_results(tmp_path: Path) -> dict:
 
 @pytest.fixture
 def tmp_git_repo(tmp_path: Path) -> Path:
-    """A real `git init` repo with an initial committed .localharness/overrides.yaml.
+    """A real `git init` repo in PRODUCTION's shape: `.localharness/` is GITIGNORED, never committed.
 
-    The adoption mechanism (AUTO-04) writes the live overlay here and git-commits it; tests
-    assert against `git log` + the overrides.yaml content. CI-safe (sets user.email/name).
-    Returns the repo root Path. The seed overlay is a minimal valid overlay ({"agent": {"role": "initial"}})
-    so the "compound baseline advances" assertion has a prior value to evolve from.
+    This mirrors the real localharness checkout (and every project that keeps its dotdir out of
+    git). The earlier fixture committed `.localharness/overrides.yaml` with no .gitignore — the
+    exact inverse of production — which hid the crash where adoption's `git add` on an ignored
+    path exits non-zero and kills the loop at its first success (F1).
+
+    Adoption (AUTO-04) writes the GLOBAL user overlay (`components_home`), so tests assert against
+    that file; this repo is `repo_root` (worktrees, HEAD, the journal dir) and is expected to stay
+    unchanged by an adoption. The seed `{"agent": {"role": "initial"}}` project overlay is written
+    but stays UNTRACKED — the value a worktree checkout therefore never carries. CI-safe (sets
+    user.email/name). Returns the repo root Path.
     """
     import subprocess
 
@@ -548,6 +554,7 @@ def tmp_git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+    (repo / ".gitignore").write_text(".localharness/\n", encoding="utf-8")
     overlay = repo / ".localharness" / "overrides.yaml"
     overlay.parent.mkdir(parents=True, exist_ok=True)
     overlay.write_text(yaml.safe_dump({"agent": {"role": "initial"}}), encoding="utf-8")

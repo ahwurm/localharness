@@ -204,8 +204,9 @@ async def test_review_and_adopt_held(components_home, tmp_git_repo, monkeypatch)
     """`review` lists a held row (component, diff, lift, p-value, id); `adopt <8-char-prefix>` flips it to 'adopted'.
 
     The seeded row addresses a REAL registry path (``agent.role``) so the adoption seal +
-    ``HarnessConfig`` re-validation pass. ``adopt`` git-commits in the cwd's git toplevel, so
-    the test chdirs into the throwaway ``tmp_git_repo`` — NEVER the real project repo.
+    ``HarnessConfig`` re-validation pass. ``adopt`` resolves repo_root from the cwd's git toplevel
+    (for the provenance sha), so the test chdirs into the throwaway ``tmp_git_repo`` — NEVER the
+    real project repo. The live write goes to the hermetic ``components_home`` overlay.
     """
     monkeypatch.chdir(tmp_git_repo)
     held_id = "held1234abcd5678"
