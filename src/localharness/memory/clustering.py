@@ -37,11 +37,14 @@ probe survives only as the embedding leg's 2-factor co-factor and in aux-failure
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 
 from localharness.memory.sqlite import Fact, FactQuery, _row_to_fact
+
+log = logging.getLogger(__name__)
 
 # Co-tag generic-hub guard (Stage B): a child tag on > _TAG_DF_FRACTION of the pool forms no
 # edges, floored at _TAG_DF_FLOOR members so a small homogeneous cluster survives a tiny pool.
