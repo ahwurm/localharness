@@ -85,11 +85,18 @@ and skip discovery entirely: no workspace layer applies when any of them is set.
 `.localharness/` anywhere above you, an interactive `localharness start` asks once: `No workspace
 here — create ./.localharness for this project?`, default no. Answer yes and the directory is
 created by the same scaffolder `init --workspace` uses — and the session you are starting is
-already layered on it, with no second command to run. The offer is silent, and creates nothing,
+already layered on it, with no second command to run. **A "no" is remembered**, per directory,
+forever: the answer goes in `~/.localharness/declined_workspace_offers.yaml`, keyed by the
+resolved path exactly as the trust store is, and that directory is never asked again. It is a
+sibling file rather than an entry in `trusted_workspaces.yaml` because it records a preference,
+not a trust boundary. Delete the entry (or the file) to be asked again; `init --workspace` and
+creating the directory by hand ignore the store entirely, so a recorded no never stands between
+you and a workspace you went and asked for. Only an answered prompt records: an EOF, or any run
+that could not ask, leaves the store untouched. The offer is silent, and creates nothing,
 wherever asking would be wrong: no terminal, `--no-input`, an explicit `--config-dir` or either env
 var (a full replacement is not a project), a workspace already found up-tree (whatever the trust
-gate then decided about loading it), and `$HOME` or the machine's global config directory, which
-are not projects. It is the one prompt in the harness that writes to disk, so those guards are the
+gate then decided about loading it), `$HOME` or the machine's global config directory, which are
+not projects, and any directory whose offer was already declined. It is the one prompt in the harness that writes to disk, so those guards are the
 design rather than a detail of it.
 
 **`--no-input`, for runs with nobody watching.** `start`, `doctor`, `validate` and `agent create`

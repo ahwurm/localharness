@@ -122,6 +122,101 @@ def test_no_input_never_prompts_even_with_a_terminal(project, monkeypatch):
     assert not (project / ".localharness").exists()
 
 
+# ------------------------------------------------------------------ the "no" is remembered
+#
+# Asked once per directory, ever — the same contract as the trust question (owner ruling
+# 2026-09-04). A prompt that comes back every time you start is one people dismiss without
+# reading, and this one writes to disk.
+
+
+def _decline_store(project: Path) -> Path:
+    from localharness.config.trust import declined_offers_path
+
+    return declined_offers_path()
+
+
+def test_a_recorded_no_is_never_asked_again(project, monkeypatch):
+    """Two runs, one question: the second must not reach the prompt at all."""
+    _tty(monkeypatch)
+    _answer(monkeypatch, False)
+    assert offer_workspace_creation(None) is None
+
+    _never_asked(monkeypatch)
+    assert offer_workspace_creation(None) is None
+    assert not (project / ".localharness").exists()
+
+
+def test_the_decline_lands_in_the_global_dir_not_the_project(project, monkeypatch):
+    """A directory cannot hold the record of its own answer — the same rule the trust store has,
+    and here also the only rule that could work: there is no workspace to write it into."""
+    _tty(monkeypatch)
+    _answer(monkeypatch, False)
+
+    offer_workspace_creation(None)
+
+    store = _decline_store(project)
+    assert store == project.parent / ".localharness" / "declined_workspace_offers.yaml"
+    assert str(project / ".localharness") in store.read_text(encoding="utf-8")
+    assert not (project / ".localharness").exists()
+
+
+def test_eof_records_nothing_and_the_next_session_is_still_asked(project, monkeypatch):
+    """A terminal that went away has not decided anything. Only an ANSWERED prompt spends the
+    one question this directory gets — the same principle as an unanswered trust prompt."""
+    _tty(monkeypatch)
+
+    def _eof(*_a, **_kw):
+        raise EOFError()
+
+    monkeypatch.setattr("rich.prompt.Confirm.ask", _eof)
+    assert offer_workspace_creation(None) is None
+    assert not _decline_store(project).exists()
+
+    asked = _answer(monkeypatch, False)
+    assert offer_workspace_creation(None) is None
+    assert len(asked) == 1, "the EOF run had already spent this directory's question"
+
+
+def test_a_yes_records_no_decline(project, monkeypatch):
+    """Nothing to remember: the workspace now exists, and its existence is what silences the
+    offer from then on."""
+    _tty(monkeypatch)
+    _answer(monkeypatch, True)
+
+    offer_workspace_creation(None)
+
+    assert not _decline_store(project).exists()
+
+
+def test_init_workspace_still_works_after_a_decline(project, monkeypatch):
+    """The store is the offer's memory, not a lock. A user who goes and asks for a workspace gets
+    one — `init --workspace` never reads this file, and neither does `mkdir`."""
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    _tty(monkeypatch)
+    _answer(monkeypatch, False)
+    offer_workspace_creation(None)
+
+    result = CliRunner().invoke(app, ["init", "--workspace"])
+
+    assert result.exit_code == 0, result.output
+    assert (project / ".localharness" / "config.yaml").is_file()
+
+
+def test_a_corrupt_decline_store_costs_a_question_not_a_session(project, monkeypatch):
+    """Fail OPEN here, deliberately — the opposite of the trust store. Nothing but this prompt
+    reads the file, so the worst an unreadable one can do is ask again."""
+    _tty(monkeypatch)
+    store = _decline_store(project)
+    store.write_text("{[not: yaml", encoding="utf-8")
+    asked = _answer(monkeypatch, False)
+
+    assert offer_workspace_creation(None) is None
+    assert len(asked) == 1
+
+
 # ------------------------------------------------------------------ where asking would be wrong
 
 

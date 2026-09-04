@@ -70,6 +70,25 @@ async def test_no_leaves_the_session_on_the_global_layer(tmp_path, monkeypatch, 
     assert "Workspace layer:" not in capsys.readouterr().out
 
 
+async def test_a_declined_project_is_never_asked_again_by_start(tmp_path, monkeypatch):
+    """Two real startups in the same directory, one question — the contract the trust prompt has
+    (owner ruling 2026-09-04). The second drive makes a prompt a failure rather than a hang."""
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **k: False)
+
+    await _drive()
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("asked again in a directory where the user already said no")
+
+    monkeypatch.setattr("rich.prompt.Confirm.ask", _boom)
+
+    await _drive()
+
+    assert not (proj / WORKSPACE_DIR_NAME).exists()
+
+
 async def test_a_scripted_start_is_never_offered_anything(tmp_path, monkeypatch):
     """No terminal, no question — `start` runs from hooks and wrappers all day."""
     _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
