@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.config import migrate as _migrate
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigError, ConfigNotFoundError
@@ -203,16 +204,26 @@ def _show_unconfigured(
         (LAYER_WORKSPACE_OVERRIDES, workspace / "overrides.yaml"),
     ]
     keys: list[tuple[str, object, str]] = []
+    unreadable: list[Path] = []
     for band, path in ws_files:
         if not path.exists():
             continue
-        raw = _load_yaml_file(path)
+        # A file that cannot be read is reported, not raised: this function only runs when the
+        # machine is ALREADY unconfigured, and dying here would replace the honest layer report
+        # with a traceback in the exact state the user needs the report (E cluster).
+        try:
+            raw = _load_yaml_file(path)
+        except Exception:
+            unreadable.append(path)
+            continue
         keys.extend((key, value, band) for key, value in _flatten(raw))
 
     if json_output:
         typer.echo(_json.dumps({
             "layers": [
-                {"layer": band, "path": str(p), "exists": p.exists()} for band, p in header_rows
+                {"layer": band, "path": str(p), "exists": p.exists(),
+                 "readable": p not in unreadable}
+                for band, p in header_rows
             ],
             # `configured: false` is why `keys` carries no `default` or `type`: those come off the
             # registry catalogue, which needs a loadable harness config. Saying so beats emitting
@@ -226,6 +237,10 @@ def _show_unconfigured(
         return
 
     _print_layer_rows(header_rows)
+    for path in unreadable:
+        err_console.print(
+            "[bold red]✗[/bold red] " + escape(f"unreadable, skipped: {path}"), soft_wrap=True
+        )
     console.print(
         "\n[yellow]This machine is not configured[/yellow] — run 'localharness init'. "
         "No effective config can be resolved, so what follows is only what this project's own "
@@ -308,6 +323,14 @@ def show(
     except ConfigError as exc:
         err_console.print(f"[bold red]Error:[/bold red] Failed to load config: {exc}")
         raise typer.Exit(1)
+    except _HANDLED as exc:
+        # E cluster (b): doctor has always caught broadly around its config load; this command did
+        # not, so a config.yaml that is a directory, holds non-UTF-8 bytes, or cannot be read ended
+        # in a traceback — in the command whose job is telling you where your config lives.
+        report_filesystem_error(
+            exc, "read your configuration", console=err_console,
+            paths=[p for _band, p in header_rows],
+        )
 
     rows = sorted(catalogue.values(), key=lambda e: e.path)
     if not show_all:

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.rule import Rule
 
+from localharness.cli.errors import polite_filesystem_errors
 from localharness.config.loader import ConfigError, ConfigLoader, ConfigValidationError
 from localharness.config.paths import resolve_config_dir
 
@@ -74,13 +75,26 @@ def validate(
                 soft_wrap=True,
             )
             raise typer.Exit(1)
-        try:
-            _validate_single_file(loader, target)
-            results.append((str(target), None))
-        except ConfigError as exc:
-            results.append((str(target), exc))
+        with polite_filesystem_errors(
+            "read that file", console=console, paths=[target]
+        ):
+            try:
+                _validate_single_file(loader, target)
+                results.append((str(target), None))
+            except ConfigError as exc:
+                results.append((str(target), exc))
     else:
-        results = loader.validate_all()
+        # E cluster (b): `validate_all` catches ConfigError per file, but a config.yaml holding
+        # non-UTF-8 bytes, one that cannot be read, or a `.localharness` that is a file are not
+        # ConfigErrors — they came out as tracebacks from the command people run to find out what
+        # is wrong with their config. Same handler doctor has always had.
+        with polite_filesystem_errors(
+            "read your configuration",
+            console=console,
+            paths=[cfg_path / "config.yaml",
+                   (workspace / "config.yaml") if workspace is not None else None],
+        ):
+            results = loader.validate_all()
 
     if not results:
         # #119: every command that fails on a missing config ends with the same next step

@@ -14,6 +14,7 @@ from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.agent.context import response_reserve
+from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
@@ -178,6 +179,19 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 """
 
 
+def _remove_partial_workspace(target: Path) -> None:
+    """Undo a scaffold that failed halfway, best effort.
+
+    Only ever called on the failure path, and only on a tree THIS invocation just made — the
+    refusal above guarantees nothing was there a moment ago. Failures here are ignored on purpose:
+    the user is already being told the real error, and a second one about the cleanup helps nobody.
+    """
+    try:
+        shutil.rmtree(target)
+    except OSError:
+        pass
+
+
 def _scaffold_workspace(
     *, endpoint: str | None, model: str | None, config_dir: str | None
 ) -> None:
@@ -205,8 +219,19 @@ def _scaffold_workspace(
         )
         raise typer.Exit(2)
 
-    target = Path.cwd() / WORKSPACE_DIR_NAME
-    if target.exists():
+    try:
+        target = Path.cwd() / WORKSPACE_DIR_NAME
+    except OSError as exc:
+        # H6: the working directory was deleted out from under this process. `Path.cwd()` is the
+        # first thing this command touches, so there is nowhere to scaffold and nothing to say
+        # except which call failed.
+        report_filesystem_error(exc, "find the current directory", console=err_console)
+        raise  # pragma: no cover - report_filesystem_error always exits
+
+    # `lexists`, not `exists` (H2): `exists()` FOLLOWS symlinks, so a `.localharness` pointing at
+    # a deleted tree answered False, sailed past this refusal, and died in mkdir with
+    # FileExistsError. A link that is there is there, whatever it points at.
+    if target.is_symlink() or target.exists():
         err_console.print(
             "[bold red]Error:[/bold red] "
             + escape(f"A workspace already exists at {target}. "
@@ -216,8 +241,17 @@ def _scaffold_workspace(
         )
         raise typer.Exit(1)
 
-    (target / "agents").mkdir(parents=True)
-    (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
+    # Validated before anything is written, and every remaining failure caught: a symlink loop
+    # (ELOOP), an unwritable project directory, a full disk. A half-made workspace left behind an
+    # error message is the worst outcome here — the next run would refuse to touch it (E cluster).
+    try:
+        (target / "agents").mkdir(parents=True)
+        (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
+    except _HANDLED as exc:
+        _remove_partial_workspace(target)
+        report_filesystem_error(
+            exc, f"create a workspace in {Path.cwd()}", console=err_console, paths=[target]
+        )
 
     # escape() around every path, markup outside it: `target` is `Path.cwd()/.localharness` and
     # a project folder named `[old] proj` is legal everywhere while `[old]` is rich markup.
