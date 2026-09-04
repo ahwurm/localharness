@@ -145,6 +145,104 @@ def _layer_files(cfg_path: Path, workspace: Optional[Path]) -> list[tuple[str, P
     return [(band, files[band]) for band in reversed(_LAYER_PRIORITY) if band in files]
 
 
+def _print_layer_rows(header_rows: list[tuple[str, Path]]) -> None:
+    """The merge-order header both `show` paths print. ONE renderer: the workspace-only path
+    (D1) must not drift into a second, differently-worded version of the same four rows."""
+    console.print(
+        "Config layers, lowest priority first — each one wins any key the ones above it set:"
+    )
+    width = max(len(band) for band, _ in header_rows)
+    for band, path in header_rows:
+        mark = "present" if path.exists() else "missing"
+        # escape() around the path, markup outside it: a folder legally named `[old] proj` printed
+        # as ` proj` here would be this command reporting a path that does not exist, in the one
+        # command whose whole job is saying where your config comes from (39-05's measured lesson).
+        #
+        # soft_wrap=True for the same reason, found by the real-binary drive and not by a test:
+        # Rich hard-wraps at the console width, so a deep project path arrives with a newline
+        # folded into it and the user copies half a path. Soft-wrapping hands the line to the
+        # TERMINAL intact — it still looks wrapped on screen, and it is one line in the data.
+        console.print(
+            f"  [cyan]{band:<{width}}[/cyan]  [dim]{mark}[/dim]  {escape(str(path))}",
+            soft_wrap=True,
+        )
+
+
+def _flatten(data: object, prefix: str = "") -> list[tuple[str, object]]:
+    """Leaf `(dotted.path, value)` pairs of a raw config mapping, sorted.
+
+    A list is a LEAF — `deny_patterns` is one value, not four keys — which is also how the
+    registry catalogue treats it, so the two views name the same things.
+    """
+    if not isinstance(data, dict):
+        return [(prefix, data)] if prefix else []
+    out: list[tuple[str, object]] = []
+    for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        out.extend(_flatten(value, path) if isinstance(value, dict) else [(path, value)])
+    return sorted(out)
+
+
+def _show_unconfigured(
+    header_rows: list[tuple[str, Path]], workspace: Path, *, json_output: bool
+) -> None:
+    """`config show` for a project whose workspace layer exists but whose MACHINE does not (D1).
+
+    No effective config can be computed — `load_harness` requires the global config.yaml, and
+    `provider:` is genuinely unresolvable without it — so nothing here pretends to show one. What
+    it shows is what actually exists: the layer rows with the absent files marked, and the keys
+    this project's own files set, read raw and attributed to the file they came from. That is the
+    honest answer to "where does my config come from" when the answer is "only from here, and the
+    machine is not set up yet".
+    """
+    from localharness.cli.components_cmd import _serialize_value
+    from localharness.config.loader import _load_yaml_file
+
+    ws_files = [
+        (LAYER_WORKSPACE_CONFIG, workspace / "config.yaml"),
+        (LAYER_WORKSPACE_OVERRIDES, workspace / "overrides.yaml"),
+    ]
+    keys: list[tuple[str, object, str]] = []
+    for band, path in ws_files:
+        if not path.exists():
+            continue
+        raw = _load_yaml_file(path)
+        keys.extend((key, value, band) for key, value in _flatten(raw))
+
+    if json_output:
+        typer.echo(_json.dumps({
+            "layers": [
+                {"layer": band, "path": str(p), "exists": p.exists()} for band, p in header_rows
+            ],
+            # `configured: false` is why `keys` carries no `default` or `type`: those come off the
+            # registry catalogue, which needs a loadable harness config. Saying so beats emitting
+            # nulls a consumer would read as real values.
+            "configured": False,
+            "keys": [
+                {"path": key, "value": _serialize_value(value), "layer": band}
+                for key, value, band in keys
+            ],
+        }, indent=2))
+        return
+
+    _print_layer_rows(header_rows)
+    console.print(
+        "\n[yellow]This machine is not configured[/yellow] — run 'localharness init'. "
+        "No effective config can be resolved, so what follows is only what this project's own "
+        "files set."
+    )
+    if not keys:
+        console.print("This project's layer sets nothing yet.")
+        return
+    table = Table(title="This project's layer", show_lines=False)
+    table.add_column("key", style="cyan", no_wrap=True)
+    table.add_column("value", overflow="fold")
+    table.add_column("set by", style="green")
+    for key, value, band in keys:
+        table.add_row(escape(key), escape(repr(value)), band)
+    console.print(table)
+
+
 @config_app.command("show")
 def show(
     config_dir: Annotated[
@@ -184,22 +282,33 @@ def show(
     )
     cfg_path = resolve_config_dir(config_dir)
 
+    header_rows = _layer_files(cfg_path, workspace)
+
     try:
         # tool_registry=None deliberately: the tools.*.description family is documentation, not
         # config, and building a live registry (asyncio.run + every builtin tool) is real cost to
         # add to a read-only command that would list ~30 rows nothing can set.
         catalogue, _overlays = layered_catalogue(cfg_path, workspace)
     except ConfigNotFoundError as exc:
-        err_console.print(
-            f"[bold red]Error:[/bold red] Failed to load config: {exc} "
-            "Run 'localharness init' to create it."
-        )
+        if workspace is None:
+            err_console.print(
+                f"[bold red]Error:[/bold red] Failed to load config: {exc} "
+                "Run 'localharness init' to create it."
+            )
+            raise typer.Exit(2)
+        # D1: a workspace-only project. `load_harness` requires the GLOBAL config.yaml — that is
+        # its contract, and `provider:` genuinely cannot be resolved without it — but going silent
+        # here is this command refusing to answer the one question it exists to answer, in exactly
+        # the state (scaffolded project, unconfigured machine) where the user most needs the
+        # layer rows. So: the rows, the workspace's own keys, and one honest line saying no
+        # effective config could be computed. Exit stays 2 — the machine really is not configured,
+        # and nothing reading the exit code changes behavior.
+        _show_unconfigured(header_rows, workspace, json_output=json_output)
         raise typer.Exit(2)
     except ConfigError as exc:
         err_console.print(f"[bold red]Error:[/bold red] Failed to load config: {exc}")
         raise typer.Exit(1)
 
-    header_rows = _layer_files(cfg_path, workspace)
     rows = sorted(catalogue.values(), key=lambda e: e.path)
     if not show_all:
         rows = [e for e in rows if e.winning_layer != LAYER_DEFAULT]
@@ -229,24 +338,7 @@ def show(
         typer.echo(_json.dumps(payload, indent=2))
         return
 
-    console.print(
-        "Config layers, lowest priority first — each one wins any key the ones above it set:"
-    )
-    width = max(len(band) for band, _ in header_rows)
-    for band, path in header_rows:
-        mark = "present" if path.exists() else "missing"
-        # escape() around the path, markup outside it: a folder legally named `[old] proj` printed
-        # as ` proj` here would be this command reporting a path that does not exist, in the one
-        # command whose whole job is saying where your config comes from (39-05's measured lesson).
-        #
-        # soft_wrap=True for the same reason, found by the real-binary drive and not by a test:
-        # Rich hard-wraps at the console width, so a deep project path arrives with a newline
-        # folded into it and the user copies half a path. Soft-wrapping hands the line to the
-        # TERMINAL intact — it still looks wrapped on screen, and it is one line in the data.
-        console.print(
-            f"  [cyan]{band:<{width}}[/cyan]  [dim]{mark}[/dim]  {escape(str(path))}",
-            soft_wrap=True,
-        )
+    _print_layer_rows(header_rows)
 
     if not rows:
         # Not reachable through a valid global config today — `provider:` is required, so at least
