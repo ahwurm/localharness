@@ -118,18 +118,18 @@ def test_agent_create_refuses_overwrite_existing_global(tmp_path):
 
 
 def test_agent_create_refuses_overwrite_existing_project(tmp_path, monkeypatch):
-    """#55 also holds for --project scope (same invariant, local dir)."""
+    """#55 also holds for --project scope (same invariant, local dir).
+
+    No `--config-dir`, and the env override cleared: `--project` refuses under an explicit config
+    directory now (A-B3), and pairing them here would grade the refusal instead of the invariant.
+    """
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.chdir(tmp_path)
     path = tmp_path / ".localharness" / "agents" / "loc-agent.yaml"
-    runner.invoke(agent_app, [
-        "create", "loc-agent", "--project", "--role", "orig",
-        "--config-dir", str(tmp_path / "global"),
-    ])
+    runner.invoke(agent_app, ["create", "loc-agent", "--project", "--role", "orig"])
     original = path.read_bytes()
-    second = runner.invoke(agent_app, [
-        "create", "loc-agent", "--project", "--role", "clobber",
-        "--config-dir", str(tmp_path / "global"),
-    ])
+    second = runner.invoke(agent_app, ["create", "loc-agent", "--project", "--role", "clobber"])
     assert second.exit_code == 1
     assert path.read_bytes() == original
 
@@ -154,14 +154,16 @@ def test_agent_create_force_overwrites(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_agent_create_project_writes_to_local_dir(tmp_path, monkeypatch):
+    """The bootstrap path: nothing to discover, so `--project` creates this project's workspace."""
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(agent_app, [
         "create", "local-agent",
         "--project",
         "--role", "Local role",
-        "--config-dir", str(tmp_path / "global"),
     ])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     expected = tmp_path / ".localharness" / "agents" / "local-agent.yaml"
     assert expected.exists()
 
@@ -186,13 +188,16 @@ def test_agent_create_prompt_global_answer(tmp_path):
 
 
 def test_agent_create_prompt_project_answer(tmp_path, monkeypatch):
+    """Answering "project" takes the same route as `--project`, explicit config dir and all — so
+    the env override is cleared here too (A-B3)."""
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         agent_app,
         [
             "create", "prompted-proj",
             "--role", "Prompted",
-            "--config-dir", str(tmp_path / "global"),
         ],
         input="project\n",
     )
