@@ -424,6 +424,12 @@ def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monke
     error — the two that name the file a user is about to OPEN — were left unescaped, which this
     grades. Both are asserted from one layout because a fix to one and not the other still leaves
     doctor naming a nonexistent file.
+
+    The last assertion is scoped to the ERROR TEXT, and that scoping is the whole assertion: over
+    the full capture it measured GREEN under a mutation that reverts the `Config invalid:` escape,
+    because a broken workspace config also makes `_print_overridden_keys` degrade to its own
+    (correctly escaped) `layer report unavailable: ...` line — which carries the same path and
+    shadowed the claim. 41-06's lesson, found by the mutation rather than by reading.
     """
     layout = _layout(tmp_path, monkeypatch, home_name="[old] home")
     ws_config = _write_workspace(layout, "org:\n  name: WS\n  log_level: not-a-level\n")
@@ -431,7 +437,8 @@ def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monke
 
     out = _run_doctor()
     squashed = _squash(out)
+    error_text = out.split("Config invalid:", 1)[1].split("(skipped:", 1)[0]
 
     assert _squash(f"Config file: {global_config}") in squashed, out
     assert _squash(f"Workspace layer: {layout.ws_dir}") in squashed, out
-    assert _squash(str(ws_config)) in squashed, out
+    assert _squash(str(ws_config)) in _squash(error_text), out
