@@ -175,13 +175,22 @@ def offer_workspace_creation(
        EOF answers no for the same reason.
     4. `$HOME` and the machine's global config dir are not projects. `./.localharness` standing in
        home IS the global layer, and "create a workspace" there means overwrite your machine.
+    5. A "no" already recorded for this directory. Asked once per directory, ever — the same
+       shape as the trust question, and for the same reason: a prompt that returns every time you
+       start is one people learn to dismiss without reading (owner ruling 2026-09-04).
 
     Refusals cost nothing and say nothing — a user who says no must not be asked to read a
-    paragraph about it. The creation itself is `init --workspace`'s scaffolder, not a second
-    implementation of it: one directory shape, one set of race and error guarantees.
+    paragraph about it, and is not asked again. Only an ANSWERED prompt records: EOF and every
+    silent path above leave the store untouched, so a session that could not ask has not spent
+    the decision. `init --workspace` and `mkdir .localharness` never consult it, so a recorded no
+    cannot stand between a user and a workspace they went and asked for.
+
+    The creation itself is `init --workspace`'s scaffolder, not a second implementation of it:
+    one directory shape, one set of race and error guarantees.
     """
     import typer
 
+    from localharness.config import trust
     from localharness.config.paths import (
         WORKSPACE_DIR_NAME,
         config_dir_env_override,
@@ -210,8 +219,13 @@ def offer_workspace_creation(
     home = _home_stop()
     if _is_the_global_config_dir(target) or (home is not None and target.parent == home):
         return None
+    if trust.offer_was_declined(target):
+        return None
 
-    if not _ask_create():
+    answer = _ask_create()
+    if answer is not True:
+        if answer is False:  # a person said no; EOF (None) is not an answer and records nothing
+            trust.record_offer_decline(target)
         return None
     try:
         _scaffold_workspace(endpoint=None, model=None, config_dir=None, next_steps=False)
@@ -223,16 +237,21 @@ def offer_workspace_creation(
     return target
 
 
-def _ask_create() -> bool:
-    """The offer itself. `Text` so a project path in the rendered line can never be read as rich
-    markup, and EOF is a plain no — a closed stdin is not consent to write to the filesystem."""
+def _ask_create() -> Optional[bool]:
+    """The offer itself: yes, no, or None for "there was nobody to answer".
+
+    `Text` so a project path in the rendered line can never be read as rich markup. EOF behaves
+    like a no for THIS run — a closed stdin is not consent to write to the filesystem — but is
+    None rather than False, because a terminal that went away has not decided anything and must
+    not spend the one question this directory ever gets.
+    """
     from rich.prompt import Confirm
     from rich.text import Text
 
     try:
         return bool(Confirm.ask(Text(OFFER_PROMPT), console=_notice_console, default=False))
     except EOFError:
-        return False
+        return None
 
 
 def _notice(message: str) -> None:
