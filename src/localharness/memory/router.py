@@ -46,6 +46,12 @@ RECALL_SCOPES = (ORIGIN_WORKSPACE, ORIGIN_GLOBAL, SCOPE_BOTH)
 # brackets does not.
 _ORIGIN_TOKEN_RE = re.compile(rf"^\s*\[({ORIGIN_WORKSPACE}|{ORIGIN_GLOBAL})#(\d+)\]\s*$")
 
+# `facts.id` is a SQLite INTEGER: a signed 64-bit value. An id past that width names no row
+# that could ever exist, and handing it to the driver raises `OverflowError: Python int too
+# large to convert to SQLite INTEGER` — which `memory_get` then returns to the model as its
+# answer. Derived from the storage width, not a chosen ceiling.
+_MAX_ADDRESSABLE_FACT_ID = 2**63 - 1
+
 
 def format_origin_token(origin: str, fact_id: int) -> str:
     """The composite handle for one row of one store: `[workspace#12]`."""
@@ -53,9 +59,15 @@ def format_origin_token(origin: str, fact_id: int) -> str:
 
 
 def parse_origin_token(token: str) -> tuple[str, int] | None:
-    """('workspace', 12) for a composite token, None for an ordinary fact key."""
+    """('workspace', 12) for a composite token, None for an ordinary fact key.
+
+    An id wider than the store can hold is NOT a token: it addresses no row, so it falls
+    through to the ordinary key lookup and misses cleanly (v0.13 B8)."""
     m = _ORIGIN_TOKEN_RE.match(token or "")
-    return (m.group(1), int(m.group(2))) if m else None
+    if m is None:
+        return None
+    fact_id = int(m.group(2))
+    return (m.group(1), fact_id) if fact_id <= _MAX_ADDRESSABLE_FACT_ID else None
 
 
 # The two composition strings for `both` mode. Named, not inlined: the merged block is an
