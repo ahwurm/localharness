@@ -1059,7 +1059,7 @@ class SummaryCompactionStage:
                 summary_message = {"role": "assistant", "content": f"[Context Summary]\n{summary_text}"}
                 working = working[:first_boundary] + [summary_message] + working[last_boundary:]
                 modified = True
-                if self.compact_md_path is not None:
+                if _writes_compact_md(self.compact_md_path):
                     _write_compact_md(self.compact_md_path, summary_text)
                 log.info(
                     "Summary compaction: %d messages → 1 summary (preserve %d/%d)",
@@ -1323,6 +1323,29 @@ def _shrink_content_to_budget(
         working[i] = {**working[i], "content": shrunk}
         shrunk_any = True
     return working, shrunk_any
+
+
+class _CompactDisabled:
+    """The type of ``COMPACT_DISABLED``. One instance, compared by identity."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # so a stray value in a log or traceback names itself
+        return "COMPACT_DISABLED"
+
+
+COMPACT_DISABLED = _CompactDisabled()
+"""This session has NO compact.md — do not read one, do not write one, do not derive a default.
+
+``None`` could not say this. It is the "nothing was configured" value, which the reader turns into
+a default path — so bench, which passed None to mean "no prior-session context", inherited the
+operator's own agent compact.md instead (F7). The two meanings now have two spellings.
+"""
+
+
+def _writes_compact_md(path: Any) -> bool:
+    """Is `path` a real compact.md target? False for None (unset) and for COMPACT_DISABLED."""
+    return path is not None and path is not COMPACT_DISABLED
 
 
 def _write_compact_md(path: Path, content: str) -> None:

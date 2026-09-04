@@ -757,8 +757,9 @@ class AgentLoop:
         memory_loader: Any = None,
         recall_router: Any = None,
         kill_file_path: Path | None = None,
-        compact_md_path: Path | None = None,
+        compact_md_path: Path | Any | None = None,  # Path | COMPACT_DISABLED | None
         session_id: str | None = None,
+        config_dir: Path | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -771,7 +772,14 @@ class AgentLoop:
         # session's own store and keeps every write and trace below; only the ambient-context
         # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
         self._recall_router = recall_router
+        # `compact_md_path` takes three values, and they mean three different things: a Path (use
+        # it), COMPACT_DISABLED (this session has none — see _resolve_compact_md_path), or None
+        # (nothing was configured; derive one under the config dir). `config_dir` is what that
+        # derivation stands on: the default used to be a hardcoded ~/.localharness, so an
+        # env-isolated or --config-dir run still read the operator's home compact.md.
         self._compact_md_path = compact_md_path
+        from localharness.config.paths import resolve_config_dir
+        self._config_dir = resolve_config_dir(config_dir)
         # Type-anytime input box: user-typed nudges routed to the CURRENT turn land here and
         # are drained into durable session history at the next step boundary (same #82 seam as
         # the stuck-recovery nudge). A one-loop, cooperative-async inbox — the REPL coroutine
@@ -801,6 +809,23 @@ class AgentLoop:
         self._sitting_session_id = session_id
         self._current_session_id: str | None = session_id
         self._conversation: list[Message] = []
+
+    def _resolve_compact_md_path(self) -> Path | None:
+        """This loop's compact.md, or None when it has none.
+
+        None comes back for COMPACT_DISABLED only — the caller that says "this session carries no
+        prior-session context" (bench). An unset `compact_md_path` still derives a default, but
+        under THIS loop's config dir rather than a hardcoded `~/.localharness`: the old default
+        made every direct construction read the operator's home agent state, which is how bench
+        runs inherited it (F7).
+        """
+        from localharness.agent.context import COMPACT_DISABLED
+
+        if self._compact_md_path is COMPACT_DISABLED:
+            return None
+        if self._compact_md_path is not None:
+            return self._compact_md_path
+        return self._config_dir / "agents" / self._config.name / "compact.md"
 
     @property
     def current_session_id(self) -> str | None:
@@ -844,9 +869,9 @@ class AgentLoop:
         # (not inserted as a message) and folded into the single leading system message by
         # _execute_loop — a second system message is rejected by strict chat templates
         # (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0, 59/59 dead turns).
-        if not prior:
+        compact_path = self._resolve_compact_md_path()
+        if not prior and compact_path is not None:
             from localharness.agent.context import load_compact_md
-            compact_path = self._compact_md_path or (Path.home() / ".localharness" / "agents" / self._config.name / "compact.md")
             compact_msg = load_compact_md(compact_path)
             if compact_msg is not None:
                 self._prior_session_context = compact_msg["content"]
