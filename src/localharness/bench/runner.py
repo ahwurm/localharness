@@ -334,7 +334,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             permission_evaluator,  # PermissionEvaluator
             memory_loader=None,
             kill_file_path=None,
-            compact_md_path=None,
+            compact_md_path=COMPACT_DISABLED,
         )
 
     Bench synthesizes a minimal AgentConfig + ContextManager + ToolRegistry +
@@ -347,7 +347,13 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # Imports are local to avoid module-import-time cycles and to keep the
     # bench package importable even when these optional modules shift.
     from localharness.agent.loop import AgentLoop
-    from localharness.agent.context import CompactionPipeline, ContentStore, ContextManager, TokenCounter
+    from localharness.agent.context import (
+        COMPACT_DISABLED,
+        CompactionPipeline,
+        ContentStore,
+        ContextManager,
+        TokenCounter,
+    )
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.config.models import AgentConfig
     from localharness.tools.registry import ToolRegistry
@@ -405,7 +411,10 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
         llm_summarize_fn=make_compaction_summarize_fn(llm_client),  # shared, tuple-unpack tested
-        compact_md_path=None,
+        # A bench scenario has NO prior-session context and leaves none behind. Said with the
+        # sentinel, not None: None means "nothing configured", which the reader turns into a
+        # default path under the config dir — i.e. the operator's own agent state (F7).
+        compact_md_path=COMPACT_DISABLED,
     )
     # FIX 2: clamp the scenario's aspirational context budget to the machine's REAL served
     # window. scenario.budget.max_context_tokens is an authoring-time number (e.g. 32000); the
@@ -552,7 +561,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             permission_evaluator=perm_evaluator,
             memory_loader=memory_loader,
             kill_file_path=None,
-            compact_md_path=None,
+            compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
         )
     except TypeError as e:
         raise RuntimeError(
