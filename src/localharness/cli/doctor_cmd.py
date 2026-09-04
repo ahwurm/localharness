@@ -216,9 +216,12 @@ def doctor(
     # 2. Config file exists
     config_file = cfg_path / "config.yaml"
     if config_file.exists():
-        console.print(f"{_PASS} Config file: {config_file}")
+        # Glyph outside escape(), path inside — the same split 39-05's layer lines use, and for
+        # the same measured reason: rich silently DELETES `[old]` from a folder named `[old] proj`,
+        # so an unescaped path here names a file that does not exist.
+        console.print(_PASS + " " + escape(f"Config file: {config_file}"))
     else:
-        console.print(f"{_FAIL} Config file not found: {config_file}")
+        console.print(_FAIL + " " + escape(f"Config file not found: {config_file}"))
         console.print(f"       Run 'localharness init' to create it.")
         failures.append("config-missing")
         # Can't continue without config
@@ -244,7 +247,11 @@ def doctor(
         harness = loader.load_harness()
         console.print(f"{_PASS} Config valid")
     except Exception as exc:
-        console.print(f"{_FAIL} Config invalid: {exc}")
+        # The message is 43-01's ConfigValidationError and CARRIES THE OWNING FILE'S PATH — the
+        # whole point of that plan. Passing it through unescaped is how the right attribution
+        # still reaches the user as a path they cannot open. escape() only, no string surgery:
+        # if the attribution itself is ever wrong, the bug is in config/loader.py.
+        console.print(_FAIL + " " + escape(f"Config invalid: {exc}"))
         failures.append("config-invalid")
 
     # F6, and the one v0.13 output change that is NOT workspace-gated (see the function's
@@ -581,7 +588,7 @@ def doctor(
     if os.access(cfg_path, os.W_OK):
         console.print(f"{_PASS} Config directory writable")
     else:
-        console.print(f"{_FAIL} Config directory not writable: {cfg_path}")
+        console.print(_FAIL + " " + escape(f"Config directory not writable: {cfg_path}"))
         failures.append("config-dir-not-writable")
 
     # 7. Agents directory
