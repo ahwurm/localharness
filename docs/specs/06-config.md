@@ -81,8 +81,19 @@ printed on stderr.
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
 
-**`--no-input`, for runs with nobody watching.** `doctor`, `validate` and `agent create` take
-`--no-input`: never ask about an untrusted workspace, skip that layer, say on stderr that it was
+**`start` offers to create one when a project has none.** Standing in a project with no
+`.localharness/` anywhere above you, an interactive `localharness start` asks once: `No workspace
+here — create ./.localharness for this project?`, default no. Answer yes and the directory is
+created by the same scaffolder `init --workspace` uses — and the session you are starting is
+already layered on it, with no second command to run. The offer is silent, and creates nothing,
+wherever asking would be wrong: no terminal, `--no-input`, an explicit `--config-dir` or either env
+var (a full replacement is not a project), a workspace already found up-tree (whatever the trust
+gate then decided about loading it), and `$HOME` or the machine's global config directory, which
+are not projects. It is the one prompt in the harness that writes to disk, so those guards are the
+design rather than a detail of it.
+
+**`--no-input`, for runs with nobody watching.** `start`, `doctor`, `validate` and `agent create`
+take `--no-input`: never ask about an untrusted workspace, skip that layer, say on stderr that it was
 skipped, and **record nothing**. The reason it exists is that the trust answer is permanent. A git
 hook, a CI job or a scheduled run that happens to inherit a terminal would otherwise be able to
 answer that question on your behalf, once, forever — a decision about trust made by whatever process

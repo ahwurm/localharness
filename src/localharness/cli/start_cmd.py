@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
+from localharness.cli.workspace import NO_INPUT_HELP
 
 console = Console()
 err_console = Console(stderr=True)
@@ -359,7 +360,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
 
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
-                       model_override: str | None = None, list_models: bool = False) -> None:
+                       model_override: str | None = None, list_models: bool = False,
+                       no_input: bool = False) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL."""
     import time as _time
     import uuid
@@ -405,8 +407,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # dir. None whenever --config-dir/LOCALHARNESS_DIR/LOCALHARNESS_HOME was explicit, nothing was
     # found, or trust was withheld — in which case this is byte-identical to v0.12 (LAYR-03).
     # The RAW flag value, not cfg_path: "was this explicit" does not survive resolution.
-    from localharness.cli.workspace import resolve_workspace_layer
-    workspace = resolve_workspace_layer(config_dir)
+    from localharness.cli.workspace import offer_workspace_creation, resolve_workspace_layer
+    interactive = False if no_input else None
+    workspace = resolve_workspace_layer(config_dir, interactive=interactive)
+    if workspace is None:
+        # No layer applies. If that is because this project has none at all, offer to make one —
+        # the one moment a person is demonstrably in a project and about to work in it (owner
+        # ruling 2026-09-04). Every guard for "don't ask" lives in the offer itself, including
+        # the ones that make it silent in scripts; a yes returns a layer that is active for THIS
+        # session, which is the whole reason it is asked here and not printed as advice.
+        workspace = offer_workspace_creation(config_dir, interactive=interactive)
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
     if workspace is not None:
         # markup=False, like the model list above: a folder named `[old] proj` is legal
@@ -1504,9 +1514,17 @@ def start_app(
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,
     list_models: Annotated[bool, typer.Option("--list-models", help="List models available at the configured provider, then exit")] = False,
+    no_input: Annotated[
+        bool,
+        # The same flag doctor/validate/agent create carry, described by the same string (F6): a
+        # run with nobody watching must not be asked to trust an outside workspace, and must not
+        # be offered a new one either. Both questions this command can ask write something
+        # permanent — a trust record, or a directory.
+        typer.Option("--no-input", help=NO_INPUT_HELP),
+    ] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model, list_models))
+        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model, list_models, no_input))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
