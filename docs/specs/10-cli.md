@@ -960,8 +960,9 @@ the exit code as *structured output* rather than as a pass/fail flag.
 | `config show` / `config migrate` | 0 done; 1 failure; 2 usage error |
 | `model`, `propose` | 0 done; 2 any error |
 | `components` | 0 done; 2 any error |
-| `bench` | 0 success; 2 infrastructure failure |
+| `bench` | 0 success; 2 infrastructure failure (config missing, empty corpus, no runs) |
 | `bench compare` | 0 stable; 1 regressed; 2 infrastructure failure; 3 unstable |
+| `bench pack` | 0 built; 1 the pack failed to build |
 | `experiment` | **the code is the gate verdict** — 0 promote, 1 reject-train, 2 reject-holdout, 3 inconclusive; ≥4 a structural refusal (the experiment did not run) |
 | `autoresearch` | 0 done; 2 any error |
 | `update` | passes through the exit code of the upgrade subprocess it runs |
