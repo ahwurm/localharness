@@ -6,11 +6,13 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [0.13.1] — 2026-09-04
 
-A fix train from running 0.13.0 on real work. A long task that promised a next
-step and then stopped, a startup that quietly deleted its own warnings, a picker
-that crashed on an agent's name, and a Windows upgrade that reported failure
-after succeeding — plus the workspace layer offering itself to projects that do
-not have one yet.
+A fix train from running 0.13.0 on real work, on Linux and on Windows. A long
+task that promised a next step and then stopped, a startup that quietly deleted
+its own warnings, a picker that crashed on an agent's name, a Windows upgrade
+that reported failure after succeeding, and a drafting session whose every
+composing step spent the whole output cap on hidden reasoning, came back empty,
+and closed as a success — plus the workspace layer offering itself to projects
+that do not have one yet.
 
 ### Added
 - **`start` offers to make a workspace when your project has none.** The layer
@@ -46,8 +48,41 @@ not have one yet.
   red, because a verdict is not a type. One knock-on you will see: the agent has
   taken the accent green, so your own input is now the site's ink rather than
   green.
+- **Live reasoning stream: `start --show-reasoning`, `terminal.show_reasoning`,
+  `/reasoning`.** Thinking models were dead air: the client already assembled
+  `reasoning_content` from the stream but nothing surfaced it, so a 3-minute
+  think looked identical to a hang (`--verbose` is per-component startup detail,
+  not this). Reasoning deltas now flow from the stream consumer to the terminal
+  channel, which prints them as dim `⋯` lines — line-buffered, with a long
+  unbroken paragraph streamed in pieces and the tail flushed when the reply
+  lands. Off by default; the sink is always wired so `/reasoning on|off` toggles
+  it mid-session. Needs the server's reasoning parser (vLLM `--reasoning-parser`,
+  llama.cpp `--reasoning-format`, Ollama think); without one the thinking is
+  inline `<think>` text the harness strips.
+- **A Platform support section in the README** (Linux / Windows), and
+  Git for Windows named as the Windows requirement `bash_exec` has always had.
 
 ### Changed
+- **The per-reply output cap is the configured value, fitted to the window, and
+  grows when a reply is cut off.** `start` sent `DEFAULT_MAX_TOKENS` (4,096)
+  whatever `default_max_tokens` or the agent's `max_tokens` said, and the reply
+  reserve it was clamped into was the same flat number — so raising the value in
+  `config.yaml` changed nothing (the live session carried `default_max_tokens:
+  8192` and still asked for 4,096; five empty replies of ~170 s each, no draft,
+  and the cruncher's extracts cut mid-sentence for the same reason). Now the
+  agent's resolved `max_tokens` (agent yaml → division → org `default_max_tokens`
+  → 4,096) is what the session and the `/model` swap refit send; the shared reply
+  reserve grows to hold it (bounded at half the window; the small-window curve is
+  unchanged); every request is fitted to the window's real headroom
+  (`window − prompt − window/64`, prompt taken from the server's own
+  `prompt_tokens` when it reports usage) so a larger cap can never push
+  `prompt + max_tokens` past the served window; and a reply that ends with
+  `finish_reason="length"` doubles the cap for the retry within that headroom —
+  for an empty reply, for a truncated tool call, and for a truncated final
+  answer, which used to ship with its tail missing and is now re-prompted once.
+  The raised cap is kept for the agent's life. `LLMClient.complete` /
+  `stream_complete` take a per-call `max_tokens`, and the `llm_response` Action
+  carries `output_cap`, so the ledger says what each request asked for.
 - **A linked git worktree counts as inside the project it was cut from.** `git
   worktree add` leaves a `.git` *file*, not a directory, and the repository walk
   stopped there — so the main checkout's `.localharness/` one level up read as
@@ -95,6 +130,50 @@ not have one yet.
 - **The `kill_file` setting no longer claims the harness deletes the file.** It
   never has: the kill switch is checked by existence and left in place, so it has
   to be removed by hand or the next session stops at its first step too.
+- **An empty completion no longer ends the turn as a success.** Observed live
+  (qwen3.8-27b): two replies ~3 minutes apart with no text and no tool call — the
+  whole output budget spent on hidden reasoning — and the turn completed
+  `success=True` with a STALE narration line ("Now let me pull the voice anchor
+  exemplars…") as its summary, because the #91 fallback resolves the last in-turn
+  assistant text. The loop now re-prompts once with a message that names the cause
+  (not the "only a confirmation" nudge), and a second empty reply ends the turn as
+  a failure whose summary says so. The `llm_response` Action now carries
+  `finish_reason` and `reasoning_chars`, and history.jsonl records the real
+  finish_reason instead of a hard-coded `"stop"`, so the ledger can say why a
+  reply was empty.
+- **Windows `bash_exec` had no coreutils from a PowerShell-started harness.**
+  Discovery preferred `Git\usr\bin\bash.exe` over the `Git\bin\bash.exe` wrapper.
+  The inner binary inherits the harness's PATH as-is — no `/usr/bin` — so `mkdir`,
+  `ls`, `cp` and friends were all `command not found` (observed live: three
+  `mkdir -p` calls in one session, every one reported ✓; the only files that
+  landed were the ones the `write` tool created parents for itself). The suite
+  never caught it because pytest under git-bash already has `/usr/bin` on PATH.
+  The wrapper, which sets PATH before exec'ing the inner bash, is now searched
+  first, and the Store `WindowsApps\bash.exe` WSL alias is rejected alongside the
+  System32 stub. A regression test strips Git entries from PATH before running
+  `command -v mkdir`.
+- **A non-zero `bash_exec` exit is now a tool failure.** It was `success=True`
+  with the code tucked in metadata: the terminal showed ✓ and the model read the
+  result as done. Because the loop forwards `.error` (not `.output`) on failure,
+  the command's output travels inside the error message (`exit code 127: …mkdir:
+  command not found`) so the model has something to react to. Commands that
+  legitimately exit non-zero (`grep` with no match, `diff`) now surface as
+  errors — append `|| true` when that is the intent.
+- **`bash_exec` no longer inherits the harness's stdin, and a timeout kills the
+  whole process tree.** Observed live (Windows): `cmd /c "…"` under git-bash —
+  MSYS path-converts the `/c` flag, cmd starts interactive on the inherited
+  terminal stdin and sits there; the inner 60s timeout's `proc.kill()` reached
+  bash alone, the orphaned cmd.exe kept the stdout pipe open, `communicate()`
+  blocked, and the base-class outer timeout fired at 65s instead. stdin is now
+  `DEVNULL`; on timeout the tree is killed (a Windows job object — `taskkill /T`
+  does not reach git-bash's forked children, verified; the command's own process
+  group on POSIX) and the post-kill wait is bounded.
+- **`memory_search` hides operational memory unless asked for it.** A
+  `gate/resolved_error` row whose value quoted a file path was the top hit for
+  four unrelated queries in one 50-call session, ahead of the handful of real
+  facts. `gate/`, `predgate/` and `learned/` keys are filtered out unless the
+  query names them (e.g. "gate", "lesson"); the clustering pass already excluded
+  the same namespaces.
 
 ## [0.13.0] — 2026-09-04
 

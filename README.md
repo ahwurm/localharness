@@ -107,6 +107,8 @@ model. Per-runtime live markers: `LOCALHARNESS_LIVE_{VLLM,OLLAMA,LLAMACPP,LMSTUD
 
 - Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
 - A local LLM server with an OpenAI-compatible API (vLLM, Ollama, LM Studio, or llama.cpp)
+- On Windows: [Git for Windows](https://git-scm.com/download/win) — `bash_exec` runs under
+  git-bash (see [Platform support](#platform-support))
 
 ## Quick start
 
@@ -137,12 +139,46 @@ share a machine. A laptop can run agents against a model served elsewhere on you
   and set `provider.api_key` to match; for access from outside your LAN use a private
   overlay network (Tailscale/WireGuard). Never port-forward a bare endpoint to the internet.
 
+## Platform support
+
+Tools run where the harness runs, and `bash_exec` always launches a real bash — never
+`/bin/sh`, never WSL. What differs per platform is how that bash is found.
+
+### Linux
+
+- `bash_exec` runs `bash -c` with the bash on `PATH` (falling back to `/bin/bash`), so brace
+  expansion, `[[ ]]` and arrays behave as written even where `/bin/sh` is dash.
+- CI runs on Ubuntu; the Linux path is the one exercised by every test run and the
+  [DGX Spark](docs/reference-architectures/dgx-spark.md) live validation. The `doctor` GPU
+  checks are Linux-only.
+
+### Windows
+
+- **Native, no WSL required.** Install [Git for Windows](https://git-scm.com/download/win).
+  The harness looks for `Git\bin\bash.exe` under `%ProgramFiles%`, `%ProgramFiles(x86)%` and
+  `%LocalAppData%\Programs`, and deliberately skips the WSL launchers (`System32\bash.exe` and
+  the Store alias under `WindowsApps`): without a distro they print UTF-16 garbage, and with
+  one they act on a different filesystem than the native file tools.
+- It picks the `Git\bin\bash.exe` wrapper over `Git\usr\bin\bash.exe` on purpose: the wrapper
+  puts `/usr/bin` on `PATH`, so coreutils (`mkdir`, `ls`, `cp`, …) resolve no matter which shell
+  started the harness. `Git\usr\bin\bash.exe` launched directly inherits a PowerShell PATH with no
+  coreutils on it. To use a different bash, set `LOCALHARNESS_BASH` to a wrapper-style executable.
+- A non-zero exit from `bash_exec` is a tool error on every platform; the command's output is
+  forwarded to the model inside the error so it can react (e.g. `command not found`). A timeout
+  kills the command's whole process tree (a job object on Windows, the process group on POSIX).
+- Paths: the file tools accept Windows or POSIX paths, relative to the harness working directory.
+  `/tmp/...` maps to `%TEMP%`, which is where git-bash mounts `/tmp`, so the file tools and
+  `bash_exec` agree on one tree. Inside `bash_exec` commands, use forward slashes — bash strips
+  backslashes as escapes.
+- Running the model on another machine (e.g. a DGX over Tailscale) and the harness on a Windows
+  laptop is a supported setup; see the previous section.
+
 ## CLI
 
 | Command | Purpose |
 |---------|---------|
 | `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
-| `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit) |
+| `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit; `--show-reasoning` streams the model's thinking as dim lines while it generates, `/reasoning` toggles it live — needs the server's reasoning parser) |
 | `doctor` | Check Python, config, endpoint, model, context budget, token counting and directories; inside a project, name both config layers and the keys the project overrides |
 | `config show` | Print the effective merged config and the file that set each key |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
