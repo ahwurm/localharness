@@ -216,7 +216,13 @@ def test_agent_list_json_never_prompts_even_with_a_terminal_attached(project, mo
     assert _names(result) == ["global-agent"]
     # ...and says so on stderr, which is also the proof `interactive=False` got through — that
     # notice is only reachable from the non-interactive branch, and the tty here is forced True.
-    assert "no terminal to ask" in result.stderr
+    #
+    # The sentence changed in the badmood wave and the change is the point (F11): it used to read
+    # "no terminal to ask", which is FALSE on exactly this run — there IS a terminal, and the
+    # reason nothing was asked is that `--json` is machine output. A true refusal with a false
+    # reason is still a lie, and this is the test that pinned it.
+    assert "non-interactive" in result.stderr
+    assert "no terminal" not in result.stderr
 
 
 def test_agent_list_without_json_does_ask_with_a_terminal_attached(project, monkeypatch):

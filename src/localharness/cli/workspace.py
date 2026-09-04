@@ -17,8 +17,12 @@ The one composition point for v0.13 workspace discovery. Four rules, in order:
 4. A candidate from OUTSIDE that project is trust-gated (LAYR-05): above your repository root, or
    a parent folder while no repository contains you at all. Agent yamls are executable intent —
    role, model, tools, deny rules — so config reaching in from a tree you did not open must be
-   agreed to. Asked once; the answer is permanent. Undecided + no terminal = inert, and NOTHING is
-   recorded: a scripted run must not spend the user's one-time answer for them.
+   agreed to. Asked once; the answer is permanent. Undecided + non-interactive = inert, and
+   NOTHING is recorded: a scripted run must not spend the user's one-time answer for them.
+   "Non-interactive" is two things, and the notice must not claim only the first: no terminal
+   attached, OR a caller that passed `interactive=False` because this run is machine output
+   (`--json`) or was told not to ask (`--no-input`). Saying "no terminal to ask" on a tty-attached
+   `--json` run was a false reason for a true refusal (F11).
 
 Known and accepted, stated plainly in SECURITY.md: cloning a repository and running the harness
 inside it loads that repository's agent files with no prompt. That is the exposure the literal
@@ -53,6 +57,16 @@ from typing import Optional, Union
 from rich.console import Console
 
 log = logging.getLogger(__name__)
+
+# F6. `--json` already forces the non-interactive path, but `doctor`, `validate` and `agent
+# create` have no machine-output mode — so a hook or CI job running them in a directory with an
+# untrusted workspace hit the one-time trust prompt, and answering it (or letting it time out into
+# whatever the harness felt like) spends a permanent decision nobody was there to make. One help
+# string for all three: three copies is two chances to describe the same flag differently.
+NO_INPUT_HELP = (
+    "Never ask about an untrusted workspace: skip its config layer, say so, and record nothing. "
+    "For hooks, CI, and any run with no one watching."
+)
 
 # Notices AND the prompt go to stderr: `agent list --json` writes machine-readable JSON on
 # stdout, and a trust banner there would corrupt it.
@@ -114,7 +128,8 @@ def resolve_workspace_layer(
         # session in this directory still gets asked once.
         _notice(
             f"Found a workspace at {real} from outside this project — ignoring its config "
-            "layer (no terminal to ask). Run an interactive localharness command here to decide."
+            "layer, because this run is non-interactive and the question was never asked. "
+            "Run an interactive localharness command here to decide."
         )
         return None
 

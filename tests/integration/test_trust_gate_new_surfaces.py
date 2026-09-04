@@ -153,8 +153,10 @@ def test_config_show_is_inert_on_a_workspace_from_outside_the_project(
     assert _MARKER not in result.stdout
     layer_paths = " ".join(layer["path"] for layer in payload["layers"])
     assert str(marked_workspace.ws_dir) not in layer_paths
-    assert "no terminal to ask" in result.stderr
-    assert "no terminal to ask" not in result.stdout
+    # "non-interactive", not the old "no terminal to ask": there IS a terminal on a --json run
+    # with a tty, and the honest reason nothing was asked is that this is machine output (F11).
+    assert "non-interactive" in result.stderr
+    assert "non-interactive" not in result.stdout
     assert trust.is_trusted(marked_workspace.ws_dir) is None
     assert not trust.trust_store_path().exists()
 

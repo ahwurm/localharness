@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from localharness.cli.workspace import NO_INPUT_HELP
 from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
 
 console = Console()
@@ -64,6 +65,7 @@ def agent_create(
     project_scope: Annotated[bool, typer.Option("--project", help="Add agent to this project's workspace (nearest .localharness/agents/ up-tree, else ./.localharness/agents/). Not available with an explicit config directory.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print YAML without writing")] = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing agent with the same name (default refuses)")] = False,
+    no_input: Annotated[bool, typer.Option("--no-input", help=NO_INPUT_HELP)] = False,
     config_dir: Annotated[
         str | None,
         typer.Option(
@@ -93,6 +95,13 @@ def agent_create(
         use_global = True
     elif project_scope:
         use_global = False
+    elif no_input:
+        # --no-input means nobody is watching, and this prompt has no safe default: writing to the
+        # wrong layer is exactly the mistake the flag exists to prevent (A-B3's whole story).
+        err_console.print(
+            "[bold red]Error:[/bold red] --no-input needs a scope: pass --global or --project."
+        )
+        raise typer.Exit(code=2)
     else:
         # Interactive prompt
         answer = typer.prompt(
@@ -151,7 +160,7 @@ def agent_create(
             )
             raise typer.Exit(code=2)
 
-        layer = resolve_workspace_layer(config_dir)
+        layer = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
         if layer is None:
             # B5/B6: None here is one of two very different situations. Nothing found at all is
             # the BOOTSTRAP case — a fresh project's first agent creates the workspace, silently,
