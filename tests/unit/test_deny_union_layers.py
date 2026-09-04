@@ -229,3 +229,55 @@ def test_workspace_org_context_falls_back_to_global_per_key(layers) -> None:
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=ws).load_agent("deployer")
     assert cfg.context.max_context_tokens == 12345
     assert cfg.context.preserve_last_n_messages == 12, "the workspace replaced the whole block"
+
+
+# ---------------------------------------------------------------------------
+# The overlay layer's own deny rules (badmood wave 2).
+# ---------------------------------------------------------------------------
+
+def test_overlay_agent_deny_patterns_reach_enforcement(layers) -> None:
+    """`agent.permissions.deny_patterns` in overrides.yaml must survive to the loaded agent.
+
+    The overlay is layered UNDER the resolved agent dict (step 5b), and that dict already carries
+    `permissions.deny_patterns` — the org/division/agent union — so deep_merge replaced the
+    overlay's list wholesale and the rules a user wrote through `components set` were stored,
+    confirmed and never enforced. Deny is union-only in every other layer; the overlay is not an
+    exception.
+    """
+    global_dir, ws = layers
+    (global_dir / "overrides.yaml").write_text(
+        yaml.dump({"agent": {"permissions": {"deny_patterns": ["bash_exec(*overlay-only*)"]}}}),
+        encoding="utf-8",
+    )
+
+    patterns = _deny_patterns(global_dir, ws)
+    assert "bash_exec(*overlay-only*)" in patterns
+    # Union, not replacement: the shipped defaults are still there underneath it.
+    assert len(patterns) > 1, "the overlay's list replaced the shipped defaults"
+
+
+def test_overlay_agent_deny_patterns_never_subtract(layers) -> None:
+    """An empty overlay list removes nothing — same physics as every other layer (MERG-02)."""
+    global_dir, ws = layers
+    before = _deny_patterns(global_dir, ws)
+    (global_dir / "overrides.yaml").write_text(
+        yaml.dump({"agent": {"permissions": {"deny_patterns": []}}}),
+        encoding="utf-8",
+    )
+    assert _deny_patterns(global_dir, ws) == before
+
+
+def test_overlay_agent_deny_patterns_dedupe(layers) -> None:
+    """Restating a rule the agent already denies adds no duplicate row."""
+    global_dir, ws = layers
+    _write_yaml(
+        global_dir / "agents" / "deployer.yaml",
+        {"name": "deployer", "role": "Deploy agent",
+         "permissions": {"deny_patterns": ["bash_exec(*shared*)"]}},
+    )
+    (global_dir / "overrides.yaml").write_text(
+        yaml.dump({"agent": {"permissions": {"deny_patterns": ["bash_exec(*shared*)"]}}}),
+        encoding="utf-8",
+    )
+    patterns = _deny_patterns(global_dir, ws)
+    assert patterns.count("bash_exec(*shared*)") == 1
