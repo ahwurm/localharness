@@ -676,7 +676,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         probe_served_window,
         response_reserve,
     )
-    from localharness.config.defaults import DEFAULT_MAX_TOKENS
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
     # #137: resolve_budget is the ONE resolution `doctor` reads too — and CONFIRM an applied pin
@@ -767,11 +766,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         # #145: history may fill (budget - reserve), so the output cap has to fit the reserve or
-        # prompt + max_tokens overruns the served window and a strict server 400s. A no-op on
-        # normal windows. DEFAULT_MAX_TOKENS is the baseline because nothing threads a configured
-        # per-session max_tokens yet — thread it HERE and in repl's swap refit together, or the
-        # two will disagree about what the unclamped value was.
-        max_tokens=clamp_response_tokens(_cfg_window, DEFAULT_MAX_TOKENS),
+        # prompt + max_tokens overruns the served window and a strict server 400s. The baseline
+        # is the agent's RESOLVED max_tokens (agent yaml -> division -> org default_max_tokens ->
+        # 4096): the reserve grows to hold it on a normal window (response_reserve), and repl's
+        # swap refit re-derives from the same value so the two never disagree.
+        max_tokens=clamp_response_tokens(_cfg_window, agent_config.max_tokens),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
         provider_type=provider.provider_type,  # keys the measured-speed ledger (speed_stats)
@@ -1156,6 +1155,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             tool_evict_enabled=agent_config.context.tool_result_eviction,
             token_counter=token_counter,
             compaction_trigger_fraction=_compaction_trigger_fraction,
+            max_response_tokens=agent_config.max_tokens,
         )
 
         # --- 9. Orchestrator layer ---

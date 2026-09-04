@@ -1456,13 +1456,16 @@ class OrchestratorREPL:
 
         # #145: the output cap must fit the reserve inside the (possibly new) budget, or prompt +
         # max_tokens overruns the served window and a strict server 400s mid-session. Re-derived
-        # from DEFAULT_MAX_TOKENS rather than the live value, so a swap DOWN to a small window and
-        # back UP restores the full allotment instead of ratcheting the cap down for the session.
-        # (Baseline must match start_cmd's — see the note at its LLMConfig construction.)
+        # from the agent's configured max_tokens rather than the live value, so a swap DOWN to a
+        # small window and back UP restores the full allotment instead of ratcheting the cap down
+        # for the session. (Baseline must match start_cmd's — see its LLMConfig construction.)
         _budget = getattr(ctx, "max_context_tokens", None)
         _llm_cfg = getattr(self._agent._llm, "config", None)
+        _configured_cap = (
+            getattr(getattr(self._agent, "_config", None), "max_tokens", None) or DEFAULT_MAX_TOKENS
+        )
         if _budget and _llm_cfg is not None:
-            _cap = context_mod.clamp_response_tokens(_budget, DEFAULT_MAX_TOKENS)
+            _cap = context_mod.clamp_response_tokens(_budget, _configured_cap)
             if _cap != getattr(_llm_cfg, "max_tokens", None):
                 _llm_cfg.max_tokens = _cap
                 notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")

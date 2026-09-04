@@ -833,10 +833,14 @@ class LLMClient:
         stream: bool = False,
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
         Returns (message, usage) — usage is openai.types.CompletionUsage or None.
+
+        max_tokens: per-call output cap overriding config.max_tokens (the loop's dynamic cap —
+        grown after an output-ceiling cut, shrunk to the window's real headroom). None = config.
 
         gen_timeout: per-call bound on GENERATION only (applied after the inference permit is
         acquired). Used by the tier-2 input classifier so its 5s clock is a generation clock, not
@@ -852,9 +856,11 @@ class LLMClient:
         """
         if self.config.tool_call_mode == "native":
             return await self._complete_native(messages, tools, stream,
-                                               disable_thinking=disable_thinking, gen_timeout=gen_timeout)
+                                               disable_thinking=disable_thinking, gen_timeout=gen_timeout,
+                                        max_tokens=max_tokens)
         return await self._complete_xml(messages, tools, stream,
-                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout)
+                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout,
+                                        max_tokens=max_tokens)
 
     async def stream_complete(
         self,
@@ -863,6 +869,7 @@ class LLMClient:
         on_token: Callable[[str], Awaitable[None]] | None = None,
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage).
 
@@ -872,9 +879,11 @@ class LLMClient:
             return await self._complete_native(
                 messages, tools, stream=True, on_token=on_token,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
+                                        max_tokens=max_tokens,
             )
         return await self._complete_xml(messages, tools, stream=True,
-                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout)
+                                        disable_thinking=disable_thinking, gen_timeout=gen_timeout,
+                                        max_tokens=max_tokens)
 
     async def _complete_native(
         self,
@@ -884,6 +893,7 @@ class LLMClient:
         on_token: Callable[[str], Awaitable[None]] | None = None,
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -895,7 +905,7 @@ class LLMClient:
         read-timeout applies BETWEEN chunks, so a healthy generation can run as long
         as the budget allows, and a client disconnect aborts engine-side generation.
         """
-        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking)
+        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens)
         try:
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
@@ -912,7 +922,7 @@ class LLMClient:
             if dropped is None:
                 raise self._wrap_error(exc) from exc
             log.warning("Server rejected native `%s` param (400) — retrying once without it", dropped)
-            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking)  # sticky → omitted
+            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens)  # sticky → omitted
             try:
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
@@ -925,7 +935,8 @@ class LLMClient:
             raise self._wrap_error(exc) from exc
 
     def _native_kwargs(
-        self, messages: list[Message], tools: list[ToolSchema] | None, disable_thinking: bool
+        self, messages: list[Message], tools: list[ToolSchema] | None, disable_thinking: bool,
+        max_tokens: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, str] | None]:
         """Build native-mode request kwargs, HONORING the per-server sticky rejections so a param a
         prior turn 400'd on is never re-sent (mirrors _complete_xml's `not self._tools_param_rejected`
@@ -940,7 +951,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens or self.config.max_tokens,
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1234,6 +1245,7 @@ class LLMClient:
         stream: bool,
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection AND fold the XML tool syntax into the
         system prompt, then parse tool calls from text.
@@ -1254,7 +1266,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": injected_messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens or self.config.max_tokens,
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1282,6 +1294,7 @@ class LLMClient:
             return await self._complete_xml_fallback(
                 injected_messages, tools, stream,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
+                                        max_tokens=max_tokens,
             )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -1293,6 +1306,7 @@ class LLMClient:
         stream: bool,
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
         system-prompt XML injection (a no-op if `messages` already carries it — see
@@ -1305,7 +1319,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": msgs,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens or self.config.max_tokens,
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences

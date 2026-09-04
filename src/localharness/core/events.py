@@ -162,6 +162,9 @@ class Action(BaseEvent):
     # every existing construction and old JSONL line stays valid.
     finish_reason: Optional[str] = None
     reasoning_chars: Optional[int] = None
+    # The max_tokens this llm_response was requested with (the loop's dynamic per-call cap);
+    # None when the client's configured cap was used unchanged.
+    output_cap: Optional[int] = None
     tool_call_id: Optional[ToolCallID] = None
     tool_name: Optional[str] = None
     tool_params: Optional[dict[str, Any]] = None
