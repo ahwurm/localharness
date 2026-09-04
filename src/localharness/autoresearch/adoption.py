@@ -156,7 +156,7 @@ async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
     entry = await store.get(proposal_id)
     if entry is None:
         raise AdoptionRefused(f"no archive row for id {proposal_id!r}")
-    # A row already declined at adoption is never re-offered or re-committed (the loop excludes
+    # A row already declined at adoption is never re-offered or re-written (the loop excludes
     # adoption_rejected from the held/re-offer list; this is the seam that locks it at adopt()).
     if entry.status == "adoption_rejected":
         raise AdoptionRefused(
