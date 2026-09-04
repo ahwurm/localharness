@@ -83,25 +83,37 @@ def test_required_surfaces_present(components_home):
 
 
 def test_layer_attribution_default_when_no_overlay(components_home):
-    """With no overlay, every entry's winning_layer is 'default' or 'project'."""
-    from localharness.registry.catalogue import build_catalogue
+    """With no overlay, every entry's winning_layer is 'default' or the global config band.
+
+    Band names corrected in 43-03: the old `project` meant the GLOBAL config.yaml, not a project
+    folder. Same assertion, same strength — only the spelling is honest now.
+    """
+    from localharness.registry.catalogue import (
+        LAYER_DEFAULT,
+        LAYER_GLOBAL_CONFIG,
+        build_catalogue,
+    )
 
     cfg = _make_minimal_harness_cfg()
     entries = build_catalogue(cfg, overlays={})
     bad = [(p, e.winning_layer) for p, e in entries.items()
-           if e.winning_layer not in {"default", "project"}]
-    assert not bad, f"Non-default/project layers without overlay: {bad[:5]}"
+           if e.winning_layer not in {LAYER_DEFAULT, LAYER_GLOBAL_CONFIG}]
+    assert not bad, f"Non-default/global-config layers without overlay: {bad[:5]}"
 
 
 def test_layer_attribution_user_when_overlay_present(components_home):
-    """Overlay sets a path → that path's entry has winning_layer == 'user'."""
-    from localharness.registry.catalogue import build_catalogue
+    """Overlay sets a path → that path's entry names the global OVERRIDES band.
+
+    Band name corrected in 43-03 (`user` → `global-overrides`): the dict this test passes is the
+    machine-global overrides.yaml, and `user` never said which of the two global files it meant.
+    """
+    from localharness.registry.catalogue import LAYER_GLOBAL_OVERRIDES, build_catalogue
 
     cfg = _make_minimal_harness_cfg()
-    overlays = {"user": {"org": {"context": {"compaction_threshold_pct": 0.85}}}}
+    overlays = {LAYER_GLOBAL_OVERRIDES: {"org": {"context": {"compaction_threshold_pct": 0.85}}}}
     entries = build_catalogue(cfg, overlays=overlays)
     target = entries["org.context.compaction_threshold_pct"]
-    assert target.winning_layer == "user"
+    assert target.winning_layer == LAYER_GLOBAL_OVERRIDES
 
 
 def test_catalogue_returns_componententry_dataclasses(components_home):
@@ -407,51 +419,78 @@ def test_write_budgets_express_manifest_scale_via_ctor():
 def test_layer_priority_records_the_ruled_order():
     """The tuple IS the owner's ruling, pinned as a value so a reorder is a deliberate act.
 
-    Owner ruling 2026-09-03 (Option A): the workspace layer outranks the global user overlay
-    (the SPECIFIC beats the GENERAL); `experiment` stays on top.
+    Owner ruling 2026-09-03 (Option A): the workspace layer outranks the global overrides file
+    (the SPECIFIC beats the GENERAL); `experiment` stays on top. 43-03 split each side into its
+    two real FILES and renamed both global bands, so the tuple is five long.
+
+    Pinned as LITERAL strings on purpose: these are the words `components list` prints, so an
+    assertion written in terms of the constants alone would stay green while the user-visible
+    vocabulary changed underneath it. The second assertion ties the constants to those literals,
+    so a caller importing the constants and a user reading the output cannot drift apart.
     """
     from localharness.registry import catalogue
 
-    assert catalogue._LAYER_PRIORITY == ("experiment", "workspace", "user", "project"), (
-        "Owner ruling 2026-09-03 (Option A): workspace outranks the global user overlay, "
-        "experiment stays on top. Changing this tuple changes what `components list` tells a "
-        "user owns their setting — reorder it only with a new ruling."
+    assert catalogue._LAYER_PRIORITY == (
+        "experiment",
+        "workspace-overrides",
+        "workspace-config",
+        "global-overrides",
+        "global-config",
+    ), (
+        "Owner ruling 2026-09-03 (Option A): workspace outranks the global layer, experiment "
+        "stays on top, and within each layer the overrides file outranks the config file. "
+        "Changing this tuple changes what `components list` tells a user owns their setting — "
+        "reorder it only with a new ruling."
     )
+    assert catalogue._LAYER_PRIORITY == (
+        catalogue.LAYER_EXPERIMENT,
+        catalogue.LAYER_WORKSPACE_OVERRIDES,
+        catalogue.LAYER_WORKSPACE_CONFIG,
+        catalogue.LAYER_GLOBAL_OVERRIDES,
+        catalogue.LAYER_GLOBAL_CONFIG,
+    ), "the exported constants must BE the tuple — one anchor, no second spelling"
 
 
 def test_workspace_outranks_user_when_both_declare_a_path():
-    """The ruled order proven behaviorally, not only as a tuple literal."""
+    """The ruled order proven behaviorally, not only as a tuple literal.
+
+    Band names corrected in 43-03. The old keys (`workspace`, `user`) match no band after the
+    rename, so `_detect_layer` would fall through to `default` and this test would grade nothing.
+    """
     from localharness.registry import catalogue
 
     both = catalogue._detect_layer(
         "org.log_level",
         {
-            "workspace": {"org": {"log_level": "debug"}},
-            "user": {"org": {"log_level": "info"}},
+            catalogue.LAYER_WORKSPACE_CONFIG: {"org": {"log_level": "debug"}},
+            catalogue.LAYER_GLOBAL_OVERRIDES: {"org": {"log_level": "info"}},
         },
     )
-    assert both == "workspace", "workspace must win over the global user overlay (Option A)"
+    assert both == catalogue.LAYER_WORKSPACE_CONFIG, (
+        "the workspace config.yaml must win over the global overrides.yaml (Option A)"
+    )
 
     top = catalogue._detect_layer(
         "org.log_level",
         {
-            "experiment": {"org": {"log_level": "warning"}},
-            "workspace": {"org": {"log_level": "debug"}},
+            catalogue.LAYER_EXPERIMENT: {"org": {"log_level": "warning"}},
+            catalogue.LAYER_WORKSPACE_CONFIG: {"org": {"log_level": "debug"}},
         },
     )
-    assert top == "experiment", "experiment stays on top of workspace"
+    assert top == catalogue.LAYER_EXPERIMENT, "experiment stays on top of workspace"
 
 
 def test_absent_workspace_overlay_changes_nothing():
-    """Adding a NAME to the priority tuple is inert until something populates that key.
+    """A band NAME in the priority tuple is inert until something populates that key.
 
-    `_detect_layer` reads `overlays.get(layer, {})`, so an unpopulated layer name can never
-    win. Nothing builds an `overlays["workspace"]` dict in v0.13 — this asserts the claim the
-    tuple's comment makes, rather than leaving it as a comment.
+    `_detect_layer` reads `overlays.get(layer, {})`, so an unpopulated band can never win. With
+    no workspace up-tree `build_layer_overlays` returns the two GLOBAL keys only (43-03), which
+    is what keeps a no-workspace session's attribution identical to pre-v0.13 (LAYR-03) — this
+    asserts that property at the detector rather than leaving it as a comment.
     """
     from localharness.registry import catalogue
 
     assert catalogue._detect_layer(
-        "org.log_level", {"project": {"org": {"log_level": "info"}}}
-    ) == "project"
-    assert catalogue._detect_layer("org.log_level", {}) == "default"
+        "org.log_level", {catalogue.LAYER_GLOBAL_CONFIG: {"org": {"log_level": "info"}}}
+    ) == catalogue.LAYER_GLOBAL_CONFIG
+    assert catalogue._detect_layer("org.log_level", {}) == catalogue.LAYER_DEFAULT
