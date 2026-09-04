@@ -204,6 +204,16 @@ def _resolve_scalar(
     return default
 
 
+def _overlay_default(overlay: dict, field: str, default: Any) -> Any:
+    """The `agent:` overlay's value for `field`, or the shipped default when it says nothing.
+
+    `None`/`"inherit"` in the overlay mean "not set" for the same reason they do everywhere else in
+    `_resolve_scalar`: they are the harness's two ways of spelling "look further up".
+    """
+    value = overlay.get(field)
+    return default if value in (None, "inherit") else value
+
+
 def _org_deny_patterns(raw: object) -> list[str]:
     """The `org.permissions.deny_patterns` list declared by ONE raw config source.
 
@@ -592,21 +602,45 @@ class ConfigLoader:
         # 4. Build merged dict via scalar resolution
         merged = dict(raw)  # start with agent raw values
 
+        # The user overlay's `agent:` section (issue #22) — the layer `components set agent.*`
+        # writes and `components get` reads back. Read HERE, before the scalar resolution, because
+        # it is the DEFAULT slot for these three fields: step 5b's deep_merge layers the overlay
+        # UNDER `merged`, and `merged` always carries a resolved value for model/temperature/
+        # max_tokens, so an overlay scalar could never win — stored, confirmed, and ignored at load
+        # (pre-existing <=0.12.5). Precedence shipped: agent yaml > division > org > overlay >
+        # schema default, which is 5b's stated contract with the last two rungs now real.
+        overlay_agent_raw = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_agent = overlay_agent_raw if isinstance(overlay_agent_raw, dict) else {}
+
         # Resolve scalar fields: model, temperature, max_tokens
         agent_model = raw.get("model", "inherit")
         div_model = division.model if division else "inherit"
         org_model = org.default_model if org.default_model else "inherit"
-        merged["model"] = _resolve_scalar("model", agent_model, div_model, org_model, "inherit")
+        merged["model"] = _resolve_scalar(
+            "model", agent_model, div_model, org_model,
+            _overlay_default(overlay_agent, "model", "inherit"),
+        )
 
+        # `model_fields_set`: OrgConfig's temperature/max_tokens carry SCHEMA defaults (0.6, 4096),
+        # never None — so reading them straight made the org layer "set" on every install and the
+        # rung below it (the overlay, and the shipped default it stands on) unreachable. Only a
+        # value the org config actually declared counts as org inheritance. `default_model` needs
+        # no such guard: its unset spelling is the empty string, already handled above.
         agent_temp = raw.get("temperature")
         div_temp = division.temperature if division else None
-        org_temp = org.default_temperature
-        merged["temperature"] = _resolve_scalar("temperature", agent_temp, div_temp, org_temp, 0.6)
+        org_temp = org.default_temperature if "default_temperature" in org.model_fields_set else None
+        merged["temperature"] = _resolve_scalar(
+            "temperature", agent_temp, div_temp, org_temp,
+            _overlay_default(overlay_agent, "temperature", 0.6),
+        )
 
         agent_mt = raw.get("max_tokens")
         div_mt = division.max_tokens if division else None
-        org_mt = org.default_max_tokens
-        merged["max_tokens"] = _resolve_scalar("max_tokens", agent_mt, div_mt, org_mt, 4096)
+        org_mt = org.default_max_tokens if "default_max_tokens" in org.model_fields_set else None
+        merged["max_tokens"] = _resolve_scalar(
+            "max_tokens", agent_mt, div_mt, org_mt,
+            _overlay_default(overlay_agent, "max_tokens", 4096),
+        )
 
         # Resolve the `context` block agent->division->org (per-field). Previously the
         # agent's raw context (or the schema default) was the ONLY source, so an org-level
@@ -678,8 +712,9 @@ class ConfigLoader:
         #     reads back. Per-agent yaml (and org/division inheritance) WINS — `merged` is
         #     layered ON TOP of the overlay. Resolved through THIS loader's config_dir like
         #     load_harness (#35 — no longer env-only, so --config-dir isolates the agent overlay).
-        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
-        if isinstance(overlay_agent, dict) and overlay_agent:
+        #     The three SCALAR fields already resolved against it in step 4 (see the note there);
+        #     this covers every other agent-scope key the overlay may carry.
+        if overlay_agent:
             merged = deep_merge(overlay_agent, merged)
 
         # 5c. CONF-01 (v0.13): the confinement leash comes free with the workspace layer. When a
