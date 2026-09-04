@@ -27,9 +27,9 @@ other's context (#150).
   attached the layer is skipped with a notice on stderr instead of prompting or
   loading — an unattended run cannot be talked into adopting a stranger's config.
 - **Config deep-merges, with two rules that do not bend.** The workspace value
-  wins per key. `permissions.deny_patterns` is the exception: the two layers
-  *union*, so a workspace can add a deny and can never remove one the global
-  config set. Provider settings stay where the hardware is — nothing ever writes
+  wins per key. `org.permissions.deny_patterns` is the exception: the two layers
+  *union*, so a workspace can add a deny there and can never remove one the
+  global config set. Provider settings stay where the hardware is — nothing ever writes
   a provider block into a workspace, and `localharness model` always edits the
   global file.
 - **Agents union by name; a collision goes to the workspace, wholesale.** The
