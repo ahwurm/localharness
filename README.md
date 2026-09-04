@@ -10,7 +10,7 @@ It's model-agnostic. Point it at any OpenAI-compatible endpoint and the same age
 
 The bet: the harness, not the model, is where most of the capability lives. The same model can swing tens of benchmark points depending on the harness around it.
 
-Three things it does that are hard to find anywhere else:
+Five things it does that are hard to find anywhere else:
 
 - **Read documents bigger than the context window — losslessly.** Every section is actually read, never truncated, and every number in the answer traces back to the source text it came from. Built for long filings, contracts, and reports, on hardware you control.
 - **Structural defense against prompt injection.** Untrusted web content can never share an agent with host-mutating tools like bash, write, or edit. The boundary is enforced in the agent topology and fails closed — not left to the model to refuse.
@@ -40,7 +40,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
 - **Memory that learns from use** — per-agent SQLite memory with an automatic write gate (lessons captured from failure→recovery signals, zero extra model calls), activation-ranked recall in pure SQL, cancellable idle consolidation, and a persisted gist/schema hierarchy over document analyses; conflicting facts supersede, never overwrite
-- **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` and `doctor` name the file behind every effective key
+- **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` names the file behind every effective key, and `doctor` names both layers and every key the project overrides
 - **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
 - **Deny-first permissions** — policies inherit down the hierarchy and can only narrow
 - **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
@@ -48,7 +48,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
-- **Pluggable channels** — CLI today; Discord adapter in development
+- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`)
 
 ## How it compares
 
@@ -143,7 +143,7 @@ share a machine. A laptop can run agents against a model served elsewhere on you
 |---------|---------|
 | `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
 | `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit) |
-| `doctor` | Diagnose config/endpoint issues; report both config layers and which one won each key |
+| `doctor` | Check Python, config, endpoint, model, context budget, token counting and directories; inside a project, name both config layers and the keys the project overrides |
 | `config show` | Print the effective merged config and the file that set each key |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
@@ -163,7 +163,7 @@ uv run pytest                                          # hermetic — no model s
 LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # opt-in tests against a live endpoint
 ```
 
-Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytest` and `localharness bench run` stage these automatically from `tests/fixtures/bench/`, so no manual copy step is needed from a repo checkout.
+Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytest` and `localharness bench` stage these automatically from `tests/fixtures/bench/`, so no manual copy step is needed from a repo checkout.
 
 ## Reference architectures
 
