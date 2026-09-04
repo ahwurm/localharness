@@ -159,7 +159,7 @@ def _print_error_details(error: ConfigError, reported_path: str | None = None) -
     Both clauses are inert when no workspace applies: the paths agree and `source_path` is None, so
     the output is byte-identical to pre-43 (LAYR-03).
     """
-    from localharness.config.loader import ConfigFieldError, ConfigValidationError, ConfigParseError
+    from localharness.config.loader import ConfigParseError, ConfigValidationError, _short_repr
 
     if isinstance(error, ConfigValidationError):
         if reported_path is not None and error.path != reported_path:
@@ -173,7 +173,9 @@ def _print_error_details(error: ConfigError, reported_path: str | None = None) -
                 f"    [red]{origin}{line_info}{field_err.field_path}:[/red] {field_err.message}"
             )
             if field_err.value is not None:
-                console.print(f"    [dim]  value: {field_err.value!r}[/dim]")
+                # Bounded repr, same as the exception text: an alias-amplified YAML value reprs to
+                # gigabytes, and this is the command people run when something is already wrong.
+                console.print(f"    [dim]  value: {escape(_short_repr(field_err.value))}[/dim]")
     elif isinstance(error, ConfigParseError):
         console.print(f"    [red]Line {error.line}:{error.column}: YAML parse error — {error.message}[/red]")
     else:
