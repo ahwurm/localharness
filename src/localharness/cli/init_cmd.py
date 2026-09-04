@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.agent.context import response_reserve
@@ -207,17 +208,27 @@ def _scaffold_workspace(
     target = Path.cwd() / WORKSPACE_DIR_NAME
     if target.exists():
         err_console.print(
-            f"[bold red]Error:[/bold red] A workspace already exists at {target}. "
-            f"Edit {target / 'config.yaml'} directly — this command never overwrites one."
+            "[bold red]Error:[/bold red] "
+            + escape(f"A workspace already exists at {target}. "
+                     f"Edit {target / 'config.yaml'} directly")
+            + " — this command never overwrites one.",
+            soft_wrap=True,
         )
         raise typer.Exit(1)
 
     (target / "agents").mkdir(parents=True)
     (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
 
-    console.print(f"[green]✓[/green] Workspace created at {target}")
-    console.print(f"  Config:  {target / 'config.yaml'} (all comments — nothing is set yet)")
-    console.print(f"  Agents:  {target / 'agents'}")
+    # escape() around every path, markup outside it: `target` is `Path.cwd()/.localharness` and
+    # a project folder named `[old] proj` is legal everywhere while `[old]` is rich markup.
+    # Unescaped, the three lines that tell you WHERE your new workspace is would name a
+    # directory that does not exist (39-05). soft_wrap so a deep path stays one copyable line.
+    console.print("[green]✓[/green] " + escape(f"Workspace created at {target}"), soft_wrap=True)
+    console.print(
+        escape(f"  Config:  {target / 'config.yaml'}") + " (all comments — nothing is set yet)",
+        soft_wrap=True,
+    )
+    console.print(escape(f"  Agents:  {target / 'agents'}"), soft_wrap=True)
     console.print(
         "  Next:    run `localharness start` from anywhere in this project — its memory, "
         "sessions and logs now stay here."

@@ -67,7 +67,12 @@ def validate(
         # Validate single file
         target = Path(path)
         if not target.exists():
-            console.print(f"[bold red]Error:[/bold red] File not found: {target}")
+            # escape(): the path came off the command line and is data. Unescaped, a file named
+            # `[old].yaml` is reported missing under a name that is not the one you typed.
+            console.print(
+                "[bold red]Error:[/bold red] " + escape(f"File not found: {target}"),
+                soft_wrap=True,
+            )
             raise typer.Exit(1)
         try:
             _validate_single_file(loader, target)

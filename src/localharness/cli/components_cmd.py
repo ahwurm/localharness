@@ -173,7 +173,12 @@ def _err(json_output: bool, message: str, exit_code: int = 2) -> None:
     if json_output:
         typer.echo(_json.dumps({"error": message}), err=True)
     else:
-        err_console.print(f"[bold red]Error:[/bold red] {message}")
+        # escape(): the message quotes back the key and the VALUE the user typed, and rich would
+        # parse `[/red]` in either and kill the command instead of explaining it — in the one
+        # function whose whole job is explaining what went wrong (E cluster, badmood review).
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(str(message)), soft_wrap=True
+        )
     raise typer.Exit(code=exit_code)
 
 
@@ -311,10 +316,16 @@ def components_get(
         typer.echo(_json.dumps(payload))
         return
 
-    console.print(f"{entry.path} = {entry.current_value!r}{display_note(entry.path, entry.current_value)}")
-    console.print(f"  type:    {entry.type_name}")
-    console.print(f"  layer:   {entry.winning_layer}")
-    console.print(f"  default: {entry.default_value!r}")
+    # Values and layer bands are both data: a band renders as `[workspace-config]`, which rich
+    # parses as a style tag, and a stored value can be any string. escape() the whole row.
+    console.print(
+        escape(f"{entry.path} = {entry.current_value!r}"
+               f"{display_note(entry.path, entry.current_value)}"),
+        soft_wrap=True,
+    )
+    console.print(escape(f"  type:    {entry.type_name}"), soft_wrap=True)
+    console.print(escape(f"  layer:   {entry.winning_layer}"), soft_wrap=True)
+    console.print(escape(f"  default: {entry.default_value!r}"), soft_wrap=True)
 
 
 # ------------------------------------------------------------------ #
@@ -468,7 +479,13 @@ def components_set(
         # EVENT's vocabulary (kept in the JSON and in ComponentMutated), and as a band name shown
         # to a human it says neither which layer nor which file — the exact ambiguity F2 removes.
         # The next line names the actual file, which is strictly more informative.
-        console.print(f"[green]set[/green] {path} = {typed_value!r} (was: {before!r})")
+        # escape() around the whole payload: the VALUE is whatever the user typed, and a value
+        # like `[dim]` renders as nothing at all — this receipt would confirm setting a key to an
+        # empty string. Same lesson as the path lines, applied to values (41-06 / doctor's rows).
+        console.print(
+            "[green]set[/green] " + escape(f"{path} = {typed_value!r} (was: {before!r})"),
+            soft_wrap=True,
+        )
         # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
         # (41-06's measured lesson, same reason doctor and validate escape theirs).
         console.print(

@@ -82,12 +82,17 @@ def migrate(
         raise typer.Exit(0)
 
     if plan.added:
+        # escape() around the path and around each pattern: both are data. A deny pattern is a
+        # glob — `write(*/[old]*)` is a legal one — and rich would eat `[old]` as a style tag, so
+        # this listing would print rules that are not the rules being added (39-05).
         console.print(
             f"[bold]{len(plan.added)}[/bold] shipped default deny pattern(s) missing from "
-            f"{config_file} (defaults revision {plan.from_revision} → {plan.to_revision}):"
+            + escape(f"{config_file} (defaults revision {plan.from_revision} → "
+                     f"{plan.to_revision}):"),
+            soft_wrap=True,
         )
         for p in plan.added:
-            console.print(f"  [green]+[/green] {p}")
+            console.print("  [green]+[/green] " + escape(str(p)), soft_wrap=True)
     else:
         console.print(
             f"No new deny patterns to add — updating defaults revision "
