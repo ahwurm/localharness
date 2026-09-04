@@ -700,6 +700,23 @@ class ConfigLoader:
                 d_val = getattr(div_budget, field) if div_budget else None
                 o_val = getattr(org_budget, field)
                 resolved_budget[field] = _resolve_scalar(field, a_val, d_val, o_val, None)
+
+            # C2-family invariant (F5): the kill switch is a machine-global CONTROL artifact — one
+            # file stops every agent on the box — so a workspace must not be able to point a
+            # session at a different one. start_cmd and subagent already pin its DIRECTORY to the
+            # global config dir; the VALUE came off this resolved config, so a workspace
+            # `agents/<name>.yaml` with an absolute `kill_file` silently detached the session from
+            # the operator's KILL. Re-resolved from the GLOBAL layer alone whenever a workspace
+            # applies. Inert without one (LAYR-03).
+            if self._local_dir is not None:
+                global_kill = self._global_layer_kill_file(path.stem, div_name, org_budget)
+                if resolved_budget.get("kill_file") != global_kill:
+                    log.warning(
+                        "ignoring workspace kill_file %r for agent %r: the kill switch resolves "
+                        "from the global config layer only (%r)",
+                        resolved_budget.get("kill_file"), path.stem, global_kill,
+                    )
+                resolved_budget["kill_file"] = global_kill
             # Remove None values so Pydantic uses its own defaults
             resolved_budget = {k: v for k, v in resolved_budget.items() if v is not None}
             perms_merged["budget"] = resolved_budget
@@ -742,6 +759,37 @@ class ConfigLoader:
             raise ConfigValidationError(str(path), errors) from exc
 
         return result
+
+    def _global_layer_kill_file(
+        self, stem: str, div_name: Optional[str], org_budget: Any
+    ) -> Any:
+        """`permissions.budget.kill_file` as the GLOBAL layer alone declares it, or None.
+
+        Same agent > division > org cascade as the merged budget, read from the global dir's files
+        only — so the global layer's own kill_file still applies through a workspace file that
+        shadows it, and a workspace-only agent simply has none (which is what an agent that
+        declares nothing has always had). Raw YAML, not the validated models, because this must
+        answer even when some unrelated key in the same file is invalid: a kill switch that goes
+        missing on a validation error is the wrong direction to fail.
+        """
+        def _declared(path: Path) -> Any:
+            if not path.exists():
+                return None
+            try:
+                raw = _load_yaml_file(path)
+            except ConfigError:
+                return None
+            perms = raw.get("permissions") if isinstance(raw, dict) else None
+            budget = perms.get("budget") if isinstance(perms, dict) else None
+            return budget.get("kill_file") if isinstance(budget, dict) else None
+
+        agent_val = _declared(self._config_dir / "agents" / f"{stem}.yaml")
+        div_val = (
+            _declared(self._config_dir / "divisions" / f"{div_name}.yaml") if div_name else None
+        )
+        return _resolve_scalar(
+            "kill_file", agent_val, div_val, getattr(org_budget, "kill_file", None), None
+        )
 
     def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
         """Overlay an optional agents/<name>.yaml onto a BUILT-IN subagent's base config.
