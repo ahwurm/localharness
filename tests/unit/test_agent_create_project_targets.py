@@ -61,6 +61,7 @@ def test_project_with_config_dir_flag_refuses(project, tmp_path):
 
     assert result.exit_code != 0, result.output
     assert "--config-dir" in result.output
+    assert "$LOCALHARNESS" not in result.output, "named an env var nobody set"
     # The refusal must leave NOTHING behind — this is the write that used to happen anyway.
     assert not (project / WORKSPACE_DIR_NAME).exists()
     assert not (tmp_path / "elsewhere").exists()
@@ -75,6 +76,11 @@ def test_project_with_config_dir_env_refuses(project, tmp_path, monkeypatch):
 
     assert result.exit_code != 0, result.output
     assert not (project / WORKSPACE_DIR_NAME).exists()
+    # Names the env var, not the flag. typer fills `config_dir` from LOCALHARNESS_DIR through its
+    # own `envvar=`, so the parameter cannot tell them apart and the first version of this message
+    # told a user who never typed `--config-dir` to go drop it.
+    assert "$LOCALHARNESS_DIR" in result.output
+    assert "--config-dir" not in result.output
 
 
 def test_project_with_legacy_home_env_refuses(project, tmp_path, monkeypatch):
@@ -84,6 +90,7 @@ def test_project_with_legacy_home_env_refuses(project, tmp_path, monkeypatch):
 
     assert result.exit_code != 0, result.output
     assert not (project / WORKSPACE_DIR_NAME).exists()
+    assert "$LOCALHARNESS_HOME" in result.output
 
 
 def test_refusal_names_both_ways_out(project, tmp_path):
