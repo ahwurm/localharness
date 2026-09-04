@@ -181,6 +181,12 @@ def agent_list(
     ).discover_agents(on_error=_skipped_agent_file)
 
     if not agents:
+        # `--json` is a machine contract, and an empty roster is `[]` — the one answer a caller's
+        # `json.loads` can read. Prose on stdout is a parse error in whatever is piping this
+        # (39-06's deferred item; the D1 repro hit it on a fresh workspace-only project).
+        if json_output:
+            typer.echo(json.dumps([]))
+            return
         console.print("No agents configured. Run: localharness agent create <name>")
         return
 

@@ -228,7 +228,8 @@ def doctor(
 
     # 2. Config file exists
     config_file = cfg_path / "config.yaml"
-    if config_file.exists():
+    configured = config_file.exists()
+    if configured:
         # Glyph outside escape(), path inside — the same split 39-05's layer lines use, and for
         # the same measured reason: rich silently DELETES `[old]` from a folder named `[old] proj`,
         # so an unescaped path here names a file that does not exist.
@@ -237,15 +238,17 @@ def doctor(
         console.print(
             _FAIL + " " + escape(f"Config file not found: {config_file}"), soft_wrap=True
         )
-        console.print(f"       Run 'localharness init' to create it.")
+        console.print("       This machine is not configured — run 'localharness init'.")
         failures.append("config-missing")
-        # Can't continue without config
-        _summarize_and_exit(failures)
 
     # 3. Config file valid
     harness: HarnessConfig | None = None
     from localharness.cli.workspace import resolve_workspace_layer
     workspace = resolve_workspace_layer(config_dir)
+    if not configured and workspace is None:
+        # Nothing to report and nothing that can be checked without a config: stop exactly where
+        # doctor always stopped (LAYR-03 — a machine with no workspace sees v0.12 behavior).
+        _summarize_and_exit(failures)
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
     # Success criterion 2: the chosen layer is stated, never silently applied. Printed only when
     # a layer applies — with none, doctor's output stays byte-identical to v0.12 (LAYR-03).
@@ -257,17 +260,31 @@ def doctor(
         # command people run to find out where their config comes from. (`[/]` raises outright.)
         console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"), soft_wrap=True)
         console.print(escape(f"       Global layer:    {cfg_path}"), soft_wrap=True)
-        _print_overridden_keys(cfg_path, workspace, loader)
-    try:
-        harness = loader.load_harness()
-        console.print(f"{_PASS} Config valid")
-    except Exception as exc:
-        # The message is 43-01's ConfigValidationError and CARRIES THE OWNING FILE'S PATH — the
-        # whole point of that plan. Passing it through unescaped is how the right attribution
-        # still reaches the user as a path they cannot open. escape() only, no string surgery:
-        # if the attribution itself is ever wrong, the bug is in config/loader.py.
-        console.print(_FAIL + " " + escape(f"Config invalid: {exc}"))
-        failures.append("config-invalid")
+        # The override diff needs a global layer to diff AGAINST. With none, every workspace key
+        # would report as an override of nothing, so the honest report is that there is nothing to
+        # compare — one line, and the layer rows above already say where the files are (D1).
+        if configured:
+            _print_overridden_keys(cfg_path, workspace, loader)
+        else:
+            console.print(
+                "       No machine config to compare against — this project's layer is all "
+                "there is."
+            )
+    if configured:
+        try:
+            harness = loader.load_harness()
+            console.print(f"{_PASS} Config valid")
+        except Exception as exc:
+            # The message is 43-01's ConfigValidationError and CARRIES THE OWNING FILE'S PATH —
+            # the whole point of that plan. Passing it through unescaped is how the right
+            # attribution still reaches the user as a path they cannot open. escape() only, no
+            # string surgery: if the attribution itself is ever wrong, the bug is in
+            # config/loader.py.
+            console.print(_FAIL + " " + escape(f"Config invalid: {exc}"))
+            failures.append("config-invalid")
+    # No `else`: an absent machine config is ONE failure, already recorded above. Loading anyway
+    # would raise ConfigNotFoundError and report the same fact a second time as "config invalid",
+    # which is doctor telling you two things are wrong when one is (D1).
 
     # F6, and the one v0.13 output change that is NOT workspace-gated (see the function's
     # docstring). ONE call site on purpose: an owner veto before release is a two-line revert.
@@ -602,22 +619,65 @@ def doctor(
     # 6. Config directory writable
     if os.access(cfg_path, os.W_OK):
         console.print(f"{_PASS} Config directory writable")
+    elif not cfg_path.exists():
+        # A directory that does not exist is not an unwritable one, and `init` is what creates it.
+        # Reported as a failure, this was doctor naming the SAME problem twice on an unconfigured
+        # machine — "2 issue(s) found" for one missing install (D1).
+        console.print(
+            _INFO + "  " + escape(f"Config directory does not exist yet: {cfg_path}"),
+            soft_wrap=True,
+        )
     else:
         console.print(_FAIL + " " + escape(f"Config directory not writable: {cfg_path}"))
         failures.append("config-dir-not-writable")
 
     # 7. Agents directory
     agents_dir = cfg_path / "agents"
-    if agents_dir.exists():
+    # is_dir(), not exists() (E-M3): a FILE named `agents` passed the old check and reported
+    # "exists" — and then every agent read through it fails with NotADirectoryError somewhere
+    # else entirely. Doctor is the command that is supposed to find that.
+    if agents_dir.is_dir():
         console.print(f"{_PASS} Agents directory exists")
         if fix and not os.access(agents_dir, os.W_OK):
             agents_dir.mkdir(parents=True, exist_ok=True)
+    elif agents_dir.exists():
+        console.print(
+            _FAIL + " " + escape(f"Agents directory is not a directory: {agents_dir}"),
+            soft_wrap=True,
+        )
+        console.print("       Move or delete that file — agents are read from a folder here.")
+        failures.append("agents-dir-not-a-directory")
     else:
         if fix:
             agents_dir.mkdir(parents=True, exist_ok=True)
             console.print(f"{_PASS} Agents directory created")
         else:
             console.print(f"{_INFO}  Agents directory not found (run --fix or 'localharness init')")
+
+    # 7b. This project's agents, when a workspace layer applies. Without it a workspace-only
+    # project — scaffolded by `init --workspace`, filled by `agent create --project` — showed no
+    # trace of the agents a session in this directory would actually load (D1).
+    if workspace is not None:
+        ws_agents = workspace / "agents"
+        if ws_agents.is_dir():
+            # Filtered off the ONE roster source, never re-globbed: a second discovery
+            # implementation here is exactly the drift `agent list` was consolidated to remove
+            # (#150 phase 38, and its invariant test).
+            names = sorted(
+                {p.stem for p in loader.agent_yaml_paths() if p.parent == ws_agents}
+            )
+            console.print(
+                _PASS + " " + escape(f"Workspace agents: {ws_agents}")
+                + f" ({len(names)} found)",
+                soft_wrap=True,
+            )
+            if names:
+                console.print(escape("       " + ", ".join(names)), soft_wrap=True)
+        else:
+            console.print(
+                _INFO + "  " + escape(f"Workspace agents directory not found: {ws_agents}"),
+                soft_wrap=True,
+            )
 
     # 8. Tool call mode info
     if harness is not None:
