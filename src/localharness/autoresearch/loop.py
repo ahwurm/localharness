@@ -8,7 +8,7 @@ sequential driver:
         -> write in_flight archive row (15)
           -> run_experiment under a per-proposal timeout (17 gate; exit code = verdict)
             -> interpret exit code + the post-run row -> adopt / hold / reject / skip
-              -> adopt (18-04) commits a clean win to HEAD -> next experiment composes on it
+              -> adopt writes a clean win to the GLOBAL user overlay (no git) -> next experiment composes on it
                 -> journal the loop-level "why" (per-run JSONL)
     ... repeat until the PRE-FLIGHT budget gate (18-03 BudgetController) trips, the
         consecutive-failure circuit breaker halts, or a graceful interrupt is requested.

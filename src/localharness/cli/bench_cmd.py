@@ -104,9 +104,9 @@ def bench_default(
         "train",
         "--slice",
         help=(
-            "Corpus slice to run: 'train' (default — matches Phase 17 EXP-03 invariant), "
-            "'holdout' (sealed slice, explicit opt-in), or 'all' (full corpus diagnostic). "
-            "Overridden by --scenario."
+            "Corpus slice to run: 'train' (default — the slice harness changes are tuned "
+            "against), 'holdout' (sealed slice, explicit opt-in), or 'all' (full corpus "
+            "diagnostic). Overridden by --scenario."
         ),
     ),
     threshold: Optional[list[str]] = typer.Option(
