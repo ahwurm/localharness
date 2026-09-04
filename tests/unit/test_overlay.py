@@ -96,12 +96,24 @@ def test_deep_merge_does_not_mutate_base():
 
 
 def test_load_overlay_invalid_yaml_raises(tmp_path):
-    import yaml
+    """Phase 43 (CLI-02) CHANGED this contract on purpose: a malformed overlay now raises
+    ConfigParseError, not a bare yaml.YAMLError.
+
+    yaml.YAMLError is not a ConfigError, so `validate_all`'s `except ConfigError` let it through
+    and `localharness validate` crashed with a raw traceback on a malformed overrides.yaml in
+    EITHER layer (phase 40 measured both). Asserting the ConfigParseError is strictly stronger than
+    the old assertion: it pins the error type the CLI can actually catch, plus the owning path and
+    a real line number. `tests/unit/test_config_error_attribution.py` grades the user-visible half.
+    """
+    from localharness.config.loader import ConfigError, ConfigParseError
     from localharness.config.overlay import load_overlay
     bad = tmp_path / "bad.yaml"
     bad.write_text("a: [unterminated\n")
-    with pytest.raises(yaml.YAMLError):
+    with pytest.raises(ConfigParseError) as exc:
         load_overlay(bad)
+    assert isinstance(exc.value, ConfigError)
+    assert exc.value.path == str(bad)
+    assert exc.value.line >= 1
 
 
 def test_atomic_write_uses_os_replace(tmp_path, monkeypatch):
