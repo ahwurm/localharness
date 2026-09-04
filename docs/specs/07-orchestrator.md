@@ -768,7 +768,7 @@ When a `TaskComplete` event arrives with `exit_reason='error'`, the orchestrator
 ### Delegation Timeout
 
 `DelegationTimeoutError` is raised by `delegate()` if `TaskComplete` does not arrive within `budget_max_duration_minutes * 60 + 60` seconds. The orchestrator:
-1. Publishes a kill signal (via a KILL file in the agent's directory).
+1. Publishes a kill signal (via the machine's one KILL file, `~/.localharness/KILL` by default).
 2. Waits 5 seconds for clean shutdown.
 3. Surfaces `DelegationTimeoutError` to the user.
 4. Updates the Agent Card's `success_rate` (counts as a failure).

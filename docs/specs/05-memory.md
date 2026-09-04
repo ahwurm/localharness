@@ -74,7 +74,7 @@ mode, `busy_timeout` so the agent loop and the idle consolidation pass wait inst
 throwing "database is locked". Schema evolves through a stepwise migration ladder; each
 rewrite script is a single `BEGIN IMMEDIATE … PRAGMA user_version = N; COMMIT` transaction,
 so a crash rolls back to the prior intact version and the next open retries cleanly.
-`CURRENT_SCHEMA_VERSION = 4`.
+`CURRENT_SCHEMA_VERSION = 8`.
 
 ### 3.1 Facts — supersede-not-overwrite, with a trust/accessibility split
 
@@ -139,7 +139,8 @@ excludes both the still-open current sitting and vacuous sittings that derived n
 
 Additive-only — four tables, zero touches to `facts`/`sessions`/`edges`, so the injected
 block is byte-stable **by construction**. They are the substrate the predictive layer
-measures against and the record Phase 36 will re-derive thresholds from.
+measures against, and the record a later release will re-derive its thresholds from instead of
+carrying them as constants.
 
 - **`tool_observations`** — one row per scored tool result. `is_error` derives from
   `Observation.error IS NOT NULL` (`exit_code` is a dead field). `duration_ms` is the

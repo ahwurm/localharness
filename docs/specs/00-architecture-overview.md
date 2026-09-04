@@ -624,18 +624,12 @@ orchestrator/workflow.py  — imports orchestrator/router.py, provider/client.py
 
 ```
 cli/app.py             — top-level Typer app
-cli/init.py            — imports provider/detector.py, config/loader.py
-cli/start.py           — imports orchestrator/router.py, channels/terminal.py, core/bus.py
-cli/agent.py           — imports config/loader.py, orchestrator/workflow.py
-cli/doctor.py          — imports provider/detector.py, config/loader.py
-cli/validate.py        — imports config/loader.py
+cli/init_cmd.py        — imports provider/detector.py, config/loader.py
+cli/start_cmd.py       — imports orchestrator/router.py, channels/terminal.py, core/bus.py
+cli/agent_cmd.py       — imports config/loader.py, orchestrator/workflow.py
+cli/doctor_cmd.py      — imports provider/detector.py, config/loader.py
+cli/validate_cmd.py    — imports config/loader.py
 ```
-
-**Phase → Wave mapping:**
-- Phase 1 (Setup & Config): Waves 1-2
-- Phase 2 (Memory & Event Bus): Waves 1-2 (bus spec, memory modules)
-- Phase 3 (Agent Loop & Tools): Waves 3-4
-- Phase 4 (Orchestrator & CLI): Waves 5-6
 
 ---
 
