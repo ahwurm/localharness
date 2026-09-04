@@ -467,17 +467,37 @@ def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path,
     _write_workspace(layout, {"org": {"name": "a-long-workspace-organisation-name-for-this-row"}})
     backup = layout.global_dir / f"{BACKUP_PREFIX}20260214-153000"
     backup.write_text("old", encoding="utf-8")
-    monkeypatch.setenv("COLUMNS", "100")
+    monkeypatch.setenv("COLUMNS", "80")  # a real default terminal, not the suite's 400
 
     lines = _run_doctor().splitlines()
 
     assert any(str(backup) in line for line in lines), (
-        f"the backup path is on no single line at width 100:\n" + "\n".join(lines)
+        f"the backup path is on no single line at width 80:\n" + "\n".join(lines)
     )
     row = (
         "org.name = 'a-long-workspace-organisation-name-for-this-row'  "
         "[workspace-config]  (global: 'GLOBAL-ORG')"
     )
     assert any(row in line for line in lines), (
-        "the overridden row is on no single line at width 100:\n" + "\n".join(lines)
+        "the overridden row is on no single line at width 80:\n" + "\n".join(lines)
+    )
+    # The three PRE-EXISTING path lines, in the same body: doctor printing one copyable path
+    # directly above one split across three lines is worse than either alone, and the deferred
+    # item that carried this (43-02 #2, 43-03 #4) named `doctor` in the set to be ruled on ONCE.
+    #
+    # LABEL and path must share a line. Checking the path alone measured two false greens: the
+    # backup line above is soft-wrapped and therefore intact, and `<dir>/config.yaml.bak-<stamp>`
+    # CONTAINS both `<dir>/config.yaml` and `<dir>` as substrings — this file's own fix shadowing
+    # the bug it is meant to grade.
+    folded = [
+        label
+        for label, path in (
+            ("Config file", layout.global_dir / "config.yaml"),
+            ("Workspace layer", layout.ws_dir),
+            ("Global layer", layout.global_dir),
+        )
+        if not any(label in line and str(path) in line for line in lines)
+    ]
+    assert folded == [], (
+        f"these doctor lines are on no single line at width 80: {folded}\n" + "\n".join(lines)
     )
