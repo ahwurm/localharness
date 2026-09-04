@@ -2124,6 +2124,7 @@ class MemoryStore:
         *,
         origin_label: str = "",
         include_preamble: bool = True,
+        exclude_keys: set[str] | None = None,
     ) -> tuple[str, list[int]]:
         """Render the agent-memory INDEX: fact names + one-line descriptions (not full
         bodies) and the most recent session-history entries — the latter from the sessions
@@ -2142,7 +2143,14 @@ class MemoryStore:
         would be ambiguous; the token names the store AND the row, and `memory_get` parses it back.
         Empty (the default, every single-store caller) renders today's exact bytes.
         `include_preamble=False` drops the leading INDEX instructions so a merged second block does
-        not repeat them; the router that merges two blocks owns the one preamble."""
+        not repeat them; the router that merges two blocks owns the one preamble.
+
+        `exclude_keys` (v0.13 B5) drops rows whose key another block already rendered, so a merged
+        index resolves a contradicted name the same way `query_facts`/`get_fact` do — to the
+        workspace's version, once. Filtered in Python rather than in SQL: the set is one block's
+        render, not a stable predicate, and a variadic NOT IN would rewrite the statement (and the
+        forced partial index's plan) on every turn. None — every single-store caller — renders
+        today's exact bytes."""
         assert self._db is not None
         now = int(time.time())
 
@@ -2185,6 +2193,8 @@ class MemoryStore:
             (self._agent_id, now, now),
         ) as cur:
             schema_rows = await cur.fetchall()
+        if exclude_keys:
+            schema_rows = [r for r in schema_rows if r[0] not in exclude_keys]
         schema_lines = [_line(r) for r in schema_rows]
         # Zero bytes when absent (mirrors history_section below): an empty schemas set must
         # not change the injected block's bytes for chapter-less stores (RANK-04 byte-stability).
@@ -2205,6 +2215,8 @@ class MemoryStore:
             (self._agent_id, now, now),
         ) as cur:
             rows = await cur.fetchall()
+        if exclude_keys:
+            rows = [r for r in rows if r[0] not in exclude_keys]
 
         # 180-char budget (live test 2026-07-03): at the default 100, one absolute
         # path (~50 chars) plus any prefix guillotined the payload — the injected
