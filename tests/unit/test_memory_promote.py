@@ -511,3 +511,119 @@ async def test_a_promoted_memory_is_actually_recalled_by_the_store_it_landed_in(
     copy = await gl.get_fact(KEY)
     assert await gl.tags_for_atom(copy.id) == [], \
         "the copy now carries tag-graph edges — the v1 gap closed, so update this test's docstring"
+
+
+# ------------------------------------------------------- cross-workspace integrity (B2/B3)
+#
+# The global store is ONE store shared by every project on the machine, and until now promote
+# treated "a global copy with a promotion marker" as "a copy MY project wrote". Two different
+# projects promoting the same NAME is not exotic — `api_style`, `deploy_cmd`, `test_cmd` are
+# exactly the names a general lesson has — and the marker already records which workspace it
+# came from. These two tests are that recorded identity being used.
+
+OTHER = "/home/u/projects/another-harness"
+
+
+async def _promoted_from(gl: MemoryStore, ws: MemoryStore, identity: str, handle) -> None:
+    """One project's confirmed promotion of its own fact under `KEY`."""
+    fact = await ws.store_fact(key=KEY, value=f"{identity} version", tags=["lesson"],
+                               confidence=0.9, source="user", provenance=ORIG_PROV)
+    out = await memory_cmd.dispatch(ws, f"promote {fact.id} confirm", promote_target=handle,
+                                    workspace_identity=identity)
+    assert (await gl.get_fact(KEY)) is not None, out
+
+
+async def test_revert_refuses_a_copy_promoted_from_another_workspace(two, tmp_path):
+    """Project B running `/memory promote <its own id> revert` retired project A's global copy:
+    same key, a promotion marker, and no check on WHOSE promotion it was. The refusal names the
+    workspace it came from, so the message is actionable rather than a wall."""
+    ws, gl, handle = two
+    other_ws = await _open_store(tmp_path / "other-proj" / ".localharness")
+    try:
+        await _promoted_from(gl, ws, IDENTITY, handle)
+        promoted = await gl.get_fact(KEY)
+
+        mine = await other_ws.store_fact(key=KEY, value="B's own version", tags=["lesson"],
+                                         confidence=0.9, source="user")
+        out = await memory_cmd.dispatch(other_ws, f"promote {mine.id} revert",
+                                        promote_target=handle, workspace_identity=OTHER)
+
+        still = await gl.get_fact(KEY)
+        assert still is not None and still.id == promoted.id, \
+            "another project's promoted memory was retired by this one"
+        assert "Refusing" in out, f"{out!r}"
+        assert IDENTITY in out, f"the refusal does not say where it was promoted from: {out!r}"
+    finally:
+        await other_ws.close()
+
+
+async def test_revert_still_undoes_this_workspace_s_own_copy(two):
+    """The other direction, so the refusal cannot pass by refusing everything."""
+    ws, gl, handle = two
+    await _promoted_from(gl, ws, IDENTITY, handle)
+    fact = await ws.get_fact(KEY)
+
+    out = await memory_cmd.dispatch(ws, f"promote {fact.id} revert", promote_target=handle,
+                                    workspace_identity=IDENTITY)
+
+    assert await gl.get_fact(KEY) is None, f"the copy this project promoted survived: {out!r}"
+    assert "Reverted" in out, f"{out!r}"
+
+
+async def test_confirm_discloses_that_it_supersedes_another_workspace_s_copy(two, tmp_path):
+    """`store_fact` supersedes by key, so promoting a name another project already promoted
+    replaces the machine-global answer for every project on the machine. That happened silently:
+    the confirm message said "agents in your other projects can recall it" and nothing else."""
+    ws, gl, handle = two
+    other_ws = await _open_store(tmp_path / "other-proj" / ".localharness")
+    try:
+        await _promoted_from(gl, other_ws, OTHER, handle)
+
+        mine = await ws.store_fact(key=KEY, value="my version", tags=["lesson"], confidence=0.9,
+                                   source="user", provenance=ORIG_PROV)
+        out = await memory_cmd.dispatch(ws, f"promote {mine.id} confirm", promote_target=handle,
+                                        workspace_identity=IDENTITY)
+
+        assert (await gl.get_fact(KEY)).value == "my version", "the supersede did not happen"
+        assert "replaces" in out.lower(), f"the supersede was not disclosed: {out!r}"
+        assert OTHER in out, f"the disclosure does not name the other workspace: {out!r}"
+    finally:
+        await other_ws.close()
+
+
+async def test_a_first_promotion_says_nothing_about_superseding(two):
+    """Assertion-order check: the disclosure must not fire on every confirm, or it is noise
+    that teaches users to skip the line that matters."""
+    ws, _gl, handle = two
+    fact = await _seed(ws)
+
+    out = await _promote(ws, f"{fact.id} confirm", handle)
+
+    assert "replaces" not in out.lower(), f"a first promotion claimed to replace something: {out!r}"
+
+
+async def test_a_semicolon_in_the_workspace_path_still_reverts(two):
+    """The marker is `<epoch>;<workspace>;<the fact's own provenance>` — three fields in one TEXT
+    column. A project path containing ';' must not parse as a different workspace and lock its own
+    owner out of the revert."""
+    ws, gl, handle = two
+    hostile = "/home/u/pr;oj;evil"
+    fact = await _seed(ws)
+
+    await _promote(ws, f"{fact.id} confirm", handle, identity=hostile)
+    out = await _promote(ws, f"{fact.id} revert", handle, identity=hostile)
+
+    assert await gl.get_fact(KEY) is None, f"the owner could not revert its own copy: {out!r}"
+    assert "Reverted" in out, f"{out!r}"
+
+
+async def test_promoting_for_an_agent_the_global_roster_lacks_says_so(two):
+    """B7, at its cheapest honest treatment. The global twin is keyed by the WORKSPACE agent's
+    name, so promoting from a workspace-only agent writes `<global>/agents/<name>/` — a store no
+    session reads until an agent of that name exists globally. Not redesigned here; disclosed."""
+    ws, _gl, handle = two
+    fact = await _seed(ws)
+
+    out = await _promote(ws, f"{fact.id} confirm", handle)
+
+    assert f"no global agent '{AGENT}'" in out, f"the promotion-into-a-void is not disclosed: {out!r}"
