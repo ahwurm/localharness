@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from rich.markup import escape
 from rich.rule import Rule
 
 from localharness.config.loader import ConfigLoader
+from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
 from localharness.config.paths import resolve_config_dir
 
@@ -132,6 +134,45 @@ def _print_overridden_keys(cfg_path: Path, workspace: Path) -> None:
         )
 
 
+def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
+    """Say which shipped-defaults revision this config carries, and when it was last migrated.
+
+    `localharness start` folds new shipped deny-defaults into config.yaml on the first start after
+    an upgrade — announced, additive, lossless, with a timestamped backup — but that announcement
+    prints once and scrolls away in a long or failing session, so the only durable trace was a
+    .bak file nobody was told to look for (v0.13 dogfood F6). No new state is written to support
+    this: the backup FILE is the record, and its own filename carries the timestamp.
+
+    This is the one v0.13 output change that is NOT gated on a workspace, and that is deliberate —
+    it is a product decision, not layering behavior. If the owner vetoes F6 before release, delete
+    this function and its single call site; nothing else in doctor depends on it.
+    """
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    stamped = harness.org.permissions.defaults_revision
+    if stamped >= CURRENT_DEFAULTS_REVISION:
+        console.print(f"{_INFO} Security defaults: revision {stamped} (current)")
+    else:
+        console.print(
+            f"{_INFO} Security defaults: revision {stamped}, shipped revision is "
+            f"{CURRENT_DEFAULTS_REVISION}. `localharness start` will fold the missing defaults in "
+            f"on its next run, or run `localharness config migrate` now."
+        )
+
+    # Sorted lexicographically, which for BACKUP_STAMP_FORMAT is also CHRONOLOGICAL — do not
+    # "fix" this into an mtime sort: a hand-copied backup keeps its name and loses its mtime.
+    backups = sorted(cfg_path.glob(f"{BACKUP_PREFIX}*"))
+    if not backups:
+        return
+    latest = backups[-1]
+    stamp = latest.name.split(BACKUP_PREFIX, 1)[-1]
+    try:
+        when = datetime.strptime(stamp, BACKUP_STAMP_FORMAT).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        when = stamp
+    console.print(escape(f"       Last migrated {when}; backup at {latest}"))
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -205,6 +246,11 @@ def doctor(
     except Exception as exc:
         console.print(f"{_FAIL} Config invalid: {exc}")
         failures.append("config-invalid")
+
+    # F6, and the one v0.13 output change that is NOT workspace-gated (see the function's
+    # docstring). ONE call site on purpose: an owner veto before release is a two-line revert.
+    if harness is not None:
+        _print_migration_state(cfg_path, harness)
 
     # 4. LLM endpoint reachable
     if harness is not None:
