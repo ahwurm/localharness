@@ -178,7 +178,7 @@ def _child_ctx_with_store_tools(context_manager: Any, child_registry: Any) -> An
     tool_result_get root-store leak (a child no longer reads the root's evicted bodies). Only tools
     the child actually has are rebound; leaves with no web/get tools are unaffected.
 
-    NOTE (dual-LLM reframe — see .planning/rlm2.md): WHICH handle a quarantined processor may be
+    NOTE (dual-LLM reframe): WHICH handle a quarantined processor may be
     granted is a PARENT-SIDE decision (the orchestrator hands a processor exactly the one handle to
     chew). The earlier blanket child-side grant-revoke was removed — a processor (incl. the verifier)
     IS granted its raw source; the verifier is blind to the researcher's SUMMARY, not the source.

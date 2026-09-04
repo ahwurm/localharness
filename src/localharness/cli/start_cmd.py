@@ -832,7 +832,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             org_id="default",
             # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md and
             # GUARDRAILS.md never do — the safety voice is the org's, and a workspace must not be
-            # able to rewrite or blank it (ROADMAP amendment #4, owner-ruled; 41-01's split).
+            # able to rewrite or blank it. That invariant is why these are two separate inputs:
+            # the safety context always reads from the global layer, whatever state_dir points at.
             base_dir=str(state_dir),
             global_base_dir=str(cfg_path),
             bus=bus,

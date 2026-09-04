@@ -2074,7 +2074,7 @@ class MemoryStore:
         BYTE-IDENTICAL; the id is captured, never rendered. Session-history entries are not
         atoms, so they contribute no ids.
 
-        `origin_label` (v0.13 MEMS-02 / ROADMAP amendment #7): when non-empty, every rendered line
+        `origin_label` (v0.13 MEMS-02): when non-empty, every rendered line
         is prefixed with a composite origin token — `[workspace#12]`, `[global#7]`. `facts.id` is
         AUTOINCREMENT **per database**, so a scope-merged blend showing a bare `#12` from two stores
         would be ambiguous; the token names the store AND the row, and `memory_get` parses it back.
