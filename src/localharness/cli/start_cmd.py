@@ -12,6 +12,9 @@ from rich.console import Console
 from rich.markup import escape
 from rich.prompt import IntPrompt
 from rich.table import Table
+from rich.text import Text
+
+from localharness.cli.theme import entity, entity_text
 
 console = Console()
 err_console = Console(stderr=True)
@@ -23,6 +26,26 @@ def _first_prompt_hint(is_returning: bool) -> str:
     full 'describe a task' hint; a returning session still gets a short '/help' reminder
     (the returning banner previously reinforced nothing)."""
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
+
+
+def _agent_roster_table(agents: list[dict[str, Any]]) -> Table:
+    """The --subagents picker roster, with each agent NAME in the agent entity color.
+
+    Cells are Text spans, not markup strings: a Table renders str cells through the markup
+    parser, so an agent legally named `[old] proj` used to lose its `[old]` to a swallowed
+    tag (and `[/red]proj` would have raised MarkupError and killed the picker). Text makes
+    the name literal by construction — the `[old] proj` lesson, applied without needing an
+    escape() call around a value that also has to carry a style.
+
+    Split out of _start_async so the roster can be rendered and asserted on directly.
+    """
+    table = Table(title=entity_text("agent", "Available Agents"))
+    table.add_column("No.")
+    table.add_column("Name")
+    table.add_column("Role", style="dim")
+    for i, a in enumerate(agents, start=1):
+        table.add_row(str(i), entity_text("agent", a.get("name", "")), Text(a.get("role", "")))
+    return table
 
 
 def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
@@ -509,13 +532,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
     else:
         # --subagents + multiple agents: show picker
-        table = Table(title="Available Agents")
-        table.add_column("No.")
-        table.add_column("Name")
-        table.add_column("Role")
-        for i, a in enumerate(agents, start=1):
-            table.add_row(str(i), a.get("name", ""), a.get("role", ""))
-        console.print(table)
+        console.print(_agent_roster_table(agents))
         choice = IntPrompt.ask("Select agent", default=1)
         idx = max(1, min(choice, len(agents))) - 1
         selected_data = agents[idx]
@@ -1293,36 +1310,49 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel.tps_source = llm.gen_speed_snapshot
 
         # --- Startup summary line ---
-        parts = [f"({elapsed:.1f}s startup)"]
-        counts: list[str] = ["1 agent"]
+        # Entity-typed per the localharness.dev architecture plates (cli/theme.py): the
+        # agent count wears the runtime hue, MCP servers and plugins the tool hue. Counts
+        # used to be one undifferentiated line, so "what did the harness actually bring
+        # up?" needed reading rather than glancing.
+        parts = [f"[dim]({elapsed:.1f}s startup)[/dim]"]
+        counts: list[str] = [entity("agent", "1 agent")]
         if mcp_connected > 0 or mcp_failed > 0:
             mcp_str = f"{mcp_connected} MCP server{'s' if mcp_connected != 1 else ''}"
             if mcp_failed > 0:
                 mcp_str += f" ({mcp_failed} failed)"
-            counts.append(mcp_str)
+            counts.append(entity("tool", mcp_str))
         if plugins_loaded > 0:
-            counts.append(f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}")
+            counts.append(entity("tool", f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}"))
         summary_line = " -- ".join(parts + [", ".join(counts)])
         if warnings:
-            summary_line += f" [{'; '.join(warnings)}]"
-        console.print(summary_line)
+            # escape() via entity(): a warning is an exception string the user's environment
+            # wrote (paths, `[Errno 2]`), and it was printed raw INSIDE literal brackets.
+            # Rich read the whole `[memory: ... (in-memory mode)]` group as one tag and
+            # DELETED it, so every degraded startup — memory fallen back to in-memory, a
+            # hook that failed to load, a crashed session-start — printed a clean-looking
+            # summary and reported nothing. Amber is the site's warning tone.
+            summary_line += " " + entity("warning", f"[{'; '.join(warnings)}]")
+        console.print(summary_line, soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
+            # entity() escapes each value as it colors it, so a server or plugin NAMED with
+            # brackets survives here too — these lines interpolated config-supplied names
+            # into markup unescaped before.
             if mcp_manager and mcp_manager.connected_servers:
                 for srv in mcp_manager.connected_servers:
-                    console.print(f"  MCP: {srv}")
+                    console.print("  " + entity("tool", f"MCP: {srv}"), soft_wrap=True)
             if plugins_loaded > 0 and hook_system:
                 for pname in hook_system.loaded_plugin_names:
-                    console.print(f"  Plugin: {pname}")
+                    console.print("  " + entity("tool", f"Plugin: {pname}"), soft_wrap=True)
             tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
-            console.print(f"  Tools: {tool_count} total")
+            console.print("  " + entity("tool", f"Tools: {tool_count} total"))
             if memory_store:
                 # escape(): the agent's state dir is derived from the config dir, which is a path
                 # the user chose. Unescaped it crashed the banner AFTER the session was wired.
-                console.print("  " + escape(f"Memory: {agent_dir / 'memory.db'} (WAL)"), soft_wrap=True)
+                console.print("  " + entity("memory", f"Memory: {agent_dir / 'memory.db'} (WAL)"), soft_wrap=True)
             else:
-                console.print("  Memory: in-memory (no persistence)")
+                console.print("  " + entity("memory", "Memory: in-memory (no persistence)"))
 
         # --- Run REPL ---
         from localharness.cli.repl import OrchestratorREPL

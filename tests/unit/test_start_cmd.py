@@ -3170,3 +3170,90 @@ async def test_start_verbose_banner_names_the_memory_db_it_opened(tmp_path, monk
     await _start_async(None, True, False, str(hostile))
 
     assert str(hostile / "agents" / "good" / "memory.db") in out.getvalue(), out.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Entity colors (cli/theme.py): the startup summary and the --subagents roster paint
+# entities by TYPE instead of arriving as one undifferentiated block. Palette itself is
+# covered in test_cli_theme.py; these are the two consumers in start.
+# --------------------------------------------------------------------------- #
+def _render_start(renderable) -> str:
+    import io as _io
+
+    from rich.console import Console as _Console
+
+    buf = _io.StringIO()
+    _Console(file=buf, width=200, no_color=True).print(renderable)
+    return buf.getvalue()
+
+
+def test_roster_names_carry_the_agent_entity_style():
+    from localharness.cli.start_cmd import _agent_roster_table
+    from localharness.cli.theme import ENTITY_STYLES
+
+    table = _agent_roster_table([{"name": "orchestrator", "role": "root"}])
+    name_cell = list(table.columns[1].cells)[0]
+
+    assert name_cell.style == ENTITY_STYLES["agent"], name_cell
+    assert "orchestrator" in _render_start(table)
+
+
+def test_roster_renders_a_markup_named_agent_literally():
+    """A Table renders str cells THROUGH the markup parser, so the old add_row(name) ate
+    `[old]` and would have raised MarkupError on `[/red]`. Text cells are literal."""
+    from localharness.cli.start_cmd import _agent_roster_table
+
+    out = _render_start(_agent_roster_table([{"name": _HOSTILE, "role": "legacy"}]))
+
+    assert _HOSTILE in out, out
+
+
+def test_roster_survives_an_agent_entry_with_no_name_or_role():
+    from localharness.cli.start_cmd import _agent_roster_table
+
+    assert "1" in _render_start(_agent_roster_table([{}]))
+
+
+async def test_startup_summary_actually_prints_its_warnings(tmp_path, monkeypatch):
+    """Regression: warnings were appended as `[hooks: boom]` into an UNESCAPED print, so
+    Rich read the bracket group as a tag and deleted it. Every degraded startup — memory
+    fallen back to in-memory, a hook that failed to load — printed a clean summary and
+    reported nothing at all."""
+    from localharness.cli.start_cmd import _start_async
+
+    class _BoomHooks:
+        def __init__(self, *a, **k):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("localharness.tools.hooks.HookSystem", _BoomHooks)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    out, _ = _real_consoles(monkeypatch)
+    _write_agent(tmp_path / "agents", "good")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert "hooks: boom" in out.getvalue(), out.getvalue()
+
+
+async def test_startup_summary_counts_are_entity_colored(tmp_path, monkeypatch):
+    """The agent count wears the runtime hue, so `start` no longer hands back a flat line."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.cli.theme import ENTITY_STYLES
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _write_agent(tmp_path / "agents", "good")
+
+    import io as _io
+
+    from rich.console import Console as _Console
+
+    import localharness.cli.start_cmd as _sc
+    buf = _io.StringIO()
+    monkeypatch.setattr(_sc, "console", _Console(
+        file=buf, width=400, force_terminal=True, color_system="truecolor"))
+    monkeypatch.setattr(_sc, "err_console", _Console(file=_io.StringIO(), width=400))
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    rgb = ";".join(str(int(ENTITY_STYLES["agent"][i:i + 2], 16)) for i in (1, 3, 5))
+    assert rgb in buf.getvalue(), buf.getvalue()[-600:]
