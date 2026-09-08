@@ -163,8 +163,11 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
   puts `/usr/bin` on `PATH`, so coreutils (`mkdir`, `ls`, `cp`, …) resolve no matter which shell
   started the harness. `Git\usr\bin\bash.exe` launched directly inherits a PowerShell PATH with no
   coreutils on it. To use a different bash, set `LOCALHARNESS_BASH` to a wrapper-style executable.
-- A non-zero exit from `bash_exec` is a tool error on every platform; the command's output is
-  forwarded to the model inside the error so it can react (e.g. `command not found`). A timeout
+- A `bash_exec` command that could not RUN — exit 127 (not found), 126 (not executable), or
+  killed by a signal — is a tool error on every platform, and the command's output is forwarded
+  to the model inside the error so it can react (e.g. `command not found`). A command that ran
+  and returned any other non-zero code is an ordinary result with `exit code N` on the first
+  line: `grep` with no match and `test -f` on a missing file are answers, not faults. A timeout
   kills the command's whole process tree (a job object on Windows, the process group on POSIX).
 - Paths: the file tools accept Windows or POSIX paths, relative to the harness working directory.
   `/tmp/...` maps to `%TEMP%`, which is where git-bash mounts `/tmp`, so the file tools and

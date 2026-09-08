@@ -10,6 +10,14 @@ from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
+# The exit codes that mean the command never RAN, from the shell's own reserved range (POSIX
+# / Bash Reference Manual §3.7.5 "Exit Status"): 126 = found but not executable, 127 = not
+# found. Everything else in 1..255 is the COMMAND's own verdict — `grep` says 1 for no match,
+# `diff` says 1 for differing files, `test` says 1 for false — and a verdict is a result, not a
+# tool failure. A negative code is the third could-not-run case: on POSIX it is -N for "killed
+# by signal N", which is a death, not an answer. (A timeout returns earlier, as timeout_error.)
+_COULD_NOT_RUN_EXIT_CODES = frozenset({126, 127})
+
 
 def _find_bash() -> str | None:
     """Locate a real bash, never a WSL stub.
@@ -284,11 +292,11 @@ class BashExecTool(Tool):
 
         output = _decode_output(stdout)
         rc = proc.returncode
-        if rc != 0:
-            # A non-zero exit is a failure, not a success with a number in metadata: the
-            # terminal showed ✓ and the model got plain text it read as done. The loop
-            # forwards .error (not .output) on failure, so the command's own output rides
-            # along in the message — "mkdir: command not found" is what the model must see.
+        if rc in _COULD_NOT_RUN_EXIT_CODES or rc < 0:
+            # The command never RAN. That is a tool failure, and the loop forwards .error (not
+            # .output) on failure, so the command's own output rides along in the message —
+            # "mkdir: command not found" is what the model must see, loudly, because no phrasing
+            # of the same command will work until something changes outside the command.
             return ToolResult(
                 output=output,
                 success=False,
@@ -296,8 +304,13 @@ class BashExecTool(Tool):
                 error_type="execution_error",
                 metadata={"exit_code": rc, "command": command},
             )
+        # It ran and said no. `grep` with no match, `diff` on files that differ, `test -f` on a
+        # missing file: an ordinary answer in the language the model writes commands in, and
+        # making it a tool error told the model its own idiom was broken. The code goes in the
+        # OUTPUT, not just metadata — metadata never reaches the model (agent/loop.py forwards
+        # result.output alone on success), which is how a non-zero exit went unseen before.
         return self.ok(
-            output or "(no output)",
+            output or "(no output)" if rc == 0 else f"exit code {rc}\n{output or '(no output)'}",
             exit_code=rc,
             command=command,
         )
