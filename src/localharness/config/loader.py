@@ -675,9 +675,9 @@ class ConfigLoader:
 
         # max_tokens needs no `model_fields_set` guard: its unset spelling is None at every rung
         # (org `default_max_tokens`, division, agent), so an undeclared value already falls
-        # through. None all the way down is the answer "nobody chose a cap" — start_cmd derives
-        # one from the served window there (agent/context.py: resolve_output_cap). A number,
-        # 4,096 included, is a choice and is carried through untouched.
+        # through. None all the way down is the answer "nobody chose a cap", and it stays None all
+        # the way to the wire: the request omits max_tokens and the model generates until it is
+        # done. A number, 4,096 included, is a choice and is carried through untouched.
         agent_mt = raw.get("max_tokens")
         div_mt = division.max_tokens if division else None
         # `org` is load_org(): the LEGACY standalone org.yaml, which nothing in src/ writes —

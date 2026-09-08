@@ -1412,10 +1412,10 @@ class AgentConfig(BaseModel):
         ge=1,
         le=MAX_CONFIGURABLE_MAX_TOKENS,
         description=(
-            "Maximum tokens to generate in a single LLM response. Unset (the default) "
-            "auto-derives from the context window the server serves — a quarter of it, never "
-            "below 4,096 tokens — so a big window gets a big reply and a small one is unchanged. "
-            "A number here is used exactly as written."
+            "Maximum tokens to generate in a single LLM response. Unset (the default) sends NO "
+            "limit: the model generates until it is finished and the server's context window is "
+            "the only bound, which is what a long-running task needs. A number here is used "
+            "exactly as written and sent on every request."
         ),
     )
 
@@ -1670,10 +1670,10 @@ class OrgConfig(BaseModel):
         ge=1,
         le=MAX_CONFIGURABLE_MAX_TOKENS,
         description=(
-            "Per-reply output cap for all agents. Unset (the default, written as `null`) "
-            "auto-derives from the served context window: a quarter of it, floored at 4,096 "
-            "tokens — 32,768 on a 131K window, unchanged on a small one. Set a number to pin "
-            "it exactly; an agent's or division's own `max_tokens` still outranks this."
+            "Per-reply output cap for all agents. Unset (the default, written as `null`) means "
+            "NO cap: the request omits max_tokens and the model decides when it is done, bounded "
+            "only by the served context window. Set a number to pin it exactly; an agent's or "
+            "division's own `max_tokens` still outranks this."
         ),
     )
 

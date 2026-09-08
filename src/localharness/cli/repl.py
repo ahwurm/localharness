@@ -1453,26 +1453,26 @@ class OrchestratorREPL:
                     "re-run `localharness init` if its window differs."
                 )
 
-        # #145: the output cap must fit the reserve inside the (possibly new) budget, or prompt +
-        # max_tokens overruns the served window and a strict server 400s mid-session. Re-derived
-        # from the agent's configured max_tokens rather than the live value, so a swap DOWN to a
-        # small window and back UP restores the full allotment instead of ratcheting the cap down
-        # for the session. (Baseline must match start_cmd's — see its LLMConfig construction.)
+        # #145: a CONFIGURED output cap must fit the reserve inside the (possibly new) budget, or
+        # prompt + max_tokens overruns the served window and a strict server 400s mid-session.
+        # Re-fitted from the agent's configured max_tokens rather than the live value, so a swap
+        # DOWN to a small window and back UP restores the full allotment instead of ratcheting
+        # the cap down for the session. (Must match start_cmd's — see its LLMConfig construction.)
         _budget = getattr(ctx, "max_context_tokens", None)
         _llm_cfg = getattr(self._agent._llm, "config", None)
         _configured_cap = getattr(getattr(self._agent, "_config", None), "max_tokens", None)
         if _budget and _llm_cfg is not None:
-            # An unset cap re-derives from the NEW window, so a swap onto a roomier model gets
-            # the reply length that window affords instead of the one the old window did.
-            _wanted = context_mod.resolve_output_cap(_configured_cap, _budget)
             # Both halves of the ONE shared reserve move together. The context manager sizes the
             # reserve from this number and lets history fill the rest; leaving it at the old
             # window's cap would let history grow past what the new request actually asks for.
-            ctx.max_response_tokens = _wanted
-            _cap = context_mod.clamp_response_tokens(_budget, _wanted)
+            # An unset cap stays unset across the swap — no number is invented for the new
+            # window, and the new window's end is the only bound, exactly as before the swap.
+            ctx.max_response_tokens = _configured_cap
+            _cap = context_mod.clamp_response_tokens(_budget, _configured_cap)
             if _cap != getattr(_llm_cfg, "max_tokens", None):
                 _llm_cfg.max_tokens = _cap
-                notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")
+                if _cap is not None:
+                    notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")
 
         # #30: rebind the counter off-loop. rebind() is exception-safe (restores the prior binding
         # on a failed re-probe), so a failure leaves an exact, usable counter — but bound to the OLD

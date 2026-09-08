@@ -4,6 +4,52 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Changed
+- **There is no output cap by default any more. The model decides when it is
+  done.** When nothing in your config sets `max_tokens` or `default_max_tokens`,
+  the harness now leaves the `max_tokens` parameter out of the request
+  altogether — not a large number, not a number derived from your window, no
+  number at all. The model generates until it has finished, and the context
+  window your server serves is the only thing that ends a reply. That is what a
+  long-running task needs: a task that takes twelve thousand tokens to finish
+  correctly should take twelve thousand tokens, and nothing in the harness should
+  be deciding otherwise on a guess. Write a number in config and it is honored
+  exactly, on every request, as it always has been.
+- **This replaces the derived cap that 0.13.1 shipped one release ago.** 0.13.1
+  computed an unset cap as a quarter of the served window with a 4,096 floor —
+  32,768 tokens on a 131,072-token window. The arithmetic was defensible and the
+  number was still arbitrary: a quarter is a guess about how long your reply
+  ought to be, made by us, in a file you never opened. The derivation is deleted
+  rather than retuned. The 128,000 bound still exists, but only as the largest
+  value the config fields will accept from you — nothing derives a cap for it to
+  bound.
+- **What keeps a runaway generation in check is not a token count.** The
+  protections that actually catch a model that will not stop are the
+  degenerate-repetition guard (a reply that is one line repeated is stopped and
+  called out, not published as an answer), the per-chunk stream timeout (a model
+  that has genuinely stopped producing tokens ends the request, and a model that
+  is still streaming is left alone), and the kill file (`localharness kill`, which
+  ends the turn whatever it is doing). Those are the safety nets. An arbitrary
+  cap was never one of them — it truncated good work as readily as bad, which is
+  the failure that started this.
+- **Two things to know on upgrade.** A `config.yaml` written by an older `init`
+  carries `default_max_tokens: 4096`, and that line still pins your cap at 4,096
+  — delete it, or set it to `null`, which is what `init` writes now, to get the
+  uncapped default. And with no cap in the request, a reply that comes back
+  marked as cut off can only mean your context window filled up, so the harness
+  no longer offers to raise a cap in that case: it says the window is full, and
+  compaction is what makes room. Where you have configured a number, the
+  fit-to-window and grow-on-cutoff behavior from 0.13.1 is unchanged.
+- **Open companion item: the request timeout is still a constant.** The read
+  timeout is a fixed 600 seconds, per chunk rather than per reply, so a streaming
+  model resets it on every token and the constant bounds silence rather than
+  length. With no cap left in the request there is no token count to derive a
+  timeout from either, which leaves the measured decode rate as the only honest
+  input. `docs/reference-architectures/gaps.md` §1 carries the arithmetic and
+  states plainly what has and has not been measured.
+
 ## [0.13.1] — 2026-09-04
 
 A fix train from running 0.13.0 on real work, on Linux and on Windows. A long

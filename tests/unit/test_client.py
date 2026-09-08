@@ -29,7 +29,9 @@ def test_llm_config_defaults():
     # ~410s, which the old 300s default killed mid-generation (e.g. bench/orchestrator.py).
     assert config.timeout_seconds == 600.0
     assert config.temperature == 0.6
-    assert config.max_tokens == 4096
+    # No cap by default: the request omits max_tokens entirely and the model generates until it
+    # is done. A number here is a deliberate choice, never a shipped guess.
+    assert config.max_tokens is None
     assert config.tool_call_mode == "native"
     assert config.api_key == "none"
     assert config.connect_timeout_seconds == 5.0
@@ -831,6 +833,75 @@ async def test_complete_xml_downgrades_native_tool_history():
     assert "<tool_response>" in tool_turn["content"] and "apricot" in tool_turn["content"]
     body = roles[1:]
     assert all(a != b for a, b in zip(body, body[1:]))
+
+
+# ---------------------------------------------------------------------------
+# The output cap on the wire: absent unless configured
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["native", "xml"])
+async def test_no_configured_cap_omits_max_tokens_from_the_request_body(mode):
+    """No cap configured (the default) => the request carries NO max_tokens key at all.
+
+    Not `max_tokens: null`, not a number we picked: the key is absent, which is what makes an
+    OpenAI-compatible server generate until the model stops or the served window ends. The
+    OpenAI schema types max_tokens as an integer, so a literal null is a different request from
+    an omitted one and a strict server may reject it — asserting on `not in` is the only
+    assertion that tells those two apart.
+    """
+    client = _xml_client() if mode == "xml" else _native_client()
+    assert client.config.max_tokens is None  # the shipped default, not a test-local choice
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+    await client.complete(messages=[{"role": "user", "content": "hi"}], tools=None, stream=False)
+
+    assert "max_tokens" not in captured
+    assert captured["model"] == "m"  # the body was really built and sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["native", "xml"])
+async def test_a_configured_cap_is_present_in_the_request_body(mode):
+    """A number in config is sent on every request, exactly as written — the other half of the
+    same switch. Uncapped is the DEFAULT, never the only behaviour."""
+    client = _xml_client() if mode == "xml" else _native_client()
+    client.config.max_tokens = 8_192
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+    await client.complete(messages=[{"role": "user", "content": "hi"}], tools=None, stream=False)
+
+    assert captured["max_tokens"] == 8_192
+
+
+@pytest.mark.asyncio
+async def test_a_per_call_cap_overrides_an_unset_config():
+    """The loop's per-request cap still reaches the wire when the config sets none — the
+    grow-on-cutoff path depends on it, and an uncapped config must not swallow it."""
+    client = _native_client()
+    captured: dict = {}
+
+    async def _spy_create(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    client._client.chat.completions.create = _spy_create
+    await client.complete(
+        messages=[{"role": "user", "content": "hi"}], tools=None, stream=False, max_tokens=777
+    )
+
+    assert captured["max_tokens"] == 777
 
 
 def test_tools_to_api_format_sanitizes_registry_names():
