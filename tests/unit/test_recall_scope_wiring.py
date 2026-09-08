@@ -297,11 +297,11 @@ def _live_read(monkeypatch, rec: dict, seen: dict) -> None:
     monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _read_through_the_router)
 
 
-async def test_a_workspace_session_constructs_two_stores_and_opens_one(tmp_path, monkeypatch):
+async def test_a_workspace_session_constructs_two_stores_and_opens_one(tmp_path, monkeypatch, fake_home):
     """MEMS-03's precondition, on the filesystem. The twin is CONSTRUCTED (so a `both` session has
     something to open) and, at the default scope, never OPENED — `MemoryStore.__init__` only
     derives paths, `open()` is what creates and migrates a database."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -325,11 +325,11 @@ async def test_a_workspace_session_constructs_two_stores_and_opens_one(tmp_path,
     )
 
 
-async def test_the_global_twin_is_constructed_without_a_bus(tmp_path, monkeypatch):
+async def test_the_global_twin_is_constructed_without_a_bus(tmp_path, monkeypatch, fake_home):
     """A bus subscription is a WRITE path (auto-diary, the predictive gates). The twin is a READ
     handle, so it must not be reachable by any of them — `recall_scope` changes what a session
     reads, never where it writes."""
-    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -340,7 +340,7 @@ async def test_the_global_twin_is_constructed_without_a_bus(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("tool", ["search", "get"])
-async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_path, monkeypatch):
+async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_path, monkeypatch, fake_home):
     """Criterion 4 made structural: there is no 'the tool bypassed the knob' path to test for,
     because injection and on-demand recall read the SAME object.
 
@@ -349,7 +349,7 @@ async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_pa
     `memory_search` wire is broken too. One id per wire is what makes the two mutations
     distinguishable.
     """
-    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
     seen = _record_wiring(monkeypatch)
 
@@ -365,11 +365,11 @@ async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_pa
     assert seen[tool][0] is not seen["instances"][0]
 
 
-async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch):
+async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch, fake_home):
     """The write verb never sees the router. `RecallRouter` has no `store_fact`, so a swap here
     would be an AttributeError at first use — loudly, but only for whoever tried to remember
     something. This asserts it before a user finds it."""
-    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
     seen = _record_wiring(monkeypatch)
 
@@ -381,11 +381,11 @@ async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch):
     assert seen["remember"][0] is not router, "remember() writes through the recall router"
 
 
-async def test_a_default_scope_session_reads_only_the_workspace(tmp_path, monkeypatch):
+async def test_a_default_scope_session_reads_only_the_workspace(tmp_path, monkeypatch, fake_home):
     """MEMS-02 criterion 1, from a LIVE session: another project's recollections do not appear in
     this project's ambient context, even though the global store exists and holds a rendering
     fact."""
-    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)
     seen: dict = {}
@@ -402,10 +402,10 @@ async def test_a_default_scope_session_reads_only_the_workspace(tmp_path, monkey
     assert seen["router"].scope == "workspace"
 
 
-async def test_a_both_scope_session_reads_both_stores_with_origin_tokens(tmp_path, monkeypatch):
+async def test_a_both_scope_session_reads_both_stores_with_origin_tokens(tmp_path, monkeypatch, fake_home):
     """The knob reaches a running session: `recall_scope: both` in the workspace agent yaml and
     the live ambient read spans both databases, every line naming which store it came from."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     _write_scoped_agent(ws / "agents", "both")
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)
@@ -426,12 +426,12 @@ async def test_a_both_scope_session_reads_both_stores_with_origin_tokens(tmp_pat
 
 
 async def test_a_session_without_a_workspace_builds_one_store_and_collapses_the_scope(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """LAYR-03's control. With no workspace layer `state_dir == cfg_path`, so a twin would be a
     SECOND aiosqlite connection to the SAME file. The knob is still READ (configured_scope keeps
     what the yaml asked for) and still collapses — proving the collapse, not a missing knob."""
-    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch)
+    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     _write_scoped_agent(global_dir / "agents", "both")
     rec = _install_recorders(monkeypatch)
 
@@ -449,11 +449,11 @@ async def test_a_session_without_a_workspace_builds_one_store_and_collapses_the_
     )
 
 
-async def test_the_opened_global_handle_is_closed_at_shutdown(tmp_path, monkeypatch):
+async def test_the_opened_global_handle_is_closed_at_shutdown(tmp_path, monkeypatch, fake_home):
     """Pitfall 6: aiosqlite's worker thread is NON-DAEMON, so a leaked handle hangs interpreter
     shutdown. The twin is opened by this drive (the live `both` read forces it) and must be
     closed by the resource-owning window's finally."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     _write_scoped_agent(ws / "agents", "both")
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)

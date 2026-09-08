@@ -35,19 +35,17 @@ def _squash(text: str) -> str:
 # --------------------------------------------------------------------------- fixtures
 
 
-def _fake_home(tmp_path, monkeypatch) -> Path:
+def _fake_home(tmp_path, fake_home) -> Path:
     """A hermetic `$HOME` holding the GLOBAL layer (and therefore the trust store), with both
     env overrides cleared so discovery is actually allowed to run."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / ".localharness").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     return home
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch):
+def project(tmp_path, monkeypatch, fake_home):
     """A discoverable workspace OUTSIDE any repository, two levels above the cwd.
 
     Deliberately has NO `.git` anywhere: that absence is exactly what makes this workspace
@@ -55,7 +53,7 @@ def project(tmp_path, monkeypatch):
     Do not add one. `tmp_path/proj` is also not under `tmp_path/home`, so the `$HOME` walk stop
     does not fire before the workspace is found.
     """
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     ws = tmp_path / "proj" / ".localharness"
     (ws / "agents").mkdir(parents=True)
     deep = tmp_path / "proj" / "src" / "pkg"
@@ -78,10 +76,10 @@ def in_repo_project(project):
 
 
 @pytest.fixture
-def cwd_workspace(tmp_path, monkeypatch):
+def cwd_workspace(tmp_path, monkeypatch, fake_home):
     """The literal `./.localharness` case: the workspace belongs to the current directory and
     there is no repository anywhere. This has always loaded ungated and must keep doing so."""
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     ws = tmp_path / "proj" / ".localharness"
     ws.mkdir(parents=True)
     monkeypatch.chdir(tmp_path / "proj")
@@ -89,7 +87,7 @@ def cwd_workspace(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def symlinked_cwd_workspace(tmp_path, monkeypatch):
+def symlinked_cwd_workspace(tmp_path, monkeypatch, fake_home):
     """`./.localharness` is a SYMLINK whose target lives in a completely different tree.
 
     The dotdir's NAME is in your current directory; what it points at is not. `is_dir()` follows
@@ -97,7 +95,7 @@ def symlinked_cwd_workspace(tmp_path, monkeypatch):
     against the cwd would read "this is your own directory" and load config from anywhere on the
     machine, ungated, in any session. Returns the real directory the link points at.
     """
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     outside = tmp_path / "elsewhere" / "planted"
     (outside / "agents").mkdir(parents=True)
     proj = tmp_path / "proj"
@@ -108,13 +106,13 @@ def symlinked_cwd_workspace(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def symlinked_workspace_inside_the_repo(tmp_path, monkeypatch):
+def symlinked_workspace_inside_the_repo(tmp_path, monkeypatch, fake_home):
     """The same shape, pointing at a folder INSIDE the repository you are standing in.
 
     Resolving before the comparison must not turn a legitimate in-project link into a prompt: the
     target is below the repo root, so the second clause still says "yours". Returns the link.
     """
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     proj = tmp_path / "proj"
     (proj / ".git").mkdir(parents=True)
     (proj / "sub" / "cfg" / "agents").mkdir(parents=True)
@@ -124,10 +122,10 @@ def symlinked_workspace_inside_the_repo(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def workspace_above_repo(tmp_path, monkeypatch):
+def workspace_above_repo(tmp_path, monkeypatch, fake_home):
     """The nearest `.localharness/` sits ABOVE the repository root: you are inside a project,
     but this config comes from a tree outside it, so the gate still applies."""
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     ws = tmp_path / "outer" / ".localharness"
     ws.mkdir(parents=True)
     (tmp_path / "outer" / "inner" / ".git").mkdir(parents=True)
@@ -203,11 +201,9 @@ def test_localharness_home_env_skips_discovery(project, discovery_spy, tmp_path,
 # ------------------------------------------------------------- row 4: nothing to find
 
 
-def test_no_workspace_returns_none_silently(tmp_path, monkeypatch, capsys):
+def test_no_workspace_returns_none_silently(tmp_path, monkeypatch, fake_home, capsys):
     """LAYR-03: a workspace-less session must be byte-identical to today — including silence."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))  # the walk stops here, so it stays bounded
+    fake_home(tmp_path)  # the walk stops here, so it stays bounded
     empty = tmp_path / "empty" / "sub"
     empty.mkdir(parents=True)
     monkeypatch.chdir(empty)
@@ -405,10 +401,10 @@ def test_all_notices_go_to_stderr_not_stdout(project, monkeypatch, capsys):
     assert stored.err != ""
 
 
-def test_a_workspace_path_with_markup_brackets_does_not_crash(tmp_path, monkeypatch, capsys):
+def test_a_workspace_path_with_markup_brackets_does_not_crash(tmp_path, monkeypatch, fake_home, capsys):
     """A folder named `[old] proj` is legal on every OS, and rich reads `[...]` as markup. The
     notice must name it, not raise a MarkupError that takes the whole command down."""
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, fake_home)
     ws = tmp_path / "[old] proj" / ".localharness"
     ws.mkdir(parents=True)
     sub = tmp_path / "[old] proj" / "sub"

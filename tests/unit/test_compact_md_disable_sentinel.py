@@ -32,11 +32,9 @@ def _loop(tmp_path, **kwargs) -> AgentLoop:
     )
 
 
-def _plant_home_compact(tmp_path, monkeypatch) -> Path:
+def _plant_home_compact(tmp_path, fake_home) -> Path:
     """A compact.md exactly where the old hardcoded default pointed."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    fake_home(tmp_path / "home")
     planted = tmp_path / "home" / ".localharness" / "agents" / "a1" / "compact.md"
     planted.parent.mkdir(parents=True)
     planted.write_text("# leaked prior session\n", encoding="utf-8")
@@ -46,18 +44,18 @@ def _plant_home_compact(tmp_path, monkeypatch) -> Path:
     return planted
 
 
-def test_disabled_reads_no_compact_md_at_all(tmp_path, monkeypatch):
+def test_disabled_reads_no_compact_md_at_all(tmp_path, fake_home):
     """The bench contract: a planted home compact.md is NOT inherited."""
-    _plant_home_compact(tmp_path, monkeypatch)
+    _plant_home_compact(tmp_path, fake_home)
 
     loop = _loop(tmp_path, compact_md_path=COMPACT_DISABLED)
 
     assert loop._resolve_compact_md_path() is None
 
 
-def test_default_derives_from_the_config_dir_not_home(tmp_path, monkeypatch):
+def test_default_derives_from_the_config_dir_not_home(tmp_path, fake_home):
     """An isolated config dir keeps a session out of the operator's home compact.md."""
-    _plant_home_compact(tmp_path, monkeypatch)
+    _plant_home_compact(tmp_path, fake_home)
     isolated = tmp_path / "isolated"
 
     loop = _loop(tmp_path, config_dir=isolated)
@@ -65,9 +63,9 @@ def test_default_derives_from_the_config_dir_not_home(tmp_path, monkeypatch):
     assert loop._resolve_compact_md_path() == isolated / "agents" / "a1" / "compact.md"
 
 
-def test_default_honors_the_config_dir_env_chain(tmp_path, monkeypatch):
+def test_default_honors_the_config_dir_env_chain(tmp_path, monkeypatch, fake_home):
     """No explicit arg: the ONE resolver answers, so LOCALHARNESS_DIR is honored (#35)."""
-    _plant_home_compact(tmp_path, monkeypatch)
+    _plant_home_compact(tmp_path, fake_home)
     monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "env-dir"))
 
     loop = _loop(tmp_path)
@@ -99,7 +97,7 @@ def test_the_write_side_skips_the_sentinel(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bench_construction_reads_no_home_compact_md(tmp_path, monkeypatch):
+async def test_bench_construction_reads_no_home_compact_md(tmp_path, fake_home):
     """The measurement this protects: a bench loop must not inherit the operator's compact.md."""
     from localharness.bench.runner import _build_agent_loop
     from localharness.bench.schema import BudgetSpec, LimitsSpec, ScenarioSpec, SuccessCriteria
@@ -107,7 +105,7 @@ async def test_bench_construction_reads_no_home_compact_md(tmp_path, monkeypatch
     from localharness.core.bus import EventBus
     from localharness.tools.registry import ToolRegistry
 
-    _plant_home_compact(tmp_path, monkeypatch)  # plants under HOME for agent "a1"
+    _plant_home_compact(tmp_path, fake_home)  # plants under HOME for agent "a1"
     scenario = ScenarioSpec(
         name="compact-isolation",
         prompt="say ok",

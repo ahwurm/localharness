@@ -71,6 +71,7 @@ _GLOBAL_CONFIG = {
 def _layout(
     tmp_path: Path,
     monkeypatch,
+    fake_home,
     *,
     ws_config: Optional[dict] = None,
     ws_overrides: Optional[dict] = None,
@@ -84,13 +85,11 @@ def _layout(
         <home>/proj/.localharness/ WORKSPACE layer: config.yaml / overrides.yaml, per test
         <home>/proj/src/pkg/       the CWD every invocation runs from
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(yaml.safe_dump(_GLOBAL_CONFIG), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     # rich wraps at the console width; a wrapped path is not a printed path.
     monkeypatch.setenv("COLUMNS", columns)
 
@@ -153,7 +152,7 @@ def _combined(result) -> str:
 # ------------------------------------------------------------------ #
 
 
-def test_show_from_a_subdirectory_names_the_workspace_as_the_setter(tmp_path, monkeypatch):
+def test_show_from_a_subdirectory_names_the_workspace_as_the_setter(tmp_path, monkeypatch, fake_home):
     """The command's whole reason to exist, from two directories down.
 
     Four assertions and all four are load-bearing. "the workspace value is printed" also passes
@@ -162,7 +161,7 @@ def test_show_from_a_subdirectory_names_the_workspace_as_the_setter(tmp_path, mo
     negative assertion on the global value is what proves the workspace one REPLACED it rather
     than joining it.
     """
-    _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["config", "show"])
 
@@ -173,7 +172,7 @@ def test_show_from_a_subdirectory_names_the_workspace_as_the_setter(tmp_path, mo
     assert _GLOBAL_NAME not in result.output, "the losing global value is still on the page"
 
 
-def test_the_workspace_overrides_band_wins_and_is_named(tmp_path, monkeypatch):
+def test_the_workspace_overrides_band_wins_and_is_named(tmp_path, monkeypatch, fake_home):
     """The top of the ruled order, end to end.
 
     `overrides.yaml` in the workspace is the highest-priority of the four files. It is also the
@@ -183,6 +182,7 @@ def test_the_workspace_overrides_band_wins_and_is_named(tmp_path, monkeypatch):
     _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         ws_config={"org": {"name": _WORKSPACE_NAME, "log_level": "warning"}},
         ws_overrides={"org": {"log_level": "debug"}},
     )
@@ -195,14 +195,14 @@ def test_the_workspace_overrides_band_wins_and_is_named(tmp_path, monkeypatch):
     assert "workspace-overrides" in row, "the winning band is misnamed"
 
 
-def test_header_names_all_four_files_in_ruled_order_marking_which_exist(tmp_path, monkeypatch):
+def test_header_names_all_four_files_in_ruled_order_marking_which_exist(tmp_path, monkeypatch, fake_home):
     """The header is the merge, rendered: four bands, four paths, lowest priority first.
 
     Ordering is asserted on the PATHS because band names recur in the table's `set by` column.
     The present/absent marks are asserted on the two files that differ — the global config.yaml
     exists, the global overrides.yaml does not — so a header that hardcoded either mark fails.
     """
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["config", "show"])
 
@@ -229,7 +229,7 @@ def test_header_names_all_four_files_in_ruled_order_marking_which_exist(tmp_path
     assert "missing" in _line_with(out, str(layout.global_ovl))
 
 
-def test_bracketed_text_survives_both_the_header_path_and_the_value_cell(tmp_path, monkeypatch):
+def test_bracketed_text_survives_both_the_header_path_and_the_value_cell(tmp_path, monkeypatch, fake_home):
     """39-05's `[old] proj` lesson, applied to BOTH places this command prints untrusted text.
 
     Rich would eat `[dim]` from the path and `[bold]` from the value — the first makes the command
@@ -237,15 +237,13 @@ def test_bracketed_text_survives_both_the_header_path_and_the_value_cell(tmp_pat
     config comes from; the second silently rewrites the value you came here to read. Two separate
     `escape()` sites, so they are asserted separately.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.setenv("COLUMNS", "400")
     home = tmp_path / "[dim] home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     bracketed = dict(_GLOBAL_CONFIG, org={"name": _BRACKETED_NAME, "log_level": "info"})
     (global_dir / "config.yaml").write_text(yaml.safe_dump(bracketed), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.chdir(home)
 
     result = runner.invoke(app, ["config", "show"])
@@ -262,14 +260,14 @@ def test_bracketed_text_survives_both_the_header_path_and_the_value_cell(tmp_pat
 # ------------------------------------------------------------------ #
 
 
-def test_no_workspace_introduces_no_workspace_vocabulary(tmp_path, monkeypatch):
+def test_no_workspace_introduces_no_workspace_vocabulary(tmp_path, monkeypatch, fake_home):
     """With nothing up-tree the command prints the two global files and NOTHING about workspaces.
 
     LAYR-03's contract is that a user who never made a `.localharness/` sees no trace of the
     feature. A header that always printed four bands and marked two of them absent would satisfy
     "names the files in play" and violate this.
     """
-    layout = _layout(tmp_path, monkeypatch, workspace=False)
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
 
     result = runner.invoke(app, ["config", "show"])
 
@@ -279,9 +277,9 @@ def test_no_workspace_introduces_no_workspace_vocabulary(tmp_path, monkeypatch):
     assert str(layout.global_cfg) in result.output
 
 
-def test_no_workspace_attributes_every_listed_key_to_the_global_config(tmp_path, monkeypatch):
+def test_no_workspace_attributes_every_listed_key_to_the_global_config(tmp_path, monkeypatch, fake_home):
     """No workspace, no overrides: every key some file sets came from the one file there is."""
-    _layout(tmp_path, monkeypatch, workspace=False)
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
 
     result = runner.invoke(app, ["config", "show", "--json"])
 
@@ -301,7 +299,7 @@ def test_no_workspace_attributes_every_listed_key_to_the_global_config(tmp_path,
 
 
 @pytest.mark.parametrize("width", [80, 200], ids=["width80", "width200"])
-def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatch, width):
+def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatch, fake_home, width):
     """The payload goes in and comes back out unchanged, at a narrow AND a wide terminal.
 
     Assertion order is the point (41-06's lesson). The raw-stdout check comes FIRST and needs no
@@ -311,6 +309,7 @@ def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatc
     _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         ws_config={"org": {"name": _BRACKETED_NAME}},
         columns=str(width),
     )
@@ -324,7 +323,7 @@ def test_json_survives_a_long_bracketed_value_at_two_widths(tmp_path, monkeypatc
     assert _key(payload, "org.name")["layer"] == "workspace-config"
 
 
-def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch):
+def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch, fake_home):
     """A path with a newline folded into it is not a path you can copy, or read.
 
     Found by the real binary at COLUMNS=120, not by any assertion here — every other test in this
@@ -333,7 +332,7 @@ def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch):
     the path appears on zero lines (folded) as loudly as if it appeared on two.
     """
     layout = _layout(
-        tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}}, columns="80"
+        tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}}, columns="80"
     )
 
     result = runner.invoke(app, ["config", "show"])
@@ -344,7 +343,7 @@ def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch):
         _line_with(result.output, str(path))
 
 
-def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch):
+def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch, fake_home):
     """The payload shape `docs/specs/10-cli.md` quotes — pinned as an exact dict, not a subset.
 
     `default` is the field that answers "is this value mine or the shipped one?", and it was
@@ -352,7 +351,7 @@ def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch)
     until this test existed (measured, mutation k). `type` was in the same position. An exact-dict
     comparison pins the field NAMES too, which is what a published payload contract needs.
     """
-    _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["config", "show", "--json"])
 
@@ -366,9 +365,9 @@ def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch)
     }
 
 
-def test_json_layers_carry_the_paths_and_their_existence(tmp_path, monkeypatch):
+def test_json_layers_carry_the_paths_and_their_existence(tmp_path, monkeypatch, fake_home):
     """The machine-readable half of the header: four entries, absolute paths, honest `exists`."""
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["config", "show", "--json"])
 
@@ -388,9 +387,9 @@ def test_json_layers_carry_the_paths_and_their_existence(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ #
 
 
-def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch):
+def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch, fake_home):
     """Naming a config directory replaces the whole thing: no workspace value, no workspace file."""
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(
         app, ["config", "show", "--config-dir", str(layout.global_dir)]
@@ -407,13 +406,13 @@ def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ #
 
 
-def test_all_lists_the_whole_catalogue_and_the_default_view_lists_less(tmp_path, monkeypatch):
+def test_all_lists_the_whole_catalogue_and_the_default_view_lists_less(tmp_path, monkeypatch, fake_home):
     """Two runs, one comparison, and the expected count is DERIVED rather than typed.
 
     182 today; 42-01 already tripped over a hardcoded catalogue count once, so the number is read
     from `build_catalogue` in-process instead of being pinned as a literal here.
     """
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     default_run = runner.invoke(app, ["config", "show", "--json"])
     all_run = runner.invoke(app, ["config", "show", "--json", "--all"])
@@ -456,14 +455,12 @@ def test_show_is_registered_beside_migrate(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ #
 
 
-def test_missing_config_exits_nonzero_and_names_init(tmp_path, monkeypatch):
+def test_missing_config_exits_nonzero_and_names_init(tmp_path, monkeypatch, fake_home):
     """#119's rule: a missing config ends with the same next step every other command gives."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     monkeypatch.setenv("COLUMNS", "400")
     home = tmp_path / "home"
     (home / "empty").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.chdir(home / "empty")
 
     result = runner.invoke(app, ["config", "show"])

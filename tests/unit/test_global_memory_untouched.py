@@ -121,7 +121,7 @@ def _fmt(paths) -> str:
 
 
 async def test_a_full_workspace_session_leaves_the_global_memory_byte_identical(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """#150, as an assertion: writes + a real consolidation pass + a MEMORY.md flush, and the
     machine-global memory tree is byte-for-byte what it was.
@@ -134,7 +134,7 @@ async def test_a_full_workspace_session_leaves_the_global_memory_byte_identical(
     proxy for its content; and the workspace-did-change assertion comes last because it is the
     weakest claim here — it exists so that "nothing changed anywhere" cannot masquerade as a pass.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_memory(global_dir)
 
     g_agents = global_dir / "agents"
@@ -172,7 +172,7 @@ async def test_a_full_workspace_session_leaves_the_global_memory_byte_identical(
 
 
 async def test_the_global_store_is_seeded_before_the_drive_so_an_empty_diff_means_something(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """The premise guard, as its own test rather than a comment.
 
@@ -183,7 +183,7 @@ async def test_the_global_store_is_seeded_before_the_drive_so_an_empty_diff_mean
     Deleting `_seed_global_memory` from the headline test leaves it GREEN (measured, 42-05 Task 2
     mutation (c)). That measurement is the whole argument for this test's existence.
     """
-    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_memory(global_dir)
 
     g_agent_dir = global_dir / "agents" / AGENT
@@ -241,7 +241,7 @@ async def test_the_offline_consolidation_pass_really_writes(tmp_path):
 
 
 async def test_the_same_recipe_without_a_workspace_does_write_the_global_agents_tree(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """The control: an assertion that cannot fail proves nothing, so make it fail on purpose.
 
@@ -253,7 +253,7 @@ async def test_the_same_recipe_without_a_workspace_does_write_the_global_agents_
     changed" would pass on a lock file, a `-wal` sidecar or a stray journal, none of which would
     show that a session's facts can reach the global database at all.
     """
-    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch)
+    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_memory(global_dir)
 
     g_agents = global_dir / "agents"

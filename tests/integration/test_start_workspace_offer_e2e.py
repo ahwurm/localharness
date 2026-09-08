@@ -25,11 +25,11 @@ from tests.unit.test_workspace_state_landing import _drive, _hermetic
 pytestmark = pytest.mark.asyncio
 
 
-def _project_without_a_workspace(tmp_path, monkeypatch) -> tuple[Path, Path]:
+def _project_without_a_workspace(tmp_path, monkeypatch, fake_home) -> tuple[Path, Path]:
     """A configured machine and a project that has no `.localharness/` yet. Returns
     `(global_dir, project_root)` with the process standing in the project."""
     home = tmp_path / "home"
-    global_dir = _hermetic(monkeypatch, home)
+    global_dir = _hermetic(monkeypatch, fake_home, home)
     _stub_start_boundaries(global_dir, monkeypatch)  # writes the GLOBAL config.yaml
     _offline_provider(global_dir)
 
@@ -40,10 +40,10 @@ def _project_without_a_workspace(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
 
 async def test_yes_creates_the_workspace_and_the_session_is_already_using_it(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, fake_home, capsys
 ):
     """One command: the directory appears and the session that made it runs layered on it."""
-    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch, fake_home)
     monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **k: True)
 
@@ -58,9 +58,9 @@ async def test_yes_creates_the_workspace_and_the_session_is_already_using_it(
     )
 
 
-async def test_no_leaves_the_session_on_the_global_layer(tmp_path, monkeypatch, capsys):
+async def test_no_leaves_the_session_on_the_global_layer(tmp_path, monkeypatch, fake_home, capsys):
     """Declining is not a failure: startup continues, with nothing created."""
-    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch, fake_home)
     monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **k: False)
 
@@ -70,10 +70,10 @@ async def test_no_leaves_the_session_on_the_global_layer(tmp_path, monkeypatch, 
     assert "Workspace layer:" not in capsys.readouterr().out
 
 
-async def test_a_declined_project_is_never_asked_again_by_start(tmp_path, monkeypatch):
+async def test_a_declined_project_is_never_asked_again_by_start(tmp_path, monkeypatch, fake_home):
     """Two real startups in the same directory, one question — the contract the trust prompt has
     (owner ruling 2026-09-04). The second drive makes a prompt a failure rather than a hang."""
-    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch, fake_home)
     monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **k: False)
 
@@ -89,9 +89,9 @@ async def test_a_declined_project_is_never_asked_again_by_start(tmp_path, monkey
     assert not (proj / WORKSPACE_DIR_NAME).exists()
 
 
-async def test_a_scripted_start_is_never_offered_anything(tmp_path, monkeypatch):
+async def test_a_scripted_start_is_never_offered_anything(tmp_path, monkeypatch, fake_home):
     """No terminal, no question — `start` runs from hooks and wrappers all day."""
-    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch, fake_home)
     monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: False)
 
     def _boom(*_a, **_kw):
@@ -104,7 +104,7 @@ async def test_a_scripted_start_is_never_offered_anything(tmp_path, monkeypatch)
     assert not (proj / WORKSPACE_DIR_NAME).exists()
 
 
-async def test_no_input_declines_for_the_whole_command(tmp_path, monkeypatch):
+async def test_no_input_declines_for_the_whole_command(tmp_path, monkeypatch, fake_home):
     """`start --no-input` with a terminal attached: the flag, not the tty, decides.
 
     Driven with the flag rather than through `_drive`, because the flag IS the claim — the
@@ -112,7 +112,7 @@ async def test_no_input_declines_for_the_whole_command(tmp_path, monkeypatch):
     """
     from localharness.cli.start_cmd import _start_async
 
-    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch)
+    _global_dir, proj = _project_without_a_workspace(tmp_path, monkeypatch, fake_home)
     monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
 
     def _boom(*_a, **_kw):

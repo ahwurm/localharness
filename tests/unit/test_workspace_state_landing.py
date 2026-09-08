@@ -71,25 +71,24 @@ def _boom(*_args, **_kwargs):
     raise AssertionError("prompted for trust on an IN-PROJECT workspace, which must never ask")
 
 
-def _hermetic(monkeypatch, home: Path) -> Path:
+def _hermetic(monkeypatch, fake_home, home: Path) -> Path:
     """A fake `$HOME` holding the GLOBAL layer, with both env overrides cleared.
 
     All three moves are required. Both discovery walks stop at `$HOME`, so a real one would let the
     developer's own `~/.localharness` answer these tests; and conftest's autouse fixture sets
     `LOCALHARNESS_HOME`, which `resolve_workspace_layer` counts as an EXPLICIT selection (39-04) —
     leaving it set switches discovery off entirely and every assertion below would pass for the
-    wrong reason, against a session that has no workspace at all.
+    wrong reason, against a session that has no workspace at all. The fake home itself now comes
+    from the `fake_home` fixture, so it holds on Windows too.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    fake_home(home)
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("COLUMNS", "400")
     return global_dir
 
 
-def _workspace_start(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+def _workspace_start(tmp_path: Path, monkeypatch, fake_home) -> tuple[Path, Path, Path]:
     """A real workspace session ready to drive: fake `$HOME`, a project inside it, CWD in it.
 
     The `.git` marker makes `proj/` the project the caller is standing in, so the workspace is
@@ -103,7 +102,7 @@ def _workspace_start(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     Returns (home, global_dir, workspace_dir).
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(monkeypatch, home)
+    global_dir = _hermetic(monkeypatch, fake_home, home)
     _stub_start_boundaries(global_dir, monkeypatch)
 
     proj = home / "proj"
@@ -122,7 +121,7 @@ def _workspace_start(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     return home, global_dir, ws
 
 
-def _global_only_start(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+def _global_only_start(tmp_path: Path, monkeypatch, fake_home) -> tuple[Path, Path, Path]:
     """The LAYR-03 control: the same recipe with NO `.localharness` anywhere up-tree.
 
     Same fake `$HOME`, same `.git`-marked project, same CWD — the ONE difference is that the project
@@ -130,7 +129,7 @@ def _global_only_start(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     must therefore be exactly what it was before this phase existed.
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(monkeypatch, home)
+    global_dir = _hermetic(monkeypatch, fake_home, home)
     _stub_start_boundaries(global_dir, monkeypatch)
 
     proj = home / "proj"
@@ -241,13 +240,13 @@ async def _drive() -> None:
 # --------------------------------------------------------------------------------- the workspace
 
 
-async def test_workspace_session_lands_its_agent_state_in_the_project(tmp_path, monkeypatch):
+async def test_workspace_session_lands_its_agent_state_in_the_project(tmp_path, monkeypatch, fake_home):
     """The headline: memory.db is written under the PROJECT, not under the machine's global dir.
 
     Asserted in both directions — a `memory.db` that exists somewhere proves nothing; a `memory.db`
     that exists under `<ws>` and is ABSENT under `<global>` is the claim.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -282,7 +281,7 @@ async def test_workspace_session_lands_its_agent_state_in_the_project(tmp_path, 
         f"the data-tree migration targeted {rec['migrate'][0]}, not the workspace {ws}"
 
 
-async def test_workspace_session_touches_nothing_under_the_global_agents_tree(tmp_path, monkeypatch):
+async def test_workspace_session_touches_nothing_under_the_global_agents_tree(tmp_path, monkeypatch, fake_home):
     """Scoped on purpose: `<global>/agents/` specifically, not the whole global dir.
 
     The drive legitimately writes elsewhere under the global layer (packaged tools, provider speed
@@ -291,7 +290,7 @@ async def test_workspace_session_touches_nothing_under_the_global_agents_tree(tm
     project's memory, and it is the tree this session must not touch. The byte-level proof that
     global MEMORY CONTENT is untouched belongs to phase 42 (MEMS-03).
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     before = _file_snapshot(global_dir)
 
     await _drive()
@@ -306,13 +305,13 @@ async def test_workspace_session_touches_nothing_under_the_global_agents_tree(tm
     assert _file_snapshot(ws), "nothing at all was written under the workspace — nothing was proven"
 
 
-async def test_root_loop_splits_its_compact_note_from_its_kill_switch(tmp_path, monkeypatch):
+async def test_root_loop_splits_its_compact_note_from_its_kill_switch(tmp_path, monkeypatch, fake_home):
     """One construction, two directories: compact.md follows the work, the kill file does not.
 
     The kill switch is a machine-global CONTROL artifact — one file stops every agent on the box —
     so a per-workspace copy would mean hunting down N files to halt N sessions.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -330,7 +329,7 @@ async def test_root_loop_splits_its_compact_note_from_its_kill_switch(tmp_path, 
 
 
 async def test_subagent_runner_gets_the_workspace_for_state_and_the_global_dir_for_kills(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """Asserted twice on purpose: the WIRING, then the CONSEQUENCE.
 
@@ -339,7 +338,7 @@ async def test_subagent_runner_gets_the_workspace_for_state_and_the_global_dir_f
     be derived from either. Feeding the captured pair back through the real resolver is what closes
     that gap.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -363,7 +362,7 @@ async def test_subagent_runner_gets_the_workspace_for_state_and_the_global_dir_f
 
 
 async def test_memory_store_keeps_the_safety_context_global_while_state_follows_the_work(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """Amendment #4, owner-ruled: a workspace may take its memory with it, never the safety voice.
 
@@ -371,7 +370,7 @@ async def test_memory_store_keeps_the_safety_context_global_while_state_follows_
     GUARDRAILS.md) are two ctor arguments precisely so a workspace cannot rewrite — or blank by
     omission — the org's safety instructions.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -385,10 +384,10 @@ async def test_memory_store_keeps_the_safety_context_global_while_state_follows_
         "both ctor arguments got the same value — the split is not observable in this session"
 
 
-async def test_repl_history_follows_the_work(tmp_path, monkeypatch):
+async def test_repl_history_follows_the_work(tmp_path, monkeypatch, fake_home):
     """The transcript records what you typed while working in THIS project, so it follows the work
     (ruled). Its neighbour two lines up in the source, the kill file, deliberately does not."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -398,12 +397,12 @@ async def test_repl_history_follows_the_work(tmp_path, monkeypatch):
     assert global_dir not in history.parents, "the REPL history stayed in the global dir"
 
 
-async def test_repl_carries_the_workspace_layer_for_the_session_lifetime(tmp_path, monkeypatch):
+async def test_repl_carries_the_workspace_layer_for_the_session_lifetime(tmp_path, monkeypatch, fake_home):
     """41-04 gave the REPL a session-lifetime workspace so `/model` can route its audit record
     without re-walking the filesystem mid-session. `start` is the only thing that can fill it, and
     it must pass the RAW `Optional[Path]` — the REPL's `_audit_base_dir` does its own
     `or self._config_dir` fallback, so `None` there is the signal "no workspace applies"."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()
@@ -418,7 +417,7 @@ async def test_repl_carries_the_workspace_layer_for_the_session_lifetime(tmp_pat
 # --------------------------------------------------------------------------------- the control
 
 
-async def test_with_no_workspace_every_path_is_the_global_dir(tmp_path, monkeypatch):
+async def test_with_no_workspace_every_path_is_the_global_dir(tmp_path, monkeypatch, fake_home):
     """LAYR-03: with nothing up-tree, `state_dir` IS `cfg_path` and the session is byte-identical
     to v0.12.
 
@@ -427,7 +426,7 @@ async def test_with_no_workspace_every_path_is_the_global_dir(tmp_path, monkeypa
     with no workspace the two locals hold the same value, so nothing that swaps one for the other can
     change what this test sees. That blindness is the LAYR-03 argument itself, not a gap in the test.
     """
-    _home, global_dir, proj = _global_only_start(tmp_path, monkeypatch)
+    _home, global_dir, proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()

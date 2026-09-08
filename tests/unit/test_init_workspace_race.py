@@ -111,7 +111,7 @@ def test_the_workspace_the_race_leaves_behind_is_complete(project):
     assert yaml.safe_load(config.read_text(encoding="utf-8")) is None
 
 
-def test_losing_the_race_is_the_same_answer_as_finding_it_there(project, monkeypatch):
+def test_losing_the_race_is_the_same_answer_as_finding_it_there(project, monkeypatch, fake_home):
     """The race, made deterministic — the half a real ten-way run cannot be relied on to hit.
 
     The pre-check is forced to answer "nothing here" for a workspace that IS here, which is
@@ -125,10 +125,9 @@ def test_losing_the_race_is_the_same_answer_as_finding_it_there(project, monkeyp
     from localharness.cli.app import app
 
     proj, home = project
-    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LOCALHARNESS_ENDPOINT",
-                "LOCALHARNESS_MODEL"):
+    for var in ("LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     monkeypatch.chdir(proj)
 

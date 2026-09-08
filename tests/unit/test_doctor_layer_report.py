@@ -83,6 +83,7 @@ def _prompt_must_not_fire(monkeypatch) -> None:
 def _layout(
     tmp_path: Path,
     monkeypatch,
+    fake_home,
     *,
     workspace: bool = True,
     global_config: str | None = None,
@@ -95,20 +96,18 @@ def _layout(
         <home>/proj/.localharness/ WORKSPACE layer: config.yaml, written per test
         <home>/proj/src/pkg/       the CWD every invocation runs from
 
-    All three env moves are load-bearing. Both walks stop at `$HOME`, so a real one would let the
+    All these env moves are load-bearing. Both walks stop at `$HOME`, so a real one would let the
     developer's own `~/.localharness` answer these tests; and the autouse conftest fixture sets
     `LOCALHARNESS_HOME`, which `resolve_workspace_layer` counts as an EXPLICIT selection — leaving
     it set would switch discovery off and every test below would pass for the wrong reason.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / home_name
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(
         global_config if global_config is not None else _global_config(), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # keep rich from folding a long key row mid-assertion
 
     proj = home / "proj"
@@ -162,7 +161,7 @@ def _line_of(path: Path, needle: str) -> int:
 # ------------------------------------------------- criterion 2: which layer won, for which key
 
 
-def test_doctor_names_the_winning_layer_for_every_changed_key(tmp_path, monkeypatch):
+def test_doctor_names_the_winning_layer_for_every_changed_key(tmp_path, monkeypatch, fake_home):
     """ROADMAP criterion 2, from a subdirectory: both layer paths AND the winning layer per key.
 
     Both the winner and the loser are printed on the row — a user debugging a surprise needs to see
@@ -171,7 +170,7 @@ def test_doctor_names_the_winning_layer_for_every_changed_key(tmp_path, monkeypa
     The DISPLAY shows both; the ASSERTION below pins the winner to the workspace band, which is the
     claim CLI-02 actually makes.
     """
-    layout = _layout(tmp_path, monkeypatch)
+    layout = _layout(tmp_path, monkeypatch, fake_home)
     _write_workspace(layout, {"org": {"name": "WORKSPACE-ORG", "log_level": "debug"}})
 
     out = _run_doctor()
@@ -188,7 +187,7 @@ def test_doctor_names_the_winning_layer_for_every_changed_key(tmp_path, monkeypa
     assert _squash(f"Global layer:    {layout.global_dir}") in squashed, out
 
 
-def test_a_key_restated_with_the_same_value_is_not_an_override(tmp_path, monkeypatch):
+def test_a_key_restated_with_the_same_value_is_not_an_override(tmp_path, monkeypatch, fake_home):
     """"Overridden" is a VALUE difference, not a presence check.
 
     One body, both assertions, deliberately: a workspace that restates `org.name` with the value the
@@ -201,7 +200,7 @@ def test_a_key_restated_with_the_same_value_is_not_an_override(tmp_path, monkeyp
     because reporting it would make doctor noise on exactly the configs people copy between
     projects, not because the attribution is wrong.
     """
-    layout = _layout(tmp_path, monkeypatch)
+    layout = _layout(tmp_path, monkeypatch, fake_home)
     _write_workspace(layout, {"org": {"name": "GLOBAL-ORG", "log_level": "debug"}})
 
     out = _run_doctor()
@@ -211,10 +210,10 @@ def test_a_key_restated_with_the_same_value_is_not_an_override(tmp_path, monkeyp
     assert "org.name" not in out, out
 
 
-def test_a_workspace_that_overrides_nothing_says_so(tmp_path, monkeypatch):
+def test_a_workspace_that_overrides_nothing_says_so(tmp_path, monkeypatch, fake_home):
     """One line, not an empty section. A heading with nothing under it reads like a bug in doctor;
     "the global config governs every key" is an answer."""
-    layout = _layout(tmp_path, monkeypatch)
+    layout = _layout(tmp_path, monkeypatch, fake_home)
     _write_workspace(layout, "# a workspace that only exists to hold agents/\n")
 
     out = _run_doctor()
@@ -223,7 +222,7 @@ def test_a_workspace_that_overrides_nothing_says_so(tmp_path, monkeypatch):
     assert "key(s) overridden" not in out, out
 
 
-def test_layr03_no_workspace_prints_no_workspace_vocabulary(tmp_path, monkeypatch):
+def test_layr03_no_workspace_prints_no_workspace_vocabulary(tmp_path, monkeypatch, fake_home):
     """LAYR-03's control: with no `.localharness/` up-tree, NOTHING about layering may appear.
 
     Every offending token is collected before asserting, rather than checked one `assert` at a
@@ -232,7 +231,7 @@ def test_layr03_no_workspace_prints_no_workspace_vocabulary(tmp_path, monkeypatc
     them (`No overrides`, because the two catalogue builds are then identical). 41-06's lesson,
     fifth shape: make the shadowing impossible instead of arguing about the order.
     """
-    _layout(tmp_path, monkeypatch, workspace=False)
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
 
     out = _run_doctor()
 
@@ -247,7 +246,7 @@ def test_layr03_no_workspace_prints_no_workspace_vocabulary(tmp_path, monkeypatc
 # ------------------------------------------------- F5, proven through doctor rather than assumed
 
 
-def test_f5_a_bad_workspace_value_is_reported_against_the_workspace_file(tmp_path, monkeypatch):
+def test_f5_a_bad_workspace_value_is_reported_against_the_workspace_file(tmp_path, monkeypatch, fake_home):
     """The post-42 dogfood repro, through DOCTOR.
 
     Before 43-01 a bad value on line 3 of a workspace `config.yaml` was reported as a line of the
@@ -259,7 +258,7 @@ def test_f5_a_bad_workspace_value_is_reported_against_the_workspace_file(tmp_pat
     `config.yaml`'s path unconditionally two lines earlier (`Config file:`, step 2, pre-v0.13). The
     claim being graded is that the global file is not named as the CAUSE.
     """
-    layout = _layout(tmp_path, monkeypatch)
+    layout = _layout(tmp_path, monkeypatch, fake_home)
     ws_config = _write_workspace(layout, "org:\n  name: WS\n  log_level: not-a-level\n")
     global_config = layout.global_dir / "config.yaml"
     global_line = _line_of(global_config, "log_level")
@@ -294,9 +293,9 @@ def _stamped(revision: int) -> str:
     return yaml.dump(data, sort_keys=False)
 
 
-def test_a_current_config_says_which_revision_it_carries(tmp_path, monkeypatch):
+def test_a_current_config_says_which_revision_it_carries(tmp_path, monkeypatch, fake_home):
     """`start`'s one-shot migration announcement scrolls away; doctor is where that fact lives."""
-    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
 
     out = _run_doctor()
 
@@ -304,7 +303,7 @@ def test_a_current_config_says_which_revision_it_carries(tmp_path, monkeypatch):
     assert "(current)" in out, out
 
 
-def test_a_stale_config_names_both_revisions_and_is_not_a_failure(tmp_path, monkeypatch):
+def test_a_stale_config_names_both_revisions_and_is_not_a_failure(tmp_path, monkeypatch, fake_home):
     """Being behind the shipped revision is INFORMATION, and the difference is measured, not argued.
 
     The same layout runs twice, changing exactly one byte of config — the stamp — so the issue
@@ -312,7 +311,7 @@ def test_a_stale_config_names_both_revisions_and_is_not_a_failure(tmp_path, monk
     the absence of the word "failure" would pass under an implementation that appends a failure id
     silently.
     """
-    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(0))
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(0))
     global_config = layout.global_dir / "config.yaml"
 
     stale_out = _run_doctor()
@@ -331,11 +330,11 @@ def test_a_stale_config_names_both_revisions_and_is_not_a_failure(tmp_path, monk
     )
 
 
-def test_the_most_recent_backup_is_the_one_named(tmp_path, monkeypatch):
+def test_the_most_recent_backup_is_the_one_named(tmp_path, monkeypatch, fake_home):
     """The backup FILE is the record — no new state is written to support this block, and its own
     filename carries the timestamp. Two backups exist; only the later one is an answer to "when was
     my config last migrated"."""
-    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(1))
     older = layout.global_dir / f"{BACKUP_PREFIX}20250101-010203"
     newer = layout.global_dir / f"{BACKUP_PREFIX}20260214-153000"
     older.write_text("old", encoding="utf-8")
@@ -349,10 +348,10 @@ def test_the_most_recent_backup_is_the_one_named(tmp_path, monkeypatch):
     assert _squash(str(older)) not in squashed, out
 
 
-def test_no_backup_file_means_no_backup_line(tmp_path, monkeypatch):
+def test_no_backup_file_means_no_backup_line(tmp_path, monkeypatch, fake_home):
     """A config that has never been migrated gets no invented date and no "unknown" — the absence
     of the line IS the answer."""
-    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(1))
 
     out = _run_doctor()
 
@@ -360,7 +359,7 @@ def test_no_backup_file_means_no_backup_line(tmp_path, monkeypatch):
     assert "backup at" not in out, out
 
 
-def test_an_unparseable_backup_stamp_degrades_and_stays_escaped(tmp_path, monkeypatch):
+def test_an_unparseable_backup_stamp_degrades_and_stays_escaped(tmp_path, monkeypatch, fake_home):
     """Two claims in one body, because both are about the same printed line surviving hostile input.
 
     A backup filename that is not a timestamp must not crash doctor (the command people run when
@@ -369,7 +368,7 @@ def test_an_unparseable_backup_stamp_degrades_and_stays_escaped(tmp_path, monkey
     not raise on an unknown tag here, it DELETES it, which is the 43-02 F1 failure mode — output
     that still looks fine while the data in it is gone.
     """
-    layout = _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(1))
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(1))
     odd = layout.global_dir / f"{BACKUP_PREFIX}[old]"
     odd.write_text("hand-copied backup", encoding="utf-8")
 
@@ -379,7 +378,7 @@ def test_an_unparseable_backup_stamp_degrades_and_stays_escaped(tmp_path, monkey
     assert "[old]" in out, out
 
 
-def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monkeypatch):
+def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monkeypatch, fake_home):
     """The one v0.13 output change that prints for EVERYONE, asserted rather than left implicit.
 
     LAYR-03 constrains workspace-CONDITIONAL behavior: with nothing up-tree, nothing about layering
@@ -388,7 +387,7 @@ def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monke
     `test_layr03_no_workspace_prints_no_workspace_vocabulary` are the two halves of that split:
     with no workspace, the migration block is the ONLY new text.
     """
-    _layout(tmp_path, monkeypatch, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config=_stamped(CURRENT_DEFAULTS_REVISION))
 
     out = _run_doctor()
 
@@ -396,14 +395,14 @@ def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monke
     assert "workspace" not in out.lower(), out
 
 
-def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypatch):
+def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypatch, fake_home):
     """The `harness is not None` guard, graded.
 
     An AttributeError raised inside doctor's own health check — on the exact configs doctor exists
     to diagnose — would be the worst regression this file could ship, so the crash path is a test
     rather than a code review note. `_run_doctor` asserts no exception escaped.
     """
-    _layout(tmp_path, monkeypatch, workspace=False, global_config="version: '1'\norg:\n  log_level: not-a-level\n")
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False, global_config="version: '1'\norg:\n  log_level: not-a-level\n")
 
     out = _run_doctor()
 
@@ -414,7 +413,7 @@ def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypa
 # --------------------------------------------------- the markup discipline, on the OTHER paths
 
 
-def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monkeypatch):
+def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monkeypatch, fake_home):
     """A folder named `[old] home` must not turn doctor into a liar.
 
     Rich reads `[old]` as a style tag and, measured, does not raise — it silently DELETES it, so
@@ -431,7 +430,7 @@ def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monke
     (correctly escaped) `layer report unavailable: ...` line — which carries the same path and
     shadowed the claim. 41-06's lesson, found by the mutation rather than by reading.
     """
-    layout = _layout(tmp_path, monkeypatch, home_name="[old] home")
+    layout = _layout(tmp_path, monkeypatch, fake_home, home_name="[old] home")
     ws_config = _write_workspace(layout, "org:\n  name: WS\n  log_level: not-a-level\n")
     global_config = layout.global_dir / "config.yaml"
 
@@ -444,7 +443,7 @@ def test_every_path_doctor_prints_survives_a_bracketed_directory(tmp_path, monke
     assert _squash(str(ws_config)) in _squash(error_text), out
 
 
-def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path, monkeypatch):
+def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path, monkeypatch, fake_home):
     """A path Rich folded across two lines is not the path it names — you cannot copy it.
 
     Every other test here runs at COLUMNS=400 so a long row stays intact for the assertions; that
@@ -461,6 +460,7 @@ def test_the_new_lines_are_not_folded_in_half_at_a_real_terminal_width(tmp_path,
     layout = _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         home_name="a-deliberately-long-project-home-directory-name",
         global_config=_stamped(CURRENT_DEFAULTS_REVISION),
     )

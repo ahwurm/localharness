@@ -52,17 +52,15 @@ class _FakeSys:
 
 
 @pytest.fixture
-def undecided_workspace(tmp_path, monkeypatch) -> Path:
+def undecided_workspace(tmp_path, monkeypatch, fake_home) -> Path:
     """An untrusted, undecided workspace ABOVE the cwd and outside any repository — the only
     shape the trust gate fires for — plus a terminal that is definitely attached."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
     (home / WORKSPACE_DIR_NAME / "config.yaml").write_text(
         yaml.dump(_MINIMAL_CONFIG), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     ws = tmp_path / "proj" / WORKSPACE_DIR_NAME
     (ws / "agents").mkdir(parents=True)
@@ -148,12 +146,10 @@ def test_no_input_says_why_the_layer_was_skipped(undecided_workspace, asked):
     assert str(undecided_workspace) in result.output
 
 
-def test_agent_create_no_input_without_a_scope_refuses(tmp_path, monkeypatch):
+def test_agent_create_no_input_without_a_scope_refuses(tmp_path, monkeypatch, fake_home):
     """`agent create` has a second prompt — which layer to write to — and no safe default: writing
     to the wrong one is the mistake A-B3 is about."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    fake_home(tmp_path / "home")
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["agent", "create", "scopeless", "--no-input", "--role", "R"])

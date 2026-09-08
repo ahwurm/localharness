@@ -82,7 +82,7 @@ def test_every_file_of_both_layers_appears_exactly_once(tmp_path):
         assert reported.count(str(path)) == 1, f"{path} reported {reported.count(str(path))} times"
 
 
-def test_validate_rows_print_the_full_path(tmp_path, monkeypatch):
+def test_validate_rows_print_the_full_path(tmp_path, monkeypatch, fake_home):
     """The CLI row must distinguish the two same-stem files it just checked.
 
     No --config-dir and no env override: an explicit config dir is a full replacement and skips
@@ -115,9 +115,7 @@ def test_validate_rows_print_the_full_path(tmp_path, monkeypatch):
     (proj / ".git").mkdir()  # in-project workspace = loads silently (LAYR-05)
     _seed_agent(global_dir, "twin", role="global")
     _seed_agent(ws, "twin", role="workspace")
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "300")  # else rich crops the row and the path is uncopyable
     monkeypatch.chdir(proj)
 
@@ -127,7 +125,7 @@ def test_validate_rows_print_the_full_path(tmp_path, monkeypatch):
     assert str(ws / "agents" / "twin.yaml") in result.output
 
 
-def _two_layer_home(tmp_path, monkeypatch):
+def _two_layer_home(tmp_path, monkeypatch, fake_home):
     """A configured machine + an in-project workspace, reached through the default HOME chain.
 
     An explicit --config-dir is a full replacement and skips discovery (LAYR-02), so the
@@ -153,15 +151,13 @@ def _two_layer_home(tmp_path, monkeypatch):
     ws = proj / ".localharness"
     ws.mkdir(parents=True)
     (proj / ".git").mkdir()  # in-project workspace = loads silently (LAYR-05)
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "300")  # else rich crops the row and the path is uncopyable
     monkeypatch.chdir(proj)
     return global_dir, ws
 
 
-def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch):
+def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch, fake_home):
     """A syntax error in the WORKSPACE config.yaml must not be reported against the global one.
 
     The harness row is keyed under the global config.yaml by `validate_all`, and the row only
@@ -173,7 +169,7 @@ def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch):
 
     from localharness.cli.app import app
 
-    global_dir, ws = _two_layer_home(tmp_path, monkeypatch)
+    global_dir, ws = _two_layer_home(tmp_path, monkeypatch, fake_home)
     (ws / "config.yaml").write_text("org:\n  name: [unclosed\n", encoding="utf-8")
 
     result = CliRunner().invoke(app, ["validate"])
@@ -182,7 +178,7 @@ def test_workspace_parse_error_names_the_workspace_file(tmp_path, monkeypatch):
     assert str(ws / "config.yaml") in result.output, result.output
 
 
-def _workspace_only_home(tmp_path, monkeypatch):
+def _workspace_only_home(tmp_path, monkeypatch, fake_home):
     """A project with a workspace layer on a machine that was never `init`ed (D1's shape)."""
     home = tmp_path / "home"
     home.mkdir(parents=True)  # no ~/.localharness at all
@@ -190,15 +186,13 @@ def _workspace_only_home(tmp_path, monkeypatch):
     ws = proj / ".localharness"
     ws.mkdir(parents=True)
     (proj / ".git").mkdir()
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.chdir(proj)
     return ws
 
 
-def test_workspace_only_broken_config_is_reported_not_called_absent(tmp_path, monkeypatch):
+def test_workspace_only_broken_config_is_reported_not_called_absent(tmp_path, monkeypatch, fake_home):
     """`validate_all` keys the harness row under the GLOBAL config.yaml and skips the block
     entirely when that file is absent — so on an un-`init`ed machine a workspace config.yaml
     that cannot be parsed produced no row at all, and `validate` answered "No configuration
@@ -209,7 +203,7 @@ def test_workspace_only_broken_config_is_reported_not_called_absent(tmp_path, mo
 
     from localharness.cli.app import app
 
-    ws = _workspace_only_home(tmp_path, monkeypatch)
+    ws = _workspace_only_home(tmp_path, monkeypatch, fake_home)
     (ws / "config.yaml").write_text("org:\n  name: [unclosed\n", encoding="utf-8")
 
     result = CliRunner().invoke(app, ["validate"])
@@ -219,7 +213,7 @@ def test_workspace_only_broken_config_is_reported_not_called_absent(tmp_path, mo
     assert result.exit_code == 1, result.output
 
 
-def test_workspace_only_valid_config_still_says_the_machine_needs_init(tmp_path, monkeypatch):
+def test_workspace_only_valid_config_still_says_the_machine_needs_init(tmp_path, monkeypatch, fake_home):
     """The other half of the contract: a workspace config.yaml that PARSES gets no verdict row.
 
     It is an overlay — partial by design — and `load_harness` still requires the global
@@ -230,7 +224,7 @@ def test_workspace_only_valid_config_still_says_the_machine_needs_init(tmp_path,
 
     from localharness.cli.app import app
 
-    ws = _workspace_only_home(tmp_path, monkeypatch)
+    ws = _workspace_only_home(tmp_path, monkeypatch, fake_home)
     (ws / "config.yaml").write_text(yaml.safe_dump({"org": {"name": "o"}}), encoding="utf-8")
 
     result = CliRunner().invoke(app, ["validate"])

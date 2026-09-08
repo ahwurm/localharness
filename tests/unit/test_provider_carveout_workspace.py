@@ -61,10 +61,10 @@ _GLOBAL_CONFIG_YAML = (
 # --------------------------------------------------------------------------------- helpers
 
 
-def _hermetic(monkeypatch, home: Path) -> Path:
+def _hermetic(monkeypatch, home: Path, fake_home) -> Path:
     """A fake `$HOME` holding the GLOBAL layer, with both env overrides cleared.
 
-    All three moves are required. Both walks stop at `$HOME`, so a real one would let the
+    All these moves are required. Both walks stop at `$HOME`, so a real one would let the
     developer's own `~/.localharness` answer these tests; and the conftest fixtures set
     `LOCALHARNESS_HOME`, which the resolver counts as an EXPLICIT selection — leaving it set would
     switch discovery off and every test below would pass for the wrong reason (there would be no
@@ -72,17 +72,15 @@ def _hermetic(monkeypatch, home: Path) -> Path:
     `tests/integration/test_workspace_discovery_e2e.py` rather than imported, so this file stays
     readable as the whole of what the global layer contains.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True, exist_ok=True)
     (global_dir / "config.yaml").write_text(_GLOBAL_CONFIG_YAML, encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     return global_dir
 
 
-def _workspace_session(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+def _workspace_session(tmp_path: Path, monkeypatch, fake_home) -> tuple[Path, Path, Path]:
     """A real workspace session: fake `$HOME`, a project inside it, CWD in the project.
 
     The `.git` marker makes `proj/` the project the caller is standing in, so the workspace is
@@ -94,7 +92,7 @@ def _workspace_session(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     Returns (home, global_dir, workspace_dir).
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(monkeypatch, home)
+    global_dir = _hermetic(monkeypatch, home, fake_home)
 
     proj = home / "proj"
     ws_dir = proj / ".localharness"
@@ -132,7 +130,7 @@ def _changed(before: dict, after: dict) -> set[Path]:
 # ------------------------------------------------------------------- the end-to-end write test
 
 
-def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_path, monkeypatch):
+def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_path, monkeypatch, fake_home):
     """`localharness model <name>` from inside a workspace writes the GLOBAL overlay, and the
     workspace directory is not touched at all.
 
@@ -168,7 +166,7 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
       * the same stray under the GLOBAL dir -> reddens the exact-set assertion.
     Both were run and restored; that pair is why these two assertions are trusted.
     """
-    home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch)
+    home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch, fake_home)
 
     before = _file_snapshot(home)
     result = runner.invoke(app, ["model", "other-model"])
@@ -204,14 +202,14 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
     )
 
 
-def test_model_swap_from_a_workspace_does_not_create_a_workspace_overlay(tmp_path, monkeypatch):
+def test_model_swap_from_a_workspace_does_not_create_a_workspace_overlay(tmp_path, monkeypatch, fake_home):
     """A workspace may STATE a provider preference; a swap still edits the global file.
 
     The workspace's own `config.yaml` declares `provider.default_model: ws-model`. That is a legal
     read-side override. The write side must not follow it: the workspace config is byte-identical
     afterwards and no `<workspace>/overrides.yaml` is minted.
     """
-    home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch)
+    home, global_dir, ws_dir = _workspace_session(tmp_path, monkeypatch, fake_home)
     ws_config = ws_dir / "config.yaml"
     ws_config.write_text(
         yaml.dump({"provider": {"default_model": "ws-model"}}), encoding="utf-8"

@@ -115,15 +115,13 @@ def _run(name, tmp_path, resolved, explicit=None) -> list[Path]:
 
 
 @pytest.mark.parametrize("name", COMMAND_IDS)
-def test_nothing_set_falls_back_to_home_dot_localharness(name, tmp_path, monkeypatch, resolved):
+def test_nothing_set_falls_back_to_home_dot_localharness(name, tmp_path, monkeypatch, resolved, fake_home):
     """Neither env var set -> ~/.localharness. The zero-behavior-change row.
 
     HOME is repointed at a tmp dir so this exercises the default leg WITHOUT reading (or, for
     `start`, running the deny-defaults auto-migration against) the developer's real config.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    fake_home(tmp_path)
     expected = Path("~/.localharness").expanduser()
     assert expected == tmp_path / ".localharness", "HOME repointing did not take"
 

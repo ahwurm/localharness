@@ -33,29 +33,27 @@ runner = CliRunner()
 # --------------------------------------------------------------------------- fixtures
 
 
-def _fake_home(tmp_path, monkeypatch) -> Path:
+def _fake_home(tmp_path, monkeypatch, fake_home) -> Path:
     """A hermetic `$HOME` holding the GLOBAL layer (and therefore the trust store), with both env
     overrides cleared so discovery is actually allowed to run. Every fixture needs this: both
     walks stop at `$HOME`, and the autouse conftest fixture sets `LOCALHARNESS_HOME`, which the
     resolver counts as an explicit selection."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / ".localharness").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # keep Rich from wrapping the --json line
     return home
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch):
+def project(tmp_path, monkeypatch, fake_home):
     """A discoverable workspace two levels above the cwd, OUTSIDE any repository (39-04's shape).
 
     No `.git` anywhere on purpose: that absence is what makes this workspace "config reaching in
     from outside the tree you opened", the only trust-gated case. Do not add one — it is what
     gives both `record_trust(ws, True)` and the untrusted `--json` test something to prove.
     """
-    _fake_home(tmp_path, monkeypatch)
+    _fake_home(tmp_path, monkeypatch, fake_home)
     ws = tmp_path / "proj" / ".localharness"
     (ws / "agents").mkdir(parents=True)
     deep = tmp_path / "proj" / "src" / "pkg"
@@ -70,12 +68,10 @@ def project(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def no_workspace(tmp_path, monkeypatch):
+def no_workspace(tmp_path, monkeypatch, fake_home):
     """No `.localharness` anywhere up-tree. `$HOME` is `tmp_path` itself so the walk stays bounded
     (it stops there without inspecting it) instead of climbing to the real filesystem root."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    fake_home(tmp_path)
     monkeypatch.setenv("COLUMNS", "400")
     here = tmp_path / "empty" / "sub"
     here.mkdir(parents=True)
@@ -286,7 +282,7 @@ def test_archive_db_is_not_trust_gated(project, monkeypatch):
     assert resolve_archive_db_path() == ws / "archive.db"
 
 
-def test_the_three_commands_share_one_archive_algorithm(project, tmp_path, monkeypatch):
+def test_the_three_commands_share_one_archive_algorithm(project, tmp_path, monkeypatch, fake_home):
     """"One 'find my .localharness' algorithm, not two." Three modules used to carry three
     byte-identical copies; this walks all three through the same three states."""
     from localharness.cli.autoresearch_cmd import _archive_db_path as autoresearch_path
@@ -304,7 +300,7 @@ def test_the_three_commands_share_one_archive_algorithm(project, tmp_path, monke
 
     # State 3: no env, nothing to discover — the cwd fallback.
     monkeypatch.delenv("LOCALHARNESS_HOME")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    fake_home(tmp_path, clear_overrides=False)
     bare = tmp_path / "bare"
     bare.mkdir()
     monkeypatch.chdir(bare)

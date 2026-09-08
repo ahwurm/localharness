@@ -68,29 +68,29 @@ def test_returns_none_when_nothing_up_tree(tmp_path):
     assert discover_workspace_dir(start) is None
 
 
-def test_home_localharness_is_never_a_workspace(tmp_path, monkeypatch):
+def test_home_localharness_is_never_a_workspace(tmp_path, monkeypatch, fake_home):
     """LAYR-03: `~/.localharness/` is the GLOBAL layer. Discovering it as a workspace would
     collapse the two layers for every user who has no project workspace at all."""
     from localharness.config.paths import discover_workspace_dir
 
-    fake_home = tmp_path / "home"
-    (fake_home / ".localharness").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(fake_home))
-    start = fake_home / "sub" / "dir"
+    home = tmp_path / "home"
+    (home / ".localharness").mkdir(parents=True)
+    fake_home(home, clear_overrides=False)
+    start = home / "sub" / "dir"
     start.mkdir(parents=True)
 
     assert discover_workspace_dir(start) is None
 
 
-def test_home_itself_is_never_a_workspace(tmp_path, monkeypatch):
+def test_home_itself_is_never_a_workspace(tmp_path, monkeypatch, fake_home):
     """The stop applies at `$HOME` exactly, not just below it."""
     from localharness.config.paths import discover_workspace_dir
 
-    fake_home = tmp_path / "home"
-    (fake_home / ".localharness").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(fake_home))
+    home = tmp_path / "home"
+    (home / ".localharness").mkdir(parents=True)
+    fake_home(home, clear_overrides=False)
 
-    assert discover_workspace_dir(fake_home) is None
+    assert discover_workspace_dir(home) is None
 
 
 def test_a_localharness_file_is_not_a_workspace(tmp_path):
@@ -231,16 +231,16 @@ def test_not_within_repo_when_no_git_exists_at_all(tmp_path):
     assert workspace_is_within_repo(ws, start) is False
 
 
-def test_git_search_stops_at_home(tmp_path, monkeypatch):
+def test_git_search_stops_at_home(tmp_path, monkeypatch, fake_home):
     """A home-directory dotfiles repo must not make every folder under home one project."""
     from localharness.config.paths import workspace_is_within_repo
 
-    fake_home = tmp_path / "home"
-    (fake_home / ".git").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(fake_home))
-    ws = fake_home / "proj" / ".localharness"
+    home = tmp_path / "home"
+    (home / ".git").mkdir(parents=True)
+    fake_home(home, clear_overrides=False)
+    ws = home / "proj" / ".localharness"
     ws.mkdir(parents=True)
-    start = fake_home / "proj" / "sub"
+    start = home / "proj" / "sub"
     start.mkdir()
 
     assert workspace_is_within_repo(ws, start) is False
@@ -287,7 +287,7 @@ def test_discovery_is_never_captured_at_import_time():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX $HOME semantics")
-def test_home_stop_survives_a_symlinked_home(tmp_path, monkeypatch):
+def test_home_stop_survives_a_symlinked_home(tmp_path, monkeypatch, fake_home):
     """`$HOME` reached through a symlink is still `$HOME` — both sides are realpath'd."""
     from localharness.config.paths import discover_workspace_dir
 
@@ -297,6 +297,6 @@ def test_home_stop_survives_a_symlinked_home(tmp_path, monkeypatch):
     start.mkdir()
     link_home = tmp_path / "link_home"
     link_home.symlink_to(real_home, target_is_directory=True)
-    monkeypatch.setenv("HOME", str(link_home))
+    fake_home(link_home, clear_overrides=False)
 
     assert discover_workspace_dir(start) is None

@@ -37,16 +37,15 @@ _MINIMAL_CONFIG = {
 
 
 @pytest.fixture
-def narrow_project(tmp_path, monkeypatch) -> Path:
-    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LOCALHARNESS_ENDPOINT",
-                "LOCALHARNESS_MODEL"):
+def narrow_project(tmp_path, monkeypatch, fake_home) -> Path:
+    for var in ("LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
         monkeypatch.delenv(var, raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
     (home / WORKSPACE_DIR_NAME / "config.yaml").write_text(
         yaml.dump(_MINIMAL_CONFIG), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "40")  # cruel on purpose
     proj = tmp_path / _DEEP
     proj.mkdir(parents=True)
