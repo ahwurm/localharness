@@ -1,9 +1,30 @@
 """EditTool: surgical in-place string replacement (avoids full-file rewrites)."""
 import asyncio
+import difflib
 
 from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+
+
+# The result carries a unified diff of the change so the model can verify what it did
+# without re-reading the file; bounded so a replace_all over a big file cannot flood the
+# context (the ledger keeps the full args either way).
+_DIFF_MAX_LINES = 40
+
+
+def unified_diff_excerpt(old: str, new: str, name: str, max_lines: int = _DIFF_MAX_LINES) -> str:
+    """A unified diff of old→new (no header noise beyond ---/+++), cut at max_lines with a
+    trailing count of what was left out. "" when the texts are identical."""
+    lines = list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(), fromfile=name, tofile=name, lineterm="", n=2,
+    ))
+    if not lines:
+        return ""
+    if len(lines) > max_lines:
+        omitted = len(lines) - max_lines
+        lines = lines[:max_lines] + [f"… {omitted} more diff line{'s' if omitted != 1 else ''}"]
+    return "\n".join(lines)
 
 
 class EditTool(Tool):
@@ -18,7 +39,8 @@ class EditTool(Tool):
                 "Make a surgical edit to a file by replacing an exact string. Prefer this over "
                 "`write` for changing an existing file — you emit only the changed snippet, not the "
                 "whole file. `old_string` must match exactly (including whitespace) and be unique "
-                "unless replace_all=true. Returns the number of replacements."
+                "unless replace_all=true. Returns the number of replacements and a unified diff "
+                "of the change."
             ),
             parameters={
                 "type": "object",
@@ -83,8 +105,10 @@ class EditTool(Tool):
         except OSError as exc:
             return self.err(str(exc))
 
+        diff = unified_diff_excerpt(text, updated, target.name)
         return self.ok(
-            f"Replaced {count} occurrence{'s' if count != 1 else ''} in {target}",
+            f"Replaced {count} occurrence{'s' if count != 1 else ''} in {target}"
+            + (f"\n{diff}" if diff else ""),
             path=str(target),
             replacements=count,
         )
