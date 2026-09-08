@@ -29,7 +29,7 @@ class ToolConfig(BaseModel):
         default=["global"],
         description=(
             "Which tool scopes to inherit. 'global' always provides the built-in tools "
-            "(glob, grep, read, write, bash). 'division' inherits the division's tool list. "
+            "(glob, grep, read, write, edit, bash). 'division' inherits the division's tool list. "
             "'org' inherits the org-level tool list."
         ),
     )

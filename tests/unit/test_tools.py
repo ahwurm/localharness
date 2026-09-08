@@ -1297,3 +1297,67 @@ async def test_registry_caps_error_payloads_too():
     assert result.success is False
     assert len(result.error) <= 50_000 + 100
     assert "[error truncated: 60,000 chars total]" in result.error
+
+
+# ---------------------------------------------------------------------------
+# edit shows its change; write steers small changes to edit (2026-09-08)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_edit_tool_result_carries_a_unified_diff(tmp_path: Path):
+    from localharness.tools.builtin.edit_tool import EditTool
+
+    f = tmp_path / "note.md"
+    f.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    result = await EditTool().run(path=str(f), old_string="beta", new_string="BETA")
+    assert result.success is True
+    assert result.metadata["replacements"] == 1
+    first, *rest = result.output.split("\n")
+    assert first == f"Replaced 1 occurrence in {result.metadata['path']}"
+    assert "-beta" in rest and "+BETA" in rest
+    assert f.read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_diff_is_bounded(tmp_path: Path):
+    from localharness.tools.builtin.edit_tool import EditTool, _DIFF_MAX_LINES
+
+    f = tmp_path / "big.txt"
+    f.write_text("\n".join(f"x line {i}" for i in range(300)), encoding="utf-8")
+    result = await EditTool().run(path=str(f), old_string="x line", new_string="y line",
+                                  replace_all=True)
+    assert result.success is True
+    assert result.metadata["replacements"] == 300
+    diff_lines = result.output.split("\n")[1:]
+    assert len(diff_lines) == _DIFF_MAX_LINES + 1
+    assert diff_lines[-1].startswith("… ") and diff_lines[-1].endswith("more diff lines")
+
+
+@pytest.mark.asyncio
+async def test_write_tool_overwrite_of_a_small_slice_points_at_edit(tmp_path: Path):
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    f = tmp_path / "draft.txt"
+    body = "\n".join(f"line {i}" for i in range(40)) + "\n"
+    await tool.run(path=str(f), content=body)
+    result = await tool.run(path=str(f), content=body.replace("line 7\n", "line seven\n"))
+    assert result.success is True
+    lines = result.output.split("\n")
+    assert lines[0].startswith("Overwrote ")
+    assert lines[1].startswith("+1 −1 of 40 lines changed.")
+    assert "`edit`" in lines[1]
+    assert f.read_text(encoding="utf-8").count("line seven") == 1
+
+
+@pytest.mark.asyncio
+async def test_write_tool_overwrite_that_replaces_most_of_a_file_has_no_edit_hint(tmp_path: Path):
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    f = tmp_path / "draft.txt"
+    await tool.run(path=str(f), content="\n".join(f"old {i}" for i in range(40)) + "\n")
+    result = await tool.run(path=str(f), content="\n".join(f"new {i}" for i in range(40)) + "\n")
+    assert result.success is True
+    assert "\n" not in result.output          # the one-line message, unchanged
+    assert result.output.startswith("Overwrote ")

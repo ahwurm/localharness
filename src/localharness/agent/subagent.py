@@ -382,6 +382,13 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
     tool_cfg = getattr(agent_config, "tools", None)
     add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
     deny = set(getattr(tool_cfg, "deny", None) or [])
+    # `write` implies `edit`: a child allowed to rewrite a whole file may certainly replace a
+    # snippet of it, and on a bandwidth-bound local model the snippet is the cheap path (a
+    # yaml that listed `write` alone left the child regenerating entire files). Same
+    # capability class (both HOST_DANGEROUS), so the floor and grant gates are unchanged;
+    # an explicit deny of `edit` still wins below.
+    if "write" in add and "edit" not in add:
+        add.append("edit")
     return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
 
 

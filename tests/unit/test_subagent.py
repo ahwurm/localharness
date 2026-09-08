@@ -540,3 +540,25 @@ def test_shipped_summarizer_role_keeps_its_rules_on_separate_lines():
         assert sum(ln.startswith(rule) for ln in lines) == 1, f"rule {rule} not on its own line"
     for heading in ("## Overview", "## Key Points", "## Action Items (if any)", "## Notable Details"):
         assert heading in lines, f"{heading!r} lost its own line (folded scalar)"
+
+
+@pytest.mark.asyncio
+async def test_config_child_write_implies_edit():
+    """A yaml child that lists `write` gets `edit` too — same capability class, cheaper path.
+    An explicit deny of `edit` still wins; a read-only child gains nothing."""
+    from localharness.agent.subagent import _config_child_allowed
+    from localharness.config.models import AgentConfig
+
+    writer = AgentConfig.model_validate({
+        "name": "drafter", "role": "Writes notes.", "tools": {"add": ["read", "write"]},
+    })
+    assert _config_child_allowed(writer) == ["read", "write", "edit"]
+
+    no_edit = AgentConfig.model_validate({
+        "name": "drafter", "role": "Writes notes.",
+        "tools": {"add": ["read", "write"], "deny": ["edit"]},
+    })
+    assert "edit" not in _config_child_allowed(no_edit)
+
+    reader = AgentConfig.model_validate({"name": "reader", "role": "Reads."})
+    assert "edit" not in _config_child_allowed(reader)

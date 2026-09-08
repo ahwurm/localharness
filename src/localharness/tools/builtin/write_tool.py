@@ -6,6 +6,27 @@ from localharness.tools.builtin.paths import resolve_user_path
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 
+# An overwrite that changes only a small slice of a large file is the case `edit` exists
+# for: the model regenerated the whole file as output tokens to alter a few lines. The
+# write still lands (refusing would cost a full round-trip — minutes on a local model);
+# the result says so, with the numbers, so the next change goes through `edit`.
+_EDIT_HINT_MIN_LINES = 20        # a file this long is worth a snippet edit
+_EDIT_HINT_MAX_CHANGED_FRACTION = 0.2  # …when at most this share of its lines changed
+
+
+def overwrite_diff_stat(old: str, new: str) -> tuple[int, int, int]:
+    """(lines added, lines removed, lines in the old file) for an old→new overwrite."""
+    import difflib
+    old_lines, new_lines = old.splitlines(), new.splitlines()
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes():
+        if tag == "equal":
+            continue
+        removed += i2 - i1
+        added += j2 - j1
+    return added, removed, len(old_lines)
+
+
 class WriteTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -81,6 +102,18 @@ class WriteTool(Tool):
                 f"Created {target} ({n} bytes)" if old_bytes is None
                 else f"Overwrote {target} (was {len(old_bytes)} bytes, now {n} bytes)"
             )
+            if old_bytes is not None:
+                try:
+                    added, removed, old_n = overwrite_diff_stat(old_bytes.decode("utf-8"), content)
+                except UnicodeDecodeError:
+                    added = removed = old_n = 0
+                changed = max(added, removed)
+                if old_n >= _EDIT_HINT_MIN_LINES and changed <= old_n * _EDIT_HINT_MAX_CHANGED_FRACTION:
+                    message += (
+                        f"\n+{added} −{removed} of {old_n} lines changed. A change this small to a "
+                        f"file this long is what `edit` is for: pass only the snippet "
+                        f"(old_string → new_string) instead of regenerating the whole file."
+                    )
         else:
             message = f"Written {n} bytes to {target}"
 

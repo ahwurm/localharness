@@ -4,6 +4,23 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Changed
+- **`edit` comes with `write`, and both tools show their work.** A fresh install's
+  root agent has always held `edit` alongside `write` and `bash_exec`, but the
+  model never reached for it: a yaml-defined subagent that listed `write` got no
+  `edit` at all, and neither tool said what actually changed. Now a child whose
+  `tools.add` names `write` gets `edit` too (same capability class — the
+  capability floor and the grant gate treat both as host-dangerous — and an
+  explicit deny of `edit` still wins). `edit` returns a unified diff of the
+  change, cut at 40 lines, so the model can verify an edit without re-reading the
+  file. `write` over an existing file reports the line delta, and when the change
+  touched a small slice of a long file it says so and points at `edit` — the
+  write still lands, because refusing it would cost a full round-trip, which is
+  minutes on a local model. The `ToolConfig` docstring finally lists `edit` among
+  the global built-ins.
+
 ## [0.13.2] — 2026-09-08
 
 ### Changed
