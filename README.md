@@ -163,12 +163,15 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
   puts `/usr/bin` on `PATH`, so coreutils (`mkdir`, `ls`, `cp`, …) resolve no matter which shell
   started the harness. `Git\usr\bin\bash.exe` launched directly inherits a PowerShell PATH with no
   coreutils on it. To use a different bash, set `LOCALHARNESS_BASH` to a wrapper-style executable.
-- A `bash_exec` command that could not RUN — exit 127 (not found), 126 (not executable), or
-  killed by a signal — is a tool error on every platform, and the command's output is forwarded
-  to the model inside the error so it can react (e.g. `command not found`). A command that ran
-  and returned any other non-zero code is an ordinary result with `exit code N` on the first
-  line: `grep` with no match and `test -f` on a missing file are answers, not faults. A timeout
-  kills the command's whole process tree (a job object on Windows, the process group on POSIX).
+- A `bash_exec` command that could not RUN is a tool error on every platform, and its output is
+  forwarded to the model inside the error so it can react (e.g. `command not found`). That is
+  exit 127 (not found), 126 (not executable), and abnormal termination — a signal on POSIX, an
+  NTSTATUS crash code on Windows. 126/127 are the shell's convention rather than a reserved
+  range, so a program that picks those codes for its own reasons is reported as a failure it
+  did not have; that is the deliberate side to err on. A command that ran and returned any
+  other non-zero code is an ordinary result with `exit code N` on the first line: `grep` with
+  no match and `test -f` on a missing file are answers, not faults. A timeout kills the
+  command's whole process tree (a job object on Windows, the process group on POSIX).
 - Paths: the file tools accept Windows or POSIX paths, relative to the harness working directory.
   `/tmp/...` maps to `%TEMP%`, which is where git-bash mounts `/tmp`, so the file tools and
   `bash_exec` agree on one tree. Inside `bash_exec` commands, use forward slashes — bash strips

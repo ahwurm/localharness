@@ -187,10 +187,18 @@ that do not have one yet.
   code tucked in metadata — and metadata never reaches the model, which reads
   `output` alone on success — so the terminal showed ✓ and a `mkdir` that had
   said `command not found` read as done. Exit 127 (not found), 126 (not
-  executable) and death by signal now fail: nothing about how the command is
-  phrased will make it work, so it has to be loud, and because the loop forwards
-  `.error` (not `.output`) on failure the command's own output travels inside the
-  error message (`exit code 127: …mkdir: command not found`). Every other
+  executable) and abnormal termination now fail — usually there is nothing to
+  rephrase, the thing asked for is missing, unrunnable or dead — and because the
+  loop forwards `.error` (not `.output`) on failure the command's own output
+  travels inside the error message (`exit code 127: …mkdir: command not found`).
+  Abnormal termination means both of its spellings: a signal on POSIX (a negative
+  code) and an NTSTATUS crash on Windows, which arrives as a large *positive*
+  number because `GetExitCodeProcess` returns a DWORD — a rule written for
+  signals alone would have called the same segfault a failure on Linux and a
+  success on Windows. 126 and 127 are the shell's convention, not a reserved
+  range: a program is free to exit 127 meaning something of its own, and it will
+  be reported as a failure it did not have. That is the deliberate side to err
+  on, since 127 from the shell is the git-bash bug this exists for. Every other
   non-zero exit stays an ordinary result — `grep` with no match, `test -f` on a
   missing file and `diff` on differing files are answers in the language commands
   are written in, and calling them tool failures fought the idiom — but the

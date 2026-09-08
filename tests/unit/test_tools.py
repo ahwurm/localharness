@@ -1017,6 +1017,22 @@ async def test_bash_exec_killed_by_signal_is_a_failure():
     assert result.metadata.get("exit_code", 0) < 0
 
 
+def test_could_not_run_classifies_both_platforms_abnormal_exits():
+    """The rule has to hold on the platform the test suite is NOT running on. A crash is a
+    negative code on POSIX and a large positive NTSTATUS on Windows (GetExitCodeProcess returns
+    a DWORD, never a negative), so a classifier that knows only about signals calls the same
+    segfault a failure on Linux and a success on Windows. Pure function, so both spellings are
+    checkable from either platform."""
+    from localharness.tools.builtin.bash_tool import _could_not_run
+
+    assert _could_not_run(127) and _could_not_run(126)          # convention: could not exec
+    assert _could_not_run(-9)                                    # POSIX: SIGKILL
+    assert _could_not_run(3221225477)                            # Windows: 0xC0000005 access violation
+    assert _could_not_run(0xC000_013A)                           # Windows: Ctrl+C termination
+    assert not _could_not_run(0)
+    assert not any(_could_not_run(rc) for rc in (1, 2, 3, 125, 128, 255))  # ordinary verdicts
+
+
 @pytest.mark.asyncio
 async def test_bash_exec_stdin_is_never_the_terminal():
     """A command that reads stdin gets EOF at once (stdin=DEVNULL) — never the harness's

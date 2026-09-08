@@ -10,13 +10,30 @@ from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
-# The exit codes that mean the command never RAN, from the shell's own reserved range (POSIX
-# / Bash Reference Manual §3.7.5 "Exit Status"): 126 = found but not executable, 127 = not
-# found. Everything else in 1..255 is the COMMAND's own verdict — `grep` says 1 for no match,
-# `diff` says 1 for differing files, `test` says 1 for false — and a verdict is a result, not a
-# tool failure. A negative code is the third could-not-run case: on POSIX it is -N for "killed
-# by signal N", which is a death, not an answer. (A timeout returns earlier, as timeout_error.)
+# The codes that read as "the command never ran", so the model is told loudly instead of being
+# handed an answer. Everything else is the COMMAND's own verdict — `grep` says 1 for no match,
+# `diff` says 1 for differing files, `test` says 1 for false — and a verdict is a result.
+#
+# 126 (found, not executable) and 127 (not found) are a CONVENTION, not a reserved range: the
+# shell uses them when it fails to exec something (Bash Reference Manual §3.7.5), and a program
+# is free to `exit 127` meaning something else entirely. So this is a judgement call, not a law
+# — a script that picks 127 as its own answer is reported as a failure it did not have. It is
+# the right side to err on: 127 from the shell is the Windows git-bash bug this exists for
+# (`mkdir` with no /usr/bin on PATH), where nothing about the command can be rephrased into
+# working, and a program choosing 127 for its own purposes is rare in the commands models write.
 _COULD_NOT_RUN_EXIT_CODES = frozenset({126, 127})
+# Abnormal termination, which is a death rather than an answer on either platform — and the two
+# platforms spell it differently, so a rule that names only one of them is a rule that holds on
+# one of them. POSIX returns -N for "killed by signal N". Windows never returns a negative:
+# GetExitCodeProcess hands back a DWORD, so a crash arrives as a large POSITIVE NTSTATUS with
+# the high bit set (0xC0000005 STATUS_ACCESS_VIOLATION = 3221225477). Without this floor a
+# segfaulting child is a failure on Linux and a success on Windows, for the same crash.
+_WINDOWS_ABNORMAL_EXIT_FLOOR = 0x8000_0000
+
+
+def _could_not_run(rc: int) -> bool:
+    """Whether an exit code means the command never ran, rather than ran and said no."""
+    return rc in _COULD_NOT_RUN_EXIT_CODES or rc < 0 or rc >= _WINDOWS_ABNORMAL_EXIT_FLOOR
 
 
 def _find_bash() -> str | None:
@@ -292,11 +309,11 @@ class BashExecTool(Tool):
 
         output = _decode_output(stdout)
         rc = proc.returncode
-        if rc in _COULD_NOT_RUN_EXIT_CODES or rc < 0:
+        if _could_not_run(rc):
             # The command never RAN. That is a tool failure, and the loop forwards .error (not
             # .output) on failure, so the command's own output rides along in the message —
-            # "mkdir: command not found" is what the model must see, loudly, because no phrasing
-            # of the same command will work until something changes outside the command.
+            # "mkdir: command not found" is what the model must see, loudly, because there is
+            # usually nothing to rephrase: the thing it asked for is missing, unrunnable or dead.
             return ToolResult(
                 output=output,
                 success=False,
