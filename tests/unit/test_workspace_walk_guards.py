@@ -42,15 +42,18 @@ def test_deleted_cwd_means_no_workspace(tmp_path, monkeypatch):
     assert workspace_is_within_repo(tmp_path / ".localharness") is False
 
 
-def test_home_unset_does_not_discover_the_global_config_dir(tmp_path, monkeypatch):
-    """With no $HOME, `~/.localharness` still resolves — and must not be found as a workspace."""
+@pytest.mark.unsets_home
+def test_home_unset_does_not_discover_the_global_config_dir(tmp_path, monkeypatch, fake_home):
+    """With no $HOME, `~/.localharness` still resolves — and must not be found as a workspace.
+
+    The `unsets_home` marker is load-bearing: deleting HOME drops this test through the session-wide
+    fake home onto the developer's real profile, so conftest fingerprints that profile around it
+    instead of checking the environment. Nothing here may write through `~`."""
     home = tmp_path / "home"
     (home / ".localharness").mkdir(parents=True)
     project = home / "project"
     project.mkdir()
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     assert discover_workspace_dir(project) is None  # premise: the home-stop holds when HOME is set
 
     monkeypatch.delenv("HOME")
@@ -62,9 +65,9 @@ def test_home_unset_does_not_discover_the_global_config_dir(tmp_path, monkeypatc
     assert discover_workspace_dir(project) is None
 
 
-def test_a_real_workspace_is_still_found(tmp_path, monkeypatch):
+def test_a_real_workspace_is_still_found(tmp_path, monkeypatch, fake_home):
     """The guards must not cost the ordinary answer."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    fake_home(tmp_path / "home", clear_overrides=False)
     project = tmp_path / "proj"
     (project / ".localharness").mkdir(parents=True)
     nested = project / "src" / "deep"
