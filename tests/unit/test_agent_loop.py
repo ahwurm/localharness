@@ -2586,10 +2586,12 @@ async def test_empty_length_reply_doubles_the_cap_for_the_retry(mock_llm_client,
     assert summary == "Here is the answer."
     calls = loop._llm.calls
     assert "max_tokens" not in calls[0]            # the configured cap, untouched
-    assert calls[1]["max_tokens"] == 8_192          # doubled for the retry
-    assert loop._output_cap == 8_192                # and kept: the next overrun starts from here
+    # This agent configures no cap, so its starting cap is the one derived from its 131,072
+    # window (32,768) and the doubled retry is 65,536 — still inside the window's headroom.
+    assert calls[1]["max_tokens"] == 65_536         # doubled for the retry
+    assert loop._output_cap == 65_536               # and kept: the next overrun starts from here
     replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
-    assert [e.output_cap for e in replies] == [None, 8_192]   # the ledger records the cap used
+    assert [e.output_cap for e in replies] == [None, 65_536]  # the ledger records the cap used
     completions = bus.history(event_types=[TaskComplete])
     assert len(completions) == 1 and completions[0].success is True
 
@@ -2630,7 +2632,7 @@ async def test_truncated_final_answer_is_retried_once_with_a_bigger_cap(mock_llm
     summary = await loop.run_turn("write the report")
 
     assert summary == "The complete draft."
-    assert loop._llm.calls[1]["max_tokens"] == 8_192
+    assert loop._llm.calls[1]["max_tokens"] == 65_536   # double the 131,072 window's derived cap
     replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
     assert len(replies) == 2
     completions = bus.history(event_types=[TaskComplete])

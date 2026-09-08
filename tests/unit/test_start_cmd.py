@@ -1254,15 +1254,22 @@ async def test_start_threads_config_dir_into_llm_config(tmp_path, monkeypatch):
         [str(c.config_dir) for c in live]
 
 
-@pytest.mark.parametrize("served, expected_max_tokens", [(8_192, 1_024), (131_072, 4_096)])
+@pytest.mark.parametrize(
+    "served, expected_max_tokens", [(8_192, 1_024), (32_768, 8_192), (131_072, 32_768)]
+)
 async def test_start_clamps_output_tokens_to_the_window_reserve(
     tmp_path, monkeypatch, served, expected_max_tokens
 ):
     """#145: the session's LLMConfig must ask for an output that fits inside the reserve. With
     the budget now equal to the served window, history may fill (window - reserve): on an 8,192
-    server that is 7,168 tokens, and the flat 4,096 default would make every request
+    server that is 7,168 tokens, and a 4,096 cap would make every request
     7,168 + 4,096 = 11,264 > 8,192 — an HTTP 400 mid-session on vLLM, which validates
-    prompt + max_tokens against max_model_len. A normal window is untouched."""
+    prompt + max_tokens against max_model_len.
+
+    These agents configure no `max_tokens`, so the cap is DERIVED from the window: a quarter of
+    it, floored at 4,096 and then fitted to the reserve. 131,072 -> 32,768 and 32,768 -> 8,192
+    are the derivation; 8,192 -> 1,024 is the floor meeting the small-window curve, unchanged
+    from the flat default it replaced."""
     from localharness.cli.start_cmd import _start_async
     from localharness.provider.client import LLMClient
 
@@ -1281,9 +1288,12 @@ async def test_start_clamps_output_tokens_to_the_window_reserve(
     assert live, "no LLMClient was built with the provider type"
     for cfg in live:
         assert cfg.max_tokens == expected_max_tokens, cfg.max_tokens
-        # the invariant, stated end-to-end: input allowance + requested output fits the server
+        # the invariant, stated end-to-end: input allowance + requested output fits the server.
+        # The reserve is asked for the SAME cap the request carries — a grown reserve is half of
+        # what makes a grown cap safe, and checking it against the flat floor would pass while
+        # the live session overran.
         from localharness.agent.context import response_reserve
-        assert (served - response_reserve(served)) + cfg.max_tokens <= served
+        assert (served - response_reserve(served, cfg.max_tokens)) + cfg.max_tokens <= served
 
 
 @pytest.mark.parametrize("served", [1_000, 1_024])

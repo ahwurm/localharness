@@ -2010,10 +2010,17 @@ class AgentLoop:
     # (doubled, within that headroom) whenever a reply is cut at the ceiling.
 
     def _configured_output_cap(self) -> int:
-        """The client's own per-request cap — the value a request carries when nothing overrides it."""
+        """The client's own per-request cap — the value a request carries when nothing overrides it.
+
+        The client's config is the authority: start_cmd already resolved the agent's cap there,
+        deriving one from the served window if no rung set a number. The two fallbacks are for a
+        loop built without that resolution (subagents under a stub client, tests) — the agent's
+        own number, else a cap derived from the window this loop is running in."""
+        from localharness.agent.context import resolve_output_cap
         return (
             getattr(getattr(self._llm, "config", None), "max_tokens", None)
             or self._config.max_tokens
+            or resolve_output_cap(None, getattr(self._ctx, "max_context_tokens", 0) or 0)
         )
 
     def _window_headroom(self, ctx_budget: Any) -> int | None:
