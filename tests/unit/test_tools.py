@@ -951,20 +951,70 @@ async def test_bash_exec_coreutils_resolve_without_git_on_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bash_exec_nonzero_exit_is_failure_and_keeps_output():
-    """A non-zero exit used to be success=True with the code tucked in metadata: the
-    terminal showed ✓ and the model read the result as done. It is a failure now, and
-    because the loop forwards .error (not .output) on failure, the command's own output
-    must travel inside the error message."""
+@pytest.mark.parametrize(
+    "command, rc",
+    [
+        ("echo boom >&2; exit 3", 3),
+        ("echo haystack | grep -q needle", 1),        # no match — grep's answer, not a fault
+        ("test -f /definitely/not/here", 1),          # false — the whole point of `test`
+    ],
+)
+async def test_bash_exec_ordinary_nonzero_exit_is_a_normal_result(command, rc):
+    """A command that RAN and said no is a result, not a tool failure. 0.13.1 briefly made every
+    non-zero exit an execution_error, which turned `grep` with no match, `test -f` and `diff`
+    into broken tools and fought the idioms models write commands in. The exit code has to be
+    visible, though — and metadata is not visible: the loop forwards result.output alone on
+    success, so the code goes in the text the model reads."""
     from localharness.tools.builtin.bash_tool import BashExecTool
 
-    result = await BashExecTool().run(command="echo boom >&2; exit 3")
+    result = await BashExecTool().run(command=command)
+    assert result.success is True, result.error
+    assert result.error_type is None
+    assert result.metadata.get("exit_code") == rc
+    assert f"exit code {rc}" in result.output
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_exit_zero_output_carries_no_exit_line():
+    """The ordinary success is untouched: no exit-code line on top of every result in the
+    session — the code is only worth its tokens when it is not 0."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command="echo hi")
+    assert result.success is True
+    assert result.output.strip() == "hi"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command, rc", [("__no_such_command_lh__", 127), ("/etc", 126)])
+async def test_bash_exec_could_not_run_is_a_loud_failure(command, rc):
+    """127 (not found) and 126 (not executable) mean the command never ran — no rephrasing of
+    it will work until something outside it changes, so it must fail loudly rather than read as
+    an answer. This is the Windows bug the strictness was for: a git-bash with no /usr/bin on
+    PATH made every `mkdir` a 127 that was reported ✓. Because the loop forwards .error (not
+    .output) on failure, the command's own message has to ride inside the error."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command=command)
     assert result.success is False
     assert result.error_type == "execution_error"
-    assert result.metadata.get("exit_code") == 3
-    assert "boom" in result.output
-    assert "exit code 3" in (result.error or "")
-    assert "boom" in (result.error or "")
+    assert result.metadata.get("exit_code") == rc
+    assert f"exit code {rc}" in (result.error or "")
+    # the shell's own diagnosis ("command not found", "Is a directory") travels with it
+    assert result.output.strip() and result.output.strip() in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_killed_by_signal_is_a_failure():
+    """A negative return code is "killed by signal N" on POSIX — a death, not a verdict."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    if os.name == "nt":
+        pytest.skip("negative return codes are the POSIX signal convention")
+    result = await BashExecTool().run(command="kill -9 $$")
+    assert result.success is False
+    assert result.error_type == "execution_error"
+    assert result.metadata.get("exit_code", 0) < 0
 
 
 @pytest.mark.asyncio

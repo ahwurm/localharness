@@ -152,13 +152,20 @@ that do not have one yet.
   first, and the Store `WindowsApps\bash.exe` WSL alias is rejected alongside the
   System32 stub. A regression test strips Git entries from PATH before running
   `command -v mkdir`.
-- **A non-zero `bash_exec` exit is now a tool failure.** It was `success=True`
-  with the code tucked in metadata: the terminal showed ✓ and the model read the
-  result as done. Because the loop forwards `.error` (not `.output`) on failure,
-  the command's output travels inside the error message (`exit code 127: …mkdir:
-  command not found`) so the model has something to react to. Commands that
-  legitimately exit non-zero (`grep` with no match, `diff`) now surface as
-  errors — append `|| true` when that is the intent.
+- **A `bash_exec` command that could not RUN is a tool failure, and its exit code
+  is visible either way.** Every non-zero exit used to be `success=True` with the
+  code tucked in metadata — and metadata never reaches the model, which reads
+  `output` alone on success — so the terminal showed ✓ and a `mkdir` that had
+  said `command not found` read as done. Exit 127 (not found), 126 (not
+  executable) and death by signal now fail: nothing about how the command is
+  phrased will make it work, so it has to be loud, and because the loop forwards
+  `.error` (not `.output`) on failure the command's own output travels inside the
+  error message (`exit code 127: …mkdir: command not found`). Every other
+  non-zero exit stays an ordinary result — `grep` with no match, `test -f` on a
+  missing file and `diff` on differing files are answers in the language commands
+  are written in, and calling them tool failures fought the idiom — but the
+  result now opens with an `exit code N` line, so the code the model could not
+  see before is in the text it actually reads. No `|| true` needed.
 - **`bash_exec` no longer inherits the harness's stdin, and a timeout kills the
   whole process tree.** Observed live (Windows): `cmd /c "…"` under git-bash —
   MSYS path-converts the `/c` flag, cmd starts interactive on the inherited
