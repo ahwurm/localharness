@@ -2012,6 +2012,25 @@ def test_derive_output_cap_is_a_fraction_of_the_window_with_a_floor():
         )
 
 
+def test_derive_output_cap_cannot_exceed_what_a_user_could_configure():
+    """A window validates up to 2,000,000 and a cap up to 128,000, so an unbounded quarter
+    derives 500,000 — a default no one could have typed into the same field by hand. Derivation
+    must not reach where configuration cannot."""
+    import pydantic
+    import pytest as _pytest
+
+    from localharness.agent.context import derive_output_cap
+    from localharness.config.defaults import MAX_CONFIGURABLE_MAX_TOKENS
+    from localharness.config.models import AgentConfig
+
+    assert derive_output_cap(524_288) == MAX_CONFIGURABLE_MAX_TOKENS
+    assert derive_output_cap(2_000_000) == MAX_CONFIGURABLE_MAX_TOKENS
+    # the bound is the schema's own, not a second opinion about it
+    AgentConfig(name="a", role="r", max_tokens=MAX_CONFIGURABLE_MAX_TOKENS)
+    with _pytest.raises(pydantic.ValidationError):
+        AgentConfig(name="a", role="r", max_tokens=MAX_CONFIGURABLE_MAX_TOKENS + 1)
+
+
 def test_derived_cap_always_fits_the_reserve_it_will_be_held_in():
     """The reason a QUARTER is the fraction: the reserve grows to hold the cap but is bounded at
     half the window, so a derived cap must never be the thing that hits that bound — if it did,

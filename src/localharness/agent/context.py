@@ -14,6 +14,7 @@ from typing import Any, Literal
 from localharness.config.defaults import (
     DEFAULT_MAX_CONTEXT_TOKENS,
     DEFAULT_MAX_TOKENS,
+    MAX_CONFIGURABLE_MAX_TOKENS,
     OUTPUT_CAP_WINDOW_FRACTION,
 )
 from localharness.core.types import Message
@@ -71,11 +72,17 @@ def derive_output_cap(max_context_tokens: int) -> int:
     the window can hold. The floor keeps the small end exactly where it was — what fits it to
     that window is `clamp_response_tokens` below, as it always was.
 
-    An unknown (<= 0) window has nothing to derive from and gets the floor.
+    Bounded above by `MAX_CONFIGURABLE_MAX_TOKENS`, which is the `le=` the max_tokens fields
+    validate against: a window may be configured up to 2,000,000, and a quarter of that is a
+    cap no user could legally have typed by hand. Derivation must not reach where configuration
+    cannot. An unknown (<= 0) window has nothing to derive from and gets the floor.
     """
     if max_context_tokens <= 0:
         return DEFAULT_MAX_TOKENS
-    return max(DEFAULT_MAX_TOKENS, int(max_context_tokens * OUTPUT_CAP_WINDOW_FRACTION))
+    return min(
+        MAX_CONFIGURABLE_MAX_TOKENS,
+        max(DEFAULT_MAX_TOKENS, int(max_context_tokens * OUTPUT_CAP_WINDOW_FRACTION)),
+    )
 
 
 def resolve_output_cap(configured_max_tokens: int | None, max_context_tokens: int) -> int:

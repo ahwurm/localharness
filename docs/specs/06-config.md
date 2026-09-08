@@ -1289,6 +1289,18 @@ resolve(agent_name: str) → AgentConfig:
          writes; "org omits" is read from the fields the org file actually set, not from
          OrgConfig's own schema defaults, or the org rung would shadow the overlay on
          every install.
+
+         The three scalars do NOT read the org rung from the same place, and the
+         difference is load-bearing. `max_tokens` reads it from the layered raw `org:`
+         section of config.yaml (workspace over global), falling back to the legacy
+         standalone org.yaml. `model` and `temperature` still read ONLY the org.yaml-backed
+         OrgConfig — a file nothing in src/ writes, since `init` puts `org:` inside
+         config.yaml — so their org rung is effectively dead on a real install. That is a
+         known gap left deliberately, not a description of intended behaviour: switching on
+         a `default_temperature` that has been inert in someone's config is a change that
+         needs its own decision. `max_tokens`'s unset spelling is also None at every rung
+         rather than a schema default, which is what lets "nobody chose a cap" reach `start`
+         and be derived from the served window.
        - ToolConfig.inherit, ToolConfig.add, ToolConfig.deny:
            These are ADDITIVE. Agent's tools = union of inherited tools + agent additions, minus denials.
            Denial always wins. See Section 5.2 for tool resolution details.

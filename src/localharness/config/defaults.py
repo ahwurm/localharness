@@ -15,6 +15,12 @@ DEFAULT_TEMPERATURE: float = 0.6
 # (agent/context.py: derive_output_cap) and never drops below this, so a small window keeps the
 # reply length 0.13.0 gave it. A configured number is used exactly and ignores both of these.
 DEFAULT_MAX_TOKENS: int = 4096
+# The largest per-reply cap the harness will accept OR derive — the `le=` bound on every
+# max_tokens field in config/models.py, named once so the schema and the derivation cannot
+# disagree. They did: max_context_tokens validates up to 2,000,000, so a quarter of a
+# long-context window derived a cap of 500,000, four times what the same user could have
+# legally typed into the field by hand.
+MAX_CONFIGURABLE_MAX_TOKENS: int = 128_000
 # ...and the fraction of the served window that derivation takes. A quarter is not a taste
 # number, it is the largest fraction that cannot collide with the reply reserve: the reserve
 # grows to hold the cap but is bounded at HALF the window (agent/context.py: response_reserve),
