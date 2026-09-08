@@ -37,16 +37,14 @@ _MINIMAL_CONFIG = {
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch) -> Path:
+def project(tmp_path, monkeypatch, fake_home) -> Path:
     """A configured machine and a project directory to sabotage."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
     (home / WORKSPACE_DIR_NAME / "config.yaml").write_text(
         yaml.dump(_MINIMAL_CONFIG), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     proj = tmp_path / "proj"
     proj.mkdir()

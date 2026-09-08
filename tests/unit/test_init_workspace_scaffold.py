@@ -59,7 +59,7 @@ def _no_prompts(monkeypatch):
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch) -> Path:
+def project(tmp_path, monkeypatch, fake_home) -> Path:
     """A CWD inside a fake project, with a fake `$HOME` holding an EMPTY global layer.
 
     All the env moves matter. Both `~` expansion and the discovery walk read `$HOME`, so a real one
@@ -68,11 +68,11 @@ def project(tmp_path, monkeypatch) -> Path:
     either set would make the conflict guard fire on a command line that never passed the flag.
     `LOCALHARNESS_ENDPOINT` / `LOCALHARNESS_MODEL` bind `--endpoint` / `--model` the same way.
     """
-    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
+    for var in ("LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
         monkeypatch.delenv(var, raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # keep rich from wrapping a path out of a message
     proj = tmp_path / "proj" / "src"
     proj.mkdir(parents=True)

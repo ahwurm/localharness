@@ -102,7 +102,7 @@ def test_persist_writes_the_audit_under_the_workspace_and_the_overlay_global(tmp
     )
 
 
-def test_explicit_config_dir_keeps_the_audit_inside_it(tmp_path, monkeypatch):
+def test_explicit_config_dir_keeps_the_audit_inside_it(tmp_path, monkeypatch, fake_home):
     """LAYR-02's full-replacement contract meeting MEMS-04: `--config-dir D` from INSIDE a
     workspace writes D's audit log, not the workspace's.
 
@@ -125,9 +125,7 @@ def test_explicit_config_dir_keeps_the_audit_inside_it(tmp_path, monkeypatch):
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(_CONFIG_YAML, encoding="utf-8")
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
 
     # A real in-project workspace, and the CWD is inside it — so discovery WOULD find it if the

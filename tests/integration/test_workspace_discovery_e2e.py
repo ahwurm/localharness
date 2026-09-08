@@ -70,7 +70,7 @@ def _write_agent(agents_dir: Path, name: str, role: str = "R") -> Path:
     return path
 
 
-def _hermetic(tmp_path: Path, monkeypatch, home: Path) -> Path:
+def _hermetic(tmp_path: Path, monkeypatch, fake_home, home: Path) -> Path:
     """A fake `$HOME` holding the GLOBAL layer, with both env overrides cleared.
 
     Every fixture needs all three moves. Both walks stop at `$HOME`, so a real one would let the
@@ -78,13 +78,11 @@ def _hermetic(tmp_path: Path, monkeypatch, home: Path) -> Path:
     `LOCALHARNESS_HOME`, which the resolver counts as an explicit selection — leaving it set would
     switch discovery off and every test below would pass for the wrong reason.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True, exist_ok=True)
     (global_dir / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
     _write_agent(global_dir / "agents", "global-agent", "global role")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # keep rich from wrapping the --json line
     return global_dir
 
@@ -141,7 +139,7 @@ def _names(result) -> list:
 # -------------------------------------------------------------------------------- fixtures
 
 
-def _build_project(tmp_path: Path, monkeypatch, *, nested: bool = False) -> SimpleNamespace:
+def _build_project(tmp_path: Path, monkeypatch, fake_home, *, nested: bool = False) -> SimpleNamespace:
     """A repository at `proj/` whose root holds the workspace, with the CWD two levels down.
 
     The `.git` directory is load-bearing, not decoration: it makes `proj/` the project the test is
@@ -149,7 +147,7 @@ def _build_project(tmp_path: Path, monkeypatch, *, nested: bool = False) -> Simp
     rule). `nested=True` adds a SECOND workspace at `proj/src/`, one level nearer the CWD.
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(tmp_path, monkeypatch, home)
+    global_dir = _hermetic(tmp_path, monkeypatch, fake_home, home)
 
     proj = tmp_path / "proj"
     ws_dir = proj / ".localharness"
@@ -178,30 +176,30 @@ def _build_project(tmp_path: Path, monkeypatch, *, nested: bool = False) -> Simp
 
 
 @pytest.fixture
-def workspace_project(tmp_path, monkeypatch):
+def workspace_project(tmp_path, monkeypatch, fake_home):
     """One workspace, at the root of the repository the CWD sits inside."""
-    project = _build_project(tmp_path, monkeypatch)
+    project = _build_project(tmp_path, monkeypatch, fake_home)
     _prompt_must_not_fire(monkeypatch)
     return project
 
 
 @pytest.fixture
-def nested_workspaces(tmp_path, monkeypatch):
+def nested_workspaces(tmp_path, monkeypatch, fake_home):
     """Two workspaces up-tree: `proj/` and the nearer `proj/src/`. Both are in-project."""
-    project = _build_project(tmp_path, monkeypatch, nested=True)
+    project = _build_project(tmp_path, monkeypatch, fake_home, nested=True)
     _prompt_must_not_fire(monkeypatch)
     return project
 
 
 @pytest.fixture
-def cwd_workspace(tmp_path, monkeypatch):
+def cwd_workspace(tmp_path, monkeypatch, fake_home):
     """The literal `./.localharness` case, outside any repository — v0.12's exact behavior.
 
     No `.git` anywhere, and the CWD *is* the workspace's folder, so this exercises the resolver's
     `found.parent == here` branch rather than the repository one.
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(tmp_path, monkeypatch, home)
+    global_dir = _hermetic(tmp_path, monkeypatch, fake_home, home)
 
     proj = tmp_path / "proj"
     ws_dir = proj / ".localharness"
@@ -216,7 +214,7 @@ def cwd_workspace(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def workspace_above_repo(tmp_path, monkeypatch):
+def workspace_above_repo(tmp_path, monkeypatch, fake_home):
     """The gated case: the nearest workspace sits ABOVE the repository root.
 
     `.localharness` at `outer/`, `.git` at `outer/inner/`, CWD `outer/inner/sub`. You opened the
@@ -225,7 +223,7 @@ def workspace_above_repo(tmp_path, monkeypatch):
     every row here into the silent in-project case.
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(tmp_path, monkeypatch, home)
+    global_dir = _hermetic(tmp_path, monkeypatch, fake_home, home)
 
     outer = tmp_path / "outer"
     ws_dir = outer / ".localharness"
@@ -347,12 +345,12 @@ def test_criterion3_localharness_dir_env_skips_discovery(workspace_project, monk
 # ------------------------------------------------------- criterion 4: no workspace, no difference
 
 
-def test_criterion4_no_workspace_uptree_is_unchanged(tmp_path, monkeypatch, doctor_offline):
+def test_criterion4_no_workspace_uptree_is_unchanged(tmp_path, monkeypatch, doctor_offline, fake_home):
     """LAYR-03: a user with no `.localharness/` anywhere up-tree sees v0.12's behavior and none of
     the new vocabulary. The roster is global-only and doctor does not mention a workspace at all —
     the new lines are conditional, not merely empty."""
     home = tmp_path / "home"
-    _hermetic(tmp_path, monkeypatch, home)
+    _hermetic(tmp_path, monkeypatch, fake_home, home)
     here = tmp_path / "empty" / "sub"
     here.mkdir(parents=True)
     monkeypatch.chdir(here)

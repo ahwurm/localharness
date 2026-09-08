@@ -36,13 +36,11 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch) -> Path:
+def project(tmp_path, monkeypatch, fake_home) -> Path:
     """CWD in a plain project, no env override, a fake $HOME with an empty global dir."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -117,14 +115,12 @@ def test_global_with_an_explicit_config_dir_still_works(project, tmp_path):
 # --------------------------------------------------- B5/B6: the fallback is announced
 
 
-def test_untrusted_workspace_fallback_is_announced(tmp_path, monkeypatch):
+def test_untrusted_workspace_fallback_is_announced(tmp_path, monkeypatch, fake_home):
     """A found-but-unusable workspace means `--project` mints a second dotdir. Say so, and name
     the one that was skipped — otherwise the user has two workspaces and no idea why."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     # A workspace ABOVE the cwd and outside any repository — 39-04's trust-gated shape.
     outside = tmp_path / "proj" / WORKSPACE_DIR_NAME

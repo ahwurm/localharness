@@ -932,7 +932,7 @@ def test_deploy_config_writes_to_agents_subdir(tmp_path):
     assert "name: test-bot" in result_path.read_text()
 
 
-def test_deploy_config_default_path(tmp_path, monkeypatch):
+def test_deploy_config_default_path(tmp_path, monkeypatch, fake_home):
     """ORCH-02: default deploy path is ~/.localharness/agents/{name}.yaml.
 
     #150 phase 38: the workflow's fallback routes through resolve_config_dir() now, which means
@@ -951,12 +951,7 @@ def test_deploy_config_default_path(tmp_path, monkeypatch):
     either expanduser consults is pointed at tmp_path, so the write lands in the tmp dir on
     POSIX and on Windows alike.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))            # posixpath.expanduser
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))     # ntpath.expanduser, first choice
-    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive or "")  # ntpath.expanduser, fallback pair
-    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):])
+    fake_home(tmp_path)
     from localharness.orchestrator.workflow import AgentCreationWorkflow
     wf = AgentCreationWorkflow()  # no config_dir
     wf.set_generated_yaml("name: default-bot\nrole: Default\n")

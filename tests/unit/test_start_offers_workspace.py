@@ -22,18 +22,16 @@ from localharness.cli.workspace import offer_workspace_creation
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch) -> Path:
+def project(tmp_path, monkeypatch, fake_home) -> Path:
     """A hermetic `$HOME` with the global layer, and a project directory with NO workspace.
 
     Both env overrides are cleared: `resolve_workspace_layer` counts either one as an explicit
     selection, and conftest sets `LOCALHARNESS_HOME` for the whole suite — left set, every
     assertion below would pass for the wrong reason.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     (home / ".localharness").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     proj = home / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
@@ -285,12 +283,10 @@ def test_home_is_not_a_project(project, monkeypatch):
     assert sorted((home / ".localharness").iterdir()) == before
 
 
-def test_the_global_config_dir_is_not_a_project_even_outside_home(tmp_path, monkeypatch):
+def test_the_global_config_dir_is_not_a_project_even_outside_home(tmp_path, monkeypatch, fake_home):
     """The realpath-keyed check, not the home rule: a global dir somewhere else is still not a
     workspace to be created."""
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    fake_home(tmp_path / "home")
     (tmp_path / "home" / ".localharness").mkdir(parents=True)
     monkeypatch.chdir(tmp_path / "home")
     _tty(monkeypatch)

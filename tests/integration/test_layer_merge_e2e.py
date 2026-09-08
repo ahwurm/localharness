@@ -117,6 +117,7 @@ def _prompt_must_not_fire(monkeypatch) -> None:
 def _layout(
     tmp_path: Path,
     monkeypatch,
+    fake_home,
     *,
     global_models: list[str],
     workspace: bool = True,
@@ -137,13 +138,11 @@ def _layout(
     outside the fixture can be discovered even if the machine running the suite has a stray
     `.localharness` in a parent of `tmp_path`.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(_full_config(global_models), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # keep rich from wrapping the --json line
 
     proj = home / "proj"
@@ -195,7 +194,7 @@ def doctor_offline(monkeypatch):
 # --------------------------------------------- criterion 1: a workspace config.yaml is finally read
 
 
-def test_criterion1_workspace_config_value_reaches_a_real_command(tmp_path, monkeypatch):
+def test_criterion1_workspace_config_value_reaches_a_real_command(tmp_path, monkeypatch, fake_home):
     """MERG-01 from the command line, and the first invocation in this project's history where a
     workspace `config.yaml` is read at all.
 
@@ -210,7 +209,7 @@ def test_criterion1_workspace_config_value_reaches_a_real_command(tmp_path, monk
     test instead pins that it leaves `provider.available_models` alone, never touches the WORKSPACE
     file, and that a second invocation on the rewritten global config still resolves the same way.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["global-only-model"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["global-only-model"])
     ws_config = layout.ws_dir / "config.yaml"
     ws_config.write_text(_models_only(["workspace-only-model"]), encoding="utf-8")
     ws_bytes_before = ws_config.read_bytes()
@@ -236,7 +235,7 @@ def test_criterion1_workspace_config_value_reaches_a_real_command(tmp_path, monk
 # ------------------------------------------------------- criterion 4: the ruled order, end to end
 
 
-def test_criterion4_workspace_config_beats_global_overrides_end_to_end(tmp_path, monkeypatch):
+def test_criterion4_workspace_config_beats_global_overrides_end_to_end(tmp_path, monkeypatch, fake_home):
     """The owner's ruling (Option A, 2026-09-03) as a user experiences it.
 
     Three layers set the same key. The ruled order is global `config.yaml` < global
@@ -248,7 +247,7 @@ def test_criterion4_workspace_config_beats_global_overrides_end_to_end(tmp_path,
     All three absences are asserted, not just the winner's presence: "the right one is printed"
     would pass with all three printed, which is a merge that resolves nothing.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["from-global-config"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["from-global-config"])
     (layout.global_dir / "overrides.yaml").write_text(
         _models_only(["from-global-overrides"]), encoding="utf-8"
     )
@@ -265,11 +264,11 @@ def test_criterion4_workspace_config_beats_global_overrides_end_to_end(tmp_path,
     assert "from-global-overrides" not in out
 
 
-def test_criterion4_workspace_overrides_beats_workspace_config_end_to_end(tmp_path, monkeypatch):
+def test_criterion4_workspace_overrides_beats_workspace_config_end_to_end(tmp_path, monkeypatch, fake_home):
     """The top of the ladder. Four sources now set the same key and the workspace's own
     `overrides.yaml` is the highest-priority layer, so it wins over the workspace `config.yaml`
     sitting next to it — the same relationship the global pair has, one scope down."""
-    layout = _layout(tmp_path, monkeypatch, global_models=["from-global-config"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["from-global-config"])
     (layout.global_dir / "overrides.yaml").write_text(
         _models_only(["from-global-overrides"]), encoding="utf-8"
     )
@@ -293,7 +292,7 @@ def test_criterion4_workspace_overrides_beats_workspace_config_end_to_end(tmp_pa
 # ------------------------------------------------------------ criterion 5: the agent roster union
 
 
-def test_criterion5_agent_list_shows_the_union_with_the_workspace_winning(tmp_path, monkeypatch):
+def test_criterion5_agent_list_shows_the_union_with_the_workspace_winning(tmp_path, monkeypatch, fake_home):
     """AGNT-01 from a command: the roster is the UNION of both layers, not a replacement of one by
     the other, and a colliding name resolves to the workspace's file.
 
@@ -301,7 +300,7 @@ def test_criterion5_agent_list_shows_the_union_with_the_workspace_winning(tmp_pa
     replaced the other wholesale would drop one of the two singletons; a merge that preferred the
     global layer would report `GLOBAL DEPLOYER`.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["global-only-model"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["global-only-model"])
     _write_agent(layout.global_dir / "agents", "reporter", "GLOBAL REPORTER")
     _write_agent(layout.global_dir / "agents", "deployer", "GLOBAL DEPLOYER")
     _write_agent(layout.ws_dir / "agents", "deployer", "WORKSPACE DEPLOYER")
@@ -319,7 +318,7 @@ def test_criterion5_agent_list_shows_the_union_with_the_workspace_winning(tmp_pa
 # -------------------------------------------------- criterion 3: a partial provider override works
 
 
-def test_criterion3_workspace_provider_partial_override_still_starts(tmp_path, monkeypatch):
+def test_criterion3_workspace_provider_partial_override_still_starts(tmp_path, monkeypatch, fake_home):
     """MERG-03's hardware-truth half, proven by the command running at all.
 
     The workspace sets ONLY `provider.available_models` — no `provider_type`, no `base_url`, no
@@ -329,7 +328,7 @@ def test_criterion3_workspace_provider_partial_override_still_starts(tmp_path, m
     exit code 0 is itself an assertion here, and the printed name says which layer supplied the one
     key the workspace did set.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["global-only-model"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["global-only-model"])
     (layout.ws_dir / "config.yaml").write_text(_models_only(["ws-model"]), encoding="utf-8")
 
     result = runner.invoke(app, ["start", "--list-models"])
@@ -343,7 +342,7 @@ def test_criterion3_workspace_provider_partial_override_still_starts(tmp_path, m
 # --------------------------------------- LAYR-02: an explicit config dir still skips the whole walk
 
 
-def test_explicit_config_dir_still_skips_the_merge(tmp_path, monkeypatch):
+def test_explicit_config_dir_still_skips_the_merge(tmp_path, monkeypatch, fake_home):
     """Naming a config directory replaces the config layer OUTRIGHT — discovery never runs, so the
     workspace two levels up contributes nothing even though the walk would find it.
 
@@ -352,7 +351,7 @@ def test_explicit_config_dir_still_skips_the_merge(tmp_path, monkeypatch):
     was skipped rather than merely outranked. Landing the merge must not quietly turn
     `--config-dir` back into a partial selection.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["from-global-config"])
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["from-global-config"])
     (layout.global_dir / "overrides.yaml").write_text(
         _models_only(["from-global-overrides"]), encoding="utf-8"
     )
@@ -373,7 +372,7 @@ def test_explicit_config_dir_still_skips_the_merge(tmp_path, monkeypatch):
 # ------------------------------------------------ LAYR-03: nothing up-tree, nothing changes at all
 
 
-def test_criterion_layr03_nothing_uptree_is_unchanged(tmp_path, monkeypatch, doctor_offline):
+def test_criterion_layr03_nothing_uptree_is_unchanged(tmp_path, monkeypatch, doctor_offline, fake_home):
     """The standing invariant at the end of every phase, in its user-visible form for phase 40.
 
     A user with no `.localharness/` anywhere up-tree gets the global config, the global roster and
@@ -381,7 +380,7 @@ def test_criterion_layr03_nothing_uptree_is_unchanged(tmp_path, monkeypatch, doc
     `Workspace layer:` line is the sharp end: the new lines are CONDITIONAL, not merely empty, so a
     workspace-less user's output is byte-for-byte what it was before phase 40.
     """
-    layout = _layout(tmp_path, monkeypatch, global_models=["global-only-model"], workspace=False)
+    layout = _layout(tmp_path, monkeypatch, fake_home, global_models=["global-only-model"], workspace=False)
     _write_agent(layout.global_dir / "agents", "reporter", "GLOBAL REPORTER")
 
     models = runner.invoke(app, ["start", "--list-models"])

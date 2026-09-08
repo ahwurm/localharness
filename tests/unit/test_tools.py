@@ -394,11 +394,10 @@ async def test_glob_tool_absolute_trailing_double_star_finds_files(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_glob_tool_tilde_trailing_double_star_finds_files(tmp_path, monkeypatch):
+async def test_glob_tool_tilde_trailing_double_star_finds_files(tmp_path, monkeypatch, fake_home):
     """#74: a '~/…/**' pattern expands home AND matches files at depth >=1 (the live shape)."""
     import os  # noqa: F401
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' Path.expanduser() prefers this over HOME
+    fake_home(tmp_path, clear_overrides=False)
     agents = tmp_path / ".localharness" / "agents"
     agents.mkdir(parents=True)
     (agents / "mine.yaml").write_text("name: mine")
@@ -1120,10 +1119,9 @@ async def test_web_fetch_start_index_past_end_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_file_tools_expand_tilde(tmp_path, monkeypatch):
+async def test_file_tools_expand_tilde(tmp_path, monkeypatch, fake_home):
     """Models routinely pass ~ paths (observed live: read + glob both failed on them)."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' Path.expanduser() prefers this over HOME
+    fake_home(tmp_path, clear_overrides=False)
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "a.txt").write_text("tilde works")
 

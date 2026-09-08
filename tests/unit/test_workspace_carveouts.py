@@ -141,7 +141,7 @@ def _only(items: list, what: str):
 
 
 async def test_a_workspace_session_confines_the_file_tools_to_the_project_root(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """The default reaches the tools, and it is the PROJECT, not the config folder inside it.
 
@@ -159,7 +159,7 @@ async def test_a_workspace_session_confines_the_file_tools_to_the_project_root(
     never fire, so it would be decorative. This way the dotdir mistake is caught by the assertion
     written for it, and every other wrong value is caught by the equality underneath.
     """
-    _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     proj = ws.parent
     calls = _record_tool_registration(monkeypatch)
 
@@ -173,13 +173,13 @@ async def test_a_workspace_session_confines_the_file_tools_to_the_project_root(
     assert root == str(proj), f"the file tools were confined to {root}, not the project {proj}"
 
 
-async def test_an_explicit_workspace_root_still_wins_inside_a_workspace(tmp_path, monkeypatch):
+async def test_an_explicit_workspace_root_still_wins_inside_a_workspace(tmp_path, monkeypatch, fake_home):
     """A default fills a gap; it does not overwrite an answer you already gave.
 
     The project root is asserted ABSENT rather than only asserting the explicit value is present:
     a test that checks one value is there passes just as happily when both are.
     """
-    _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     proj = ws.parent
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -202,10 +202,10 @@ async def test_an_explicit_workspace_root_still_wins_inside_a_workspace(tmp_path
     assert root != str(proj), "the workspace default overwrote the root the user configured"
 
 
-async def test_with_no_workspace_the_file_tools_stay_unconfined(tmp_path, monkeypatch):
+async def test_with_no_workspace_the_file_tools_stay_unconfined(tmp_path, monkeypatch, fake_home):
     """The control. With nothing up-tree there is no layer to default from, so the contract is
     untouched: `workspace_root=None`, which means unconfined, exactly as before v0.13."""
-    _home, _global_dir, _proj = _global_only_start(tmp_path, monkeypatch)
+    _home, _global_dir, _proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     calls = _record_tool_registration(monkeypatch)
 
     await _drive()
@@ -217,7 +217,7 @@ async def test_with_no_workspace_the_file_tools_stay_unconfined(tmp_path, monkey
 # --------------------------------------------------------- criterion 5: the GPU server carve-out
 
 
-async def test_a_workspace_session_resolves_the_gpu_server_dir_globally(tmp_path, monkeypatch):
+async def test_a_workspace_session_resolves_the_gpu_server_dir_globally(tmp_path, monkeypatch, fake_home):
     """A session WITH a workspace still asks the global-only function where the daemon lives.
 
     What this proves: during a real workspace drive, the line that binds `server_cfg_path` called
@@ -229,7 +229,7 @@ async def test_a_workspace_session_resolves_the_gpu_server_dir_globally(tmp_path
     it was written — and it is re-run alongside this file rather than re-derived here. The two
     together are criterion 5; neither is it alone.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     calls = _record_global_config_dir(monkeypatch)
 
     await _drive()
@@ -263,7 +263,7 @@ async def test_a_workspace_session_resolves_the_gpu_server_dir_globally(tmp_path
 
 
 async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_session(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """The rest of the never-follows list, recorded from the same real workspace drive.
 
@@ -276,7 +276,7 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
     These three are what the published table's right-hand column claims beyond the kill switch, the
     GPU daemon and the safety context, so they are asserted rather than assumed.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
 
     tools_dirs: list = []
     monkeypatch.setattr(
@@ -309,7 +309,7 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
         assert ws not in path.parents and path != ws, f"{path} followed the workspace"
 
 
-async def test_a_model_swap_inside_a_workspace_session_audits_in_the_project(tmp_path, monkeypatch):
+async def test_a_model_swap_inside_a_workspace_session_audits_in_the_project(tmp_path, monkeypatch, fake_home):
     """MEMS-04 end to end: the swap is recorded where the work is, the overlay is written globally.
 
     The previous plan proved this in three pieces — that `start` hands the REPL its workspace, that
@@ -321,7 +321,7 @@ async def test_a_model_swap_inside_a_workspace_session_audits_in_the_project(tmp
     one model server, and a swap that audited globally would put this project's history in another
     project's log.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     swapped: dict = {}
 
     async def _swap_the_model(self):
@@ -366,7 +366,7 @@ async def test_one_repl_answers_two_questions_about_one_session(tmp_path, monkey
     )
 
 
-async def test_a_fresh_workspace_starts_with_a_memory_of_its_own(tmp_path, monkeypatch):
+async def test_a_fresh_workspace_starts_with_a_memory_of_its_own(tmp_path, monkeypatch, fake_home):
     """Nothing is copied out of your global store, and nothing in it is rewritten.
 
     This backs the published promise that opening the harness in a new project gives that project
@@ -378,7 +378,7 @@ async def test_a_fresh_workspace_starts_with_a_memory_of_its_own(tmp_path, monke
     copies memory between stores — that absence IS the promise. It is a forward guard, so a later
     change that helpfully seeds a new workspace from the global store cannot land unnoticed.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     global_notes = global_dir / "agents" / AGENT / "MEMORY.md"
     global_notes.parent.mkdir(parents=True)
     global_notes.write_text("GLOBAL-MEMORY-MARKER\n")
@@ -397,7 +397,7 @@ async def test_a_fresh_workspace_starts_with_a_memory_of_its_own(tmp_path, monke
 # ------------------------------------------------- the safety split, at the live store
 
 
-async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_path, monkeypatch):
+async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_path, monkeypatch, fake_home):
     """The live proof of amendment #4: memory follows the work, the safety voice never does.
 
     A decoy `GUARDRAILS.md` and `DIVISION.md` are planted INSIDE the workspace. If the store's
@@ -408,7 +408,7 @@ async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_pa
     `load_context()` while the database is still open, which is the same call the agent loop makes
     to build a system prompt. A path assertion alone would only show where the store is pointed.
     """
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     stores = _record_store_instances(monkeypatch)
 
     (global_dir / "orgs" / "default").mkdir(parents=True)

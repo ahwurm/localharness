@@ -399,10 +399,10 @@ async def _global_copy(global_dir: Path, key: str = KEY):
         await gl.close()
 
 
-async def test_a_live_workspace_session_promotes_into_the_global_store(tmp_path, monkeypatch):
+async def test_a_live_workspace_session_promotes_into_the_global_store(tmp_path, monkeypatch, fake_home):
     """The end-to-end claim: `/memory promote <id> confirm` typed in a real workspace session puts
     the fact in `<global>/agents/<AGENT>/memory.db`."""
-    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     seen: dict = {}
     _in_session(monkeypatch, seen, "promote {id} confirm")
 
@@ -416,11 +416,11 @@ async def test_a_live_workspace_session_promotes_into_the_global_store(tmp_path,
     assert copy.source == "promote"
 
 
-async def test_the_promoted_provenance_names_the_project_root(tmp_path, monkeypatch):
+async def test_the_promoted_provenance_names_the_project_root(tmp_path, monkeypatch, fake_home):
     """Which workspace it came from, in the ONE identity format this milestone uses: the project
     root, realpath'd — the same string `permissions.workspace_root` carries and the trust store
     keys on. NOT the `.localharness` dir, and not a workspace-relative name."""
-    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     seen: dict = {}
     _in_session(monkeypatch, seen, "promote {id} confirm")
 
@@ -436,10 +436,10 @@ async def test_the_promoted_provenance_names_the_project_root(tmp_path, monkeypa
     assert original == ORIG_PROV, "the original provenance chain was dropped"
 
 
-async def test_the_memory_window_still_browses_only_this_projects_store(tmp_path, monkeypatch):
+async def test_the_memory_window_still_browses_only_this_projects_store(tmp_path, monkeypatch, fake_home):
     """The ruled v1 boundary, asserted so that widening it is a deliberate act: promote is the ONE
     verb that reaches across. `search` (and the rest of the browsing family) stays primary-only."""
-    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_decoy(global_dir)
     seen: dict = {}
     _in_session(monkeypatch, seen, "search never")
@@ -452,10 +452,10 @@ async def test_the_memory_window_still_browses_only_this_projects_store(tmp_path
         f"/memory search did not even read this project's own store: {seen['out']!r}"
 
 
-async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path, monkeypatch):
+async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path, monkeypatch, fake_home):
     """With no `.localharness/` the session's memory IS the machine-global memory. The failure mode
     this guards is a promote that "succeeds" by writing a duplicate row into the same database."""
-    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch)
+    _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     seen: dict = {}
     _in_session(monkeypatch, seen, "promote {id} confirm")
 
@@ -468,7 +468,7 @@ async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path
     assert len(history) == 1, f"promote forked the one store it had: {history}"
 
 
-async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypatch):
+async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypatch, fake_home):
     """The discrimination the behavioral tests cannot make.
 
     "start never passed the router to the REPL" and "the REPL never used it" both leave promote
@@ -478,7 +478,7 @@ async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypa
     databases would behave correctly here and would open a second aiosqlite connection to one file
     (Pitfall 6), which is exactly the lifecycle `ensure_global` exists to keep single-owner.
     """
-    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch)
+    _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
 
     await _drive()

@@ -54,6 +54,7 @@ def _listing(root: Path) -> list[str]:
 def _layout(
     tmp_path: Path,
     monkeypatch,
+    fake_home,
     *,
     ws_config: Optional[dict] = None,
     workspace: bool = True,
@@ -65,13 +66,11 @@ def _layout(
         <home>/proj/.localharness/ WORKSPACE layer: config.yaml, per test
         <home>/proj/src/pkg/       the CWD every invocation runs from
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(yaml.safe_dump(_GLOBAL_CONFIG), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     # rich wraps at the console width; a wrapped path is not a printed path.
     monkeypatch.setenv("COLUMNS", "400")
 
@@ -110,14 +109,14 @@ def _layout(
 # ------------------------------------------------------------------ #
 
 
-def test_f4_get_from_a_subdirectory_reports_the_workspace_value_and_band(tmp_path, monkeypatch):
+def test_f4_get_from_a_subdirectory_reports_the_workspace_value_and_band(tmp_path, monkeypatch, fake_home):
     """The dogfood repro. Three assertions, and all three are load-bearing.
 
     "the workspace value is printed" also passes when BOTH values are printed, and "the band is
     not global" also passes when the band is `default`. The negative assertion on the global value
     is what proves the workspace one replaced it rather than joining it.
     """
-    _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["components", "get", "org.name"])
 
@@ -127,10 +126,10 @@ def test_f4_get_from_a_subdirectory_reports_the_workspace_value_and_band(tmp_pat
     assert _GLOBAL_NAME not in result.stdout, result.stdout
 
 
-def test_f4_get_json_twin_carries_the_workspace_band(tmp_path, monkeypatch):
+def test_f4_get_json_twin_carries_the_workspace_band(tmp_path, monkeypatch, fake_home):
     """Machine output tells the same truth. `--json` also means non-interactive: a workspace from
     outside the project must never stop to prompt on a payload stream."""
-    _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["components", "get", "--json", "org.name"])
 
@@ -140,12 +139,13 @@ def test_f4_get_json_twin_carries_the_workspace_band(tmp_path, monkeypatch):
     assert payload["value"] == _WORKSPACE_NAME
 
 
-def test_list_layer_filter_selects_exactly_the_workspace_set_paths(tmp_path, monkeypatch):
+def test_list_layer_filter_selects_exactly_the_workspace_set_paths(tmp_path, monkeypatch, fake_home):
     """`--layer workspace-config` is a band a user can now ask for by name, and it returns the
     paths that file set — exactly those, not "at least" those."""
     _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         ws_config={"org": {"name": _WORKSPACE_NAME, "log_level": "debug"}},
     )
 
@@ -162,13 +162,13 @@ def test_list_layer_filter_selects_exactly_the_workspace_set_paths(tmp_path, mon
 # ------------------------------------------------------------------ #
 
 
-def test_set_names_the_global_file_it_wrote_and_says_it_is_machine_wide(tmp_path, monkeypatch):
+def test_set_names_the_global_file_it_wrote_and_says_it_is_machine_wide(tmp_path, monkeypatch, fake_home):
     """The write target is unchanged v0.13 policy; what changes is that the command SAYS so.
 
     The third assertion is the one that makes the first two mean something: nothing may be written
     into the workspace, so the note is a disclosure and not a description of a split write.
     """
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"log_level": "debug"}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"log_level": "debug"}})
     before = _listing(layout.ws_dir)
 
     result = runner.invoke(app, ["components", "set", "org.name", "SET-BY-CLI"])
@@ -183,10 +183,10 @@ def test_set_names_the_global_file_it_wrote_and_says_it_is_machine_wide(tmp_path
     assert "layer: user" not in result.stdout, result.stdout
 
 
-def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_path, monkeypatch):
+def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_path, monkeypatch, fake_home):
     """A machine-wide write to a key THIS project already owns changes nothing here, and saying
     only "machine-wide" would leave the user watching a value that never moves."""
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(app, ["components", "set", "org.name", "SET-BY-CLI"])
 
@@ -199,7 +199,7 @@ def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_
     assert json.loads(after.stdout)["value"] == _WORKSPACE_NAME
 
 
-def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatch):
+def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatch, fake_home):
     """`set`'s own loader must be workspace-aware too, not just the catalogue.
 
     Written because the prescribed mutation for that wire measured ZERO red: the loader
@@ -213,6 +213,7 @@ def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatc
     layout = _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         ws_config={"org": {"log_level": "debug", "audit_log_path": "ws-audit.jsonl"}},
     )
 
@@ -225,10 +226,10 @@ def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatc
     )
 
 
-def test_set_json_carries_the_write_target_and_keeps_the_audit_vocabulary(tmp_path, monkeypatch):
+def test_set_json_carries_the_write_target_and_keeps_the_audit_vocabulary(tmp_path, monkeypatch, fake_home):
     """`target` is new; `layer` is NOT renamed. It mirrors the ComponentMutated audit event's own
     vocabulary, which this phase deliberately leaves alone (a persisted log's schema)."""
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"log_level": "debug"}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"log_level": "debug"}})
 
     result = runner.invoke(app, ["components", "set", "--json", "org.name", "SET-BY-CLI"])
 
@@ -238,9 +239,9 @@ def test_set_json_carries_the_write_target_and_keeps_the_audit_vocabulary(tmp_pa
     assert payload["layer"] == "user"
 
 
-def test_set_with_no_workspace_says_nothing_about_a_project(tmp_path, monkeypatch):
+def test_set_with_no_workspace_says_nothing_about_a_project(tmp_path, monkeypatch, fake_home):
     """LAYR-03 on the human output: with nothing up-tree the extra note must not appear at all."""
-    layout = _layout(tmp_path, monkeypatch, workspace=False)
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
 
     result = runner.invoke(app, ["components", "set", "org.name", "SET-BY-CLI"])
 
@@ -254,10 +255,10 @@ def test_set_with_no_workspace_says_nothing_about_a_project(tmp_path, monkeypatc
 # ------------------------------------------------------------------ #
 
 
-def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch):
+def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch, fake_home):
     """LAYR-02: an explicit --config-dir is a FULL replacement, not an addition. The workspace is
     two directories up and must not be seen."""
-    layout = _layout(tmp_path, monkeypatch, ws_config={"org": {"name": _WORKSPACE_NAME}})
+    layout = _layout(tmp_path, monkeypatch, fake_home, ws_config={"org": {"name": _WORKSPACE_NAME}})
 
     result = runner.invoke(
         app,
@@ -270,9 +271,9 @@ def test_config_dir_skips_discovery_entirely(tmp_path, monkeypatch):
     assert payload["layer"] == "global-config"
 
 
-def test_no_workspace_control_is_unchanged_except_for_the_spelling(tmp_path, monkeypatch):
+def test_no_workspace_control_is_unchanged_except_for_the_spelling(tmp_path, monkeypatch, fake_home):
     """With nothing up-tree, attribution is exactly what it was before v0.13, honestly spelled."""
-    _layout(tmp_path, monkeypatch, workspace=False)
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
 
     result = runner.invoke(app, ["components", "get", "--json", "org.name"])
 

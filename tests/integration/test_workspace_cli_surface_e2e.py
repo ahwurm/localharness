@@ -100,7 +100,7 @@ def _subdir(proj: Path, monkeypatch) -> Path:
     return sub
 
 
-def _scaffolded_project(tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
+def _scaffolded_project(tmp_path, monkeypatch, fake_home) -> tuple[Path, Path, Path]:
     """A fake `$HOME` and a git-marked project whose workspace was created by the SHIPPED CLI.
 
     Returns `(home, global_dir, project_root)`. The `.git` marker makes `proj/` the project the
@@ -108,7 +108,7 @@ def _scaffolded_project(tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
     `_boom` turns a prompt into a failure instead of a hang.
     """
     home = tmp_path / "home"
-    global_dir = _hermetic(monkeypatch, home)
+    global_dir = _hermetic(monkeypatch, fake_home, home)
     _stub_start_boundaries(global_dir, monkeypatch)  # writes the GLOBAL config.yaml
     _offline_provider(global_dir)
 
@@ -130,14 +130,14 @@ def _scaffolded_project(tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
 # ------------------------------------------------------------------ 1. it is found from below
 
 
-def test_the_cli_made_workspace_is_discovered_from_a_subdirectory(tmp_path, monkeypatch):
+def test_the_cli_made_workspace_is_discovered_from_a_subdirectory(tmp_path, monkeypatch, fake_home):
     """The first link in the chain: the command wrote a layer that discovery recognises.
 
     `resolve_workspace_layer(None)` rather than `discover_workspace_dir()` alone, because the
     resolver is the gate that could ask for trust — and `_boom` is installed, so a prompt on an
     in-project workspace fails this test rather than silently changing the answer.
     """
-    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch)
+    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     ws = proj / WORKSPACE_DIR_NAME
     _subdir(proj, monkeypatch)
 
@@ -152,7 +152,7 @@ def test_the_cli_made_workspace_is_discovered_from_a_subdirectory(tmp_path, monk
 
 
 def test_an_agent_in_the_scaffolded_dir_appears_in_the_roster_from_a_subdirectory(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """`agents/` is the directory the scaffold creates for you, so putting a yaml in it must be all
     it takes for `agent list` to see it from anywhere in the project.
@@ -161,7 +161,7 @@ def test_an_agent_in_the_scaffolded_dir_appears_in_the_roster_from_a_subdirector
     fix (`typer.echo`, not a Rich console that eats `[...]` and wraps mid-string), reached from a
     different file and a different topology than the one that pinned it.
     """
-    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch)
+    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     _write_agent(proj / WORKSPACE_DIR_NAME / "agents", AGENT)
     _subdir(proj, monkeypatch)
 
@@ -176,7 +176,7 @@ def test_an_agent_in_the_scaffolded_dir_appears_in_the_roster_from_a_subdirector
 
 
 async def test_a_session_in_the_cli_made_workspace_lands_its_state_in_the_project(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """The milestone's sentence, executable: scaffold with the command, then run a real session.
 
@@ -198,7 +198,7 @@ async def test_a_session_in_the_cli_made_workspace_lands_its_state_in_the_projec
     stats), so "the global dir is unchanged" would be false today and any later relaxation of it
     would be indistinguishable from a regression.
     """
-    _home, global_dir, proj = _scaffolded_project(tmp_path, monkeypatch)
+    _home, global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     ws = proj / WORKSPACE_DIR_NAME
     # The agent lives in the WORKSPACE, so the roster comes from the workspace and `start`'s
     # root-agent mint branch never fires — nothing writes an agent into the global dir, which is
@@ -236,7 +236,7 @@ async def test_a_session_in_the_cli_made_workspace_lands_its_state_in_the_projec
 
 
 async def test_the_scaffold_confines_the_file_tools_to_the_project_not_the_dotdir(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_home
 ):
     """CONF-01 arrives with the scaffold: no second setup step, and the root is the PROJECT.
 
@@ -248,7 +248,7 @@ async def test_the_scaffold_confines_the_file_tools_to_the_project_not_the_dotdi
     equality first, a `.parent`-shaped regression reddens that line and the dotdir assertion below
     can never fire, which would make it decorative.
     """
-    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch)
+    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     ws = proj / WORKSPACE_DIR_NAME
     _write_agent(ws / "agents", AGENT)
     _subdir(proj, monkeypatch)
@@ -267,7 +267,7 @@ async def test_the_scaffold_confines_the_file_tools_to_the_project_not_the_dotdi
 # ------------------------------------------------------------------ 5. the new CLI surface
 
 
-def test_both_new_surfaces_name_the_scaffolded_file_as_the_source(tmp_path, monkeypatch):
+def test_both_new_surfaces_name_the_scaffolded_file_as_the_source(tmp_path, monkeypatch, fake_home):
     """Set one key in the file the command wrote, and ask the two new commands who set it.
 
     This also proves the comment block is INERT rather than merely harmless: the scaffolded config
@@ -279,7 +279,7 @@ def test_both_new_surfaces_name_the_scaffolded_file_as_the_source(tmp_path, monk
     whole output would be satisfied by the header even if the key row credited the global file —
     that is 43-05's shadow, and it is the failure mode this file is most exposed to.
     """
-    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch)
+    _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     cfg = proj / WORKSPACE_DIR_NAME / "config.yaml"
     original = cfg.read_text()
     assert yaml.safe_load(original) is None, "the scaffolded config was not comment-only"
@@ -307,7 +307,7 @@ def test_both_new_surfaces_name_the_scaffolded_file_as_the_source(tmp_path, monk
 # ------------------------------------------------------------------ 6. the LAYR-03 control
 
 
-async def test_a_project_that_never_ran_init_workspace_sees_none_of_this(tmp_path, monkeypatch):
+async def test_a_project_that_never_ran_init_workspace_sees_none_of_this(tmp_path, monkeypatch, fake_home):
     """LAYR-03: skip the one command, and the harness is exactly what it was before v0.13.
 
     The same fake `$HOME`, the same git-marked project, the same subdirectory, the same offline
@@ -315,7 +315,7 @@ async def test_a_project_that_never_ran_init_workspace_sees_none_of_this(tmp_pat
     `.localharness/` appears in the project, and neither new surface says the word `workspace-`
     anywhere: a user who never made a workspace sees no trace of the feature.
     """
-    _home, global_dir, proj = _global_only_start(tmp_path, monkeypatch)
+    _home, global_dir, proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     _offline_provider(global_dir)
     _subdir(proj, monkeypatch)
     assert discover_workspace_dir() is None, "premise: the control must find no workspace"

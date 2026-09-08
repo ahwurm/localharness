@@ -30,14 +30,12 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def unconfigured_project(tmp_path, monkeypatch) -> Path:
+def unconfigured_project(tmp_path, monkeypatch, fake_home) -> Path:
     """CWD inside a project, with a $HOME that has NO `.localharness` at all."""
-    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LOCALHARNESS_ENDPOINT",
-                "LOCALHARNESS_MODEL"):
+    for var in ("LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
         monkeypatch.delenv(var, raising=False)
     home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     proj = tmp_path / "proj"
     proj.mkdir()

@@ -111,12 +111,12 @@ def test_a_pointer_at_a_git_dir_that_is_gone_fails_closed(tmp_path):
     assert workspace_is_within_repo(workspace, wt) is False
 
 
-def test_a_worktree_of_a_home_repository_does_not_swallow_home(tmp_path, monkeypatch):
+def test_a_worktree_of_a_home_repository_does_not_swallow_home(tmp_path, fake_home):
     """The home-dotfiles rule survives the widening: a parent repo AT `$HOME` must not turn every
     folder under home into one project (the same reason the plain walk stops at `$HOME`)."""
     home = tmp_path / "home"
     (home / ".git" / "worktrees" / "wt").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home, clear_overrides=False)
     wt = home / "projects" / "wt"
     wt.mkdir(parents=True)
     (wt / ".git").write_text(f"gitdir: {home}/.git/worktrees/wt\n", encoding="utf-8")
@@ -135,13 +135,11 @@ def test_the_worktrees_own_workspace_still_counts(tmp_path):
     assert workspace_is_within_repo(own, wt) is True
 
 
-def test_the_repro_loads_silently_with_no_prompt(tmp_path, monkeypatch):
+def test_the_repro_loads_silently_with_no_prompt(tmp_path, monkeypatch, fake_home):
     """End to end through the gate: no question, and the main checkout's layer is returned."""
     from localharness.cli.workspace import resolve_workspace_layer
 
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    fake_home(tmp_path / "home")
     (tmp_path / "home" / ".localharness").mkdir(parents=True)
     workspace, wt = _worktree(tmp_path, gitdir_line="gitdir: {main}/.git/worktrees/wt\n")
     monkeypatch.chdir(wt)

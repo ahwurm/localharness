@@ -90,6 +90,7 @@ def _line_of(text: str, needle: str) -> int:
 def _layout(
     tmp_path: Path,
     monkeypatch,
+    fake_home,
     *,
     global_config: Optional[str] = None,
     global_overlay: Optional[str] = None,
@@ -104,8 +105,6 @@ def _layout(
         <home>/proj/.localharness/ WORKSPACE layer: config.yaml / overrides.yaml, per test
         <home>/proj/src/pkg/       the CWD every invocation runs from
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
     home = tmp_path / "home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
@@ -113,7 +112,7 @@ def _layout(
     (global_dir / "config.yaml").write_text(text, encoding="utf-8")
     if global_overlay is not None:
         (global_dir / "overrides.yaml").write_text(global_overlay, encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")  # rich wraps at the console width; paths must arrive whole
 
     proj = home / "proj"
@@ -173,32 +172,32 @@ def _assert_clean_report(result) -> None:
 # ------------------------------------------------- task 1: a malformed overlay is reported, not raised
 
 
-def test_malformed_global_overlay_reports_cleanly(tmp_path, monkeypatch):
+def test_malformed_global_overlay_reports_cleanly(tmp_path, monkeypatch, fake_home):
     """The CONTROL row from phase 40's table: the global overlay's read path predates workspace
     layering and crashed identically, so this proves the fix is not workspace-specific."""
-    _layout(tmp_path, monkeypatch, global_overlay=_MALFORMED, workspace=False)
+    _layout(tmp_path, monkeypatch, fake_home, global_overlay=_MALFORMED, workspace=False)
 
     result = runner.invoke(app, ["validate"])
 
     _assert_clean_report(result)
 
 
-def test_malformed_workspace_overlay_reports_cleanly(tmp_path, monkeypatch):
+def test_malformed_workspace_overlay_reports_cleanly(tmp_path, monkeypatch, fake_home):
     """The row phase 40 added a second instance of."""
-    _layout(tmp_path, monkeypatch, ws_overlay=_MALFORMED)
+    _layout(tmp_path, monkeypatch, fake_home, ws_overlay=_MALFORMED)
 
     result = runner.invoke(app, ["validate"])
 
     _assert_clean_report(result)
 
 
-def test_malformed_overlay_error_names_that_overlay_with_a_line(tmp_path, monkeypatch):
+def test_malformed_overlay_error_names_that_overlay_with_a_line(tmp_path, monkeypatch, fake_home):
     """The error carries the OWNING overlay's own path plus a line/column from the YAML mark —
     the same shape `_load_yaml_file` has always produced for config.yaml."""
     from localharness.config.loader import ConfigParseError
     from localharness.config.overlay import load_overlay
 
-    lay = _layout(tmp_path, monkeypatch, ws_overlay=_MALFORMED)
+    lay = _layout(tmp_path, monkeypatch, fake_home, ws_overlay=_MALFORMED)
 
     with pytest.raises(ConfigParseError) as exc:
         load_overlay(lay.ws_ovl)
@@ -239,7 +238,7 @@ def _loader_for(lay, *, workspace: bool = True):
     )
 
 
-def test_dogfood_f5_repro_workspace_config_error_names_the_workspace_file(tmp_path, monkeypatch):
+def test_dogfood_f5_repro_workspace_config_error_names_the_workspace_file(tmp_path, monkeypatch, fake_home):
     """The post-42 dogfood measurement (report-post42.md §5, F5) as an assertion.
 
     Measured before this plan: a bad value on line 3 of the WORKSPACE config.yaml was reported as
@@ -247,7 +246,7 @@ def test_dogfood_f5_repro_workspace_config_error_names_the_workspace_file(tmp_pa
     "the right line is printed" also passes when BOTH lines are printed, and a plausibly-wrong
     pointer is worse than an obviously-bogus one because the user edits a correct line.
     """
-    lay = _layout(tmp_path, monkeypatch, ws_config=_BAD_WS_CONFIG)
+    lay = _layout(tmp_path, monkeypatch, fake_home, ws_config=_BAD_WS_CONFIG)
     global_line = _line_of(lay.global_text, "log_level")
     assert global_line != _BAD_LOG_LEVEL_LINE  # premise: the two lines must differ to grade anything
 
@@ -261,13 +260,13 @@ def test_dogfood_f5_repro_workspace_config_error_names_the_workspace_file(tmp_pa
     assert f"Line {global_line}:" not in out, out  # nor is the line where its valid value sits
 
 
-def test_dogfood_f5_repro_the_report_header_is_the_workspace_file(tmp_path, monkeypatch):
+def test_dogfood_f5_repro_the_report_header_is_the_workspace_file(tmp_path, monkeypatch, fake_home):
     """`doctor` prints the whole `str(exc)`, header included (doctor_cmd.py:164) — that header is
     where the dogfood saw the wrong file named, so it is asserted directly rather than inferred
     from the `validate` rendering."""
     from localharness.config.loader import ConfigValidationError
 
-    lay = _layout(tmp_path, monkeypatch, ws_config=_BAD_WS_CONFIG)
+    lay = _layout(tmp_path, monkeypatch, fake_home, ws_config=_BAD_WS_CONFIG)
 
     with pytest.raises(ConfigValidationError) as exc:
         _loader_for(lay).load_harness()
@@ -281,7 +280,7 @@ def test_dogfood_f5_repro_the_report_header_is_the_workspace_file(tmp_path, monk
     assert exc.value.errors[0].field_path == "org.log_level"
 
 
-def test_global_only_error_text_is_unchanged(tmp_path, monkeypatch):
+def test_global_only_error_text_is_unchanged(tmp_path, monkeypatch, fake_home):
     """LAYR-03: with no workspace, the FULL rendered error is byte-identical to pre-43.
 
     `expected` is built through the PRE-43 four-argument `ConfigFieldError` signature, so this is a
@@ -293,6 +292,7 @@ def test_global_only_error_text_is_unchanged(tmp_path, monkeypatch):
     lay = _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         global_config='version: "1"\norg:\n  log_level: not-a-level\n' + _PROVIDER_BLOCK,
         workspace=False,
     )
@@ -315,12 +315,12 @@ def test_global_only_error_text_is_unchanged(tmp_path, monkeypatch):
     assert str(lay.global_dir) not in result.stdout, result.stdout
 
 
-def test_workspace_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatch):
+def test_workspace_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatch, fake_home):
     """The highest-priority layer owns what it sets — `overrides.yaml`, not the config.yaml
     beside it."""
     from localharness.config.loader import ConfigValidationError
 
-    lay = _layout(tmp_path, monkeypatch, ws_overlay="org:\n  log_level: not-a-level\n")
+    lay = _layout(tmp_path, monkeypatch, fake_home, ws_overlay="org:\n  log_level: not-a-level\n")
 
     with pytest.raises(ConfigValidationError) as exc:
         _loader_for(lay).load_harness()
@@ -329,12 +329,12 @@ def test_workspace_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatc
     assert exc.value.errors[0].yaml_line == 2  # that overlay's own line, not the config.yaml's
 
 
-def test_global_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatch):
+def test_global_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatch, fake_home):
     """The middle layer is reachable too — all four sources are walked, not just the two files."""
     from localharness.config.loader import ConfigValidationError
 
     lay = _layout(
-        tmp_path, monkeypatch, global_overlay="org:\n  log_level: not-a-level\n", workspace=False
+        tmp_path, monkeypatch, fake_home, global_overlay="org:\n  log_level: not-a-level\n", workspace=False
     )
 
     with pytest.raises(ConfigValidationError) as exc:
@@ -344,13 +344,14 @@ def test_global_overlay_error_attributes_to_that_overlay(tmp_path, monkeypatch):
     assert exc.value.errors[0].yaml_line == 2
 
 
-def test_two_bad_files_each_error_names_its_own_file(tmp_path, monkeypatch):
+def test_two_bad_files_each_error_names_its_own_file(tmp_path, monkeypatch, fake_home):
     """Mixed sources: the report keeps the global header and every line names its own owner."""
     from localharness.config.loader import ConfigValidationError
 
     lay = _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         global_config=_PROVIDER_BLOCK + "  timeout_seconds: soon\n",
         ws_config=_BAD_WS_CONFIG,
     )
@@ -370,7 +371,7 @@ def test_two_bad_files_each_error_names_its_own_file(tmp_path, monkeypatch):
     assert str(lay.ws_cfg) in out, out
 
 
-def test_a_list_index_error_attributes_to_its_owning_block(tmp_path, monkeypatch):
+def test_a_list_index_error_attributes_to_its_owning_block(tmp_path, monkeypatch, fake_home):
     """A Pydantic `loc` can end in a LIST INDEX, which is not a YAML key anywhere.
 
     `provider.available_models.0` is in no source as a key chain; dropping the last segment finds
@@ -380,7 +381,7 @@ def test_a_list_index_error_attributes_to_its_owning_block(tmp_path, monkeypatch
     from localharness.config.loader import ConfigValidationError
 
     lay = _layout(
-        tmp_path, monkeypatch, ws_config='version: "1"\nprovider:\n  available_models:\n    - 123\n'
+        tmp_path, monkeypatch, fake_home, ws_config='version: "1"\nprovider:\n  available_models:\n    - 123\n'
     )
 
     with pytest.raises(ConfigValidationError) as exc:
@@ -390,7 +391,7 @@ def test_a_list_index_error_attributes_to_its_owning_block(tmp_path, monkeypatch
     assert str(exc.value).startswith(f"{lay.ws_cfg}:")
 
 
-def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkeypatch):
+def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkeypatch, fake_home):
     """A cross-field validator's `loc` is EMPTY — no file "sets" it, because the error is about a
     relationship between two values rather than about one line.
 
@@ -403,6 +404,7 @@ def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkey
     lay = _layout(
         tmp_path,
         monkeypatch,
+        fake_home,
         ws_config='version: "1"\nproposer:\n  base_url: http://127.0.0.1:9/v1\n'
         "  model: test-model\n",  # identical to the global provider.default_model
     )

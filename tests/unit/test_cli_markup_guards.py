@@ -46,22 +46,21 @@ _MINIMAL_CONFIG = {
 
 
 @pytest.fixture
-def hostile_project(tmp_path, monkeypatch) -> Path:
+def hostile_project(tmp_path, monkeypatch, fake_home) -> Path:
     """CWD inside a project whose directory name is rich markup, with an empty global layer.
 
     Every env var the commands read is cleared or repointed: a developer's real `~/.localharness`
     must not answer these, and `LOCALHARNESS_DIR` being set would make `--project` take the
     explicit-config-dir refusal path instead of the one under test.
     """
-    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LOCALHARNESS_ENDPOINT",
-                "LOCALHARNESS_MODEL"):
+    for var in ("LOCALHARNESS_ENDPOINT", "LOCALHARNESS_MODEL"):
         monkeypatch.delenv(var, raising=False)
     home = tmp_path / "home"
     (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
     (home / WORKSPACE_DIR_NAME / "config.yaml").write_text(
         yaml.dump(_MINIMAL_CONFIG), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
     monkeypatch.setenv("COLUMNS", "400")
     proj = tmp_path / HOSTILE
     proj.mkdir(parents=True)

@@ -103,7 +103,7 @@ def _prompt_must_not_fire(monkeypatch) -> None:
 
 
 @pytest.fixture
-def in_repo_project(tmp_path, monkeypatch):
+def in_repo_project(tmp_path, monkeypatch, fake_home):
     """A global layer under a fake `$HOME`, a workspace two levels above the CWD, inside a repo.
 
     Returns the workspace, the global dir and the deep CWD. The workspace holds `ws-agent` (only
@@ -116,15 +116,12 @@ def in_repo_project(tmp_path, monkeypatch):
     printed `/tmp/ proj/...` — so the hostile name lives in the fixture where every path
     assertion in this file has to survive it.
     """
-    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
-    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-
     home = tmp_path / "home"
     global_dir = home / ".localharness"
     global_dir.mkdir(parents=True)
     (global_dir / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
     _write_agent(global_dir / "agents", "global-agent", "global role")
-    monkeypatch.setenv("HOME", str(home))
+    fake_home(home)
 
     workspace = tmp_path / "[old] proj" / ".localharness"
     _write_agent(workspace / "agents", "ws-agent", "workspace role")
