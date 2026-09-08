@@ -17,6 +17,15 @@ No override is needed today.
 
 - **Still open:** the timeout is a fixed constant, not derived. A slower future model or a
   larger `max_tokens` re-opens the same hole silently.
+- **Larger `max_tokens` is no longer hypothetical (0.13.1).** An unset per-reply cap now
+  derives from the served window — 32,768 on the 131,072 architecture A serves, where it
+  used to be a flat 4,096 — so the *default* worst-case single reply is 8x what this
+  section's arithmetic assumed. Fully spending 32,768 tokens at A's measured 9.5–17 tok/s
+  is ~32–57 minutes against a 600s constant. It is not known to bite in practice, because
+  the read timeout is per-chunk and a streaming reply resets it on every token; the honest
+  position is that nobody has measured a slow model spending the full derived cap. What
+  changed is the exposure, not the mechanism — which is the argument for deriving the
+  timeout rather than raising the constant again.
 - **Fix:** derive the read timeout from `max_tokens / measured_decode_rate` (with a floor),
   using a decode rate measured once by `init`/`doctor` and stored in provider config.
 

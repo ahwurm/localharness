@@ -97,8 +97,13 @@ that do not have one yet.
   first known (`start`'s window probe, and again on a `/model` swap, so moving to
   a roomier model widens the reply instead of carrying the old window's number),
   and it only sets the STARTING cap — the per-request fit and the grow-on-cutoff
-  above still apply. A number you write in config is used exactly as written,
-  including 4,096.
+  above still apply. It is bounded above by the same 128,000 the `max_tokens`
+  fields validate against, so a derived default can never land somewhere you
+  could not have typed by hand. A number you write in config is used exactly as
+  written, including 4,096. One consequence worth knowing on slow hardware: the
+  default worst-case reply is now 8x longer than the arithmetic in
+  `docs/reference-architectures/gaps.md` §1 assumed, against a request timeout
+  that is still a constant — that section says what is and is not known about it.
 - **An org-level `default_max_tokens` in `config.yaml` reaches your agents at
   all.** The chain read `org.yaml` — a legacy standalone file nothing in the
   harness has ever written, since `init` writes `org:` *inside* `config.yaml` —

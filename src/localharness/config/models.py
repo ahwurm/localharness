@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, MAX_CONFIGURABLE_MAX_TOKENS
 
 
 class ToolConfig(BaseModel):
@@ -1410,7 +1410,7 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(
         default=None,
         ge=1,
-        le=128_000,
+        le=MAX_CONFIGURABLE_MAX_TOKENS,
         description=(
             "Maximum tokens to generate in a single LLM response. Unset (the default) "
             "auto-derives from the context window the server serves — a quarter of it, never "
@@ -1605,7 +1605,7 @@ class DivisionConfig(BaseModel):
     # None, not 4096: a schema default here SHADOWS the org rung below it for every agent in the
     # division — the same bug the org comment in loader.py describes, one level down. "Not set"
     # has to be spellable or inheritance cannot pass through a division.
-    max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=MAX_CONFIGURABLE_MAX_TOKENS)
 
     tools: ToolConfig = Field(
         default_factory=ToolConfig,
@@ -1668,7 +1668,7 @@ class OrgConfig(BaseModel):
     default_max_tokens: Optional[int] = Field(
         default=None,
         ge=1,
-        le=128_000,
+        le=MAX_CONFIGURABLE_MAX_TOKENS,
         description=(
             "Per-reply output cap for all agents. Unset (the default, written as `null`) "
             "auto-derives from the served context window: a quarter of it, floored at 4,096 "
