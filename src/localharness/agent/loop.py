@@ -66,6 +66,9 @@ class Session:
     # #152: one corrective nudge per turn is spent on a degenerate (one-line-repeated) candidate
     # answer; the next degenerate reply fails the turn instead of shipping the repetition.
     repetition_nudge_used: bool = False
+    # One bounded retry per turn after the provider aborted a generation that degenerated
+    # into repetition mid-stream; the second such abort ends the turn as a failure.
+    degenerate_reprompt_used: bool = False
 
     @property
     def baton_nudge_used(self) -> bool:
@@ -360,6 +363,20 @@ _TRUNCATED_REPLY_NUDGE = (
     "full. The limit has been raised for your next reply. Send the complete reply again, and "
     "keep any reasoning brief."
 )
+_DEGENERATE_STREAM_NUDGE = (
+    "Your last reply was cut off: the generation locked into repeating the same fragment "
+    "over and over and was stopped. Do not enumerate or list things exhaustively. Reason "
+    "briefly in prose, then give your answer or a tool call."
+)
+_DEGENERATE_TURN_NOTICE = (
+    "No answer was produced this turn: the model's generation degenerated into repetition "
+    "twice ({unit!r} repeated {repeats} times), even with a presence penalty on the retry. "
+    "Lower the temperature, shorten the task, or try another model."
+)
+# Sampling penalty for the ONE retry after a degenerate generation. Qwen's own guidance for
+# thinking-mode repetition is a presence_penalty of 1.5 (range 0-2); it is applied only to
+# that retry and the rest of the turn, never as an ambient default.
+_DEGENERATE_RETRY_PRESENCE_PENALTY = 1.5
 _EMPTY_REPLY_NUDGE = (
     "Your last reply was empty: no text and no tool call reached the user. If you were "
     "reasoning, the output budget ran out before the answer. Reply now with your answer "
@@ -398,7 +415,8 @@ def _is_harness_nudge(message: Message) -> bool:
     content = message.get("content") or ""
     return content in {
         _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
-        _EMPTY_REPLY_NUDGE, _TRUNCATED_REPLY_NUDGE, _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
+        _EMPTY_REPLY_NUDGE, _TRUNCATED_REPLY_NUDGE, _DEGENERATE_STREAM_NUDGE,
+        _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
     } or content.startswith(_BATON_ESCALATION_PREFIX)
 
 
@@ -876,6 +894,12 @@ class AgentLoop:
         self._llm_takes_max_tokens = _accepts_kwarg(
             getattr(llm, "stream_complete", None), "max_tokens"
         )
+        self._llm_takes_presence_penalty = _accepts_kwarg(
+            getattr(llm, "stream_complete", None), "presence_penalty"
+        )
+        # Sampling penalty for the rest of the current turn after a degenerate generation
+        # (None = not sent). Reset at every turn start.
+        self._presence_penalty_next: float | None = None
         self._tools = tool_registry
         self._permissions = permission_evaluator
         self._memory = memory_loader
@@ -1110,10 +1134,12 @@ class AgentLoop:
     async def _execute_loop(self, session: Session, task: str, on_token: Callable | None) -> str:
         from localharness.provider.client import (
             ProviderConnectionError,
+            ProviderDegenerateError,
             ProviderTimeoutError,
             ProviderAPIError,
         )
         from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
@@ -1350,6 +1376,8 @@ class AgentLoop:
                 self._request_output_cap(ctx_budget) if self._llm_takes_max_tokens else None
             )
             _cap_kwargs = {"max_tokens": request_cap} if request_cap is not None else {}
+            if self._presence_penalty_next is not None and self._llm_takes_presence_penalty:
+                _cap_kwargs["presence_penalty"] = self._presence_penalty_next
             try:
                 response_message, usage = await self._llm.stream_complete(
                     messages=request_messages,
@@ -1357,6 +1385,39 @@ class AgentLoop:
                     on_token=on_token,
                     **_cap_kwargs,
                 )
+            except ProviderDegenerateError as exc:
+                # The provider aborted a generation that locked into repetition (see
+                # client._RepetitionWatch). Record it where the empty reply would have been,
+                # then retry ONCE with a presence penalty for the rest of the turn; a second
+                # abort ends the turn honestly instead of burning another cap's worth of GPU.
+                await self._bus.publish(Action(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    action_type="llm_response",
+                    content="",
+                    has_tool_calls=False,
+                    finish_reason="degenerate",
+                    reasoning_chars=exc.chars,
+                    output_cap=request_cap,
+                ))
+                if not session.degenerate_reprompt_used:
+                    session.degenerate_reprompt_used = True
+                    session.act_nudge_used = True  # this re-prompt already asks for the answer
+                    self._presence_penalty_next = _DEGENERATE_RETRY_PRESENCE_PENALTY
+                    log.warning(
+                        "Degenerate generation for %s (%r x%d) — retrying once with "
+                        "presence_penalty=%s", self._config.name, exc.unit[:40], exc.repeats,
+                        _DEGENERATE_RETRY_PRESENCE_PENALTY,
+                    )
+                    session.push({"role": "user", "content": _DEGENERATE_STREAM_NUDGE})
+                    continue
+                log.error(
+                    "Degenerate generation twice for %s — ending the turn without an answer",
+                    self._config.name,
+                )
+                session.terminated_reason = "error"
+                self._conversation = _strip_sentinel_exchanges(session.messages)
+                return _DEGENERATE_TURN_NOTICE.format(unit=exc.unit[:40], repeats=exc.repeats)
             except ProviderConnectionError as exc:
                 log.warning(
                     "LLM connection error in %s (iter %d): %s",
