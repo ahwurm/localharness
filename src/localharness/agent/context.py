@@ -65,10 +65,11 @@ def derive_output_cap(max_context_tokens: int) -> int:
     """The per-reply output cap for an agent that configured none — derived, not a constant.
 
     `OUTPUT_CAP_WINDOW_FRACTION` of the served window, floored at `DEFAULT_MAX_TOKENS`. A flat
-    4,096 was one number for every window: too small on the 131K the reference setup serves
-    (a thinking model can spend the whole of it on hidden reasoning and return empty), and no
-    smaller on the 8K windows where it does not fit at all. The floor keeps small windows at the
-    length they already had — `clamp_response_tokens` is what fits it to those, once, below.
+    4,096 was one number for every window, and it means two different things at the two ends:
+    on the 131K the reference setup serves it is small enough that a thinking model can spend
+    the whole of it on hidden reasoning and return empty, while on an 8K window it is more than
+    the window can hold. The floor keeps the small end exactly where it was — what fits it to
+    that window is `clamp_response_tokens` below, as it always was.
 
     An unknown (<= 0) window has nothing to derive from and gets the floor.
     """
