@@ -700,7 +700,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.agent.context import (
         clamp_response_tokens,
         probe_served_window,
-        resolve_output_cap,
         response_reserve,
     )
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
@@ -785,11 +784,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
         raise typer.Exit(1)
 
-    # The session's STARTING per-reply cap, resolved once and used by both halves of the shared
-    # reserve below (the client's request cap, and the ContextManager's max_response_tokens the
-    # reserve is sized from). An unset cap becomes a fraction of the window we just settled;
-    # a configured number passes through untouched.
-    _output_cap = resolve_output_cap(agent_config.max_tokens, _cfg_window)
+    # The session's per-reply cap — the agent's RESOLVED max_tokens (agent yaml -> division ->
+    # org default_max_tokens) and nothing else. None means no rung set one, which is the default:
+    # no cap is sent, the model decides when it is done, and the served window is the only bound.
+    # Used by both halves of the shared reserve below (the client's request cap, and the
+    # ContextManager's max_response_tokens the reserve is sized from) so the two cannot disagree.
+    _output_cap = agent_config.max_tokens
 
     # Build the real LLMClient with the probe-derived tool_call_mode (FIDEL-04).
     # A model swap re-probes via _probe_llm before constructing the new LLMClient.
@@ -798,13 +798,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         model=resolved_model,
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
-        # #145: history may fill (budget - reserve), so the output cap has to fit the reserve or
-        # prompt + max_tokens overruns the served window and a strict server 400s. The baseline
-        # is the agent's RESOLVED max_tokens (agent yaml -> division -> org default_max_tokens),
-        # or — when no rung set one — a cap DERIVED from this window, which is the first place
-        # the served window is actually known. The reserve grows to hold it on a normal window
-        # (response_reserve), and repl's swap refit re-derives from the same two values so the
-        # two never disagree.
+        # #145: history may fill (budget - reserve), so a CONFIGURED output cap has to fit the
+        # reserve or prompt + max_tokens overruns the served window and a strict server 400s.
+        # The reserve grows to hold it on a normal window (response_reserve), and repl's swap
+        # refit runs the same fit on the same two values so the two never disagree. No cap
+        # configured (the default) => None => the request omits max_tokens entirely.
         max_tokens=clamp_response_tokens(_cfg_window, _output_cap),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling

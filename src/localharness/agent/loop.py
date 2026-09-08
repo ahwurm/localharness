@@ -861,7 +861,8 @@ class AgentLoop:
         self._llm = llm
         self._bus = bus
         self._ctx = context_manager
-        # Dynamic per-call output cap. None = the client's configured max_tokens. Raised by
+        # Dynamic per-call output cap. None = the client's configured max_tokens — which is
+        # itself None unless someone configured one, and then no cap is sent at all. Raised by
         # _grow_output_cap after an output-ceiling cut (finish_reason="length") and kept for the
         # agent's life (a model that overran once will overrun again); every request is still
         # fitted to the window's real headroom by _request_output_cap, so a raised cap can never
@@ -1615,7 +1616,10 @@ class AgentLoop:
                 # finish_reason="length") used to ship as the answer with its tail missing — a
                 # draft that ends mid-sentence while the turn reports done. If the cap can grow
                 # (headroom in the window), re-prompt once with the bigger cap; otherwise the
-                # cut reply is still the best answer available and ships as before.
+                # cut reply is still the best answer available and ships as before. With no cap
+                # configured the cut IS the window's end, _grow_output_cap says so and returns
+                # None, and this re-prompt is correctly skipped: asking again for a longer answer
+                # cannot help when there is no room left to put one.
                 if (finish_reason == "length" and not session.truncated_reply_reprompt_used
                         and self._grow_output_cap(request_cap, usage, ctx_budget) is not None):
                     session.truncated_reply_reprompt_used = True
@@ -2002,25 +2006,25 @@ class AgentLoop:
             return _format_stuck_summary(session)
 
     # --- Dynamic output cap -------------------------------------------------------------
-    # Two numbers used to be magic here: the 4,096 DEFAULT_MAX_TOKENS baseline start_cmd sent
-    # regardless of config, and the flat reserve it was clamped into. Live 2026-09-04
-    # (qwen3.8-27b, reasoning parser on): every drafting step spent the whole 4,096 on hidden
-    # reasoning — five empty replies of ~170s each, and no draft. The cap is now (a) the
-    # configured value, (b) fitted per request to the window's REAL headroom, and (c) grown
+    # A number used to be magic here: the 4,096 DEFAULT_MAX_TOKENS baseline start_cmd sent
+    # regardless of config. Live 2026-09-04 (qwen3.8-27b, reasoning parser on): every drafting
+    # step spent the whole 4,096 on hidden reasoning — five empty replies of ~170s each, and no
+    # draft. Deriving a smarter number from the window was the same mistake with better
+    # arithmetic, so there is no number at all now: unconfigured means max_tokens is OMITTED from
+    # the request and the model stops when it is done. A CONFIGURED cap still gets the full
+    # treatment — used exactly, fitted per request to the window's REAL headroom, and grown
     # (doubled, within that headroom) whenever a reply is cut at the ceiling.
 
-    def _configured_output_cap(self) -> int:
-        """The client's own per-request cap — the value a request carries when nothing overrides it.
+    def _configured_output_cap(self) -> int | None:
+        """The client's own per-request cap, or None when nobody configured one.
 
-        The client's config is the authority: start_cmd already resolved the agent's cap there,
-        deriving one from the served window if no rung set a number. The two fallbacks are for a
-        loop built without that resolution (subagents under a stub client, tests) — the agent's
-        own number, else a cap derived from the window this loop is running in."""
-        from localharness.agent.context import resolve_output_cap
+        The client's config is the authority: start_cmd already fitted the agent's cap there.
+        The fallback is for a loop built without that fitting (subagents under a stub client,
+        tests) — the agent's own number. None all the way down is the DEFAULT and is not a
+        missing value to fill in: it means no cap was configured, so no cap is sent."""
         return (
             getattr(getattr(self._llm, "config", None), "max_tokens", None)
             or self._config.max_tokens
-            or resolve_output_cap(None, getattr(self._ctx, "max_context_tokens", 0) or 0)
         )
 
     def _window_headroom(self, ctx_budget: Any) -> int | None:
@@ -2048,9 +2052,16 @@ class AgentLoop:
         Target = the grown cap if one is set, else the configured cap. Fitted to the window's
         headroom so a grown cap never pushes prompt + max_tokens past the served window (vLLM
         400s on that); never below 1 token. Returns None whenever the result equals the
-        configured cap so the common request stays byte-identical."""
+        configured cap so the common request stays byte-identical.
+
+        With no cap configured — the default — there is nothing to fit and nothing to override:
+        None here means the client sends no max_tokens at all, and the window is the only bound.
+        The headroom arithmetic below runs ONLY on a cap that exists, so it can never underflow
+        its way into capping a request that was meant to be uncapped."""
         configured = self._configured_output_cap()
         target = self._output_cap or configured
+        if target is None:
+            return None
         headroom = self._window_headroom(ctx_budget)
         if headroom is not None:
             target = min(target, max(headroom, 1))
@@ -2060,11 +2071,24 @@ class AgentLoop:
         """Raise the cap for the next request after a reply was cut at the ceiling: double the
         cap that was sent, bounded by the window's headroom (from the exact prompt_tokens this
         very reply reported when the server sent usage). Returns the new cap, or None when there
-        is no room to grow — the caller then falls through to its bounded remedy."""
+        is no room to grow — the caller then falls through to its bounded remedy.
+
+        There is one shape with no cap to raise, and it is now the default: no max_tokens was
+        sent, so finish_reason="length" cannot mean an output ceiling was hit — it can only mean
+        the reply reached the end of the served window. Doubling nothing is not a remedy (and
+        `None * 2` is not arithmetic), so this reports honestly that there is nothing to grow and
+        the caller takes its bounded path: compaction is what makes room in a full window."""
         current = sent_cap or self._configured_output_cap()
         exact_prompt = getattr(usage, "prompt_tokens", None) if usage is not None else None
         if exact_prompt:
             self._last_prompt_tokens = exact_prompt
+        if current is None:
+            log.warning(
+                "Reply for %s ended at the served window, not an output cap (none is configured) "
+                "— nothing to raise; the window itself is full",
+                self._config.name,
+            )
+            return None
         headroom = self._window_headroom(ctx_budget)
         new_cap = current * 2 if headroom is None else min(current * 2, headroom)
         if new_cap <= current:

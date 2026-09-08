@@ -1254,22 +1254,14 @@ async def test_start_threads_config_dir_into_llm_config(tmp_path, monkeypatch):
         [str(c.config_dir) for c in live]
 
 
-@pytest.mark.parametrize(
-    "served, expected_max_tokens", [(8_192, 1_024), (32_768, 8_192), (131_072, 32_768)]
-)
-async def test_start_clamps_output_tokens_to_the_window_reserve(
-    tmp_path, monkeypatch, served, expected_max_tokens
-):
-    """#145: the session's LLMConfig must ask for an output that fits inside the reserve. With
-    the budget now equal to the served window, history may fill (window - reserve): on an 8,192
-    server that is 7,168 tokens, and a 4,096 cap would make every request
-    7,168 + 4,096 = 11,264 > 8,192 — an HTTP 400 mid-session on vLLM, which validates
-    prompt + max_tokens against max_model_len.
+@pytest.mark.parametrize("served", [8_192, 32_768, 131_072])
+async def test_start_sends_no_output_cap_when_none_is_configured(tmp_path, monkeypatch, served):
+    """The default, end to end: these agents configure no `max_tokens` at any rung, so the
+    session's LLMConfig carries NO cap and the request omits the parameter — the model generates
+    until it is done and the served window is the only bound.
 
-    These agents configure no `max_tokens`, so the cap is DERIVED from the window: a quarter of
-    it, floored at 4,096 and then fitted to the reserve. 131,072 -> 32,768 and 32,768 -> 8,192
-    are the derivation; 8,192 -> 1,024 is the floor meeting the small-window curve, unchanged
-    from the flat default it replaced."""
+    0.13.1 derived a number here (a quarter of the window: 32,768 / 8,192 / the 4,096 floor
+    fitted to 1,024). No number is derived now, at any window size, including the small one."""
     from localharness.cli.start_cmd import _start_async
     from localharness.provider.client import LLMClient
 
@@ -1285,6 +1277,47 @@ async def test_start_clamps_output_tokens_to_the_window_reserve(
     await _start_async(None, False, False, str(tmp_path))
 
     live = [c for c in seen if c.provider_type]  # the session client, not the bare probe client
+    assert live, "no LLMClient was built with the provider type"
+    for cfg in live:
+        assert cfg.max_tokens is None, cfg.max_tokens
+        # Uncapped, the reserve is still a real planning number the window can afford — it is
+        # what compaction leaves free for the reply, and it is never sent anywhere.
+        from localharness.agent.context import response_reserve
+        assert 0 < response_reserve(served, None) <= served // 2
+
+
+@pytest.mark.parametrize(
+    "served, expected_max_tokens", [(8_192, 1_024), (32_768, 4_096), (131_072, 4_096)]
+)
+async def test_start_fits_a_configured_output_cap_to_the_window_reserve(
+    tmp_path, monkeypatch, served, expected_max_tokens
+):
+    """#145, unchanged for anyone who configured a number: the session's LLMConfig must ask for
+    an output that fits inside the reserve. With the budget equal to the served window, history
+    may fill (window - reserve): on an 8,192 server that is 7,168 tokens, and a 4,096 cap would
+    make every request 7,168 + 4,096 = 11,264 > 8,192 — an HTTP 400 mid-session on vLLM, which
+    validates prompt + max_tokens against max_model_len.
+
+    The cap here is set at the org rung of a real config.yaml, so this also covers the chain
+    reaching `start` at all: 4,096 passes through on a roomy window and is fitted to 1,024 on
+    the 8,192 one."""
+    from localharness.cli.start_cmd import _start_async
+    from localharness.provider.client import LLMClient
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=served, probe_window=None)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(cfg_path.read_text() + "org:\n  default_max_tokens: 4096\n")
+    seen: list = []
+    real_init = LLMClient.__init__
+
+    def spy_init(self, config, *a, **k):
+        seen.append(config)
+        return real_init(self, config, *a, **k)
+    monkeypatch.setattr(LLMClient, "__init__", spy_init)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    live = [c for c in seen if c.provider_type]
     assert live, "no LLMClient was built with the provider type"
     for cfg in live:
         assert cfg.max_tokens == expected_max_tokens, cfg.max_tokens
@@ -1351,8 +1384,9 @@ async def test_start_refuses_a_tiny_window_even_when_the_config_agrees_with_it(
 
 async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch):
     """#145: 1_025 is the first window that reserves anything, so it must START — and what it
-    builds must satisfy the invariant the whole fix exists for: the history allowance plus the
-    requested output fit inside the served window."""
+    builds must satisfy the invariant the whole fix exists for: the history allowance leaves the
+    reply somewhere to go. With no cap configured no output size is requested at all, so the
+    invariant is the reserve's own: something is held back, and history does not get the lot."""
     from localharness.agent.context import response_reserve
     from localharness.cli.start_cmd import _start_async
     from localharness.provider.client import LLMClient
@@ -1371,7 +1405,8 @@ async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch)
     live = [c for c in seen if c.provider_type]
     assert live, "the smallest runnable window must still start a session"
     for cfg in live:
-        assert (1_025 - response_reserve(1_025)) + cfg.max_tokens <= 1_025, cfg.max_tokens
+        assert cfg.max_tokens is None, cfg.max_tokens
+        assert 0 < response_reserve(1_025, cfg.max_tokens) <= 1_025
 
 
 async def test_start_wires_the_bus_into_the_context_manager(tmp_path, monkeypatch):

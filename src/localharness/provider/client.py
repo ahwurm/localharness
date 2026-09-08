@@ -56,7 +56,10 @@ class LLMConfig:
     # ProviderConfig.inference_queue_wait_seconds by `start`.
     queue_wait_seconds: float | None = _DEFAULT_QUEUE_WAIT_SECONDS
     temperature: float = 0.6
-    max_tokens: int = 4096
+    # None = NO cap: the request omits max_tokens and the model generates until it is done,
+    # bounded only by the window the server serves. That is the default, and it is what a
+    # long-running task needs — a number here is honored exactly and sent on every request.
+    max_tokens: int | None = None
     tool_call_mode: Literal["native", "xml", "text"] = "native"
     context_window: int = DEFAULT_MAX_CONTEXT_TOKENS
     is_local: bool = True
@@ -370,6 +373,18 @@ async def _inference_gate(config: LLMConfig):
 
 
 _TOOL_NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _max_tokens_kwarg(cap: int | None) -> dict[str, int]:
+    """`{"max_tokens": cap}` — or NOTHING at all when there is no cap.
+
+    Splatted into every request kwargs dict so "uncapped" is the ABSENCE of the parameter, not
+    `max_tokens: null`. The OpenAI schema types max_tokens as an integer; a literal null is a
+    different thing from an omitted key and strict servers are entitled to reject it. Omitted,
+    vLLM and every OpenAI-compatible server generate until the model stops or the served window
+    ends, which is exactly the default this harness wants: the model decides when it is done.
+    """
+    return {"max_tokens": cap} if cap is not None else {}
 
 
 def _tools_to_api_format(tools: list[ToolSchema]) -> tuple[list[dict], dict[str, str]]:
@@ -840,7 +855,9 @@ class LLMClient:
         Returns (message, usage) — usage is openai.types.CompletionUsage or None.
 
         max_tokens: per-call output cap overriding config.max_tokens (the loop's dynamic cap —
-        grown after an output-ceiling cut, shrunk to the window's real headroom). None = config.
+        grown after an output-ceiling cut, shrunk to the window's real headroom). None = config,
+        which is itself None unless a cap was configured — and then the parameter is not sent at
+        all (_max_tokens_kwarg), so the model runs to its own stopping point.
 
         gen_timeout: per-call bound on GENERATION only (applied after the inference permit is
         acquired). Used by the tier-2 input classifier so its 5s clock is a generation clock, not
@@ -951,7 +968,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1266,7 +1283,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": injected_messages,
             "temperature": self.config.temperature,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1319,7 +1336,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": msgs,
             "temperature": self.config.temperature,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences

@@ -31,7 +31,8 @@ def _stub(ctxcfg: ContextConfig, live_budget: int):
     agent = SimpleNamespace(
         _ctx=ctx,
         _llm=SimpleNamespace(config=SimpleNamespace(base_url="http://localhost:8000/v1",
-                                                    max_tokens=4096)),
+                                                    # the shipped default: no cap sent
+                                                    max_tokens=None)),
         _config=SimpleNamespace(context=ctxcfg),
     )
     return SimpleNamespace(

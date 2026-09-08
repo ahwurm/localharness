@@ -11,12 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from localharness.config.defaults import (
-    DEFAULT_MAX_CONTEXT_TOKENS,
-    DEFAULT_MAX_TOKENS,
-    MAX_CONFIGURABLE_MAX_TOKENS,
-    OUTPUT_CAP_WINDOW_FRACTION,
-)
+from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message
 
 log = logging.getLogger("localharness.agent.context")
@@ -31,10 +26,18 @@ RESPONSE_RESERVE_TOKENS: int = 4096
 def response_reserve(max_context_tokens: int, max_response_tokens: int | None = None) -> int:
     """Output room held back from the window — the ONE place the harness reserves it.
 
-    `max_response_tokens` is the configured per-reply output cap (agent/org `max_tokens`). On a
-    normal window the reserve grows to hold it — a reply the model is allowed to produce must
-    have room in the window it is produced into — bounded at half the window so history always
-    keeps at least as much room as the reply. None keeps the flat RESPONSE_RESERVE_TOKENS floor.
+    This is a PLANNING reserve for compaction, not a generation limit. Nothing computed here is
+    ever sent to the server: it only tells the context manager how much of the window to keep
+    free for the reply when it decides what history still fits. The number the request actually
+    carries — when it carries one at all — is `clamp_response_tokens` below.
+
+    `max_response_tokens` is the configured per-reply output cap (agent/org `max_tokens`), and is
+    None whenever nobody configured one, which is the default: the request then omits max_tokens
+    entirely and the model generates until it is done. Uncapped, the reserve is computed from the
+    window alone — the flat RESPONSE_RESERVE_TOKENS floor, which is the curve every window has
+    always had. A CONFIGURED cap grows the reserve to hold it — a reply the model is allowed to
+    produce must have room in the window it is produced into — bounded at half the window so
+    history always keeps at least as much room as the reply.
 
     `max_context_tokens` MEANS the full served window (config/defaults.py): init writes the
     window the server serves, and the reply reserve is subtracted here, once. No other site
@@ -62,45 +65,15 @@ def response_reserve(max_context_tokens: int, max_response_tokens: int | None = 
     return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
 
 
-def derive_output_cap(max_context_tokens: int) -> int:
-    """The per-reply output cap for an agent that configured none — derived, not a constant.
-
-    `OUTPUT_CAP_WINDOW_FRACTION` of the served window, floored at `DEFAULT_MAX_TOKENS`. A flat
-    4,096 was one number for every window, and it means two different things at the two ends:
-    on the 131K the reference setup serves it is small enough that a thinking model can spend
-    the whole of it on hidden reasoning and return empty, while on an 8K window it is more than
-    the window can hold. The floor keeps the small end exactly where it was — what fits it to
-    that window is `clamp_response_tokens` below, as it always was.
-
-    Bounded above by `MAX_CONFIGURABLE_MAX_TOKENS`, which is the `le=` the max_tokens fields
-    validate against: a window may be configured up to 2,000,000, and a quarter of that is a
-    cap no user could legally have typed by hand. Derivation must not reach where configuration
-    cannot. An unknown (<= 0) window has nothing to derive from and gets the floor.
-    """
-    if max_context_tokens <= 0:
-        return DEFAULT_MAX_TOKENS
-    return min(
-        MAX_CONFIGURABLE_MAX_TOKENS,
-        max(DEFAULT_MAX_TOKENS, int(max_context_tokens * OUTPUT_CAP_WINDOW_FRACTION)),
-    )
-
-
-def resolve_output_cap(configured_max_tokens: int | None, max_context_tokens: int) -> int:
-    """The starting per-reply cap for a session: the configured number, or a derived one.
-
-    `None` is how every rung of the inheritance chain (agent yaml -> division -> org
-    `default_max_tokens`) spells "not set", so `None` here means nobody chose a cap and the
-    window decides. A number — including one that happens to equal the floor — is honored
-    exactly. This is the STARTING cap: the loop refits it to real headroom per request and
-    grows it when a reply is cut off (agent/loop.py: _request_output_cap).
-    """
-    if configured_max_tokens is not None:
-        return configured_max_tokens
-    return derive_output_cap(max_context_tokens)
-
-
-def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -> int:
+def clamp_response_tokens(
+    max_context_tokens: int, configured_max_tokens: int | None
+) -> int | None:
     """The per-request output cap that FITS the reserve — the other half of one shared reserve.
+
+    `None` in, `None` out, and that is the DEFAULT path: no rung of the inheritance chain (agent
+    yaml -> division -> org `default_max_tokens`) set a number, so there is no cap to fit and the
+    request omits max_tokens altogether. The fit below only ever runs on a cap that EXISTS —
+    there is no window arithmetic to underflow when the answer is "send nothing".
 
     History is allowed to fill `max_context_tokens - response_reserve(...)`, so the output the
     request asks for must fit the reserve itself, or prompt + max_tokens exceeds the served
@@ -108,10 +81,12 @@ def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -
     max_model_len and 400s mid-session, and recent Ollama hard-errors too.
 
     It only ever bites where the reserve is smaller than the configured output cap — a window
-    under ~12K. On a normal window the reserve IS the 4,096 default, so nothing changes. An
+    under ~12K. On a normal window the reserve grows to hold that cap, so nothing changes. An
     unknown (<= 0) window, or one degenerate enough to reserve nothing, is left alone: there is
     no reserve to fit the output into, so guessing would be worse than the caller's own value.
     """
+    if configured_max_tokens is None:
+        return None
     if max_context_tokens <= 0:
         return configured_max_tokens
     reserve = response_reserve(max_context_tokens, configured_max_tokens)

@@ -15,19 +15,24 @@ the default could cut a healthy generation off before it finished.
 which covers 431s with margin, and every measured configuration on both architectures.
 No override is needed today.
 
-- **Still open:** the timeout is a fixed constant, not derived. A slower future model or a
-  larger `max_tokens` re-opens the same hole silently.
-- **Larger `max_tokens` is no longer hypothetical (0.13.1).** An unset per-reply cap now
-  derives from the served window — 32,768 on the 131,072 architecture A serves, where it
-  used to be a flat 4,096 — so the *default* worst-case single reply is 8x what this
-  section's arithmetic assumed. Fully spending 32,768 tokens at A's measured 9.5–17 tok/s
-  is ~32–57 minutes against a 600s constant. It is not known to bite in practice, because
-  the read timeout is per-chunk and a streaming reply resets it on every token; the honest
-  position is that nobody has measured a slow model spending the full derived cap. What
-  changed is the exposure, not the mechanism — which is the argument for deriving the
-  timeout rather than raising the constant again.
-- **Fix:** derive the read timeout from `max_tokens / measured_decode_rate` (with a floor),
-  using a decode rate measured once by `init`/`doctor` and stored in provider config.
+- **Still open:** the timeout is a fixed constant, not derived. A slower future model
+  re-opens the same hole silently.
+- **There is no `max_tokens` to do the arithmetic against any more (0.13.2).** The default
+  per-reply cap is *absent*: no `max_tokens` is sent and the model generates until it stops
+  or the served window ends. So the worst-case single reply is no longer 4,096 tokens, and
+  no longer the 32,768 that 0.13.1's derived cap made it — it is whatever the window still
+  holds, up to ~127K on the 131,072 architecture A serves. At A's measured 9.5–17 tok/s a
+  reply that large is hours, against a 600s constant.
+  This is exposure, not a known break: the read timeout is per-chunk and a streaming reply
+  resets it on every token, so the constant bounds the gap *between tokens*, not the length
+  of the generation. Nobody has measured a slow model running that long in one reply. What
+  the harness relies on instead is named in the 0.13.2 CHANGELOG — the repetition guard, the
+  per-chunk stream timeout, and the kill file — none of which is a token count.
+- **Fix (open companion item):** derive the read timeout from the measured decode rate
+  rather than from a cap — a decode rate measured once by `init`/`doctor` and stored in
+  provider config, bounding the per-chunk wait at "this model has plainly stopped talking"
+  instead of at a fixed 600s. With no cap in the request, decode rate is the only input
+  left, which makes this the last piece of the same decision.
 
 ## §2 Context budget exceeds the served window — RESOLVED
 

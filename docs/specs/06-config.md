@@ -941,9 +941,9 @@ class AgentConfig(BaseModel):
         ge=1,
         le=128_000,
         description=(
-            "Maximum tokens to generate in a single LLM response. Unset (the default) "
-            "auto-derives from the context window the server serves — a quarter of it, never "
-            "below 4,096 tokens. A number here is used exactly as written."
+            "Maximum tokens to generate in a single LLM response. Unset (the default) sends "
+            "NO limit: the model generates until it is finished and the served context window "
+            "is the only bound. A number here is used exactly as written."
         ),
     )
 
@@ -1202,7 +1202,7 @@ list — every field is declared there with its own description.
 | `role` | string | required | non-empty | Role description |
 | `model` | string | `"inherit"` | non-empty | LLM model name |
 | `temperature` | float | `0.6` | 0.0–2.0 | Sampling temperature |
-| `max_tokens` | int or null | null | 1–128000 | Per-reply output cap; null derives it from the served window (a quarter of it, floored at 4,096) |
+| `max_tokens` | int or null | null | 1–128000 | Per-reply output cap; null sends none at all — the model stops when it is done, bounded only by the served window |
 | `timeout_seconds` | float or null | null | 30.0–3600.0 | Per-agent HTTP timeout; null uses the provider's |
 | `max_subagent_depth` | int | `2` | 1–4 | How deep delegation may nest (1 disables nesting) |
 | `channel` | string | `"terminal"` | — | Output channel |
@@ -1299,8 +1299,8 @@ resolve(agent_name: str) → AgentConfig:
          known gap left deliberately, not a description of intended behaviour: switching on
          a `default_temperature` that has been inert in someone's config is a change that
          needs its own decision. `max_tokens`'s unset spelling is also None at every rung
-         rather than a schema default, which is what lets "nobody chose a cap" reach `start`
-         and be derived from the served window.
+         rather than a schema default, which is what lets "nobody chose a cap" reach the
+         request — where it becomes an OMITTED `max_tokens`, not a derived number.
        - ToolConfig.inherit, ToolConfig.add, ToolConfig.deny:
            These are ADDITIVE. Agent's tools = union of inherited tools + agent additions, minus denials.
            Denial always wins. See Section 5.2 for tool resolution details.
@@ -1852,7 +1852,7 @@ name: default
 
 default_model: qwen2.5:72b
 default_temperature: 0.6
-default_max_tokens: null   # null = derive from the served window (window/4, floor 4096)
+default_max_tokens: null   # null = no cap sent; the model stops when it is done
 
 permissions:
   mode: auto
