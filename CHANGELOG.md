@@ -4,7 +4,7 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.13.2] — 2026-09-08
 
 ### Changed
 - **There is no output cap by default any more. The model decides when it is
