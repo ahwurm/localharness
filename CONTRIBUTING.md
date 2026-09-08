@@ -19,6 +19,12 @@ tests are opt-in:
 LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # needs a local OpenAI-compatible endpoint
 ```
 
+Hermetic includes your home directory: `~` points at a throwaway directory for the whole
+run, so nothing can write into your real `~/.localharness`. If a test needs a home of its
+own, take the `fake_home` fixture (`home = fake_home()`, or `fake_home(some_path)`) — never
+`monkeypatch.setenv("HOME", ...)` by hand. That spelling is inert on Windows, where
+`expanduser` reads `USERPROFILE`, and tests using it wrote into real developer profiles.
+
 ## Hard rules
 
 - **Every change ships a test.** Behavior without a test is behavior we can't keep.

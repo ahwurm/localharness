@@ -94,6 +94,126 @@ _MINIMAL_CONFIG_YAML = (
 )
 
 
+# The home the developer actually has, captured at import time — before any fixture repoints the
+# environment. Everything below exists to keep the suite from ever writing here. Held as a plain
+# string and compared with `os.path`, never `pathlib`: `Path()` picks its flavour from `os.name` at
+# instantiation, and test_tools' Windows-discovery tests patch `os.name` to "nt", which would make
+# a `Path(...)` here raise NotImplementedError instead of checking anything.
+_REAL_HOME = os.path.realpath(os.path.expanduser("~"))
+
+
+def _real_profile_signature() -> dict[str, tuple[int, int]]:
+    """(size, mtime_ns) for every file in the developer's REAL `~/.localharness`, or `{}` if there
+    is none (a clean CI runner). Walked with `os.walk` for the same `os.name` reason as above."""
+    sig: dict[str, tuple[int, int]] = {}
+    for dirpath, _dirs, files in os.walk(os.path.join(_REAL_HOME, ".localharness")):
+        for name in files:
+            path = os.path.join(dirpath, name)
+            try:
+                st = os.stat(path)
+            except OSError:  # a file that vanished mid-walk cannot have been written by this test
+                continue
+            sig[path] = (st.st_size, st.st_mtime_ns)
+    return sig
+
+
+def _point_home_at(monkeypatch, home: Path) -> Path:
+    """Point EVERY variable `os.path.expanduser` consults at `home`, and return it.
+
+    A fake home spelled `setenv("HOME", tmp)` alone is INERT on Windows and always was:
+    `ntpath.expanduser` never reads `HOME` — it takes `USERPROFILE`, else `HOMEDRIVE` + `HOMEPATH`.
+    So on Windows a test using that spelling ran against the developer's real profile, and the ones
+    that also clear `LOCALHARNESS_DIR`/`LOCALHARNESS_HOME` (the vars that keep the rest of the suite
+    off the real config dir) wrote into it: observed, a `default-bot.yaml` deployed into the real
+    `~/.localharness/agents/` (4f77eb0) and a `swapped-model` fixture literal persisted into the
+    real `~/.localharness/config.yaml`. Set all four and the fake home holds on every platform.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))                        # posixpath.expanduser
+    monkeypatch.setenv("USERPROFILE", str(home))                 # ntpath.expanduser, first choice
+    monkeypatch.setenv("HOMEDRIVE", home.drive or "")            # ntpath.expanduser, fallback pair
+    monkeypatch.setenv("HOMEPATH", str(home)[len(home.drive):])
+    return home
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_home_for_the_whole_suite(tmp_path_factory):
+    """THE BACKSTOP: `~` points at a session tmp dir for the entire run, so no test can reach the
+    developer's real profile — not even one written with the inert `setenv("HOME", ...)` spelling,
+    and not even a future one that fakes no home at all.
+
+    Sweeping the known offenders onto `fake_home` fixes the tests that exist today; this fixes the
+    ones that don't. It is a session-scoped `MonkeyPatch` rather than the function-scoped fixture
+    because it has to be in force during collection-time imports and between tests too. A test that
+    sets its own home still wins for its own duration — function-scoped `monkeypatch` layers on top
+    and unwinds back to this floor.
+
+    The floor is deliberately EMPTY (no seeded `.localharness`): a test that falls through to `~`
+    should see what a clean machine sees, not whatever the developer happens to have installed.
+    """
+    mp = pytest.MonkeyPatch()
+    home = _point_home_at(mp, tmp_path_factory.mktemp("no_real_home"))
+    try:
+        yield home
+    finally:
+        mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _the_real_profile_stays_unreachable(request, monkeypatch, _no_real_home_for_the_whole_suite):
+    """Tripwire under the backstop: after every test, `~` must still not be the real home.
+
+    The session pin above covers the vars `expanduser` reads; this catches the residue — a test that
+    DELETES them (posixpath then falls back to the passwd database) or repoints one at the real
+    profile. It requests `monkeypatch` so pytest builds that fixture first and therefore tears it
+    down last: the check runs while the test's own env mutations are still standing, which is the
+    only moment the offending state is visible. Cost is one `expanduser` call per test.
+
+    A handful of tests unset the home vars ON PURPOSE — "no `$HOME`" is the behaviour under test.
+    They mark themselves `@pytest.mark.unsets_home`, which swaps the env check for the expensive but
+    exact one: the real `~/.localharness` tree is fingerprinted around the test and must come back
+    byte-identical. Those tests genuinely escape the session pin, so they are the only ones that
+    need the tree walk (~10ms each), and the marker is the reviewable record of which they are.
+    """
+    if request.node.get_closest_marker("unsets_home"):
+        before = _real_profile_signature()
+        yield
+        changed = {p for p, v in _real_profile_signature().items() if before.get(p) != v}
+        assert not changed, (
+            f"this test unsets the home vars, so `~` was the developer's REAL profile — and it "
+            f"WROTE there: {sorted(changed)}. Pin the directory under test explicitly "
+            f"(LOCALHARNESS_HOME) so nothing resolves through `~`."
+        )
+        return
+    yield
+    reached = os.path.realpath(os.path.expanduser("~"))
+    assert reached != _REAL_HOME, (
+        f"this test left `~` resolving to the REAL home ({_REAL_HOME}) — anything it wrote under "
+        f"`~/.localharness` landed in the developer's own profile. Take the `fake_home` fixture "
+        f"instead of setting home vars by hand, or mark the test `unsets_home` if going without a "
+        f"home IS the behaviour under test."
+    )
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """A fake home every platform honors — the one supported way for a test to fake `~`.
+
+    Call it: `home = fake_home()` for `tmp_path/"home"`, or `fake_home(some_path)` to put the home
+    exactly where the test needs it. It creates the directory, points all four home vars at it (see
+    `_point_home_at`), and by default clears `LOCALHARNESS_DIR`/`LOCALHARNESS_HOME` so discovery
+    actually walks to the fake home instead of short-circuiting on the autouse override. Pass
+    `clear_overrides=False` when the test only wants tilde-expansion or a walk boundary moved and
+    means to keep the autouse `LOCALHARNESS_HOME` in force.
+    """
+    def _fake_home(home: Path | None = None, *, clear_overrides: bool = True) -> Path:
+        if clear_overrides:
+            monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+            monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+        return _point_home_at(monkeypatch, Path(home) if home is not None else tmp_path / "home")
+    return _fake_home
+
+
 @pytest.fixture(autouse=True)
 def _isolate_localharness_home(tmp_path_factory, monkeypatch):
     """Hermetic home for EVERY test (autouse).
@@ -819,6 +939,12 @@ def pytest_configure(config):
         "markers",
         "live_vllm: opt-in real-model spine test hitting a live vLLM endpoint; "
         "skipped by default unless LOCALHARNESS_LIVE_VLLM=1 is set",
+    )
+    config.addinivalue_line(
+        "markers",
+        "unsets_home: this test deletes the home env vars on purpose (going without a $HOME is the "
+        "behaviour under test), so it escapes the session-wide fake home; the tripwire fingerprints "
+        "the real ~/.localharness around it instead. Never add this to silence the tripwire",
     )
 
 
