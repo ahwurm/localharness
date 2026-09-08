@@ -147,6 +147,20 @@ class ProviderAPIError(ProviderError):
         self.status_code = status_code
 
 
+class ProviderDegenerateError(ProviderError):
+    """The stream degenerated into back-to-back repetition and was aborted client-side (the
+    disconnect ends engine-side generation). Carries what was seen so the loop can say why."""
+
+    def __init__(
+        self, message: str, *, unit: str = "", repeats: int = 0, chars: int = 0,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(message, cause)
+        self.unit = unit
+        self.repeats = repeats
+        self.chars = chars
+
+
 class MalformedResponseError(ProviderError):
     """Model returned a response that could not be parsed."""
 
@@ -375,6 +389,13 @@ async def _inference_gate(config: LLMConfig):
 _TOOL_NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
+def _presence_penalty_kwarg(value: float | None) -> dict[str, float]:
+    """`{"presence_penalty": value}` — or nothing. Set by the loop for the retry after a
+    degenerate (repeating) generation; never sent otherwise, so the common request is
+    byte-identical and a server that does not know the field is never shown it."""
+    return {"presence_penalty": value} if value is not None else {}
+
+
 def _max_tokens_kwarg(cap: int | None) -> dict[str, int]:
     """`{"max_tokens": cap}` — or NOTHING at all when there is no cap.
 
@@ -414,6 +435,59 @@ def _tools_to_api_format(tools: list[ToolSchema]) -> tuple[list[dict], dict[str,
         unmap[safe] = original
         result.append({"type": "function", "function": fn})
     return result, unmap
+
+
+# Mid-stream degenerate-repetition guard. Observed live (qwen3.8-27b, 2026-09-08): hidden
+# reasoning locked into "413, 313, 213, " for the rest of a 16K-token reply. Nothing else can
+# catch that: the loop's line-based guard only sees the FINAL text after the stream ends, a
+# user nudge only lands on the next request, and an output cap merely postpones the cut (and
+# the cut then grows the cap). The watch looks at the tail of everything streamed — reasoning
+# and content alike — and aborts the request once a short unit has repeated back-to-back
+# across the whole window. Prose never does that; a stuck sampler always does.
+_REPEAT_WINDOW_CHARS = 1_200      # tail examined: ~300 tokens, 15 s of a 20 tok/s stream
+_REPEAT_MAX_UNIT_CHARS = 120      # longest unit that counts as a loop rather than prose
+_REPEAT_MIN_REPEATS = 6           # the unit must fill the window at least this many times
+_REPEAT_CHECK_EVERY_CHARS = 256   # detector cadence; the scan is cheap but not free
+
+
+def find_repeated_tail(
+    text: str, *, window: int = _REPEAT_WINDOW_CHARS, max_unit: int = _REPEAT_MAX_UNIT_CHARS,
+    min_repeats: int = _REPEAT_MIN_REPEATS,
+) -> tuple[str, int] | None:
+    """(unit, repeats) when the last `window` chars of `text` are one unit of at most
+    `max_unit` chars repeated back-to-back at least `min_repeats` times; None otherwise
+    (including when there is less than a window of text yet)."""
+    tail = text[-window:]
+    if len(tail) < window:
+        return None
+    for period in range(1, max_unit + 1):
+        repeats = len(tail) // period
+        if repeats < min_repeats:
+            break
+        unit = tail[-period:]
+        if tail.endswith(unit * repeats):
+            return unit, repeats
+    return None
+
+
+class _RepetitionWatch:
+    """Feed every streamed delta; returns (unit, repeats) the moment the tail degenerates."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._since_check = 0
+        self.chars = 0
+
+    def feed(self, text: str) -> tuple[str, int] | None:
+        if not text:
+            return None
+        self.chars += len(text)
+        self._buf = (self._buf + text)[-2 * _REPEAT_WINDOW_CHARS:]
+        self._since_check += len(text)
+        if self._since_check < _REPEAT_CHECK_EVERY_CHARS:
+            return None
+        self._since_check = 0
+        return find_repeated_tail(self._buf)
 
 
 def _reasoning_text(obj: Any) -> str | None:
@@ -849,10 +923,15 @@ class LLMClient:
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
         Returns (message, usage) — usage is openai.types.CompletionUsage or None.
+
+        presence_penalty: per-call sampling penalty (OpenAI-standard field, honored by vLLM
+        and llama.cpp). The loop sets it only for the retry after a generation degenerated
+        into repetition; None = not sent.
 
         max_tokens: per-call output cap overriding config.max_tokens (the loop's dynamic cap —
         grown after an output-ceiling cut, shrunk to the window's real headroom). None = config,
@@ -874,10 +953,12 @@ class LLMClient:
         if self.config.tool_call_mode == "native":
             return await self._complete_native(messages, tools, stream,
                                                disable_thinking=disable_thinking, gen_timeout=gen_timeout,
-                                        max_tokens=max_tokens)
+                                        max_tokens=max_tokens,
+                                        presence_penalty=presence_penalty)
         return await self._complete_xml(messages, tools, stream,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
-                                        max_tokens=max_tokens)
+                                        max_tokens=max_tokens,
+                                        presence_penalty=presence_penalty)
 
     async def stream_complete(
         self,
@@ -887,6 +968,7 @@ class LLMClient:
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage).
 
@@ -896,11 +978,12 @@ class LLMClient:
             return await self._complete_native(
                 messages, tools, stream=True, on_token=on_token,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
-                                        max_tokens=max_tokens,
+                                        max_tokens=max_tokens, presence_penalty=presence_penalty,
             )
         return await self._complete_xml(messages, tools, stream=True,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
-                                        max_tokens=max_tokens)
+                                        max_tokens=max_tokens,
+                                        presence_penalty=presence_penalty)
 
     async def _complete_native(
         self,
@@ -911,6 +994,7 @@ class LLMClient:
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -922,7 +1006,7 @@ class LLMClient:
         read-timeout applies BETWEEN chunks, so a healthy generation can run as long
         as the budget allows, and a client disconnect aborts engine-side generation.
         """
-        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens)
+        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens, presence_penalty)
         try:
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
@@ -939,7 +1023,7 @@ class LLMClient:
             if dropped is None:
                 raise self._wrap_error(exc) from exc
             log.warning("Server rejected native `%s` param (400) — retrying once without it", dropped)
-            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens)  # sticky → omitted
+            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens, presence_penalty)  # sticky → omitted
             try:
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
@@ -954,6 +1038,7 @@ class LLMClient:
     def _native_kwargs(
         self, messages: list[Message], tools: list[ToolSchema] | None, disable_thinking: bool,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, str] | None]:
         """Build native-mode request kwargs, HONORING the per-server sticky rejections so a param a
         prior turn 400'd on is never re-sent (mirrors _complete_xml's `not self._tools_param_rejected`
@@ -969,6 +1054,7 @@ class LLMClient:
             "messages": messages,
             "temperature": self.config.temperature,
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
+            **_presence_penalty_kwarg(presence_penalty),
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1195,6 +1281,28 @@ class LLMClient:
         calls: dict[int, dict] = {}
         usage = None
         finish_reason = None
+        watch = _RepetitionWatch()
+
+        async def _abort(hit: tuple[str, int]) -> None:
+            # Close the HTTP stream first so the server sees the disconnect and stops
+            # generating; the fake streams in tests have no close() and that is fine.
+            close = getattr(response, "close", None) or getattr(response, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001 — teardown must not mask the real error
+                    pass
+            unit, repeats = hit
+            log.warning(
+                "Aborting degenerate generation after %d chars: %r repeated %d times",
+                watch.chars, unit[:60], repeats,
+            )
+            raise ProviderDegenerateError(
+                f"generation degenerated into repetition after {watch.chars} chars: "
+                f"{unit[:60]!r} repeated {repeats} times back-to-back",
+                unit=unit, repeats=repeats, chars=watch.chars,
+            )
+
         async for chunk in response:
             if getattr(chunk, "usage", None) is not None:
                 usage = chunk.usage
@@ -1228,11 +1336,15 @@ class LLMClient:
                 reasoning_parts.append(reasoning)
                 if on_reasoning is not None:
                     await on_reasoning(reasoning)
+                if (hit := watch.feed(reasoning)) is not None:
+                    await _abort(hit)
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)
                 if on_token is not None:
                     await on_token(piece)
+                if (hit := watch.feed(piece)) is not None:
+                    await _abort(hit)
             for tc in getattr(delta, "tool_calls", None) or []:
                 idx = getattr(tc, "index", 0) or 0
                 slot = calls.setdefault(
@@ -1263,6 +1375,7 @@ class LLMClient:
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection AND fold the XML tool syntax into the
         system prompt, then parse tool calls from text.
@@ -1284,6 +1397,7 @@ class LLMClient:
             "messages": injected_messages,
             "temperature": self.config.temperature,
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
+            **_presence_penalty_kwarg(presence_penalty),
         }
         name_unmap: dict[str, str] | None = None
         if tools and not self._tools_param_rejected:
@@ -1311,7 +1425,7 @@ class LLMClient:
             return await self._complete_xml_fallback(
                 injected_messages, tools, stream,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
-                                        max_tokens=max_tokens,
+                                        max_tokens=max_tokens, presence_penalty=presence_penalty,
             )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -1324,6 +1438,7 @@ class LLMClient:
         disable_thinking: bool = False,
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
+        presence_penalty: float | None = None,
     ) -> tuple[Any, Any]:
         """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
         system-prompt XML injection (a no-op if `messages` already carries it — see
@@ -1337,6 +1452,7 @@ class LLMClient:
             "messages": msgs,
             "temperature": self.config.temperature,
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
+            **_presence_penalty_kwarg(presence_penalty),
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences

@@ -857,3 +857,61 @@ async def test_stream_forwards_reasoning_deltas_to_on_reasoning():
     assert seen == ["think ", "hard"]
     assert msg.reasoning_content == "think hard"
     assert msg.content == "answer"
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream degenerate-repetition guard (2026-09-08)
+# ---------------------------------------------------------------------------
+
+def test_find_repeated_tail_detects_a_short_unit_filling_the_window():
+    from localharness.provider.client import find_repeated_tail
+    text = "some earlier reasoning about the fixture numbers. " + "413, 313, 213, " * 200
+    hit = find_repeated_tail(text)
+    assert hit is not None
+    unit, repeats = hit
+    assert len(unit) == len("413, 313, 213, ") and repeats >= 6
+
+
+def test_find_repeated_tail_ignores_prose_and_short_text():
+    from localharness.provider.client import find_repeated_tail
+    prose = " ".join(f"sentence number {i} says something different about topic {i % 7}." for i in range(60))
+    assert len(prose) > 1_200
+    assert find_repeated_tail(prose) is None
+    assert find_repeated_tail("413, 313, 213, " * 10) is None   # under a window: not judged yet
+
+
+@pytest.mark.asyncio
+async def test_stream_aborts_when_reasoning_degenerates():
+    """The consumer raises ProviderDegenerateError and STOPS consuming — the rest of the
+    stream is never pulled, which is what ends generation server-side."""
+    from localharness.provider.client import LLMClient, ProviderDegenerateError
+
+    pulled = {"n": 0}
+
+    async def stream():
+        for _ in range(500):
+            pulled["n"] += 1
+            yield NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None,
+                                                    reasoning_content="413, 313, 213, "),
+                                            finish_reason=None)])
+
+    with pytest.raises(ProviderDegenerateError) as info:
+        await LLMClient._consume_native_stream(stream(), None)
+    assert info.value.repeats >= 6 and info.value.chars >= 1_200
+    assert pulled["n"] < 500
+
+
+@pytest.mark.asyncio
+async def test_stream_with_varied_reasoning_is_left_alone():
+    from localharness.provider.client import LLMClient
+
+    async def stream():
+        for i in range(300):
+            yield NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None,
+                                                    reasoning_content=f"step {i}: consider item {i * 7 % 13}. "),
+                                            finish_reason=None)])
+        yield NS(usage=None, choices=[NS(delta=NS(content="done", tool_calls=None,
+                                                reasoning_content=None), finish_reason="stop")])
+
+    msg, _ = await LLMClient._consume_native_stream(stream(), None)
+    assert msg.content == "done" and msg.finish_reason == "stop"

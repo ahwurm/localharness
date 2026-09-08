@@ -2713,3 +2713,59 @@ async def test_uncapped_truncated_final_answer_ships_without_a_retry(mock_llm_cl
     assert summary == "The draft begins and then"
     assert len(loop._llm.calls) == 1                  # no retry was attempted
     assert all("max_tokens" not in c for c in loop._llm.calls)
+
+
+# ---------------------------------------------------------------------------
+# Degenerate generation aborted mid-stream by the provider (2026-09-08)
+# ---------------------------------------------------------------------------
+
+def _degenerate_then(mock_llm_client, responses, times=1):
+    """A mock whose first `times` stream_complete calls raise ProviderDegenerateError."""
+    from localharness.provider.client import ProviderDegenerateError
+    llm = mock_llm_client(responses)
+    real = llm.stream_complete
+    state = {"left": times}
+
+    async def flaky(*a, **kw):
+        if state["left"] > 0:
+            state["left"] -= 1
+            llm.calls.append(dict(kw))   # the real method records the successful calls
+            raise ProviderDegenerateError("looped", unit="413, 313, 213, ", repeats=80, chars=1_500)
+        return await real(*a, **kw)
+    llm.stream_complete = flaky
+    return llm
+
+
+@pytest.mark.asyncio
+async def test_degenerate_stream_is_retried_once_with_a_presence_penalty(bus, mock_llm_client):
+    from localharness.core.events import Action, TaskComplete
+    from localharness.config.models import AgentConfig
+    Response = mock_llm_client.Response
+    llm = _degenerate_then(mock_llm_client, [Response(content="Here is the answer.")])
+    loop = AgentLoop(config=_no_self_check_config(), llm=llm, bus=bus,
+                     context_manager=ContextManager(), tool_registry=None,
+                     permission_evaluator=PermissionEvaluator())
+    summary = await loop.run_turn("write the report")
+
+    assert summary == "Here is the answer."
+    assert "presence_penalty" not in llm.calls[0]
+    assert llm.calls[1]["presence_penalty"] == 1.5
+    replies = [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
+    assert replies[0].finish_reason == "degenerate" and replies[0].reasoning_chars == 1_500
+    completions = bus.history(event_types=[TaskComplete])
+    assert len(completions) == 1 and completions[0].success is True
+
+
+@pytest.mark.asyncio
+async def test_degenerate_stream_twice_fails_the_turn_honestly(bus, mock_llm_client):
+    from localharness.core.events import TaskComplete
+    Response = mock_llm_client.Response
+    llm = _degenerate_then(mock_llm_client, [Response(content="never reached")], times=2)
+    loop = AgentLoop(config=_no_self_check_config(), llm=llm, bus=bus,
+                     context_manager=ContextManager(), tool_registry=None,
+                     permission_evaluator=PermissionEvaluator())
+    summary = await loop.run_turn("write the report")
+
+    assert "degenerated into repetition" in summary
+    assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
+    assert len(llm.calls) == 2
