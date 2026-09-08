@@ -10,7 +10,18 @@
 DEFAULT_TIMEOUT_SECONDS: float = 600.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS: float = 5.0
 DEFAULT_TEMPERATURE: float = 0.6
+# The FLOOR of the per-reply output cap, not the cap itself. An agent that configures no
+# `max_tokens` derives its starting cap from the window the server actually serves
+# (agent/context.py: derive_output_cap) and never drops below this, so a small window keeps the
+# reply length 0.13.0 gave it. A configured number is used exactly and ignores both of these.
 DEFAULT_MAX_TOKENS: int = 4096
+# ...and the fraction of the served window that derivation takes. A quarter is not a taste
+# number, it is the largest fraction that cannot collide with the reply reserve: the reserve
+# grows to hold the cap but is bounded at HALF the window (agent/context.py: response_reserve),
+# so a quarter-window cap always fits inside that bound with history keeping three quarters.
+# It reads 32,768 on the reference 131,072-token window — 8x the flat floor, which is what a
+# thinking model spending its whole budget on hidden reasoning needs.
+OUTPUT_CAP_WINDOW_FRACTION: float = 1 / 4
 # The FULL served window (Qwen/vLLM max_model_len, single source of truth). The harness reserves
 # response room internally (agent.context.response_reserve) — never pre-subtract it here.
 DEFAULT_MAX_CONTEXT_TOKENS: int = 131_072

@@ -65,4 +65,7 @@ def test_no_overlay_keeps_the_shipped_defaults(tmp_path):
 
     cfg = ConfigLoader(config_dir=tmp_path).load_agent("a1")
 
-    assert (cfg.temperature, cfg.max_tokens, cfg.model) == (0.6, 4096, "inherit")
+    # max_tokens is None, not 4096: "nobody chose a cap" is a state the chain has to be able to
+    # REACH, because that is what makes start derive one from the served window. 4096 survives
+    # only as the floor of that derivation (config/defaults.py: DEFAULT_MAX_TOKENS).
+    assert (cfg.temperature, cfg.max_tokens, cfg.model) == (0.6, None, "inherit")

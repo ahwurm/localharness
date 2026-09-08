@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+from localharness.config.defaults import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    DEFAULT_MAX_TOKENS,
+    OUTPUT_CAP_WINDOW_FRACTION,
+)
 from localharness.core.types import Message
 
 log = logging.getLogger("localharness.agent.context")
@@ -55,6 +59,36 @@ def response_reserve(max_context_tokens: int, max_response_tokens: int | None = 
         wanted = max(RESPONSE_RESERVE_TOKENS, max_response_tokens or 0)
         return min(wanted, max_context_tokens // 2)
     return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
+
+
+def derive_output_cap(max_context_tokens: int) -> int:
+    """The per-reply output cap for an agent that configured none — derived, not a constant.
+
+    `OUTPUT_CAP_WINDOW_FRACTION` of the served window, floored at `DEFAULT_MAX_TOKENS`. A flat
+    4,096 was one number for every window: too small on the 131K the reference setup serves
+    (a thinking model can spend the whole of it on hidden reasoning and return empty), and no
+    smaller on the 8K windows where it does not fit at all. The floor keeps small windows at the
+    length they already had — `clamp_response_tokens` is what fits it to those, once, below.
+
+    An unknown (<= 0) window has nothing to derive from and gets the floor.
+    """
+    if max_context_tokens <= 0:
+        return DEFAULT_MAX_TOKENS
+    return max(DEFAULT_MAX_TOKENS, int(max_context_tokens * OUTPUT_CAP_WINDOW_FRACTION))
+
+
+def resolve_output_cap(configured_max_tokens: int | None, max_context_tokens: int) -> int:
+    """The starting per-reply cap for a session: the configured number, or a derived one.
+
+    `None` is how every rung of the inheritance chain (agent yaml -> division -> org
+    `default_max_tokens`) spells "not set", so `None` here means nobody chose a cap and the
+    window decides. A number — including one that happens to equal the floor — is honored
+    exactly. This is the STARTING cap: the loop refits it to real headroom per request and
+    grows it when a reply is cut off (agent/loop.py: _request_output_cap).
+    """
+    if configured_max_tokens is not None:
+        return configured_max_tokens
+    return derive_output_cap(max_context_tokens)
 
 
 def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -> int:

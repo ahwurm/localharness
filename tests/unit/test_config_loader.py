@@ -504,3 +504,61 @@ def test_invalidate_cache_drops_cache(config_dir: Path, monkeypatch) -> None:
     cfg3 = loader.load_harness()
     assert cfg3 is not cfg1
     assert cfg3.org.context.compaction_threshold_pct == 90.0
+
+
+# ------------------------------------------------------------------ #
+# The output-cap chain: "nobody set one" has to survive every rung
+# ------------------------------------------------------------------ #
+def _seed_org_config(config_dir: Path, org: dict) -> None:
+    _write_yaml(config_dir / "config.yaml", {
+        "version": "1",
+        "provider": {
+            "provider_type": "vllm",
+            "base_url": "http://localhost:8000/v1",
+            "default_model": "test-model",
+        },
+        "org": {"name": "myorg", **org},
+    })
+
+
+def test_unset_max_tokens_resolves_to_none_through_every_rung(config_dir: Path) -> None:
+    """None is the answer "nobody chose a per-reply cap", and it has to reach the caller intact —
+    that is what makes `start` derive one from the served window instead of sending a constant.
+    A schema default of 4096 anywhere in the chain silently answers the question for the user;
+    the division rung did exactly that, shadowing org `default_max_tokens` for every agent in a
+    division."""
+    _seed_org_config(config_dir, {})
+    _write_yaml(config_dir / "divisions" / "research.yaml", {"name": "research"})
+    _write_yaml(config_dir / "agents" / "solo.yaml", {"name": "solo", "role": "r"})
+    _write_yaml(config_dir / "agents" / "in-div.yaml",
+                {"name": "in-div", "role": "r", "division": "research"})
+
+    loader = ConfigLoader(config_dir=config_dir)
+    assert loader.load_agent("solo").max_tokens is None
+    assert loader.load_agent("in-div").max_tokens is None
+
+
+def test_configured_max_tokens_wins_at_each_rung(config_dir: Path) -> None:
+    """...and a number anywhere is honored exactly, most specific first: agent > division > org.
+
+    The org rung is authored in config.yaml's `org:` section, which is the ONLY place `init`
+    ever writes one — `load_org()` reads the standalone org.yaml that nothing in src/ creates,
+    so an org-level cap in a real installation reached nothing until this was sourced from the
+    layered raw section instead."""
+    _seed_org_config(config_dir, {"default_max_tokens": 8_192})
+    _write_yaml(config_dir / "divisions" / "research.yaml", {"name": "research"})
+    _write_yaml(config_dir / "divisions" / "loud.yaml", {"name": "loud", "max_tokens": 16_384})
+    _write_yaml(config_dir / "agents" / "org-level.yaml", {"name": "org-level", "role": "r"})
+    _write_yaml(config_dir / "agents" / "div-passthrough.yaml",
+                {"name": "div-passthrough", "role": "r", "division": "research"})
+    _write_yaml(config_dir / "agents" / "div-level.yaml",
+                {"name": "div-level", "role": "r", "division": "loud"})
+    _write_yaml(config_dir / "agents" / "agent-level.yaml",
+                {"name": "agent-level", "role": "r", "division": "loud", "max_tokens": 2_048})
+
+    loader = ConfigLoader(config_dir=config_dir)
+    assert loader.load_agent("org-level").max_tokens == 8_192
+    # the division bug: a division that says nothing must not answer for the org
+    assert loader.load_agent("div-passthrough").max_tokens == 8_192
+    assert loader.load_agent("div-level").max_tokens == 16_384
+    assert loader.load_agent("agent-level").max_tokens == 2_048

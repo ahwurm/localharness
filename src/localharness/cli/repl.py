@@ -1393,7 +1393,6 @@ class OrchestratorREPL:
         import asyncio
 
         from localharness.agent import context as context_mod
-        from localharness.config.defaults import DEFAULT_MAX_TOKENS
 
         ctx = getattr(self._agent, "_ctx", None)
         # Cross-endpoint swap passes the TARGET endpoint's base_url + provider_type so the window
@@ -1461,11 +1460,16 @@ class OrchestratorREPL:
         # for the session. (Baseline must match start_cmd's — see its LLMConfig construction.)
         _budget = getattr(ctx, "max_context_tokens", None)
         _llm_cfg = getattr(self._agent._llm, "config", None)
-        _configured_cap = (
-            getattr(getattr(self._agent, "_config", None), "max_tokens", None) or DEFAULT_MAX_TOKENS
-        )
+        _configured_cap = getattr(getattr(self._agent, "_config", None), "max_tokens", None)
         if _budget and _llm_cfg is not None:
-            _cap = context_mod.clamp_response_tokens(_budget, _configured_cap)
+            # An unset cap re-derives from the NEW window, so a swap onto a roomier model gets
+            # the reply length that window affords instead of the one the old window did.
+            _wanted = context_mod.resolve_output_cap(_configured_cap, _budget)
+            # Both halves of the ONE shared reserve move together. The context manager sizes the
+            # reserve from this number and lets history fill the rest; leaving it at the old
+            # window's cap would let history grow past what the new request actually asks for.
+            ctx.max_response_tokens = _wanted
+            _cap = context_mod.clamp_response_tokens(_budget, _wanted)
             if _cap != getattr(_llm_cfg, "max_tokens", None):
                 _llm_cfg.max_tokens = _cap
                 notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")

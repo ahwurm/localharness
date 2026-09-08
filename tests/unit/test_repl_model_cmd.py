@@ -612,25 +612,31 @@ async def test_model_hotswap_refits_context_window_budget(tmp_path, monkeypatch)
 @pytest.mark.asyncio
 async def test_model_hotswap_clamps_output_tokens_and_restores_them(tmp_path, monkeypatch):
     """#145: a swap DOWN to a small-window model must shrink the per-reply output cap to fit that
-    window's reserve — history may fill (window - reserve), so an unclamped 4,096 would make
+    window's reserve — history may fill (window - reserve), so an unclamped cap would make
     prompt + max_tokens overrun the 8,192 server and 400 mid-session. Swapping back UP must
-    RESTORE the full cap: the clamp is re-derived from the default, never ratcheted down."""
+    RESTORE the full cap: it is re-derived from the agent's config each time, never ratcheted
+    down. This agent configures no cap, so "the full cap" is the one the NEW window derives —
+    a quarter of 131,072 — not the number the old window happened to give."""
     from localharness.agent.context import TokenCounter
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 7)
     tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
     repl, channel, agent, ctx = _repl_with_ctx(tmp_path, tc, max_ctx=131_072)
-    assert agent._llm.config.max_tokens == 4_096
+    assert agent._llm.config.max_tokens == 4_096  # the fake client's own starting value
 
     monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 8_192)
     await repl._handle_slash("/model model-b")
     assert ctx.max_context_tokens == 8_192
     assert agent._llm.config.max_tokens == 1_024, "output cap must fit the 8_192 window's reserve"
+    assert ctx.max_response_tokens == 4_096, "the floor is what an 8K window derives"
     assert "output cap" in "\n".join(channel.messages), "a shrunk output cap must be disclosed"
 
     monkeypatch.setattr("localharness.agent.context.probe_served_window", lambda *a, **k: 131_072)
     await repl._handle_slash("/model model-a")
-    assert agent._llm.config.max_tokens == 4_096, "swapping back up must restore the full cap"
+    assert agent._llm.config.max_tokens == 32_768, "swapping back up must restore the full cap"
+    # the reserve the context manager holds back moves with it, or history would be allowed to
+    # fill room the request is about to ask for
+    assert ctx.max_response_tokens == 32_768
 
 
 @pytest.mark.asyncio

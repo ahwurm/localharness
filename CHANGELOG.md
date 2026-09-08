@@ -70,8 +70,8 @@ that do not have one yet.
   `config.yaml` changed nothing (the live session carried `default_max_tokens:
   8192` and still asked for 4,096; five empty replies of ~170 s each, no draft,
   and the cruncher's extracts cut mid-sentence for the same reason). Now the
-  agent's resolved `max_tokens` (agent yaml → division → org `default_max_tokens`
-  → 4,096) is what the session and the `/model` swap refit send; the shared reply
+  agent's resolved `max_tokens` (agent yaml → division → org `default_max_tokens`)
+  is what the session and the `/model` swap refit send; the shared reply
   reserve grows to hold it (bounded at half the window; the small-window curve is
   unchanged); every request is fitted to the window's real headroom
   (`window − prompt − window/64`, prompt taken from the server's own
@@ -83,6 +83,36 @@ that do not have one yet.
   The raised cap is kept for the agent's life. `LLMClient.complete` /
   `stream_complete` take a per-call `max_tokens`, and the `llm_response` Action
   carries `output_cap`, so the ledger says what each request asked for.
+- **…and when you have not set one, that cap auto-derives from the served context
+  window** instead of being a bigger number picked by us. An unset
+  `max_tokens`/`default_max_tokens` now means "a quarter of the window this
+  session runs in, and never below 4,096 tokens" — the served window, or the
+  smaller `max_context_tokens` you pinned: 32,768 on the 131,072
+  the reference setup serves, 8,192 on a 32K one, and unchanged on anything
+  small, where the 4,096 floor still meets the same reserve curve as before
+  (an 8,192-token window still asks for 1,024). A quarter is not a taste number —
+  the reply reserve grows to hold the cap but is bounded at half the window, so a
+  quarter is the largest fraction that always fits inside that bound with history
+  keeping the other three quarters. It is computed where the served window is
+  first known (`start`'s window probe, and again on a `/model` swap, so moving to
+  a roomier model widens the reply instead of carrying the old window's number),
+  and it only sets the STARTING cap — the per-request fit and the grow-on-cutoff
+  above still apply. A number you write in config is used exactly as written,
+  including 4,096.
+- **An org-level `default_max_tokens` in `config.yaml` reaches your agents at
+  all.** The chain read `org.yaml` — a legacy standalone file nothing in the
+  harness has ever written, since `init` writes `org:` *inside* `config.yaml` —
+  so the org rung of "agent → division → org" was dead on every real install and
+  the value in the file you have was inert. It is now read from `config.yaml`
+  (both layers, workspace over global), and a division that sets no `max_tokens`
+  of its own no longer shadows it with a schema default. Two consequences worth
+  knowing on upgrade: an org cap you had set and assumed was working starts
+  working, and a `config.yaml` written by an older `init` carries
+  `default_max_tokens: 4096`, which now pins the cap at 4,096 — delete that line
+  (or set it to `null`, which is what `init` writes now) to get the derived one.
+  `default_temperature` and `default_model` have the same dead rung and are
+  deliberately left alone here; switching on a temperature that has been inert in
+  someone's config is a change that needs its own decision.
 - **A linked git worktree counts as inside the project it was cut from.** `git
   worktree add` leaves a `.git` *file*, not a directory, and the repository walk
   stopped there — so the main checkout's `.localharness/` one level up read as

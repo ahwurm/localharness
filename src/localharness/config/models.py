@@ -1407,11 +1407,16 @@ class AgentConfig(BaseModel):
         description="LLM sampling temperature for this agent.",
     )
 
-    max_tokens: int = Field(
-        default=4096,
+    max_tokens: Optional[int] = Field(
+        default=None,
         ge=1,
         le=128_000,
-        description="Maximum tokens to generate in a single LLM response.",
+        description=(
+            "Maximum tokens to generate in a single LLM response. Unset (the default) "
+            "auto-derives from the context window the server serves — a quarter of it, never "
+            "below 4,096 tokens — so a big window gets a big reply and a small one is unchanged. "
+            "A number here is used exactly as written."
+        ),
     )
 
     timeout_seconds: Optional[float] = Field(
@@ -1597,7 +1602,10 @@ class DivisionConfig(BaseModel):
     )
 
     temperature: float = Field(default=0.6, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=4096, ge=1, le=128_000)
+    # None, not 4096: a schema default here SHADOWS the org rung below it for every agent in the
+    # division — the same bug the org comment in loader.py describes, one level down. "Not set"
+    # has to be spellable or inheritance cannot pass through a division.
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
 
     tools: ToolConfig = Field(
         default_factory=ToolConfig,
@@ -1657,7 +1665,17 @@ class OrgConfig(BaseModel):
     )
 
     default_temperature: float = Field(default=0.6, ge=0.0, le=2.0)
-    default_max_tokens: int = Field(default=4096, ge=1, le=128_000)
+    default_max_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=128_000,
+        description=(
+            "Per-reply output cap for all agents. Unset (the default, written as `null`) "
+            "auto-derives from the served context window: a quarter of it, floored at 4,096 "
+            "tokens — 32,768 on a 131K window, unchanged on a small one. Set a number to pin "
+            "it exactly; an agent's or division's own `max_tokens` still outranks this."
+        ),
+    )
 
     permissions: PermissionConfig = Field(
         default_factory=PermissionConfig,

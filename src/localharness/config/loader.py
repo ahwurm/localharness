@@ -673,12 +673,26 @@ class ConfigLoader:
             _overlay_default(overlay_agent, "temperature", 0.6),
         )
 
+        # max_tokens needs no `model_fields_set` guard: its unset spelling is None at every rung
+        # (org `default_max_tokens`, division, agent), so an undeclared value already falls
+        # through. None all the way down is the answer "nobody chose a cap" — start_cmd derives
+        # one from the served window there (agent/context.py: resolve_output_cap). A number,
+        # 4,096 included, is a choice and is carried through untouched.
         agent_mt = raw.get("max_tokens")
         div_mt = division.max_tokens if division else None
-        org_mt = org.default_max_tokens if "default_max_tokens" in org.model_fields_set else None
+        # `org` is load_org(): the LEGACY standalone org.yaml, which nothing in src/ writes —
+        # `init` writes `org:` INSIDE config.yaml. So an org-level cap in the config users
+        # actually have never reached this resolution at all, exactly as the deny-pattern union
+        # below documents for its own field. Read the layered raw `org:` section first (the same
+        # precedence `_raw_org_context` uses for `context:`), legacy org.yaml second.
+        # `default_temperature` and `default_model` have the identical hole and are deliberately
+        # NOT changed here: switching on a temperature that has been inert in someone's
+        # config.yaml is a behaviour change that needs its own decision, not a silent ride along
+        # with a fix about the output cap.
+        org_mt = self._layered_raw_org().get("default_max_tokens", org.default_max_tokens)
         merged["max_tokens"] = _resolve_scalar(
             "max_tokens", agent_mt, div_mt, org_mt,
-            _overlay_default(overlay_agent, "max_tokens", 4096),
+            _overlay_default(overlay_agent, "max_tokens", None),
         )
 
         # Resolve the `context` block agent->division->org (per-field). Previously the

@@ -1992,6 +1992,57 @@ def test_response_reserve_grows_to_the_configured_cap_on_a_normal_window():
     assert response_reserve(8_192, 16_384) == 1_024                      # small-window curve untouched
 
 
+def test_derive_output_cap_is_a_fraction_of_the_window_with_a_floor():
+    """The unconfigured cap is derived, not a constant: OUTPUT_CAP_WINDOW_FRACTION of the served
+    window, floored at DEFAULT_MAX_TOKENS. The two windows that matter in practice are the
+    reference 131,072 and a 32,768 server; below ~16K the floor is what applies, which is how a
+    small window keeps exactly the reply length the flat 4,096 default gave it."""
+    from localharness.agent.context import derive_output_cap
+    from localharness.config.defaults import DEFAULT_MAX_TOKENS, OUTPUT_CAP_WINDOW_FRACTION
+
+    assert derive_output_cap(131_072) == 32_768
+    assert derive_output_cap(32_768) == 8_192
+    assert derive_output_cap(8_192) == DEFAULT_MAX_TOKENS      # floor: a quarter would be 2,048
+    assert derive_output_cap(4_096) == DEFAULT_MAX_TOKENS
+    assert derive_output_cap(0) == DEFAULT_MAX_TOKENS          # no window to derive from
+    # stated as the relationship, not the numbers: neither end is a literal that can drift
+    for window in (16_384, 65_536, 131_072, 262_144):
+        assert derive_output_cap(window) == max(
+            DEFAULT_MAX_TOKENS, int(window * OUTPUT_CAP_WINDOW_FRACTION)
+        )
+
+
+def test_derived_cap_always_fits_the_reserve_it_will_be_held_in():
+    """The reason a QUARTER is the fraction: the reserve grows to hold the cap but is bounded at
+    half the window, so a derived cap must never be the thing that hits that bound — if it did,
+    the request would silently ask for more than the reserve holds."""
+    from localharness.agent.context import (
+        clamp_response_tokens,
+        derive_output_cap,
+        response_reserve,
+    )
+    for window in (4_096, 8_192, 12_288, 16_384, 32_768, 65_536, 131_072, 262_144):
+        cap = derive_output_cap(window)
+        reserve = response_reserve(window, cap)
+        assert (window - reserve) + clamp_response_tokens(window, cap) <= window
+        if window >= 16_384:  # above the floor's reach, the derivation is untouched by clamping
+            assert clamp_response_tokens(window, cap) == cap
+            assert reserve <= window // 2
+
+
+def test_resolve_output_cap_honors_a_configured_number_and_derives_from_none():
+    """The whole contract in one place: a number is used exactly — INCLUDING one that equals the
+    floor, because 4,096 typed by a user is a choice, not a sentinel — and only None derives."""
+    from localharness.agent.context import resolve_output_cap
+
+    assert resolve_output_cap(4_096, 131_072) == 4_096
+    assert resolve_output_cap(8_192, 131_072) == 8_192
+    assert resolve_output_cap(1, 131_072) == 1
+    assert resolve_output_cap(None, 131_072) == 32_768
+    assert resolve_output_cap(None, 32_768) == 8_192
+    assert resolve_output_cap(None, 8_192) == 4_096
+
+
 def test_clamp_response_tokens_honors_a_configured_cap_the_window_can_hold():
     from localharness.agent.context import clamp_response_tokens
     assert clamp_response_tokens(131_072, 16_384) == 16_384

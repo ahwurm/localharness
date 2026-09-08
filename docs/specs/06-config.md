@@ -936,11 +936,15 @@ class AgentConfig(BaseModel):
         description="LLM sampling temperature for this agent.",
     )
 
-    max_tokens: int = Field(
-        default=4096,
+    max_tokens: Optional[int] = Field(
+        default=None,
         ge=1,
         le=128_000,
-        description="Maximum tokens to generate in a single LLM response.",
+        description=(
+            "Maximum tokens to generate in a single LLM response. Unset (the default) "
+            "auto-derives from the context window the server serves — a quarter of it, never "
+            "below 4,096 tokens. A number here is used exactly as written."
+        ),
     )
 
     # --- Subsystem configs ---
@@ -1041,7 +1045,7 @@ class DivisionConfig(BaseModel):
     )
 
     temperature: float = Field(default=0.6, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=4096, ge=1, le=128_000)
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
 
     tools: ToolConfig = Field(
         default_factory=ToolConfig,
@@ -1104,7 +1108,7 @@ class OrgConfig(BaseModel):
     )
 
     default_temperature: float = Field(default=0.6, ge=0.0, le=2.0)
-    default_max_tokens: int = Field(default=4096, ge=1, le=128_000)
+    default_max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
 
     permissions: PermissionConfig = Field(
         default_factory=PermissionConfig,
@@ -1198,7 +1202,7 @@ list — every field is declared there with its own description.
 | `role` | string | required | non-empty | Role description |
 | `model` | string | `"inherit"` | non-empty | LLM model name |
 | `temperature` | float | `0.6` | 0.0–2.0 | Sampling temperature |
-| `max_tokens` | int | `4096` | 1–128000 | Max response tokens |
+| `max_tokens` | int or null | null | 1–128000 | Per-reply output cap; null derives it from the served window (a quarter of it, floored at 4,096) |
 | `timeout_seconds` | float or null | null | 30.0–3600.0 | Per-agent HTTP timeout; null uses the provider's |
 | `max_subagent_depth` | int | `2` | 1–4 | How deep delegation may nest (1 disables nesting) |
 | `channel` | string | `"terminal"` | — | Output channel |
@@ -1836,7 +1840,7 @@ name: default
 
 default_model: qwen2.5:72b
 default_temperature: 0.6
-default_max_tokens: 4096
+default_max_tokens: null   # null = derive from the served window (window/4, floor 4096)
 
 permissions:
   mode: auto
