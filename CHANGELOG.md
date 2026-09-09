@@ -4,9 +4,55 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.13.3] — 2026-09-09
+
+The orchestrator's out-of-the-box path, dogfooded on a real multi-file drafting
+project with a slow thinking model. Every item here is something that made a
+turn look hung, end early, or do more work than it needed: a status row that
+said "working" for twelve minutes, a generation that fell into a loop nothing
+could see, a 30-minute clock that killed productive work, and an `edit` tool
+the model never reached for.
+
+### Added
+- **The status row says what the model is doing, not just "working".** With the
+  reasoning stream off, every phase of a reply looked the same: a spinner and the
+  word working, for twelve minutes at a time. The row now shows three things: the
+  phase of the last delta, colored, with its icon and live token tally — `⋯
+  thinking 2.3k`, `✎ writing 410`, `◆ tool call 120`, or `… waiting` before the
+  first delta (queue wait or prefill); the elapsed time, which turns into a red
+  `silent 14s` when no delta has arrived for ten seconds mid-stream; and the
+  tok/s figure that was already there. The tally is an estimate from the same
+  chunk-to-token ratio the rate uses (chars/4 before a ratio has been measured).
+  `LLMClient.stream_snapshot()` exposes the live picture, poll-cheap.
+- **A generation that locks into repetition is stopped mid-stream, not at the cap.**
+  Observed live (qwen3.8-27b, 2026-09-08): the model's hidden reasoning fell into
+  `413, 313, 213, ` and stayed there for the rest of a 16,384-token reply while the
+  status row said "working". Nothing could catch it — the repetition guard only
+  inspects the final text once the stream ends, a typed nudge lands on the next
+  request, and an output cap merely postpones the cut, after which the cap grows.
+  The stream consumer now watches the tail of everything it receives, reasoning
+  and content alike, and aborts the request the moment a short unit has repeated
+  back-to-back across a 1,200-character window; closing the stream ends generation
+  server-side. The loop records the abort in the ledger as an `llm_response` with
+  `finish_reason="degenerate"`, re-prompts once with `presence_penalty=1.5` for the
+  rest of the turn (Qwen's own guidance for thinking-mode repetition, applied only
+  after a loop was seen, never as an ambient default), and a second abort ends the
+  turn as a failure that says why. `LLMClient.complete` / `stream_complete` take a
+  per-call `presence_penalty`, sent only when set.
 
 ### Changed
+- **No turn time limit by default.** `permissions.budget.max_duration_minutes` now
+  defaults to `null`, which means no limit; write a number to pin one, exactly as
+  with the output cap. The old 30 minutes could not tell a runaway from slow
+  hardware: live (2026-09-09, qwen3.8-27b at ~20 tok/s), a productive
+  13-iteration turn resuming interrupted work — 56,000 output tokens, every step
+  landing — was ended by the clock between iterations at 39 minutes, and its
+  continuation faced the same wall. What actually stops a turn that has gone
+  wrong is `max_actions`, the stuck detector, the mid-stream repetition guard,
+  the per-chunk silence timeout, the kill file, and Ctrl-C; those are unchanged.
+  Built-in subagents keep their own bounded budgets. A `config.yaml` written by an
+  older `init` still carries `max_duration_minutes: 30.0` and still pins it —
+  delete the line or set it to `null`.
 - **`edit` comes with `write`, and both tools show their work.** A fresh install's
   root agent has always held `edit` alongside `write` and `bash_exec`, but the
   model never reached for it: a yaml-defined subagent that listed `write` got no
