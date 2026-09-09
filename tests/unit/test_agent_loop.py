@@ -243,6 +243,18 @@ def test_budget_unlimited_actions():
     assert result is None or result.reason == "time"
 
 
+def test_budget_time_unlimited_by_default():
+    """No turn time limit unless a number is written: the schema default is None, the loop
+    hands the tracker 0.0 for it, and 0.0 never trips on time (2026-09-09: a productive
+    13-iteration turn on slow hardware died to the old 30-minute default)."""
+    from localharness.config.models import BudgetConfig
+    assert BudgetConfig().max_duration_minutes is None
+    s = Session(agent_id="a", session_id="s", messages=[])
+    time.sleep(0.05)
+    tracker = BudgetTracker(max_actions=0, max_duration_minutes=0.0)
+    assert tracker.check(s) is None
+
+
 def test_budget_time_exceeded():
     # Use very short duration to trigger time violation
     s = Session(agent_id="a", session_id="s", messages=[])
