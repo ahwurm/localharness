@@ -1,7 +1,7 @@
 # Reference Architectures
 
-LocalHarness is developed and tested against two concrete hardware targets. Every harness
-default should work out of the box on both; per-hardware setup and tuning notes are in
+LocalHarness is developed and tested against three concrete hardware targets. Every harness
+default should work out of the box on all of them; per-hardware setup and tuning notes are in
 [gaps.md](gaps.md).
 
 ## Practicality bar
@@ -21,23 +21,35 @@ architecture A also has a fully tested DeepSeek V4 Flash configuration. Both arc
 are personally maintained and re-tested by the project maintainer; when a new family
 ships, both docs are revised together.
 
+**How architecture C meets bar 1:** on an 8 GB card, 64k of FP16 KV does not fit alongside
+the weights — it reaches the 64k figure with `q8_0` KV cache (`-ctk q8_0 -ctv q8_0`), a
+one-flag setting that measured no decode or tool-calling cost. Its native FP16 window is
+32k. Stated here rather than buried, because it is the one place a reference architecture
+clears the bar by a documented setting instead of outright.
+
 | Status | Meaning |
 |--------|---------|
 | **TESTED** | Numbers measured on the maintainer's hardware; treat as ground truth. |
 | **PROPOSED** | Config meets the bar on paper; numbers are estimates until the doc's validation checklist passes. |
 
-## The two architectures
+## The three architectures
 
-| | A: [DGX Spark](dgx-spark.md) | B: [Base Mac mini](mac-mini.md) |
-|---|---|---|
-| Status | **TESTED** | **PROPOSED** |
-| Hardware | NVIDIA DGX Spark — GB10 Grace Blackwell, 128 GB LPDDR5x (119 GiB usable), 273 GB/s | Apple Mac mini (base) — M4, 16 GB unified, 120 GB/s |
-| Default model | Qwen3.8-27B (dense, multimodal) — **3 other tested configs**, see below | `Qwen/Qwen3.5-9B` (dense 9B, hybrid attention) |
-| Quantization | GGUF `UD-Q4_K_XL` (17.9 GB) + MTP head (4.5 GB) | MLX 4-bit / GGUF `Q4_K_M` (5.68 GB) |
-| Runtime | llama.cpp with MTP speculative decode, OpenAI API on `:8080` | vLLM ([vllm-metal](https://github.com/vllm-project/vllm-metal)), OpenAI API on `:8000` |
-| Context served | 64k (`-c 65536`) | 64k (`--max-model-len 65536`), KV ≈ 2.1 GB |
-| Decode, single stream | **17 tok/s prose, 19.5–21.3 tok/s code (measured)** | est. 10–15 tok/s @ 64k depth (validate ≥9.5) |
-| Tool calling | llama.cpp `--jinja` (model's own template) | vllm-metal parser / llama.cpp hermes (unvalidated) |
+| | A: [DGX Spark](dgx-spark.md) | B: [Base Mac mini](mac-mini.md) | C: [8 GB consumer GPU](rtx-4060.md) |
+|---|---|---|---|
+| Status | **TESTED** | **PROPOSED** | **PROPOSED** |
+| Hardware | NVIDIA DGX Spark — GB10 Grace Blackwell, 128 GB LPDDR5x (119 GiB usable), 273 GB/s | Apple Mac mini (base) — M4, 16 GB unified, 120 GB/s | Discrete 8 GB GPU + 16 GB RAM — reference part RTX 4060, 272 GB/s |
+| Default model | Qwen3.8-27B (dense, multimodal) — **3 other tested configs**, see below | `Qwen/Qwen3.5-9B` (dense 9B, hybrid attention) | `empero-ai/Qwen3.8-9B-Distill` (Qwen3.5-9B base, distilled) |
+| Quantization | GGUF `UD-Q4_K_XL` (17.9 GB) + MTP head (4.5 GB) | MLX 4-bit / GGUF `Q4_K_M` (5.68 GB) | GGUF `Q4_K_M` (5.38 GiB) |
+| Runtime | llama.cpp with MTP speculative decode, OpenAI API on `:8080` | vLLM ([vllm-metal](https://github.com/vllm-project/vllm-metal)), OpenAI API on `:8000` | llama.cpp, OpenAI API on `:8080` |
+| Context served | 64k (`-c 65536`) | 64k (`--max-model-len 65536`), KV ≈ 2.1 GB | 32k FP16 KV, or 64k with `q8_0` KV |
+| Decode, single stream | **17 tok/s prose, 19.5–21.3 tok/s code (measured)** | est. 10–15 tok/s @ 64k depth (validate ≥9.5) | **~39 tok/s (measured on a bandwidth-equivalent proxy)** |
+| Tool calling | llama.cpp `--jinja` (model's own template) | vllm-metal parser / llama.cpp hermes (unvalidated) | llama.cpp `--jinja`, **native — validated end to end** |
+
+Architecture C is the first target aimed at hardware the reader already owns. Its numbers
+were measured on the maintainer's Spark standing in for the 8 GB card — the two are within
+0.4% on memory bandwidth, which is what single-stream decode is bound by — so decode and
+memory-footprint figures transfer but prefill does not. [rtx-4060.md](rtx-4060.md) states
+exactly what that proxy does and does not establish.
 
 ### Tested configurations on architecture A
 
@@ -69,7 +81,7 @@ Full recipes, flags and caveats: [dgx-spark.md](dgx-spark.md).
 
 ## Zero-config detection
 
-`localharness init` already auto-detects both architectures with no configuration:
+`localharness init` already auto-detects all three architectures with no configuration:
 `provider/detector.py` probes ports `[8081, 8000, 11434, 1234, 8080]` in priority order
 (harness-managed vLLM, stock vLLM, Ollama, LM Studio, llama.cpp). **Agent YAML is
 portable across every configuration on this page** — all of them speak the OpenAI API, and
@@ -89,7 +101,8 @@ vLLM, llama.cpp and Ollama must all work out of the box harness-wide:
   [vllm-metal](https://github.com/vllm-project/vllm-metal) (MLX backend) on the mini.
 - **llama.cpp** — tier 1 on the Spark, where it is the only runtime that currently serves
   configs A1 and A3 (both need speculative decoding); also validated on architecture B
-  (`:8080`).
+  (`:8080`), and the sole runtime for architecture C, where `init` was confirmed to
+  auto-detect it and land on native tool calling.
 - **Ollama** — supported on both for models that meet the bar resident (the
   architecture-B model fits comfortably). `doctor` should warn when a configured model
   cannot sit resident in machine RAM — see [gaps.md](gaps.md) §3.
@@ -98,7 +111,8 @@ vLLM, llama.cpp and Ollama must all work out of the box harness-wide:
 
 - [dgx-spark.md](dgx-spark.md) — architecture A, tested config
 - [mac-mini.md](mac-mini.md) — architecture B, proposed config + validation checklist
-- [gaps.md](gaps.md) — development items blocking out-of-box support for both
+- [rtx-4060.md](rtx-4060.md) — architecture C, 8 GB consumer GPU, proposed config + validation checklist
+- [gaps.md](gaps.md) — development items blocking out-of-box support for all three
 
 ---
 
