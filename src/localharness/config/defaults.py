@@ -28,7 +28,7 @@ DEFAULT_COMPACTION_THRESHOLD_PCT: float = 80.0
 DEFAULT_MAX_TOOL_OUTPUT_CHARS: int = 32_000
 DEFAULT_MAX_NOTES_CHARS: int = 16_000
 DEFAULT_MAX_ACTIONS: int = 100
-DEFAULT_MAX_DURATION_MINUTES: float = 30.0
+DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by default (see BudgetConfig)
 
 # Revision of the SHIPPED default deny list (PermissionConfig.deny_patterns). Bump by 1
 # whenever that list grows/changes in a release. A user config stamps the revision it was

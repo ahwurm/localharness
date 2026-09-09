@@ -1019,7 +1019,7 @@ class AgentLoop:
             task_summary=task[:200],
             budget=BudgetSpec(
                 max_actions=budget_cfg.max_actions,
-                max_duration_minutes=budget_cfg.max_duration_minutes,
+                max_duration_minutes=budget_cfg.max_duration_minutes or 0.0,  # None = unbounded
                 max_context_tokens=self._config.context.max_context_tokens,
             ),
         ))
@@ -1143,7 +1143,7 @@ class AgentLoop:
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
-            max_duration_minutes=self._config.permissions.budget.max_duration_minutes,
+            max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
             max_tool_calls=self._config.permissions.budget.max_tool_calls,
         )
         sd_cfg = self._config.stuck_detector
@@ -2176,7 +2176,7 @@ class AgentLoop:
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
-            max_duration_minutes=self._config.permissions.budget.max_duration_minutes,
+            max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
         )
         violation = budget.check(session)
         if violation is not None:

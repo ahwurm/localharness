@@ -150,11 +150,16 @@ class BudgetConfig(BaseModel):
         ),
     )
 
-    max_duration_minutes: float = Field(
-        default=30.0,
+    max_duration_minutes: Optional[float] = Field(
+        default=None,
         ge=0.1,
         le=1440.0,  # 24 hours
-        description="Maximum wall-clock duration for one session.",
+        description=(
+            "Maximum wall-clock minutes for one turn. None (the default) means no time limit: "
+            "the turn ends on max_actions, the stuck and repetition guards, the kill file, or "
+            "Ctrl-C. A clock cannot tell a runaway from slow hardware — live, a productive "
+            "13-iteration turn on a 20 tok/s model died to the old 30-minute default."
+        ),
     )
 
     kill_file: Optional[str] = Field(
