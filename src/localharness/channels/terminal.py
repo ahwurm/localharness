@@ -85,6 +85,23 @@ _REASON_FLUSH_CHARS = 240  # a paragraph with no newline yet still streams in pi
 # rich spinners under patch_stdout glue lines and, worse, FREEZE on Ctrl+C-during-burst.
 _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# Status-row phases while the model generates (see _working_frags). One icon per kind of
+# delta: ⋯ thinking (reasoning), ✎ writing (answer text), ◆ tool call (arguments), … waiting
+# (no delta yet: queue wait or prefill). The icons double as the tally markers.
+_PHASE_ICONS = {"waiting": "…", "thinking": "⋯", "writing": "✎", "tool_call": "◆"}
+_PHASE_LABELS = {"waiting": "waiting", "thinking": "thinking", "writing": "writing",
+                 "tool_call": "tool call"}
+_SILENCE_NOTE_SECONDS = 10.0   # no delta for this long mid-stream → say so on the row
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+
 # Burst consolidation: consecutive calls from one tool family collapse into a single
 # live counter line (`◆ web_search · web_fetch · 30/30`) instead of a line per call —
 # a 30-hit research burst is one scrollback line, not 60. Per-call truth (args, errors,
@@ -128,6 +145,12 @@ INPUT_STYLE = Style.from_dict({
     "tps-green": "ansigreen",
     "tps-yellow": "ansiyellow",
     "tps-red": "ansired bold",
+    # generation phase (status row): the kind of delta arriving right now
+    "phase-thinking": "ansiblue",
+    "phase-writing": "ansigreen",
+    "phase-tool_call": "ansicyan",
+    "phase-waiting": "ansiyellow",
+    "phase-silent": "ansired bold",
 })
 
 
@@ -716,6 +739,10 @@ class TerminalChannel(ChannelAdapter):
         # Decode-speed supplier (start_cmd wires LLMClient.gen_speed_snapshot): () -> (tok/s,
         # verified) | None. Drives the colored tok/s readout in the status row / thinking label.
         self.tps_source: Callable[[], tuple[float, bool] | None] | None = None
+        # Live-request supplier (start_cmd wires LLMClient.stream_snapshot): () -> {phase,
+        # thinking_tokens, answer_tokens, tool_call_tokens, elapsed, silent} | None. Drives the
+        # phase + tallies in the status row's working text; None → the plain "working".
+        self.progress_source: Callable[[], dict | None] | None = None
         # Reasoning stream (terminal.show_reasoning / --show-reasoning / /reasoning). start_cmd
         # points LLMClient.on_reasoning at on_reasoning below; the flag decides whether the
         # deltas print. Line-buffered: a complete line (or _REASON_FLUSH_CHARS of one) prints
@@ -1112,11 +1139,45 @@ class TerminalChannel(ChannelAdapter):
         elif self._box_dreaming and not self._box_working:
             activity = _DREAMING_LABEL   # · dreaming…
         else:
-            activity = "working"
-            show_tps = True
+            frags = [("class:hint", f"  {glyph} ")] + self._working_frags() + [("class:hint", " ")]
+            frags.extend(self._tps_frag())
+            return frags
         frags = [("class:hint", f"  {glyph} {activity} ")]
         if show_tps:
             frags.extend(self._tps_frag())
+        return frags
+
+    def _working_frags(self) -> list[tuple[str, str]]:
+        """Status-row text while the model generates — two fragments, then the tok/s one.
+        A bare "working" was every phase at once (live: a 12-minute hidden think looked
+        exactly like a hang). Fragment 1, colored by phase: the kind of the last delta with
+        its icon and its live token tally — `⋯ thinking 2.3k`, `✎ writing 410`, `◆ tool
+        call 120`, or `… waiting` before the first delta. Fragment 2, dim: elapsed time,
+        which turns into a red `silent 14s` when no delta has arrived for a while
+        mid-stream. Without a supplier (or between requests): the plain "working"."""
+        snap = None
+        if self.progress_source is not None:
+            try:
+                snap = self.progress_source()
+            except Exception:
+                snap = None
+        if snap is None:
+            return [("class:hint", "working")]
+        phase = snap.get("phase") or "waiting"
+        tally = {
+            "thinking": int(snap.get("thinking_tokens") or 0),
+            "writing": int(snap.get("answer_tokens") or 0),
+            "tool_call": int(snap.get("tool_call_tokens") or 0),
+        }.get(phase, 0)
+        head = f"{_PHASE_ICONS.get(phase, '')} {_PHASE_LABELS.get(phase, phase)}".strip()
+        if tally:
+            head += f" {_fmt_tokens(tally)}"
+        frags = [(f"class:phase-{phase}", head)]
+        silent = float(snap.get("silent") or 0.0)
+        if phase != "waiting" and silent >= _SILENCE_NOTE_SECONDS:
+            frags.append(("class:phase-silent", f" · silent {_fmt_elapsed(silent)}"))
+        else:
+            frags.append(("class:hint", f" · {_fmt_elapsed(float(snap.get('elapsed') or 0.0))}"))
         return frags
 
     def _tps_frag(self) -> list[tuple[str, str]]:

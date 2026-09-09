@@ -467,7 +467,10 @@ async def test_create_and_consume_stream_measures_and_records(tmp_path, monkeypa
         return _aiter(chunks)
 
     c._client = NS(chat=NS(completions=NS(create=fake_create)))
-    ticks = iter([100.0, 102.0])  # first payload delta at 100, note-time at 102
+    # One tick per clock read: request start (the status row's started_at), then each of the
+    # three payload deltas (last_delta_at; the first one is also first_at = 100), then the
+    # note-time at 102. Any extra read lands on the 102 default.
+    ticks = iter([99.0, 100.0, 100.5, 101.0, 102.0])
     monkeypatch.setattr(client_mod.time, "monotonic", lambda: next(ticks, 102.0))
     msg, usage = await c._create_and_consume({}, stream=True)
     assert msg.content == "xyz"
@@ -915,3 +918,48 @@ async def test_stream_with_varied_reasoning_is_left_alone():
 
     msg, _ = await LLMClient._consume_native_stream(stream(), None)
     assert msg.content == "done" and msg.finish_reason == "stop"
+
+
+# ---------------------------------------------------------------------------
+# Live stream tallies for the status row (2026-09-09)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_progress_counts_each_kind_of_delta():
+    from localharness.provider.client import LLMClient
+    progress = {"first_at": None, "chunks": 0, "server_tps": None, "started_at": 0.0,
+                "last_delta_at": None, "last_kind": None, "reasoning_chunks": 0,
+                "reasoning_chars": 0, "content_chunks": 0, "content_chars": 0,
+                "tool_chunks": 0, "tool_chars": 0}
+
+    def r(text):
+        return NS(usage=None, choices=[NS(delta=NS(content=None, tool_calls=None,
+                                                   reasoning_content=text), finish_reason=None)])
+
+    chunks = [r("let me "), r("think"), _chunk(content="Answer"), _chunk(content=" text")]
+    msg, _ = await LLMClient._consume_native_stream(_aiter(chunks), None, progress)
+    assert progress["reasoning_chunks"] == 2 and progress["reasoning_chars"] == len("let me think")
+    assert progress["content_chunks"] == 2 and progress["content_chars"] == len("Answer text")
+    assert progress["last_kind"] == "writing" and progress["last_delta_at"] is not None
+    assert msg.content == "Answer text"
+
+
+def test_stream_snapshot_reports_phase_and_estimated_tallies():
+    import time
+    from localharness.provider.client import LLMClient, LLMConfig
+    client = LLMClient(LLMConfig(base_url="http://localhost:1/v1", model="m"))
+    assert client.stream_snapshot() is None            # nothing in flight
+    now = time.monotonic()
+    client._stream_progress = {"first_at": now - 30, "chunks": 100, "server_tps": None,
+                               "started_at": now - 40, "last_delta_at": now - 12,
+                               "last_kind": "thinking", "reasoning_chunks": 90,
+                               "reasoning_chars": 1800, "content_chunks": 10,
+                               "content_chars": 200, "tool_chunks": 0, "tool_chars": 0}
+    client._tokens_per_chunk = None                    # no measured ratio yet → chars/4
+    snap = client.stream_snapshot()
+    assert snap["phase"] == "thinking"
+    assert snap["thinking_tokens"] == 450 and snap["answer_tokens"] == 50
+    assert 39 <= snap["elapsed"] <= 41 and 11 <= snap["silent"] <= 13
+    client._tokens_per_chunk = 3.0                     # measured ratio → chunks × ratio
+    snap = client.stream_snapshot()
+    assert snap["thinking_tokens"] == 270 and snap["answer_tokens"] == 30
