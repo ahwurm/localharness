@@ -490,6 +490,18 @@ class _RepetitionWatch:
         return find_repeated_tail(self._buf)
 
 
+# Live tallies for the status row (LLMClient.stream_snapshot): what KIND of delta is
+# arriving and how much of each so far. A 12-minute hidden think used to read as "working",
+# indistinguishable from a hang. The consumer fills these in on any progress dict it is
+# handed (setdefault), so a caller that passes the older three-key shape keeps working.
+_PROGRESS_TALLY_DEFAULTS: dict[str, Any] = {
+    "last_delta_at": None, "last_kind": None,
+    "reasoning_chunks": 0, "reasoning_chars": 0,
+    "content_chunks": 0, "content_chars": 0,
+    "tool_chunks": 0, "tool_chars": 0,
+}
+
+
 def _reasoning_text(obj: Any) -> str | None:
     """Thinking text off a streaming delta or a response message, whichever field the runtime
     spells it with (#142).
@@ -1101,7 +1113,10 @@ class LLMClient:
             kwargs["stream_options"] = {"include_usage": True}
             # Local dict per call (concurrent streams each keep their own); the instance
             # pointer only serves the UI's tick-poll and is cleared before measurement.
-            progress: dict[str, Any] = {"first_at": None, "chunks": 0, "server_tps": None}
+            progress: dict[str, Any] = {
+                "first_at": None, "chunks": 0, "server_tps": None,
+                "started_at": time.monotonic(), **_PROGRESS_TALLY_DEFAULTS,
+            }
             self._stream_progress = progress
             try:
                 response = await self._client.chat.completions.create(**kwargs)
@@ -1228,6 +1243,35 @@ class LLMClient:
             return (self.last_gen_tps, True)
         return None
 
+    def stream_snapshot(self) -> dict[str, Any] | None:
+        """Live picture of the request in flight, for a status row; None between requests.
+
+        phase is the kind of the LAST delta: "waiting" (nothing yet — queue wait or prefill),
+        "thinking" (reasoning), "writing" (answer text), "tool_call" (arguments streaming).
+        The token counts are estimates: chunks scaled by the tokens-per-chunk ratio measured
+        on the last finished stream when one is known, else chars/4 — a rough yardstick, but
+        the same one for every tally, so thinking and answer compare. elapsed and silent are
+        seconds since the request started and since the last delta. Poll-cheap (UI tick)."""
+        p = self._stream_progress
+        if p is None:
+            return None
+        now = time.monotonic()
+        ratio = self._tokens_per_chunk
+
+        def est(chunks: int, chars: int) -> int:
+            return int(chunks * ratio) if ratio else int(chars / 4)
+
+        started = p.get("started_at") or now
+        last = p.get("last_delta_at")
+        return {
+            "phase": p.get("last_kind") or "waiting",
+            "thinking_tokens": est(p.get("reasoning_chunks", 0), p.get("reasoning_chars", 0)),
+            "answer_tokens": est(p.get("content_chunks", 0), p.get("content_chars", 0)),
+            "tool_call_tokens": est(p.get("tool_chunks", 0), p.get("tool_chars", 0)),
+            "elapsed": now - started,
+            "silent": now - (last if last is not None else started),
+        }
+
     @staticmethod
     def _unmap_tool_call_names(message: Any, unmap: dict[str, str] | None) -> None:
         """Restore registry tool names (sanitized -> original) on a parsed response, in place.
@@ -1281,6 +1325,9 @@ class LLMClient:
         calls: dict[int, dict] = {}
         usage = None
         finish_reason = None
+        if progress is not None:
+            for key, default in _PROGRESS_TALLY_DEFAULTS.items():
+                progress.setdefault(key, default)
         watch = _RepetitionWatch()
 
         async def _abort(hit: tuple[str, int]) -> None:
@@ -1330,10 +1377,16 @@ class LLMClient:
                 or reasoning is not None
             ):
                 progress["chunks"] += 1
+                now = time.monotonic()  # one read: the first delta IS the last delta so far
+                progress["last_delta_at"] = now
                 if progress["first_at"] is None:
-                    progress["first_at"] = time.monotonic()
+                    progress["first_at"] = now
             if reasoning:
                 reasoning_parts.append(reasoning)
+                if progress is not None:
+                    progress["reasoning_chunks"] += 1
+                    progress["reasoning_chars"] += len(reasoning)
+                    progress["last_kind"] = "thinking"
                 if on_reasoning is not None:
                     await on_reasoning(reasoning)
                 if (hit := watch.feed(reasoning)) is not None:
@@ -1341,11 +1394,19 @@ class LLMClient:
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)
+                if progress is not None:
+                    progress["content_chunks"] += 1
+                    progress["content_chars"] += len(piece)
+                    progress["last_kind"] = "writing"
                 if on_token is not None:
                     await on_token(piece)
                 if (hit := watch.feed(piece)) is not None:
                     await _abort(hit)
-            for tc in getattr(delta, "tool_calls", None) or []:
+            _tool_deltas = getattr(delta, "tool_calls", None) or []
+            if _tool_deltas and progress is not None:
+                progress["tool_chunks"] += 1
+                progress["last_kind"] = "tool_call"
+            for tc in _tool_deltas:
                 idx = getattr(tc, "index", 0) or 0
                 slot = calls.setdefault(
                     idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
@@ -1358,6 +1419,8 @@ class LLMClient:
                         slot["function"]["name"] = fn.name
                     if getattr(fn, "arguments", None):
                         slot["function"]["arguments"] += fn.arguments
+                        if progress is not None:
+                            progress["tool_chars"] += len(fn.arguments)
         tool_calls = [calls[i] for i in sorted(calls)] or None
         message = SimpleNamespace(
             content="".join(content_parts) or None,

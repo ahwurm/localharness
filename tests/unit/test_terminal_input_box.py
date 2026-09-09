@@ -404,3 +404,55 @@ class TestStatusRowTps:
         assert ch._thinking_label() == "[muted]thinking…[/muted]"
         ch.tps_source = None
         assert ch._thinking_label() == "[muted]thinking…[/muted]"
+
+
+class TestWorkingTallies:
+    """The working row names the phase and counts its tokens (2026-09-09). With reasoning
+    hidden, a bare "working" was every phase at once; a 12-minute think looked like a hang.
+    Three things at most: the colored phase + tally, elapsed (or a red silence), tok/s."""
+
+    def _text(self, frags) -> str:
+        return "".join(t for _style, t in frags)
+
+    def _row(self, snap):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_notify_working(True)
+        ch.progress_source = lambda: snap
+        return ch, ch._box_status_frags()
+
+    def test_thinking_phase_is_colored_and_carries_its_tally(self):
+        _, frags = self._row({"phase": "thinking", "thinking_tokens": 2300, "answer_tokens": 410,
+                              "tool_call_tokens": 0, "elapsed": 72.4, "silent": 0.3})
+        text = self._text(frags)
+        assert "⋯ thinking 2.3k" in text and "1m12s" in text
+        assert "410" not in text, "only the current phase's tally — three things, not six"
+        assert "working" not in text and "silent" not in text
+        assert any(style == "class:phase-thinking" and "thinking" in txt for style, txt in frags)
+
+    def test_writing_phase_with_a_long_silence_goes_red(self):
+        _, frags = self._row({"phase": "writing", "thinking_tokens": 0, "answer_tokens": 88,
+                              "tool_call_tokens": 0, "elapsed": 30.0, "silent": 14.2})
+        text = self._text(frags)
+        assert "✎ writing 88" in text and "silent 14s" in text
+        assert any(style == "class:phase-silent" for style, _ in frags)
+
+    def test_waiting_phase_before_the_first_delta(self):
+        _, frags = self._row({"phase": "waiting", "thinking_tokens": 0, "answer_tokens": 0,
+                              "tool_call_tokens": 0, "elapsed": 8.0, "silent": 8.0})
+        text = self._text(frags)
+        assert "… waiting" in text and "8s" in text
+        assert "silent" not in text, "waiting IS the silence; no double report"
+
+    def test_no_supplier_keeps_the_plain_working(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_notify_working(True)
+        assert "working" in self._text(ch._box_status_frags())
+
+    def test_rate_still_follows_the_phase(self):
+        ch, _ = self._row({"phase": "thinking", "thinking_tokens": 120, "answer_tokens": 0,
+                           "tool_call_tokens": 0, "elapsed": 5.0, "silent": 0.2})
+        ch.tps_source = lambda: (28.4, False)
+        text = self._text(ch._box_status_frags())
+        assert "⋯ thinking 120" in text and "~28 tok/s" in text

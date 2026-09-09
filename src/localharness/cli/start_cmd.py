@@ -1325,6 +1325,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # decode-speed snapshot. The client object survives /model rebinds, so this
             # stays valid across swaps.
             channel.tps_source = llm.gen_speed_snapshot
+            channel.progress_source = llm.stream_snapshot  # phase + live token tallies
 
         # --- Startup summary line ---
         # Entity-typed per the localharness.dev architecture plates (cli/theme.py): the
