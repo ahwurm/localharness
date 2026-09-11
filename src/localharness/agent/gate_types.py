@@ -222,22 +222,44 @@ into the signature (``rm -r -f x`` → ``rm -rf``; ``git push -f`` → ``git pus
 ``--force``→f/force, ``--recursive`` for chmod→R."""
 
 PIPE_TO_SHELL_SOURCES_DEFAULT: frozenset[str] = frozenset({"curl", "wget"})
+"""The fetch side of the pipe-to-shell rule: a segment with one of these signatures piped into a
+sink below makes the SINK destructive (PRD §3.1; Claude Code block list). Two entries because
+these are the two fetchers the dogfood corpus (PRD §5) actually used; the rule is overridable
+from ``permissions.ask.pipe_to_shell_sources`` for anyone whose install ships another."""
+
 PIPE_TO_SHELL_SINKS_DEFAULT: frozenset[str] = frozenset({"sh", "bash", "zsh", "python", "python3"})
-"""``curl … | sh`` and friends: the sink segment is destructive (PRD §3.1; Claude Code block list)."""
+"""The execute side of the same rule: ``curl … | sh`` and friends, where the sink segment is
+destructive (PRD §3.1; Claude Code block list). Read with the sources above — neither half means
+anything alone, and a bare ``sh`` is an interpreter, not a destructive command."""
 
 INTERPRETER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "python", "python3", "bash", "sh", "zsh", "node", "uv run", "ruby", "perl",
 })
+"""Commands whose SIGNATURE carries an interpreter mode (PRD §3.2 step 7, critic finding 5).
+
+``python3 -c``, ``python3 -m MOD``, ``python3 <script>`` and bare ``python3`` are four different
+grant keys, so answering "always" about an inline one-liner is never an answer about a script.
+The list is the interpreters present in the dogfood corpus (PRD §5), where ``python3`` is the
+second signature nearly every workspace is asked about."""
+
 INLINE_CODE_FLAGS_DEFAULT: dict[str, tuple[str, ...]] = {
     "python": ("-c",), "python3": ("-c",), "uv run": ("-c",),
     "bash": ("-c",), "sh": ("-c",), "zsh": ("-c",),
     "node": ("-e", "--eval", "-p", "--print"),
     "ruby": ("-e",), "perl": ("-e", "-E"),
 }
+"""Per-interpreter flags that mean "the code is on the command line" (PRD §3.2 step 7).
+
+The table that turns a command into the ``interpreter-inline`` class and puts the mode in the
+grant key. Each row is that interpreter's own documented inline flags — ``node`` carries four
+because ``-p``/``--print`` evaluate too. Deliberately NOT overridable from config (see
+``AskConfig``): it is a canonicalization table, and a wrong row silently changes what a grant
+key means."""
+
 INLINE_BY_NATURE_DEFAULT: frozenset[str] = frozenset({"eval"})
-"""PRD §3.1 ``interpreter-inline`` class (grantable per owner ruling 2026-09-11 §9.3). The
-signature carries the mode so ``python3 -c``, ``python3 -m MOD``, ``python3 <script>`` and bare
-``python3`` are four different grant keys (critic finding 5)."""
+"""Commands that are inline interpreters with no flag at all (PRD §3.1 ``interpreter-inline``,
+grantable per owner ruling 2026-09-11 §9.3). ``eval`` takes its code as plain arguments, so
+there is no mode flag to key on — the command itself is the signature."""
 
 WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "env", "nohup", "time", "nice", "ionice", "command", "builtin", "exec", "timeout", "stdbuf",
