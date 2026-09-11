@@ -16,27 +16,48 @@ All notable changes to LocalHarness are documented here. The format follows
   opens a workspace, LocalHarness asks **once** whether you trust it — the
   same `~/.localharness/trusted_workspaces.yaml` record that already decided
   whether a project's own `.localharness/` config is loaded — and after that
-  everything runs except a named blacklist. Decline, and the session runs
-  `guarded`; a channel that cannot ask and has no record for that workspace
-  runs `guarded` too. In Zed the question is the permission dialog, once per
-  project.
+  everything runs except a named blacklist. Three ways past that question, in
+  order: a decision recorded here or above here (nested folders inherit), then
+  evidence that you have already worked here (any session file in the
+  workspace's own `.localharness/`, or the global store for a home-rooted
+  session), then the question itself. A "yes" is recorded forever; a "no" is
+  recorded too and runs the session in `guarded`; a channel that cannot ask
+  and has no record runs `guarded` and records **nothing**, so the next
+  interactive session still gets its one question. An explicitly configured
+  `permissions.mode` skips the question entirely. In Zed it arrives as a
+  permission dialog with two buttons, *Trust this workspace* and *Not now*.
 - **What still asks in `auto`, every time, with no answer remembered —
-  `AUTO_BLACKLIST`, and nothing else.** A delete or recursive permission
-  change whose target is outside the project or cannot be resolved
-  (`rm -rf`, `find -delete`, the Windows deletes, `chmod -R`, `chown -R`);
-  `git push --force`/`--delete`, `git reset --hard`, `git clean -f`;
-  `sudo`/`su`; a download piped into a shell (`curl … | sh`); `dd`, `mkfs`,
-  `shred`, `format`; writes to a secret store (`~/.ssh`, `~/.aws`,
-  `~/.gnupg`, credential files, shell rc files, `~/.localharness`) or a
-  system directory; and, inside the project, writes to `.git/**` and
-  `.localharness/**`. **Everything else runs without asking.** Deliberately
-  not on the list: `docker` in any form (the shipped deny patterns already
-  refuse `docker stop`/`kill`/`rm`/`compose down` outright), `git branch`,
-  `git stash`, `git checkout`, `git restore`, `.env` and key files inside
-  the project (a deny pattern covers `.env`), interpreters, `python_exec`,
-  subagents, MCP and plugin tools, network reads, and writes anywhere else —
-  including elsewhere in your home directory. Recorded refusals still deny in
-  `auto`, and your deny patterns still deny before the gate speaks at all.
+  `AUTO_BLACKLIST`, and nothing else.** One structure in `agent/gate_types.py`
+  with four fields: `target_scoped_verbs` (`rm`, `rmdir`, `chmod`, `chown`,
+  `chgrp`, `truncate`, `find`, and the Windows `Remove-Item`/`del`/`rd`
+  spellings) when the target is outside the project, protected, or
+  unresolvable; `irreversible_signatures` wherever they point (`sudo`, `su`,
+  `doas`, `dd`, `mkfs`, `shred`, `format`, `diskpart`, `git push --force`,
+  `git push --delete`, `git reset --hard`, `git clean -f`);
+  `protected_paths_workspace`, which in `auto` is `.git/**` plus the
+  behaviour-changing files of `.localharness/` (`config.yaml`,
+  `overrides.yaml`, `plugins/**`), with the home and system sets applying in
+  full; and `pipe_to_shell`, a download whose sink takes its program from
+  stdin. A call the gate cannot read at all — a non-string command or path —
+  asks too. **Everything else runs without asking.** Deliberately not on the
+  list: `docker` in any form (the shipped deny patterns already refuse
+  `docker stop`/`kill`/`rm`/`compose down` outright), every other git
+  subcommand including `branch`, `stash`, `checkout` and `restore`, `.env` and
+  key files inside the project (a deny pattern covers `.env`), a command name
+  computed at runtime (`eval "$(direnv hook bash)"`, `$VAR …`), interpreters,
+  `python_exec`, subagents, MCP and plugin tools, network reads, and writes
+  anywhere else — including elsewhere in your home directory. Recorded
+  refusals still deny in `auto`, and your deny patterns still deny before the
+  gate speaks at all. `AUTO_BLACKLIST` is deliberately not reachable from
+  `permissions.ask.*`; `localharness ask-rate --traces DIR --mode auto`
+  reports which entries actually fired over your own traces.
+- **The harness's own directories are protected by file, not wholesale.**
+  Under `~/.localharness` only `config.yaml`, `overrides.yaml`,
+  `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`
+  and `plugins/**` are protected — the files that change what the harness does
+  next. Agents, tools, session state, memory and history under it are
+  bookkeeping and are not. The same shape applies in-project:
+  `.localharness/config.yaml`, `overrides.yaml` and `plugins/**`.
 - **New protected paths: the system directories.** `/etc`, `/usr`, `/bin`,
   `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`,
   `/srv`, macOS `/System`, `/Library`, `/Applications`, and Windows
@@ -46,8 +67,9 @@ All notable changes to LocalHarness are documented here. The format follows
   explicitly; they are `permissions.ask.protected_paths_system`.
 - **A folder you have already worked in is never asked about.** The trust
   question is for a folder this machine has never run a session in; a
-  workspace with earlier LocalHarness sessions behind it is recognized and
-  trusted without a dialog.
+  workspace with earlier LocalHarness sessions behind it is recognized, the
+  trust is recorded, and one line says so instead of a dialog. Prior use is
+  taken as consent — SECURITY.md names that as a gap rather than hiding it.
 - **`unattended` is settable from a channel.** `/mode unattended` in the
   terminal, `mode unattended` in Discord, and the Zed picker now reach it,
   alongside `/mode auto`. It used to be config-only; a session that turns its
