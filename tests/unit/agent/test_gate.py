@@ -243,6 +243,9 @@ async def test_timeout_denies_as_reject_once_and_says_so_on_the_bus(tmp_path):
     outcome = await _check(gate, "bash_exec", {"command": "cargo build"}, tool_timeout_s=0.05)
     assert not outcome.allowed
     assert "no answer" in outcome.reason
+    # A sub-second deadline used to render as "no answer within 0s", which reads as a bug in
+    # the gate rather than as a short timeout.
+    assert "within 0.05s" in outcome.reason
 
     resolved = bus.history(event_types=[PermissionResolved])
     assert [e.decision for e in resolved] == ["reject_once"]
