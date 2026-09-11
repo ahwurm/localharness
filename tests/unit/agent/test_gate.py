@@ -241,6 +241,21 @@ async def test_mode_is_live_on_the_shared_object(tmp_path):
     assert outcome.reason == "not permitted in read-only mode"
 
 
+@pytest.mark.asyncio
+async def test_a_keyless_request_writes_nothing_either_way(tmp_path):
+    """A computed command name (`$(echo rm) -rf x`) has nothing to remember: `grantable=False`
+    and `key=None`. Neither answer may become durable state — a bare `bash_exec` deny would ban
+    every shell command forever, which is not what the human answered."""
+    gate = _gate(tmp_path, asker=_answer("reject_always"))
+    outcome = await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})
+    assert not outcome.allowed
+    assert gate.grants.deny_patterns_for(gate.workspace) == []
+
+    gate.asker = _answer("allow_always")
+    assert (await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})).allowed
+    assert gate.grants.lookup(gate.workspace, "bash_exec") is None
+
+
 # ------------------------------------------------------------ derivation helpers
 
 @pytest.mark.parametrize(
