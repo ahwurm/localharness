@@ -556,6 +556,91 @@ def test_a_brace_shaped_argument_is_not_a_function_definition() -> None:
     assert sigs("ls {a,b}") == ("ls",)
 
 
+# -------------------------------------------- git operations behind a read-only key (A2)
+
+# (command, signature, destructive, read_only) — the v0.14 critic's repro: every destructive
+# entry here collapsed onto the bare `git branch` / `git remote` / `git stash`, which are in the
+# ALLOW tier, so the read-only verdict covered a branch delete and a remote repoint.
+GIT_OPERATIONS: list[tuple[str, str, bool, bool]] = [
+    ("git branch -D feature", "git branch -D", True, False),
+    ("git branch -d feature", "git branch -d", True, False),
+    ("git branch --delete feature", "git branch -d", True, False),
+    ("git branch -M main", "git branch -M", True, False),
+    ("git branch -m old new", "git branch -m", False, False),
+    ("git branch", "git branch", False, True),
+    ("git branch -v", "git branch", False, True),
+    ("git branch -a", "git branch", False, True),
+    ("git branch --show-current", "git branch", False, True),
+    ("git remote set-url origin http://attacker/x", "git remote set-url", True, False),
+    ("git remote remove origin", "git remote remove", True, False),
+    ("git remote rm origin", "git remote rm", True, False),
+    ("git remote prune origin", "git remote prune", True, False),
+    ("git remote add upstream https://x/y", "git remote add", False, False),
+    ("git remote", "git remote", False, True),
+    ("git remote -v", "git remote", False, True),
+    ("git remote show origin", "git remote show", False, True),
+    ("git remote get-url origin", "git remote get-url", False, True),
+    ("git stash drop", "git stash drop", True, False),
+    ("git stash clear", "git stash clear", True, False),
+    ("git stash", "git stash", False, False),
+    ("git stash push -m wip", "git stash push", False, False),
+    ("git stash pop", "git stash pop", False, False),
+    ("git stash apply", "git stash apply", False, False),
+    ("git stash list", "git stash list", False, True),
+    ("git stash show -p", "git stash show", False, True),
+    ("git checkout -- src/main.py", "git checkout --", True, False),
+    ("git checkout .", "git checkout --", True, False),
+    ("git checkout main", "git checkout", False, False),
+    ("git checkout -b feature", "git checkout", False, False),
+    ("git switch main", "git switch", False, False),
+    ("git restore src/main.py", "git restore", True, False),
+    ("git restore --staged src/main.py", "git restore --staged", False, False),
+    ("git restore -S src/main.py", "git restore --staged", False, False),
+    # table order, not command-line order: this one DOES discard the worktree copy
+    ("git restore --staged --worktree f", "git restore --worktree", True, False),
+    ("git reflog expire --expire=now --all", "git reflog expire", True, False),
+    ("git gc --prune=now", "git gc --prune", True, False),
+    ("git gc --aggressive", "git gc", False, False),
+    ("git filter-branch --tree-filter x HEAD", "git filter-branch", True, False),
+    ("git push --delete origin feature", "git push --delete", True, False),
+    ("git push -d origin feature", "git push --delete", True, False),
+    ("git push origin main", "git push", False, False),
+    ("git worktree remove --force /tmp/w", "git worktree remove --force", True, False),
+    ("git worktree remove /tmp/w", "git worktree remove", False, False),
+    ("git worktree add /tmp/w", "git worktree add", False, False),
+    ("git worktree list", "git worktree list", False, False),
+    ("git submodule deinit --force vendor/x", "git submodule deinit --force", True, False),
+    ("git submodule deinit vendor/x", "git submodule deinit", False, False),
+    ("git submodule update --init", "git submodule update", False, False),
+    ("git submodule add https://x/y vendor/y", "git submodule add", False, False),
+]
+
+
+@pytest.mark.parametrize("command,signature,destructive,read_only", GIT_OPERATIONS,
+                         ids=[case[0] for case in GIT_OPERATIONS])
+def test_a_git_operation_is_in_its_own_key(
+    command: str, signature: str, destructive: bool, read_only: bool
+) -> None:
+    segment = classify_shell(command, SETTINGS).segments[0]
+    assert segment.signature == signature
+    assert segment.destructive is destructive
+    assert segment.read_only is read_only
+
+
+def test_a_grant_on_the_bare_git_subcommand_never_covers_its_operations() -> None:
+    """The A2 bar: the listing key and the destroying key are different keys."""
+    assert sigs("git branch") != sigs("git branch -D x")
+    assert sigs("git remote") != sigs("git remote set-url origin http://x")
+    assert sigs("git stash") != sigs("git stash drop")
+    assert sigs("git restore --staged f") != sigs("git restore f")
+
+
+def test_an_unrecognized_git_operation_word_does_not_join_the_key() -> None:
+    """A branch NAME is not an operation: `git branch feature` must not key on the name."""
+    assert sigs("git branch feature") == ("git branch",)
+    assert sigs("git remote") == ("git remote",)
+
+
 # ------------------------------------------------------------- git config (critic finding F3a)
 
 GIT_CONFIG_DANGEROUS = [
