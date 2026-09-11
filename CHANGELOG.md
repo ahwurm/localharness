@@ -65,10 +65,25 @@ All notable changes to LocalHarness are documented here. The format follows
   `C:\ProgramData`; `/tmp` and `/var/tmp` are exempt. A mode that allows
   ordinary writes needs the places a mistaken write is unrecoverable named
   explicitly; they are `permissions.ask.protected_paths_system`.
+- **One startup question, not two.** The separate `No workspace here —
+  create ./.localharness for this project?` offer is gone. In a project with
+  no workspace, the trust question is the only thing asked, and a "yes"
+  records the trust **and** creates `./.localharness`, so that project's
+  sessions, memory and state live with the project from then on. A "no"
+  creates nothing, is remembered, and runs the session in `guarded`. Where
+  `./.localharness` already exists only the trust half applies.
+- **`permissions.workspace_root` is no longer filled in for you.** A
+  workspace layer used to set it to the project folder silently, which put
+  "where files are written" in two places at once. The gate owns the boundary
+  now; the loader fills nothing. A `workspace_root` you write yourself is
+  unchanged and still a hard confinement — write, edit and `bash_exec` outside
+  it return `permission_denied`, with no prompt and no grant that lifts it.
 - **A folder you have already worked in is never asked about.** The trust
   question is for a folder this machine has never run a session in; a
   workspace with earlier LocalHarness sessions behind it is recognized, the
-  trust is recorded, and one line says so instead of a dialog. Prior use is
+  trust is recorded, and one line says so instead of a dialog. Recognition
+  reads **earlier** sessions only — the session doing the asking never counts
+  itself. Prior use is
   taken as consent — SECURITY.md names that as a gap rather than hiding it.
 - **`unattended` is settable from a channel.** `/mode unattended` in the
   terminal, `mode unattended` in Discord, and the Zed picker now reach it,

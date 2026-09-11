@@ -67,7 +67,9 @@ progress can actually be shown. A warm server costs nothing; a cold one streams 
 the trust question — **Trust this workspace?**, with two buttons: *Trust this workspace* and *Not
 now*. Unlike every other dialog here the answer is permanent, which is why the buttons say so; it
 goes in `~/.localharness/trusted_workspaces.yaml` and covers both halves of trust (the project's
-config layer loads, and its tool calls run without asking). A project with earlier sessions behind
+config layer loads, and its tool calls run without asking). In a project that has no
+`.localharness/` yet, *Trust this workspace* also creates one, so that project's sessions, memory
+and state live with the project instead of in your global directory; *Not now* creates nothing. A project with earlier sessions behind
 it is recognized and never asked at all. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
 a docker command, an MCP tool, a subagent — never raises another dialog. Answer no and the thread
 runs in Guarded, which asks about each new thing and remembers it. After that the only dialogs you
