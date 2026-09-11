@@ -294,3 +294,78 @@ async def test_grant_store_is_never_read_from_the_workspace(tmp_path):
     )
     gate = _gate(tmp_path, workspace=workspace, asker=None)
     assert not (await _check(gate, "bash_exec", {"command": "rm -rf /"})).allowed
+
+
+# ------------------------------- the deadline is a channel property (defect D3)
+
+class _HoldsDialog:
+    """A channel with a person in front of it (terminal, Zed): PRD §3.5 "Timeout: none"."""
+
+    channel_id = "holds"
+    can_ask = True
+    ask_holds_dialog = True
+    has_review_surface = True
+
+    async def ask_permission(self, request):  # pragma: no cover - replaced per test
+        raise AssertionError("not called")
+
+
+class _Expires:
+    """A message-shaped channel (Discord): a question nobody reacts to has to expire."""
+
+    channel_id = "expires"
+    can_ask = True
+    ask_holds_dialog = False
+    has_review_surface = False
+
+    async def ask_permission(self, request):  # pragma: no cover - replaced per test
+        raise AssertionError("not called")
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_holds_the_dialog_is_never_timed_out(tmp_path):
+    """Verification A defect D3: an unanswered terminal prompt auto-denied after the tool's own
+    timeout. A slow answer must still be the human's answer, at any tool timeout."""
+    from localharness.channels.terminal import TerminalChannel
+
+    assert TerminalChannel.ask_holds_dialog is True
+
+    async def _slow(request):
+        await asyncio.sleep(0.05)
+        return Decision(kind="allow_once")
+
+    gate = _gate(tmp_path)
+    gate.attach_channel(_HoldsDialog())
+    gate.asker = _slow
+    assert gate._timeout_s(0.01) is None
+    outcome = await _check(gate, "bash_exec", {"command": "cargo build"}, tool_timeout_s=0.01)
+    assert outcome.allowed, outcome.reason
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_cannot_hold_the_dialog_still_times_out(tmp_path):
+    from localharness.channels.discord import DiscordChannel
+
+    assert DiscordChannel.ask_holds_dialog is False
+
+    async def _never(request):
+        await asyncio.sleep(10)
+        return Decision(kind="allow_always")
+
+    bus = EventBus()
+    gate = _gate(tmp_path, bus=bus)
+    gate.attach_channel(_Expires())
+    gate.asker = _never
+    assert gate._timeout_s(0.05) == 0.05 * ASK_TIMEOUT_TOOL_MULTIPLE
+    outcome = await _check(gate, "bash_exec", {"command": "cargo build"}, tool_timeout_s=0.05)
+    assert not outcome.allowed and "no answer" in outcome.reason
+    assert [e.decision for e in bus.history(event_types=[PermissionResolved])] == ["reject_once"]
+
+
+def test_attach_channel_reads_the_flag_and_defaults_it_off(tmp_path):
+    gate = _gate(tmp_path)
+    assert gate.ask_holds_dialog is False, "the safe default is a deadline"
+    gate.attach_channel(_HoldsDialog())
+    assert gate.ask_holds_dialog is True
+    gate.attach_channel(_Expires())
+    assert gate.ask_holds_dialog is False
