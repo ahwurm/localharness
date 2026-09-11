@@ -58,7 +58,9 @@ def test_other_command_arguments_stay_uncompleted():
 
 
 def test_command_token_completion_unchanged():
-    assert {c.text for c in _complete("/mo")} == {"/model"}
+    # `/mode` joined the table in v0.14 and shares the `/mo` prefix. What this test is about is
+    # unchanged: a COMMAND token completes to commands, never to model names.
+    assert {c.text for c in _complete("/mo")} == {"/model", "/mode"}
 
 
 # ------------------------------------------------------------------ headless menu drive
