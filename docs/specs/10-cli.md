@@ -929,17 +929,19 @@ A line starting with `/` is a REPL command, not a task. The list is defined once
 
 **`/mode <name>` switches the session's permission mode.** `/mode auto`, `/mode guarded`,
 `/mode trusted` or `/mode read-only` changes it for this session only — nothing is persisted, and
-the next start reads `permissions.mode` from config again. `auto` is the default since v0.14.1: the
-workspace is trusted once, and after that everything runs except the blacklist — protected paths,
-destructive file operations aimed outside the project, irreversible operations — which asks every
-time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
+the next start reads `permissions.mode` from config again. `auto` is the default since v0.14.1: a folder this machine has not worked in before is trusted
+once, and after that everything runs except `AUTO_BLACKLIST` — deletes aimed outside the project,
+`git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … | sh`,
+`dd`/`mkfs`/`shred`/`format`, writes to a secret store or a system directory, and writes to
+`.git/**` or `.localharness/**` — which asks every time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
 the workspace boundary or is unfamiliar, and remembers an
 "always" in `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for destructive
 operations aimed inside the project. `read-only` refuses writes,
-non-read-only shell and code execution, returning a message the model can re-plan against. The
-fifth mode, `unattended`, is **config-only and deliberately not settable here**: it turns every ask
-into an allow, so it is written in the config file of a bench run or a scheduled job, where a human
-has decided that in advance. Discord takes the same four names as a plain `mode <name>` message.
+non-read-only shell and code execution, returning a message the model can re-plan against. `/mode unattended`
+turns every ask into an allow — the pre-v0.14 behaviour — and from v0.14.1 it is settable here like
+any other mode; a scheduled job still writes `permissions.mode: unattended` in its config, because
+nobody is there to type it. Discord takes the same five names as a plain `mode <name>` message, and
+Zed's picker lists them.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
 
 **`--no-input` is not a permission switch.** It governs one question only — whether to load an

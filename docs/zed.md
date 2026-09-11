@@ -53,25 +53,29 @@ immediately; the model server and the agent come up on your first prompt, which 
 progress can actually be shown. A warm server costs nothing; a cold one streams a
 `Starting the session — 40s so far…` line every fifteen seconds until it is ready.
 
-**Four modes, in Zed's mode picker.**
+**Five modes, in Zed's mode picker.**
 
 | Mode | What it does |
 |---|---|
-| **Auto** (default) | Asks once whether you trust this project, then stays out of the way. A dialog appears only for a protected or system path, a destructive command aimed outside the project, or an irreversible one — `sudo`, `curl … \| sh`, a force push, `git reset --hard`. Nothing is remembered. |
+| **Auto** (default) | Asks once whether you trust a project you have never opened here, then stays out of the way. A dialog appears only for the short blacklist: a delete aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … \| sh`, `dd`/`mkfs`/`shred`, a write to a secret store or a system directory, and a write to `.git/` or `.localharness/`. Nothing is remembered. |
 | **Guarded** | The v0.14.0 default: asks once about each new thing — anything leaving the project folder, a protected path, a command this workspace has never allowed — and remembers the answer. Reads and web fetches never ask. |
 | **Trusted** | Auto plus one prompt: a destructive command whose target is inside the project asks too. |
+| **Unattended** | Never asks: every question becomes a yes, leaving only your deny patterns. |
 | **Read only** | Writes, edits, code execution and non-read-only shell commands are refused with an explanation the model can re-plan against. |
 
-**What to expect in Auto.** Opening a project you have not used before, the first dialog is the
-trust question: trust this workspace? Answer yes and ordinary work — reading, editing, running
-your build, an unfamiliar command, an MCP tool — never raises another dialog. Answer no and the
-thread runs in Guarded, which asks about each new thing and remembers it. After that the only
-dialogs you should see in a session are the dangerous ones in the table above, and they come back
-every time, because an "always" on them would be a lie. If you are getting more than that, treat
-it as a defect worth reporting.
+**What to expect in Auto.** Opening a folder LocalHarness has never worked in, the first dialog is
+the trust question: trust this workspace? A project you have already used is recognized and never
+asks. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
+a docker command, an MCP tool, a subagent — never raises another dialog. Answer no and the thread
+runs in Guarded, which asks about each new thing and remembers it. After that the only dialogs you
+should see are the blacklist entries in the table above, and they come back every time, because an
+"always" on them would be a lie. If you are getting more than that, treat it as a defect worth
+reporting.
 
-There is a fifth mode, `unattended`, which turns every question into a yes. It is config-only
-(`permissions.mode: unattended`) and deliberately not in the picker.
+**Unattended** is the fifth entry in the picker: it turns every question into a yes, leaving only
+your deny patterns — the pre-v0.14 behaviour. A scheduled job sets it as `permissions.mode:
+unattended` in config; in Zed it is one click, for a session you are watching and have decided
+about.
 
 **The permission dialog.** When the gate decides a call needs a human, Zed shows its own
 permission dialog with up to four buttons: *Allow once*, *Always allow in this workspace*, *No*,

@@ -1273,20 +1273,29 @@ store derives all three paths from the agent's own directory (`memory.db`, `hist
 them moves nothing. They are declarative leftovers, kept only so an older config still loads.
 
 **The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
-default since v0.14.1, asks once whether you trust this workspace and then allows everything except
-a blacklist: writes to protected paths (home, in-project and system), destructive file operations
-whose target is outside the project or unresolvable, and irreversible operations wherever they
-point. It remembers nothing beyond the trust answer. **There is no allow-list in `auto`** — nothing
-is enumerated as safe, so the blacklist is the surface to curate (the `permissions.ask.*` rule sets
-below, which a project layer may only extend). `guarded`, the v0.14.0 default and now opt-in, also
+default since v0.14.1, asks once whether you trust this workspace — only for a folder this machine
+has never run a session in; one with earlier sessions behind it is recognized and never asked — and
+then allows everything except **`AUTO_BLACKLIST`**: a delete or recursive permission change
+(`rm -rf`, `find -delete`, the Windows deletes, `chmod -R`, `chown -R`) whose target is outside the
+project or unresolvable; `git push --force`/`--delete`, `git reset --hard`, `git clean -f`;
+`sudo`/`su`; a download piped into a shell; `dd`, `mkfs`, `shred`, `format`; writes to a secret
+store (`~/.ssh`, `~/.aws`, `~/.gnupg`, credential files, shell rc files, `~/.localharness`) or a
+system directory; and writes to `.git/**` or `.localharness/**` inside the project. Everything else
+runs without asking — docker, `git branch`/`stash`/`checkout`/`restore`, `.env` and key files
+inside the project, interpreters, subagents, MCP and plugin tools, network reads, and writes
+anywhere else. It remembers nothing beyond the trust answer. **There is no allow-list in `auto`** —
+nothing is enumerated as safe, so `AUTO_BLACKLIST` is the one surface to curate: it is assembled
+from the `permissions.ask.*` rule sets below, which a project layer may only extend, never
+shorten. `guarded`, the v0.14.0 default and now opt-in, also
 asks a human before a call crosses the workspace boundary or is unfamiliar, and remembers the
 answer; it is what a declined workspace, and a run that cannot ask and has no trust record, fall
 back to. `trusted` is `auto` plus a prompt for destructive operations aimed inside the project.
 `read-only` refuses writes, non-read-only shell and code execution
 with an observation the model can re-plan against. `unattended` turns every ask into an allow,
 leaving only `deny_patterns` — how the harness behaved before v0.14, named honestly; it is never a
-default and cannot be set from a channel command, so bench runs and scheduled jobs write it in
-config. A **project layer may only raise strictness**, ordered `unattended` < `auto` < `trusted` <
+default, and from v0.14.1 it is settable from a channel like the others (`/mode unattended` in the
+terminal, `mode unattended` in Discord, the Zed picker); bench runs and scheduled jobs write it in
+config because nobody is there to type it. A **project layer may only raise strictness**, ordered `unattended` < `auto` < `trusted` <
 `guarded` < `read-only`: a workspace agent file that asks for
 `trusted` while your own config says `guarded` is ignored with a warning, the same narrow-only union
 `deny_patterns` and `workspace_root` use. The v0.13 spelling `auto` is now the real mode and loads

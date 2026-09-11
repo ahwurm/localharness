@@ -100,6 +100,11 @@ record for this workspace runs `guarded` too — failing closed is still the rul
 `permissions.mode: unattended` is still the explicit way a scheduled job opts out of all of it. In
 Zed the question arrives as the permission dialog, once per project.
 
+**A folder you have already worked in is not asked about.** A workspace with earlier LocalHarness
+sessions behind it — its own `.localharness/`, its state and history — is recognized and trusted
+without a question; only a folder this machine has never run a session in gets the one dialog. The
+prompt exists for the repository you just cloned, not for the project you have been living in.
+
 **There is no allow-list in `auto`.** Nothing is enumerated as safe; everything is allowed unless
 it is on the blacklist in step 2 below, and that list is the thing to curate. This is deliberate
 and it is the honest weakness: a whitelist fails closed on the operation nobody thought of, and a
@@ -109,42 +114,49 @@ read and argue with. Each step below says what it does in `auto`.
 
 1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
    grant, not a mode.
-2. **The blacklist: ask, and no answer is remembered.** This is what `auto` stops you for, **every
-   time**, on purpose — in a trusted workspace it is the whole of what still asks:
-   - **A write whose target is a protected path.** `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
-     credential files, your shell rc files, `~/.localharness`, and inside the project `.git/**`,
-     `.localharness/**`, `.env*`, `*.pem`, `id_*` — and, from v0.14.1, the system directories:
-     `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`, `/srv`,
-     macOS `/System`, `/Library` and `/Applications`, and Windows `C:\Windows`,
-     `C:\Program Files`, `C:\Program Files (x86)` and `C:\ProgramData`. `/tmp` and `/var/tmp` are
-     carved back out — every build and every `mktemp` writes there.
-   - **A destructive file operation whose target is outside the project, or cannot be resolved.**
-     `rm -rf`, `chmod -R`, `find -delete`, and the Windows delete spellings. Inside the project
-     they run without asking — that is a named gap below, not an oversight.
-   - **An irreversible operation, wherever it points.** `sudo` and `su`, `curl … | sh`,
-     `git push --force` and `git push --delete`, `git reset --hard`, `git clean -f`, discarding
-     changes with `git checkout --` or `git restore`, `git stash drop`/`clear`, `git branch -D`,
-     `git filter-branch`, `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, `format`
-     and the other disk formatters, and
-     `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/`compose up`/`compose down`.
+2. **`AUTO_BLACKLIST`: ask, and no answer is remembered.** In a trusted workspace this is the
+   **whole** of what still asks. Everything not on it runs without asking.
+   - **A delete or a recursive permission change whose target is outside the project, or cannot be
+     resolved.** `rm -rf`, `find -delete`, the Windows delete spellings, `chmod -R`, `chown -R`.
+     Inside the project they run — that is a named gap below, not an oversight — and a target the
+     gate cannot resolve (a variable, a glob, a command it could not read) counts as outside,
+     because the rule rests on knowing where the command points.
+   - **Git commands that throw away committed or published work.** `git push --force`,
+     `git push --delete`, `git reset --hard`, `git clean -f`.
+   - **Running as another user.** `sudo`, `su`.
+   - **Piping a download into a shell.** `curl … | sh` and its kin.
+   - **Writing raw devices.** `dd`, `mkfs`, `shred`, `format`.
+   - **Writes to a secret store.** `~/.ssh`, `~/.aws`, `~/.gnupg`, credential files, your shell rc
+     files, `~/.localharness`.
+   - **Writes to a system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`),
+     `/boot`, `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
+     `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
+   - **Writes inside the project to `.git/**` or `.localharness/**`.** The two directories that
+     change what the next run does.
 
-   - **A call the gate could not classify.** A command it could not read, a command name computed
-     at runtime (`$RM -rf build`), a path argument that is not a string: the rule above rests on
-     having classified the call, so when there is no key to reason about, `auto` asks.
+   The flags are part of what is matched, so `rm file` and `rm -rf dir` are different things.
 
-   Two more things bind in `auto` and are not questions at all: a refusal you have already recorded
-   denies outright (step 3), and so does anything your `deny_patterns` name (step 1).
+   **What is deliberately NOT on the list**, and therefore runs without asking in a trusted
+   workspace: `docker` in any form (your own deny patterns already refuse `docker stop`, `kill`,
+   `rm`/`rmi` and `compose down` outright, which is where that protection belongs); `git branch`,
+   `git stash`, `git checkout` and `git restore`, including their discarding spellings; `.env` and
+   key files inside the project (a `write(*/.env)` deny pattern ships by default and refuses those
+   outright, and a key checked into your own repo is the repo's problem, not the gate's);
+   interpreters (`python3 -c`, `bash -c`, `perl -e`), `python_exec` and `cruncher_exec`; subagents;
+   MCP and plugin tools; network reads; and writes anywhere else at all — including elsewhere in
+   your home directory.
 
-   The flags are part of what is matched, so `rm file` and `rm -rf dir` are different things and an
-   answer about one is never an answer about the other. `guarded` adds one class to this step:
-   every write-shaped call made when there is no workspace boundary at all.
+   Two more things bind in `auto` and are not questions: a refusal you have already recorded denies
+   outright (step 3), and so does anything your `deny_patterns` name (step 1). `guarded` adds the
+   classes in step 4, and one of its own: every write-shaped call made when there is no workspace
+   boundary at all.
 
-   **Curate this list rather than the allow side.** Each rule set behind it is a
-   `permissions.ask.<name>` field you may extend — `destructive_signatures`,
-   `protected_paths_home`, `protected_paths_workspace`, `protected_paths_system` and the rest (spec
-   06 has the full set); a project layer may only tighten it, never shorten it.
+   **Curate this list, because there is no other surface to curate.** It is one structure —
+   `AUTO_BLACKLIST` — assembled from the `permissions.ask.*` rule sets (`destructive_signatures`,
+   `protected_paths_home`, `protected_paths_workspace`, `protected_paths_system` and the rest; spec
+   06 has the full set), and a project layer may only extend it, never shorten it.
    `localharness ask-rate --traces DIR --mode auto` replays your own traces and reports which
-   blacklist entries actually fired, which is the evidence for adding one.
+   entries actually fired, which is the evidence for adding one.
 3. **Grants.** A remembered "always" for this workspace. `auto` neither reads them nor writes them
    — it remembers nothing, because it asks about nothing that could be remembered. In `guarded`
    they are checked only after step 2, so an old permissive answer can never cover a destructive
@@ -161,18 +173,16 @@ read and argue with. Each step below says what it does in `auto`.
    `sed -n`, and their kin), network reads, and edits inside the project when the channel can show
    you the diff.
 
-**`docker` is judged by its subcommand, not by its name.** The ungrantable step-2 set names the
-docker operations that run code on the host or destroy state — `exec`, `run`, `start`, `restart`,
-`stop`, `kill`, `rm`, `rmi`, `system prune`, `compose up/down/exec/run/rm` (and the old
-`docker-compose` spelling), plus the `docker container …` / `docker image …` management spellings
-of the same operations and the `volume`/`network` removals. `docker ps`, `logs`, `images`,
-`inspect`, `version` and `info` are reads and never ask; `build`, `pull`, `push`, `tag` and `login`
-are ordinary unfamiliar commands — `auto` runs them, `guarded` asks once. A bare `docker` entry
-made all of those ungrantable, which is ask-fatigue on commands nobody needs protection from.
-Four of them never reach the gate at all: the shipped deny patterns hard-deny `docker stop`,
-`docker kill`, `docker rm`/`rmi` and `docker compose down`, so those are refused outright rather
-than asked about — an agent killing the model server it is running on is the incident that put
-them there.
+**`docker` is not on the blacklist, and in `guarded` it is judged by its subcommand.** In `auto`
+no docker command asks: the four that cost people real state — `docker stop`, `docker kill`,
+`docker rm`/`rmi` and `docker compose down` — are refused outright by shipped deny patterns, which
+is a stronger answer than a prompt, and an agent killing the model server it runs on is the
+incident that put them there. In `guarded`, `exec`, `run`, `start`, `restart`, `system prune`,
+`compose up/exec/run/rm` (and the old `docker-compose` spelling), the `docker container …` /
+`docker image …` management spellings and the `volume`/`network` removals are ungrantable and ask
+every time; `docker ps`, `logs`, `images`, `inspect`, `version` and `info` are reads and never ask;
+`build`, `pull`, `push`, `tag` and `login` ask once and can be granted. A bare `docker` entry made
+all of those ungrantable, which is ask-fatigue on commands nobody needs protection from.
 
 **The boundary is derived from where you stand, never configured.** It is the folder holding the
 nearest in-project `.localharness/`, else the git top level, else the directory you started in,
@@ -221,8 +231,11 @@ boundary. `trusted` is `auto` plus one thing: a destructive file operation aimed
 project asks too. `read-only` refuses writes, non-read-only shell, and code execution with a
 message the model can re-plan against. `unattended` turns every ask into allow, leaving only your
 deny patterns — **this is exactly how the harness behaved before v0.14**, named honestly. It is
-never a default and cannot be set from a chat or terminal command; write it in config, which is
-what the benchmark runner and scheduled jobs do. Ordered from most permissive to strictest —
+never a default, and from v0.14.1 it is settable the same way the others are: `/mode unattended` in
+the terminal, `mode unattended` in Discord, the picker in Zed, or `permissions.mode: unattended` in
+the config file of a bench run or a scheduled job. A session that turns its own gate off is a
+decision a person can make out loud; a config file is still the right place for a job nobody is
+watching. Ordered from most permissive to strictest —
 `unattended` < `auto` < `trusted` < `guarded` < `read-only` — because a project layer may only
 raise strictness, never lower it.
 

@@ -88,9 +88,10 @@ ACP_MODES: tuple[SessionMode, ...] = (
         id="auto",
         name="Auto",
         description=(
-            "Stay out of the way: ordinary work never asks. A dialog appears only for a "
-            "protected or system path, a destructive command aimed outside this project, or an "
-            "irreversible one like sudo, a force push or a reset --hard. Nothing is remembered."
+            "Trust this project once, then stay out of the way. A dialog appears only for the "
+            "blacklist: a delete aimed outside the project, a force push, reset --hard, "
+            "clean -f, sudo, curl | sh, dd/mkfs/shred, a write to your secret stores or a system "
+            "directory, and a write to .git or .localharness. Nothing is remembered."
         ),
     ),
     SessionMode(
@@ -110,6 +111,14 @@ ACP_MODES: tuple[SessionMode, ...] = (
         ),
     ),
     SessionMode(
+        id="unattended",
+        name="Unattended",
+        description=(
+            "Never ask: every question becomes a yes and only your deny patterns stop anything. "
+            "How the harness behaved before v0.14 — pick it for a session you are watching."
+        ),
+    ),
+    SessionMode(
         id="read-only",
         name="Read only",
         description=(
@@ -125,9 +134,11 @@ ACP_MODES: tuple[SessionMode, ...] = (
 the ask-once classes are silent in `auto` and only the genuinely dangerous ones still stop you.
 `guarded` stays on the picker for anyone who wants the ask-once-and-remember behaviour back.
 
-`unattended` is deliberately absent. It turns every ASK into an ALLOW, so it is set in config by
-bench and scheduled jobs and is never reachable from a picker — the same rule
-`PermissionGate.set_mode(from_channel=True)` enforces one layer down (PRD §3.4)."""
+`unattended` is on the picker from v0.14.1 (owner ruling: `/mode unattended` and `/mode auto` are
+accepted from the terminal, Discord and Zed alike). It turns every ASK into an ALLOW, which a
+person watching a session may decide out loud; a scheduled job with nobody watching still writes
+`permissions.mode: unattended` in config. `PermissionGate.set_mode(from_channel=True)` is the layer
+that has to agree — an entry advertised here and refused there would fail on the first prompt."""
 
 ACP_MODE_IDS: frozenset[str] = frozenset(m.id for m in ACP_MODES)
 """The settable set, derived from :data:`ACP_MODES` so the advertised list and the accepted list
@@ -536,7 +547,7 @@ class AcpChannel(ChannelAdapter):
     async def set_session_mode(
         self, session_id: str, mode_id: str, **kwargs: Any
     ) -> SetSessionModeResponse | None:
-        """Zed's mode picker (PRD §3.4). `unattended` is never reachable from here.
+        """Zed's mode picker (PRD §3.4).
 
         Before the first prompt there is no gate, so the mode is validated against the advertised
         list and remembered; once the gate exists it IS the validator, and its `ValueError`
