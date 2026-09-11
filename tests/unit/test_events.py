@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 26 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 32 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -20,6 +20,8 @@ from localharness.core.events import (
     MutationArchived,
     Observation,
     OutcomeObserved,
+    PermissionAsked,
+    PermissionResolved,
     ParseFailed,
     ScenarioCompleted,
     SentinelAlert,
@@ -137,8 +139,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 30 event types."""
-    assert len(EVENT_TYPE_MAP) == 30
+    """EVENT_TYPE_MAP has entries for all 32 event types."""
+    assert len(EVENT_TYPE_MAP) == 32
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -147,7 +149,7 @@ def test_event_type_map_complete():
         "ComponentMutated", "MutationArchived", "SentinelAlert", "MemoryGateFired",
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
-        "TurnEndMicroPassCompleted",
+        "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionResolved",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -227,7 +229,7 @@ def test_any_event_union():
         ConsolidationFinished, ConsolidationStarted, InputRouted, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 30
+    assert len(args) == 32
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -236,7 +238,7 @@ def test_any_event_union():
         ComponentMutated, MutationArchived, SentinelAlert, MemoryGateFired,
         ExpectationAttached, OutcomeObserved, SurpriseScored,
         ConsolidationStarted, ConsolidationFinished, InputRouted,
-        TurnEndMicroPassCompleted,
+        TurnEndMicroPassCompleted, PermissionAsked, PermissionResolved,
     }
     assert set(args) == expected
 
@@ -630,3 +632,51 @@ async def test_consolidation_status_events_deliver_to_subscriber(bus):
     await bus.publish(ConsolidationStarted(agent_id=AgentID("a")))
     await bus.publish(ConsolidationFinished(agent_id=AgentID("a")))
     assert [k for k, _ in seen] == ["start", "end"]
+
+
+def test_permission_events_roundtrip_like_escalation():
+    """PRD §3.6: the ask events ride the same trace files as every other bus event.
+
+    That is the whole design — the ask rate (prompts per session, SLO median 0) is measurable
+    from traces already on disk, and the replay script becomes the regression tool for any
+    classifier change. An event that does not survive the JSONL round-trip is an event the
+    ask-rate report cannot read, so this asserts the property against `Escalation`, the sibling
+    whose shape they were modelled on, rather than in isolation.
+    """
+    asked = PermissionAsked(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_name="bash_exec", klass="shell-unfamiliar", key="uv run", channel="terminal",
+    )
+    resolved = PermissionResolved(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_name="bash_exec", klass="shell-unfamiliar", key="uv run",
+        decision="allow_always", latency_ms=1200, wrote_grant=True,
+    )
+    escalation = Escalation(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        reason="stuck", detail="x", iteration_at_escalation=1,
+    )
+
+    for event in (asked, resolved, escalation):
+        line = event.model_dump_json()
+        assert json.loads(line)["event_type"] == type(event).__name__
+        assert deserialize_event(line) == event
+
+    # Ungrantable classes carry no grant key — they ask every time (PRD §3.1).
+    ungrantable = PermissionAsked(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        tool_name="bash_exec", klass="shell-destructive", channel="discord",
+    )
+    assert ungrantable.key is None
+    assert deserialize_event(ungrantable.model_dump_json()) == ungrantable
+
+
+def test_permission_resolved_rejects_a_decision_that_is_not_a_decision_kind():
+    """`decision` is the DecisionKind Literal from agent/gate_types.py — the four ACP option
+    kinds every channel maps its UI onto. A free-form string here would let a channel invent a
+    fifth answer that the ask-rate report silently miscounts."""
+    with pytest.raises(Exception):
+        PermissionResolved(
+            agent_id=AgentID("a"), session_id=SessionID("s"),
+            tool_name="bash_exec", klass="mcp", decision="maybe",
+        )
