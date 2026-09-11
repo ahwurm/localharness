@@ -141,19 +141,24 @@ read and argue with. Each step below says what it does in `auto`.
      `dd`, `mkfs`, `shred`, `format`, `diskpart`; `git push --force`, `git push --delete`,
      `git reset --hard`, `git clean -f`. Matched on the canonical signature, so `git push -f` and
      `git push --force-with-lease` are the one `git push --force` entry.
-   - **`protected_paths_workspace` — in-project writes to `.git/**` and the behaviour-changing
-     files of `.localharness/`** (`config.yaml`, `overrides.yaml`, `plugins/**`). Those are the
-     files that change what the next run executes. The rest of a project's `.localharness/` —
-     agents, tools, state, memory — is ordinary project content and is not protected, and neither
-     are `.env` files or keys inside your own repository, which `guarded` still asks about.
+   - **`protected_paths_workspace` — in-project writes to `.git/**`, plus the config-directory
+     list below applied to a project's own `.localharness/`** (`config.yaml`, `overrides.yaml`,
+     `plugins/**`). `.git` keeps its whole subtree: there is no part of it you write by hand, and
+     `.git/hooks` and `.git/config` both re-point what the next ordinary git command executes. The
+     rest of a project's `.localharness/` — agents, tools, state, memory — is ordinary project
+     content and is not protected, and neither are `.env` files or keys inside your own repository,
+     which `guarded` still asks about.
      The home and system protected sets apply in full on top of this: `~/.ssh`, `~/.aws`,
      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
-     `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files, the
-     Windows credential folders — and, under `~/.localharness`, the same behaviour-changing
-     shortlist: `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
-     `declined_workspace_offers.yaml` and `plugins/**`. The harness's own bookkeeping under that
-     directory (agents, tools, session state, memory, history, the audit log, the kill file) is
-     not protected: writing it cannot change what the harness does next.
+     `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files and
+     the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
+     **one six-entry list protects every harness config directory**, global or in-project —
+     `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
+     `declined_workspace_offers.yaml` and `plugins/**`, the files that change what the harness does
+     next. Everything else under one (agents, divisions, tools, session state, memory, history, the
+     audit log, the kill file) is the harness being *used* and is not protected; naming what is
+     protected rather than what is exempt also means a new kind of runtime state added there is
+     allowed by default rather than becoming a prompt nobody wanted.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.

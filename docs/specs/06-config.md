@@ -1345,12 +1345,13 @@ holds the system directories a mistaken write cannot be taken back from — `/et
 `/Applications`, Windows `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
 `C:\ProgramData` — because a default that allows ordinary writes has to name those explicitly.
 `protected_paths_system_exempt` carves `/tmp` and `/var/tmp` back out. The harness's own
-directories are protected by file rather than wholesale: under `~/.localharness` only
+directories are protected by file rather than wholesale, through one list that applies to **any**
+harness config directory — the global `~/.localharness` and a project's `.localharness/` alike:
 `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
-`declined_workspace_offers.yaml` and `plugins/**` — the files that change what the harness does
-next — and in a project the same shape, `.localharness/config.yaml`, `overrides.yaml` and
-`plugins/**`. Agents, tools, session state, memory, history and the audit log under either are
-bookkeeping and are not protected. The two dict-shaped tables (`destructive_flag_verbs`,
+`declined_workspace_offers.yaml` and `plugins/**`, the entries that change what the harness does
+next (the last three exist only in the global one). Agents, divisions, tools, session state,
+memory, history, the audit log and the kill file are bookkeeping and are not protected — writing
+them is the harness being used. The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 
