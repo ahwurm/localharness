@@ -222,6 +222,12 @@ Under ``unattended`` this ask becomes an ALLOW like every other ask (PRD §3.4) 
 behave differently from every other ungrantable class. Under ``read-only`` it DENIES: a command
 that cannot be read cannot be shown to be a read."""
 
+NON_STRING_URL_REASON = "url argument {param} is not a string; cannot name a host"
+"""The third instance of the same split, in the network branch. It only binds when
+``permissions.ask.network_hosts`` is on — and that is exactly when it matters, because that knob
+exists to raise a per-host ask, and an unreadable url used to skip it by taking the "names no
+host" exit. Ungrantable: there is no host to key a grant on."""
+
 NON_STRING_PATH_REASON = "path argument {param} is not a string; cannot classify"
 """The same shape for a write-shaped call whose path parameter is present but not a string.
 
@@ -844,7 +850,16 @@ def _evaluate_network(
     """
     if not settings.ask_network_hosts:
         return VerdictResult(Verdict.ALLOW, "network read")
-    url = params.get(NETWORK_URL_PARAMS.get(tool_name, "url"))
+    name = NETWORK_URL_PARAMS.get(tool_name, "url")
+    url = params.get(name)
+    if _bad_string_param(params, (name,)) is not None:
+        # Same split as the shell and write branches: a url the gate cannot read is not a call
+        # that names no host, it is a call whose host it cannot see. With the per-host knob on,
+        # collapsing the two let an unreadable url skip the ask the knob exists to raise.
+        return _decide(ctx, tool_name, params, [_ask_record(
+            "network-host", None, NON_STRING_URL_REASON.format(param=name),
+            grantable=False, detail=type(url).__name__,
+        )], salient="")
     if not isinstance(url, str) or not url.strip():
         return VerdictResult(Verdict.ALLOW, "network call names no host")
     host = urlparse(url).hostname

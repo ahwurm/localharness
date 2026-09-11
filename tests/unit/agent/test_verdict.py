@@ -1025,6 +1025,21 @@ def test_a_non_string_write_path_asks_ungrantably(ws, path):
     assert "not a string" in result.reason
 
 
+def test_a_non_string_url_asks_when_the_per_host_knob_is_on(ws):
+    """The third instance of the split. It only binds with `ask_network_hosts` on — which is
+    exactly when it matters, since that knob exists to raise a per-host ask."""
+    settings = dataclasses.replace(SETTINGS, ask_network_hosts=True)
+    result = evaluate("web_fetch", {"url": {"href": "http://evil"}}, ToolMeta(group="web"),
+                      make_ctx(ws), settings)
+    assert result.verdict is Verdict.ASK
+    assert result.request.grantable is False and result.request.key is None
+
+    # Off by default, so the knob still decides whether the branch asks at all.
+    off = evaluate("web_fetch", {"url": {"href": "http://evil"}}, ToolMeta(group="web"),
+                   make_ctx(ws), SETTINGS)
+    assert off.verdict is Verdict.ALLOW
+
+
 def test_a_non_string_working_dir_does_not_anchor_writes_in_the_workspace(ws, monkeypatch):
     """An unreadable ``working_dir`` is unresolvable, and PRD §3.2 step 8 treats unresolvable as
     outside — anchoring at the workspace would have read an unplaceable write as in-workspace."""
