@@ -16,7 +16,7 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from localharness.agent.gate_types import PermissionRequest
-from localharness.channels.base import ChannelAdapter
+from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.terminal import (
     PERMISSION_OPTIONS_GRANTABLE,
     PERMISSION_OPTIONS_UNGRANTABLE,
@@ -37,7 +37,7 @@ def _channel() -> TerminalChannel:
     return ch
 
 
-def _request(grantable: bool = True) -> PermissionRequest:
+def _request(grantable: bool = True, display: str | None = None) -> PermissionRequest:
     return PermissionRequest(
         tool_name="bash_exec",
         tool_params={"command": "cargo publish"},
@@ -45,7 +45,7 @@ def _request(grantable: bool = True) -> PermissionRequest:
         key="cargo publish" if grantable else None,
         grantable=grantable,
         reason="not seen in this workspace before",
-        display="bash_exec: cargo publish  (shell-unfamiliar — not seen before)",
+        display=display or "bash_exec: cargo publish  (shell-unfamiliar — not seen before)",
     )
 
 
@@ -93,6 +93,28 @@ async def test_the_question_is_printed_where_the_user_can_read_it():
     printed = ch._console.file.getvalue()
     assert "Permission needed" in printed
     assert "cargo publish" in printed
+
+
+@pytest.mark.asyncio
+async def test_control_characters_never_reach_the_screen():
+    """F5: a `\\r` rewrites the line the human is reading and `\\x1b[2J` clears the screen, so a
+    question could be answered that is not the question on screen. Stripped before rendering."""
+    hostile = "bash_exec: echo \x1b[2Jharmless\rrm -rf /  (shell-unfamiliar)"
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        inp.send_text("y")
+        await asyncio.wait_for(ch.ask_permission(_request(display=hostile)), timeout=10.0)
+    printed = ch._console.file.getvalue()
+    assert "2J" not in printed
+    assert "\r" not in printed
+    assert "harmlessrm -rf /" in printed
+
+
+def test_the_sanitizer_keeps_layout_and_drops_control():
+    """Tab and newline are layout — the gate's multi-reason display is genuinely multi-line."""
+    assert sanitize_for_display("a\tb\nc") == "a\tb\nc"
+    assert sanitize_for_display("a\x1b[31mb\x07c\rd\x00e") == "abcde"
+    assert sanitize_for_display("") == ""
 
 
 def test_the_legends_name_every_option_the_keys_bind():

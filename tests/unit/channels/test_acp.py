@@ -505,6 +505,31 @@ async def test_a_single_line_reason_carries_no_body(tmp_path, monkeypatch, keep_
     assert [o.kind for o in options] == ["allow_once", "reject_once"]
 
 
+async def test_control_characters_never_reach_the_dialog(tmp_path, monkeypatch, keep_cwd):
+    """F5: the question quotes the model's own words, and a `\\x1b[2J` or `\\r` in them can
+    repaint the dialog the human is answering. Stripped before the title/body split."""
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    session.client.answers = ["reject_once"]
+    await session.agent.ask_permission(
+        _request(
+            tool_name="bash_exec",
+            tool_params={"command": "echo x"},
+            klass="shell-unfamiliar",
+            key="echo",
+            grantable=True,
+            reason="unfamiliar",
+            display="bash: echo \x1b[2Jharmless\rrm -rf /\n  · \x07unfamiliar command",
+        )
+    )
+    tool_call, _options = session.client.permission_requests[-1]
+    body = tool_call.content[0].content.text if tool_call.content else ""
+    for rendered in (tool_call.title, body):
+        assert "\x1b" not in rendered and "\r" not in rendered and "\x07" not in rendered
+        assert "2J" not in rendered
+    assert tool_call.title == "bash: echo harmlessrm -rf /"
+    assert body == "  · unfamiliar command"
+
+
 async def test_a_dismissed_dialog_is_a_refusal_of_this_call_only(tmp_path, monkeypatch, keep_cwd):
     """ACP's `DeniedOutcome{cancelled}` is Escape, which is `reject_once` — never a durable
     'never', which the user did not say."""

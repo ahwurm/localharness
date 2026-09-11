@@ -33,7 +33,11 @@ from rich.status import Status
 from rich.text import Text
 from rich.theme import Theme
 
-from localharness.channels.base import PERMISSION_DENIED_LINE, ChannelAdapter
+from localharness.channels.base import (
+    PERMISSION_DENIED_LINE,
+    ChannelAdapter,
+    sanitize_for_display,
+)
 from localharness.channels.errors import ChannelStartError
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
 from localharness.core.bus import EventBus
@@ -1284,7 +1288,8 @@ class TerminalChannel(ChannelAdapter):
             on_stdout = self.can_run_input_box()
             console = self._console if on_stdout else self._err_console
             console.print(
-                f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] {escape(request.display)}"
+                f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
+                f"{escape(sanitize_for_display(request.display))}"
             )
             options = (
                 PERMISSION_OPTIONS_GRANTABLE if request.grantable

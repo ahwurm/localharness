@@ -63,7 +63,7 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from localharness.channels.base import ChannelAdapter
+from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.events import (
     Action,
@@ -652,7 +652,7 @@ class AcpChannel(ChannelAdapter):
         kinds = GRANTABLE_OPTION_KINDS if request.grantable else UNGRANTABLE_OPTION_KINDS
         params = dict(getattr(request, "tool_params", {}) or {})
         tool_name = getattr(request, "tool_name", "")
-        title, body = split_display(request.display)
+        title, body = split_display(sanitize_for_display(request.display))
         response = await self._conn.request_permission(
             self._session_id,
             ToolCallUpdate(
