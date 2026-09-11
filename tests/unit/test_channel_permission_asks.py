@@ -305,3 +305,23 @@ async def test_the_terminal_keeps_the_bare_word_as_a_message(tmp_path):
         await turn
     assert started == ["mode trusted"], "the line did not reach the model as a message"
     assert gate.mode == "guarded", "a plain sentence changed the permission mode"
+
+
+# ------------------------------------------- the human sees the denial (defect D7)
+
+@pytest.mark.asyncio
+async def test_discord_posts_one_line_when_a_call_is_denied():
+    """Defect D7: Discord's send_tool_result is deliberately silent, so without this the person
+    is never told why the agent stopped short."""
+    from localharness.core.events import Observation
+
+    ch = _discord_channel()
+    await ch.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result", tool_call_id="tc-1",
+        tool_name="bash_exec", output="[DENIED]",
+        error="Permission denied: you answered 'never here' for this: bash_exec(*cargo publish*)",
+    ))
+    sent = ch._current_msg.channel.sent
+    assert len(sent) == 1
+    assert "permission denied" in sent[0]
+    assert "never here" in sent[0]

@@ -17,6 +17,29 @@ from localharness.core.events import (
 )
 
 
+PERMISSION_DENIED_LINE = "permission denied — {tool_name}: {reason}"
+"""The one line a human gets when the gate refuses a call (PRD §3.5, verification A defect D7).
+
+One line per denial, not a block: denials arrive mid-turn while the model re-plans, and the
+person needs the reason, not a report."""
+
+
+def permission_denied_reason(error: str | None) -> str | None:
+    """The reason out of a denied observation's error text, or None if it is an ordinary error.
+
+    Matches the label the loop writes (`agent/gate.DENIED_OBSERVATION_PREFIX`), imported here
+    rather than repeated so the two cannot drift. The import is local: `agent/gate` reaches the
+    loop and the tool registry, and `channels` must stay importable on its own.
+    """
+    if not error:
+        return None
+    from localharness.agent.gate import DENIED_OBSERVATION_PREFIX
+
+    if not error.startswith(DENIED_OBSERVATION_PREFIX):
+        return None
+    return error[len(DENIED_OBSERVATION_PREFIX):].strip() or None
+
+
 class ChannelAdapter(ABC):
     """
     Abstract base for all channel adapters.
@@ -144,6 +167,24 @@ class ChannelAdapter(ABC):
         """Display an error to the user."""
         ...
 
+    async def send_permission_denied(
+        self,
+        tool_name: str,
+        reason: str,
+        agent_id: str | None = None,
+    ) -> None:
+        """Tell the human why the gate refused a call — one line (PRD §3.5, defect D7).
+
+        Default: through `send_error`, which every channel already renders. The terminal
+        overrides it to keep the line inline with the tool lines it belongs to. A channel that
+        genuinely has nowhere to put it can override with a no-op, but silence is the failure
+        this exists to fix: the reason otherwise reaches only the model.
+        """
+        await self.send_error(
+            error=PERMISSION_DENIED_LINE.format(tool_name=tool_name, reason=reason),
+            agent_id=agent_id,
+        )
+
     async def send_renderable(
         self,
         renderable: Any,
@@ -187,7 +228,13 @@ class ChannelAdapter(ABC):
             )
 
     async def on_observation(self, event: Observation) -> None:
-        """Default handler for Observation events. Calls send_tool_result."""
+        """Default handler for Observation events. Calls send_tool_result.
+
+        A permission denial gets one extra line: its reason travels on `event.error`, and the
+        tool-result line shows only `[DENIED]`, so without this the person watching is never
+        told why a call was refused — a soft "not permitted in read-only mode" or a stored
+        "never here" looked like a crash (verification A, defect D7).
+        """
         result = event.output or event.error or ""
         is_error = event.error is not None
         await self.send_tool_result(
@@ -196,6 +243,11 @@ class ChannelAdapter(ABC):
             is_error=is_error,
             agent_id=event.agent_id,
         )
+        reason = permission_denied_reason(event.error)
+        if reason is not None:
+            await self.send_permission_denied(
+                tool_name=event.tool_name or "", reason=reason, agent_id=event.agent_id
+            )
 
     async def on_task_complete(self, event: TaskComplete) -> None:
         """Default handler for TaskComplete events. Sends the summary.

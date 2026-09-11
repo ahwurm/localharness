@@ -86,6 +86,14 @@ so nothing durable may be written."""
 
 TIMEOUT_REASON = "no answer within {seconds:.0f}s; denied"
 
+DENIED_OBSERVATION_PREFIX = "Permission denied: "
+"""How the loop labels a gated call in the observation it hands back (``agent/loop.py``).
+
+It is also what a channel matches on to show the human WHY a call was refused: the reason used
+to reach only the model, so a person watching saw ``✗ write (exit 1): [DENIED]`` and nothing
+else (verification A, defect D7). One definition, imported by both sides, so the label and the
+matcher cannot drift apart."""
+
 MS_PER_SECOND = 1000
 """Unit conversion for ``PermissionResolved.latency_ms`` — ``time.monotonic()`` returns seconds
 and the event, like its siblings on the bus, reports milliseconds."""
