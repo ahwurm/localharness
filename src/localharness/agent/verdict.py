@@ -206,6 +206,32 @@ MISSING_TARGET_DISPLAY = "<no path argument>"
 """A write-shaped call that names no target at all. It cannot be resolved, so PRD §3.2 step 8's
 "unresolvable targets are treated as outside" applies — the call asks rather than passing."""
 
+NON_STRING_SHELL_COMMAND_REASON = "shell command is not a string; cannot classify"
+"""A ``command`` argument that is PRESENT but not a string — a list, a dict, a number.
+
+A model that emits ``{"command": ["rm", "-rf", "/"]}`` used to collapse into the same branch as
+"no command at all" and ALLOW, because both were tested with one ``isinstance(...) or not
+strip()`` guard. Absent is a call that does nothing; present-and-unreadable is a call whose
+content the classifier cannot see, and PRD §3.2 step 8's rule for anything it cannot see is
+"treat it as outside" — so it asks, UNGRANTABLY (``grantable=False``, ``key=None``): there is
+no stable identity here to remember, exactly as for a runtime-computed command name
+(:data:`DYNAMIC_COMMAND_NAME_PREFIXES`).
+
+Under ``unattended`` this ask becomes an ALLOW like every other ask (PRD §3.4) — the mode is
+"nobody is watching, run it", and carving out an exception here would make bench and cron
+behave differently from every other ungrantable class. Under ``read-only`` it DENIES: a command
+that cannot be read cannot be shown to be a read."""
+
+NON_STRING_PATH_REASON = "path argument {param} is not a string; cannot classify"
+"""The same shape for a write-shaped call whose path parameter is present but not a string.
+
+Filed under ``edit-outside`` because that is what PRD §3.2 step 8 already says about a target
+that cannot be resolved — it is treated as outside the boundary — but with ``grantable=False``
+and no key: an unreadable argument is not an identity a human can answer "always" about. The
+old path let it through :func:`_write_target`'s ``isinstance`` filter as "no target named" and
+then asked GRANTABLY on the literal key :data:`MISSING_TARGET_DISPLAY`, so one "always here"
+pre-approved every future write whose target the gate could not read."""
+
 ASK_SEVERITY_ORDER: tuple[str, ...] = (
     "shell-destructive",
     "protected-path",
@@ -361,6 +387,25 @@ def _write_target(tool_name: str, params: dict) -> Optional[str]:
     return None
 
 
+def _bad_string_param(params: dict, names: tuple[str, ...]) -> Optional[str]:
+    """The first of ``names`` that is PRESENT in ``params`` but is not a string.
+
+    The distinction the guards below rest on: a parameter that is MISSING says the call names
+    nothing, a parameter that is present and unreadable says the call names something the gate
+    cannot see. The two used to share one ``isinstance`` test, and the unreadable case inherited
+    the harmless answer (:data:`NON_STRING_SHELL_COMMAND_REASON`).
+
+    An explicit ``None`` counts as MISSING, not as unreadable: JSON's null is how a model spells
+    "no argument", and the tool it is handed to will reject it for the same reason the gate
+    would have — there is nothing there to run.
+    """
+    for name in names:
+        value = params.get(name)
+        if name in params and value is not None and not isinstance(value, str):
+            return name
+    return None
+
+
 def _resolve(target: str, anchor: Optional[Path]) -> Optional[Path]:
     """Realpath a write target, or None when it cannot be resolved (PRD §3.2 step 8).
 
@@ -381,7 +426,7 @@ def _resolve(target: str, anchor: Optional[Path]) -> Optional[Path]:
                 return None
             path = Path(anchor) / path
         return path.resolve()
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -395,9 +440,15 @@ def _shell_anchor(tool_name: str, params: dict, ctx: GateContext) -> Optional[Pa
     anchors a relative ``working_dir`` when it is confined (``bash_tool.py:252``).
 
     Returns None when the working directory itself is unresolvable (a variable or a glob): its
-    relative targets then resolve to None and are treated as outside, per PRD §3.2 step 8.
+    relative targets then resolve to None and are treated as outside, per PRD §3.2 step 8. A
+    ``working_dir`` that is PRESENT but not a string is unresolvable for the same reason and
+    gets the same answer — anchoring its relative targets at the workspace instead would have
+    let a call the gate cannot place read as an in-workspace write.
     """
-    raw = params.get(SHELL_WORKING_DIR_PARAMS.get(tool_name, ""))
+    name = SHELL_WORKING_DIR_PARAMS.get(tool_name, "")
+    if _bad_string_param(params, (name,)) is not None:
+        return None
+    raw = params.get(name)
     if not isinstance(raw, str) or not raw.strip():
         return Path(ctx.workspace)
     return _resolve(raw, Path(ctx.workspace))
@@ -418,7 +469,7 @@ def _exempt_runtime_store(path: Path) -> bool:
     """
     try:
         config_dir = global_config_dir().resolve()
-    except OSError:
+    except (OSError, ValueError):
         return False
     if not _within(config_dir, path) or path == config_dir:
         return False
@@ -438,13 +489,13 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     for raw in settings.protected_paths_home:
         try:
             base = Path(raw).expanduser().resolve()
-        except OSError:
+        except (OSError, ValueError):
             continue
         if path == base or _within(base, path):
             return True
     try:
         config_dir = global_config_dir().resolve()
-    except OSError:
+    except (OSError, ValueError):
         config_dir = None
     if config_dir is not None and (path == config_dir or _within(config_dir, path)):
         return True
@@ -681,6 +732,13 @@ def _evaluate_write(
     """``write`` / ``edit`` and any tool in the ``fs.write`` group (PRD §3.1).
 
     Read-only mode is handled up front in :func:`evaluate`, not here."""
+    param = WRITE_TOOL_PATH_PARAMS.get(tool_name)
+    bad = _bad_string_param(params, (param,) if param else WRITE_PATH_PARAM_CANDIDATES)
+    if bad is not None:
+        return _decide(ctx, tool_name, params, [_ask_record(
+            "edit-outside", None, NON_STRING_PATH_REASON.format(param=bad),
+            grantable=False, detail=bad,
+        )], salient="")
     raw = _write_target(tool_name, params)
     target = ((raw, _resolve(raw, ctx.workspace)),) if raw else ((MISSING_TARGET_DISPLAY, None),)
     salient = raw or ""
@@ -704,7 +762,13 @@ def _evaluate_shell(
     The classifier is imported lazily so this module stays importable — and every non-shell
     verdict testable — independently of it.
     """
-    command = params.get(SHELL_COMMAND_PARAMS.get(tool_name, "command"))
+    name = SHELL_COMMAND_PARAMS.get(tool_name, "command")
+    command = params.get(name)
+    if _bad_string_param(params, (name,)) is not None:
+        return _decide(ctx, tool_name, params, [_ask_record(
+            "shell-unfamiliar", None, NON_STRING_SHELL_COMMAND_REASON,
+            grantable=False, detail=type(command).__name__,
+        )], salient="")
     if not isinstance(command, str) or not command.strip():
         return VerdictResult(Verdict.ALLOW, "no shell command to classify")
 
@@ -843,7 +907,10 @@ def _read_only_denies(
     parse, only in read-only mode, only for a command that turned out to be all reads.
     """
     if kind == "shell":
-        command = params.get(SHELL_COMMAND_PARAMS.get(tool_name, "command"))
+        name = SHELL_COMMAND_PARAMS.get(tool_name, "command")
+        command = params.get(name)
+        if _bad_string_param(params, (name,)) is not None:
+            return True  # unreadable command: it cannot be SHOWN to be a read, so read-only refuses
         if not isinstance(command, str) or not command.strip():
             return False
 
