@@ -318,6 +318,76 @@ async def test_new_session_returns_the_mode_picker(tmp_path, monkeypatch, keep_c
     assert all(m.name and m.description for m in modes.available_modes)
 
 
+# ------------------------------------------------------------------ one thread per process
+
+
+async def test_a_second_session_is_refused(tmp_path, monkeypatch, keep_cwd):
+    """F2: ACP allows many sessions on one connection; this adapter has one loop, one gate, one
+    turn task and one working directory, so a second session would be served by the first one's
+    state under a different id. Refused, in both folders."""
+    from acp.core import RequestError
+
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    other = tmp_path / "other"
+    other.mkdir()
+    for folder in (tmp_path / "project", other):
+        with pytest.raises(RequestError) as caught:
+            await session.conn.new_session(cwd=str(folder))
+        assert "one thread" in str(caught.value.data or caught.value)
+    assert session.agent._session_id == session.session_id
+
+
+async def test_a_prompt_for_another_session_is_refused(tmp_path, monkeypatch, keep_cwd):
+    """The live id used to be overwritten by whatever id arrived, so a stale thread's prompt
+    re-tagged the running turn's file reads, dialogs and updates."""
+    from acp.core import RequestError
+
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    with pytest.raises(RequestError):
+        await session.conn.prompt(session_id="not-a-session", prompt=[text_block("hello")])
+    assert session.agent._session_id == session.session_id
+    assert session.client.chunks() == []
+
+
+async def test_setting_a_mode_on_another_session_is_refused(tmp_path, monkeypatch, keep_cwd):
+    from acp.core import RequestError
+
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    with pytest.raises(RequestError):
+        await session.conn.set_session_mode(session_id="not-a-session", mode_id="trusted")
+    assert session.agent._current_mode_id() == "guarded"
+
+
+async def test_cancel_for_another_session_does_nothing(tmp_path, monkeypatch, keep_cwd):
+    """`session/cancel` is a notification — it cannot answer — so a foreign id is dropped rather
+    than stopping the turn this process is actually running."""
+    started = asyncio.Event()
+
+    class SlowShell(Shell):
+        async def _execute(self, **kwargs: Any) -> ToolResult:
+            started.set()
+            await asyncio.sleep(30)
+            return self.ok("never")  # pragma: no cover — cancelled first
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=_plan(("bash_exec", {"command": "ls"})),
+        tools=[SlowShell()],
+    )
+    turn = asyncio.create_task(
+        session.conn.prompt(session_id=session.session_id, prompt=[text_block("wait")])
+    )
+    await asyncio.wait_for(started.wait(), 10)
+
+    await session.conn.cancel(session_id="not-a-session")
+    await asyncio.sleep(0)
+    assert not turn.done(), "a foreign cancel stopped this thread's turn"
+
+    await session.conn.cancel(session_id=session.session_id)
+    assert (await asyncio.wait_for(turn, 10)).stop_reason == "cancelled"
+
+
 # ------------------------------------------------------------------ a turn
 
 

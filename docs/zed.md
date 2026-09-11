@@ -93,10 +93,16 @@ Honest list of what this adapter does not do in its first version.
   every start and there is nothing to resume. Reopening a thread starts a new session.
 - **Thinking is shown as ordinary text.** The streaming callback carries no phase yet, so
   reasoning arrives as message chunks rather than Zed's collapsible thought blocks.
-- **One project folder per agent process.** The harness derives its boundary, config layer and
-  memory from one directory and the process changes into it, so a second session for a
-  *different* folder is refused rather than answered by a session pointed somewhere else.
-  Threads on the same folder share one session.
+- **One thread per agent process.** ACP allows an editor to run several threads over one agent
+  process ("Each connection can support several concurrent sessions"), and this adapter does not.
+  The harness derives its boundary, config layer, memory and state directory from one folder the
+  process changes into, and the loop, the permission gate and the running turn all belong to that
+  one session — a second thread would be served by the first one's session under a different id,
+  which is the kind of quiet wrong answer the whole boundary exists to prevent. So a second
+  thread on the same agent server is refused with a message saying so, whether it opens the same
+  folder or another one. If your editor gives a second thread its own process (Zed's docs do not
+  say either way), you will not notice this at all; if it does not, run a second LocalHarness
+  agent server entry in `settings.json` for the second thread.
 - **Zed's terminal capability is unused.** `bash_exec` runs the command itself; it does not
   appear as a Zed terminal you can watch or kill.
 - **Images and attachments in a prompt are ignored.** Only the text blocks of a prompt reach the
