@@ -107,8 +107,10 @@ because two questions about the same folder at the same moment is exactly the fa
 removes. Answer yes and two things happen: the trust is recorded in
 `~/.localharness/trusted_workspaces.yaml`, and `./.localharness` is created by the same scaffolder
 `init --workspace` uses, so this project's sessions, memory and state live with the project from
-this session on. Answer no and **nothing is created**, the session runs `guarded`, and the answer
-is recorded so the question is not asked here again. Where `./.localharness` already exists only
+this session on. Answer no and **nothing is created**, the session runs `guarded`, and the refusal is recorded as a
+"no" in the same `trusted_workspaces.yaml`, so the question is not asked here again (a
+`declined_workspace_offers.yaml` entry written by an earlier version is still honored, which is why
+that file is still protected). Where `./.localharness` already exists only
 the trust half applies: there is nothing to create, and a recognized workspace is not asked about
 at all.
 
