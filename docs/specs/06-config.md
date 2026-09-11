@@ -1297,6 +1297,12 @@ one file in the global config directory, keyed by the workspace's resolved path,
 human answers a prompt, and **never read from a project tree** — a cloned repository must not be
 able to pre-approve its own commands. Nested folders inherit the nearest ancestor's entry.
 
+A "never here" answer lives in the same file as a **negative grant**: same workspace entry, same key
+space, same mandatory provenance. It is not a text pattern — a refusal of the signature `cp` denies
+`cp` and leaves `scp`, `cpio` and any command whose arguments merely contain "cp" alone. Refusals are
+consulted ahead of grants, so a "never" wins over any later "always" on that key and denies without
+prompting; a refusal on a directory covers its subtree, exactly as a directory grant does.
+
 ```yaml
 /home/you/projects/api:
   grants:
@@ -1305,15 +1311,16 @@ able to pre-approve its own commands. Nested folders inherit the nearest ancesto
       granted_at: "2026-09-11T14:02:11+00:00"
       channel: terminal                 # provenance is mandatory — a record missing any of
       session_id: 0c4f…                 # these four is skipped with a warning
-  denies:
-    - pattern: bash_exec(*curl * | sh*) # a "never here" answer joins the DENY tier, which wins forever
-      added_at: "2026-09-11T14:05:40+00:00"
+  refusals:
+    - key: cargo publish                # a "never here" answer: denies this key, and only this key
+      class: shell-unfamiliar
+      refused_at: "2026-09-11T14:05:40+00:00"
       channel: terminal
       session_id: 0c4f…
 ```
 
 There is no CLI verb for grants: the prompt is the interface and this file is the escape hatch —
-delete an entry to be asked again.
+delete an entry to be asked again, including a refusal.
 
 **The kill switch.** `permissions.budget.kill_file` names one file; while that file exists, every
 agent session stops at its next iteration boundary. Two things about it are deliberate. It resolves

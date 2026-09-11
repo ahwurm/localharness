@@ -122,8 +122,9 @@ the fact. A channel with no review surface asks once per workspace instead.
 
 **Answers live in your global config, and a repository can only tighten.** An "always" is written to
 `~/.localharness/grants.yaml`, keyed by the workspace's resolved path, with the channel, session and
-timestamp that produced it; a "never" writes a deny pattern into the same file. Nested folders
-inherit the parent project's grants. A `grants.yaml` **inside a project tree is never read** — a
+timestamp that produced it; a "never" is written to the same file as a negative grant, under the same
+key, and denies exactly that key — refusing the command `cp` does not touch `scp` — beating any later
+"always" on it. Nested folders inherit the parent project's grants and refusals. A `grants.yaml` **inside a project tree is never read** — a
 cloned repository must not be able to pre-approve its own `curl … | sh` — and `permissions.mode` and
 `permissions.workspace_root` coming from a project layer may only make the policy stricter, never
 looser. `permissions.allow_patterns` is gone rather than repurposed; it was a loosening surface.
