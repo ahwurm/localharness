@@ -6,6 +6,7 @@ import typer
 from localharness import resolved_version
 
 from localharness.cli.agent_cmd import agent_app
+from localharness.cli.askrate_cmd import ask_rate
 from localharness.cli.autoresearch_cmd import autoresearch_app
 from localharness.cli.bench_cmd import bench_app
 from localharness.cli.components_cmd import components_app
@@ -37,6 +38,8 @@ app.command("validate")(validate)
 app.command("model")(model)
 app.command("propose")(propose)
 app.command("update")(update)
+# Internal instrument for the permission classifier, not a marketed verb (PRD §10).
+app.command("ask-rate", hidden=True)(ask_rate)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
