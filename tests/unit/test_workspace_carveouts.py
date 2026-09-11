@@ -178,10 +178,14 @@ async def test_an_explicit_workspace_root_still_wins_inside_a_workspace(tmp_path
 
     The project root is asserted ABSENT rather than only asserting the explicit value is present:
     a test that checks one value is there passes just as happily when both are.
+
+    The explicit root is a SUBFOLDER of the project. It used to sit outside it, which the
+    narrow-only union now drops for a project layer (PRD §3.3) — tightening is the direction a
+    repo is allowed to move its own leash, and it is the direction this property needs.
     """
     _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     proj = ws.parent
-    elsewhere = tmp_path / "elsewhere"
+    elsewhere = proj / "sandbox"
     elsewhere.mkdir()
     (ws / "agents" / f"{AGENT}.yaml").write_text(
         yaml.dump(
