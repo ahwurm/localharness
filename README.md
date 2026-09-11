@@ -31,6 +31,8 @@ Frontier coding agents are great when you're driving them. But metering and rate
 - **Always on.** No quota or rate caps to budget around for unattended runs.
 - **Familiar.** Same agent, tool, and permission model as the cloud tools, just local.
 
+**One setting a cron job needs.** From v0.14 the permission gate is on by default (`guarded`), and a run with nobody to answer a prompt refuses the call instead of allowing it — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
+
 A frontier agent like Claude Code is still the easy way to set the harness up and compose a bespoke subagent for a task. The split that works: frontier to design, local to run.
 
 **Migrating existing headless work?** [LocalShift](https://github.com/ahwurm/localshift) is the companion project. Point Claude Code at a cron job, skill, or bare prompt and it builds a per-workload quality eval, proves the local model is good enough (or honestly says keep-frontier), then cuts the job over to run claude-free on LocalHarness.

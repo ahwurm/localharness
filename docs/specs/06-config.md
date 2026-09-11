@@ -107,7 +107,9 @@ answer that question on your behalf, once, forever — a decision about trust ma
 happened to run first. `--no-input` makes the run declare that it is not the right process to be
 asked. It is also the honest way to script these commands: the run still works, it just works
 without that layer. (`agent create --no-input` additionally refuses to guess a target layer: pass
-`--global` or `--project`.)
+`--global` or `--project`.) It does **not** touch the permission gate: a `--no-input` run is still
+`guarded` unless config says otherwise, and a gate ask with nobody to answer it is refused rather
+than allowed. `permissions.mode: unattended` is the only setting that turns gate asks into allows.
 
 **Three current behaviors worth knowing before you rely on the walk.** These are what the code does
 today, described plainly rather than promised:
@@ -521,11 +523,11 @@ class PermissionConfig(BaseModel):
     )
 
     deny_patterns: list[str] = Field(
-        # 24 shipped defaults, in four groups — see the table below.
+        # 25 shipped defaults, in four groups — see the table below.
         default_factory=lambda: [
             "write(*/.env)",
             "write(*/secrets*)",
-            # … 22 more; config/models.py is the list
+            # … 23 more; config/models.py is the list
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
@@ -578,23 +580,26 @@ class PermissionConfig(BaseModel):
         return patterns
 ```
 
-**The 24 shipped deny defaults**, by what they stop:
+**The 25 shipped deny defaults**, by what they stop:
 
 | Group | Patterns |
 |---|---|
 | Credential and config writes | `write(*/.env)`, `write(*/secrets*)`, `write(*/config.yaml)`, `write(*/agents/*.yaml)` |
-| Privilege escalation, recursive delete, world-writable | `bash_exec(*sudo *)`, `bash_exec(rm -rf *)`, `bash_exec(*rm -rf *)`, `bash_exec(chmod 777 *)` |
+| Privilege escalation, recursive delete, world-writable | `bash_exec(*sudo *)`, `bash_exec(rm -rf *)`, `bash_exec(*rm -rf *)`, `bash_exec(chmod 777 *)`, `bash_exec(*chmod 777*)` |
 | Destructive container / service ops | `bash_exec(*docker stop*)`, `*docker kill*`, `*docker rm*`, `*docker compose down*`, `*docker-compose down*`, `*systemctl stop*`, `*systemctl disable*`, `*systemctl kill*`, `*systemctl mask*` |
 | Process and machine control | `bash_exec(*pkill*)`, `*killall*`, `kill *`, `* kill *`, `*shutdown*`, `*reboot*`, `*poweroff*` |
 
 Read-only equivalents stay allowed on purpose — `docker ps`, `docker logs`, `systemctl status`,
-`journalctl`.
+`journalctl`. `chmod 777` ships in both the anchored and the embedded form (issue #159): the
+anchored pattern alone missed `find . -exec chmod 777 {} \;` and `cd build && chmod 777 out`,
+which is why `sudo` and `rm -rf` carry both forms too.
 
 Because these are unioned into every agent at resolution time, a config that declares
 `deny_patterns: []` is not an agent with nothing denied. `config show`, `components get` and
 `components list` say so where it would otherwise mislead, appending
-`(+24 shipped defaults always enforced)` to an empty value. The count is read off the model, so it
-cannot drift from what ships.
+`(+25 shipped defaults always enforced)` to an empty value. That printed count is computed from
+the live list at run time, so what the CLI tells you cannot drift from what ships; the number in
+this page is prose, and drifts the moment a default is added without editing here.
 
 **`workspace_root` confines where files are written.** Set it and every `write`/`edit` target path
 and every `bash_exec` working directory must resolve inside that directory — symlinks followed
@@ -1224,10 +1229,10 @@ list — every field is declared there with its own description.
 | `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
-| `permissions.deny_patterns` | list[string] | 24 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
+| `permissions.deny_patterns` | list[string] | 25 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
 | `permissions.workspace_root` | string or null | null, or the project folder inside a workspace | abs or `~/…` path | Filesystem confinement for write/edit/bash_exec. Null and no workspace = unconfined |
 | `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
-| `permissions.budget.max_duration_minutes` | float | `30.0` | 0.1–1440 | Max duration |
+| `permissions.budget.max_duration_minutes` | float or null | `null` | 0.1–1440 | Max turn duration; null (the default since 0.13.3) = no time limit. A `config.yaml` written by an older `init` still carries `30.0` and still pins it |
 | `permissions.budget.max_tool_calls` | int or null | null | 0+ | Separate ceiling on dispatched tool calls; null = `max_actions` alone governs |
 | `permissions.budget.kill_file` | string or null | `"KILL"` | bare name, abs, or `~/…` path | Kill switch file. A bare name resolves under the config directory (`~/.localharness/KILL` by default); null disables the kill switch. Read from the global layer only — see "The kill switch" below |
 | `memory.max_notes_chars` | int | `16000` | 0–200000 | Chars of `MEMORY.md` injected per turn |

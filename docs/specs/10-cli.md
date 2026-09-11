@@ -25,8 +25,10 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 
 ## App Structure
 
-`src/localharness/cli/app.py` builds one Typer app and registers thirteen top-level commands —
-seven flat commands and six subcommand groups. `localharness --help` prints exactly this list:
+`src/localharness/cli/app.py` builds one Typer app and registers fourteen visible top-level
+commands — eight flat commands and six subcommand groups. `localharness --help` prints exactly
+this list. A fifteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
+reports permission prompts per session over a trace corpus and is documented by its own `--help`.
 
 | Command | What it does |
 |---|---|
@@ -37,6 +39,7 @@ seven flat commands and six subcommand groups. `localharness --help` prints exac
 | `model` | List available models, or switch the persisted default with `localharness model <name>`. |
 | `propose` | Generate ONE typed mutation `{diff, rationale}` for ONE component from failed TRAIN traces. |
 | `update` | Upgrade LocalHarness to the latest release on PyPI. |
+| `acp` | Serve the editor protocol Zed speaks; see [docs/zed.md](../zed.md). |
 | `agent` *(group)* | Manage LocalHarness agents — `create`, `list`. |
 | `bench` *(group)* | Run scenario benchmarks; compare runs for regressions. Matrix is opt-in (`--matrix`). Subcommands: `compare`, `pack`. |
 | `components` *(group)* | List, inspect, and mutate harness components (registry) — `list`, `get`, `set`. |
@@ -45,8 +48,8 @@ seven flat commands and six subcommand groups. `localharness --help` prints exac
 | `experiment` *(group)* | Run a proposal through the promotion gate (train Welch → holdout Bonferroni). |
 
 Sections below document `init`, `start`, `agent`, `doctor`, `validate`, `config` and `components`
-in detail. `bench`, `autoresearch`, `experiment`, `propose`, `model` and `update` are documented by
-their own `--help`, which is generated from the same source that defines them.
+in detail. `bench`, `autoresearch`, `experiment`, `propose`, `model`, `update` and `acp` are
+documented by their own `--help`, which is generated from the same source that defines them.
 
 ```python
 # src/localharness/cli/app.py (abridged — the registrations)
@@ -795,7 +798,7 @@ backup is written before the config is updated.
 `--dry-run` reports what would change and writes nothing:
 
 ```
-24 shipped default deny pattern(s) missing from /home/you/.localharness/config.yaml (defaults revision 0 → 1):
+25 shipped default deny pattern(s) missing from /home/you/.localharness/config.yaml (defaults revision 0 → 2):
   + write(*/.env)
   + bash_exec(*sudo *)
   ...
@@ -935,6 +938,12 @@ fourth mode, `unattended`, is **config-only and deliberately not settable here**
 into an allow, so it is written in the config file of a bench run or a scheduled job, where a human
 has decided that in advance. Discord takes the same three names as a plain `mode <name>` message.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
+
+**`--no-input` is not a permission switch.** It governs one question only — whether to load an
+untrusted workspace's config layer — and has no effect on the gate. A `--no-input` run is still
+`guarded` unless config says otherwise, and because such a run usually has nobody to answer, an
+ask there is **refused**, not allowed. `permissions.mode: unattended` in config is the only thing
+that turns gate asks into allows.
 
 ### Streaming Output
 
