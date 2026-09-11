@@ -8,6 +8,18 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agent-client-protocol"
+version = "0.12.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/95/2c28ca34e545ce0282e88272aa3a8abdf8f3f926a0492f567ea11acd071b/agent_client_protocol-0.12.1.tar.gz", hash = "sha256:9963ccb590ed96d7dc542c9c023e90676fc76b1c6562e21a9ee112f4fbcb0095", size = 130605, upload-time = "2026-08-16T14:08:22.545Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/61/0a2186c8ca53cf464767d4c4fb7fd9e23f48ce4547c2fa0d1c83a4d52410/agent_client_protocol-0.12.1-py3-none-any.whl", hash = "sha256:aaf3cc301ed87d9e2c4ccb91adfe1cd58784355f6ce7e513f50e7ca2391862ef", size = 85929, upload-time = "2026-08-16T14:08:21.307Z" },
+]
+
+[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1055,6 +1067,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json-repair"
+version = "0.63.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/62/72/4ec122befe7c2091ba7370d985cf0a3d4dbeccc2f832898ddb7921b4ab94/json_repair-0.63.4.tar.gz", hash = "sha256:77aa642193d62b02b889e8ce0df33898d3ea87282f0b9d8653f8ce8772c642b4", size = 52906, upload-time = "2026-08-25T07:39:02.725Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/ea/1a7b47196b0d03f59a80f5218b2a34160587c84ca8b0bcb56cb4ee93834e/json_repair-0.63.4-py3-none-any.whl", hash = "sha256:0f374f3eee21454aef0a5d72c06b8689b660a1788f80ab392639e3f7d5c5d458", size = 51295, upload-time = "2026-08-25T07:39:01.259Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1155,16 +1176,20 @@ sdist = { url = "https://files.pythonhosted.org/packages/c1/2f/46487e949da42b318
 
 [[package]]
 name = "localharness"
-version = "0.12.10"
+version = "0.13.3"
 source = { editable = "." }
 dependencies = [
+    { name = "agent-client-protocol" },
     { name = "aiosqlite" },
+    { name = "anyio" },
     { name = "bubus" },
     { name = "ddgs" },
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "mcp" },
+    { name = "numpy" },
     { name = "openai" },
+    { name = "packaging" },
     { name = "pluggy" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
@@ -1193,19 +1218,27 @@ embeddings = [
 exact-tokenizer = [
     { name = "llama-cpp-python" },
 ]
+json-repair = [
+    { name = "json-repair" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-client-protocol", specifier = ">=0.12,<0.13" },
     { name = "aiosqlite", specifier = ">=0.22,<1" },
+    { name = "anyio", specifier = ">=4.0,<5" },
     { name = "bubus", specifier = ">=1.5,<2" },
     { name = "ddgs", specifier = ">=6.0" },
     { name = "discord-py", marker = "extra == 'dispatch'", specifier = ">=2.3" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.26" },
+    { name = "json-repair", marker = "extra == 'json-repair'", specifier = ">=0.30,<1" },
     { name = "llama-cpp-python", marker = "extra == 'exact-tokenizer'", specifier = ">=0.3" },
     { name = "mcp", specifier = ">=1.27.1,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
+    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "openai", specifier = ">=1.0,<2" },
+    { name = "packaging", specifier = ">=23.2" },
     { name = "pluggy", specifier = ">=1.5,<2" },
     { name = "prompt-toolkit", specifier = ">=3.0,<4" },
     { name = "pydantic", specifier = ">=2.13,<3" },
@@ -1221,7 +1254,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.13.0" },
     { name = "typer", specifier = ">=0.25,<1" },
 ]
-provides-extras = ["dispatch", "embeddings", "exact-tokenizer", "dev"]
+provides-extras = ["dispatch", "embeddings", "exact-tokenizer", "json-repair", "dev"]
 
 [[package]]
 name = "lxml"

@@ -45,6 +45,11 @@ dependencies = [
     "numpy>=1.26,<3",
     "anyio>=4.0,<5",
     "packaging>=23.2",
+    # Agent Client Protocol — the one mechanism Zed recognizes an outside agent through
+    # (PRD §4). Pure Python, pydantic-only, so it is a main dependency rather than an extra:
+    # `localharness acp` must work on a plain `uv tool install localharness`. Upper bound <0.13
+    # because the SDK is pre-1.0 and the adapter is pinned to the 0.12 method signatures.
+    "agent-client-protocol>=0.12,<0.13",
 ]
 
 [project.optional-dependencies]
