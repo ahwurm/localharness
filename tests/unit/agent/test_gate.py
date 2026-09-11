@@ -16,12 +16,11 @@ from localharness.agent.gate import (
     NO_ASKER_REASON,
     PermissionGate,
     deny_fn_from,
-    deny_pattern_for,
     tool_meta_from_schema,
 )
 from localharness.agent.gate_types import Decision, PermissionRequest, ToolMeta
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.config.grants import GrantStore
+from localharness.config.grants import GrantStore, new_refusal
 from localharness.config.models import PermissionConfig
 from localharness.core.bus import EventBus
 from localharness.core.events import PermissionAsked, PermissionResolved
@@ -97,17 +96,91 @@ async def test_ungrantable_allow_always_never_writes_a_grant(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reject_always_writes_a_deny_the_deny_tier_then_matches(tmp_path):
-    """"Never here" wins forever after — through the DENY tier, before any ask (PRD §3.3)."""
+async def test_reject_always_writes_a_refusal_that_then_denies_without_asking(tmp_path):
+    """"Never here" wins forever after, as a negative grant on the key (PRD §3.3)."""
     gate = _gate(tmp_path, asker=_answer("reject_always"))
     first = await _check(gate, "bash_exec", {"command": "cargo publish"})
     assert not first.allowed
 
-    gate.asker = _answer("allow_always")  # even a yes cannot undo it
+    refusal = gate.grants.refused(gate.workspace, "cargo publish")
+    assert refusal is not None
+    assert (refusal.klass, refusal.channel, refusal.session_id) == ("shell-unfamiliar", "test", "s")
+
+    asked: list[PermissionRequest] = []
+    gate.asker = _answer("allow_always", asked)  # even a yes cannot undo it
     second = await _check(gate, "bash_exec", {"command": "cargo publish"})
     assert not second.allowed
     assert "never here" in second.reason
-    assert gate.grants.deny_patterns_for(gate.workspace) == ["bash_exec(*cargo publish*)"]
+    assert asked == []  # a refusal asks no more
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_denies_only_the_signature_it_names(tmp_path):
+    """The defect: a "never" on ``cp`` used to become ``bash_exec(*cp*)`` and ban ``scp`` too."""
+    gate = _gate(tmp_path, asker=_answer("reject_always"))
+    assert not (await _check(gate, "bash_exec", {"command": "cp a b"})).allowed
+
+    gate.asker = _answer("allow_once")
+    assert (await _check(gate, "bash_exec", {"command": "scp a host:b"})).allowed
+    assert (await _check(gate, "bash_exec", {"command": "cpio -o < list"})).allowed
+    assert (await _check(gate, "bash_exec", {"command": "ls /srv/backup-cp"})).allowed
+
+
+@pytest.mark.asyncio
+async def test_reject_always_refuses_every_key_the_call_asked_about(tmp_path):
+    """One prompt covers several keys, so one "never" must refuse all of them (PRD §3.3)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    gate = _gate(tmp_path, asker=_answer("reject_always"))
+    command = f"cargo publish && touch {outside}/f"
+    assert not (await _check(gate, "bash_exec", {"command": command})).allowed
+
+    assert gate.grants.refused(gate.workspace, "cargo publish") is not None
+    assert gate.grants.refused(gate.workspace, str(outside)) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_directory_refusal_covers_the_subtree(tmp_path):
+    """Directory refusals reach down exactly as directory grants do (PRD §3.1 edit-outside)."""
+    outside = tmp_path / "outside"
+    (outside / "y").mkdir(parents=True)
+    gate = _gate(tmp_path, asker=_answer("reject_always"))
+    assert not (await _check(gate, "write", {"path": str(outside / "f")}, WRITE)).allowed
+
+    asked: list[PermissionRequest] = []
+    gate.asker = _answer("allow_always", asked)
+    deeper = await _check(gate, "write", {"path": str(outside / "y" / "f")}, WRITE)
+    assert not deeper.allowed
+    assert "never here" in deeper.reason
+    assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_beats_a_grant_already_written_for_the_same_key(tmp_path):
+    """A "never" is a tightening, so it wins over any grant on the key, in either order."""
+    gate = _gate(tmp_path, asker=_answer("allow_always"))
+    assert (await _check(gate, "bash_exec", {"command": "cargo publish"})).allowed
+    assert gate.grants.lookup(gate.workspace, "cargo publish") is not None
+
+    gate.grants.add_refusal(
+        new_refusal(key="cargo publish", klass="shell-unfamiliar", workspace=gate.workspace,
+                    channel="test", session_id="s"))
+    outcome = await _check(gate, "bash_exec", {"command": "cargo publish"})
+    assert not outcome.allowed
+    assert "never here" in outcome.reason
+
+
+@pytest.mark.asyncio
+async def test_an_ungrantable_reject_always_refuses_its_primary_key(tmp_path):
+    """A destructive call asks every time, but a "never" on it still sticks (PRD §3.3)."""
+    gate = _gate(tmp_path, asker=_answer("reject_always"))
+    assert not (await _check(gate, "bash_exec", {"command": "rm -rf build"})).allowed
+    assert gate.grants.refused(gate.workspace, "rm -rf") is not None
+
+    asked: list[PermissionRequest] = []
+    gate.asker = _answer("allow_once", asked)
+    assert not (await _check(gate, "bash_exec", {"command": "rm -rf dist"})).allowed
+    assert asked == []
 
 
 # ------------------------------------------------------------------- fail closed
@@ -168,7 +241,7 @@ async def test_timeout_denies_as_reject_once_and_says_so_on_the_bus(tmp_path):
     resolved = bus.history(event_types=[PermissionResolved])
     assert [e.decision for e in resolved] == ["reject_once"]
     assert resolved[0].wrote_grant is False
-    assert gate.grants.deny_patterns_for(gate.workspace) == []
+    assert gate.grants.refused(gate.workspace, "cargo build") is None
 
 
 def test_ask_timeout_derives_from_the_tool_timeout(tmp_path):
@@ -249,7 +322,8 @@ async def test_a_keyless_request_writes_nothing_either_way(tmp_path):
     gate = _gate(tmp_path, asker=_answer("reject_always"))
     outcome = await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})
     assert not outcome.allowed
-    assert gate.grants.deny_patterns_for(gate.workspace) == []
+    assert gate.grants.refused(gate.workspace, "bash_exec") is None
+    assert not (tmp_path / "grants.yaml").exists()
 
     gate.asker = _answer("allow_always")
     assert (await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})).allowed
@@ -257,22 +331,6 @@ async def test_a_keyless_request_writes_nothing_either_way(tmp_path):
 
 
 # ------------------------------------------------------------ derivation helpers
-
-@pytest.mark.parametrize(
-    "tool,klass,key,expected",
-    [
-        ("bash_exec", "shell-unfamiliar", "cargo publish", "bash_exec(*cargo publish*)"),
-        ("bash_exec", "shell-destructive", "rm -rf", "bash_exec(*rm -rf*)"),
-        ("bash_exec", "protected-path", "/h/.ssh/id", "bash_exec(*/h/.ssh/id*)"),
-        ("write", "edit-outside", "/tmp/out", "write(/tmp/out*)"),
-        ("web_fetch", "network-host", "evil.example", "web_fetch(*evil.example*)"),
-        ("python_exec", "code-exec", "python_exec", "python_exec"),
-        ("agent", "delegate", None, "agent"),
-    ],
-)
-def test_deny_pattern_shapes(tool, klass, key, expected):
-    assert deny_pattern_for(tool, klass, key) == expected
-
 
 def test_tool_meta_reads_the_schema_and_the_mcp_group():
     plain = ToolSchema(name="write", description="", parameters={}, group="fs.write", destructive=True)

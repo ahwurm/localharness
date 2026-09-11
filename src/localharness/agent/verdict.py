@@ -38,6 +38,7 @@ from localharness.agent.gate_types import (
     Grant,
     Mode,
     PermissionRequest,
+    Refusal,
     ToolMeta,
     Verdict,
     VerdictResult,
@@ -47,6 +48,23 @@ from localharness.config.paths import ARCHIVE_DB_NAME, global_config_dir
 
 GrantLookup = Callable[[Path, str], Optional[Grant]]
 """``(workspace, key) -> Grant | None`` — ``config.grants.GrantStore.lookup`` in production."""
+
+RefusalLookup = Callable[[Path, str], Optional[Refusal]]
+"""``(workspace, key) -> Refusal | None`` — ``config.grants.GrantStore.refused`` in production.
+
+A refusal is a grant's negative twin in the same key space (PRD §3.3), so "never here" is
+consulted with the same call shape as "always here" and denies exactly the key it names."""
+
+REFUSAL_DENY_REASON = "refused by a human in this workspace (never here)"
+"""PRD §3.3: what the model and the person watching are told when a stored "never" decides the
+call. A refusal denies without prompting — that is the "asks no more" half of the answer."""
+
+PATH_KEYED_CLASSES: frozenset[str] = frozenset(
+    {"edit-outside", "edit-unreviewed", "protected-path", "no-boundary"}
+)
+"""Ask classes whose grant key is a filesystem path (PRD §3.1 table). A refusal on one of these
+covers the subtree beneath it, exactly as :func:`_granted_directory` makes a directory grant
+cover its subtree — "never write there again" means the place, not one path segment."""
 
 DenyFn = Callable[[str, dict], PermissionResult]
 """``(tool_name, tool_params) -> PermissionResult`` — wraps the existing
@@ -249,6 +267,10 @@ class GateContext:
     boundary: Optional[Path]
     workspace: Path
     grants: GrantLookup
+    refusals: Optional[RefusalLookup] = None
+    """"Never here" answers (PRD §3.3), consulted ahead of ``grants``. None means none are
+    recorded — a caller that cannot read them simply asks, it never silently allows."""
+
     mode: Mode = DEFAULT_MODE
     can_ask: bool = True
     has_review_surface: bool = False
@@ -443,11 +465,20 @@ def _decide(
     no grant is written, because a single "always" must never quietly remember a destructive or
     protected-path exposure that was bundled with a benign one.
 
-    ``unattended`` turns every ASK into ALLOW (today's behavior named honestly — bench and
-    scheduled jobs pin it, critic finding 7). ``trusted`` allows a request only when every ask
-    in it is grantable. DENY is never reached from here.
+    A stored "never here" (:data:`REFUSAL_DENY_REASON`) is checked over every collected ask
+    first and denies the whole call without prompting: the human answered the call, so one
+    refused key is enough, and no mode may override it — a refusal is a DENY, and DENY ignores
+    modes (PRD §3.3, §3.4).
+
+    ``unattended`` turns every remaining ASK into ALLOW (today's behavior named honestly — bench
+    and scheduled jobs pin it, critic finding 7). ``trusted`` allows a request only when every
+    ask in it is grantable.
     """
     ordered = _ordered_unique(asks)
+    for ask in ordered:
+        refusal = _refused(ctx, ask.klass, ask.key)
+        if refusal is not None:
+            return VerdictResult(Verdict.DENY, f"{REFUSAL_DENY_REASON}: {refusal.key}")
     primary = ordered[0]
     grantable = all(a.grantable for a in ordered)
     if ctx.mode == "unattended":
@@ -472,6 +503,29 @@ def _decide(
             grant_keys=tuple((a.klass, a.key) for a in ordered if a.grantable and a.key),
         ),
     )
+
+
+def _refused(ctx: GateContext, klass: str, key: Optional[str]) -> Optional[Refusal]:
+    """The stored "never here" covering this ask, if a human wrote one (PRD §3.3).
+
+    Consulted at every point the grant store is (and BEFORE it, so a refusal beats a later
+    "always" on the same key), and again over every collected ask in :func:`_decide` — one
+    refused key denies the whole call, because the human answered the call, not the class.
+
+    For a path-keyed class the walk goes upward from the key, so a refusal on ``/tmp/x`` covers
+    ``/tmp/x/y/f``; for every other class the key matches exactly. Nothing here is a text
+    pattern: a refusal on the signature ``cp`` cannot touch ``scp`` or ``cpio``.
+    """
+    if ctx.refusals is None or not key:
+        return None
+    if klass in PATH_KEYED_CLASSES:
+        here = Path(key)
+        for candidate in (here, *here.parents):
+            refusal = ctx.refusals(ctx.workspace, str(candidate))
+            if refusal is not None:
+                return refusal
+        return None
+    return ctx.refusals(ctx.workspace, key)
 
 
 def _granted_directory(ctx: GateContext, directory: Path) -> bool:
@@ -528,7 +582,7 @@ def _target_asks(
         else:
             key, where = raw, f"{raw} (unresolvable)"
             granted = ctx.grants(ctx.workspace, key) is not None
-        if granted:
+        if granted and _refused(ctx, "edit-outside", key) is None:
             continue
         asks.append(_ask_record(
             "edit-outside", key, f"writes outside the workspace boundary ({where})",
@@ -548,7 +602,7 @@ def _evaluate_write(
     asks = _target_asks(ctx, settings, target)
     if not asks and not ctx.has_review_surface:
         key = str(Path(ctx.workspace).expanduser().resolve())
-        if ctx.grants(ctx.workspace, key) is None:
+        if ctx.grants(ctx.workspace, key) is None or _refused(ctx, "edit-unreviewed", key):
             asks.append(_ask_record(
                 "edit-unreviewed", key, "this channel shows no diff to review the edit in",
             ))
@@ -598,18 +652,16 @@ def _evaluate_shell(
                 grantable=False, detail=segment.signature,
             ))
             continue
-        if ctx.grants(ctx.workspace, segment.signature) is not None:
+        klass, reason = (
+            ("interpreter-inline", f"runs code inline through an interpreter ({segment.signature})")
+            if segment.inline_interpreter
+            else ("shell-unfamiliar",
+                  f"shell command not seen in this workspace before ({segment.signature})")
+        )
+        granted = ctx.grants(ctx.workspace, segment.signature) is not None
+        if granted and _refused(ctx, klass, segment.signature) is None:
             continue
-        if segment.inline_interpreter:
-            asks.append(_ask_record(
-                "interpreter-inline", segment.signature,
-                f"runs code inline through an interpreter ({segment.signature})",
-            ))
-        else:
-            asks.append(_ask_record(
-                "shell-unfamiliar", segment.signature,
-                f"shell command not seen in this workspace before ({segment.signature})",
-            ))
+        asks.append(_ask_record(klass, segment.signature, reason))
     if not asks:
         return VerdictResult(Verdict.ALLOW, "read-only shell")
     return _decide(ctx, tool_name, params, asks, salient=command)
@@ -621,7 +673,7 @@ def _evaluate_named(
     """The classes keyed by tool name: ``code-exec`` and ``delegate`` (PRD §3.1)."""
     if ctx.mode == "read-only":
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
-    if ctx.grants(ctx.workspace, tool_name) is not None:
+    if ctx.grants(ctx.workspace, tool_name) is not None and not _refused(ctx, klass, tool_name):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
         ctx, tool_name, params, [_ask_record(klass, tool_name, reason)],
@@ -645,7 +697,7 @@ def _evaluate_network(
     host = urlparse(url).hostname
     if not host:
         return VerdictResult(Verdict.ALLOW, "network call names no host")
-    if ctx.grants(ctx.workspace, host) is not None:
+    if ctx.grants(ctx.workspace, host) is not None and not _refused(ctx, "network-host", host):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {host}")
     return _decide(
         ctx, tool_name, params,
@@ -669,7 +721,7 @@ def _evaluate_mcp(
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if server and server in settings.mcp_trusted_servers:
         return VerdictResult(Verdict.ALLOW, f"trusted MCP server: {server}")
-    if ctx.grants(ctx.workspace, key) is not None:
+    if ctx.grants(ctx.workspace, key) is not None and not _refused(ctx, "mcp", key):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {key}")
     return _decide(
         ctx, tool_name, params,
@@ -697,7 +749,9 @@ def evaluate(
 ) -> VerdictResult:
     """The whole verdict for one tool call (PRD §3.1), pure, and asked ONCE.
 
-    Order, fixed: **DENY → ungrantable ASK → grant lookup → grantable ASK → ALLOW**, with the
+    Order, fixed: **DENY → ungrantable ASK → refusals → grant lookup → grantable ASK → ALLOW**,
+    where a refusal is a human's "never here" recorded as a negative grant (PRD §3.3) and denies
+    the call outright without prompting. With the
     mode effects of PRD §3.4 applied when the asks are merged (:func:`_decide`). Deny is never
     overridden by a grant or a mode. The ungrantable checks (shell-destructive, protected-path,
     no-boundary) run before any grant is consulted — critic finding 12.

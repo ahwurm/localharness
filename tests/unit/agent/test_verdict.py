@@ -18,6 +18,7 @@ from localharness.agent.gate_types import (
     GateSettings,
     Grant,
     PermissionRequest,
+    Refusal,
     ShellClassification,
     ShellSegment,
     ToolMeta,
@@ -26,6 +27,7 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import (
     READ_ONLY_DENY_REASON,
+    REFUSAL_DENY_REASON,
     GateContext,
     derive_boundary,
     evaluate,
@@ -60,6 +62,20 @@ def a_grant(key: str = "k") -> Grant:
         key=key, klass="shell-unfamiliar", granted_at="2026-09-11T00:00:00+00:00",
         channel="terminal", session_id="s1", workspace="/w",
     )
+
+
+def a_refusal(key: str) -> Refusal:
+    return Refusal(
+        key=key, klass="shell-unfamiliar", refused_at="2026-09-11T00:00:00+00:00",
+        channel="terminal", session_id="s1", workspace="/w",
+    )
+
+
+def refusing(*keys: str):
+    """A ``RefusalLookup`` that refuses exactly these keys — nothing fuzzy, nothing globbed."""
+    def _refused(workspace: Path, key: str) -> Refusal | None:
+        return a_refusal(key) if key in keys else None
+    return _refused
 
 
 def make_ctx(workspace: Path, **kw) -> GateContext:
@@ -692,3 +708,67 @@ def test_the_subtree_grant_reaches_shell_write_targets(ws, monkeypatch, tmp_path
     result = evaluate("bash_exec", {"command": "touch sub/x"}, SHELL_META,
                       make_ctx(ws, grants=granted), SETTINGS)
     assert result.verdict is Verdict.ALLOW
+
+
+# ------------------------------------------------------------------- refusals
+
+def test_a_refused_signature_denies_without_a_request(ws, monkeypatch):
+    """PRD §3.3: a "never here" denies and asks no more — no prompt is rendered at all."""
+    fake_shell(monkeypatch, seg("cargo publish"))
+    result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
+                      make_ctx(ws, refusals=refusing("cargo publish")), SETTINGS)
+    assert result.verdict is Verdict.DENY
+    assert result.request is None
+    assert REFUSAL_DENY_REASON in result.reason
+
+
+def test_a_refusal_matches_its_key_and_not_a_neighbour(ws, monkeypatch):
+    """The defect: a refusal on ``cp`` must not reach ``scp``, ``cpio`` or a path holding "cp"."""
+    fake_shell(monkeypatch, seg("scp"), seg("cpio"))
+    result = evaluate("bash_exec", {"command": "scp a h:b && cpio -o < /srv/backup-cp/list"},
+                      SHELL_META, make_ctx(ws, refusals=refusing("cp")), SETTINGS)
+    assert result.verdict is Verdict.ASK
+
+
+def test_a_refusal_beats_a_grant_on_the_same_key(ws, monkeypatch):
+    """A tightening always wins, whichever answer was recorded last (PRD §3.3)."""
+    fake_shell(monkeypatch, seg("cargo publish"))
+    result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
+                      make_ctx(ws, grants=lambda w, k: a_grant(k),
+                               refusals=refusing("cargo publish")), SETTINGS)
+    assert result.verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", ALL_MODES)
+def test_no_mode_overrides_a_refusal(ws, monkeypatch, mode):
+    """A refusal is a DENY, and DENY ignores modes — unattended included (PRD §3.4)."""
+    fake_shell(monkeypatch, seg("cargo publish"))
+    result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
+                      make_ctx(ws, mode=mode, refusals=refusing("cargo publish")), SETTINGS)
+    assert result.verdict is Verdict.DENY
+
+
+def test_a_directory_refusal_covers_the_subtree(ws, tmp_path):
+    """Directory refusals reach down exactly as directory grants do (PRD §3.1 edit-outside)."""
+    outside = (tmp_path / "elsewhere").resolve()
+    result = evaluate("write", {"path": str(outside / "y" / "f"), "content": "x"}, WRITE_META,
+                      make_ctx(ws, refusals=refusing(str(outside))), SETTINGS)
+    assert result.verdict is Verdict.DENY
+    assert REFUSAL_DENY_REASON in result.reason
+
+
+def test_one_refused_key_denies_the_whole_call(ws, monkeypatch, tmp_path):
+    """One prompt covers every key of a call, so one refused key denies all of it (PRD §3.3)."""
+    outside = (tmp_path / "elsewhere").resolve()
+    fake_shell(monkeypatch, seg("cargo publish"), seg("touch", write_targets=(str(outside / "f"),)))
+    result = evaluate("bash_exec", {"command": "cargo publish && touch f"}, SHELL_META,
+                      make_ctx(ws, refusals=refusing("cargo publish")), SETTINGS)
+    assert result.verdict is Verdict.DENY
+
+
+def test_without_a_refusal_lookup_nothing_is_refused(ws, monkeypatch):
+    """``refusals=None`` (a caller that cannot read them) asks; it never silently allows."""
+    fake_shell(monkeypatch, seg("cargo publish"))
+    result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
+                      make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK

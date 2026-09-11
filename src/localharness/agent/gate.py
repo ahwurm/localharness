@@ -19,7 +19,6 @@ regression nobody notices, so the warning is not optional.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 import time
 from pathlib import Path
@@ -39,7 +38,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
-from localharness.config.grants import GrantStore, new_grant
+from localharness.config.grants import GrantStore, new_grant, new_refusal
 
 log = logging.getLogger(__name__)
 
@@ -102,52 +101,6 @@ MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` gives every MCP tool the group ``mcp/<server>``. That group IS how the
 registry knows the server name, so the ``ToolMeta`` builder reads it rather than taking a
 second, drift-prone path through the registry."""
-
-SHELL_DENY_TOOLS: frozenset[str] = frozenset({"bash_exec"})
-"""Tools whose one argument is an opaque command string, so a "never here" answer has to match
-as a SUBSTRING of it. Mirrors ``verdict.SHELL_COMMAND_PARAMS``."""
-
-SHELL_DENY_CLASSES: frozenset[str] = frozenset(
-    {"shell-destructive", "shell-unfamiliar", "interpreter-inline"}
-)
-"""Ask classes whose grant key is a shell signature (PRD §3.1 table)."""
-
-PATH_DENY_CLASSES: frozenset[str] = frozenset(
-    {"edit-outside", "protected-path", "no-boundary", "edit-unreviewed"}
-)
-"""Ask classes whose grant key is a filesystem path — a directory for ``edit-outside`` and
-``edit-unreviewed``, a file for ``protected-path``."""
-
-SUBSTRING_DENY_CLASSES: frozenset[str] = frozenset({"network-host"})
-"""Ask classes whose key appears INSIDE an argument (a host inside a URL)."""
-
-
-def deny_pattern_for(tool_name: str, klass: str, key: Optional[str]) -> str:
-    """Turn a "never here" answer into a deny pattern that matches this call from now on.
-
-    PRD §3.3: ``"Never" answers write a deny pattern into the same file (deny tier, so it wins
-    forever)``. The pattern has to match the same call through the DENY tier's fnmatch over raw
-    argument strings, so the shape follows the shape of the key:
-
-    * **shell** (key is a signature, or the tool is ``bash_exec``) → ``bash_exec(*<key>*)`` —
-      the embedded form the shipped deny defaults already use for ``sudo`` and ``rm -rf``,
-      because the signature sits anywhere inside the command string.
-    * **path** (key is a directory or file) → ``<tool>(<key>*)`` for a filesystem tool: the
-      prefix glob covers the subtree, which is what "never write there again" means when the
-      key is the target's parent directory.
-    * **substring** (a host inside a URL) → ``<tool>(*<key>*)``.
-    * **anything else** (``code-exec``, ``delegate``, ``mcp``, or no key at all) → the bare
-      tool name, which the DENY tier reads as "every call to this tool".
-    """
-    if not key:
-        return tool_name
-    if klass in SHELL_DENY_CLASSES or tool_name in SHELL_DENY_TOOLS:
-        return f"{tool_name}(*{key}*)"
-    if klass in PATH_DENY_CLASSES:
-        return f"{tool_name}({key}*)"
-    if klass in SUBSTRING_DENY_CLASSES:
-        return f"{tool_name}(*{key}*)"
-    return tool_name
 
 
 def derive_session_boundary(
@@ -249,36 +202,6 @@ def tool_meta_from_schema(schema: Any, *, mcp_server: Optional[str] = None) -> T
     )
 
 
-def _iter_strings(obj: Any) -> list[str]:
-    """Every string value inside a tool-call argument tree (same walk as ``permissions``)."""
-    if isinstance(obj, str):
-        return [obj]
-    if isinstance(obj, dict):
-        return [s for v in obj.values() for s in _iter_strings(v)]
-    if isinstance(obj, (list, tuple)):
-        return [s for v in obj for s in _iter_strings(v)]
-    return []
-
-
-def _matches_stored_deny(pattern: str, tool_name: str, params: dict) -> bool:
-    """Does a stored "never here" pattern match this call?
-
-    Same fnmatch semantics as ``agent/permissions.PermissionEvaluator`` — exact tool name, then
-    the argument glob against every string argument — with one deliberate difference: the tool
-    name is compared literally instead of through that module's ``[a-z_][a-z0-9_]*`` regex.
-    The regex exists to parse patterns a human typed into config; these patterns are generated
-    by :func:`deny_pattern_for`, and MCP tool names routinely carry capitals, so running them
-    through the regex would silently drop a human's "never here" answer.
-    """
-    name, _, rest = pattern.partition("(")
-    if name != tool_name:
-        return False
-    if not rest:
-        return True
-    glob = rest[:-1] if rest.endswith(")") else rest
-    return any(fnmatch.fnmatch(v, glob) or fnmatch.fnmatch("./" + v, glob) for v in _iter_strings(params))
-
-
 # ------------------------------------------------------------------- the gate
 
 class PermissionGate:
@@ -364,24 +287,22 @@ class PermissionGate:
     def _deny(
         self, tool_name: str, params: dict, config_deny: Optional[DenyFn] = None
     ) -> PermissionResult:
-        """The DENY tier: the config deny patterns, then the workspace's "never here" answers.
+        """The DENY tier: the config deny patterns, unchanged.
 
-        The config half is the existing evaluator, untouched — and it belongs to the CALLING
-        agent, not to the session: a subagent may tighten its own deny list, so
-        :meth:`check` passes that agent's deny function in and it wins over the gate's own.
-        The stored half is re-read on every call (``GrantStore`` reloads), so a
-        ``reject_always`` answered one minute ago wins the next minute without a restart.
+        This tier belongs to the CALLING agent, not to the session: a subagent may tighten its
+        own deny list, so :meth:`check` passes that agent's deny function in and it wins over
+        the gate's own.
+
+        A human's "never here" is NOT here. It is a structural refusal in the grant key space
+        (``GrantStore.add_refusal``) consulted by ``verdict.evaluate``, not an fnmatch pattern
+        over raw arguments — refusing the signature ``cp`` must not also ban ``scp``, ``cpio``
+        and every command whose arguments merely contain "cp".
         """
         deny = config_deny if config_deny is not None else self._config_deny
         if deny is not None:
             result = deny(tool_name, params)
             if result.denied:
                 return result
-        for pattern in self.grants.deny_patterns_for(self.workspace):
-            if _matches_stored_deny(pattern, tool_name, params):
-                return PermissionResult(
-                    denied=True, reason=f"you answered 'never here' for this: {pattern}"
-                )
         return PermissionResult(denied=False)
 
     def context(self, deny: Optional[DenyFn] = None) -> GateContext:
@@ -390,6 +311,7 @@ class PermissionGate:
             boundary=self.boundary,
             workspace=self.workspace,
             grants=self.grants.lookup,
+            refusals=self.grants.refused,
             mode=self.mode,
             can_ask=self.asker is not None,
             has_review_surface=self.has_review_surface,
@@ -537,12 +459,22 @@ class PermissionGate:
         key on (``verdict.DYNAMIC_COMMAND_NAME_PREFIXES``: a shell segment whose command name is
         computed at runtime).
 
-        ``reject_always`` is not downgraded for being ungrantable — a "never" answer is a
-        tightening, and tightening is always allowed — but it IS downgraded when the request
-        carries no key at all. With nothing to identify the call by, the only pattern that could
-        be written is the bare tool name, which would ban every shell command forever; that is
-        far more than the human answered, so nothing durable is written and the answer stands as
-        a ``reject_once``.
+        ``reject_always`` writes a REFUSAL — a negative grant in the same key space, filed under
+        the very keys the prompt offered (PRD §3.3). A grantable request refuses every key it
+        asked about, the mirror of an "always here"; an ungrantable one refuses only its primary
+        key, because the rest were bundled into an ask the human answered about that one thing.
+        It is not downgraded for being ungrantable — a "never" answer is a tightening, and
+        tightening is always allowed — but it IS downgraded when the request carries no key at
+        all. With nothing to identify the call by, the only thing that could be written is the
+        bare tool name, which would ban every shell command forever; that is far more than the
+        human answered, so nothing durable is written and the answer stands as a
+        ``reject_once``.
+
+        The earlier shape wrote an fnmatch DENY pattern derived from the key
+        (``bash_exec(*cp*)``), which from then on also blocked ``scp``, ``cpio`` and any command
+        whose arguments contained "cp", with nothing in the UI able to undo it. The refusal keeps
+        the spirit of §3.3 — a "never" wins over any later grant and asks no more — while
+        denying exactly what the human refused.
         """
         if not decision.remembered or not request.key:
             return False
@@ -560,10 +492,19 @@ class PermissionGate:
                     )
                 )
             return True
-        self.grants.add_deny(
-            self.workspace,
-            deny_pattern_for(request.tool_name, request.klass, request.key),
-            channel=self.channel_name,
-            session_id=session_id,
+        refused = (
+            request.grant_keys or ((request.klass, request.key),)
+            if request.grantable
+            else ((request.klass, request.key),)
         )
+        for klass, key in refused:
+            self.grants.add_refusal(
+                new_refusal(
+                    key=key,
+                    klass=klass,
+                    workspace=self.workspace,
+                    channel=self.channel_name,
+                    session_id=session_id,
+                )
+            )
         return True
