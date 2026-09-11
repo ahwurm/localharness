@@ -336,9 +336,11 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     Runs the SAME engine as `localharness config migrate`, revision-gated: silent with zero
     writes when the config is already at the current defaults revision (the common path, and
     the removal-respect path — a deliberately-deleted default stays deleted). It also fires on
-    a config still carrying v0.14's removed `permissions.allow_patterns`, whatever the stamp:
-    running BEFORE the loader is what lets that key be repaired instead of read. Best-effort: a
-    migration failure NEVER blocks startup — we warn once and continue with the on-disk config.
+    a config — or an `agents/`/`divisions/` file — still carrying v0.14's removed
+    `permissions.allow_patterns`, whatever the stamp: running BEFORE the loader is what lets that
+    key be repaired instead of read, and a stamped-current config gets the removal ALONE (no deny
+    default the user deleted is re-added). Best-effort: a migration failure NEVER blocks startup
+    — we warn once and continue with the on-disk config.
     """
     from localharness.config import migrate as _migrate
 
@@ -350,7 +352,7 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
         return  # already current: no output, no writes
 
     try:
-        backup = _migrate.apply(config_file, original, plan)
+        backups = _migrate.apply(config_file, original, plan)
     except Exception as exc:
         err_console.print(
             "[yellow]⚠[/yellow]  " + escape(f"Could not auto-update security defaults: {exc}. ")
@@ -366,10 +368,19 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
         f"; removed permissions.{_migrate.DEAD_KEY} (gone in v0.14 — grants live in the global "
         "store)" if plan.removed_allow_patterns is not None else ""
     )
+    # The sidecar files are named, not counted: this receipt is the only notice a user gets that
+    # an agent file on disk was rewritten, and "1 file cleaned" does not say which (finding R10).
+    for sidecar in plan.sidecars:
+        removed_note += f"; cleaned {_migrate.DEAD_KEY} from {sidecar.path.name}"
+    head = (
+        "Config repaired"
+        if plan.config_unchanged
+        else (f"Security defaults updated (revision {plan.from_revision} → {plan.to_revision}): "
+              f"added {len(plan.added)} deny pattern(s)")
+    )
     console.print(
-        f"[cyan]i[/cyan]  Security defaults updated (revision {plan.from_revision} → "
-        f"{plan.to_revision}): added {len(plan.added)} deny pattern(s){removed_note} — "
-        + escape(f"backup at {backup}"),
+        f"[cyan]i[/cyan]  {head}{removed_note} — "
+        + escape("backups at " + ", ".join(str(b) for b in backups)),
         soft_wrap=True,
     )
 
