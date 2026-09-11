@@ -33,7 +33,7 @@ from rich.status import Status
 from rich.text import Text
 from rich.theme import Theme
 
-from localharness.channels.base import ChannelAdapter
+from localharness.channels.base import PERMISSION_DENIED_LINE, ChannelAdapter
 from localharness.channels.errors import ChannelStartError
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
 from localharness.core.bus import EventBus
@@ -1135,6 +1135,25 @@ class TerminalChannel(ChannelAdapter):
                 self._console.print(f"  [tool.result]{_CHECK} {name} ({len(lines)} lines)[/tool.result]")
             if tool_name in UNTRUSTED_INGEST and not is_error:
                 self._print_close_note(_UNTRUSTED_NOTE)  # itemized (verbose) web calls keep the disclosure
+
+    async def send_permission_denied(
+        self,
+        tool_name: str,
+        reason: str,
+        agent_id: str | None = None,
+    ) -> None:
+        """One inline line saying why the gate refused this call (PRD §3.5, defect D7).
+
+        Inline on the ordinary console rather than through `send_error`'s stderr path: it
+        belongs directly under the `✗ <tool> (exit 1): [DENIED]` line it explains, and a
+        denial is not a crash — the model is about to re-plan around it.
+        """
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()
+            self._console.print(
+                f"  [tool.error]{PERMISSION_DENIED_LINE.format(tool_name=escape(tool_name), reason=escape(reason))}[/tool.error]"
+            )
 
     async def send_error(
         self,

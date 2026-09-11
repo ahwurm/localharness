@@ -220,3 +220,56 @@ async def test_the_persistent_box_is_restored_after_a_question():
             assert ch._box_active is True, "the input box was not restarted"
         finally:
             await ch.stop_input_box()
+
+
+# ------------------------------------------- the human sees the denial (defect D7)
+
+def _denied_observation(reason: str, tool_name: str = "write"):
+    from localharness.core.events import Observation
+
+    return Observation(
+        agent_id="a",
+        session_id="s",
+        observation_type="tool_result",
+        tool_call_id="tc-1",
+        tool_name=tool_name,
+        output="[DENIED]",
+        error=f"Permission denied: {reason}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_denial_is_explained_to_the_person_watching(monkeypatch):
+    """Verification A defect D7: the reason reached the model's observation only; the terminal
+    printed `✗ write (exit 1): [DENIED]` and the human was left guessing."""
+    _streams(monkeypatch, stdin=True, stdout=True)
+    ch = _channel()
+    await ch.on_observation(_denied_observation("not permitted in read-only mode"))
+    printed = ch._console.file.getvalue()
+    assert "[DENIED]" in printed
+    assert "permission denied" in printed
+    assert "not permitted in read-only mode" in printed
+    assert printed.count("not permitted in read-only mode") == 1, "one line per denial"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_tool_error_gets_no_permission_line(monkeypatch):
+    from localharness.core.events import Observation
+
+    _streams(monkeypatch, stdin=True, stdout=True)
+    ch = _channel()
+    await ch.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result", tool_call_id="tc-1",
+        tool_name="write", output="", error="Error: disk full",
+    ))
+    assert "permission denied" not in ch._console.file.getvalue()
+
+
+def test_the_denied_label_is_one_definition():
+    """The loop writes it, the channels match on it — one constant, imported by both."""
+    from localharness.agent.gate import DENIED_OBSERVATION_PREFIX
+    from localharness.channels.base import permission_denied_reason
+
+    assert permission_denied_reason(f"{DENIED_OBSERVATION_PREFIX}because") == "because"
+    assert permission_denied_reason("Error: something else") is None
+    assert permission_denied_reason(None) is None

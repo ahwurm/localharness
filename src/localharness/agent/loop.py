@@ -19,7 +19,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
-from localharness.agent.gate import fail_closed_gate, tool_meta_from_schema
+from localharness.agent.gate import (
+    DENIED_OBSERVATION_PREFIX,
+    fail_closed_gate,
+    tool_meta_from_schema,
+)
 from localharness.agent.gate_types import ToolMeta
 from localharness.core.types import Message
 from localharness.tools.capabilities import CoResidenceError
@@ -1935,7 +1939,7 @@ class AgentLoop:
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": f"Permission denied: {perm_result.reason}",
+                        "content": f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}",
                     })
                     await self._bus.publish(Observation(
                         agent_id=session.agent_id,
@@ -1944,7 +1948,7 @@ class AgentLoop:
                         tool_call_id=tool_call.id,
                         tool_name=tool_call.name,
                         output="[DENIED]",
-                        error=f"Permission denied: {perm_result.reason}",
+                        error=f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}",
                     ))
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
@@ -2376,7 +2380,7 @@ class AgentLoop:
                 session.push({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": f"Permission denied: {perm.reason}",
+                    "content": f"{DENIED_OBSERVATION_PREFIX}{perm.reason}",
                 })
                 executed += 1
                 continue
