@@ -20,17 +20,53 @@ from typing import Any, Awaitable, Callable, Literal
 
 # --------------------------------------------------------------------------- modes
 
-Mode = Literal["guarded", "trusted", "read-only", "unattended"]
+Mode = Literal["auto", "guarded", "trusted", "read-only", "unattended"]
 
-MODE_STRICTNESS: dict[str, int] = {"unattended": 0, "trusted": 1, "guarded": 2, "read-only": 3}
+MODE_STRICTNESS: dict[str, int] = {
+    "unattended": 0, "auto": 1, "trusted": 2, "guarded": 3, "read-only": 4,
+}
 """Strictness order used by the loader's narrow-only union (PRD §3.3, §3.4).
 
 A project layer may only raise strictness; ``unattended`` is never a default and is never
-settable from a channel command.
+settable from a channel command. ``auto`` sits one rung above ``unattended`` because it is the
+first mode that still asks about anything at all, and below ``trusted`` because ``trusted``
+asks about every destructive command while ``auto`` asks only about the ones that point outside
+the project (owner ruling 2026-09-11).
 """
 
-DEFAULT_MODE: Mode = "guarded"
-"""PRD §3.4: the default for every channel that can ask."""
+DEFAULT_MODE: Mode = "auto"
+"""The default for every channel that can ask.
+
+Owner ruling 2026-09-11, after using the shipped ``guarded`` default for a day: "way too
+intrusive, it stopped me multiple times… the default should be an auto mode that almost never
+triggers unless genuinely risky / dangerous… essentially the thinnest interaction off of no
+interaction". ``guarded`` — which asks once per new shell signature, once per write outside the
+project, once per interpreter, and on EVERY write when the session starts in ``$HOME`` — is
+still there, one ``/mode guarded`` away, for anyone who wants it. It is no longer what a person
+meets on first run.
+"""
+
+AUTO_ASK_CLASSES: frozenset[str] = frozenset({"protected-path", "shell-destructive"})
+"""The only two ask classes ``auto`` still raises (owner ruling 2026-09-11: "auto = thinnest
+interaction; asks only when genuinely dangerous").
+
+Everything else a call can raise — a first-exposure shell signature, a write outside the
+project, an inline interpreter, a subagent dispatch, an MCP tool, a fetch from a new host, a
+session with no boundary at all — is allowed silently: none of it is irreversible, and asking
+about all of it is the prompt fatigue that trains a person to answer "yes" without reading.
+What is left is the pair that cannot be undone by the next command: writing a path whose
+contents decide what runs later (:data:`PROTECTED_PATHS_HOME_DEFAULT`,
+:data:`PROTECTED_PATHS_SYSTEM_DEFAULT`, :data:`PROTECTED_PATHS_WORKSPACE_DEFAULT`), and a
+destructive shell command — the latter narrowed further by
+:data:`TARGET_SCOPED_DESTRUCTIVE_VERBS`, because ``rm -rf build`` inside your own project is
+routine.
+
+``auto`` also asks about an ask that carries NO key, whatever its class: a command the gate
+could not read (``{"command": ["rm", "-rf", "/"]}``), a command name computed at runtime
+(``$RM -rf build``), a path argument that is not a string. Those are not benign classes, they
+are calls the gate could not classify, and the whole rule above rests on having classified the
+call. See :func:`localharness.agent.verdict._ask_record`.
+"""
 
 
 # --------------------------------------------------------------------------- verdicts
@@ -101,6 +137,13 @@ class PermissionRequest:
     ``PermissionGate`` also prefixes ``display`` with it when the asker is not the session's own
     agent, so a channel that renders nothing but the one line still shows who asked."""
 
+    auto_entry: str | None = None
+    """Which :class:`AutoBlacklist` entry raised this, when ``auto`` is the mode.
+
+    Reported by ``localharness ask-rate --mode auto`` so the blacklist can be curated from what
+    actually fires over a real corpus. None in every other mode, and on an ask that ``auto``
+    would not have raised at all."""
+
     call_id: str | None = None
     """The tool call's own id (``Action.tool_call_id``), so a channel can pair the question with
     the call it is about.
@@ -170,6 +213,36 @@ class ShellSegment:
     inline_interpreter: bool = False
     write_targets: tuple[str, ...] = ()
     unresolvable_write: bool = False
+
+    target_scoped_destructive: bool = False
+    """True when this segment's destructiveness is entirely a question of WHERE it points —
+    its verb is in :data:`TARGET_SCOPED_DESTRUCTIVE_VERBS` (owner ruling 2026-09-11).
+
+    False on every other destructive segment, including every non-destructive one: ``sudo``,
+    ``curl … | sh``, ``git push --force`` and ``dd`` are irreversible wherever they run, so
+    ``auto`` asks about them regardless of target."""
+
+    destructive_targets: tuple[str, ...] = ()
+    """The paths a target-scoped destructive segment operates ON, joined onto the directory the
+    segment runs in exactly as :attr:`write_targets` are.
+
+    Kept apart from ``write_targets`` on purpose: ``rm`` does not WRITE its operands, it deletes
+    them, and folding the two together would change what ``guarded`` asks about. Empty on every
+    segment whose ``target_scoped_destructive`` is False."""
+
+    pipe_to_shell: bool = False
+    """True when this segment is the SINK of a ``curl … | sh`` (:data:`PIPE_TO_SHELL_SINKS_DEFAULT`).
+
+    Carried separately from ``destructive`` because the sink's signature — a bare ``sh``, a
+    ``python3`` — says nothing about why it is dangerous, and ``auto``'s blacklist is read off
+    signatures for everything else."""
+
+    unresolvable_destructive: bool = False
+    """True when a target-scoped destructive segment names a target the classifier cannot place
+    — a variable, a glob, a substitution, a ``cd`` it could not follow — or names none at all.
+
+    ``auto`` reads it as "ask": the whole narrowing rests on knowing where the command points,
+    so not knowing is the one answer that cannot be allowed."""
 
 
 @dataclass(frozen=True)
@@ -614,6 +687,155 @@ PROTECTED_PATHS_WORKSPACE_DEFAULT: tuple[str, ...] = (
 """PRD §3.1: names matched at any depth inside the workspace; a directory entry protects its
 subtree (``.git/hooks/pre-commit`` is protected via ``.git``)."""
 
+PROTECTED_PATHS_SYSTEM_DEFAULT: tuple[str, ...] = (
+    "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/root", "/srv",
+    "/System", "/Library", "/Applications",
+    "C:/Windows", "C:/Program Files", "C:/Program Files (x86)", "C:/ProgramData",
+)
+"""The machine's own directories, ungrantable like the two sets above (owner ruling 2026-09-11:
+"auto = thinnest interaction; asks only when genuinely dangerous").
+
+``auto`` allows a write outside the project silently — that is most of what made ``guarded``
+intrusive — and this set is what keeps "outside the project" from meaning ``/etc/hosts``,
+``/usr/bin``, a systemd unit or a startup item. Without it the new default would have been a
+strict loosening of the shipped one on exactly the paths a person cannot undo from the next
+prompt. The three rows are the Linux/BSD system tree (FHS: ``/etc`` configuration, ``/usr`` and
+``/bin``/``/sbin``/``/lib`` the installed system, ``/boot`` the kernel, ``/var`` service state,
+``/opt`` and ``/srv`` add-on software and served data, ``/root`` the superuser's home), macOS's
+three (``/System``, ``/Library``, ``/Applications``), and Windows's, where the owner also
+dogfoods.
+
+Matched AFTER realpath, against both the entry as written and its own realpath, so macOS's
+``/etc`` → ``/private/etc`` and Linux's merged-usr ``/lib`` → ``/usr/lib`` are the same entry
+rather than a hole. The Windows rows are matched case-insensitively on the posix spelling of the
+resolved path, because Windows paths are case-insensitive and a drive-letter path is not
+absolute on a POSIX host (see :func:`localharness.agent.verdict._system_root_matches`).
+
+:data:`PROTECTED_PATHS_SYSTEM_EXEMPT_DEFAULT` carves the scratch directories back out."""
+
+PROTECTED_PATHS_SYSTEM_EXEMPT_DEFAULT: tuple[str, ...] = ("/tmp", "/var/tmp")
+"""Scratch directories that are NOT protected, even though one of them sits inside ``/var``.
+
+``/tmp`` and ``/var/tmp`` are where every build, every test run and every ``mktemp`` writes
+(FHS: both are for temporary files, and ``/var/tmp`` is the one that survives a reboot). Leaving
+``/var/tmp`` inside the ``/var`` entry above would make an ordinary scratch write an ungrantable
+prompt, which is the fatigue this release exists to remove. ``/tmp`` needs no carve-out on a
+stock Linux — it is not under any entry above — and is listed anyway because on a host where it
+is a symlink into one, the honest answer is still "scratch".
+
+Deliberately NOT config-settable, in either layer: every other rule set here can be TIGHTENED
+from a project layer, and this is the one list where adding an entry removes protection."""
+
+TARGET_SCOPED_DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
+    "rm", "rmdir", "chmod", "chown", "chgrp", "truncate",
+    "find",
+    "Remove-Item", "ri", "del", "erase", "rd",
+})
+"""Destructive verbs whose danger is ENTIRELY where they point (owner ruling 2026-09-11).
+
+``rm -rf build`` inside your own project is routine — it is what a build script does — and
+``rm -rf ~/Documents`` is not. Nothing about the verb separates them; only the target does. So
+``auto`` resolves these verbs' operands (:attr:`ShellSegment.destructive_targets`) and allows
+the command when every one of them lands inside the workspace boundary and none is protected,
+and asks otherwise: outside the boundary, protected, or unresolvable.
+
+Every OTHER member of :data:`DESTRUCTIVE_SIGNATURES_DEFAULT` is irreversible regardless of
+target and keeps asking in ``auto``: ``sudo``/``su``/``doas`` (the target is the whole machine),
+pipe-to-shell (the target is code nobody has read), ``git push --force``/``--delete``,
+``git reset --hard``, ``git clean -f``, ``git checkout --``/``git restore``, ``git stash
+drop``/``clear``, ``git branch -D``, ``git filter-branch``, ``git reflog expire``,
+``git gc --prune`` (each destroys work that is inside the project and still unrecoverable),
+``dd``, ``mkfs``, ``format``/``diskpart`` (a device, not a path), and the docker verbs that run
+or destroy containers.
+
+``find`` is in the set for its ``-delete`` spelling only — a plain ``find`` is read-only and
+never reaches the destructive branch. ``shred`` is in it despite overwriting irrecoverably: so
+does ``rm``, and the same operand rule tells them apart. The Windows delete verbs are the
+spellings of the same operation on the other shell (:data:`WINDOWS_DESTRUCTIVE_FLAG_VERBS`).
+
+Deliberately NOT config-settable: adding a verb here LOOSENS ``auto``."""
+
+AUTO_IRREVERSIBLE_SIGNATURES: frozenset[str] = frozenset({
+    "sudo", "su", "doas",
+    "dd", "mkfs", "shred", "format", "diskpart",
+    "git push --force", "git push --delete", "git reset --hard", "git clean -f",
+})
+"""The commands ``auto`` asks about wherever they point (owner ruling 2026-09-11: "only hard
+blacklists for git and rm and shit like that, and even then very minimal").
+
+Matched on the canonical signature, so ``git push -f`` and ``git push --force-with-lease`` are
+the one ``git push --force`` entry and ``git push origin :branch`` is the one
+``git push --delete`` entry (the classifier canonicalizes both).
+
+Why each is here and not merely "destructive": ``sudo``/``su``/``doas`` put the command outside
+the boundary by definition — the target is the machine. ``dd``, ``mkfs``, ``format`` and
+``diskpart`` write DEVICES, which no path check covers, and ``shred`` overwrites so that the
+file is gone even from a backup of the block. The four git entries destroy work that no later
+command can recover: a force-push and a delete-push rewrite what other people have already
+pulled, ``git reset --hard`` and ``git clean -f`` throw away uncommitted work with no reflog
+entry to walk back to.
+
+What is deliberately NOT here, though the fuller
+:data:`DESTRUCTIVE_SIGNATURES_DEFAULT` that ``guarded`` uses still carries it: every docker verb
+(the shipped ``permissions.deny_patterns`` already hard-denies ``docker stop``/``kill``/``rm``/
+``compose down``, which is a tier above asking), ``git branch -D``/``-d``, ``git stash
+drop``/``clear``, ``git checkout --``/``git restore``, ``git reflog expire``,
+``git gc --prune``, ``git filter-branch``, ``git worktree remove --force``,
+``git submodule deinit --force``, ``git remote set-url``, and ``git config`` writes to a key git
+later executes. Each of those is recoverable, rare, or already covered — and each of them
+stopped the owner mid-task in the v0.14.0 dogfood. They keep their classification so ``guarded``
+is unchanged; ``auto`` does not ask about them."""
+
+AUTO_PROTECTED_PATHS_WORKSPACE: tuple[str, ...] = (".git", ".localharness")
+"""The in-project protected names ``auto`` keeps, out of
+:data:`PROTECTED_PATHS_WORKSPACE_DEFAULT` (owner ruling 2026-09-11).
+
+``.git`` because a write under it re-points what the next ordinary git command executes
+(``.git/hooks/*``, ``.git/config``), and ``.localharness`` because a write under it changes what
+the harness itself does next. ``.env``/``.env.*``, ``*.pem``, ``*.key``, ``id_rsa*`` and
+``id_ed25519*`` are dropped: writing your own project's ``.env`` is ordinary work, the real key
+material lives under ``~/.ssh`` and the other home entries, and those stay protected in every
+mode. ``guarded`` keeps the full set."""
+
+
+@dataclass(frozen=True)
+class AutoBlacklist:
+    """The ONE curated structure that decides what ``auto`` still asks about.
+
+    Owner ruling 2026-09-11: "default to auto mode so that it asks to trust the workspace, and
+    allows anything except a dangerous blacklist that we can explore rather than building out a
+    whitelist", refined to "only hard blacklists for git and rm and shit like that, and even then
+    very minimal". Kept apart from the fuller rule sets ``guarded`` uses so the two can be curated
+    independently: ``guarded``'s job is to ask about anything it has not seen, ``auto``'s is to
+    ask about the handful of things that cannot be undone.
+
+    ``localharness ask-rate --mode auto`` reports which of these entries actually fired over a
+    corpus, which is how the list gets shorter over time rather than longer.
+
+    Not in it, and therefore silent in ``auto``: every interpreter, ``python_exec``, ``agent``,
+    every MCP and plugin tool, every network call, and every write to a path this does not name.
+    Two tiers still run ahead of it and are unaffected: the config ``deny_patterns`` (a DENY, the
+    owner's own list) and a recorded :class:`Refusal`.
+    """
+
+    target_scoped_verbs: frozenset[str] = TARGET_SCOPED_DESTRUCTIVE_VERBS
+    """Asks only when a target is outside the boundary, protected, or unresolvable."""
+
+    irreversible_signatures: frozenset[str] = AUTO_IRREVERSIBLE_SIGNATURES
+    """Asks wherever it points."""
+
+    protected_paths_workspace: tuple[str, ...] = AUTO_PROTECTED_PATHS_WORKSPACE
+    """The in-project protected names; the home and system sets apply in full."""
+
+    pipe_to_shell: bool = True
+    """``curl … | sh`` and its PowerShell twin: the code being run has not been read by anyone,
+    so there is no target to check and no signature that means anything
+    (:data:`PIPE_TO_SHELL_SOURCES_DEFAULT`, :data:`PIPE_TO_SHELL_SINKS_DEFAULT`)."""
+
+
+AUTO_BLACKLIST = AutoBlacklist()
+"""The shipped blacklist. One value, so a change is one diff and one review."""
+
 
 @dataclass(frozen=True)
 class GateSettings:
@@ -640,6 +862,15 @@ class GateSettings:
     write_shaped_commands: frozenset[str] = WRITE_SHAPED_COMMANDS_DEFAULT
     protected_paths_home: tuple[str, ...] = PROTECTED_PATHS_HOME_DEFAULT
     protected_paths_workspace: tuple[str, ...] = PROTECTED_PATHS_WORKSPACE_DEFAULT
+    protected_paths_system: tuple[str, ...] = PROTECTED_PATHS_SYSTEM_DEFAULT
+    protected_paths_system_exempt: tuple[str, ...] = PROTECTED_PATHS_SYSTEM_EXEMPT_DEFAULT
+    """Not reachable from ``AskConfig``: see the constant's docstring."""
+    target_scoped_destructive_verbs: frozenset[str] = TARGET_SCOPED_DESTRUCTIVE_VERBS
+    """Not reachable from ``AskConfig``: see the constant's docstring."""
+    auto_blacklist: AutoBlacklist = AUTO_BLACKLIST
+    """The ``auto`` blacklist. Not reachable from ``AskConfig``: every field of it either
+    LOOSENS the mode when extended (the two signature sets) or is the one list that decides
+    whether the default mode is safe at all — and config travels with a repo (PRD §3.3)."""
     mcp_trusted_servers: frozenset[str] = frozenset()
     """PRD §3.1: a whole MCP server whose tools skip the once-per-tool ask."""
     ask_network_hosts: bool = False

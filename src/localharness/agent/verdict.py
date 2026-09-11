@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from localharness.agent.gate_types import (
+    AUTO_ASK_CLASSES,
     DEFAULT_MODE,
     UNGRANTABLE_CLASSES,
     GateSettings,
@@ -82,6 +83,24 @@ cover its subtree — "never write there again" means the place, not one path se
 DenyFn = Callable[[str, dict], PermissionResult]
 """``(tool_name, tool_params) -> PermissionResult`` — wraps the existing
 ``agent/permissions.PermissionEvaluator.evaluate`` (the DENY tier, unchanged)."""
+
+AUTO_PIPE_TO_SHELL_ENTRY = "pipe-to-shell"
+"""The name :func:`_auto_blacklisted` reports for a ``curl … | sh``.
+
+The sink's signature is a bare ``sh`` or ``python3``, which is not the reason the call is on the
+blacklist, so the report would have been unreadable ("sh: 4 prompts") without a name for the
+RULE. Every other entry reports as itself, because every other entry is a signature."""
+
+MODES_WITHOUT_GRANTS: frozenset[str] = frozenset({"auto"})
+"""Modes in which the grant store is never READ and never WRITTEN (owner ruling 2026-09-11:
+``auto`` is "blacklist-only… allows anything except a dangerous blacklist").
+
+A grant is a memory of an answer to a question. ``auto`` does not ask those questions — a first
+-exposure command, a write outside the project, an unfamiliar tool all simply run — so there is
+nothing to remember and nothing to consult, and consulting the store anyway would make the mode
+depend on state a person cannot see. The one thing that IS consulted is the negative twin: a
+recorded :class:`Refusal` still denies, in every mode, because "never here" is a DENY and DENY
+outranks modes (PRD §3.3, §3.4)."""
 
 
 # --------------------------------------------------------------- tool vocabulary
@@ -482,16 +501,63 @@ def _exempt_runtime_store(path: Path) -> bool:
     return path.relative_to(config_dir).parts[0] in HARNESS_RUNTIME_STORE_NAMES
 
 
+def _system_root_matches(path: Path, raw: str) -> bool:
+    """Is ``path`` at or below the system directory ``raw``? (:data:`PROTECTED_PATHS_SYSTEM_DEFAULT`.)
+
+    Two spellings, because the set covers three operating systems:
+
+    * A drive-letter entry (``C:/Windows``) is not an absolute path on a POSIX host — ``Path``
+      would anchor it at the CWD — and Windows compares paths case-insensitively. So it is
+      matched as a case-insensitive prefix of the resolved path's posix spelling, which is what
+      a real Windows realpath renders as (``C:/Windows/System32``).
+    * A POSIX entry is matched both as written AND as its own realpath, so macOS's
+      ``/etc`` → ``/private/etc`` and Linux's merged-usr ``/lib`` → ``/usr/lib`` are one entry
+      rather than a hole: the target is realpathed before it gets here, so an entry that is a
+      symlink would otherwise never match anything.
+    """
+    if PureWindowsPath(raw).drive:
+        base = PureWindowsPath(raw).as_posix().rstrip("/").lower()
+        here = path.as_posix().lower()
+        return here == base or here.startswith(base + "/")
+    literal = Path(raw)
+    candidates = {literal}
+    try:
+        candidates.add(literal.resolve())
+    except (OSError, ValueError):
+        pass
+    return any(path == base or _within(base, path) for base in candidates)
+
+
+def _protected_system(path: Path, settings: GateSettings) -> bool:
+    """Does this resolved target land in one of the machine's own directories?
+
+    The scratch carve-out wins over the roots: ``/var/tmp`` is inside ``/var`` and is where
+    ordinary work happens (:data:`PROTECTED_PATHS_SYSTEM_EXEMPT_DEFAULT`).
+    """
+    for raw in settings.protected_paths_system_exempt:
+        if _system_root_matches(path, raw):
+            return False
+    return any(_system_root_matches(path, raw) for raw in settings.protected_paths_system)
+
+
 def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     """Does this resolved target land on a protected path? (PRD §3.1 ``protected-path``.)
 
-    Two sets: absolute home paths (``~/.ssh``, shell rc files, the harness's own config dir)
+    Three sets: absolute home paths (``~/.ssh``, shell rc files, the harness's own config dir),
+    the machine's own directories (``/etc``, ``/usr``, ``C:/Windows`` — :func:`_protected_system`),
     and names matched at any depth inside the workspace (``.git``, ``.env*``, ``*.pem``). A
     directory entry protects its subtree, so ``.git/hooks/pre-commit`` is protected via
     ``.git``. The harness's runtime store is exempted (:func:`_exempt_runtime_store`).
+
+    The system set is what makes ``auto`` safe to ship as the default (owner ruling 2026-09-11:
+    "auto = thinnest interaction; asks only when genuinely dangerous"): ``auto`` allows a write
+    outside the project silently, and without this set "outside the project" would include
+    ``/etc/hosts``.
     """
     if _exempt_runtime_store(path):
         return False
+    if _protected_system(path, settings):
+        return True
     for raw in settings.protected_paths_home:
         try:
             base = Path(raw).expanduser().resolve()
@@ -505,6 +571,14 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
         config_dir = None
     if config_dir is not None and (path == config_dir or _within(config_dir, path)):
         return True
+    # `auto` keeps only the in-project names whose CONTENTS decide what runs next (owner ruling
+    # 2026-09-11): `.git` — hooks and config — and `.localharness`. Writing your own project's
+    # `.env` is ordinary work, and the key material the other patterns guard lives under the home
+    # set, which applies in every mode. `guarded` keeps the full set.
+    patterns = (
+        settings.auto_blacklist.protected_paths_workspace if ctx.mode == "auto"
+        else settings.protected_paths_workspace
+    )
     for container in (ctx.workspace, ctx.boundary):
         if container is None:
             continue
@@ -512,7 +586,7 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
         if not _within(container, path):
             continue
         for part in path.relative_to(container).parts:
-            if any(fnmatch.fnmatch(part, pattern) for pattern in settings.protected_paths_workspace):
+            if any(fnmatch.fnmatch(part, pattern) for pattern in patterns):
                 return True
     return False
 
@@ -540,17 +614,35 @@ class _Ask:
     grantable: bool
     reason: str
     detail: str = ""
+    allowed_in_auto: bool = True
+    """Whether ``auto`` lets this one through (owner ruling 2026-09-11). See
+    :func:`_ask_record` for the rule and :data:`~localharness.agent.gate_types.AUTO_ASK_CLASSES`
+    for why the blacklist is these two classes."""
+    auto_entry: Optional[str] = None
+    """WHICH blacklist entry fired, when one did — reported by ``ask-rate --mode auto`` so the
+    list can be curated from evidence (:func:`_auto_blacklisted`)."""
 
 
 def _ask_record(
     klass: str, key: Optional[str], reason: str, *, grantable: Optional[bool] = None,
-    detail: Optional[str] = None,
+    detail: Optional[str] = None, allowed_in_auto: Optional[bool] = None,
+    auto_entry: Optional[str] = None,
 ) -> _Ask:
     """One ask, with ``grantable`` defaulting to the class's tier (``UNGRANTABLE_CLASSES``).
 
     It is overridden only where a normally-grantable class has nothing rememberable to key on —
     a shell segment whose command NAME is computed at runtime
     (:data:`DYNAMIC_COMMAND_NAME_PREFIXES`).
+
+    ``allowed_in_auto`` defaults to the blacklist rule of owner ruling 2026-09-11 ("auto =
+    thinnest interaction; asks only when genuinely dangerous"): ``auto`` asks when the class is
+    in :data:`~localharness.agent.gate_types.AUTO_ASK_CLASSES`, and otherwise when the ask
+    carries NO key — which is exactly the set of calls the gate could not read well enough to
+    check against the blacklist at all (an unreadable ``command``, a command name computed at
+    runtime, a path argument that is not a string). Allowing those would be allowing a call
+    BECAUSE it could not be classified, which inverts the rule. It is passed explicitly only by
+    the shell branch, where a destructive command that points entirely inside the project is
+    allowed (:func:`_destructive_stays_inside`).
     """
     return _Ask(
         klass=klass,
@@ -558,7 +650,23 @@ def _ask_record(
         grantable=(klass not in UNGRANTABLE_CLASSES) if grantable is None else grantable,
         reason=reason,
         detail=detail if detail is not None else (key or ""),
+        allowed_in_auto=(
+            (klass not in AUTO_ASK_CLASSES and key is not None)
+            if allowed_in_auto is None else allowed_in_auto
+        ),
+        auto_entry=auto_entry,
     )
+
+
+def _granted(ctx: GateContext, klass: str, key: str) -> bool:
+    """Is there a stored "always here" for this ``(class, key)``? (PRD §3.3.)
+
+    The one place the grant store is read, so :data:`MODES_WITHOUT_GRANTS` can hold for the
+    whole verdict rather than in each branch that remembered to check.
+    """
+    if ctx.mode in MODES_WITHOUT_GRANTS:
+        return False
+    return ctx.grants(ctx.workspace, klass, key) is not None
 
 
 def _ordered_unique(asks: list[_Ask]) -> list[_Ask]:
@@ -609,16 +717,33 @@ def _decide(
     ``unattended`` turns every remaining ASK into ALLOW (today's behavior named honestly — bench
     and scheduled jobs pin it, critic finding 7). ``trusted`` allows a request only when every
     ask in it is grantable.
+
+    ``auto`` — the default since v0.14.1 (owner ruling 2026-09-11: "auto = thinnest interaction;
+    asks only when genuinely dangerous") — drops every ask the blacklist does not name and asks
+    about what is left. When nothing is left the call ALLOWS; when something is, the request
+    names only the dangerous part, so the question a person reads is "this deletes outside your
+    project", never "this deletes outside your project, and also runs a command I have not seen
+    before". A refusal is still checked over EVERY ask first, including the ones auto would have
+    allowed: "never here" is a DENY and outranks every mode.
     """
     ordered = _ordered_unique(asks)
     for ask in ordered:
         refusal = _refused(ctx, ask.klass, ask.key)
         if refusal is not None:
             return VerdictResult(Verdict.DENY, f"{REFUSAL_DENY_REASON}: {refusal.key}")
+    if ctx.mode == "unattended":
+        return VerdictResult(
+            Verdict.ALLOW, f"unattended mode: {ordered[0].klass} allowed without asking"
+        )
+    if ctx.mode == "auto":
+        blacklisted = [ask for ask in ordered if not ask.allowed_in_auto]
+        if not blacklisted:
+            return VerdictResult(
+                Verdict.ALLOW, f"auto mode: {ordered[0].klass} is not on the blacklist"
+            )
+        ordered = blacklisted
     primary = ordered[0]
     grantable = all(a.grantable for a in ordered)
-    if ctx.mode == "unattended":
-        return VerdictResult(Verdict.ALLOW, f"unattended mode: {primary.klass} allowed without asking")
     if grantable and ctx.mode == "trusted":
         return VerdictResult(Verdict.ALLOW, f"trusted mode: {primary.klass} allowed without asking")
     groups = _grouped_reasons(ordered)
@@ -637,6 +762,7 @@ def _decide(
             reason=reason,
             display=display,
             grant_keys=tuple((a.klass, a.key) for a in ordered if a.grantable and a.key),
+            auto_entry=next((a.auto_entry for a in ordered if a.auto_entry), None),
         ),
     )
 
@@ -686,7 +812,7 @@ def _granted_directory(ctx: GateContext, klass: str, directory: Path) -> bool:
     every write under that directory.
     """
     for candidate in (directory, *directory.parents):
-        if ctx.grants(ctx.workspace, klass, str(candidate)) is not None:
+        if _granted(ctx, klass, str(candidate)):
             return True
     return False
 
@@ -723,7 +849,7 @@ def _target_asks(
             granted = _granted_directory(ctx, "edit-outside", resolved.parent)
         else:
             key, where = raw, f"{raw} (unresolvable)"
-            granted = ctx.grants(ctx.workspace, "edit-outside", key) is not None
+            granted = _granted(ctx, "edit-outside", key)
         if granted and _refused(ctx, "edit-outside", key) is None:
             continue
         asks.append(_ask_record(
@@ -751,13 +877,64 @@ def _evaluate_write(
     asks = _target_asks(ctx, settings, target)
     if not asks and not ctx.has_review_surface:
         key = str(Path(ctx.workspace).expanduser().resolve())
-        if ctx.grants(ctx.workspace, "edit-unreviewed", key) is None or _refused(ctx, "edit-unreviewed", key):
+        if not _granted(ctx, "edit-unreviewed", key) or _refused(ctx, "edit-unreviewed", key):
             asks.append(_ask_record(
                 "edit-unreviewed", key, "this channel shows no diff to review the edit in",
             ))
     if not asks:
         return VerdictResult(Verdict.ALLOW, "in-workspace edit")
     return _decide(ctx, tool_name, params, asks, salient=salient)
+
+
+def _auto_blacklisted(
+    segment, anchor: Optional[Path], ctx: GateContext, settings: GateSettings
+) -> Optional[str]:
+    """Which :class:`~localharness.agent.gate_types.AutoBlacklist` entry this segment hits, if any.
+
+    The whole of ``auto``'s shell rule, in one function (owner ruling 2026-09-11: "only hard
+    blacklists for git and rm and shit like that, and even then very minimal"). Returns the
+    entry's own name — a signature, or the target-scoped verb, or ``pipe-to-shell`` — so the
+    ask-rate report can say WHICH blacklist entry fired over a corpus and the list can get
+    shorter with evidence rather than longer with fear. ``None`` means the segment runs silently,
+    destructive or not: the fuller set ``guarded`` uses is much longer, and every entry outside
+    this one stopped the owner mid-task in the v0.14.0 dogfood.
+
+    A target-scoped verb (``rm``, ``chmod``, ``find -delete``, the Windows deletes) fires only
+    when the command points somewhere it should not. Three ways that happens, all of them "I
+    cannot say this is safe": the classifier could not place a target (a variable, a glob, a
+    ``cd`` it could not follow, or no target at all); a target is outside the boundary; a target
+    is protected. ``rm -rf build`` inside your own checkout is what a build script does, and it
+    runs.
+
+    When there is no boundary (the session started in ``$HOME``) the effective boundary is the
+    directory the command actually runs in. ``auto`` does not raise the ``no-boundary`` ask at
+    all, so without this the mode would have no answer for ``rm -rf`` in a home session; "inside
+    the directory you are standing in" is the honest fallback, and everything above ``$HOME``
+    still lands outside it.
+    """
+    blacklist = settings.auto_blacklist
+    if blacklist.pipe_to_shell and segment.pipe_to_shell:
+        return AUTO_PIPE_TO_SHELL_ENTRY
+    signature = segment.signature
+    if signature in blacklist.irreversible_signatures:
+        return signature
+    verb = signature.split(" ", 1)[0]
+    if verb in blacklist.irreversible_signatures:
+        return verb
+    if verb not in blacklist.target_scoped_verbs:
+        return None
+    if segment.unresolvable_destructive:
+        return signature
+    boundary = ctx.boundary if ctx.boundary is not None else anchor
+    if boundary is None:
+        return signature
+    for raw in segment.destructive_targets:
+        resolved = _resolve(raw, anchor)
+        if resolved is None or _protected(resolved, ctx, settings):
+            return signature
+        if not _within(Path(boundary), resolved):
+            return signature
+    return None
 
 
 def _evaluate_shell(
@@ -783,14 +960,22 @@ def _evaluate_shell(
     classified = classify_shell(command, settings)
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
 
+    anchor = _shell_anchor(tool_name, params, ctx)
+
     asks: list[_Ask] = []
     destructive = {s.signature for s in classified.segments if s.destructive}
     for signature in sorted(destructive):
+        entries = [
+            _auto_blacklisted(segment, anchor, ctx, settings)
+            for segment in classified.segments
+            if segment.destructive and segment.signature == signature
+        ]
+        hit = next((entry for entry in entries if entry is not None), None)
         asks.append(_ask_record(
             "shell-destructive", signature, f"destructive shell command ({signature})",
+            allowed_in_auto=hit is None, auto_entry=hit,
         ))
 
-    anchor = _shell_anchor(tool_name, params, ctx)
     asks += _target_asks(ctx, settings, tuple(
         (target, _resolve(target, anchor))
         for segment in classified.segments
@@ -812,7 +997,7 @@ def _evaluate_shell(
             else ("shell-unfamiliar",
                   f"shell command not seen in this workspace before ({segment.signature})")
         )
-        granted = ctx.grants(ctx.workspace, klass, segment.signature) is not None
+        granted = _granted(ctx, klass, segment.signature)
         if granted and _refused(ctx, klass, segment.signature) is None:
             continue
         asks.append(_ask_record(klass, segment.signature, reason))
@@ -832,7 +1017,7 @@ def _evaluate_named(
 
     Read-only mode is handled up front in :func:`evaluate`, not here.
     """
-    if ctx.grants(ctx.workspace, klass, tool_name) is not None and not _refused(ctx, klass, tool_name):
+    if _granted(ctx, klass, tool_name) and not _refused(ctx, klass, tool_name):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
         ctx, tool_name, params, [_ask_record(klass, tool_name, reason)],
@@ -865,7 +1050,7 @@ def _evaluate_network(
     host = urlparse(url).hostname
     if not host:
         return VerdictResult(Verdict.ALLOW, "network call names no host")
-    if ctx.grants(ctx.workspace, "network-host", host) is not None and not _refused(ctx, "network-host", host):
+    if _granted(ctx, "network-host", host) and not _refused(ctx, "network-host", host):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {host}")
     return _decide(
         ctx, tool_name, params,
@@ -887,7 +1072,7 @@ def _evaluate_mcp(
     key = f"mcp/{server}/{bare}"
     if server and server in settings.mcp_trusted_servers:
         return VerdictResult(Verdict.ALLOW, f"trusted MCP server: {server}")
-    if ctx.grants(ctx.workspace, "mcp", key) is not None and not _refused(ctx, "mcp", key):
+    if _granted(ctx, "mcp", key) and not _refused(ctx, "mcp", key):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {key}")
     return _decide(
         ctx, tool_name, params,

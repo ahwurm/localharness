@@ -92,9 +92,17 @@ def refusing(*keys: str):
 
 
 def make_ctx(workspace: Path, **kw) -> GateContext:
+    """A context for the GUARDED suite below, which is what this file tests.
+
+    ``mode`` is pinned rather than left to :data:`DEFAULT_MODE`: v0.14.1 moved the default to
+    ``auto`` (owner ruling 2026-09-11), and every test here is about the ask-once-and-remember
+    behaviour that ``guarded`` still has. The ``auto`` semantics have their own suite,
+    ``tests/unit/agent/test_auto_mode.py``.
+    """
     kw.setdefault("boundary", workspace)
     kw.setdefault("grants", no_grants)
     kw.setdefault("has_review_surface", True)
+    kw.setdefault("mode", "guarded")
     return GateContext(workspace=workspace, **kw)
 
 
