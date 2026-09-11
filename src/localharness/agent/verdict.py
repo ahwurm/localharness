@@ -86,6 +86,16 @@ target, which lands it in the unresolvable branch — treated as outside (PRD §
 SHELL_COMMAND_PARAMS: dict[str, str] = {"bash_exec": "command"}
 """``tools/builtin/bash_tool.py:218`` — the one opaque string PRD §3.2 parses."""
 
+SHELL_WORKING_DIR_PARAMS: dict[str, str] = {"bash_exec": "working_dir"}
+"""The parameter naming the directory a shell call actually RUNS IN
+(``tools/builtin/bash_tool.py:229``, default ``"."``).
+
+PRD §3.2 step 8 resolves every write target, and a relative target resolves against the process's
+cwd — which for ``bash_exec`` is this parameter, not the workspace. Anchoring relative targets at
+the workspace regardless made ``bash_exec(command="echo k >> authorized_keys",
+working_dir="~/.ssh")`` read as an in-workspace write and ALLOW: the boundary check was answering
+a question about a file that was never going to be written."""
+
 NETWORK_URL_PARAMS: dict[str, str] = {"web_fetch": "url"}
 """``tools/builtin/web_tool.py:164``. ``web_search`` (a query) and ``web_page_query`` (a query
 over an already-fetched page held in this process) name no host, so a per-host ask cannot apply
@@ -307,21 +317,46 @@ def _write_target(tool_name: str, params: dict) -> Optional[str]:
     return None
 
 
-def _resolve(target: str, workspace: Path) -> Optional[Path]:
+def _resolve(target: str, anchor: Optional[Path]) -> Optional[Path]:
     """Realpath a write target, or None when it cannot be resolved (PRD §3.2 step 8).
 
-    Relative targets resolve against the workspace — the directory the tool runs in. A target
-    holding a variable, glob or substitution resolves to None and is treated as outside.
+    ``anchor`` is the directory a RELATIVE target resolves against — the directory the call will
+    actually run in (:func:`_shell_anchor` for shell, the workspace otherwise). ``None`` means
+    even that is unknown, so a relative target cannot be placed and is treated as outside.
+
+    ``expanduser`` runs BEFORE the absoluteness test, so a target the classifier already joined
+    onto a ``cd`` (``~/.ssh/authorized_keys``) is recognised as absolute and never gets the anchor
+    prepended. A target holding a variable, glob or substitution resolves to None — outside.
     """
     if any(ch in target for ch in UNRESOLVABLE_TARGET_CHARS):
         return None
     try:
         path = Path(target).expanduser()
         if not path.is_absolute():
-            path = Path(workspace) / path
+            if anchor is None:
+                return None
+            path = Path(anchor) / path
         return path.resolve()
     except OSError:
         return None
+
+
+def _shell_anchor(tool_name: str, params: dict, ctx: GateContext) -> Optional[Path]:
+    """Where this shell call's relative write targets land (:data:`SHELL_WORKING_DIR_PARAMS`).
+
+    The tool's own working-directory argument wins; it is expanded and realpathed exactly as the
+    tool does it (``tools/builtin/paths.resolve_user_path``), so ``~/.ssh`` anchors relative
+    targets in ``~/.ssh`` — protected — and ``/tmp/x`` anchors them outside the boundary. With no
+    argument (or the default ``"."``) the anchor is the workspace, which is where the tool
+    anchors a relative ``working_dir`` when it is confined (``bash_tool.py:252``).
+
+    Returns None when the working directory itself is unresolvable (a variable or a glob): its
+    relative targets then resolve to None and are treated as outside, per PRD §3.2 step 8.
+    """
+    raw = params.get(SHELL_WORKING_DIR_PARAMS.get(tool_name, ""))
+    if not isinstance(raw, str) or not raw.strip():
+        return Path(ctx.workspace)
+    return _resolve(raw, Path(ctx.workspace))
 
 
 def _within(base: Optional[Path], path: Path) -> bool:
@@ -637,8 +672,9 @@ def _evaluate_shell(
             "shell-destructive", signature, f"destructive shell command ({signature})",
         ))
 
+    anchor = _shell_anchor(tool_name, params, ctx)
     asks += _target_asks(ctx, settings, tuple(
-        (target, _resolve(target, ctx.workspace))
+        (target, _resolve(target, anchor))
         for segment in classified.segments
         for target in segment.write_targets
     ))
