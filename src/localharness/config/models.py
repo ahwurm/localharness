@@ -207,6 +207,10 @@ class PermissionConfig(BaseModel):
             "bash_exec(rm -rf *)",
             "bash_exec(*rm -rf *)",  # embedded: `cd /tmp && rm -rf x`
             "bash_exec(chmod 777 *)",
+            # embedded (issue #159): the prefix form above is anchored at the start of the
+            # command, so `find . -exec chmod 777 {} \;` and `cd build && chmod 777 out` walked
+            # straight past it. sudo and rm -rf already ship both forms; chmod did not.
+            "bash_exec(*chmod 777*)",
             # --- destructive service / process ops (issue #15: the 2026-07-11 run where the
             # subject bash_exec'd `docker stop` against its OWN vLLM server). Destructive VERBS
             # only — read-only ops (docker ps, docker logs, systemctl status, journalctl) stay

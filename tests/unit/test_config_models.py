@@ -62,8 +62,9 @@ def test_permission_config_deny_patterns_default_count():
     from localharness.config.models import PermissionConfig
     cfg = PermissionConfig()
     # issue #15 grew the list from 7 to 24: destructive service/process-op globs + the fixed
-    # sudo pattern + the embedded rm -rf form.
-    assert len(cfg.deny_patterns) == 24
+    # sudo pattern + the embedded rm -rf form. Issue #159 added the 25th, the embedded
+    # `chmod 777` form (defaults revision 2).
+    assert len(cfg.deny_patterns) == 25
 
 
 def test_permission_config_invalid_pattern_raises():
