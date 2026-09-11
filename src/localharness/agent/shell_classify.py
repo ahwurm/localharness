@@ -49,7 +49,12 @@ import re
 import shlex
 from dataclasses import replace
 
-from .gate_types import GateSettings, ShellClassification, ShellSegment
+from .gate_types import (
+    DOTTED_VARIANT_SEPARATOR,
+    GateSettings,
+    ShellClassification,
+    ShellSegment,
+)
 
 # --------------------------------------------------------------------------- constants
 
@@ -1201,6 +1206,7 @@ def _make_segment(
         force_destructive
         or signature in settings.destructive_signatures
         or signature.split(" ", 1)[0] in settings.destructive_signatures
+        or _dotted_variant(signature.split(" ", 1)[0]) in settings.destructive_signatures
     )
     read_only = (
         (force_read_only or signature in settings.read_only_signatures)
@@ -1782,6 +1788,16 @@ FIND_EXPRESSION_STARTERS: tuple[str, ...] = ("(", "!")
 ``(`` or ``!``. Read the operands this way rather than as "every non-option token", or
 ``find . -name '*.pyc' -delete`` would report the GLOB ``*.pyc`` as a target, be unresolvable,
 and ask — on the single most ordinary use of the command."""
+
+
+def _dotted_variant(head: str) -> str:
+    """The family name of a ``family.variant`` command, or the head unchanged.
+
+    ``mkfs.ext4`` → ``mkfs``. A head with no dot, or one that starts with a dot (``./script``,
+    a hidden file), is returned as-is so it can only ever match itself.
+    """
+    family, separator, _variant = head.partition(DOTTED_VARIANT_SEPARATOR)
+    return family if separator and family else head
 
 
 def _pushes_a_ref_deletion(argv: tuple[str, ...]) -> bool:

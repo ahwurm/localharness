@@ -764,6 +764,16 @@ spellings of the same operation on the other shell (:data:`WINDOWS_DESTRUCTIVE_F
 
 Deliberately NOT config-settable: adding a verb here LOOSENS ``auto``."""
 
+DOTTED_VARIANT_SEPARATOR = "."
+"""How a command family spells its variants: ``mkfs`` is a dispatcher and the thing anybody
+actually runs is ``mkfs.ext4``, ``mkfs.xfs``, ``mkfs.vfat`` (mkfs(8): "mkfs.<fstype>").
+
+The destructive sets name the FAMILY, and without this the entry matched only the bare
+dispatcher — which nobody types — so every real invocation of the one command in the set that
+makes a filesystem was classified as an unfamiliar, grantable command. Restricted to a dotted
+suffix on an entry that is already a bare name, so it can never widen a flagged entry like
+``rm -rf`` or a subcommand entry like ``git push --force``."""
+
 AUTO_IRREVERSIBLE_SIGNATURES: frozenset[str] = frozenset({
     "sudo", "su", "doas",
     "dd", "mkfs", "shred", "format", "diskpart",
