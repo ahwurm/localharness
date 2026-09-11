@@ -151,6 +151,13 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   second signature nearly every workspace is asked about, so this is the widest hole by design and
   by frequency. `python_exec` is the tool to prefer; `trusted` mode is the honest alternative to
   granting interpreters one at a time.
+- **A granted `python3 <script>` covers a script the agent just wrote.** `python3 build.py` is one
+  signature, and the file it names sits inside the project, where writing it does not ask when your
+  channel shows you the diff. So an agent can write `build.py` and then run it under an answer you
+  gave about an earlier `build.py` — the contents of that file were never part of what you approved.
+  The same holds for `bash run.sh` and every other interpreter-plus-file signature. Reading the diff
+  is what stands between the grant and the code it runs, which is why the review surface matters and
+  why a channel that cannot show you one asks about in-project edits instead.
 - **The shell boundary is best-effort by construction.** A `bash_exec` call is one opaque string.
   The harness strips heredoc bodies, lifts `$(…)`, backticks and process substitutions, splits at
   `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`
@@ -169,6 +176,17 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
   program that has already started running.
 
+**Being asked too often is itself a security failure.** A gate that interrupts you about ordinary
+work trains you to approve without reading, and an approval nobody read protects nothing — the
+prompt is only worth what your attention to it is worth. That is why the silent paths above are
+deliberately wide, and why the harness measures how often it asks rather than assuming the answer.
+`localharness ask-rate --traces DIR` reads your own session traces and reports prompts per session;
+the target is a median of zero and at least nine sessions in ten with no prompt at all once a
+workspace is warm, with three prompts the ceiling for the first session in a fresh one. It also
+counts "never here" answers, because a rising count of those means the gate is asking about the
+wrong things and is spending attention it will need later. If your own numbers sit far above these,
+treat that as a defect in the gate and report it, not as something to click through.
+
 ## What `localharness start` writes without asking
 
 Two things happen on a start that are worth knowing about, because both write into your config
@@ -177,17 +195,21 @@ directory and neither stops to ask.
 **Your `config.yaml` gains any newly-shipped default deny patterns.** New releases add to the
 default deny list, but `localharness init` baked the list into your `config.yaml` when you first set
 up, so a later addition would never reach you. On the first start after an upgrade the harness folds
-the missing ones in. It is additive only — it never removes or reorders an entry you wrote, touches
-no other key, and is gated on the `defaults_revision` stamp your config carries, so a default you
-deliberately deleted is not re-added. A
+the missing ones in. It never reorders an entry you wrote and is gated on the `defaults_revision`
+stamp your config carries, so a default you deliberately deleted is not re-added. One key it does
+delete: `permissions.allow_patterns`, which v0.14 removed and which every earlier `localharness
+init` wrote. A config still carrying it cannot be loaded at all, so the fold-in strips it before the
+loader ever reads the file — and `localharness config migrate` does the same, on purpose, because
+the documented repair has to be able to repair the thing that breaks. If yours held entries, they
+are listed as they are removed; they were never honored by any release. A
 timestamped `config.yaml.bak-<stamp>` is written before the change, and the change is announced:
-`i  Security defaults updated (revision 0 → 1): added 24 deny pattern(s) — additive only; backup at
+`i  Security defaults updated (revision 0 → 1): added 24 deny pattern(s) — backup at
 …`. State it plainly: **this happens without asking you.** The reason it is not a prompt is that the
-change only ever tightens the deny list and a start that blocks on a question is a start that fails
-in a script. The reason it is not invisible is `localharness doctor`, which prints the revision your
+change only ever tightens the deny list and drops a key no release honors, and a start that blocks
+on a question is a start that fails in a script. The reason it is not invisible is `localharness doctor`, which prints the revision your
 config carries, the revision shipped, and the backup path — so you can see the change after the
 announcement has scrolled away. `localharness config migrate --dry-run` prints exactly what a start
-would add, and writes nothing. Whether this should stay automatic is an open question for the
+would add and remove, and writes nothing. Whether this should stay automatic is an open question for the
 project owner; the behavior above is what ships today, not a settled ruling.
 
 **`start` also seeds `<config-dir>/tools/design-screenshot.js`.** The frontend-designer builtin
