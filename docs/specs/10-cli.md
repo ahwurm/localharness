@@ -919,6 +919,23 @@ def build_session() -> PromptSession:
     )
 ```
 
+### Slash commands
+
+A line starting with `/` is a REPL command, not a task. The list is defined once, in
+`cli/slash_commands.py`, and `/help` renders it from there.
+
+**`/mode <name>` switches the session's permission mode.** `/mode guarded`, `/mode trusted` or
+`/mode read-only` changes it for this session only — nothing is persisted, and the next start reads
+`permissions.mode` from config again. `guarded` is the default:
+the gate asks before a call crosses the workspace boundary or looks destructive, and remembers an
+"always" in `~/.localharness/grants.yaml`. `trusted` allows the remembered-once classes without
+asking while destructive and protected-path calls still prompt. `read-only` refuses writes,
+non-read-only shell and code execution, returning a message the model can re-plan against. The
+fourth mode, `unattended`, is **config-only and deliberately not settable here**: it turns every ask
+into an allow, so it is written in the config file of a bench run or a scheduled job, where a human
+has decided that in advance. Discord takes the same three names as a plain `mode <name>` message.
+See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
+
 ### Streaming Output
 
 Agent output is streamed to the terminal as it arrives. The terminal channel adapter (see spec 11) publishes token events to the bus; the REPL subscribes and writes tokens to stdout using `rich.console.Console.print`.

@@ -1257,6 +1257,57 @@ store derives all three paths from the agent's own directory (`memory.db`, `hist
 `MEMORY.md` under `<config-dir>/agents/<name>/`, or under the workspace when one applies). Setting
 them moves nothing. They are declarative leftovers, kept only so an older config still loads.
 
+**The permission gate keys.** `permissions.mode` picks one of four modes (PRD §3.4). `guarded`, the
+default, asks a human before a call crosses the workspace boundary or looks destructive and
+remembers the answer. `trusted` allows the remembered-once classes outright while destructive and
+protected-path calls still ask. `read-only` refuses writes, non-read-only shell and code execution
+with an observation the model can re-plan against. `unattended` turns every ask into an allow,
+leaving only `deny_patterns` — how the harness behaved before v0.14, named honestly; it is never a
+default and cannot be set from a channel command, so bench runs and scheduled jobs write it in
+config. A **project layer may only raise strictness**: a workspace agent file that asks for
+`trusted` while your own config says `guarded` is ignored with a warning, the same narrow-only union
+`deny_patterns` and `workspace_root` use. The v0.13 spellings `auto` and `manual` still load — both
+resolve to `guarded` with a deprecation warning — and `permissions.allow_patterns` is **removed**: a
+config carrying it fails validation, because config travels with a repository and grants must not.
+Permission grants live in the global store below.
+
+`permissions.ask` holds the gate's tunables. Three are session knobs: `network_hosts` (default
+`false` — network reads never ask, since seven in ten real tool calls are web fetches; `true` asks
+once per host), `timeout_s` (how long a channel waits for an answer; `null` derives it from the
+tool's own timeout, and it binds on Discord — the terminal and Zed hold their dialog open), and
+`mcp_trusted_servers` (server names whose tools skip the once-per-tool ask). The rest are optional
+overrides for one of the gate's rule sets, each defaulting to `null`, meaning "use the shipped
+default in `agent/gate_types.py`", which is where the defaults and their sources are documented:
+`read_only_signatures`, `destructive_signatures`, `pipe_to_shell_sources`, `pipe_to_shell_sinks`,
+`interpreter_commands`, `inline_by_nature`, `wrapper_commands`, `dropped_commands`,
+`subcommand_tools`, `payload_commands`, `write_shaped_commands`, `protected_paths_home`,
+`protected_paths_workspace`. The two dict-shaped tables (`destructive_flag_verbs`,
+`inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
+signature, so a wrong entry would silently change what an existing grant means.
+
+**The grant store (`~/.localharness/grants.yaml`).** Remembered answers are not config. They live in
+one file in the global config directory, keyed by the workspace's resolved path, written only when a
+human answers a prompt, and **never read from a project tree** — a cloned repository must not be
+able to pre-approve its own commands. Nested folders inherit the nearest ancestor's entry.
+
+```yaml
+/home/you/projects/api:
+  grants:
+    - key: pytest                       # what was granted: a shell signature, a directory, or a tool name
+      class: shell-unfamiliar           # which ask class it answered
+      granted_at: "2026-09-11T14:02:11+00:00"
+      channel: terminal                 # provenance is mandatory — a record missing any of
+      session_id: 0c4f…                 # these four is skipped with a warning
+  denies:
+    - pattern: bash_exec(*curl * | sh*) # a "never here" answer joins the DENY tier, which wins forever
+      added_at: "2026-09-11T14:05:40+00:00"
+      channel: terminal
+      session_id: 0c4f…
+```
+
+There is no CLI verb for grants: the prompt is the interface and this file is the escape hatch —
+delete an entry to be asked again.
+
 **The kill switch.** `permissions.budget.kill_file` names one file; while that file exists, every
 agent session stops at its next iteration boundary. Two things about it are deliberate. It resolves
 under the **global** config directory, never a workspace's — one file has to stop every session on
