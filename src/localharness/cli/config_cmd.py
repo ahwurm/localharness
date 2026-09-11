@@ -67,9 +67,13 @@ def migrate(
     revision-gated) never re-adds a default you deliberately deleted. A timestamped backup is
     written before the config is updated.
 
-    One key is deleted rather than added: `org.permissions.allow_patterns`, removed in v0.14.
-    Every pre-v0.14 `init` wrote it, and a config still carrying it does not load at all, so
-    this is the repair — run it after upgrading if startup complains about that key.
+    One key is deleted rather than added: `permissions.allow_patterns`, removed in v0.14. Every
+    pre-v0.14 `init` wrote it into config.yaml and every pre-v0.14 `agent create` wrote it into
+    `agents/<name>.yaml`, and a file still carrying it does not load (or warns on every load), so
+    this is the repair — run it after upgrading if startup complains about that key. Agent and
+    division files are walked and repaired too, each with its own timestamped backup. When your
+    config is already at the current defaults revision the repair is the removal ALONE: no deny
+    pattern you deleted is re-added.
     """
     config_file = resolve_config_dir(config_dir) / "config.yaml"
 
@@ -120,6 +124,23 @@ def migrate(
                 soft_wrap=True,
             )
 
+    # Agent/division files carry the same dead key (pre-v0.14 `write_agent` serialized it), and a
+    # file rewritten without a word on screen is a file the user cannot audit — so each one is
+    # named, with its entries, exactly like the config.yaml removal above (review finding R10).
+    for sidecar in plan.sidecars:
+        console.print(
+            "  [red]-[/red] " + escape(f"permissions.{_migrate.DEAD_KEY}")
+            + " in " + escape(str(sidecar.path))
+            + (" [dim](empty — nothing was carried)[/dim]" if not sidecar.removed else ""),
+            soft_wrap=True,
+        )
+        for entry in sidecar.removed:
+            console.print(
+                "      [red]·[/red] " + escape(str(entry))
+                + " [dim]— never honored; removed[/dim]",
+                soft_wrap=True,
+            )
+
     console.print(f"\n[dim]{_NOTE}[/dim]")
 
     if dry_run:
@@ -127,7 +148,7 @@ def migrate(
         raise typer.Exit(0)
 
     try:
-        backup = _migrate.apply(config_file, original, plan)
+        backups = _migrate.apply(config_file, original, plan)
     except Exception as exc:
         err_console.print(
             f"[bold red]✗[/bold red] Refusing to write — {exc}"
@@ -139,10 +160,19 @@ def migrate(
         if plan.removed_allow_patterns is not None
         else ""
     )
-    console.print(
-        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s){removed_note}; stamped defaults "
-        f"revision {plan.to_revision}.\n  Backup: {backup}"
+    if plan.sidecars:
+        removed_note += (
+            f"; cleaned {len(plan.sidecars)} agent/division file(s)"
+        )
+    stamp_note = (
+        "config.yaml already current" if plan.config_unchanged
+        else f"stamped defaults revision {plan.to_revision}"
     )
+    console.print(
+        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s){removed_note}; {stamp_note}."
+    )
+    for backup in backups:
+        console.print("  Backup: " + escape(str(backup)), soft_wrap=True)
 
 
 # ------------------------------------------------------------------ #

@@ -405,3 +405,141 @@ def test_start_auto_migrate_repairs_the_dead_key_before_the_loader_reads_it(tmp_
     _auto_migrate_deny_defaults(cfg)
     assert "allow_patterns" not in _perms(cfg)
     assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
+
+
+# --------------------------------------------------------------------------- #
+# R10: the dead-key repair must not smuggle the deny defaults back in, and it
+# has to reach the agent/division files `write_agent` stamped the same way.
+# --------------------------------------------------------------------------- #
+
+def test_repairing_the_dead_key_at_the_current_stamp_re_adds_nothing(tmp_path):
+    """R10: the removal-respect promise survives the repair path.
+
+    A config stamped current still gets a plan when `allow_patterns` is present — but that plan
+    is the removal and NOTHING else. Re-appending a shipped default the user deliberately
+    deleted, just because the dead key happened to be in the same file, contradicts the whole
+    reason auto-apply is safe to run unattended."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.migrate import plan
+
+    deny = list(PermissionConfig().deny_patterns)
+    deleted = deny.pop()  # a shipped default the user removed on purpose
+    cfg = _write_config(tmp_path, deny, allow_patterns=[])
+    data = yaml.safe_load(cfg.read_text())
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    p = plan(yaml.safe_load(cfg.read_text()))
+    assert p is not None
+    assert p.added == [], "a stamped-current config must not have defaults re-added"
+    assert p.removed_allow_patterns == []
+
+    assert _run(tmp_path).exit_code == 0
+    assert "allow_patterns" not in _perms(cfg)
+    assert deleted not in _deny(cfg), "the deleted default came back"
+
+
+def _write_agent_file(config_dir: Path, name: str, *, allow_patterns, subdir: str = "agents") -> Path:
+    """An agent/division file exactly as pre-v0.14 `write_agent` wrote it: the model's own
+    serialization, `allow_patterns: []` and all."""
+    perms: dict = {"mode": "guarded", "deny_patterns": []}
+    if allow_patterns is not _ABSENT:
+        perms["allow_patterns"] = allow_patterns
+    body: dict = {"name": name, "role": f"{name} agent.", "permissions": perms}
+    if subdir == "divisions":
+        body = {"name": name, "description": f"{name} division.", "permissions": body["permissions"]}
+    path = config_dir / subdir / f"{name}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_migrate_strips_the_dead_key_from_an_agent_file_that_only_warns(tmp_path):
+    """R10: `write_agent` stamped every agent file with `allow_patterns: []` too, and migrate
+    never looked there — so the file warned on every single load with no repair path."""
+    from localharness.config.loader import ConfigLoader
+
+    _write_config(tmp_path, PermissionConfig().deny_patterns)
+    agent = _write_agent_file(tmp_path, "scout", allow_patterns=[])
+
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "scout.yaml" in result.output
+    assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
+    assert len(list((tmp_path / "agents").glob("scout.yaml.bak-*"))) == 1
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        assert ConfigLoader(config_dir=tmp_path).load_agent("scout").name == "scout"
+
+
+def test_migrate_strips_a_populated_dead_key_from_an_agent_file_and_names_it(tmp_path):
+    """A populated `allow_patterns` in an agent file does not warn — it fails validation, so the
+    agent cannot be loaded at all. Migrate removes it and says the entries were never honored."""
+    from localharness.config.loader import ConfigLoader
+
+    _write_config(tmp_path, PermissionConfig().deny_patterns)
+    agent = _write_agent_file(tmp_path, "scout", allow_patterns=["bash_exec(*)"])
+
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "scout.yaml" in result.output and "bash_exec(*)" in result.output
+    assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
+    assert ConfigLoader(config_dir=tmp_path).load_agent("scout").name == "scout"
+
+
+def test_migrate_strips_the_dead_key_from_a_division_file(tmp_path):
+    """Divisions sit on the same cascade (`loader._global_layer_permission`) and were written by
+    the same serializer, so they carry the same dead key."""
+    _write_config(tmp_path, PermissionConfig().deny_patterns)
+    division = _write_agent_file(tmp_path, "research", allow_patterns=[], subdir="divisions")
+
+    assert _run(tmp_path).exit_code == 0
+    assert "allow_patterns" not in yaml.safe_load(division.read_text())["permissions"]
+
+
+def test_a_clean_tree_plans_nothing(tmp_path):
+    """No config work, no agent file carrying the dead key → None, zero writes, zero backups."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.migrate import load_plan
+
+    cfg = _write_config(tmp_path, PermissionConfig().deny_patterns)
+    data = yaml.safe_load(cfg.read_text())
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    _write_agent_file(tmp_path, "scout", allow_patterns=_ABSENT)
+
+    _original, p = load_plan(cfg)
+    assert p is None
+
+    before = cfg.read_bytes()
+    result = _run(tmp_path)
+    assert result.exit_code == 0
+    assert "up to date" in result.output.lower()
+    assert cfg.read_bytes() == before
+    assert list(tmp_path.glob("**/*.bak-*")) == []
+
+
+def test_start_auto_migrate_repairs_an_agent_file_and_says_so(tmp_path):
+    """The startup receipt names the sidecar files too — a silent file rewrite is not a receipt."""
+    import io
+    from contextlib import redirect_stdout
+
+    from localharness.cli.start_cmd import _auto_migrate_deny_defaults
+
+    cfg = _write_config(tmp_path, PermissionConfig().deny_patterns)
+    data = yaml.safe_load(cfg.read_text())
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    agent = _write_agent_file(tmp_path, "scout", allow_patterns=[])
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        _auto_migrate_deny_defaults(cfg)
+    out = buffer.getvalue()
+
+    assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
+    assert "scout.yaml" in out
+    assert list(tmp_path.glob("config.yaml.bak-*")) == [], "config.yaml needed nothing — leave it"
