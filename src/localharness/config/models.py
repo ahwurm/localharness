@@ -1,8 +1,8 @@
 """All Pydantic config models for LocalHarness."""
 from __future__ import annotations
 
+import logging
 import re
-import warnings
 from dataclasses import fields as dataclass_fields
 from typing import Any, Literal, Optional
 
@@ -16,6 +16,18 @@ from pydantic import (
 
 from localharness.agent.gate_types import DEFAULT_MODE, GateSettings, Mode
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, MAX_CONFIGURABLE_MAX_TOKENS
+
+log = logging.getLogger(__name__)
+"""Where a config DEPRECATION notice goes.
+
+Deliberately not `warnings.warn(DeprecationWarning)`. A pydantic validator runs inside
+`model_validate`, so under `-W error::DeprecationWarning` (or `PYTHONWARNINGS=error`, which a
+CI job or a wrapper script sets for reasons that have nothing to do with us) the notice is
+RAISED — the validator fails, and `localharness config migrate`, the documented repair for
+exactly these configs, reports "migrated config fails validation" and aborts. The user is then
+left with a config that cannot load and a repair command that refuses to run. A log record says
+the same thing and can never become the reason the repair path dies.
+"""
 
 # The pre-v0.14 spellings of `permissions.mode`, and what each becomes. `auto` was
 # "allow everything except deny_patterns" and `manual` was an unimplemented stub, so both
@@ -464,7 +476,7 @@ class PermissionConfig(BaseModel):
         `allow_patterns: []` into config.yaml, so rejecting the bare key stopped every existing
         install from starting — and `config migrate`, the documented repair, failed on the same
         validator. An empty value (`[]` or null) carried nothing, so it is dropped with a
-        DeprecationWarning and the config loads. A NON-EMPTY value is a real loosening intent
+        logged deprecation notice and the config loads. A NON-EMPTY value is a real loosening intent
         that this release does not honor, and silently dropping it would be the dangerous
         reading: it still fails, with the message above.
         """
@@ -479,13 +491,11 @@ class PermissionConfig(BaseModel):
                 "pre-approve itself (PRD §3.3). Delete the key; to stop being asked, answer "
                 "'always' once, or set permissions.mode explicitly."
             )
-        warnings.warn(
+        log.warning(
             "permissions.allow_patterns was removed in v0.14 and is ignored. Yours is empty, so "
             "nothing changed — `localharness config migrate` deletes the key for you. Permission "
             "grants live in the global store (~/.localharness/grants.yaml) and are written only "
-            "when a human answers a prompt (PRD §3.3).",
-            DeprecationWarning,
-            stacklevel=2,
+            "when a human answers a prompt (PRD §3.3)."
         )
         return {k: v for k, v in data.items() if k != "allow_patterns"}
 
@@ -500,13 +510,12 @@ class PermissionConfig(BaseModel):
         alias = LEGACY_MODE_ALIASES.get(value) if isinstance(value, str) else None
         if alias is None:
             return value
-        warnings.warn(
-            f"permissions.mode: {value!r} is deprecated and now loads as {alias!r} — the harness "
-            "asks a human before boundary-crossing and destructive calls and remembers the "
-            "answer. Set permissions.mode explicitly ('unattended' restores the old "
-            "never-ask behaviour for bench and scheduled jobs).",
-            DeprecationWarning,
-            stacklevel=2,
+        log.warning(
+            "permissions.mode: %r is deprecated and now loads as %r — the harness asks a human "
+            "before boundary-crossing and destructive calls and remembers the answer. Set "
+            "permissions.mode explicitly ('unattended' restores the old never-ask behaviour for "
+            "bench and scheduled jobs).",
+            value, alias,
         )
         return alias
 
