@@ -10,6 +10,7 @@ record on disk is the record the next session would read.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -50,12 +51,32 @@ def _answers(kind: str, seen: list | None = None):
     return _asker
 
 
+def _backdate(path: Path) -> Path:
+    """Make a file look like it was written by an EARLIER run.
+
+    `prior_session_count` only counts session files older than `trust.PROCESS_STARTED_AT`,
+    because the bug it closes was a brand-new project recognizing the file the RUNNING session had
+    just written. A test that wants the recognition path has to write evidence that genuinely
+    predates this process, and backdating the mtime is how.
+    """
+    earlier = trust.PROCESS_STARTED_AT - EVIDENCE_AGE_SECONDS
+    os.utime(path, (earlier, earlier))
+    return path
+
+
+EVIDENCE_AGE_SECONDS = 60
+"""How far back `_backdate` puts a file. Any positive number works; a minute is far enough to be
+unambiguous and near enough to read as "the session before this one"."""
+
+
 def _worked_here(root: Path, sessions: int = 3) -> None:
-    """Give a workspace root the state store a few real sessions would have left behind."""
+    """Give a workspace root the state store a few EARLIER sessions would have left behind."""
     store = root / WORKSPACE_DIR_NAME / "agents" / "orchestrator" / "sessions"
     store.mkdir(parents=True)
     for index in range(sessions):
-        (store / f"{index}.jsonl").write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+        path = store / f"{index}.jsonl"
+        path.write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+        _backdate(path)
 
 
 # ------------------------------------------------------------------- the question
@@ -174,7 +195,10 @@ async def test_the_owners_own_global_store_shape_is_recognized(tmp_path, monkeyp
     global_store.mkdir(parents=True)
     for name in ("00548a4c-e82e-43ce-9a91-dde48f5aa20b.jsonl",
                  "00e8d7a2-a5bb-4246-b23c-9367958e8234.jsonl"):
-        (global_store / name).write_text('{"event_type": "Action"}\n', encoding="utf-8")
+        path = global_store / name
+        path.write_text('{"event_type": "Action"}\n', encoding="utf-8")
+        _backdate(path)
+
     monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
 
@@ -384,3 +408,90 @@ async def test_a_declined_config_layer_also_settles_the_session_mode(tmp_path, m
     gate = _gate(tmp_path, root, asker=_answers("allow_once"))
     assert await establish_session_trust(gate) == UNTRUSTED_MODE
     assert len(asked) == 1
+
+
+# --------------------------------------------- the order the real start path uses
+
+def _session_file(root: Path, name: str = "s1") -> Path:
+    """The file a session writes as it runs — the thing that must not vouch for its own run."""
+    sessions = root / WORKSPACE_DIR_NAME / "agents" / "orchestrator" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    path = sessions / f"{name}.jsonl"
+    path.write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+    return path
+
+
+def test_a_brand_new_project_asks_and_the_second_start_does_not(tmp_path, monkeypatch, fake_home):
+    """The blocker a live end-to-end run found: a brand-new project printed "recognized this
+    workspace (1 earlier session)", trusted itself and wrote the record, with nobody asked.
+
+    The evidence it recognized was the file the RUNNING session had just written. Two things fix
+    it and both are asserted here — the question runs BEFORE any session store is opened (which
+    is why `settle_startup_trust` is called from the same place `_start_async` calls it, ahead of
+    the state dir), and a session file is only evidence if it predates this process.
+    """
+    from localharness.cli import workspace as workspace_mod
+    from localharness.cli.workspace import settle_startup_trust
+
+    fake_home(tmp_path / "home")
+    project = tmp_path / "fresh"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    asked: list[str] = []
+    monkeypatch.setattr(workspace_mod, "_ask_create", lambda prompt=None: asked.append(prompt) or True)
+    monkeypatch.setattr(workspace_mod, "_stdin_is_a_terminal", lambda: True)
+
+    assert settle_startup_trust() is not None, "a yes creates the workspace"
+    assert len(asked) == 1, "a brand-new project must be asked, not recognized"
+    assert trust.is_trusted_tree(project) is True
+
+    # the session then runs and writes its own file; a second start must not re-ask, and must not
+    # have needed that file to decide. It creates nothing either — the workspace is already
+    # there, and `resolve_workspace_layer` is what loads it.
+    _session_file(project)
+    assert settle_startup_trust() is None
+    assert len(asked) == 1
+
+
+def test_this_runs_own_session_file_is_not_evidence(tmp_path, fake_home):
+    """The belt to that pair of braces, for the channels — ACP, Discord — whose question cannot
+    be drawn until after the session store is already open."""
+    fake_home(tmp_path / "home")
+    project = tmp_path / "fresh"
+    project.mkdir()
+    _session_file(project)  # written NOW, i.e. after trust.PROCESS_STARTED_AT
+
+    assert trust.prior_session_count(project / WORKSPACE_DIR_NAME) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_session_file_from_a_previous_run_is_evidence(tmp_path, fake_home):
+    """The other direction, so the fix cannot be read as "recognition stopped working"."""
+    fake_home(tmp_path / "home")
+    project = tmp_path / "familiar"
+    project.mkdir()
+    _backdate(_session_file(project))
+
+    assert trust.prior_session_count(project / WORKSPACE_DIR_NAME) == 1
+
+    asked: list[PermissionRequest] = []
+    gate = _gate(tmp_path, project, asker=_answers("reject_once", asked))
+    assert await establish_session_trust(gate) == "auto"
+    assert asked == []
+
+
+def test_a_declined_outside_workspace_is_not_loaded_by_the_back_door(tmp_path, monkeypatch, fake_home):
+    """`settle_startup_trust` returns only what it CREATED.
+
+    `_start_async` falls back to its return value when `resolve_workspace_layer` returned None —
+    and None is exactly what the layer resolver returns for a workspace the trust gate declined.
+    Returning the existing workspace from here would have handed that caller the very config
+    layer the human had just refused.
+    """
+    from localharness.cli.workspace import resolve_workspace_layer, settle_startup_trust
+
+    root, workspace = _outside_workspace(tmp_path, monkeypatch, fake_home)
+    assert resolve_workspace_layer(asker=lambda _q: False) is None, "declined, so no layer"
+    assert workspace.is_dir(), "the workspace is still there; it is simply not loaded"
+    assert settle_startup_trust() is None, "a declined workspace must not come back this way"

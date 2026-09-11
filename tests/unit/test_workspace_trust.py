@@ -8,6 +8,9 @@ Three properties this file exists to hold down:
    harden into a permanent "no"; only an answered prompt records anything.
 3. The key is the realpath, so a symlinked checkout and its real path are ONE entry, while a
    git worktree (a real sibling directory) is a separate workspace by design.
+4. `prior_session_count` counts only sessions that were on disk BEFORE this process started. A
+   run that counts its own footprints recognizes every brand-new project and asks nobody — which
+   is what it did, live, until v0.14.1.
 
 The autouse `_isolate_localharness_home` fixture (tests/conftest.py) already points
 LOCALHARNESS_HOME at a tmp dir, so the store is hermetic without extra setup.
@@ -153,3 +156,120 @@ def test_a_decision_can_be_changed_by_a_later_record(tmp_path):
     assert is_trusted(ws) is False
     stored = yaml.safe_load(trust_store_path().read_text(encoding="utf-8"))
     assert list(stored) == [str(ws.resolve())]
+
+
+# ---------------------------------------------------------------------------
+# prior_session_count — "have I been here before?", and the run that answered
+# that question with its own footprints
+# ---------------------------------------------------------------------------
+
+
+def _back_dated_session(state_dir: Path, name: str = "0.jsonl", agent: str = "orchestrator") -> Path:
+    """One session file that was on disk BEFORE this process started.
+
+    `trust.PROCESS_STARTED_AT` is captured when the module is first imported — which happens at
+    collection, before any test body runs — so a file created in a test is newer than the cutoff
+    and is deliberately not counted. Real earlier sessions are older than the process asking the
+    question, and `os.utime` is what makes these stand-ins honest instead of merely convenient.
+    """
+    from localharness.config import trust
+
+    sessions = state_dir / "agents" / agent / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    path = sessions / name
+    path.write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+    old = trust.PROCESS_STARTED_AT - 60
+    os.utime(path, (old, old))
+    return path
+
+
+def test_no_state_store_is_no_prior_sessions(tmp_path):
+    from localharness.config.trust import prior_session_count
+
+    assert prior_session_count(tmp_path / "proj" / ".localharness") == 0
+
+
+def test_a_bare_init_is_not_evidence_of_work(tmp_path):
+    """`localharness init` leaves a directory and an empty `memory.db` behind. Neither is somebody
+    having worked here, which is why files — session files — are what gets counted."""
+    from localharness.config.trust import prior_session_count
+
+    ws = _workspace(tmp_path / "proj")
+    (ws / "memory.db").write_bytes(b"")
+    (ws / "agents").mkdir()
+
+    assert prior_session_count(ws) == 0
+
+
+def test_earlier_session_files_are_counted(tmp_path):
+    from localharness.config.trust import prior_session_count
+
+    ws = _workspace(tmp_path / "proj")
+    _back_dated_session(ws, "a.jsonl")
+    _back_dated_session(ws, "b.jsonl")
+    _back_dated_session(ws, "c.jsonl", agent="reporter")
+
+    assert prior_session_count(ws) == 3
+
+
+def test_a_session_file_this_run_just_wrote_is_not_evidence(tmp_path):
+    """The bug, exactly: a brand-new project recognized the file the running session had just
+    written, trusted itself, and asked nobody.
+
+    A file whose mtime is at or after `PROCESS_STARTED_AT` belongs to the process doing the
+    asking, and a process cannot be its own prior session. Written NOW on purpose — no `utime`,
+    because "now" is the whole scenario.
+    """
+    from localharness.config.trust import prior_session_count
+
+    ws = _workspace(tmp_path / "proj")
+    sessions = ws / "agents" / "orchestrator" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "this-one.jsonl").write_text('{"event_type": "TurnStarted"}\n', encoding="utf-8")
+
+    assert prior_session_count(ws) == 0
+
+
+def test_only_the_older_half_of_a_mixed_store_counts(tmp_path):
+    """The realistic shape: a workspace with history, being started again. The earlier sessions
+    are evidence; this run's own file is not, and the count must not quietly include it."""
+    from localharness.config.trust import prior_session_count
+
+    ws = _workspace(tmp_path / "proj")
+    _back_dated_session(ws, "yesterday.jsonl")
+    (ws / "agents" / "orchestrator" / "sessions" / "right-now.jsonl").write_text("{}\n",
+                                                                                encoding="utf-8")
+
+    assert prior_session_count(ws) == 1
+
+
+def test_the_rolling_history_file_is_not_counted(tmp_path):
+    """`agents/*/history.jsonl` used to count too, and could not be made safe: one file, appended
+    to by every session including this one, with no way to ask what was there before. It is gone,
+    and a store that only has one is simply asked its question."""
+    from localharness.config import trust
+    from localharness.config.trust import prior_session_count
+
+    ws = _workspace(tmp_path / "proj")
+    agent = ws / "agents" / "orchestrator"
+    agent.mkdir(parents=True)
+    history = agent / "history.jsonl"
+    history.write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+    old = trust.PROCESS_STARTED_AT - 60
+    os.utime(history, (old, old))
+
+    assert prior_session_count(ws) == 0
+
+
+
+def test_an_explicit_cutoff_overrides_the_process_start(tmp_path):
+    """`before=` exists so a caller that knows its own start time can say so; the default is the
+    import-time constant, which is the earliest moment this module can name."""
+    from localharness.config import trust
+
+    ws = _workspace(tmp_path / "proj")
+    path = _back_dated_session(ws)
+    mtime = path.stat().st_mtime
+
+    assert trust.prior_session_count(ws, before=mtime + 1) == 1
+    assert trust.prior_session_count(ws, before=mtime) == 0

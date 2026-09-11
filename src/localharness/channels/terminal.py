@@ -421,6 +421,22 @@ live box — so a session with six prompts in it had six dead boxes to scroll pa
 applications erase themselves (:data:`ERASE_APPLICATIONS_WHEN_DONE`) and this line is what is
 left: the question above it, the answer below it, nothing else."""
 
+PERMISSION_ANSWER_LINES_BY_CLASS: dict[str, dict[str, str]] = {
+    "workspace-trust": {
+        "allow_once": "✓ trusted — remembered for this workspace",
+        "allow_always": "✓ trusted — remembered for this workspace",
+        "reject_once": "✗ not trusted — guarded for this session",
+        "reject_always": "✗ not trusted — guarded for this session",
+    },
+}
+"""Per-ask-class overrides for :data:`PERMISSION_ANSWER_LINES`.
+
+The workspace-trust question is the one ask whose answer is not about a tool call, and "✓ allowed
+once" was a lie in both directions: a yes is remembered forever, and a no does not deny anything
+— it puts the session in ``guarded``. The four kinds collapse to two here because the question
+only ever offers two (``cli/session_trust`` builds it ungrantable), and both spellings of each
+are listed so a channel that ever offers all four cannot fall through to the wrong sentence."""
+
 ERASE_APPLICATIONS_WHEN_DONE = True
 """Whether a prompt_toolkit application clears its own drawing when it exits.
 
@@ -1367,8 +1383,11 @@ class TerminalChannel(ChannelAdapter):
                 # The keystroke erased the legend; this is what replaces it. Printed INSIDE the
                 # patch, before the box is restarted, so it lands in the scrollback directly
                 # under the question it answers rather than above a freshly redrawn box.
+                lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
+                    getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
+                )
                 async with self._output_lock:
-                    console.print(f"[system.info]{PERMISSION_ANSWER_LINES[kind]}[/system.info]")
+                    console.print(f"[system.info]{lines[kind]}[/system.info]")
             return Decision(kind=kind)
         finally:
             if restart is not None:

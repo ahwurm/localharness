@@ -164,11 +164,44 @@ async def test_an_interrupted_prompt_still_says_what_it_recorded():
     assert PERMISSION_ANSWER_LINES["reject_once"] in ch._console.file.getvalue()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key,line", [
+    ("y", "\u2713 trusted \u2014 remembered for this workspace"),
+    ("n", "\u2717 not trusted \u2014 guarded for this session"),
+])
+async def test_the_trust_question_gets_its_own_confirmation(key, line):
+    """"\u2713 allowed once" was a lie in both directions on the one ask that is not about a tool
+    call: a yes to trusting a workspace is remembered forever, and a no denies nothing — it puts
+    the session in guarded."""
+    ch = _channel()
+    request = PermissionRequest(
+        tool_name="workspace",
+        tool_params={"workspace": "/proj"},
+        klass="workspace-trust",
+        key="/proj",
+        grantable=False,
+        reason="trust this workspace?",
+        display="Trust this workspace?\nAnswering yes records /proj.",
+    )
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        inp.send_text(key)
+        await asyncio.wait_for(ch.ask_permission(request), timeout=10.0)
+    printed = ch._console.file.getvalue()
+    assert line in printed
+    assert "allowed once" not in printed and "denied" not in printed
+
+
 def test_every_option_has_a_confirmation_line():
     """A key with no line would crash the answer path, which is the worst place to find out."""
-    from localharness.channels.terminal import PERMISSION_KEYS_GRANTABLE
+    from localharness.channels.terminal import (
+        PERMISSION_ANSWER_LINES_BY_CLASS,
+        PERMISSION_KEYS_GRANTABLE,
+    )
 
-    assert set(PERMISSION_KEYS_GRANTABLE.values()) <= set(PERMISSION_ANSWER_LINES)
+    kinds = set(PERMISSION_KEYS_GRANTABLE.values())
+    assert kinds <= set(PERMISSION_ANSWER_LINES)
+    for klass, lines in PERMISSION_ANSWER_LINES_BY_CLASS.items():
+        assert kinds <= set(lines), f"{klass} can crash on a key it does not name"
 
 
 def test_both_applications_erase_themselves_when_they_exit():
