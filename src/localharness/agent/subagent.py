@@ -445,6 +445,7 @@ async def dispatch_config_subagent(
     base_registry: Any,
     parent_session_id: str | None,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     context_manager: Any = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
@@ -485,6 +486,7 @@ async def dispatch_config_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
     )
@@ -502,6 +504,7 @@ async def dispatch_explore_subagent(
     base_registry: Any,
     parent_session_id: str | None,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     context_manager: Any = None,
     agent_name: str = "explore",
     depth: int = 0,
@@ -560,6 +563,7 @@ async def dispatch_explore_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
     )
@@ -582,6 +586,7 @@ async def dispatch_web_subagent(
     base_registry: Any,
     parent_session_id: str | None,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     context_manager: Any = None,
     agent_name: str = "web-researcher",
     depth: int = 0,
@@ -631,6 +636,7 @@ async def dispatch_web_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
     )
@@ -741,6 +747,7 @@ async def dispatch_search_verifier_subagent(
     base_registry: Any,
     parent_session_id: str | None,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     context_manager: Any = None,
     agent_name: str = "search-verifier",
     depth: int = 0,
@@ -780,6 +787,7 @@ async def dispatch_search_verifier_subagent(
         context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
         tool_registry=child_registry,
         permission_evaluator=permission_evaluator,
+        gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
     )
@@ -869,7 +877,7 @@ def _cruncher_chunk_chars(max_context_tokens: int | None) -> int:
 
 async def _run_chunk_summarizer(
     chunk_handle: str, question: str, cruncher_store: Any, *, llm: Any, bus: Any, base_registry: Any,
-    parent_session_id: str | None, permission_evaluator: Any, token_counter: Any,
+    parent_session_id: str | None, permission_evaluator: Any, gate: Any = None, token_counter: Any,
     max_context_tokens: int | None, depth: int, max_subagent_depth: int, section_label: str = "",
     config_dir: Any = None,
     state_dir: Any = None,
@@ -912,6 +920,7 @@ async def _run_chunk_summarizer(
             config=chunk_cfg, llm=llm, bus=child_bus,
             context_manager=leaf_ctx, tool_registry=leaf_registry,
             permission_evaluator=permission_evaluator,
+            gate=gate,
             kill_file_path=_kill, compact_md_path=_compact,
         )
         answer = await leaf_loop.run_turn(leaf_task)  # raw extract (no findings-wrapper to mis-parse)
@@ -923,7 +932,7 @@ async def _run_chunk_summarizer(
 
 async def _cruncher_combine_turn(
     question: str, items: list[str], *, partial: bool, llm: Any, child_bus: Any, base_registry: Any,
-    permission_evaluator: Any, ctx: Any, exec_seed: Any = None, exec_cfg: Any = None,
+    permission_evaluator: Any, gate: Any = None, ctx: Any, exec_seed: Any = None, exec_cfg: Any = None,
     config_dir: Any = None,
     state_dir: Any = None,
 ) -> str:
@@ -941,7 +950,7 @@ async def _cruncher_combine_turn(
     cfg.tools = ToolConfig(add=[])  # reduce over inline text; exec (if any) resolves via inherited global
     _kill, _compact = _child_runtime_paths(cfg, config_dir, state_dir=state_dir)
     loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
-                     tool_registry=reg, permission_evaluator=permission_evaluator,
+                     tool_registry=reg, permission_evaluator=permission_evaluator, gate=gate,
                      kill_file_path=_kill, compact_md_path=_compact)
     label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
     goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
@@ -1010,6 +1019,7 @@ async def dispatch_cruncher_subagent(
     base_registry: Any,
     parent_session_id: str | None,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     context_manager: Any = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
@@ -1064,7 +1074,7 @@ async def dispatch_cruncher_subagent(
         async with sem:
             return await _run_chunk_summarizer(
                 ph, question, cruncher_store, llm=llm, bus=bus, base_registry=base_registry,
-                parent_session_id=parent_session_id, permission_evaluator=permission_evaluator,
+                parent_session_id=parent_session_id, permission_evaluator=permission_evaluator, gate=gate,
                 token_counter=token_counter, max_context_tokens=max_ctx,
                 depth=depth + 1, max_subagent_depth=max_subagent_depth,
                 section_label=f"section {idx + 1} of {n_sections} of a larger document; you are reading "
@@ -1114,7 +1124,7 @@ async def dispatch_cruncher_subagent(
     async def _combine_partial(batch: list[str]) -> str:
         return await _cruncher_combine_turn(
             question, batch, partial=True, llm=llm, child_bus=child_bus, base_registry=base_registry,
-            permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+            permission_evaluator=permission_evaluator, gate=gate, ctx=ContextManager(**combine_ctx_kwargs),
             config_dir=config_dir,
             state_dir=state_dir,
         )
@@ -1128,7 +1138,7 @@ async def dispatch_cruncher_subagent(
 
     answer = await _cruncher_combine_turn(
         question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
-        permission_evaluator=permission_evaluator, ctx=ContextManager(**combine_ctx_kwargs),
+        permission_evaluator=permission_evaluator, gate=gate, ctx=ContextManager(**combine_ctx_kwargs),
         exec_seed=exec_seed, exec_cfg=cruncher_config, config_dir=config_dir, state_dir=state_dir,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
@@ -1169,6 +1179,7 @@ def make_explore_agent_runner(
     bus: Any,
     base_registry: Any,
     permission_evaluator: Any,
+    gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     get_parent_session_id: Callable[[], str | None],
     load_agent: Callable[[str], Any] | None = None,
     load_builtin_override: Callable[[str, AgentConfig], AgentConfig] | None = None,
@@ -1251,6 +1262,7 @@ def make_explore_agent_runner(
             bus=bus,
             base_registry=base_registry,
             permission_evaluator=permission_evaluator,
+            gate=gate,
             get_parent_session_id=get_parent_session_id,
             load_agent=load_agent,
             load_builtin_override=load_builtin_override,
@@ -1288,7 +1300,7 @@ def make_explore_agent_runner(
             # store; grant_handles names which over-window bodies to crunch.
             return await dispatch_cruncher_subagent(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
-                parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator,
+                parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator, gate=gate,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
                 cruncher_config=cruncher_config, memory_store=memory_store, config_dir=config_dir,
                 state_dir=state_dir,
@@ -1322,6 +1334,7 @@ def make_explore_agent_runner(
                 base_registry=base_registry,
                 parent_session_id=get_parent_session_id(),
                 permission_evaluator=permission_evaluator,
+                gate=gate,
                 context_manager=child_ctx,
                 depth=depth,
                 max_subagent_depth=max_subagent_depth,
@@ -1345,6 +1358,7 @@ def make_explore_agent_runner(
             base_registry=base_registry,
             parent_session_id=get_parent_session_id(),
             permission_evaluator=permission_evaluator,
+            gate=gate,
             context_manager=child_ctx,
             depth=depth,
             max_subagent_depth=max_subagent_depth,

@@ -19,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
+from localharness.agent.gate import fail_closed_gate, tool_meta_from_schema
+from localharness.agent.gate_types import ToolMeta
 from localharness.core.types import Message
 from localharness.tools.capabilities import CoResidenceError
 
@@ -874,6 +876,7 @@ class AgentLoop:
         compact_md_path: Path | Any | None = None,  # Path | COMPACT_DISABLED | None
         session_id: str | None = None,
         config_dir: Path | None = None,
+        gate: Any = None,  # PermissionGate
     ) -> None:
         self._config = config
         self._llm = llm
@@ -902,6 +905,15 @@ class AgentLoop:
         self._presence_penalty_next: float | None = None
         self._tools = tool_registry
         self._permissions = permission_evaluator
+        # The human-approval gate (PRD §3.1-§3.5). Every tool call of every agent goes through
+        # it. A caller that passes none gets a FAIL-CLOSED one: same deny tier, mode from this
+        # agent's own config, and no asker — so an ASK verdict denies with a reason the model can
+        # re-plan against and logs the fix once, rather than running unguarded because a call
+        # site forgot. Subagents are handed the parent's instance, so a `/mode` switch and a
+        # fresh grant reach them mid-session (PRD §3.4).
+        self._gate = gate if gate is not None else fail_closed_gate(
+            permissions=getattr(config, "permissions", None), deny=self._deny_fn, bus=bus
+        )
         self._memory = memory_loader
         # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
         # session's own store and keeps every write and trace below; only the ambient-context
@@ -966,6 +978,54 @@ class AgentLoop:
     def current_session_id(self) -> str | None:
         """Return the session_id from the most recent run_turn() call."""
         return self._current_session_id
+
+    @property
+    def gate(self) -> Any:
+        """This session's permission gate — the object subagents share (PRD §3.4)."""
+        return self._gate
+
+    def _deny_fn(self, tool_name: str, params: dict) -> Any:
+        """THIS agent's DENY tier, handed to the gate on every check.
+
+        The gate is session-scoped and shared with subagents (one boundary, one grant store, one
+        mode), but the deny list is NOT: it is the union `load_agent()` resolved for this agent's
+        own layers, and a child agent may tighten it. So the deny function travels with the loop,
+        not with the gate, and `self._config.permissions` is read at call time — the same object
+        the evaluator was composed with before the gate existed, unchanged.
+        """
+        from localharness.core.types import ToolCall
+
+        return self._permissions.evaluate(
+            ToolCall(name=tool_name, arguments=params or {}), self._config.permissions
+        )
+
+    def _tool_facts(self, tool_call: Any) -> tuple[ToolMeta, float | None]:
+        """What the gate needs to know ABOUT a tool, as opposed to about the call.
+
+        `ToolMeta` carries the schema's `destructive` flag and its `group` (the v0.14 exposure
+        taxonomy, PRD §6) so the verdict can classify a tool it does not know by name. The
+        timeout is the tool's own declared `timeout_s` — the budget the call itself would have
+        had — which `PermissionGate` turns into the wait for a human when
+        `permissions.ask.timeout_s` is unset (PRD §3.5).
+
+        A registry without a `lookup_tool` (the minimal fakes in the test suite) yields the
+        neutral defaults: the verdict then classifies by tool NAME, which covers every builtin.
+        """
+        lookup = getattr(self._tools, "lookup_tool", None)
+        if lookup is None:
+            return ToolMeta(), None
+        try:
+            tool = lookup(
+                tool_call.name, self._config.name, self._config.division or "", self._config.tools
+            )
+        except Exception:  # noqa: BLE001 — a lookup failure must never block a turn
+            tool = None
+        if tool is None:
+            return ToolMeta(), None
+        try:
+            return tool_meta_from_schema(tool.info()), getattr(tool, "timeout_s", None)
+        except Exception:  # noqa: BLE001
+            return ToolMeta(), None
 
     def push_user_nudge(self, text: str) -> None:
         """Queue a user-typed nudge for delivery to the running turn at its next step
@@ -1857,9 +1917,21 @@ class AgentLoop:
                     tool_params=tool_call.arguments,
                 ))
 
-                # Permission check
-                perm_result = self._permissions.evaluate(tool_call, self._config.permissions)
-                if perm_result.denied:
+                # Permission gate: deny patterns, then the ask a human answers (PRD §3.1).
+                # The reason reaches the model as the tool observation, so a soft deny
+                # ("not permitted in read-only mode") or an unaskable one ("needs human
+                # approval; this channel cannot ask") is something it can re-plan against.
+                meta, tool_timeout_s = self._tool_facts(tool_call)
+                perm_result = await self._gate.check(
+                    tool_call.name,
+                    tool_call.arguments,
+                    meta,
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    tool_timeout_s=tool_timeout_s,
+                    deny=self._deny_fn,
+                )
+                if not perm_result.allowed:
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -2290,8 +2362,17 @@ class AgentLoop:
         executed = 0
         for tool_call in tool_calls:
             session.actions_taken += 1
-            perm = self._permissions.evaluate(tool_call, self._config.permissions)
-            if perm.denied:
+            meta, tool_timeout_s = self._tool_facts(tool_call)
+            perm = await self._gate.check(
+                tool_call.name,
+                tool_call.arguments,
+                meta,
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+                tool_timeout_s=tool_timeout_s,
+                deny=self._deny_fn,
+            )
+            if not perm.allowed:
                 session.push({
                     "role": "tool",
                     "tool_call_id": tool_call.id,

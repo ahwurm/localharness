@@ -238,6 +238,21 @@ class ToolRegistry:
             return self._tools["mcp"][name]
         return None
 
+    def lookup_tool(
+        self,
+        name: str,
+        agent_id: str,
+        division_id: str,
+        tool_config: Any,
+    ) -> ToolProtocol | None:
+        """The tool `dispatch` WOULD run, without running it.
+
+        The permission gate needs a tool's schema (its `destructive` flag and `group`) and its
+        declared `timeout_s` BEFORE the call happens — same resolution order as `dispatch`, so
+        the gate can never judge a different tool than the one that executes.
+        """
+        return self._get_tool_for_agent(name, agent_id, division_id, tool_config)
+
     async def dispatch(
         self,
         name: str,
