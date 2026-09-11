@@ -32,12 +32,17 @@ All notable changes to LocalHarness are documented here. The format follows
   discards, `git stash drop`/`clear`, `git branch -D`, `git filter-branch`,
   `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, disk
   formatting, and `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/
-  `compose up`/`compose down`. Recorded refusals still deny in `auto`, and
-  your deny patterns still deny before the gate speaks at all.
+  `compose up`/`compose down`. It also asks about a call it could not
+  classify at all — a command it could not read, a name computed at runtime
+  (`$RM -rf build`), a path argument that is not a string — because the rest
+  of the rule rests on having classified the call. Recorded refusals still
+  deny in `auto`, and your deny patterns still deny before the gate speaks at
+  all.
 - **New protected paths: the system directories.** `/etc`, `/usr`, `/bin`,
-  `/sbin`, `/lib*`, `/boot`, `/var` (except `/var/tmp`), `/opt`, `/root`,
+  `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`,
   `/srv`, macOS `/System`, `/Library`, `/Applications`, and Windows
-  `C:\Windows`, `C:\Program Files*`, `C:\ProgramData`. A mode that allows
+  `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
+  `C:\ProgramData`; `/tmp` and `/var/tmp` are exempt. A mode that allows
   ordinary writes needs the places a mistaken write is unrecoverable named
   explicitly; they are `permissions.ask.protected_paths_system`.
 - **A session in `$HOME` no longer asks about every write.** With no project

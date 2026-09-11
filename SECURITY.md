@@ -114,9 +114,10 @@ read and argue with. Each step below says what it does in `auto`.
    - **A write whose target is a protected path.** `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
      credential files, your shell rc files, `~/.localharness`, and inside the project `.git/**`,
      `.localharness/**`, `.env*`, `*.pem`, `id_*` — and, from v0.14.1, the system directories:
-     `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/var` (except `/var/tmp`), `/opt`,
-     `/root`, `/srv`, macOS `/System`, `/Library` and `/Applications`, and Windows `C:\Windows`,
-     `C:\Program Files*` and `C:\ProgramData`.
+     `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`, `/srv`,
+     macOS `/System`, `/Library` and `/Applications`, and Windows `C:\Windows`,
+     `C:\Program Files`, `C:\Program Files (x86)` and `C:\ProgramData`. `/tmp` and `/var/tmp` are
+     carved back out — every build and every `mktemp` writes there.
    - **A destructive file operation whose target is outside the project, or cannot be resolved.**
      `rm -rf`, `chmod -R`, `find -delete`, and the Windows delete spellings. Inside the project
      they run without asking — that is a named gap below, not an oversight.
@@ -126,6 +127,10 @@ read and argue with. Each step below says what it does in `auto`.
      `git filter-branch`, `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, `format`
      and the other disk formatters, and
      `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/`compose up`/`compose down`.
+
+   - **A call the gate could not classify.** A command it could not read, a command name computed
+     at runtime (`$RM -rf build`), a path argument that is not a string: the rule above rests on
+     having classified the call, so when there is no key to reason about, `auto` asks.
 
    Two more things bind in `auto` and are not questions at all: a refusal you have already recorded
    denies outright (step 3), and so does anything your `deny_patterns` name (step 1).
