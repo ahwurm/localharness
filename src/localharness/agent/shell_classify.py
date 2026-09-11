@@ -65,9 +65,15 @@ ABSOLUTE_PATH_RE = re.compile(r"^(/|~|[A-Za-z]:[\\/])")
 """A target that already names its own root — POSIX, a tilde (the verdict expands it), or a
 Windows drive (the owner dogfoods on Windows). Nothing is joined onto these."""
 
-UNRESOLVABLE_TARGET_CHARS = ("$", "*", "?", "`")
+UNRESOLVABLE_TARGET_CHARS = ("$", "*", "?", "`", "{")
 """PRD §3.2 step 8: a target containing any of these cannot be resolved to a path here, so
-it is treated as outside the boundary."""
+it is treated as outside the boundary.
+
+``{`` covers the two shapes that stand in for a path nobody has chosen yet: brace expansion
+(``cp a b{1,2}``) and the ``{}`` placeholder a ``find -exec`` / ``xargs -I`` payload substitutes.
+The placeholder became visible when clustered flags started signing as writes (finding R7) —
+``find . -exec sed -Ei s/a/b/ {} +`` would otherwise have reported a write to a workspace file
+literally named ``{}``."""
 
 REDIRECTION_OPERATOR_CHARS = "<>&|"
 """Characters that may follow the first ``<``/``>`` of a redirection operator: ``>>``, ``>|``,

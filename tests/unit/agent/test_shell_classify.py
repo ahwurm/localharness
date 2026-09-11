@@ -298,6 +298,12 @@ def test_unresolvable_write_targets() -> None:
         assert result.unresolvable_write is True, command
 
 
+def test_a_placeholder_target_is_unresolvable() -> None:
+    """`{}` is the path find/xargs will substitute, not a file named `{}` in the workspace."""
+    for command in (r"find . -exec sed -Ei s/a/b/ {} +", "xargs -I {} cp key {}", "cp a b{1,2}"):
+        assert classify_shell(command, SETTINGS).unresolvable_write is True, command
+
+
 def test_substitution_target_is_unresolvable() -> None:
     result = classify_shell("cat x > $(cat which_file)", SETTINGS)
     assert result.unresolvable_write is True
