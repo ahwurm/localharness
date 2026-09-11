@@ -18,6 +18,7 @@ from prompt_toolkit.output import DummyOutput
 from localharness.agent.gate_types import PermissionRequest
 from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.terminal import (
+    PERMISSION_ANSWER_LINES,
     PERMISSION_OPTIONS_GRANTABLE,
     PERMISSION_OPTIONS_UNGRANTABLE,
     TERMINAL_THEME,
@@ -122,6 +123,74 @@ def test_the_legends_name_every_option_the_keys_bind():
     assert "[a]lways here" in PERMISSION_OPTIONS_GRANTABLE
     assert "[N]ever here" in PERMISSION_OPTIONS_GRANTABLE
     assert "[a]lways" not in PERMISSION_OPTIONS_UNGRANTABLE
+
+
+# ------------------------------------------------------- what is left on screen
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key,line",
+    [("y", "✓ allowed once"), ("a", "✓ always here"),
+     ("n", "✗ denied"), ("N", "✗ never here")],
+)
+async def test_answering_leaves_one_confirmation_line_and_no_legend(key, line):
+    """Owner, 2026-09-11: "I don't like how it persists a chat box every time I answer (a) (y)
+    or whatever; it should just record my input."
+
+    One keystroke, and what remains is the question and one short line. The legend was a menu,
+    not a record, and it used to stay painted in the scrollback — along with the dead input box
+    the question suspended — once per answer.
+    """
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        inp.send_text(key)
+        await asyncio.wait_for(ch.ask_permission(_request()), timeout=10.0)
+    printed = ch._console.file.getvalue()
+    assert line in printed
+    assert PERMISSION_OPTIONS_GRANTABLE not in printed
+    assert "[y]es once" not in printed
+    # exactly one confirmation, not one per redraw
+    assert printed.count(line) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_prompt_still_says_what_it_recorded():
+    """Ctrl+C answers "no, this once" — and the person has to be able to see that it did."""
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        inp.send_text("\x03")
+        decision = await asyncio.wait_for(ch.ask_permission(_request()), timeout=10.0)
+    assert decision.kind == "reject_once"
+    assert PERMISSION_ANSWER_LINES["reject_once"] in ch._console.file.getvalue()
+
+
+def test_every_option_has_a_confirmation_line():
+    """A key with no line would crash the answer path, which is the worst place to find out."""
+    from localharness.channels.terminal import PERMISSION_KEYS_GRANTABLE
+
+    assert set(PERMISSION_KEYS_GRANTABLE.values()) <= set(PERMISSION_ANSWER_LINES)
+
+
+def test_both_applications_erase_themselves_when_they_exit():
+    """The mechanism behind the test above: prompt_toolkit's default leaves the last frame
+    painted forever, which is what put a dead box and a dead legend in the scrollback per
+    answer. Asserted on both apps, because the box is the half the owner actually named."""
+    from prompt_toolkit.history import InMemoryHistory as _History
+
+    from localharness.channels.terminal import _build_persistent_input_app
+
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        assert _build_permission_app(PERMISSION_OPTIONS_GRANTABLE, True).erase_when_done is True
+        box = _build_persistent_input_app(
+            _History(), ">",
+            on_submit=lambda _line: None,
+            on_interrupt=lambda: None,
+            on_eof=lambda: None,
+            hint_fn=list,
+            right_fn=list,
+            status_fn=list,
+        )
+        assert box.erase_when_done is True
 
 
 @pytest.mark.asyncio
