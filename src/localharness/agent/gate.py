@@ -472,16 +472,25 @@ class PermissionGate:
     ) -> bool:
         """Make an "always" answer durable (PRD §3.3). Returns whether anything was written.
 
-        An ungrantable request (shell-destructive, protected-path, no-boundary) never writes a
-        grant even if a channel hands back ``allow_always``: those classes ask every time by
-        construction, so the answer is downgraded to ``allow_once`` here rather than trusted to
-        every channel's UI to get right. ``reject_always`` is not downgraded — a "never" answer
-        is a tightening, and tightening is always allowed.
+        An ungrantable request never writes a grant even if a channel hands back
+        ``allow_always``: those requests ask every time by construction, so the answer is
+        downgraded to ``allow_once`` here rather than trusted to every channel's UI to get
+        right. Grantability is read off ``request.grantable`` and never off the class name —
+        a normally-grantable class can arrive ungrantable when it has nothing rememberable to
+        key on (``verdict.DYNAMIC_COMMAND_NAME_PREFIXES``: a shell segment whose command name is
+        computed at runtime).
+
+        ``reject_always`` is not downgraded for being ungrantable — a "never" answer is a
+        tightening, and tightening is always allowed — but it IS downgraded when the request
+        carries no key at all. With nothing to identify the call by, the only pattern that could
+        be written is the bare tool name, which would ban every shell command forever; that is
+        far more than the human answered, so nothing durable is written and the answer stands as
+        a ``reject_once``.
         """
-        if not decision.remembered:
+        if not decision.remembered or not request.key:
             return False
         if decision.kind == "allow_always":
-            if not request.grantable or not request.key:
+            if not request.grantable:
                 return False
             self.grants.add(
                 new_grant(

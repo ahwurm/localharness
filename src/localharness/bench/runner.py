@@ -26,6 +26,17 @@ from localharness.core.events import (
 
 log = logging.getLogger(__name__)
 
+BENCH_PERMISSION_MODE = "unattended"
+"""The session mode every bench run pins (PRD §3.4, critic finding 7).
+
+Bench has no human and its scenarios legitimately run `rm` and `chmod`, so any asking mode
+would fail those calls closed and move the scores — the gate would read as a capability
+regression rather than a permission change. `unattended` is the harness's pre-v0.14 behaviour
+named honestly: the DENY tier still holds, every ASK becomes ALLOW. It is a named value here,
+rather than a literal at the construction site, because "bench never asks" is a property the
+ask-rate report and any future runner must be able to reference by name.
+"""
+
 
 # -------------------------------------------------------------------------
 # EVAL-01: bench-side memory seed map for stateful_behavior scenarios.
@@ -354,7 +365,9 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         ContextManager,
         TokenCounter,
     )
+    from localharness.agent.gate import PermissionGate, settings_from
     from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.grants import GrantStore
     from localharness.config.models import AgentConfig
     from localharness.tools.registry import ToolRegistry
 
@@ -477,6 +490,25 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # Defined before the `agent` block below so the real subagent runner can capture it.
     perm_evaluator = PermissionEvaluator()
 
+    # v0.14 permission spine: bench pins `unattended` (PRD §3.4, critic finding 7). There is
+    # nobody to ask here, and bench scenarios legitimately run `rm` and `chmod` — under any
+    # asking mode every such call would fail closed and the scores would move, which would make
+    # the gate look like a capability regression instead of a permission change. `unattended`
+    # is today's pre-gate behaviour named honestly: the DENY tier still holds, every ASK
+    # becomes ALLOW, and `asker=None` guarantees no bench run can ever block on a human.
+    bench_gate = PermissionGate(
+        boundary=Path.cwd(),
+        workspace=Path.cwd(),
+        grants=GrantStore(),
+        mode=BENCH_PERMISSION_MODE,
+        asker=None,
+        channel_name="bench",
+        has_review_surface=False,
+        deny=None,  # AgentLoop hands its own agent's deny tier in on every check
+        settings=settings_from(getattr(agent_config, "permissions", None)),
+        bus=bus,
+    )
+
     # SUBAGENT-05 / J3: register the REAL delegation runner when 'agent' is in tools_allowed, built via
     # the SAME module-level seam the live start path uses (make_explore_agent_runner) so the bench
     # exercises PRODUCTION routing — crucially including the cruncher. The factory routes by agent_id:
@@ -498,6 +530,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         _bench_agents = ["explore", "web-researcher", "cruncher", "search-verifier"]
         _agent_runner = make_explore_agent_runner(
             llm=llm_client,
+            gate=bench_gate,
             bus=bus,
             base_registry=base_registry,
             permission_evaluator=perm_evaluator,
@@ -559,6 +592,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             context_manager=ctx_manager,
             tool_registry=tool_registry,
             permission_evaluator=perm_evaluator,
+            gate=bench_gate,
             memory_loader=memory_loader,
             kill_file_path=None,
             compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
