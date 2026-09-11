@@ -206,15 +206,29 @@ TRUST_TOOL_CALL_TITLE = "Load workspace configuration?"
 request, so the one-time trust dialog rides on the same mechanism as every other ask (PRD §3.5:
 "the existing workspace-trust dialog becomes the first client of ask_permission")."""
 
-ONE_PROJECT_PER_PROCESS = (
-    "This localharness process is already serving {current}. Open {requested} in its own Zed "
-    "thread, or restart the agent server for that folder — one agent process serves one project."
+ONE_THREAD_PER_PROCESS = (
+    "This localharness process is already serving a thread in {current}. Start a second "
+    "LocalHarness agent server for {requested} — one agent process serves one project folder and "
+    "one thread."
 )
-"""v1 limitation, stated as an error rather than silently answering for the wrong folder: the
-harness session derives its boundary, config layer and memory from ONE directory, and the
-process changes into it. A second `session/new` for a different folder would be served by a
-session pointed somewhere else, which is exactly the kind of quiet wrong answer the boundary
-exists to prevent. Named in docs/zed.md's "not yet" list."""
+"""v1 limitation, stated as an error rather than silently answering for the wrong thread.
+
+ACP itself allows many sessions on one connection ("Each connection can support several
+concurrent sessions" — agentclientprotocol.com/overview/architecture), and this adapter does not:
+the harness session derives its boundary, config layer, memory and state directory from ONE
+directory that the process changes into, and everything downstream of `serve()` — the loop, the
+gate, the running turn — is that one session. Accepting a second `session/new` would tag one
+thread's `fs/*` calls, permission dialogs and `session/update`s with the other thread's id, and
+let `session/cancel` stop the wrong turn. Refusing is the honest version of what is built.
+Named in docs/zed.md's "not yet" list."""
+
+UNKNOWN_SESSION = (
+    "Unknown session {requested}. This localharness process is serving {current} and no other "
+    "session — start a second LocalHarness agent server for another thread."
+)
+"""A `session/prompt` or `session/set_mode` for an id this process never issued, or issued and
+replaced. It can only be a client that believes it has two threads here; answering it would run
+the turn on the one session this process does have, under another thread's id."""
 
 SESSION_TEARDOWN_TIMEOUT_S = 10.0
 """How long `aclose` waits for the harness session's ordered shutdown (MCP servers, memory
@@ -306,7 +320,6 @@ class AcpChannel(ChannelAdapter):
         self._client_can_write = False
 
         self._session_id: Optional[str] = None
-        self._session_ids: set[str] = set()
         self._cwd: Optional[Path] = None
         self._boundary: Optional[Path] = None
         self._workspace: Optional[Path] = None
@@ -386,8 +399,9 @@ class AcpChannel(ChannelAdapter):
         project" means.
 
         The process changes into `cwd`: the harness derives its boundary, its config layer and
-        its state directory from the working directory, so one process serves one project
-        folder (:data:`ONE_PROJECT_PER_PROCESS`).
+        its state directory from the working directory, so one process serves one project folder
+        and one thread (:data:`ONE_THREAD_PER_PROCESS`). A second `session/new` — another folder
+        or the same one — is `invalid_params`, not a second session sharing the first one's loop.
         """
         from acp.core import RequestError
 
@@ -396,16 +410,17 @@ class AcpChannel(ChannelAdapter):
         from localharness.cli.workspace import resolve_workspace_layer
 
         requested = Path(cwd).expanduser()
-        if self._cwd is not None and requested.resolve() != self._cwd:
+        if self._session_id is not None:
             raise RequestError.invalid_params(
-                {"reason": ONE_PROJECT_PER_PROCESS.format(current=self._cwd, requested=requested)}
+                {"reason": ONE_THREAD_PER_PROCESS.format(current=self._cwd, requested=requested)}
             )
 
+        # Claimed before the work below, because the trust question is put through
+        # `session/request_permission`, which needs a session id to address. Released again if
+        # that work fails, so a folder that could not be opened does not lock the process out.
         session_id = uuid.uuid4().hex
         self._session_id = session_id
-        self._session_ids.add(session_id)
-
-        if self._cwd is None:
+        try:
             os.chdir(requested)
             self._cwd = requested.resolve()
             self._workspace = await asyncio.to_thread(
@@ -417,7 +432,11 @@ class AcpChannel(ChannelAdapter):
             # the real config. Here it is derived without narrowing so `new_session` can answer
             # the only question it needs to: is there a project folder at all?
             self._boundary, _ = narrow_boundary(derived, None)
-            log.info("acp session %s: cwd=%s boundary=%s", session_id, self._cwd, self._boundary)
+        except BaseException:
+            self._session_id = None
+            self._cwd = None
+            raise
+        log.info("acp session %s: cwd=%s boundary=%s", session_id, self._cwd, self._boundary)
 
         return NewSessionResponse(
             session_id=session_id,
@@ -435,10 +454,13 @@ class AcpChannel(ChannelAdapter):
         list and remembered; once the gate exists it IS the validator, and its `ValueError`
         message is what the user sees. Either way an unknown or forbidden mode is
         `invalid_params`, never a silent no-op that leaves the picker showing a mode the session
-        is not in.
+        is not in. A mode set on any id but the live one is refused for the same reason a prompt
+        is: this process has one session, and switching its mode on another thread's behalf is a
+        change nobody asked for.
         """
         from acp.core import RequestError
 
+        self._require_live_session(session_id)
         try:
             if self._gate is not None:
                 self._gate.set_mode(mode_id, from_channel=True)
@@ -463,8 +485,12 @@ class AcpChannel(ChannelAdapter):
         otherwise the session is brought up if this is the first prompt, streaming status while
         it takes; then `run_turn` runs with `on_token` wired to `agent_message_chunk`, as its own
         task so `session/cancel` has something to cancel.
+
+        A prompt for any id but the live one is refused (:data:`UNKNOWN_SESSION`). It used to
+        overwrite the live id, so a second thread's prompt silently re-tagged the first thread's
+        file reads, permission dialogs and updates with its own session id.
         """
-        self._session_id = session_id
+        self._require_live_session(session_id)
         text = _prompt_text(prompt)
 
         if self._boundary is None:
@@ -499,7 +525,15 @@ class AcpChannel(ChannelAdapter):
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """`session/cancel` — the same path SIGINT takes in the REPL (PRD §4). A notification,
-        so it returns at once; the in-flight `prompt` answers `cancelled`."""
+        so it returns at once; the in-flight `prompt` answers `cancelled`.
+
+        Only for the live session: a cancel carrying another id is a client cancelling a thread
+        this process does not serve, and stopping the running turn on its behalf would kill
+        somebody else's work. A notification cannot answer, so it is dropped and logged.
+        """
+        if session_id != self._session_id:
+            log.warning("acp cancel for an unknown session: %s", session_id)
+            return
         task = self._turn_task
         if task is not None and not task.done():
             task.cancel()
@@ -851,6 +885,21 @@ class AcpChannel(ChannelAdapter):
         raise NotInteractiveError("the ACP channel receives turns via session/prompt")
 
     # ------------------------------------------------------------ helpers
+
+    def _require_live_session(self, session_id: str) -> None:
+        """Refuse a request addressed to any session but the one this process is serving.
+
+        One process, one session (:data:`ONE_THREAD_PER_PROCESS`); everything session-scoped —
+        the loop, the gate, the turn task, the `fs/*` calls, the permission dialog — belongs to
+        it. Raising here is what keeps a stale or foreign id from being answered by it.
+        """
+        if session_id == self._session_id:
+            return
+        from acp.core import RequestError
+
+        raise RequestError.invalid_params(
+            {"reason": UNKNOWN_SESSION.format(requested=session_id, current=self._cwd)}
+        )
 
     def _current_mode_id(self) -> str:
         from localharness.agent.gate_types import DEFAULT_MODE
