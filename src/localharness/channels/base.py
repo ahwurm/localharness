@@ -1,6 +1,7 @@
 """ChannelAdapter ABC — pluggable interface for all channel adapters."""
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -22,6 +23,51 @@ PERMISSION_DENIED_LINE = "permission denied — {tool_name}: {reason}"
 
 One line per denial, not a block: denials arrive mid-turn while the model re-plans, and the
 person needs the reason, not a report."""
+
+
+KEPT_CONTROL_CHARS = "\t\n"
+"""The two control characters a rendered question may keep: tab, and newline.
+
+Newline is structural here — one tool call can raise several reasons and the gate renders them
+as a short multi-line `display`, which the terminal prints as lines and the ACP adapter splits
+into a title and a body. Every other C0 character is removed (see :func:`sanitize_for_display`).
+"""
+
+ESCAPE_SEQUENCE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])?"
+)
+"""ANSI escape sequences: CSI (`\\x1b[…`), OSC (`\\x1b]…` up to BEL or ST), and the two-character
+forms. Removed whole, so what is left of a cursor-moving sequence is not a stray `[2J` printed as
+text."""
+
+CONTROL_CHARS_RE = re.compile(
+    "["
+    + "".join(
+        re.escape(chr(code))
+        for code in (*range(0x00, 0x20), 0x7F)
+        if chr(code) not in KEPT_CONTROL_CHARS
+    )
+    + "]"
+)
+"""Every C0 control and DEL except :data:`KEPT_CONTROL_CHARS` — derived from that set rather
+than spelled out, so the two cannot drift apart."""
+
+
+def sanitize_for_display(text: str) -> str:
+    """Strip terminal control characters from text a channel is about to render.
+
+    A permission question quotes the model's own words — a shell command, a path, an MCP tool's
+    arguments — and those words reach a terminal that acts on control characters. `\\r` rewrites
+    the line the human is reading, `\\x1b[2J` clears the screen, and either one can leave a
+    question on screen that is not the question being answered. Both renderers of an ASK call
+    this before their own escaping (rich markup escaping is about markup, not about the
+    terminal), because the answer to a mangled question is a permission the human did not grant.
+
+    Tab and newline survive (:data:`KEPT_CONTROL_CHARS`): they are layout, not control.
+    """
+    if not text:
+        return text
+    return CONTROL_CHARS_RE.sub("", ESCAPE_SEQUENCE_RE.sub("", text))
 
 
 def permission_denied_reason(error: str | None) -> str | None:
