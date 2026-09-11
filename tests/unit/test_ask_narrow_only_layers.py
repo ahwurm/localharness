@@ -240,3 +240,166 @@ def test_a_workspaceless_session_is_untouched(tmp_path: Path) -> None:
     gate = _gate(global_dir)
     assert gate.destructive_signatures == frozenset()
     assert gate.mcp_trusted_servers == frozenset({"evil"})
+
+
+# ---------------------------------------------------------------------------
+# The second door: built-in subagent overlays (ConfigLoader.overlay_builtin_config)
+#
+# `_find_file` searches the WORKSPACE first, so a cloned repo's `.localharness/agents/explore.yaml`
+# overlays the built-in's code-defined config — a path that never went through the narrow-only
+# union at all, and whose `deep_merge` REPLACES lists (a `deny_patterns: []` dropped the shipped
+# deny list for that subagent outright).
+# ---------------------------------------------------------------------------
+
+def _builtin(global_dir: Path, workspace_dir: Path | None = None, name: str = "explore"):
+    from localharness.agent.subagent import build_explore_config
+
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=workspace_dir)
+    return loader.overlay_builtin_config(name, build_explore_config(name))
+
+
+def _builtin_base(name: str = "explore"):
+    from localharness.agent.subagent import build_explore_config
+
+    return build_explore_config(name)
+
+
+def test_a_workspace_overlay_cannot_loosen_a_builtin(layers, caplog) -> None:
+    """The repro on the second door: mode, root and an ungrantable rule set in one repo file."""
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {
+        "mode": "unattended",
+        "workspace_root": "/",
+        "ask": {"destructive_signatures": []},
+    }})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    base = _builtin_base()
+    assert cfg.permissions.mode == base.permissions.mode
+    assert cfg.permissions.workspace_root == base.permissions.workspace_root
+    assert cfg.permissions.ask.to_gate_settings().destructive_signatures == (
+        SHIPPED.destructive_signatures
+    )
+    warnings = "\n".join(r.getMessage() for r in caplog.records)
+    for key in ("mode", "workspace_root", "destructive_signatures"):
+        assert key in warnings, f"{key} was dropped silently"
+
+
+def test_a_workspace_overlay_may_add_a_deny_pattern(layers) -> None:
+    """MERG-02 through the overlay door: `deep_merge` REPLACES lists, so an overlay that declares
+    deny_patterns used to DROP the shipped list. It is a union now — additions honored."""
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml",
+                {"permissions": {"deny_patterns": ["read(*/secrets/*)"]}})
+
+    deny = _builtin(global_dir, ws).permissions.deny_patterns
+    assert "read(*/secrets/*)" in deny
+    assert set(_builtin_base().permissions.deny_patterns) <= set(deny), "shipped deny list dropped"
+
+
+def test_a_workspace_overlay_may_add_a_destructive_signature(layers) -> None:
+    """Tightening stays open on this door too."""
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml",
+                {"permissions": {"ask": {"destructive_signatures": ["fly deploy"]}}})
+
+    gate = _builtin(global_dir, ws).permissions.ask.to_gate_settings()
+    assert "fly deploy" in gate.destructive_signatures
+    assert SHIPPED.destructive_signatures <= gate.destructive_signatures
+
+
+def test_a_workspace_overlay_may_tighten_the_builtins_mode(layers) -> None:
+    """Narrowing stays available on the overlay door."""
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"mode": "read-only"}})
+
+    assert _builtin(global_dir, ws).permissions.mode == "read-only"
+
+
+def test_a_workspace_overlay_may_confine_a_builtin_inside_the_project(layers) -> None:
+    """A repo may leash a built-in to a subfolder of itself — that is tightening."""
+    global_dir, ws = layers
+    inner = ws.parent / "sandbox"
+    inner.mkdir()
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"workspace_root": str(inner)}})
+
+    assert Path(_builtin(global_dir, ws).permissions.workspace_root) == inner
+
+
+def test_a_workspace_overlay_cannot_move_a_builtins_kill_file(layers, caplog, tmp_path) -> None:
+    """F5: the kill switch is a machine-global control artifact, not a repo setting."""
+    global_dir, ws = layers
+    elsewhere = tmp_path / "never-pressed"
+    _write_yaml(ws / "agents" / "explore.yaml",
+                {"permissions": {"budget": {"kill_file": str(elsewhere)}}})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    assert cfg.permissions.budget.kill_file == _builtin_base().permissions.budget.kill_file
+    assert any("kill_file" in r.getMessage() for r in caplog.records)
+
+
+def test_the_documented_budget_overlay_still_works(layers, caplog) -> None:
+    """The reason this hook exists (a bigger budget) must survive the narrowing, silently."""
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"budget": {"max_actions": 99}}})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    assert cfg.permissions.budget.max_actions == 99
+    assert cfg.permissions.mode == _builtin_base().permissions.mode
+    assert not caplog.records, "a plain budget overlay warned about something"
+
+
+def test_the_workspace_overlay_is_narrowed_against_the_operators_own_file(layers) -> None:
+    """Baseline order: the global `agents/<name>.yaml` when the operator wrote one, else the
+    built-in's code-defined config."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "explore.yaml", {"permissions": {"mode": "read-only"}})
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"mode": "trusted"}})
+
+    assert _builtin(global_dir, ws).permissions.mode == "read-only"
+
+
+def test_a_global_overlay_of_a_builtin_is_untouched(layers) -> None:
+    """The operator's own `agents/explore.yaml` in the GLOBAL dir keeps full authority — the
+    workspace has no file here, so nothing may be narrowed."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "explore.yaml", {"permissions": {
+        "mode": "unattended",
+        "deny_patterns": [],
+        "ask": {"mcp_trusted_servers": ["trusted-server"]},
+    }})
+
+    cfg = _builtin(global_dir, ws)
+    assert cfg.permissions.mode == "unattended"
+    assert cfg.permissions.deny_patterns == []
+    assert cfg.permissions.ask.to_gate_settings().mcp_trusted_servers == frozenset({"trusted-server"})
+
+
+def test_a_workspaceless_builtin_overlay_is_untouched(tmp_path: Path) -> None:
+    """LAYR-03 on the second door."""
+    global_dir = tmp_path / "global"
+    scratch = tmp_path / "scratch"
+    _write_yaml(global_dir / "config.yaml", _MINIMAL)
+    _write_yaml(global_dir / "agents" / "explore.yaml", {"permissions": {
+        "mode": "unattended", "deny_patterns": [], "workspace_root": str(scratch),
+    }})
+
+    cfg = _builtin(global_dir)
+    assert cfg.permissions.mode == "unattended"
+    assert cfg.permissions.deny_patterns == []
+    assert Path(cfg.permissions.workspace_root) == scratch
+
+
+def test_no_overlay_file_is_a_pure_noop(layers) -> None:
+    """Absence stays absence: the built-in base is returned unchanged, object identity included."""
+    global_dir, ws = layers
+    base = _builtin_base()
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
+
+    assert loader.overlay_builtin_config("explore", base) is base

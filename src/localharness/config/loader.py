@@ -998,8 +998,29 @@ class ConfigLoader:
             overlay_val,
         )
 
+    def _layer_baseline(
+        self, field: str, stem: str, div_name: Optional[str], base_perms: Optional[dict]
+    ) -> Any:
+        """What `permissions.<field>` is NARROWED AGAINST: the global layer, else the code base.
+
+        The global layer's own declaration always wins (`_global_layer_permission`). `base_perms`
+        is the rung under it — the code-defined config a built-in subagent overlay sits on top of,
+        which has no file anywhere and so cannot be read by the cascade. None on the config-agent
+        path, where a silent global layer means "no baseline" exactly as before.
+        """
+        value = self._global_layer_permission(field, stem, div_name)
+        if value is None and isinstance(base_perms, dict):
+            value = base_perms.get(field)
+        return value
+
     def _narrow_project_layer_permissions(
-        self, merged: dict, stem: str, div_name: Optional[str]
+        self,
+        merged: dict,
+        stem: str,
+        div_name: Optional[str],
+        *,
+        base_perms: Optional[dict] = None,
+        declared: Optional[dict] = None,
     ) -> None:
         """Apply the narrow-only union to `mode`, `workspace_root` and the `ask` rule sets.
 
@@ -1014,20 +1035,40 @@ class ConfigLoader:
         empty the ungrantable tier and pre-trust an MCP server. See `_narrow_project_layer_ask`.
 
         Mutates `merged["permissions"]` in place, dropping a project-layer value back to the
-        global layer's (mode, ask) or to nothing, so 5c's derived default applies (workspace_root).
-        Every drop warns, naming the value — a silently ignored setting is its own bug report.
-        Called only when a workspace layer applies; without one, nothing here can fire.
+        baseline. Every drop warns, naming the value — a silently ignored setting is its own bug
+        report. Called only when a workspace layer applies; without one, nothing here can fire.
+
+        `base_perms`: the code-defined base's `permissions`, used as the LOWEST baseline rung
+        under the global layer's files. `overlay_builtin_config` passes the built-in subagent's
+        base config here, so a repo's `agents/explore.yaml` is narrowed against what the built-in
+        actually ships rather than against a generic default. None (the config-agent path) keeps
+        the baselines it has always had: `DEFAULT_MODE`, no root, the shipped gate rule sets.
+
+        `declared`: the `permissions` keys the PROJECT layer actually WROTE, when the caller knows
+        them. `overlay_builtin_config` merges the base's full `model_dump()`, so every key is
+        present in `merged` whether the repo mentioned it or not, and narrowing a key the repo
+        never wrote would warn about the operator's own value. None (the config-agent path) means
+        every key in `merged` is a candidate, which is what that path needs.
         """
         perms = merged.get("permissions")
         if not isinstance(perms, dict):
             return
 
-        self._narrow_project_layer_ask(perms, stem, div_name)
+        def _wrote(field: str) -> bool:
+            """Did the PROJECT layer write this key? (Always yes when the caller cannot tell.)"""
+            return declared is None or field in declared
+
+        base_ask = base_perms.get("ask") if isinstance(base_perms, dict) else None
+        self._narrow_project_layer_ask(
+            perms, stem, div_name,
+            base_ask=base_ask,
+            declared=declared.get("ask") if isinstance(declared, dict) else declared,
+        )
 
         # --- mode: a project layer may only RAISE strictness.
-        global_mode = _normalize_mode(self._global_layer_permission("mode", stem, div_name))
+        global_mode = _normalize_mode(self._layer_baseline("mode", stem, div_name, base_perms))
         baseline = global_mode if global_mode is not None else DEFAULT_MODE
-        effective = _normalize_mode(perms.get("mode"))
+        effective = _normalize_mode(perms.get("mode")) if _wrote("mode") else None
         if effective is not None and MODE_STRICTNESS[effective] < MODE_STRICTNESS[baseline]:
             log.warning(
                 "ignoring workspace permissions.mode %r for agent %r: a project layer may only "
@@ -1040,10 +1081,9 @@ class ConfigLoader:
         # loader can derive from the workspace itself (PRD §3.1: the boundary is derived, never
         # configured). A root equal to the global layer's is the operator's own choice and is
         # left alone wherever it points.
-        configured = perms.get("workspace_root")
-        if not configured or configured == self._global_layer_permission(
-            "workspace_root", stem, div_name
-        ):
+        configured = perms.get("workspace_root") if _wrote("workspace_root") else None
+        global_root = self._layer_baseline("workspace_root", stem, div_name, base_perms)
+        if not configured or configured == global_root:
             return
         boundary = self._local_dir.parent.resolve()  # type: ignore[union-attr]
         try:
@@ -1056,7 +1096,7 @@ class ConfigLoader:
                 "may only confine INSIDE the project it sits in (%s)",
                 configured, stem, boundary,
             )
-            perms["workspace_root"] = None
+            perms["workspace_root"] = global_root
 
     def _global_layer_ask(self, stem: str, div_name: Optional[str]) -> dict:
         """`permissions.ask` as the GLOBAL layer alone declares it, key by key.
@@ -1100,7 +1140,15 @@ class ConfigLoader:
             declared.update({k: v for k, v in layer.items() if v is not None})
         return declared
 
-    def _narrow_project_layer_ask(self, perms: dict, stem: str, div_name: Optional[str]) -> None:
+    def _narrow_project_layer_ask(
+        self,
+        perms: dict,
+        stem: str,
+        div_name: Optional[str],
+        *,
+        base_ask: Optional[dict] = None,
+        declared: Optional[dict] = None,
+    ) -> None:
         """Narrow the project layer's `permissions.ask.*` to what a repo is allowed to ask for.
 
         PRD §3.3 again, for the block that actually decides what the gate stops:
@@ -1113,11 +1161,17 @@ class ConfigLoader:
         points — the same test `workspace_root` uses, and what keeps a globally-defined agent
         (no workspace `agents/<name>.yaml`) byte-identical. A key dropped entirely, rather than
         pinned to a restated value, is how the shipped default keeps standing.
+
+        `base_ask` and `declared` carry the same meaning as in `_narrow_project_layer_permissions`:
+        the code-defined base's `ask` block as the lowest baseline rung, and the `ask` keys the
+        project layer actually wrote.
         """
         ask = perms.get("ask")
         if not isinstance(ask, dict):
             return
         global_ask = self._global_layer_ask(stem, div_name)
+        if isinstance(base_ask, dict):
+            global_ask = {**{k: v for k, v in base_ask.items() if v is not None}, **global_ask}
 
         def _restore(field: str, global_val: Any) -> None:
             if global_val is None:
@@ -1126,6 +1180,8 @@ class ConfigLoader:
                 ask[field] = global_val
 
         for field in list(ask):
+            if declared is not None and field not in declared:
+                continue  # the base's own value, not the repo's
             value = ask[field]
             global_val = global_ask.get(field)
             if value == global_val:  # the operator declared it themselves
@@ -1192,6 +1248,14 @@ class ConfigLoader:
         turn, mirroring the dispatch seam's load_agent(bypass_cache=True). The built-in TOOLSET is
         structural (fixed by the dispatcher) and is NOT taken from this overlay — only AgentConfig
         fields (budget, role, temperature, timeout, ...) apply.
+
+        `_find_file` searches the WORKSPACE first, so this is the second door into the same
+        loosening surface `_narrow_project_layer_permissions` closes for configured agents — and
+        it used to be wide open: `deep_merge` REPLACES lists, so a cloned repo's
+        `.localharness/agents/explore.yaml` with `permissions: {deny_patterns: []}` dropped the
+        shipped deny list for that subagent outright. When the file that won is the workspace's,
+        the same narrow-only union applies, baselined on the built-in's own code-defined config
+        (PRD §3.3). A global `agents/<name>.yaml` and a workspace-less session are untouched.
         """
         path = self._find_file("agents", name)
         if path is None:
@@ -1199,7 +1263,61 @@ class ConfigLoader:
         text = path.read_text(encoding="utf-8")
         raw = _load_yaml_file(path)  # raises ConfigParseError on malformed YAML
         merged = deep_merge(base.model_dump(), raw)  # base = the defaults; yaml fields win
+        if self._local_dir is not None and path == self._local_dir / "agents" / f"{name}.yaml":
+            self._narrow_builtin_overlay(merged, base, name, raw)
         return self._validate_dict(AgentConfig, merged, str(path), text)
+
+    def _narrow_builtin_overlay(
+        self, merged: dict, base: AgentConfig, name: str, raw: dict
+    ) -> None:
+        """Narrow a WORKSPACE overlay of a built-in subagent to what a repo may ask for.
+
+        The built-in's code-defined config is the baseline a repo can only tighten from, because
+        for these agents there is usually no global file at all: no `agents/explore.yaml` ships,
+        so "what did the operator ask for?" is answered by the built-in itself unless the operator
+        wrote one (`_layer_baseline`, `_global_layer_ask`, `_global_layer_kill_file` all take that
+        rung). Everything else is the shared rule: `mode`, `workspace_root` and the `ask` rule sets
+        narrow-only (PRD §3.3), `deny_patterns` UNION (MERG-02 — safety accumulates), `kill_file`
+        pinned (F5 — one file stops every agent on the box).
+
+        Only keys the workspace yaml actually WROTE are considered; the rest of `merged` is the
+        base's own dump and is none of the repo's doing.
+        """
+        base_perms = base.model_dump().get("permissions") or {}
+        declared = raw.get("permissions") if isinstance(raw.get("permissions"), dict) else {}
+        self._narrow_project_layer_permissions(
+            merged, name, None, base_perms=base_perms, declared=declared
+        )
+        perms = merged.get("permissions")
+        if not isinstance(perms, dict):
+            return
+
+        # deny_patterns: the union `_load_agent_yaml` does at step 5, which this path never had.
+        if "deny_patterns" in declared:
+            base_deny = base_perms.get("deny_patterns") or []
+            overlay_deny = perms.get("deny_patterns") or []
+            seen: set[str] = set()
+            union: list[str] = []
+            for pattern in (*base_deny, *overlay_deny):
+                if pattern not in seen:
+                    seen.add(pattern)
+                    union.append(pattern)
+            perms["deny_patterns"] = union
+
+        # kill_file: the C2-family invariant (F5). The kill switch is a machine-global CONTROL
+        # artifact, so a repo must not be able to point a built-in child at a different one.
+        budget = perms.get("budget")
+        if isinstance(budget, dict) and "kill_file" in (declared.get("budget") or {}):
+            baseline = self._global_layer_kill_file(
+                name, None, getattr(base.permissions, "budget", None)
+            )
+            if budget.get("kill_file") != baseline:
+                log.warning(
+                    "ignoring workspace kill_file %r for agent %r: the kill switch resolves from "
+                    "the global config layer only (%r)",
+                    budget.get("kill_file"), name, baseline,
+                )
+                budget["kill_file"] = baseline
 
     def agent_yaml_paths(self) -> list[Path]:
         """Every agent yaml discovery reads, GLOBAL dir first so the local layer wins by stem.
