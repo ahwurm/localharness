@@ -21,10 +21,11 @@ from typing import Any, Callable, Literal, NamedTuple
 
 from localharness.agent.gate import (
     DENIED_OBSERVATION_PREFIX,
+    GATE_ERROR_REASON,
     fail_closed_gate,
     tool_meta_from_schema,
 )
-from localharness.agent.gate_types import ToolMeta
+from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message
 from localharness.tools.capabilities import CoResidenceError
 
@@ -1048,6 +1049,33 @@ class AgentLoop:
             self._warn_unknown_tool_meta(tool_call.name)
             return UNKNOWN_TOOL_META, None
 
+    async def _gate_check(self, session: Session, tool_call: Any) -> GateOutcome:
+        """The gate, called the one way, with a crash counted as a DENIAL.
+
+        `PermissionGate.check` already fails closed on a verdict that raises, but the gate is an
+        injected object — a stub in a test, an ACP adapter's subclass, a channel's asker — and a
+        loop that lets it raise loses the whole turn to a permission bug, which is the failure
+        mode with the worst blast radius the gate has. So the call site denies too, with the same
+        sentence the model can re-plan against. `CancelledError` is a `BaseException` and is NOT
+        caught here: a cancelled turn must stay cancelled.
+        """
+        meta, tool_timeout_s = self._tool_facts(tool_call)
+        try:
+            return await self._gate.check(
+                tool_call.name,
+                tool_call.arguments,
+                meta,
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+                tool_timeout_s=tool_timeout_s,
+                deny=self._deny_fn,
+            )
+        except Exception:  # noqa: BLE001 — see the docstring: a gate that raises denies
+            log.exception(
+                "the permission gate raised for %r; denying the call", tool_call.name
+            )
+            return GateOutcome(allowed=False, reason=GATE_ERROR_REASON)
+
     def _warn_unknown_tool_meta(self, tool_name: str) -> None:
         """Say once per session that a tool's schema could not be read (it now asks instead)."""
         if tool_name in self._unknown_tool_meta_warned:
@@ -1952,16 +1980,7 @@ class AgentLoop:
                 # The reason reaches the model as the tool observation, so a soft deny
                 # ("not permitted in read-only mode") or an unaskable one ("needs human
                 # approval; this channel cannot ask") is something it can re-plan against.
-                meta, tool_timeout_s = self._tool_facts(tool_call)
-                perm_result = await self._gate.check(
-                    tool_call.name,
-                    tool_call.arguments,
-                    meta,
-                    agent_id=session.agent_id,
-                    session_id=session.session_id,
-                    tool_timeout_s=tool_timeout_s,
-                    deny=self._deny_fn,
-                )
+                perm_result = await self._gate_check(session, tool_call)
                 if not perm_result.allowed:
                     session.push({
                         "role": "tool",
@@ -2270,8 +2289,6 @@ class AgentLoop:
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
         """Single iteration for testing/debugging."""
-        from localharness.provider.client import ProviderConnectionError, ProviderTimeoutError, ProviderAPIError
-
         # Guardrail checks
         if self._kill.is_killed():
             session.terminated_reason = "kill_file"
@@ -2393,16 +2410,7 @@ class AgentLoop:
         executed = 0
         for tool_call in tool_calls:
             session.actions_taken += 1
-            meta, tool_timeout_s = self._tool_facts(tool_call)
-            perm = await self._gate.check(
-                tool_call.name,
-                tool_call.arguments,
-                meta,
-                agent_id=session.agent_id,
-                session_id=session.session_id,
-                tool_timeout_s=tool_timeout_s,
-                deny=self._deny_fn,
-            )
+            perm = await self._gate_check(session, tool_call)
             if not perm.allowed:
                 session.push({
                     "role": "tool",

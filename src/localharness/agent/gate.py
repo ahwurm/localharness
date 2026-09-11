@@ -93,6 +93,25 @@ to reach only the model, so a person watching saw ``✗ write (exit 1): [DENIED]
 else (verification A, defect D7). One definition, imported by both sides, so the label and the
 matcher cannot drift apart."""
 
+GATE_ERROR_REASON = "the permission gate could not decide this call; denied"
+"""What the model is told when :func:`verdict.evaluate` itself raises (PRD §3.5's fail-closed
+row, applied to the gate's own failure rather than to a channel that cannot ask).
+
+`evaluate` is pure, but it parses model-supplied strings and realpaths model-supplied paths, so
+"it cannot raise" is a claim about code that changes every time the classifier does. A null byte
+in a write path (``Path("/tmp/x\\0y").resolve()`` raises ValueError, not OSError) escaped it and
+crashed the whole turn — the gate failing OPEN in the worst possible way: not by allowing the
+call, but by taking the agent down with it. A crash here is now a denial with a sentence the
+model can re-plan against, and the traceback goes to the log where it can be fixed."""
+
+GATE_ERROR_LOG = (
+    "the permission gate raised while deciding %r; denying the call. This is a bug in the "
+    "verdict — the call itself was not run."
+)
+"""Logged with the traceback (``log.exception``) every time :data:`GATE_ERROR_REASON` is
+returned. Not once-per-session like :data:`NO_ASKER_WARNING`: each occurrence is a distinct
+argument the verdict could not handle, and the arguments are the evidence."""
+
 MS_PER_SECOND = 1000
 """Unit conversion for ``PermissionResolved.latency_ms`` — ``time.monotonic()`` returns seconds
 and the event, like its siblings on the bus, reports milliseconds."""
@@ -121,7 +140,7 @@ def derive_session_boundary(
     home = Path.home()
     try:
         git_toplevel = _nearest_repo_root(here, home)
-    except OSError:
+    except (OSError, ValueError):
         git_toplevel = None
     return derive_boundary(cwd=here, local_dir=local_dir, git_toplevel=git_toplevel, home=home)
 
@@ -342,7 +361,11 @@ class PermissionGate:
         rather than per gate because one shared gate serves an orchestrator and its subagents,
         and each of those resolved its own deny-pattern union from its own config layers.
         """
-        result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
+        try:
+            result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
+        except Exception:  # noqa: BLE001 — a verdict that crashes must deny, never escape
+            log.exception(GATE_ERROR_LOG, tool_name)
+            return GateOutcome(allowed=False, reason=GATE_ERROR_REASON)
         if result.verdict is Verdict.ALLOW:
             return GateOutcome(allowed=True, reason=result.reason)
         if result.verdict is Verdict.DENY:
