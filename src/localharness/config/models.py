@@ -310,6 +310,16 @@ class AskConfig(BaseModel):
     protected_paths_workspace: Optional[list[str]] = Field(
         default=None, description="Override the ungrantable protected names inside a workspace."
     )
+    protected_config_dir_entries: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Override the entries inside a harness config directory (the global one and any "
+            "in-project .localharness/) that are ungrantable in every mode: the config the gate "
+            "reads, the trust and grant stores, and plugins/. Everything else there — agents/, "
+            "tools/, divisions/, memory and the session stores — is allowed, because writing "
+            "them is the harness being used."
+        ),
+    )
     protected_paths_system: Optional[list[str]] = Field(
         default=None,
         description=(

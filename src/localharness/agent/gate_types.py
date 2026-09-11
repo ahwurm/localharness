@@ -665,15 +665,24 @@ SECURITY.md rather than hidden behind a signature that looks like a plain comman
 PROTECTED_PATHS_HOME_DEFAULT: tuple[str, ...] = (
     "~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube", "~/.docker",
     "~/.bashrc", "~/.zshrc", "~/.profile", "~/.bash_profile", "~/.zprofile",
-    "~/.localharness",
     "~/.git-credentials", "~/.netrc", "~/.npmrc", "~/.pypirc",
     "~/.config/gcloud", "~/.azure",
     "~/AppData/Roaming/GitHub CLI", "~/AppData/Local/Microsoft/Credentials",
     "~/Documents/PowerShell", "~/Documents/WindowsPowerShell",
 )
-"""PRD §3.1 ``protected-path`` (ungrantable). ``~/.localharness`` is protected because writing it
-changes what the harness does next; the harness's own runtime store under it is exempted by the
-verdict (A2). Source: Claude Code "protected paths" tier + PRD critic finding 1.
+"""PRD §3.1 ``protected-path`` (ungrantable). Source: Claude Code "protected paths" tier + PRD
+critic finding 1.
+
+``~/.localharness`` used to be an entry here — the WHOLE tree, with a hand-listed exemption for
+the handful of files the harness writes as it runs. It is gone, replaced by
+:data:`PROTECTED_CONFIG_DIR_ENTRIES`, which names the few files inside it that are protected
+instead of naming the few that are not. The replay of the owner's 384-session corpus is why: 14
+of the 20 prompts ``auto`` raised were the orchestrator writing ``~/.localharness/agents/*.yaml``
+and ``~/.localharness/tools/*`` — creating an agent and dropping a tool script, which is the
+harness being USED, not the harness being rewritten (owner ruling 2026-09-11: "only hard
+blacklists… and even then very minimal"). An allow-list of protected entries also fails in the
+safe direction as the directory grows: a new kind of runtime state added under the config dir is
+allowed by default, where the old exemption list had to be remembered or it became a prompt.
 
 The second block is the credential files the first one missed (v0.14 critic A6), each one a
 plaintext token store for a service that can publish or deploy: ``~/.git-credentials`` (git's own
@@ -691,10 +700,56 @@ They are written under ``~`` like every other entry, which is platform-agnostic 
 where the directory does not exist."""
 
 PROTECTED_PATHS_WORKSPACE_DEFAULT: tuple[str, ...] = (
-    ".git", ".localharness", ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*",
+    ".git", ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*",
 )
 """PRD §3.1: names matched at any depth inside the workspace; a directory entry protects its
-subtree (``.git/hooks/pre-commit`` is protected via ``.git``)."""
+subtree (``.git/hooks/pre-commit`` is protected via ``.git``).
+
+``.localharness`` is no longer one of them, for the reason
+:data:`PROTECTED_PATHS_HOME_DEFAULT` gives about its global twin: a project's
+``.localharness/agents/`` and ``.localharness/tools/`` are what you WRITE when you use the
+harness in that project, and stopping for each of them is the fatigue this release exists to
+remove. The files inside it that decide what runs — ``config.yaml``, ``overrides.yaml``,
+``plugins/`` — are protected by :data:`PROTECTED_CONFIG_DIR_ENTRIES` instead, at whatever depth
+the directory appears. ``.git`` keeps its whole subtree: there is no part of it you write by
+hand, and ``.git/hooks`` and ``.git/config`` both re-point what the next ordinary git command
+executes."""
+
+PROTECTED_CONFIG_DIR_ENTRIES: tuple[str, ...] = (
+    "config.yaml",
+    "overrides.yaml",
+    "trusted_workspaces.yaml",
+    "grants.yaml",
+    "declined_workspace_offers.yaml",
+    "plugins",
+)
+"""The entries inside a harness config directory — the global one and any in-project
+``.localharness/`` — that are protected in every mode.
+
+The list is the answer to one question: which files here change what the harness DOES, rather
+than recording what it did? ``config.yaml`` and ``overrides.yaml`` carry ``permissions.mode``,
+the deny patterns and the ``ask`` rule sets, so a write there edits the gate itself.
+``trusted_workspaces.yaml`` decides which directories run in ``auto`` and whose config layers
+load; ``grants.yaml`` holds every "always here" and every "never here" a human has answered;
+``declined_workspace_offers.yaml`` is its smaller sibling. ``plugins/`` is CODE the harness
+imports and runs. A directory entry protects its subtree, so ``plugins/**`` is covered by the
+one word.
+
+Everything else under a config directory is allowed: ``agents/`` and ``divisions/`` (agent
+definitions — creating one through the harness is the harness working), ``tools/`` (scripts the
+user drops in), ``memory.db`` and the session, history and bus-event stores, ``archive.db``,
+``audit.jsonl``, ``speed_stats.json``, ``KILL``, ``.repl_history``, and every backup file beside
+them. That is the inversion this constant is: the old rule protected the whole tree and
+hand-listed five runtime files as exemptions, which made 14 of the 20 prompts a replay of the
+owner's real corpus raised in ``auto`` be the orchestrator creating agents and tool scripts.
+
+An agent yaml is not a free pass for the gate, incidentally: the shipped
+``permissions.deny_patterns`` still carry ``write(*/agents/*.yaml)`` and ``write(*/config.yaml)``,
+which are a DENY — a tier above asking — for anyone who keeps them.
+
+Matched on the FIRST path component under the config directory, so ``config.yaml.bak`` is not
+``config.yaml`` (a backup is not read by anything) and a file called ``config.yaml`` sitting
+inside ``agents/`` is not either."""
 
 PROTECTED_PATHS_SYSTEM_DEFAULT: tuple[str, ...] = (
     "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/root", "/srv",
@@ -805,16 +860,18 @@ later executes. Each of those is recoverable, rare, or already covered — and e
 stopped the owner mid-task in the v0.14.0 dogfood. They keep their classification so ``guarded``
 is unchanged; ``auto`` does not ask about them."""
 
-AUTO_PROTECTED_PATHS_WORKSPACE: tuple[str, ...] = (".git", ".localharness")
+AUTO_PROTECTED_PATHS_WORKSPACE: tuple[str, ...] = (".git",)
 """The in-project protected names ``auto`` keeps, out of
 :data:`PROTECTED_PATHS_WORKSPACE_DEFAULT` (owner ruling 2026-09-11).
 
 ``.git`` because a write under it re-points what the next ordinary git command executes
-(``.git/hooks/*``, ``.git/config``), and ``.localharness`` because a write under it changes what
-the harness itself does next. ``.env``/``.env.*``, ``*.pem``, ``*.key``, ``id_rsa*`` and
+(``.git/hooks/*``, ``.git/config``). ``.env``/``.env.*``, ``*.pem``, ``*.key``, ``id_rsa*`` and
 ``id_ed25519*`` are dropped: writing your own project's ``.env`` is ordinary work, the real key
 material lives under ``~/.ssh`` and the other home entries, and those stay protected in every
-mode. ``guarded`` keeps the full set."""
+mode. ``guarded`` keeps the full set.
+
+``.localharness`` is absent from BOTH sets now, not just this one: its few behaviour-deciding
+files are named by :data:`PROTECTED_CONFIG_DIR_ENTRIES`, which applies in every mode."""
 
 
 @dataclass(frozen=True)
@@ -881,6 +938,7 @@ class GateSettings:
     write_shaped_commands: frozenset[str] = WRITE_SHAPED_COMMANDS_DEFAULT
     protected_paths_home: tuple[str, ...] = PROTECTED_PATHS_HOME_DEFAULT
     protected_paths_workspace: tuple[str, ...] = PROTECTED_PATHS_WORKSPACE_DEFAULT
+    protected_config_dir_entries: tuple[str, ...] = PROTECTED_CONFIG_DIR_ENTRIES
     protected_paths_system: tuple[str, ...] = PROTECTED_PATHS_SYSTEM_DEFAULT
     protected_paths_system_exempt: tuple[str, ...] = PROTECTED_PATHS_SYSTEM_EXEMPT_DEFAULT
     """Not reachable from ``AskConfig``: see the constant's docstring."""

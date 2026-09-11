@@ -302,6 +302,7 @@ ASK_TIGHTEN_ONLY_FIELDS: frozenset[str] = frozenset({
     "protected_paths_home",
     "protected_paths_workspace",
     "protected_paths_system",
+    "protected_config_dir_entries",
     "write_shaped_commands",
     "payload_commands",
     "pipe_to_shell_sources",
