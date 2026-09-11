@@ -37,35 +37,53 @@ def _request(grantable: bool = True) -> PermissionRequest:
 
 
 class _SentMessage:
-    def __init__(self, message_id: int) -> None:
+    """A posted message, with the two ways the adapter can annotate it afterwards.
+
+    `can_edit=False` stands in for a channel where the edit fails (a permissions change), which
+    is the case the reply fallback exists for.
+    """
+
+    def __init__(self, message_id: int, content: str = "", *, can_edit: bool = True) -> None:
         self.id = message_id
+        self.content = content
         self.reactions: list[str] = []
+        self.replies: list[str] = []
+        self.can_edit = can_edit
 
     async def add_reaction(self, emoji: str) -> None:
         self.reactions.append(emoji)
 
+    async def edit(self, content: str) -> None:
+        if not self.can_edit:
+            raise RuntimeError("cannot edit this message")
+        self.content = content
+
+    async def reply(self, content: str) -> None:
+        self.replies.append(content)
+
 
 class _Channel:
-    def __init__(self) -> None:
+    def __init__(self, *, can_edit: bool = True) -> None:
         self.sent: list[str] = []
         self.messages: list[_SentMessage] = []
+        self._can_edit = can_edit
 
     async def send(self, content: str) -> _SentMessage:
         self.sent.append(content)
-        msg = _SentMessage(1000 + len(self.messages))
+        msg = _SentMessage(1000 + len(self.messages), content, can_edit=self._can_edit)
         self.messages.append(msg)
         return msg
 
 
 class _InboundMessage:
-    def __init__(self) -> None:
-        self.channel = _Channel()
+    def __init__(self, *, can_edit: bool = True) -> None:
+        self.channel = _Channel(can_edit=can_edit)
 
 
-def _discord_channel() -> DiscordChannel:
+def _discord_channel(*, can_edit: bool = True) -> DiscordChannel:
     ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
     ch._client = object()  # ask_permission only checks it is not None
-    ch._current_msg = _InboundMessage()
+    ch._current_msg = _InboundMessage(can_edit=can_edit)
     return ch
 
 
@@ -145,6 +163,84 @@ async def test_the_gate_times_the_wait_out_and_denies(tmp_path):
     )
     assert not outcome.allowed and "no answer" in outcome.reason
     assert ch._reaction_waiters == {}, "the waiter leaked after the timeout"
+
+
+async def _expire(ch: DiscordChannel, seconds: float = 0.05) -> None:
+    """Put the question through the gate's own deadline — the only thing that expires it."""
+    task = asyncio.ensure_future(ch.ask_permission(_request()))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(task, seconds)
+
+
+@pytest.mark.asyncio
+async def test_an_expired_question_says_so_on_the_message():
+    """D7: the 🛑 message used to stand unchanged forever after the gate had already denied the
+    call. Three reactions, no answer, no sign it had stopped mattering — and a tap on ✅ an hour
+    later was a silent no-op, because the waiter it would have reached was gone."""
+    from localharness.channels.discord import PERMISSION_TIMEOUT_LINE
+
+    ch = _discord_channel()
+    await _expire(ch)
+
+    posted = ch._current_msg.channel.messages[0]
+    assert "Permission needed" in posted.content, "the question itself must survive the edit"
+    assert PERMISSION_TIMEOUT_LINE.split("{")[0] in posted.content
+    assert "denied" in posted.content
+    assert ch._reaction_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_an_answered_question_is_never_annotated():
+    from localharness.channels.discord import PERMISSION_TIMEOUT_LINE
+
+    ch = _discord_channel()
+    task = asyncio.ensure_future(ch.ask_permission(_request()))
+    await asyncio.sleep(0)
+    posted = ch._current_msg.channel.messages[0]
+    _react(ch, posted.id, "✅")
+    assert (await asyncio.wait_for(task, timeout=5.0)).kind == "allow_once"
+    assert PERMISSION_TIMEOUT_LINE.split("{")[0] not in posted.content
+    assert posted.replies == []
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_refuses_the_edit_gets_a_reply_instead():
+    """Saying it in the wrong shape beats not saying it: the verdict has to be visible."""
+    ch = _discord_channel(can_edit=False)
+    await _expire(ch)
+
+    posted = ch._current_msg.channel.messages[0]
+    assert len(posted.replies) == 1
+    assert "denied" in posted.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_gateway_costs_the_note_and_nothing_else():
+    """The annotation runs while the gate is already cancelling this coroutine, so it must never
+    become the reason a turn hangs or raises something other than the cancel it was handed."""
+    ch = _discord_channel()
+
+    async def _never(*_a, **_kw):
+        await asyncio.sleep(3600)
+
+    ch._current_msg.channel._can_edit = True
+    task = asyncio.ensure_future(ch.ask_permission(_request()))
+    await asyncio.sleep(0)
+    posted = ch._current_msg.channel.messages[0]
+    posted.edit = _never  # type: ignore[method-assign]
+    posted.reply = _never  # type: ignore[method-assign]
+
+    from localharness.channels import discord as discord_module
+
+    # The wait is bounded by a named constant; shortened here so the test does not sit for it.
+    original = discord_module.PERMISSION_TIMEOUT_POST_TIMEOUT_S
+    discord_module.PERMISSION_TIMEOUT_POST_TIMEOUT_S = 0.05
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(task, 0.05)
+    finally:
+        discord_module.PERMISSION_TIMEOUT_POST_TIMEOUT_S = original
+    assert ch._reaction_waiters == {}, "the waiter leaked when the annotation hung"
 
 
 @pytest.mark.asyncio

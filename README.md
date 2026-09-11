@@ -52,6 +52,15 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
 - **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`)
 
+**Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
+🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
+**♾️ always allow this in this workspace** (an "always" is written to `grants.yaml` and holds in
+the terminal and Zed too), and **❌ no, this once**. Only a user on `LOCALHARNESS_DISCORD_ALLOW`
+can answer, and some prompts — destructive shell commands, protected paths — offer only ✅ and ❌
+because they ask every single time. Unlike the terminal, a Discord question expires: if nobody
+reacts before `permissions.ask.timeout_s`, the call is denied and the message is edited to say
+so. React after that and nothing happens; ask again instead.
+
 ## How it compares
 
 LocalHarness is an *agent layer* — not an inference engine, and not a cloud SaaS. It sits on top of whatever serves your model and gives that model agents, tools, memory, and permissions.

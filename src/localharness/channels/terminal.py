@@ -1275,7 +1275,26 @@ class TerminalChannel(ChannelAdapter):
         instead, so the person at the keyboard still sees what they are answering — defect D6:
         `can_ask` follows stdin, and a question drawn into a pipe would be a question nobody
         can answer on a channel that now holds its dialog open forever.
+
+        The question and the legend run under `patch_stdout(raw=True)`, the same protection
+        `start_input_box` holds for the box's whole life. A turn does not stop while a human
+        thinks: subagents keep streaming, and every one of those writes goes through the ordinary
+        console path. Without the patch they landed straight on the terminal the legend was
+        painting, and the line the person answers from was the corrupted one. The patch cannot be
+        the `_output_lock` instead: that lock is held by whichever task is writing, so holding it
+        across `run_async()` would stall every writer until a human answered — and `run_async`
+        is exactly the wait that can last minutes. The lock stays where it belongs, around the
+        print alone; `patch_stdout` is what makes concurrent writers safe, by rendering them
+        ABOVE the running application instead of through it.
+
+        The patch is stdout-only on purpose. It replaces `sys.stderr` as well and routes both
+        into the app session's output, which on the redirected path is the pipe — the exact
+        place this question must never be drawn.
         """
+        from contextlib import nullcontext
+
+        from prompt_toolkit.patch_stdout import patch_stdout
+
         from localharness.agent.gate_types import Decision
 
         restart = self._box_restart_args if self._box_active else None
@@ -1287,10 +1306,6 @@ class TerminalChannel(ChannelAdapter):
                 self._close_burst()
             on_stdout = self.can_run_input_box()
             console = self._console if on_stdout else self._err_console
-            console.print(
-                f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
-                f"{escape(sanitize_for_display(request.display))}"
-            )
             options = (
                 PERMISSION_OPTIONS_GRANTABLE if request.grantable
                 else PERMISSION_OPTIONS_UNGRANTABLE
@@ -1300,10 +1315,18 @@ class TerminalChannel(ChannelAdapter):
                 from prompt_toolkit.output.defaults import create_output
 
                 output = create_output(always_prefer_tty=True)
-            try:
-                kind = await _build_permission_app(options, request.grantable, output).run_async()
-            except (KeyboardInterrupt, EOFError):
-                kind = PERMISSION_DEFAULT_DECISION
+            with (patch_stdout(raw=True) if on_stdout else nullcontext()):
+                async with self._output_lock:
+                    console.print(
+                        f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
+                        f"{escape(sanitize_for_display(request.display))}"
+                    )
+                try:
+                    kind = await _build_permission_app(
+                        options, request.grantable, output
+                    ).run_async()
+                except (KeyboardInterrupt, EOFError):
+                    kind = PERMISSION_DEFAULT_DECISION
             return Decision(kind=kind or PERMISSION_DEFAULT_DECISION)
         finally:
             if restart is not None:
