@@ -228,6 +228,21 @@ TOOL_TITLE_ARG_CHARS = 80
 row. Long enough for a path or a short command, short enough not to wrap the panel."""
 
 
+def split_display(display: str) -> tuple[str, Optional[str]]:
+    """A `PermissionRequest.display` split into a dialog title and its body.
+
+    One command can now carry several reasons at once, and the gate renders them as a short
+    multi-line `display`. ACP's `ToolCallUpdate.title` is a one-row string — a client showing
+    embedded newlines in it would either clip everything after the first line or blow up the
+    dialog's header — so the first line becomes the title and the rest becomes a text content
+    block underneath it, which is where the reasons belong anyway. A single-line display is
+    unchanged and gets no body.
+    """
+    head, _, rest = (display or "").partition("\n")
+    tail = rest.strip("\n")
+    return head, tail or None
+
+
 def acp_kind_for_group(group: str) -> str:
     """`ToolSchema.group` → ACP `ToolCallKind` (:data:`TOOL_GROUP_TO_ACP_KIND`, PRD §4)."""
     return TOOL_GROUP_TO_ACP_KIND.get(group or "", ACP_KIND_DEFAULT)
@@ -271,6 +286,13 @@ class AcpChannel(ChannelAdapter):
 
     can_ask = True
     """PRD §3.5: Zed renders an ASK as its own permission dialog, held open with no timeout."""
+
+    ask_holds_dialog = True
+    """The client holds the question open, so the gate must not put a deadline on it (PRD §3.5,
+    Zed row: "Timeout: none"). A timeout here would turn a user who stepped away from their
+    editor into a `reject_once` that also looks, in the ask-rate report, like a channel that
+    could not reach anybody. Discord is the opposite case — a message nobody reacts to has to
+    expire — which is why this is a per-channel flag rather than a rule in the gate."""
 
     def __init__(self, *, config_dir: Optional[str] = None) -> None:
         # bus=None on purpose: the bus does not exist until `_start_async` builds the session on
@@ -630,13 +652,15 @@ class AcpChannel(ChannelAdapter):
         kinds = GRANTABLE_OPTION_KINDS if request.grantable else UNGRANTABLE_OPTION_KINDS
         params = dict(getattr(request, "tool_params", {}) or {})
         tool_name = getattr(request, "tool_name", "")
+        title, body = split_display(request.display)
         response = await self._conn.request_permission(
             self._session_id,
             ToolCallUpdate(
                 tool_call_id=self._pending_call_id(tool_name, params),
-                title=request.display,
+                title=title,
                 kind=acp_kind_for_group(self._group_for(tool_name)),
                 status="pending",
+                content=[tool_content(text_block(body))] if body else None,
                 raw_input=params,
             ),
             options=[
