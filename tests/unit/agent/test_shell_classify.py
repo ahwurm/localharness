@@ -200,6 +200,43 @@ def test_pipe_to_shell_is_settings_driven() -> None:
     assert classify_shell("curl x | sh", disabled).destructive is False
 
 
+# --------------------------------------- the destination can be a flag (finding R6)
+
+TARGET_DIRECTORY: list[tuple[str, tuple[str, ...]]] = [
+    # the review repro: the last positional is the SOURCE when `-t` names the destination, so
+    # `cp -t ~/.ssh mykey` reported a write to `mykey` and the protected directory never showed.
+    ("cp -t ~/.ssh mykey", ("~/.ssh/mykey",)),
+    ("mv -t ~/.ssh mykey", ("~/.ssh/mykey",)),
+    ("install -t ~/.ssh mykey", ("~/.ssh/mykey",)),
+    ("cp --target-directory=~/.ssh mykey", ("~/.ssh/mykey",)),
+    ("cp --target-directory ~/.ssh mykey", ("~/.ssh/mykey",)),
+    ("cp -t ~/.ssh a b", ("~/.ssh/a", "~/.ssh/b")),
+    ("cp -t ~/.ssh src/nested/key", ("~/.ssh/key",)),
+    ("install -m 755 -t /usr/local/bin tool", ("/usr/local/bin/tool",)),
+    ("cp -t ~/.ssh", ("~/.ssh",)),  # no source named: the directory is the write
+    # -T says the destination is a file, which is the positional rule
+    ("cp -T a b", ("b",)),
+    ("cp --no-target-directory a b", ("b",)),
+    # the control: the ordinary spelling is unchanged
+    ("cp mykey ~/.ssh/authorized_keys", ("~/.ssh/authorized_keys",)),
+    ("mv a b", ("b",)),
+    ("rsync -avz src/ dest/", ("dest/",)),
+    ("rsync -t a b", ("b",)),  # rsync's -t is --times, never a target directory
+]
+
+
+@pytest.mark.parametrize("command,targets", TARGET_DIRECTORY, ids=[c[0] for c in TARGET_DIRECTORY])
+def test_a_target_directory_flag_is_the_destination(
+    command: str, targets: tuple[str, ...]
+) -> None:
+    assert classify_shell(command, SETTINGS).write_targets == targets
+
+
+def test_a_target_directory_is_joined_onto_the_cd() -> None:
+    """R6 and R2a compose: a relative `-t` directory still follows the `cd`."""
+    assert classify_shell("cd /tmp && cp -t out a", SETTINGS).write_targets == ("/tmp/out/a",)
+
+
 # ----------------------------------------- relative writes follow the `cd` (finding R2a)
 
 CD_TARGETS: list[tuple[str, tuple[str, ...]]] = [

@@ -236,6 +236,29 @@ SED_MODE_FLAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
 ``READ_ONLY_SIGNATURES_DEFAULT``, ``sed -i`` edits its file arguments in place. First match
 wins, so ``sed -n -i`` is a write (PRD §3.2 steps 7-8)."""
 
+COPY_COMMANDS = ("cp", "mv", "install", "rsync")
+"""PRD §3.2 step 8: the commands whose destination is a positional argument."""
+
+TARGET_DIRECTORY_COMMANDS = frozenset({"cp", "mv", "install"})
+"""The coreutils copies that also accept the destination as a FLAG: ``-t DIR`` /
+``--target-directory=DIR`` puts every positional on the SOURCE side, so reading the last
+positional reported the source as the target — ``cp -t ~/.ssh mykey`` looked like a write to
+``mykey`` (finding R6). ``rsync`` is deliberately absent: its ``-t`` is ``--times``
+(cp(1), mv(1), install(1), rsync(1))."""
+
+TARGET_DIRECTORY_FLAGS = ("-t", "--target-directory")
+NO_TARGET_DIRECTORY_FLAGS = ("-T", "--no-target-directory")
+"""``-T`` says the destination is a plain file even when it is a directory, so the last
+positional is the target — the same answer as the default path, kept explicit so the two flags
+cannot be confused for each other."""
+
+COPY_VALUE_FLAGS = frozenset({
+    "-t", "--target-directory", "-S", "--suffix", "--backup",
+    "-m", "--mode", "-o", "--owner", "-g", "--group", "-Z", "--context",
+})
+"""``cp``/``mv``/``install`` options whose next token is a VALUE, not a path. Without them
+``install -m 755 -t DIR a`` would read the mode as a source and report ``DIR/755``."""
+
 SED_SCRIPT_FLAGS = frozenset({"-e", "--expression", "-f", "--file"})
 """When present, every positional argument of ``sed`` is a file; otherwise the first
 positional is the script and the rest are files."""
@@ -1187,8 +1210,8 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     positionals = [token for token in rest if not token.startswith("-")]
     if head in ("tee", "touch", "mkdir"):
         return positionals
-    if head in ("cp", "mv", "install", "rsync"):
-        return positionals[-1:] if len(positionals) >= 2 else positionals
+    if head in COPY_COMMANDS:
+        return _copy_targets(head, rest)
     if head == "ln":
         return positionals[-1:] if len(positionals) >= 2 else positionals
     if head == "dd":
@@ -1200,6 +1223,45 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     if head in ("unzip", "tar"):
         return _flag_values(rest, ("-d", "-C", "--directory")) or ["."]
     return []
+
+
+def _copy_targets(head: str, rest: list[str]) -> list[str]:
+    """Destinations of ``cp``/``mv``/``install``/``rsync`` (PRD §3.2 step 8, finding R6).
+
+    Normally the last positional, but ``-t DIR`` / ``--target-directory[=]DIR`` moves the
+    destination into a flag and makes every positional a source — so the targets are the sources'
+    names inside DIR (``cp -t ~/.ssh mykey`` writes ``~/.ssh/mykey``). See
+    :data:`TARGET_DIRECTORY_COMMANDS` for why ``rsync`` keeps the positional rule.
+    """
+    if head in TARGET_DIRECTORY_COMMANDS:
+        sources = _positionals(rest, COPY_VALUE_FLAGS)
+        directory = _flag_values(rest, TARGET_DIRECTORY_FLAGS)
+        if directory and not any(token in NO_TARGET_DIRECTORY_FLAGS for token in rest):
+            return [posixpath.join(directory[-1], _leaf(source)) for source in sources] or [
+                directory[-1]
+            ]
+        return sources[-1:] if len(sources) >= 2 else sources
+    positionals = [token for token in rest if not token.startswith("-")]
+    return positionals[-1:] if len(positionals) >= 2 else positionals
+
+
+def _positionals(rest: list[str], value_flags: frozenset[str]) -> list[str]:
+    """Arguments that are paths: options dropped, and the value of a value-taking option too."""
+    out: list[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token.startswith("-") and token != "-":
+            index += 2 if token in value_flags else 1
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
+def _leaf(path: str) -> str:
+    """The name a copy keeps when it lands in a directory (``src/key`` → ``key``)."""
+    return posixpath.basename(path.rstrip("/")) or path
 
 
 def _flag_values(rest: list[str], flags: tuple[str, ...]) -> list[str]:
