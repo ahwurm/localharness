@@ -89,6 +89,26 @@ class PermissionRequest:
     ``(klass, key)``". Ignored when ``grantable`` is False: one ungrantable ask makes the whole
     request ungrantable and nothing durable is written."""
 
+    agent_id: str | None = None
+    """WHO is asking — the id of the agent whose tool call raised this (PRD §3.4: subagents
+    share the parent's gate, and therefore its channel).
+
+    One gate serves an orchestrator and every subagent it dispatches, so without this a renderer
+    could only say "a tool call wants to run `rm -rf`" and the person answering had no way to
+    tell which agent's call it was. Optional because a caller that builds a request by hand (a
+    test, a channel replaying one) has no agent to name; the gate fills it in on every real ask.
+    ``PermissionGate`` also prefixes ``display`` with it when the asker is not the session's own
+    agent, so a channel that renders nothing but the one line still shows who asked."""
+
+    call_id: str | None = None
+    """The tool call's own id (``Action.tool_call_id``), so a channel can pair the question with
+    the call it is about.
+
+    ACP is the reason it has to travel on the request: the client renders a permission dialog
+    against a `tool_call` it already knows about, and without the id the adapter can only guess
+    which one — the last call it saw — which is wrong the moment a model emits two tool calls in
+    one response. Optional for the same reason as ``agent_id``."""
+
 
 @dataclass(frozen=True)
 class VerdictResult:

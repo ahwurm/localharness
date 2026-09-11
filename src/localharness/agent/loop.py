@@ -1067,6 +1067,11 @@ class AgentLoop:
                 meta,
                 agent_id=session.agent_id,
                 session_id=session.session_id,
+                # The call's own id (`Action.tool_call_id`), so a channel can pair the question
+                # with the call it is about — ACP renders its dialog against a `tool_call` it
+                # already knows, and guessing "the last one" is wrong the moment a response
+                # carries two tool calls.
+                call_id=getattr(tool_call, "id", None),
                 tool_timeout_s=tool_timeout_s,
                 deny=self._deny_fn,
             )
