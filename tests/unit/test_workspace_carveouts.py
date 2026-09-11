@@ -4,12 +4,13 @@ Phase 41 moved a project's WORK into that project's own `.localharness/`. Two th
 decided separately, and this file is where each is shown to be true of a running session rather
 than of a function signature.
 
-**The leash comes free with the layer (CONF-01).** If you are working inside a project, the file
-tools should not need a second setup step before they stay inside it. So when a workspace layer
-applies, `permissions.workspace_root` defaults to the folder that CONTAINS `.localharness/` — the
-project itself, not the config folder inside it. If you named a root in your own config, yours
-still wins; if there is no workspace at all, nothing changes and the tools stay unconfined, exactly
-as they were. This is a default that narrows what the tools reach. It is not a sandbox.
+**No leash comes free with the layer (v0.14.1 removed CONF-01's default).** v0.13 made a workspace
+layer fill `permissions.workspace_root` in with the folder that CONTAINS `.localharness/`, so the
+file tools stayed inside the project with no second setup step. The leash only ever reached three
+tools, though, and the gap showed up live: with `auto` as the mode, `bash_exec("cat > /tmp/x")`
+ran while `write(path="/tmp/x")` was hard-refused in the same session. So the boundary belongs to
+the gate, which derives it and applies it to every tool alike, and `workspace_root` is once again
+what a human wrote down — still a hard confinement when they wrote one, and None otherwise.
 
 **The GPU server never follows the work.** There is one physical accelerator in this machine and
 one daemon in front of it, so its pidfile, its log and its venv are facts about the machine, not
@@ -140,24 +141,23 @@ def _only(items: list, what: str):
 # ------------------------------------------------------- criterion 4: the confinement default
 
 
-async def test_a_workspace_session_confines_the_file_tools_to_the_project_root(
+async def test_a_workspace_session_leaves_the_file_tools_unconfined(
     tmp_path, monkeypatch, fake_home
 ):
-    """The default reaches the tools, and it is the PROJECT, not the config folder inside it.
+    """No root reaches the tools, because no human asked for one (v0.14.1 removed the 5c default).
 
-    `register_builtin_tools` is where the root is bound into the Write / Edit / BashExec instances,
+    `register_builtin_tools` is where a root is bound into the Write / Edit / BashExec instances,
     once, at startup — subagents reuse those same instances through the shared registry. So this
-    kwarg is the whole of "the file tools are confined" for every agent in the session.
+    kwarg is the whole of "the file tools are leashed", and the leash covers exactly those three
+    tools. That is the bug it was removed for: with `auto` as the mode,
+    `bash_exec("cat > /tmp/notes/x")` ran while `write(path="/tmp/notes/x")` came back
+    permission_denied — same file, same session, opposite answers — because the shell tool's own
+    path string never reaches `_outside_workspace`. The gate derives the boundary for every tool
+    alike; a second, invisible, tool-shaped copy of the idea could only disagree with it.
 
-    Both halves are asserted in one test on purpose. `str(proj)` and `str(ws)` differ by a single
-    path component, and confining every agent INSIDE `.localharness/` is a mistake that type-checks,
-    names a real directory, and would look correct in any assertion that only checked for
-    not-None.
-
-    ORDER IS DELIBERATE: the specific check runs first. Measured, not assumed — with the general
-    equality first, a `.parent` regression reddens THAT line and the dotdir assertion below it can
-    never fire, so it would be decorative. This way the dotdir mistake is caught by the assertion
-    written for it, and every other wrong value is caught by the equality underneath.
+    Both wrong values are named. `str(proj)` and `str(ws)` differ by a single path component and
+    both are real directories, so a re-added default of either shape would satisfy any assertion
+    that only rejected the other one.
     """
     _home, _global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     proj = ws.parent
@@ -167,10 +167,14 @@ async def test_a_workspace_session_confines_the_file_tools_to_the_project_root(
 
     root = _only(calls, "register_builtin_tools")["workspace_root"]
     assert root != str(ws), (
-        "the file tools were confined to the .localharness config folder instead of the project "
-        "that contains it"
+        "the file tools were leashed to the .localharness config folder; nothing in a workspace "
+        "session may switch the leash on by itself"
     )
-    assert root == str(proj), f"the file tools were confined to {root}, not the project {proj}"
+    assert root != str(proj), (
+        f"the file tools were leashed to the project {proj} — the 5c default is back, and with it "
+        "the session where bash writes a file that write() is refused"
+    )
+    assert root is None
 
 
 async def test_an_explicit_workspace_root_still_wins_inside_a_workspace(tmp_path, monkeypatch, fake_home):

@@ -1,19 +1,25 @@
-"""CONF-01 — the confinement leash comes free with the workspace layer.
+"""The confinement leash does NOT come free with the workspace layer (v0.14.1 removed 5c).
 
-`permissions.workspace_root` is opt-in filesystem confinement for write/edit/bash_exec, and until
-this plan it had zero workspace-awareness: `load_agent()` copied the agent's own `permissions`
-block and nothing later touched the key, so a workspace session's file tools were unconfined
-unless the user had hand-configured a root. The layer already names the folder the work lives in,
-so the default now follows from it — when a workspace applies and nothing else set a root,
-`workspace_root` defaults to the folder CONTAINING `.localharness/` (the project root, NOT the
-dotdir). Explicit config still wins, from either source that can set it: the agent's own yaml or
-the user overlay's `agent:` section. With no workspace layer the injection is inert and `None`
-still means UNCONFINED — the shipped contract in models.py, which file-write capability depends on.
+`permissions.workspace_root` is opt-in filesystem confinement for write/edit/bash_exec. v0.13
+(CONF-01) made a workspace layer fill it in automatically with the folder CONTAINING
+`.localharness/`, on the reasoning that the layer already names where the work lives. A live
+end-to-end run showed what that actually bought: with `auto` as the mode,
+`bash_exec("cat > /tmp/notes/x")` ran and `write(path="/tmp/notes/x")` was hard-refused — same
+file, same session, opposite answers. The refusal came from the per-tool leash
+(`tools/base.Tool._outside_workspace`), which 5c had switched on without anyone asking for it,
+while the shell tool's own path string never reached it.
+
+So the default is gone and the gate owns the boundary: it DERIVES one from where you stand
+(`verdict.derive_boundary`), applies it to every tool the same way, and `auto`'s contract is that
+a write outside the project runs unless it lands somewhere protected. What stays is the EXPLICIT
+setting: a `workspace_root` in the agent's own yaml or the overlay's `agent:` section still
+resolves exactly as it always did and is still a hard confinement (permission_denied, no prompt,
+no mode that overrides it) — which is what the harness's own evals set, and now the only way the
+leash switches on is that a human wrote it down.
 
 Scope, stated plainly: these tests exercise the LOADER by constructing `ConfigLoader` with a named
-workspace layer. Nothing here drives a real session, and no test here proves the value reaches the
-Write/Edit/BashExec instances — `register_builtin_tools(..., workspace_root=...)` at
-start_cmd.py:799 is that seam, and 41-06 owns proving it end to end.
+workspace layer. Nothing here drives a real session; `tests/unit/test_workspace_carveouts.py` is
+where the value (or its absence) is followed into the Write/Edit/BashExec instances.
 """
 from __future__ import annotations
 
@@ -62,35 +68,34 @@ def layers(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 1-2. The default, and the half of it that is easy to get wrong
+# 1-2. No default, and neither of the two paths it used to be
 # ---------------------------------------------------------------------------
 
-def test_workspace_session_defaults_the_root_to_the_project(layers):
-    """A workspace applies, the agent yaml says nothing about permissions → the project root.
+def test_a_workspace_session_leaves_the_root_unset(layers):
+    """A workspace applies, the agent yaml says nothing about permissions → still None.
 
-    This is CONF-01's whole claim: the leash comes free with the layer. Before this, the same
-    load returned None and the agent's write/edit/bash tools were unconfined.
+    None means UNCONFINED (models.py), and unconfined is the honest answer here: the session is
+    not unguarded, it is guarded by the ONE mechanism that sees every tool. The leash this used to
+    switch on saw only three of them, which is how `bash_exec("cat > /tmp/notes/x")` ran in the
+    same session that hard-refused `write(path="/tmp/notes/x")`.
     """
-    global_dir, project, workspace = layers
+    global_dir, _project, workspace = layers
     _seed_agent(workspace, "builder")
 
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=workspace).load_agent("builder")
 
-    assert cfg.permissions.workspace_root == str(project), (
-        "CONF-01: with a workspace layer and no explicit root, workspace_root must default to the "
-        f"folder CONTAINING .localharness/ — expected {str(project)!r}, got "
-        f"{cfg.permissions.workspace_root!r}"
+    assert cfg.permissions.workspace_root is None, (
+        "a workspace layer must not invent a confinement root — the gate derives the boundary and "
+        f"applies it to every tool, got {cfg.permissions.workspace_root!r}"
     )
 
 
-def test_the_default_is_the_parent_not_the_dotdir(layers):
-    """Asserted SEPARATELY from test 1 so it cannot hide behind that equality.
+def test_neither_the_project_nor_the_dotdir_is_injected(layers):
+    """Asserted SEPARATELY from test 1 so a half-removal cannot hide behind that None.
 
-    `ConfigLoader._local_dir` IS the `.localharness/` directory (both discovery entry points
-    return the dotdir), so `str(self._local_dir)` is the plausible wrong answer: it type-checks,
-    it is a real directory, and confinement would still "work" — it would just leash every agent
-    inside the config folder instead of the project. This assertion is written for exactly that
-    regression, so it reddens on its own rather than depending on test 1's fixture shape.
+    The two candidate values differ by a single path component and both name a real directory, so
+    a re-added default — whichever of them it picked — would look plausible in any assertion that
+    only checked "not the other one". This test names both and rejects both.
     """
     global_dir, project, workspace = layers
     _seed_agent(workspace, "builder")
@@ -98,14 +103,13 @@ def test_the_default_is_the_parent_not_the_dotdir(layers):
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=workspace).load_agent("builder")
     root = cfg.permissions.workspace_root
 
+    assert root != str(project), (
+        f"the project root {root!r} was injected again — that is the leash the gate replaced"
+    )
     assert root != str(workspace), (
-        "CONF-01 says the folder CONTAINING .localharness/, not the dotdir itself — got the "
-        f"workspace dir {root!r}, which would confine every agent inside the config folder"
+        f"the dotdir {root!r} was injected — the wrong half of a default that should not exist"
     )
-    assert not str(root).endswith(".localharness"), (
-        f"the default must be the project root; {root!r} ends in .localharness"
-    )
-    assert Path(root) == workspace.parent
+    assert root is None
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +117,7 @@ def test_the_default_is_the_parent_not_the_dotdir(layers):
 # ---------------------------------------------------------------------------
 
 def test_explicit_agent_yaml_root_is_not_overwritten(layers):
-    """The agent's own yaml is the primary source; the default only fills a GAP.
+    """The agent's own yaml is the primary source, and now the ONLY one — a human wrote it down.
 
     A user who confined an agent to a scratch dir (the harness's own evals do exactly this) must
     not silently have that widened to the whole project just because a workspace exists.
@@ -130,21 +134,21 @@ def test_explicit_agent_yaml_root_is_not_overwritten(layers):
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=workspace).load_agent("builder")
 
     assert cfg.permissions.workspace_root == "/explicit/root", (
-        "an explicitly configured workspace_root must survive the workspace default — got "
-        f"{cfg.permissions.workspace_root!r}"
+        "an explicitly configured workspace_root must reach the session untouched by the "
+        f"workspace layer — got {cfg.permissions.workspace_root!r}"
     )
     assert cfg.permissions.workspace_root != str(project), (
-        "the project-root default must NOT have replaced the agent's explicit confinement"
+        "the project root must not appear here at all — neither as a replacement for the "
+        "agent's explicit confinement nor as a resurrected default"
     )
 
 
 def test_overlay_agent_section_root_is_not_overwritten(layers):
-    """The user overlay's `agent:` section is the second source, and the reason placement matters.
+    """The user overlay's `agent:` section is the second place a human can write the root down.
 
-    The injection sits AFTER the 5b overlay merge. Injected BEFORE it, the overlay would be
-    deep-merged UNDERNEATH our default and lose — the user's `components set agent.*` value would
-    be silently discarded in any workspace. Both halves are asserted: the overlay value present
-    AND the project root absent, because "the overlay value is there" passes when both are.
+    Both halves are asserted — the overlay value present AND the project root absent — because
+    "the overlay value is there" passes just as happily when something else put a default in
+    alongside it, which is exactly what 5c used to do from the line below the overlay merge.
     """
     global_dir, project, workspace = layers
     _seed_agent(workspace, "builder")
@@ -156,12 +160,12 @@ def test_overlay_agent_section_root_is_not_overwritten(layers):
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=workspace).load_agent("builder")
 
     assert cfg.permissions.workspace_root == "/from/overlay", (
-        "the overlay's agent.permissions.workspace_root is explicit config and must win over the "
-        f"workspace default — got {cfg.permissions.workspace_root!r}"
+        "the overlay's agent.permissions.workspace_root is explicit config and must reach the "
+        f"session — got {cfg.permissions.workspace_root!r}"
     )
     assert cfg.permissions.workspace_root != str(project), (
-        "the project-root default must be ABSENT here; asserting only that the overlay value is "
-        "present would pass an implementation that injected before the overlay merge"
+        "the project root must be ABSENT here; asserting only that the overlay value is present "
+        "would pass an implementation that injected a default over it"
     )
 
 
@@ -170,11 +174,11 @@ def test_overlay_agent_section_root_is_not_overwritten(layers):
 # ---------------------------------------------------------------------------
 
 def test_no_workspace_layer_leaves_the_root_unset(layers):
-    """LAYR-03: a workspace-less load must be byte-identical to before this plan.
+    """LAYR-03: a workspace-less load never had a root and still does not.
 
     `None` means UNCONFINED and that is deliberate (models.py) — file-write capability is a core
-    product feature. A default that leaked into global-only sessions would silently confine every
-    existing user to whatever directory their config lives beside.
+    product feature. Kept as its own test because it is the case that never changed: whatever
+    happens to the workspace path, a global-only session must not acquire a leash.
     """
     global_dir, _project, _workspace = layers
     _seed_agent(global_dir, "builder")
@@ -188,19 +192,19 @@ def test_no_workspace_layer_leaves_the_root_unset(layers):
 
 
 # ---------------------------------------------------------------------------
-# 6. Why no per-subagent wiring is needed
+# 6. The removal holds for every agent the loader serves
 # ---------------------------------------------------------------------------
 
-def test_every_agent_from_one_workspace_loader_gets_the_root(layers):
-    """Two different agent names, ONE workspace-aware loader, both confined to the project.
+def test_no_agent_from_a_workspace_loader_is_silently_confined(layers):
+    """Two different agent names, ONE workspace-aware loader, neither one leashed.
 
-    This is the mechanism that makes per-subagent confinement wiring unnecessary: `start` hands
+    Checked across two agents because that is the seam the removal has to hold at: `start` hands
     the subagent dispatch `load_agent=lambda n: loader.load_agent(n, bypass_cache=True)` — the
-    same loader and the same injection that produced the root agent's config. A default that
-    only applied to the first-loaded agent would confine the orchestrator and leave every
-    delegated agent unconfined.
+    same loader that produced the root agent's config. A default left behind on any path through
+    this loader would resurrect the split answer for whichever agents took that path, and a
+    subagent that refuses a write its orchestrator just made is the same bug wearing a hat.
     """
-    global_dir, project, workspace = layers
+    global_dir, _project, workspace = layers
     _seed_agent(workspace, "builder")
     _seed_agent(workspace, "reporter")
 
@@ -208,9 +212,8 @@ def test_every_agent_from_one_workspace_loader_gets_the_root(layers):
     builder = loader.load_agent("builder", bypass_cache=True)
     reporter = loader.load_agent("reporter", bypass_cache=True)
 
-    assert builder.permissions.workspace_root == str(project)
-    assert reporter.permissions.workspace_root == str(project), (
-        "every agent loaded through a workspace-aware loader must get the project root — the "
-        "subagent dispatch reuses this loader, so a first-agent-only default would leave "
-        "delegated agents unconfined"
+    assert builder.permissions.workspace_root is None
+    assert reporter.permissions.workspace_root is None, (
+        "every agent loaded through a workspace-aware loader is unconfined unless a human "
+        "configured a root — the subagent dispatch reuses this loader"
     )

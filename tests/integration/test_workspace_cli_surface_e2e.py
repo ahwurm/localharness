@@ -1,7 +1,8 @@
 """Criterion 4 — a workspace the SHIPPED COMMAND created is immediately live.
 
-Phases 39-42 taught a session to find a `.localharness/`, merge it, confine the file tools to the
-project around it and keep that project's memory inside it. Phase 43 gave users a command that
+Phases 39-42 taught a session to find a `.localharness/`, merge it and keep that project's memory
+inside it (they also leashed the file tools to the project around it, which v0.14.1 undid — the
+gate derives that boundary now). Phase 43 gave users a command that
 creates one. Every other test in this milestone builds `.localharness/` with `mkdir` — which proves
 the layering and says nothing about whether the thing a user actually types produces a layer the
 harness can then use. That gap is the milestone's one-sentence goal, and it is what this file
@@ -232,21 +233,22 @@ async def test_a_session_in_the_cli_made_workspace_lands_its_state_in_the_projec
     assert _file_snapshot(ws), "nothing at all was written under the workspace — nothing was proven"
 
 
-# ------------------------------------------------------------------ 4. the confinement default
+# --------------------------------------------------------------- 4. no confinement default
 
 
-async def test_the_scaffold_confines_the_file_tools_to_the_project_not_the_dotdir(
+async def test_the_scaffold_brings_no_confinement_leash_with_it(
     tmp_path, monkeypatch, fake_home
 ):
-    """CONF-01 arrives with the scaffold: no second setup step, and the root is the PROJECT.
+    """`init --workspace` and a start inside it must not switch on a per-tool leash.
 
-    Both halves in one body on purpose. `str(proj)` and `str(ws)` differ by a single path component,
-    and confining every agent inside `.localharness/` is a mistake that type-checks, names a real
-    directory, and would satisfy any assertion that only checked for not-None (41-03's finding).
+    CONF-01 used to say the leash came free with the scaffold. It came free and it came WRONG:
+    only Write/Edit/BashExec path arguments pass through `_outside_workspace`, so with `auto` as
+    the mode `bash_exec("cat > /tmp/notes/x")` ran while `write(path="/tmp/notes/x")` was hard-
+    refused in the same session. The gate derives the boundary for every tool instead, and a
+    scaffolded project arrives with `workspace_root` unset unless a human configured one.
 
-    The specific check runs FIRST, mirroring `test_workspace_carveouts.py`: with the general
-    equality first, a `.parent`-shaped regression reddens that line and the dotdir assertion below
-    can never fire, which would make it decorative.
+    Both wrong values are named: `str(proj)` and `str(ws)` differ by one path component and both
+    name a real directory, so rejecting only one of them would pass a half-resurrected default.
     """
     _home, _global_dir, proj = _scaffolded_project(tmp_path, monkeypatch, fake_home)
     ws = proj / WORKSPACE_DIR_NAME
@@ -257,11 +259,12 @@ async def test_the_scaffold_confines_the_file_tools_to_the_project_not_the_dotdi
     await _drive()
 
     root = _only(calls, "register_builtin_tools")["workspace_root"]
-    assert root != str(ws), (
-        "the file tools were confined to the config folder INSIDE the project; the leash belongs "
-        "around the project itself"
+    assert root != str(ws), "the file tools were leashed to the config folder inside the project"
+    assert root != str(proj), (
+        f"the file tools were leashed to the project root {proj} — the scaffold must not hand a "
+        "session a confinement nobody configured"
     )
-    assert root == str(proj), f"the tools were confined to {root}, not the project root {proj}"
+    assert root is None
 
 
 # ------------------------------------------------------------------ 5. the new CLI surface
