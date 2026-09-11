@@ -401,8 +401,48 @@ PERMISSION_DEFAULT_DECISION = "reject_once"
 
 PERMISSION_PROMPT_LABEL = "Permission needed"
 
+CANNOT_ASK_NOTICE = (
+    "permission prompts are disabled on this channel: {why}; asks will be denied — set "
+    "`permissions.mode: unattended` in config for unattended runs"
+)
+"""PRD §3.5's last row asks for "a loud startup warning naming the fix". The gate logs one for
+the model's side; this is the human's, printed once at session start, because a person who ran
+`localharness` in a terminal will otherwise meet a denial mid-turn with no idea why."""
 
-def _build_permission_app(options: str, grantable: bool) -> Application:
+CANNOT_ASK_NO_STDIN = "standard input is not a terminal, so nobody can answer a question"
+CANNOT_ASK_NO_TTY = "neither standard output nor standard error is a terminal, so a question would be invisible"
+"""The two ways a terminal session loses the ability to ask; the notice names which one it is
+rather than saying "non-interactive", which is what sent the verifier looking for a bug."""
+
+
+def _tty(stream: Any) -> bool:
+    """Is this stream a real terminal? False for a pipe, a file, a closed or absent stream."""
+    try:
+        return stream is not None and bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def cannot_ask_reason() -> str | None:
+    """Why this process could not put a permission question to a human — None when it can.
+
+    PRD §3.5's non-tty row, corrected by verification A defect D6: an ASK is answered on the
+    INPUT side, so the test is `stdin`. `localharness start | tee session.log` keeps a real
+    keyboard and a real screen; judging it by `stdout` alone fail-closed every prompt in a
+    session where the person was sitting right there. The output side still has to reach a
+    terminal somewhere — `ask_permission` draws the question on stderr when stdout is
+    redirected — or the question would be invisible and the answer would never come.
+    """
+    import sys
+
+    if not _tty(sys.stdin):
+        return CANNOT_ASK_NO_STDIN
+    if not (_tty(sys.stdout) or _tty(sys.stderr)):
+        return CANNOT_ASK_NO_TTY
+    return None
+
+
+def _build_permission_app(options: str, grantable: bool, output: Any = None) -> Application:
     """A one-keystroke choice for `TerminalChannel.ask_permission` (PRD §3.5).
 
     Deliberately NOT a `Buffer`/line-editor like the input bubble: there is nothing to type, and
@@ -436,6 +476,7 @@ def _build_permission_app(options: str, grantable: bool) -> Application:
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,
+        **({"output": output} if output is not None else {}),
     )
 
 
@@ -778,14 +819,16 @@ class TerminalChannel(ChannelAdapter):
 
     @property
     def can_ask(self) -> bool:
-        """A question needs a real TTY to answer (PRD §3.5's "non-tty" row).
+        """Can a person answer a question here? (PRD §3.5's "non-tty" row.)
 
-        The terminal channel also serves piped and `--no-input` runs, where a prompt_toolkit
-        application has nobody to read from; reporting the truth here is what routes those to the
-        fail-closed path with its warning instead of a hang. Same test the persistent input box
-        uses, so the two can never disagree.
+        The test is the INPUT side — verification A defect D6. `can_run_input_box()` asks
+        whether the persistent box can own STDOUT, which is a different question: piping the
+        transcript (`localharness start | tee session.log`) drops the box but keeps the
+        keyboard, and judging the ask by stdout fail-closed every prompt in a session where the
+        person was sitting right in front of it. :func:`cannot_ask_reason` is the honest test,
+        and `ask_permission` draws the question on stderr when stdout is redirected.
         """
-        return self.can_run_input_box()
+        return cannot_ask_reason() is None
 
     def __init__(
         self,
@@ -872,7 +915,12 @@ class TerminalChannel(ChannelAdapter):
         self._consolidation_finished_handle = None
 
     async def start(self) -> None:
-        """Initialize input history and subscribe to bus events."""
+        """Initialize input history, say so if we cannot ask, and subscribe to bus events."""
+        why = cannot_ask_reason()
+        if why is not None:
+            self._err_console.print(
+                f"[warning]{escape(CANNOT_ASK_NOTICE.format(why=why))}[/warning]"
+            )
         history_path = os.path.expanduser(self._history_file)
         os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
@@ -1199,6 +1247,11 @@ class TerminalChannel(ChannelAdapter):
         and restarted afterwards: two live applications cannot share one terminal, and
         suspending rather than tearing down keeps the REPL's queue and interrupt callbacks
         intact. Ctrl+C, Escape and Enter all answer "no, this once" (fail closed).
+
+        When stdout is redirected (`| tee`, `> file`) the question and its legend go to stderr
+        instead, so the person at the keyboard still sees what they are answering — defect D6:
+        `can_ask` follows stdin, and a question drawn into a pipe would be a question nobody
+        can answer on a channel that now holds its dialog open forever.
         """
         from localharness.agent.gate_types import Decision
 
@@ -1209,15 +1262,22 @@ class TerminalChannel(ChannelAdapter):
             async with self._output_lock:
                 self._stop_thinking()
                 self._close_burst()
-            self._console.print(
+            on_stdout = self.can_run_input_box()
+            console = self._console if on_stdout else self._err_console
+            console.print(
                 f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] {escape(request.display)}"
             )
             options = (
                 PERMISSION_OPTIONS_GRANTABLE if request.grantable
                 else PERMISSION_OPTIONS_UNGRANTABLE
             )
+            output = None
+            if not on_stdout:
+                from prompt_toolkit.output.defaults import create_output
+
+                output = create_output(always_prefer_tty=True)
             try:
-                kind = await _build_permission_app(options, request.grantable).run_async()
+                kind = await _build_permission_app(options, request.grantable, output).run_async()
             except (KeyboardInterrupt, EOFError):
                 kind = PERMISSION_DEFAULT_DECISION
             return Decision(kind=kind or PERMISSION_DEFAULT_DECISION)

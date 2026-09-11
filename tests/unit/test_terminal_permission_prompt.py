@@ -113,19 +113,90 @@ async def test_the_app_exits_on_one_keystroke():
 
 # ------------------------------------------------------------------ the contract
 
-def test_the_terminal_declares_it_can_ask_and_shows_diffs():
+class _Stream:
+    """A stand-in for sys.stdin/stdout/stderr with a known isatty()."""
+
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def _streams(monkeypatch, *, stdin: bool, stdout: bool, stderr: bool = True) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", _Stream(stdin))
+    monkeypatch.setattr(sys, "stdout", _Stream(stdout))
+    monkeypatch.setattr(sys, "stderr", _Stream(stderr))
+
+
+def test_the_terminal_declares_it_can_ask_and_shows_diffs(monkeypatch):
+    _streams(monkeypatch, stdin=True, stdout=True)
     ch = _channel()
     assert ch.can_ask is True
     assert ch.has_review_surface is True
+    assert ch.ask_holds_dialog is True
 
 
-def test_a_non_tty_terminal_reports_that_it_cannot_ask():
-    """PRD §3.5's non-tty row: piped and --no-input runs route to the fail-closed path."""
+def test_a_piped_transcript_can_still_be_asked(monkeypatch):
+    """Defect D6: `localharness start | tee session.log` keeps a real keyboard, so the ask must
+    follow the INPUT side — judging it by stdout denied every prompt in a session where the
+    person was sitting right there."""
+    _streams(monkeypatch, stdin=True, stdout=False, stderr=True)
+    assert _channel().can_ask is True
+
+
+def test_a_session_with_no_keyboard_reports_that_it_cannot_ask(monkeypatch):
+    """PRD §3.5's non-tty row: piped-in and --no-input runs route to the fail-closed path."""
+    from localharness.channels.terminal import CANNOT_ASK_NO_STDIN, cannot_ask_reason
+
+    _streams(monkeypatch, stdin=False, stdout=True)
+    assert _channel().can_ask is False
+    assert cannot_ask_reason() == CANNOT_ASK_NO_STDIN
+
+
+def test_a_question_with_nowhere_to_draw_it_cannot_be_asked(monkeypatch):
+    from localharness.channels.terminal import CANNOT_ASK_NO_TTY, cannot_ask_reason
+
+    _streams(monkeypatch, stdin=True, stdout=False, stderr=False)
+    assert _channel().can_ask is False
+    assert cannot_ask_reason() == CANNOT_ASK_NO_TTY
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_cannot_ask_says_so_once_at_startup(monkeypatch, tmp_path):
+    """PRD §3.5 wants the fix named out loud; the gate logs it for the model, this is the line
+    the human reads (defect D6)."""
     from rich.console import Console
 
-    ch = TerminalChannel(EventBus(), {})
-    ch._console = Console(file=StringIO(), force_terminal=False, width=120)
-    assert ch.can_ask is False
+    from localharness.channels.terminal import CANNOT_ASK_NO_STDIN
+
+    _streams(monkeypatch, stdin=False, stdout=True)
+    ch = TerminalChannel(EventBus(), {}, history_file=str(tmp_path / "hist"))
+    err = StringIO()
+    ch._console = Console(file=StringIO(), force_terminal=False, width=200)
+    ch._err_console = Console(file=err, force_terminal=False, width=200)
+    await ch.start()
+    await ch.stop()
+    printed = err.getvalue()
+    assert "permission prompts are disabled" in printed
+    assert CANNOT_ASK_NO_STDIN.split(",")[0] in printed
+    assert "permissions.mode: unattended" in printed
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_can_ask_prints_no_notice(monkeypatch, tmp_path):
+    from rich.console import Console
+
+    _streams(monkeypatch, stdin=True, stdout=True)
+    ch = TerminalChannel(EventBus(), {}, history_file=str(tmp_path / "hist"))
+    err = StringIO()
+    ch._console = Console(file=StringIO(), force_terminal=False, width=200)
+    ch._err_console = Console(file=err, force_terminal=False, width=200)
+    await ch.start()
+    await ch.stop()
+    assert err.getvalue() == ""
 
 
 def test_the_base_channel_cannot_ask_and_says_so_loudly():
