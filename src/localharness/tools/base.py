@@ -107,7 +107,28 @@ class Tool(ABC):
 
     Contract: `read(path) -> str` raises `OSError` when the client cannot produce the file;
     `write(path, text) -> None` replaces the whole file (ACP has no append mode, so `write`'s
-    append branch reads-then-concatenates through the same pair)."""
+    append branch reads-then-concatenates through the same pair). The two are a PAIR on any tool
+    that writes — see `_editor_hooks_unpaired`."""
+
+    def _editor_hooks_unpaired(self) -> "ToolResult | None":
+        """Refuse to run a writing tool with half the editor seam wired (review finding R5).
+
+        Every editor-backed write is a read-modify-write: ACP has no append, so `write`'s append
+        branch and `edit`'s match both have to read the current buffer before rewriting the whole
+        file. A write hook without its read hook would read the stale DISK copy (or nothing at
+        all) and hand the editor a file with the user's unsaved work deleted. `channels/acp.py`
+        wires the pair all-or-nothing; this is the assertion that says so at the only place the
+        damage would happen, and it returns an error instead of touching the disk behind the
+        buffer. Read-only tools never call it — `read` is wired with the read hook alone."""
+        if (self.file_read_hook is None) == (self.file_write_hook is None):
+            return None
+        missing = "file_read_hook" if self.file_read_hook is None else "file_write_hook"
+        return self.err(
+            f"Editor-backed file I/O is misconfigured: {missing} is not set while its partner "
+            "is. A write through an editor must read the buffer first, so the two hooks are "
+            "wired together or not at all — refusing to touch the file on disk.",
+            error_type="execution_error",
+        )
 
     def __init__(self, workspace_root: str | None = None) -> None:
         # Filesystem-touching tools (write/edit/bash_exec) accept an optional confinement root.

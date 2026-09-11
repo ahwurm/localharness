@@ -64,6 +64,8 @@ class WriteTool(Tool):
         )
 
     async def _execute(self, path: str, content: str, mode: str = "overwrite") -> ToolResult:
+        if (unpaired := self._editor_hooks_unpaired()) is not None:
+            return unpaired
         target = resolve_user_path(path)
 
         forbidden_suffixes = {".env", ".secret", ".token", ".pem", ".key"}
@@ -129,8 +131,10 @@ class WriteTool(Tool):
                 # ACP's fs/write_text_file replaces the WHOLE file — there is no append mode in
                 # the protocol (PRD §4) — so append becomes read-then-concatenate through the
                 # same editor-backed pair rather than a silent disk write behind the buffer.
+                # The read half is guaranteed present (`_editor_hooks_unpaired` above): making it
+                # optional here is exactly how an append used to TRUNCATE the file (R5).
                 text = content
-                if mode == "append" and target.exists() and self.file_read_hook is not None:
+                if mode == "append" and target.exists():
                     text = await self.file_read_hook(target) + content
                 await self.file_write_hook(target, text)
             else:

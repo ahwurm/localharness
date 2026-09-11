@@ -709,6 +709,107 @@ async def test_an_in_workspace_edit_goes_through_write_text_file_without_asking(
     assert target.read_text(encoding="utf-8") == "alpha\n", "the edit went to disk, not the editor"
 
 
+async def test_a_write_only_client_gets_no_editor_hooks_and_the_edit_asks(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """R5: the editor seam is all-or-nothing (PRD §4).
+
+    A client advertising `fs/write_text_file` but not `fs/read_text_file` used to get the write
+    hook alone — an append then truncated the file, and an edit read DISK while writing the
+    BUFFER, overwriting unsaved work. Neither hook is wired now, there is no review surface, and
+    the in-workspace edit falls back to the `edit-unreviewed` ask (PRD §3.1)."""
+    from localharness.tools.builtin.edit_tool import EditTool
+
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    target = project / "notes.md"
+    target.write_text("alpha\n", encoding="utf-8")
+    client = FakeClient(answers=["allow_once"], files={str(target): "alpha\n"})
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=_plan(
+            ("edit", {"path": str(target), "old_string": "alpha", "new_string": "beta"})
+        ),
+        tools=[EditTool()],
+        client=client,
+        fs_read=False,
+        fs_write=True,
+    )
+    assert session.agent.has_review_surface is False
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("rename alpha")])
+
+    edit = session.tools["edit"]  # the session (and its registry) is built on the first prompt
+    assert edit.file_read_hook is None and edit.file_write_hook is None
+    assert len(client.permission_requests) == 1, "an unreviewed in-workspace edit must ask once"
+    _tool_call, options = client.permission_requests[0]
+    assert "allow_always" in [o.kind for o in options], (
+        "edit-unreviewed is grantable — it is the ask that can be answered once and for all"
+    )
+    assert client.written == {}, "nothing may reach fs/write_text_file without the read half"
+    assert target.read_text(encoding="utf-8") == "beta\n"
+
+
+async def test_append_under_the_editor_keeps_the_buffer_content_not_the_disk_copy(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """R5: ACP has no append, so `write(mode='append')` reads the BUFFER and rewrites the whole
+    file. The disk copy is stale by definition — appending onto it would silently drop every
+    unsaved line (PRD §4)."""
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    target = project / "log.md"
+    target.write_text("saved\n", encoding="utf-8")
+    client = FakeClient(files={str(target): "saved\nunsaved\n"})
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=_plan(
+            ("write", {"path": str(target), "content": "appended\n", "mode": "append"})
+        ),
+        tools=[WriteTool()],
+        client=client,
+        fs_read=True,
+        fs_write=True,
+    )
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("append a line")])
+
+    assert client.written == {str(target): "saved\nunsaved\nappended\n"}
+    assert target.read_text(encoding="utf-8") == "saved\n", "the append went to disk, not the editor"
+
+
+async def test_an_edit_under_the_editor_reads_the_unsaved_buffer(tmp_path, monkeypatch, keep_cwd):
+    """R5: the edit's `old_string` is matched against what the user is LOOKING at, not the file on
+    disk — the two differ the moment there is an unsaved change (PRD §4)."""
+    from localharness.tools.builtin.edit_tool import EditTool
+
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    target = project / "notes.md"
+    target.write_text("on disk\n", encoding="utf-8")
+    client = FakeClient(files={str(target): "in the buffer\n"})
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=_plan(
+            ("edit", {"path": str(target), "old_string": "in the buffer", "new_string": "edited"})
+        ),
+        tools=[EditTool()],
+        client=client,
+        fs_read=True,
+        fs_write=True,
+    )
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("edit it")])
+
+    assert client.written == {str(target): "edited\n"}
+    assert target.read_text(encoding="utf-8") == "on disk\n"
+
+
 # ------------------------------------------------------------------ cancel
 
 

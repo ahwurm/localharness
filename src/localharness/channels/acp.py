@@ -15,8 +15,9 @@ worth defending between them.
 Lifecycle, and why it is shaped this way (PRD §4, critic finding 10):
 
 1. `initialize` must return immediately, so nothing is built here beyond remembering what the
-   client can do. Whether the client offers `fs/write_text_file` is what decides
-   `has_review_surface`, and therefore whether an in-workspace edit asks at all (§3.1 choice 2).
+   client can do. Whether the client offers BOTH `fs/read_text_file` and `fs/write_text_file` is
+   what decides `has_review_surface`, and therefore whether an in-workspace edit asks at all
+   (§3.1 choice 2). The pair is indivisible: an editor-backed write is a read-modify-write.
 2. `new_session(cwd)` must also return immediately. It derives the workspace boundary and runs
    v0.13 workspace discovery — including the one-time trust question, put to the human through
    `session/request_permission` because Zed is not a terminal and the phase-39 rule would
@@ -360,15 +361,19 @@ class AcpChannel(ChannelAdapter):
         field to be present, and a local harness has no account. `load_session=False` is honest:
         session ids are fresh per start (`start_cmd.py`), so we cannot resume one.
 
-        The client's `fs` capabilities are the load-bearing part: `write_text_file` is what gives
-        this session a review surface (Zed's diff pane, accept/reject per hunk), which is what
-        lets an in-workspace edit run without asking at all (PRD §3.1 choice 2, critic finding
-        11). Without it, edits go to disk and the gate asks once per workspace.
+        The client's `fs` capabilities are the load-bearing part, and they count only as a PAIR:
+        `read_text_file` AND `write_text_file` together give this session a review surface (Zed's
+        diff pane, accept/reject per hunk), which is what lets an in-workspace edit run without
+        asking at all (PRD §3.1 choice 2, critic finding 11). Write alone is not a review surface
+        but a data-loss hazard — an append or an edit has to READ the buffer before rewriting the
+        whole file, so a write-only client would append onto (or diff against) the stale disk
+        copy and silently drop the user's unsaved work (review finding R5). Without the pair,
+        edits go to disk exactly as in a terminal and the gate asks once per workspace.
         """
         fs = getattr(client_capabilities, "fs", None)
         self._client_can_read = bool(getattr(fs, "read_text_file", False))
         self._client_can_write = bool(getattr(fs, "write_text_file", False))
-        self.has_review_surface = self._client_can_write
+        self.has_review_surface = self._client_can_read and self._client_can_write
         log.info(
             "acp initialize: protocol=%s client_fs_read=%s client_fs_write=%s",
             protocol_version, self._client_can_read, self._client_can_write,
@@ -641,21 +646,27 @@ class AcpChannel(ChannelAdapter):
     def _wire_editor_file_io(self, registry: Any) -> None:
         """Point `read`/`write`/`edit` at the editor instead of the disk (PRD §4).
 
-        Only when the client advertises the matching `fs` capability, and only on the three
-        builtins whose whole job is one text file (:data:`EDITOR_FILE_IO_TOOLS`). The hooks are
-        set on the registered instances rather than passed at construction because capabilities
-        are known at `initialize`, long after `register_builtin_tools()` ran — see
+        ALL-OR-NOTHING, and only on the three builtins whose whole job is one text file
+        (:data:`EDITOR_FILE_IO_TOOLS`). The seam needs BOTH `fs` capabilities because every
+        editor-backed write is a read-modify-write: ACP has no append, so `write(mode='append')`
+        rewrites the whole file, and `edit` matches `old_string` against the buffer. Wiring the
+        write half alone would have appended onto the stale DISK copy and thrown away every
+        unsaved line (review finding R5) — so a client advertising only one of the two gets
+        neither hook, `has_review_surface` stays False, and the gate asks once for an
+        in-workspace edit instead (PRD §3.1).
+
+        The hooks are set on the registered instances rather than passed at construction because
+        capabilities are known at `initialize`, long after `register_builtin_tools()` ran — see
         `tools/base.Tool.file_read_hook`.
         """
-        if not (self._client_can_read or self._client_can_write):
+        if not (self._client_can_read and self._client_can_write):
             return
         for name in EDITOR_FILE_IO_TOOLS:
             tool = registry._find_tool_by_name(name)
             if tool is None:
                 continue
-            if self._client_can_read:
-                tool.file_read_hook = self._read_text_file
-            if self._client_can_write and name != "read":
+            tool.file_read_hook = self._read_text_file
+            if name != "read":
                 tool.file_write_hook = self._write_text_file
 
     async def _read_text_file(self, path: Path) -> str:
