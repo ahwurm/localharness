@@ -1233,7 +1233,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # layer v0.13 discovery applied, else the nearest checkout, else the cwd. Config's
         # `permissions.workspace_root` may only NARROW it; a value outside it is ignored with a
         # warning, because a repo that could move the boundary could approve its own writes.
-        from localharness.agent.gate import PermissionGate, derive_session_boundary, settings_from
+        from localharness.agent.gate import (
+            PermissionGate,
+            deny_fn_from,
+            derive_session_boundary,
+            settings_from,
+        )
         from localharness.agent.verdict import narrow_boundary
         from localharness.config.grants import GrantStore
 
@@ -1253,7 +1258,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             asker=None,  # attached to the channel below, once it exists
             channel_name="none",
             has_review_surface=False,
-            deny=None,  # AgentLoop hands its own agent's deny tier in on every check
+            # AgentLoop hands its OWN agent's deny tier in on every check (a subagent may have
+            # tightened it); this is the fallback for anything else that consults the gate —
+            # the ACP adapter, the trust dialog — so a caller can never skip the DENY tier.
+            deny=deny_fn_from(perm_eval, agent_config.permissions),
             settings=settings_from(agent_config.permissions),
             bus=bus,
         )
