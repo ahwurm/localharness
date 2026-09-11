@@ -17,8 +17,8 @@ from localharness.agent.shell_classify import classify_shell
 SETTINGS = GateSettings()
 
 
-def sigs(command: str) -> tuple[str, ...]:
-    return classify_shell(command, SETTINGS).signatures
+def sigs(command: str, settings: GateSettings = SETTINGS) -> tuple[str, ...]:
+    return classify_shell(command, settings).signatures
 
 
 # --------------------------------------------------------------------------- evasion corpus
@@ -58,8 +58,13 @@ EVASIONS: list[tuple[str, tuple[str, ...], bool, bool, tuple[str, ...]]] = [
     ('uv run python -c "print(1)"', ("uv run python -c",), False, True, ()),
     ("uv run pytest -q", ("uv run pytest",), False, False, ()),
     ("node -e 'require(\"fs\")'", ("node -e",), False, True, ()),
-    # step 7 — the subcommand survives a global flag with a value
-    ("git -c core.sshCommand=x push --force", ("git push --force",), True, False, ()),
+    # step 7 — the subcommand survives a global flag with a value, and the `-c` write is its own
+    # segment (F3a) rather than disappearing into the host command
+    (
+        "git -c core.sshCommand=x push --force",
+        ("git push --force", "git config core.sshCommand"),
+        True, False, (),
+    ),
     ("npx cowsay", ("npx cowsay",), False, False, ()),
     # step 8 — write-shaped targets
     ("cp a ~/.ssh/authorized_keys", ("cp",), False, False, ("~/.ssh/authorized_keys",)),
@@ -285,6 +290,94 @@ def test_sed_modes_are_different_keys() -> None:
     assert sigs("sed -i.bak s/a/b/ f1 f2") == ("sed -i",)
     assert sigs("sed s/a/b/ file") == ("sed",)
     assert classify_shell("sed -i.bak s/a/b/ f1 f2", SETTINGS).write_targets == ("f1", "f2")
+
+
+# ------------------------------------------------------------- git config (critic finding F3a)
+
+GIT_CONFIG_DANGEROUS = [
+    "git config core.hooksPath .evil",
+    "git config --global core.sshCommand 'ssh -i /tmp/k'",
+    "git config --system core.fsmonitor ./watch",
+    "git config --local core.pager 'sh -c evil'",
+    "git config --worktree core.editor vim",
+    "git config core.askPass ./ask.sh",
+    "git config --add credential.helper '!sh -c evil'",
+    "git config --unset core.pager",
+    "git config --replace-all alias.st '!sh -c evil'",
+    "git config --file .git/config include.path ../evil",
+    "git config includeIf.gitdir:/repo.path ../evil",
+    "git config url.'https://evil/'.insteadOf https://github.com/",
+    "git config diff.odd.command ./run",
+    "git config diff.external ./run",
+    "git config filter.lfs.clean ./run",
+    "git config filter.lfs.smudge ./run",
+    "git config merge.ours.driver ./run",
+    "git config sequence.editor ./run",
+    "git config gpg.program ./run",
+    "git config set core.hooksPath .evil",  # git 2.46's subcommand spelling
+    "git config core.hookspath .evil",  # git keys are case-insensitive
+]
+
+
+@pytest.mark.parametrize("command", GIT_CONFIG_DANGEROUS)
+def test_a_git_config_write_that_repoints_execution_is_destructive(command: str) -> None:
+    """F3a: these values are commands git runs LATER, so an "always" here answers for a command
+    the human never sees — ungrantable, and the key is in the signature."""
+    result = classify_shell(command, SETTINGS)
+    assert result.destructive is True, command
+    assert result.signatures[0].startswith("git config "), command
+    assert result.segments[0].read_only is False
+
+
+@pytest.mark.parametrize("command", [
+    "git config user.name Alex",
+    "git config --global user.email a@b.c",
+    "git config --add remote.origin.fetch +refs/heads/*:refs/remotes/origin/*",
+    "git config set push.default simple",
+])
+def test_an_ordinary_git_config_write_stays_grantable(command: str) -> None:
+    assert sigs(command) == ("git config",)
+    assert classify_shell(command, SETTINGS).destructive is False
+
+
+@pytest.mark.parametrize("command", [
+    "git config --get core.pager",
+    "git config --get-regexp alias",
+    "git config --list",
+    "git config -l",
+    "git config user.name",
+    "git config core.hooksPath",  # reading a dangerous key is still a read
+])
+def test_a_git_config_read_is_read_only(command: str) -> None:
+    result = classify_shell(command, SETTINGS)
+    assert result.signatures == ("git config",)
+    assert result.segments[0].read_only is True
+    assert result.destructive is False
+
+
+@pytest.mark.parametrize("command,signatures", [
+    ("git -c core.pager='sh -c evil' log", ("git log", "git config core.pager")),
+    ("git --config-env=core.pager=EVIL log", ("git log", "git config core.pager")),
+    ("git -c core.hooksPath=.evil commit -m x", ("git commit", "git config core.hooksPath")),
+])
+def test_an_inline_c_config_is_its_own_destructive_segment(
+    command: str, signatures: tuple[str, ...]
+) -> None:
+    """`git -c core.pager=… log` turns a READ into an exec; the host keeps its own signature."""
+    result = classify_shell(command, SETTINGS)
+    assert result.signatures == signatures
+    assert result.destructive is True
+
+
+def test_a_harmless_inline_c_config_adds_no_segment() -> None:
+    assert sigs("git -c color.ui=always log") == ("git log",)
+    assert classify_shell("git -c color.ui=always log", SETTINGS).destructive is False
+
+
+def test_the_dangerous_git_key_set_is_settings_driven() -> None:
+    relaxed = GateSettings(git_config_dangerous_keys=())
+    assert sigs("git config core.hooksPath .evil", relaxed) == ("git config",)
+    assert classify_shell("git config core.hooksPath .evil", relaxed).destructive is False
 
 
 def test_uv_run_composes_with_the_inner_command() -> None:

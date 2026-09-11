@@ -322,6 +322,44 @@ WRITE_SHAPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
 against the boundary and the protected set on every call. Redirections ``>``/``>>`` apply to any
 segment."""
 
+GIT_CONFIG_DANGEROUS_KEYS_DEFAULT: tuple[str, ...] = (
+    "core.hooksPath", "core.sshCommand", "core.fsmonitor", "core.pager", "core.editor",
+    "core.askPass", "credential.helper",
+    "include.path", "includeIf.*",
+    "alias.*", "url.*.insteadOf",
+    "diff.*.command", "diff.external", "filter.*.clean", "filter.*.smudge", "merge.*.driver",
+    "sequence.editor", "gpg.program",
+)
+"""Git config keys whose VALUE is a command git will run later (PRD §3.1 ``shell-destructive``).
+
+Writing one of these repoints future execution: ``core.hooksPath`` makes an ordinary ``git commit``
+run a script of the attacker's choosing, ``core.pager`` and ``diff.external`` turn a *read*
+(``git log``, ``git diff``) into an exec, ``credential.helper`` and ``core.askPass`` hand over
+secrets, ``url.*.insteadOf`` silently redirects a fetch to another host, and ``include.path`` /
+``includeIf.*`` pull in a whole config file that can set any of the others. That is why they are
+ungrantable rather than merely unfamiliar: the damage happens on some *later* command, so an
+"always" answer here would be an answer about a command the human never sees.
+
+Derivation: every git-config(1) key whose documented value is a command line or a path git later
+executes or includes, restricted to the ones reachable from a single ``git config`` write (the
+hook, pager, editor, credential, alias, external-diff/filter/merge-driver and include families).
+Source: git-config(1) and githooks(5); raised by the v0.14 critic as F3(a), because the shipped
+classifier filed all of these under one grantable ``git config`` key.
+
+``*`` is a glob over the rest of the key (``alias.*`` covers every alias; ``url.*.insteadOf``
+covers every URL base, dots and slashes included), matched case-insensitively because git treats
+section and variable names that way. Over-matching is the safe direction: it asks.
+"""
+
+SOURCE_COMMANDS_DEFAULT: frozenset[str] = frozenset({"source", "."})
+"""Shell builtins that run a FILE's contents in the current shell (PRD §3.2 step 7).
+
+``source ~/.bashrc`` and ``. ./env.sh`` are the same command and are an interpreter by nature:
+nothing on the command line says what will run. They get the ``<script>`` placeholder key that
+``python3 <script>`` gets, and carry ``inline_interpreter`` so the gate files them under
+``interpreter-inline`` — grantable per owner ruling §9.3, with the interpreter gap named in
+SECURITY.md rather than hidden behind a signature that looks like a plain command."""
+
 PROTECTED_PATHS_HOME_DEFAULT: tuple[str, ...] = (
     "~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube", "~/.docker",
     "~/.bashrc", "~/.zshrc", "~/.profile", "~/.bash_profile", "~/.zprofile",
@@ -354,6 +392,8 @@ class GateSettings:
         default_factory=lambda: dict(INLINE_CODE_FLAGS_DEFAULT)
     )
     inline_by_nature: frozenset[str] = INLINE_BY_NATURE_DEFAULT
+    source_commands: frozenset[str] = SOURCE_COMMANDS_DEFAULT
+    git_config_dangerous_keys: tuple[str, ...] = GIT_CONFIG_DANGEROUS_KEYS_DEFAULT
     wrapper_commands: frozenset[str] = WRAPPER_COMMANDS_DEFAULT
     dropped_commands: frozenset[str] = DROPPED_COMMANDS_DEFAULT
     subcommand_tools: frozenset[str] = SUBCOMMAND_TOOLS_DEFAULT

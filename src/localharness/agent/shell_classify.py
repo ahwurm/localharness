@@ -26,6 +26,7 @@ Two conventions the PRD leaves open, decided here and kept consistent:
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import shlex
 from dataclasses import replace
@@ -134,6 +135,40 @@ XARGS_VALUE_FLAGS = frozenset({"-n", "-I", "-i", "-P", "-d", "-a", "-E", "-s", "
                                "--max-chars", "--max-lines"})
 """``xargs`` options that consume the next argument; the first token after them is the
 payload command (PRD §3.2 step 5)."""
+
+GIT_CONFIG_SIGNATURE = "git config"
+"""The plain ``git config`` key. A write that is not one of
+``GateSettings.git_config_dangerous_keys`` keeps it (grantable); a dangerous one gets its key
+appended and goes destructive; a read keeps it and is read-only."""
+
+GIT_INLINE_CONFIG_FLAG = "-c"
+GIT_INLINE_CONFIG_ENV_FLAG = "--config-env"
+"""``git -c key=value CMD`` and ``git --config-env=key=VAR CMD`` set a config key for ONE command,
+on any subcommand — ``git -c core.pager='sh -c evil' log`` turns a read into an exec. Both forms
+are scanned on every ``git`` segment and a dangerous key is lifted into its own destructive
+segment, so the host command keeps its own signature and the config write is still seen."""
+
+GIT_CONFIG_READ_FLAGS = frozenset({
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool",
+    "-l", "--list",
+})
+GIT_CONFIG_WRITE_FLAGS = frozenset({
+    "--add", "--unset", "--unset-all", "--replace-all", "--remove-section", "--rename-section",
+    "--edit", "-e",
+})
+GIT_CONFIG_VALUE_FLAGS = frozenset({"--file", "-f", "--blob", "--type", "-t", "--default"})
+"""git-config(1)'s three flag families: the ones that read, the ones that write, and the ones
+whose next token is a value rather than the key. ``--global``/``--system``/``--local``/
+``--worktree`` choose a FILE, not a direction, so they say nothing here — a scope flag with a key
+and a value is still a write, which is why the direction is decided by flags and positionals
+together."""
+
+GIT_CONFIG_READ_SUBCOMMANDS = frozenset({"get", "list", "get-all", "get-regexp", "get-urlmatch"})
+GIT_CONFIG_WRITE_SUBCOMMANDS = frozenset({
+    "set", "unset", "add", "replace-all", "remove-section", "rename-section", "edit",
+})
+"""git 2.46's subcommand spelling (``git config set core.pager x``) alongside the classic flag
+form. Without these, the modern spelling of exactly the same write would read as a bare key."""
 
 SED_MODE_FLAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("-i", ("-i", "--in-place")),
@@ -548,6 +583,12 @@ def _build(
             payload_argvs, find_delete = _find_payloads(argv)
 
     signature, inline = _signature(argv, settings, find_delete=find_delete)
+    force_destructive = False
+    force_read_only = False
+    if signature == GIT_CONFIG_SIGNATURE:
+        signature, force_destructive, force_read_only = _git_config_facts(argv, settings)
+    if head == "git":
+        extras.extend(_git_inline_config_segments(argv, settings))
 
     if head in SHELL_INTERPRETERS:
         payload_texts = _inline_payloads(argv, settings)
@@ -568,6 +609,8 @@ def _build(
         redirect_targets,
         inline=inline,
         payload_lifted=bool(payload_argvs or payload_texts),
+        force_destructive=force_destructive,
+        force_read_only=force_read_only,
     )
     return host, extras, [], head
 
@@ -580,12 +623,22 @@ def _make_segment(
     *,
     inline: bool = False,
     payload_lifted: bool = False,
+    force_destructive: bool = False,
+    force_read_only: bool = False,
 ) -> ShellSegment:
-    """Assemble the segment: destructive/read-only verdict plus step 8's write targets."""
+    """Assemble the segment: destructive/read-only verdict plus step 8's write targets.
+
+    ``force_destructive`` / ``force_read_only`` are for facts that cannot be read off a signature
+    set because the signature is built from the command's own arguments — ``git config
+    core.hooksPath`` is destructive and ``git config --get x`` is read-only, and neither key can be
+    enumerated in advance.
+    """
     targets = list(redirect_targets) + _write_targets(signature, argv, settings)
-    destructive = signature in settings.destructive_signatures
+    destructive = force_destructive or signature in settings.destructive_signatures
     read_only = (
-        signature in settings.read_only_signatures and not destructive and not payload_lifted
+        (force_read_only or signature in settings.read_only_signatures)
+        and not destructive
+        and not payload_lifted
     )
     return ShellSegment(
         signature=signature,
@@ -766,6 +819,102 @@ def _interpreter_mode(
             return "<script>", False
         index += 1
     return "", False
+
+
+def _git_config_facts(argv: list[str], settings: GateSettings) -> tuple[str, bool, bool]:
+    """``git config …`` → (signature, destructive, read_only) — critic finding F3(a).
+
+    A WRITE to a key in ``settings.git_config_dangerous_keys`` repoints what git will execute on
+    some later command, so it is destructive and therefore ungrantable: the signature carries the
+    key (``git config core.hooksPath``) because that is the thing the human is being asked about.
+    Any other write keeps the plain ``git config`` key and stays grantable; a read
+    (``--get``, ``--list``, ``-l``, ``git config KEY`` with no value) is read-only and never asks.
+    """
+    try:
+        tokens = argv[argv.index("config") + 1:]
+    except ValueError:  # pragma: no cover - only reached with the "git config" signature
+        return GIT_CONFIG_SIGNATURE, False, False
+
+    write = False
+    key: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name = token.split("=", 1)[0]
+        if name in GIT_CONFIG_VALUE_FLAGS:
+            index += 1 if "=" in token else 2
+            continue
+        if token.startswith("-"):
+            write = write or name in GIT_CONFIG_WRITE_FLAGS
+            index += 1
+            continue
+        if key is None and token in GIT_CONFIG_WRITE_SUBCOMMANDS:
+            write = True
+        elif key is None and token in GIT_CONFIG_READ_SUBCOMMANDS:
+            pass
+        elif key is None:
+            key = token
+        else:
+            # A second positional is the VALUE the key is being set to.
+            write = True
+        index += 1
+
+    if write and key and _is_dangerous_git_key(key, settings):
+        return f"{GIT_CONFIG_SIGNATURE} {key}", True, False
+    return GIT_CONFIG_SIGNATURE, False, not write
+
+
+def _git_inline_config_segments(
+    argv: list[str], settings: GateSettings
+) -> list[ShellSegment]:
+    """``git -c key=value CMD`` / ``git --config-env=key=VAR CMD`` (:data:`GIT_INLINE_CONFIG_FLAG`).
+
+    A dangerous key becomes its own destructive segment so the host command keeps its own
+    signature: ``git -c core.pager='sh -c evil' log`` is still a ``git log``, and it is also a
+    config write that nobody would see if the two facts were merged.
+    """
+    keys: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == GIT_INLINE_CONFIG_FLAG and index + 1 < len(argv):
+            keys.append(argv[index + 1].split("=", 1)[0])
+            index += 2
+            continue
+        if token.startswith(f"{GIT_INLINE_CONFIG_ENV_FLAG}="):
+            keys.append(token.split("=", 1)[1].split("=", 1)[0])
+            index += 1
+            continue
+        if token == GIT_INLINE_CONFIG_ENV_FLAG and index + 1 < len(argv):
+            keys.append(argv[index + 1].split("=", 1)[0])
+            index += 2
+            continue
+        index += 1
+    return [
+        _make_segment(
+            f"{GIT_CONFIG_SIGNATURE} {key}",
+            ("git", "config", key),
+            settings,
+            [],
+            force_destructive=True,
+        )
+        for key in keys
+        if _is_dangerous_git_key(key, settings)
+    ]
+
+
+def _is_dangerous_git_key(key: str, settings: GateSettings) -> bool:
+    """Match one config key against ``settings.git_config_dangerous_keys``.
+
+    ``*`` globs the rest of the key (``url.*.insteadOf`` covers ``url.https://x/.insteadOf``, dots
+    and slashes included) and the comparison is case-insensitive, as git treats section and
+    variable names.
+    """
+    lowered = key.lower()
+    return any(
+        fnmatch.fnmatchcase(lowered, pattern.lower())
+        for pattern in settings.git_config_dangerous_keys
+    )
 
 
 def _first_subcommand(head: str, rest: list[str]) -> str | None:
