@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import reprlib as repr_lib
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -11,9 +12,16 @@ import yaml
 from pydantic import ValidationError
 from pydantic_yaml import to_yaml_str
 
-from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS
+from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS, GateSettings
 
-from .models import LEGACY_MODE_ALIASES, AgentConfig, DivisionConfig, HarnessConfig, OrgConfig
+from .models import (
+    ASK_TO_GATE_FIELD,
+    LEGACY_MODE_ALIASES,
+    AgentConfig,
+    DivisionConfig,
+    HarnessConfig,
+    OrgConfig,
+)
 from localharness.config.overlay import (
     deep_merge,
     load_overlay,
@@ -268,6 +276,78 @@ def _normalize_mode(value: Any) -> Optional[str]:
         return None
     mapped = LEGACY_MODE_ALIASES.get(value, value)
     return mapped if mapped in MODE_STRICTNESS else None
+
+
+# ------------------------------------------------------------------ #
+# PRD §3.3: the `permissions.ask.*` half of the narrow-only union
+# ------------------------------------------------------------------ #
+#
+# The v0.14 spine critic found the hole these two sets close: `_narrow_project_layer_permissions`
+# narrowed `mode` and `workspace_root`, while EVERY `permissions.ask.*` key a project layer wrote
+# passed straight through the merge into `AskConfig.to_gate_settings()`. A cloned repo whose
+# `.localharness/agents/<name>.yaml` said
+#   permissions: {ask: {destructive_signatures: [], protected_paths_home: [],
+#                       mcp_trusted_servers: ["evil"]}}
+# emptied the UNGRANTABLE tier and pre-trusted an MCP server without a single prompt — the exact
+# thing PRD §3.3 says a repo cannot do: it can only TIGHTEN.
+#
+# Every `AskConfig` field belongs to exactly one of the sets below, except `network_hosts`, which
+# is handled on its own because it is a bool: a project layer may switch the ask ON, never off.
+# A rule set added to `AskConfig` without a classification here is simply left alone by the
+# narrowing — add it to one of the two sets when you add the field.
+
+ASK_TIGHTEN_ONLY_FIELDS: frozenset[str] = frozenset({
+    "destructive_signatures",
+    "protected_paths_home",
+    "protected_paths_workspace",
+    "write_shaped_commands",
+    "payload_commands",
+    "pipe_to_shell_sources",
+    "pipe_to_shell_sinks",
+    "interpreter_commands",
+    "inline_by_nature",
+})
+"""The `permissions.ask` rule sets a project layer may ADD to (PRD §3.3).
+
+Every one of them names calls that ASK or REFUSE, so a longer list is a stricter session and a
+shorter one is a hole. The project layer's value is therefore unioned onto the global layer's
+(or onto the shipped `GateSettings` default when the global layer is silent) — a repo that knows
+its own dangerous command gets to say so, and a repo that deletes `rm -rf` from the ungrantable
+class changes nothing.
+"""
+
+ASK_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
+    "read_only_signatures",
+    "dropped_commands",
+    "wrapper_commands",
+    "subcommand_tools",
+    "mcp_trusted_servers",
+    "timeout_s",
+})
+"""The `permissions.ask` keys a project layer may not set at all (PRD §3.3).
+
+There is no tightening direction for these: ADDING to any of them loosens the gate. A signature
+added to `read_only_signatures` ALLOWS outright; a command added to `dropped_commands`,
+`wrapper_commands` or `subcommand_tools` changes what a segment signs as and so what a grant key
+means; a name in `mcp_trusted_servers` is a grant the operator writes themselves; a longer
+`timeout_s` moves the deadline a human answers inside. A project-layer value is dropped back to
+the global layer's, with a warning naming the key.
+"""
+
+
+def _gate_default(ask_field: str) -> Any:
+    """The shipped `GateSettings` default behind one `AskConfig` field, or None.
+
+    The baseline a tighten-only union starts from when the global layer declared nothing: `None`
+    in `AskConfig` means "use the shipped default in `agent/gate_types.py`", so the union has to
+    reach the same value the gate would have used. Read off the dataclass rather than restated
+    here, exactly as `AskConfig.to_gate_settings()` does.
+    """
+    gate_name = ASK_TO_GATE_FIELD.get(ask_field, ask_field)
+    for gate_field in dataclass_fields(GateSettings):
+        if gate_field.name == gate_name:
+            return gate_field.default
+    return None
 
 
 def _org_deny_patterns(raw: object) -> list[str]:
@@ -921,7 +1001,7 @@ class ConfigLoader:
     def _narrow_project_layer_permissions(
         self, merged: dict, stem: str, div_name: Optional[str]
     ) -> None:
-        """Apply the narrow-only union to `permissions.mode` and `permissions.workspace_root`.
+        """Apply the narrow-only union to `mode`, `workspace_root` and the `ask` rule sets.
 
         PRD §3.3, stated precisely: a repo can only TIGHTEN. It can add deny patterns (the union
         at step 5), register tools and define agents — things that ASK. It cannot hand itself a
@@ -929,14 +1009,20 @@ class ConfigLoader:
         repo-settable before v0.14: `deny_patterns` had the union, `mode` and `workspace_root`
         simply took whatever the highest-priority layer said (PRD §1).
 
+        `permissions.ask.*` was the third loosening surface and the widest (the v0.14 spine
+        critic's finding): it reached `AskConfig.to_gate_settings()` untouched, so a repo could
+        empty the ungrantable tier and pre-trust an MCP server. See `_narrow_project_layer_ask`.
+
         Mutates `merged["permissions"]` in place, dropping a project-layer value back to the
-        global layer's (mode) or to nothing, so 5c's derived default applies (workspace_root).
-        Both drops warn, naming both values — a silently ignored setting is its own bug report.
+        global layer's (mode, ask) or to nothing, so 5c's derived default applies (workspace_root).
+        Every drop warns, naming the value — a silently ignored setting is its own bug report.
         Called only when a workspace layer applies; without one, nothing here can fire.
         """
         perms = merged.get("permissions")
         if not isinstance(perms, dict):
             return
+
+        self._narrow_project_layer_ask(perms, stem, div_name)
 
         # --- mode: a project layer may only RAISE strictness.
         global_mode = _normalize_mode(self._global_layer_permission("mode", stem, div_name))
@@ -971,6 +1057,122 @@ class ConfigLoader:
                 configured, stem, boundary,
             )
             perms["workspace_root"] = None
+
+    def _global_layer_ask(self, stem: str, div_name: Optional[str]) -> dict:
+        """`permissions.ask` as the GLOBAL layer alone declares it, key by key.
+
+        The dict sibling of `_global_layer_permission`: the same agent > division > org > overlay
+        cascade read from the global dir's files only, merged PER KEY because `ask` is a block of
+        independent knobs — an operator who trusts an MCP server in the overlay and tunes a rule
+        set in `agents/<name>.yaml` declared both, and both keep their full authority (PRD §3.3).
+        Raw YAML for the same reason as its sibling: this must still answer when an unrelated key
+        in the same file is invalid, because the alternative is a gate that loosens on a typo.
+        """
+        def _declared(source: Any) -> dict:
+            perms = source.get("permissions") if isinstance(source, dict) else None
+            ask = perms.get("ask") if isinstance(perms, dict) else None
+            return ask if isinstance(ask, dict) else {}
+
+        def _declared_file(path: Path) -> dict:
+            if not path.exists():
+                return {}
+            try:
+                return _declared(_load_yaml_file(path))
+            except ConfigError:
+                return {}
+
+        global_cfg, global_overlay, _ws_cfg, _ws_overlay = self._raw_config_sources()
+        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+
+        # Lowest rung first: each layer overwrites the keys it declares, exactly as the merge
+        # itself resolves them (org < overlay `agent:` < division < agent).
+        layers: list[dict] = [
+            _declared(source.get("org") if isinstance(source, dict) else None)
+            for source in (global_cfg, global_overlay)
+        ]
+        layers.append(_declared(overlay_agent))
+        if div_name:
+            layers.append(_declared_file(self._config_dir / "divisions" / f"{div_name}.yaml"))
+        layers.append(_declared_file(self._config_dir / "agents" / f"{stem}.yaml"))
+
+        declared: dict = {}
+        for layer in layers:
+            declared.update({k: v for k, v in layer.items() if v is not None})
+        return declared
+
+    def _narrow_project_layer_ask(self, perms: dict, stem: str, div_name: Optional[str]) -> None:
+        """Narrow the project layer's `permissions.ask.*` to what a repo is allowed to ask for.
+
+        PRD §3.3 again, for the block that actually decides what the gate stops:
+        `ASK_TIGHTEN_ONLY_FIELDS` become the UNION of the global layer's list (or the shipped
+        `GateSettings` default) and the project's, so a repo can add a dangerous command and can
+        never delete one; `ASK_GLOBAL_ONLY_FIELDS` have no tightening direction at all and a
+        project-layer value is dropped; `network_hosts` may only be switched ON.
+
+        A value EQUAL to the global layer's is the operator's own and is left alone wherever it
+        points — the same test `workspace_root` uses, and what keeps a globally-defined agent
+        (no workspace `agents/<name>.yaml`) byte-identical. A key dropped entirely, rather than
+        pinned to a restated value, is how the shipped default keeps standing.
+        """
+        ask = perms.get("ask")
+        if not isinstance(ask, dict):
+            return
+        global_ask = self._global_layer_ask(stem, div_name)
+
+        def _restore(field: str, global_val: Any) -> None:
+            if global_val is None:
+                ask.pop(field, None)
+            else:
+                ask[field] = global_val
+
+        for field in list(ask):
+            value = ask[field]
+            global_val = global_ask.get(field)
+            if value == global_val:  # the operator declared it themselves
+                continue
+
+            if field in ASK_GLOBAL_ONLY_FIELDS:
+                log.warning(
+                    "ignoring workspace permissions.ask.%s %s for agent %r: the key is a "
+                    "loosening surface, and a project layer may only tighten the gate "
+                    "(the global layer asks for %s)",
+                    field, _short_repr(value), stem, _short_repr(global_val),
+                )
+                _restore(field, global_val)
+                continue
+
+            if field == "network_hosts":
+                baseline = global_val if isinstance(global_val, bool) else _gate_default(field)
+                if value is True or value == baseline:
+                    continue  # switching the ask ON is tightening; restating it is a no-op
+                log.warning(
+                    "ignoring workspace permissions.ask.network_hosts %r for agent %r: a project "
+                    "layer may only switch the network-host ask ON (the global layer asks for %r)",
+                    value, stem, baseline,
+                )
+                _restore(field, global_val)
+                continue
+
+            if field not in ASK_TIGHTEN_ONLY_FIELDS or not isinstance(value, list):
+                continue  # unknown key or wrong shape: AskConfig(extra="forbid") is the answer
+
+            baseline_seq = (
+                list(global_val) if isinstance(global_val, list)
+                else list(_gate_default(field) or ())
+            )
+            removed = [item for item in baseline_seq if item not in value]
+            extras = [item for item in value if item not in baseline_seq]
+            if removed:
+                log.warning(
+                    "ignoring %d removal(s) from workspace permissions.ask.%s for agent %r: a "
+                    "project layer may only ADD to the gate's rule sets, never subtract from "
+                    "them (dropped: %s)",
+                    len(removed), field, stem, _short_repr(removed),
+                )
+            if extras:
+                ask[field] = [*baseline_seq, *extras]
+            else:
+                _restore(field, global_val)
 
     def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
         """Overlay an optional agents/<name>.yaml onto a BUILT-IN subagent's base config.

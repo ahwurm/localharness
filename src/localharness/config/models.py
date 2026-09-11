@@ -204,6 +204,23 @@ class AskConfig(BaseModel):
     The gate's two DICT-shaped rule sets (`destructive_flag_verbs`, `inline_code_flags`) are
     deliberately not overridable from config: they are flag canonicalization tables, not policy
     lists, and a wrong entry silently changes what a grant key means (PRD §3.2 step 7).
+
+    WHICH LAYER may set what (PRD §3.3 — a repo can only TIGHTEN). The global config dir sets
+    every field here freely; a PROJECT layer (a workspace `.localharness/agents/<name>.yaml`) is
+    narrowed by `loader.ConfigLoader._narrow_project_layer_ask`:
+
+    * tighten-only — `destructive_signatures`, `protected_paths_home`,
+      `protected_paths_workspace`, `write_shaped_commands`, `payload_commands`,
+      `pipe_to_shell_sources`, `pipe_to_shell_sinks`, `interpreter_commands`, `inline_by_nature`:
+      a project layer may ADD entries (the result is the union with the global layer's list, or
+      with the shipped default) and can never delete one. `network_hosts` may only be set True.
+    * global-only — `read_only_signatures`, `dropped_commands`, `wrapper_commands`,
+      `subcommand_tools`, `mcp_trusted_servers`, `timeout_s`: these have no tightening direction
+      (adding to any of them loosens the gate), so a project-layer value is dropped with a
+      warning and the global layer's stands.
+
+    The narrowing is a LOADER property, not a validator: these fields are all perfectly legal in
+    the layer that is allowed to write them, and only the loader knows which layer a file is in.
     """
 
     model_config = ConfigDict(frozen=False, extra="forbid")

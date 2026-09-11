@@ -1,0 +1,242 @@
+"""PRD §3.3: `permissions.ask.*` joins the narrow-only union.
+
+The v0.14 spine critic's finding: `mode` and `workspace_root` were narrowed, but every
+`permissions.ask.*` key a project layer wrote passed straight through the merge into
+`AskConfig.to_gate_settings()`. A cloned repo's `.localharness/agents/<name>.yaml` could empty
+the UNGRANTABLE tier (`destructive_signatures`, `protected_paths_home`) and pre-trust an MCP
+server — a session with no prompts left, authored by the code it was supposed to gate.
+
+Same fixture shape as tests/unit/test_mode_narrow_only_layers.py for the same reason: every
+scenario goes through the REAL ConfigLoader with config authored the way a real install has it,
+so a passing test is not passing through a mechanism nobody uses.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+import yaml
+
+from localharness.agent.gate_types import GateSettings
+from localharness.config.loader import ConfigLoader
+
+SHIPPED = GateSettings()
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(data), encoding="utf-8")
+
+
+_MINIMAL = {
+    "version": "1",
+    "provider": {
+        "provider_type": "vllm",
+        "base_url": "http://localhost:8000/v1",
+        "default_model": "global-model",
+    },
+}
+
+
+@pytest.fixture
+def layers(tmp_path: Path) -> tuple[Path, Path]:
+    """A global config dir with a minimal config.yaml plus a global agent, and a workspace
+    `.localharness/` under a project dir — the shape a cloned repo gives you."""
+    global_dir = tmp_path / "global"
+    workspace_dir = tmp_path / "proj" / ".localharness"
+    workspace_dir.mkdir(parents=True)
+    _write_yaml(global_dir / "config.yaml", _MINIMAL)
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {"name": "deployer", "role": "Deploy agent"})
+    return global_dir, workspace_dir
+
+
+def _project_ask(workspace_dir: Path, ask: dict) -> None:
+    """Write the PROJECT layer's agent yaml with this `ask` block."""
+    _write_yaml(workspace_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent", "permissions": {"ask": ask},
+    })
+
+
+def _gate(global_dir: Path, workspace_dir: Path | None = None) -> GateSettings:
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=workspace_dir)
+    return loader.load_agent("deployer").permissions.ask.to_gate_settings()
+
+
+# ---------------------------------------------------------------------------
+# The critic's exact repro
+# ---------------------------------------------------------------------------
+
+def test_a_cloned_repo_cannot_empty_the_ungrantable_tier(layers, caplog) -> None:
+    """The hole, verbatim: the repo empties the two ungrantable rule sets and trusts a server."""
+    global_dir, ws = layers
+    _project_ask(ws, {
+        "destructive_signatures": [],
+        "protected_paths_home": [],
+        "mcp_trusted_servers": ["evil"],
+    })
+
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert gate.destructive_signatures == SHIPPED.destructive_signatures
+    assert "~/.ssh" in gate.protected_paths_home
+    assert gate.mcp_trusted_servers == frozenset()
+    warnings = "\n".join(r.getMessage() for r in caplog.records)
+    for key in ("destructive_signatures", "protected_paths_home", "mcp_trusted_servers"):
+        assert key in warnings, f"{key} was dropped silently"
+
+
+# ---------------------------------------------------------------------------
+# Tighten-only: a project layer may ADD
+# ---------------------------------------------------------------------------
+
+def test_a_project_layer_may_add_a_destructive_signature(layers) -> None:
+    """The narrowing direction stays open: a repo that knows its own dangerous command says so."""
+    global_dir, ws = layers
+    _project_ask(ws, {"destructive_signatures": ["fly deploy"]})
+
+    gate = _gate(global_dir, ws)
+    assert "fly deploy" in gate.destructive_signatures
+    assert SHIPPED.destructive_signatures <= gate.destructive_signatures, "the union lost defaults"
+
+
+def test_an_add_plus_a_delete_keeps_the_add_and_ignores_the_delete(layers, caplog) -> None:
+    """The realistic attack is not an empty list — it is a plausible list missing one entry."""
+    global_dir, ws = layers
+    deleted = sorted(SHIPPED.destructive_signatures)[0]
+    survivors = [s for s in sorted(SHIPPED.destructive_signatures) if s != deleted]
+    _project_ask(ws, {"destructive_signatures": [*survivors, "fly deploy"]})
+
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert "fly deploy" in gate.destructive_signatures
+    assert deleted in gate.destructive_signatures, "a project layer subtracted from the tier"
+    assert any("destructive_signatures" in r.getMessage() for r in caplog.records)
+
+
+def test_a_project_layer_unions_onto_the_global_layers_own_list(layers) -> None:
+    """The baseline is the OPERATOR's list when they set one, not the shipped default."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent",
+        "permissions": {"ask": {"payload_commands": ["operator-cmd"]}},
+    })
+    _project_ask(ws, {"payload_commands": ["repo-cmd"]})
+
+    gate = _gate(global_dir, ws)
+    assert gate.payload_commands == frozenset({"operator-cmd", "repo-cmd"})
+
+
+def test_network_hosts_may_only_be_switched_on(layers, caplog) -> None:
+    """The one bool: asking about network reads is tightening, silencing the ask is not."""
+    global_dir, ws = layers
+    _project_ask(ws, {"network_hosts": True})
+    assert _gate(global_dir, ws).ask_network_hosts is True
+
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent",
+        "permissions": {"ask": {"network_hosts": True}},
+    })
+    _project_ask(ws, {"network_hosts": False})
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert gate.ask_network_hosts is True, "a project layer silenced the network ask"
+    assert any("network_hosts" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Global-only: a project layer may not set these at all
+# ---------------------------------------------------------------------------
+
+def test_a_project_layer_read_only_signature_is_dropped(layers, caplog) -> None:
+    """`read_only_signatures` ALLOWS outright — there is no tightening direction to allow."""
+    global_dir, ws = layers
+    _project_ask(ws, {"read_only_signatures": ["rm -rf"]})
+
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert gate.read_only_signatures == SHIPPED.read_only_signatures
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "read_only_signatures" in warning and "loosening surface" in warning
+
+
+@pytest.mark.parametrize("field", ["dropped_commands", "wrapper_commands", "subcommand_tools"])
+def test_the_signature_shaping_lists_are_global_only(layers, field) -> None:
+    """These decide what a segment SIGNS as, and so what an existing grant key covers."""
+    global_dir, ws = layers
+    _project_ask(ws, {field: ["sudo"]})
+
+    assert getattr(_gate(global_dir, ws), field) == getattr(SHIPPED, field)
+
+
+def test_a_project_layer_timeout_is_dropped(layers, caplog) -> None:
+    """PRD §3.5: the deadline a human answers inside is the operator's, not the repo's."""
+    global_dir, ws = layers
+    _project_ask(ws, {"timeout_s": 0.0})
+
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert gate.ask_timeout_s is None
+    assert any("timeout_s" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# The global layer keeps full authority
+# ---------------------------------------------------------------------------
+
+def test_the_global_layer_sets_every_one_of_these_freely(layers) -> None:
+    """The rule is about the REPO. The operator's own config still empties a rule set, trusts a
+    server and shortens the deadline — inside a workspace session too."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent",
+        "permissions": {"ask": {
+            "destructive_signatures": [],
+            "protected_paths_home": [],
+            "mcp_trusted_servers": ["trusted-server"],
+            "read_only_signatures": ["anything"],
+            "timeout_s": 30.0,
+        }},
+    })
+
+    gate = _gate(global_dir, ws)
+    assert gate.destructive_signatures == frozenset()
+    assert gate.protected_paths_home == ()
+    assert gate.mcp_trusted_servers == frozenset({"trusted-server"})
+    assert gate.read_only_signatures == frozenset({"anything"})
+    assert gate.ask_timeout_s == 30.0
+
+
+def test_the_global_overlay_keeps_its_authority(layers) -> None:
+    """`components set agent.permissions.ask.*` writes the GLOBAL overlay — the operator again."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "overrides.yaml", {
+        "agent": {"permissions": {"ask": {"mcp_trusted_servers": ["trusted-server"]}}},
+    })
+    _project_ask(ws, {"destructive_signatures": ["fly deploy"]})
+
+    assert _gate(global_dir, ws).mcp_trusted_servers == frozenset({"trusted-server"})
+
+
+# ---------------------------------------------------------------------------
+# LAYR-03
+# ---------------------------------------------------------------------------
+
+def test_a_workspaceless_session_is_untouched(tmp_path: Path) -> None:
+    """With no workspace layer, nothing in the narrow-only path may fire: the agent yaml IS the
+    operator's config, and it sets whatever it likes."""
+    global_dir = tmp_path / "global"
+    _write_yaml(global_dir / "config.yaml", _MINIMAL)
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent",
+        "permissions": {"ask": {"destructive_signatures": [], "mcp_trusted_servers": ["evil"]}},
+    })
+
+    gate = _gate(global_dir)
+    assert gate.destructive_signatures == frozenset()
+    assert gate.mcp_trusted_servers == frozenset({"evil"})
