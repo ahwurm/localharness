@@ -29,12 +29,18 @@ left with a config that cannot load and a repair command that refuses to run. A 
 the same thing and can never become the reason the repair path dies.
 """
 
-# The pre-v0.14 spellings of `permissions.mode`, and what each becomes. `auto` was
-# "allow everything except deny_patterns" and `manual` was an unimplemented stub, so both
-# describe a session that never asked a human anything. They map to `guarded` — the mode that
-# DOES ask — rather than to `unattended`, which would silently preserve today's behaviour and
-# keep the gate switched off for every existing config (PRD §3.4).
-LEGACY_MODE_ALIASES: dict[str, Mode] = {"auto": DEFAULT_MODE, "manual": DEFAULT_MODE}
+# The one remaining pre-v0.14 spelling of `permissions.mode`. `manual` was an unimplemented
+# stub — a session that never asked anyone anything — so it maps to `guarded`, the mode that
+# DOES ask, rather than to `unattended`, which would keep the gate switched off for every
+# existing config (PRD §3.4).
+#
+# `auto` was here too, mapped to `guarded` with the same notice. It is no longer an alias: as of
+# v0.14.1 it is a REAL mode and the default (owner ruling 2026-09-11), so an existing config
+# that says `mode: auto` now loads as exactly what it says, with no deprecation notice. The
+# behaviour it gets is not the pre-v0.14 "allow everything" it originally meant — the blacklist
+# still holds — but it is far closer to that than to `guarded`, and it is what the word says.
+LEGACY_MANUAL_MODE: Mode = "guarded"
+LEGACY_MODE_ALIASES: dict[str, Mode] = {"manual": LEGACY_MANUAL_MODE}
 
 # `AskConfig` field name -> the `GateSettings` field it feeds, where the two differ. Config
 # reads `permissions.ask.timeout_s` / `.network_hosts` (the block already says "ask"), while
@@ -304,6 +310,15 @@ class AskConfig(BaseModel):
     protected_paths_workspace: Optional[list[str]] = Field(
         default=None, description="Override the ungrantable protected names inside a workspace."
     )
+    protected_paths_system: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Override the machine's own directories (/etc, /usr, C:/Windows, …) that are "
+            "ungrantable in every mode. They are what makes 'auto' safe to ship as the default: "
+            "auto allows a write outside the project silently, and this set is what keeps "
+            "'outside the project' from meaning /etc/hosts. /tmp and /var/tmp are exempt."
+        ),
+    )
     source_commands: Optional[list[str]] = Field(
         default=None,
         description=(
@@ -359,14 +374,19 @@ class PermissionConfig(BaseModel):
     mode: Mode = Field(
         default=DEFAULT_MODE,
         description=(
-            "Session permission mode (PRD §3.4). 'guarded' (default): deny patterns win, then the "
-            "gate asks a human about boundary-crossing and destructive calls and remembers the "
-            "answer. 'trusted': grantable asks become allow; destructive/protected-path calls "
-            "still ask. 'read-only': writes, non-read-only shell and code execution are refused "
-            "with an observation the model can re-plan against. 'unattended': every ask becomes "
-            "allow (deny patterns unchanged) — today's pre-v0.14 behaviour, named honestly; never "
-            "a default, set it explicitly for bench and scheduled jobs. The legacy 'auto' and "
-            "'manual' spellings load as 'guarded' with a deprecation warning."
+            "Session permission mode. 'auto' (default, owner ruling 2026-09-11): deny patterns "
+            "win, recorded refusals win, and then everything runs except a small curated "
+            "blacklist — deletes pointing outside the project, sudo, pipe-to-shell, dd/mkfs/"
+            "shred/format, git push --force/--delete, git reset --hard, git clean -f, and writes "
+            "to protected paths. No grants are read or written. 'guarded': the v0.14.0 default, "
+            "which asks once per new shell signature, per write outside the project, per "
+            "interpreter and per unfamiliar tool, and remembers the answer. 'trusted': like auto, "
+            "but every destructive command asks even inside the project, and a session with no "
+            "workspace boundary asks on every write. 'read-only': writes, non-read-only shell and "
+            "code execution are refused with an observation the model can re-plan against. "
+            "'unattended': every ask becomes allow (deny patterns unchanged) — set it for bench "
+            "and scheduled jobs. The legacy 'manual' spelling loads as 'guarded' with a "
+            "deprecation notice; 'auto' is no longer an alias, it is the real mode."
         ),
     )
 

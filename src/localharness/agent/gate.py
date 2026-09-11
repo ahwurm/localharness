@@ -80,6 +80,14 @@ auto-denied after the tool's own timeout while three separate docs promised it w
 Nothing is awaited under a deadline either when both the config value and the tool timeout are
 None."""
 
+MODE_SET_FROM_CHANNEL_LOG = "permission mode %s -> %s, set by a human on the %s channel"
+"""Logged at INFO every time :meth:`PermissionGate.set_mode` is driven from a channel.
+
+The audit trail that replaces the old refusal: a human may now switch their own session into
+``unattended`` mid-turn (owner, 2026-09-11: "I can't swap my active localharness session to
+unattended without exiting"), and a session that spent part of its life with the gate off should
+say so in its own log rather than only in someone's memory."""
+
 TIMEOUT_DECISION = Decision(kind="reject_once")
 """PRD §3.5: "deny on timeout", and §3.6: a timeout resolves as ``reject_once`` so
 timeout-denies are countable as their own guardrail. Never ``reject_always`` — nobody answered,
@@ -314,21 +322,28 @@ class PermissionGate:
     # ---------------------------------------------------------------- modes
 
     def set_mode(self, name: str, *, from_channel: bool = False) -> Mode:
-        """Switch the session mode (PRD §3.4), validating the name.
+        """Switch the session mode, validating the name.
 
-        ``unattended`` is never settable from a channel command: it turns every ASK into an
-        ALLOW, so a chat message must not be able to reach it — it is set explicitly in config
-        by bench and scheduled jobs, and nowhere else. Raises ``ValueError`` with a message the
-        channel shows verbatim.
+        EVERY mode is settable from a channel, ``unattended`` included. It was refused there
+        until v0.14.1, on the reasoning that a chat message must not be able to switch the gate
+        off — but the person typing ``/mode`` in their own terminal IS the person the gate
+        protects, and the owner met the rule the only way anyone does: "I can't swap my active
+        localharness session to unattended without exiting" (2026-09-11). A decision a human
+        makes about their own session is not an escalation; making them restart to make it was
+        the bug. The switch is logged at INFO so a session that ran unattended says so in its
+        log.
+
+        The rule that stays is the one about a layer that is NOT a human: a project's config may
+        only raise strictness, never lower it (``config/loader.MODE_STRICTNESS``), so a cloned
+        repo still cannot put itself in ``auto`` or ``unattended``.
+
+        Raises ``ValueError`` with a message the channel shows verbatim when the name is unknown.
         """
         if name not in MODE_STRICTNESS:
-            known = ", ".join(sorted(MODE_STRICTNESS, key=lambda m: -MODE_STRICTNESS[m]))
+            known = ", ".join(sorted(MODE_STRICTNESS, key=lambda m: MODE_STRICTNESS[m]))
             raise ValueError(f"unknown mode {name!r}; choose one of: {known}")
-        if from_channel and name == "unattended":
-            raise ValueError(
-                "unattended mode allows every call without asking, so it cannot be set from a "
-                "channel command — set `permissions.mode: unattended` in config instead"
-            )
+        if from_channel and name != self.mode:
+            log.info(MODE_SET_FROM_CHANNEL_LOG, self.mode, name, self.channel_name)
         self.mode = name  # type: ignore[assignment]
         return self.mode
 

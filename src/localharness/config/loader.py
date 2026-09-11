@@ -301,6 +301,7 @@ ASK_TIGHTEN_ONLY_FIELDS: frozenset[str] = frozenset({
     "destructive_signatures",
     "protected_paths_home",
     "protected_paths_workspace",
+    "protected_paths_system",
     "write_shaped_commands",
     "payload_commands",
     "pipe_to_shell_sources",
