@@ -85,7 +85,12 @@ TIMEOUT_DECISION = Decision(kind="reject_once")
 timeout-denies are countable as their own guardrail. Never ``reject_always`` — nobody answered,
 so nothing durable may be written."""
 
-TIMEOUT_REASON = "no answer within {seconds:.0f}s; denied"
+TIMEOUT_REASON = "no answer within {seconds:g}s; denied"
+"""What the model is told when nobody answered in time.
+
+``:g`` rather than ``:.0f``: a sub-second deadline rendered as "no answer within 0s", which
+reads as a bug in the gate rather than as a short timeout, and is the first thing a person
+debugging a too-eager auto-deny would see. ``:g`` prints 0.2 as "0.2" and 30.0 as "30"."""
 
 DENIED_OBSERVATION_PREFIX = "Permission denied: "
 """How the loop labels a gated call in the observation it hands back (``agent/loop.py``).
