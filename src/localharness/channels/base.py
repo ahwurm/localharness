@@ -39,6 +39,36 @@ class ChannelAdapter(ABC):
 
     channel_id: str  # must be set as class attribute in subclasses
 
+    can_ask: bool = False
+    """Can this channel put a permission question to a human? (PRD §3.5.)
+
+    False is the safe default and it is deliberately the BASE value: a new channel that says
+    nothing is treated as unable to ask, so its ASK verdicts fail closed with a loud warning
+    rather than silently running. Overridden to True by the terminal, Discord and (phase B) the
+    ACP adapter.
+    """
+
+    has_review_surface: bool = False
+    """Does an in-workspace edit land somewhere a human will see it? (PRD §3.1 choice 2.)
+
+    True for the terminal (it prints the diff after the fact) and for an ACP client that
+    advertises `fs` (Zed's diff pane, accept/reject per hunk). False everywhere else, which
+    makes in-workspace edits ask ONCE per workspace instead of never — critic finding 11.
+    """
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Render one ASK verdict and return the human's `Decision` (PRD §3.5).
+
+        `request` is a `PermissionRequest`; the return is a `Decision` whose kind is one of
+        allow_once / allow_always / reject_once / reject_always — the four ACP option kinds every
+        channel maps its UI onto. A channel that has not implemented this must also leave
+        `can_ask` False; the gate never calls it, and raising here makes a mismatch between the
+        two loud instead of silent.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot ask for permission; it must leave can_ask=False"
+        )
+
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         self.bus = bus
         self.config = config

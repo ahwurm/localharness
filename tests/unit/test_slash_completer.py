@@ -36,9 +36,15 @@ def test_completer_lists_all_commands_on_bare_slash():
 
 
 def test_completer_prefix_filters():
-    assert _texts("/m") == {"/memory", "/model"}   # both m-commands
-    assert _texts("/me") == {"/memory"}             # /model is /mo…, excluded
-    assert _texts("/mo") == {"/model"}
+    assert _texts("/m") == {"/memory", "/model", "/mode"}   # every m-command
+    assert _texts("/me") == {"/memory"}             # /model and /mode are /mo…, excluded
+    assert _texts("/mo") == {"/model", "/mode"}
+    assert _texts("/mod") == {"/model", "/mode"}
+    # `/mode` is itself a prefix of `/model`, so a fully typed `/mode` still shows both. That is
+    # fine and deliberate: nothing is highlighted, so Enter submits the typed command
+    # (test_enter_submits_a_fully_typed_command_despite_open_menu pins that rule).
+    assert _texts("/mode") == {"/mode", "/model"}
+    assert _texts("/model") == {"/model"}
     assert _texts("/h") == {"/help"}
 
 
@@ -96,10 +102,12 @@ class TestSlashMenuKeybindings:
         assert subs == ["/memory"]
 
     async def test_arrow_navigates_open_menu_then_enter_accepts(self):
-        # "/m" -> menu [/model, /memory]; Tab opens + highlights the first, Down moves to the next,
-        # Enter accepts it into the line, Enter submits.
+        # "/m" -> the m-commands in registry order; Tab opens + highlights the first, Down moves
+        # to the next, Enter accepts it into the line, Enter submits. The expected name is read
+        # from the registry so adding an m-command edits one list, not this assertion.
+        m_commands = [name for name, _ in SLASH_COMMANDS if name.startswith("/m")]
         subs = await self._drive("/m\t\x1b[B\r\r\x04")
-        assert subs == ["/memory"]
+        assert subs == [m_commands[1]]
 
     async def test_plain_text_is_unaffected_by_the_menu(self):
         # non-slash input never triggers completion; Enter submits verbatim.

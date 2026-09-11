@@ -12,6 +12,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/model", "List available models; /model <name|number> to switch"),
     ("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off"),
     ("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off"),
+    ("/mode", "Permission mode for this session; /mode guarded|trusted|read-only"),
     ("/memory", "Browse the agent's memory by tag; show/forget/search a memory"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
