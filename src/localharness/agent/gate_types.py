@@ -243,6 +243,9 @@ DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "sudo", "su", "doas",
     "docker exec", "docker run", "docker start", "docker restart", "docker stop", "docker kill",
     "docker rm", "docker rmi", "docker system prune",
+    "docker container exec", "docker container run", "docker container start",
+    "docker container restart", "docker container stop", "docker container kill",
+    "docker container rm", "docker container prune", "docker image rm", "docker image prune",
     "docker volume rm", "docker volume prune", "docker network rm",
     "docker compose up", "docker compose down", "docker compose exec", "docker compose run",
     "docker compose rm",
@@ -260,8 +263,9 @@ A BARE name here condemns every spelling of it — right for ``sudo``, ``su``, `
 ``mkfs`` and ``shred``, which do only one thing. Docker is not like that, so it is enumerated by
 subcommand instead (owner ruling on review finding R9): the entries above are the ones that run
 code on the host (``exec``, ``run``, ``compose up/run/exec``) or destroy state (``stop``,
-``kill``, ``rm``, ``rmi``, ``prune``, ``compose down``), and both spellings of compose carry
-their own subcommand. Everything else docker does is left where it belongs — ``ps``, ``logs``,
+``kill``, ``rm``, ``rmi``, ``prune``, ``compose down``), the ``docker container …`` /
+``docker image …`` management spellings of the same operations, and both spellings of compose
+carry their own subcommand. Everything else docker does is left where it belongs — ``ps``, ``logs``,
 ``images``, ``inspect``, ``version`` and ``info`` are reads in the ALLOW tier above, and
 ``build``, ``pull``, ``push``, ``tag``, ``login`` are ordinary unfamiliar commands the human can
 grant once. The bare ``docker`` entry this replaces made every one of those ungrantable, which is
