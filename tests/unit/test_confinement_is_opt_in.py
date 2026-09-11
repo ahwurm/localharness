@@ -11,61 +11,18 @@ _outside_workspace`, a second boundary that predates the gate, switched on by th
 layer applied. Nobody had asked for it; the shell tool's own command string never reached it; and
 `auto`'s contract is that a write outside the project runs unless it lands somewhere protected.
 
-So 5c is gone. The gate owns the boundary: it DERIVES it from where you stand, applies it to
-every tool the same way, and is the one thing a mode can talk about. An EXPLICIT
+So 5c's auto-fill is gone. The gate owns the boundary: it DERIVES it from where you stand,
+applies it to every tool the same way, and is the one thing a mode can talk about. An EXPLICIT
 `permissions.workspace_root` is untouched and is still a hard confinement — no prompt, no mode
 that overrides it — which is what harness-run evals set.
+
+This file is the TOOL half of that: what the leash does when it is and is not set.
+`tests/unit/test_workspace_root_default.py` is the loader half — whether it gets set at all —
+and asserting the same loader call in both places would be two tests and one signal.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-import yaml
-
-from localharness.config.loader import ConfigLoader
-
-_MINIMAL = {
-    "version": "1",
-    "provider": {
-        "provider_type": "vllm",
-        "base_url": "http://localhost:8000/v1",
-        "default_model": "m",
-    },
-}
-
-
-def _layers(tmp_path: Path, agent: dict) -> tuple[Path, Path]:
-    global_dir = tmp_path / "global"
-    (global_dir / "agents").mkdir(parents=True)
-    (global_dir / "config.yaml").write_text(yaml.dump(_MINIMAL), encoding="utf-8")
-    (global_dir / "agents" / "worker.yaml").write_text(yaml.dump(agent), encoding="utf-8")
-    workspace = tmp_path / "proj" / ".localharness"
-    workspace.mkdir(parents=True)
-    return global_dir, workspace
-
-
-def _permissions(global_dir: Path, workspace: Path):
-    loader = ConfigLoader(config_dir=global_dir, local_config_dir=workspace)
-    return loader.load_agent("worker").permissions
-
-
-def test_a_workspace_layer_no_longer_invents_a_confinement(tmp_path):
-    """Step 5c's auto-fill is gone. UNCONFINED is what `workspace_root: None` has always meant
-    (`config/models.PermissionConfig`), and it is now what a workspace session actually gets."""
-    global_dir, workspace = _layers(tmp_path, {"name": "worker", "role": "Work"})
-    assert _permissions(global_dir, workspace).workspace_root is None
-
-
-def test_an_explicitly_configured_root_still_confines(tmp_path):
-    """The knob a human writes down is untouched — evals depend on it, and it is the only way
-    the per-tool leash switches on now."""
-    root = tmp_path / "scratch"
-    global_dir, workspace = _layers(tmp_path, {
-        "name": "worker", "role": "Work", "permissions": {"workspace_root": str(root)},
-    })
-    assert _permissions(global_dir, workspace).workspace_root == str(root)
-
 
 @pytest.mark.asyncio
 async def test_a_write_outside_the_project_is_not_refused_by_the_tool(tmp_path):
