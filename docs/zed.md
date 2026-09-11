@@ -1,0 +1,113 @@
+# Use LocalHarness in Zed
+
+Zed talks to outside agents through one mechanism: the [Agent Client
+Protocol](https://agentclientprotocol.com) (ACP), JSON-RPC over stdin and stdout. LocalHarness
+ships that as a subcommand — `localharness acp` — so it appears in Zed's agent panel next to any
+other agent, running entirely on your own model server.
+
+## Install
+
+```bash
+uv tool install localharness
+localharness init     # detects your model server and writes ~/.localharness/config.yaml
+```
+
+`localharness acp` needs a working `localharness start`. If `start` cannot reach your model
+server, neither can Zed.
+
+## Register it with Zed
+
+Open Zed's `settings.json` (`cmd-shift-p` → *open settings*) and add:
+
+```json
+{
+  "agent_servers": {
+    "LocalHarness": {
+      "type": "custom",
+      "command": "localharness",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
+}
+```
+
+Use the absolute path to the binary (`~/.local/bin/localharness`, or the output of
+`which localharness`) if Zed's environment does not have it on `PATH`.
+
+Then open the agent panel, click **New Thread**, and pick **LocalHarness**.
+
+To point one Zed thread at a different config directory, add it to `args`:
+`["acp", "--config-dir", "/path/to/config"]`.
+
+## What to expect
+
+**Open a project folder first.** LocalHarness derives a workspace boundary from where the
+session stands — the nearest in-project `.localharness/`, else the git top level, else the
+folder itself. If that resolves to your home directory or above there is no boundary at all, and
+the first message you get back says so and asks you to open a project folder instead of a bare
+directory. Nothing runs until you do.
+
+**The first message takes as long as your model server does.** Zed gets a session id
+immediately; the model server and the agent come up on your first prompt, which is where
+progress can actually be shown. A warm server costs nothing; a cold one streams a
+`Starting the model server — 40s so far…` line every fifteen seconds until it is ready.
+
+**Three modes, in Zed's mode picker.**
+
+| Mode | What it does |
+|---|---|
+| **Guarded** (default) | Asks before anything leaves the project folder, touches a protected path, or runs a command this workspace has never allowed. Reads and web fetches never ask. |
+| **Trusted** | Allows anything that could have been remembered with "always". Destructive shell commands and protected paths still ask every time. |
+| **Read only** | Writes, edits, code execution and non-read-only shell commands are refused with an explanation the model can re-plan against. |
+
+There is a fourth mode, `unattended`, which turns every question into a yes. It is config-only
+(`permissions.mode: unattended`) and deliberately not in the picker.
+
+**The permission dialog.** When the gate decides a call needs a human, Zed shows its own
+permission dialog with up to four buttons: *Allow once*, *Always allow in this workspace*, *No*,
+*Never allow in this workspace*. Some calls — destructive shell commands, protected paths —
+offer only the two "once" buttons, because they are designed to ask every single time and an
+"always" there would be a lie. An "always" answer is written to `~/.localharness/grants.yaml`,
+keyed by this workspace, and it holds in the terminal and Discord too — one gate, one memory.
+Dismissing the dialog with Escape refuses that one call and remembers nothing.
+
+The first time you open a project whose `.localharness/` lives outside it, you get one extra
+dialog asking whether to load that workspace's config. It defines roles, models and tool
+permissions, so treat it like code you are about to run. Answered once, permanently.
+
+**Edits go through Zed.** Because Zed advertises filesystem access, `read` sees the buffer you
+are actually looking at (unsaved edits included) and `write`/`edit` hand their changes to Zed
+rather than writing to disk — so they land in the review pane where you can accept or reject
+them. That review surface is also why an in-workspace edit does not ask for permission at all:
+you are going to see it.
+
+**Cancel works.** The stop button cancels the running turn, the same path `Ctrl-C` takes in the
+terminal.
+
+## Not yet
+
+Honest list of what this adapter does not do in its first version.
+
+- **No session resume.** `session/load` is not advertised, because session ids are fresh on
+  every start and there is nothing to resume. Reopening a thread starts a new session.
+- **Thinking is shown as ordinary text.** The streaming callback carries no phase yet, so
+  reasoning arrives as message chunks rather than Zed's collapsible thought blocks.
+- **One project folder per agent process.** The harness derives its boundary, config layer and
+  memory from one directory and the process changes into it, so a second session for a
+  *different* folder is refused rather than answered by a session pointed somewhere else.
+  Threads on the same folder share one session.
+- **Zed's terminal capability is unused.** `bash_exec` runs the command itself; it does not
+  appear as a Zed terminal you can watch or kill.
+- **Images and attachments in a prompt are ignored.** Only the text blocks of a prompt reach the
+  agent.
+- **Not in the ACP registry yet**, so this is a manual `settings.json` entry rather than a
+  one-click install. That is a later phase.
+- **No per-turn token usage** is reported back to Zed.
+
+## When something goes wrong
+
+The protocol owns stdout, so everything LocalHarness would normally print goes to stderr. In
+Zed, the agent panel's menu has **View Server Logs** — startup failures (no config, a config
+this version rejects, a model server that is not answering) print their real explanation there.
+The panel itself will tell you a session could not be started and point you at that log.

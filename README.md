@@ -185,6 +185,7 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 |---------|---------|
 | `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
 | `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit; `--show-reasoning` streams the model's thinking as dim lines while it generates, `/reasoning` toggles it live — needs the server's reasoning parser) |
+| `acp` | Run as an [Agent Client Protocol](https://agentclientprotocol.com) server so LocalHarness appears in Zed's agent panel — see [docs/zed.md](docs/zed.md) |
 | `doctor` | Check Python, config, endpoint, model, context budget, token counting and directories; inside a project, name both config layers and the keys the project overrides |
 | `config show` | Print the effective merged config and the file that set each key |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
@@ -223,6 +224,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Documentation
 
+- [docs/zed.md](docs/zed.md) — **Use in Zed**: register `localharness acp` as an agent server, what the panel shows, and what it does not do yet
 - [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and setup notes
 - [docs/specs/](docs/specs/) — component specs
 
