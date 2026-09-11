@@ -117,9 +117,15 @@ def test_explicit_agent_yaml_root_is_not_overwritten(layers):
 
     A user who confined an agent to a scratch dir (the harness's own evals do exactly this) must
     not silently have that widened to the whole project just because a workspace exists.
+
+    The explicit root lives in the GLOBAL agent yaml here. It used to live in the workspace one,
+    where a root pointing outside the project is now dropped by the narrow-only union (PRD §3.3,
+    tests/unit/test_mode_narrow_only_layers.py): a repo may tighten its own confinement, never
+    move it outward. "Explicit config beats the default" is unchanged for every layer entitled to
+    set it — which is what this asserts.
     """
     global_dir, project, workspace = layers
-    _seed_agent(workspace, "builder", permissions={"workspace_root": "/explicit/root"})
+    _seed_agent(global_dir, "builder", permissions={"workspace_root": "/explicit/root"})
 
     cfg = ConfigLoader(config_dir=global_dir, local_config_dir=workspace).load_agent("builder")
 

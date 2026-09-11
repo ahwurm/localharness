@@ -11,7 +11,9 @@ import yaml
 from pydantic import ValidationError
 from pydantic_yaml import to_yaml_str
 
-from .models import AgentConfig, DivisionConfig, HarnessConfig, OrgConfig
+from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS
+
+from .models import LEGACY_MODE_ALIASES, AgentConfig, DivisionConfig, HarnessConfig, OrgConfig
 from localharness.config.overlay import (
     deep_merge,
     load_overlay,
@@ -251,6 +253,21 @@ def _overlay_default(overlay: dict, field: str, default: Any) -> Any:
     """
     value = overlay.get(field)
     return default if value in (None, "inherit") else value
+
+
+def _normalize_mode(value: Any) -> Optional[str]:
+    """A raw `permissions.mode` as one of the v0.14 session modes, or None if it is neither.
+
+    The narrow-only union runs on RAW yaml, before `PermissionConfig` validates, so it meets the
+    legacy `auto`/`manual` spellings that models.py maps to `guarded` (PRD §3.4). Comparing
+    strictness on the mapped value is what stops a workspace `mode: auto` from reading as an
+    unknown mode and slipping through unchecked. An unrecognized value returns None and is left
+    for Pydantic to reject with a proper field error.
+    """
+    if not isinstance(value, str):
+        return None
+    mapped = LEGACY_MODE_ALIASES.get(value, value)
+    return mapped if mapped in MODE_STRICTNESS else None
 
 
 def _org_deny_patterns(raw: object) -> list[str]:
@@ -812,8 +829,10 @@ class ConfigLoader:
         # falsy check is what makes explicit config win; falsy-not-None is deliberate, since an
         # empty-string root is a mistake rather than a confinement and the project root is the
         # better answer than a leash around "".
-        if self._local_dir is not None and not merged.get("permissions", {}).get("workspace_root"):
-            merged.setdefault("permissions", {})["workspace_root"] = str(self._local_dir.parent)
+        if self._local_dir is not None:
+            self._narrow_project_layer_permissions(merged, path.stem, div_name)
+            if not merged.get("permissions", {}).get("workspace_root"):
+                merged.setdefault("permissions", {})["workspace_root"] = str(self._local_dir.parent)
 
         # 6. Validate merged dict
         line_map = _build_line_map(text)
@@ -855,6 +874,103 @@ class ConfigLoader:
         return _resolve_scalar(
             "kill_file", agent_val, div_val, getattr(org_budget, "kill_file", None), None
         )
+
+    def _global_layer_permission(self, field: str, stem: str, div_name: Optional[str]) -> Any:
+        """`permissions.<field>` as the GLOBAL layer alone declares it, or None.
+
+        The same agent > division > org cascade the merged permissions use, read from the global
+        dir's files only — the sibling of `_global_layer_kill_file`, generalized because the
+        narrow-only union needs the same "what did the operator, not the repo, ask for?" answer
+        for `mode` and `workspace_root` (PRD §3.3). Raw YAML for the same reason: this must still
+        answer when an unrelated key in the file is invalid.
+        """
+        def _declared(source: dict) -> Any:
+            perms = source.get("permissions") if isinstance(source, dict) else None
+            return perms.get(field) if isinstance(perms, dict) else None
+
+        def _declared_file(path: Path) -> Any:
+            if not path.exists():
+                return None
+            try:
+                return _declared(_load_yaml_file(path))
+            except ConfigError:
+                return None
+
+        global_cfg, global_overlay, _ws_cfg, _ws_overlay = self._raw_config_sources()
+        org_val = None
+        for source in (global_cfg, global_overlay):
+            section = source.get("org") if isinstance(source, dict) else None
+            declared = _declared(section) if isinstance(section, dict) else None
+            if declared is not None:
+                org_val = declared
+
+        # The overlay's `agent:` section is the lowest rung, exactly as step 5b layers it — and it
+        # is GLOBAL-only (`_raw_config_sources` strips `agent:` from the workspace overlay), so a
+        # value set by `components set agent.permissions.*` is the operator's, not the repo's.
+        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_val = _declared(overlay_agent) if isinstance(overlay_agent, dict) else None
+
+        return _resolve_scalar(
+            field,
+            _declared_file(self._config_dir / "agents" / f"{stem}.yaml"),
+            _declared_file(self._config_dir / "divisions" / f"{div_name}.yaml") if div_name else None,
+            org_val,
+            overlay_val,
+        )
+
+    def _narrow_project_layer_permissions(
+        self, merged: dict, stem: str, div_name: Optional[str]
+    ) -> None:
+        """Apply the narrow-only union to `permissions.mode` and `permissions.workspace_root`.
+
+        PRD §3.3, stated precisely: a repo can only TIGHTEN. It can add deny patterns (the union
+        at step 5), register tools and define agents — things that ASK. It cannot hand itself a
+        looser session mode, and it cannot move its own confinement leash outward. Both were
+        repo-settable before v0.14: `deny_patterns` had the union, `mode` and `workspace_root`
+        simply took whatever the highest-priority layer said (PRD §1).
+
+        Mutates `merged["permissions"]` in place, dropping a project-layer value back to the
+        global layer's (mode) or to nothing, so 5c's derived default applies (workspace_root).
+        Both drops warn, naming both values — a silently ignored setting is its own bug report.
+        Called only when a workspace layer applies; without one, nothing here can fire.
+        """
+        perms = merged.get("permissions")
+        if not isinstance(perms, dict):
+            return
+
+        # --- mode: a project layer may only RAISE strictness.
+        global_mode = _normalize_mode(self._global_layer_permission("mode", stem, div_name))
+        baseline = global_mode if global_mode is not None else DEFAULT_MODE
+        effective = _normalize_mode(perms.get("mode"))
+        if effective is not None and MODE_STRICTNESS[effective] < MODE_STRICTNESS[baseline]:
+            log.warning(
+                "ignoring workspace permissions.mode %r for agent %r: a project layer may only "
+                "tighten the session mode, and the global layer asks for %r",
+                effective, stem, baseline,
+            )
+            perms["mode"] = baseline
+
+        # --- workspace_root: a project layer may only name a root INSIDE the boundary the
+        # loader can derive from the workspace itself (PRD §3.1: the boundary is derived, never
+        # configured). A root equal to the global layer's is the operator's own choice and is
+        # left alone wherever it points.
+        configured = perms.get("workspace_root")
+        if not configured or configured == self._global_layer_permission(
+            "workspace_root", stem, div_name
+        ):
+            return
+        boundary = self._local_dir.parent.resolve()  # type: ignore[union-attr]
+        try:
+            candidate = Path(configured).expanduser().resolve()
+        except (OSError, RuntimeError):  # unresolvable path: treat as outside, fail closed
+            candidate = None
+        if candidate is None or not candidate.is_relative_to(boundary):
+            log.warning(
+                "ignoring workspace permissions.workspace_root %r for agent %r: a project layer "
+                "may only confine INSIDE the project it sits in (%s)",
+                configured, stem, boundary,
+            )
+            perms["workspace_root"] = None
 
     def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
         """Overlay an optional agents/<name>.yaml onto a BUILT-IN subagent's base config.
