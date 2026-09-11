@@ -159,6 +159,12 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   The same holds for `bash run.sh` and every other interpreter-plus-file signature. Reading the diff
   is what stands between the grant and the code it runs, which is why the review surface matters and
   why a channel that cannot show you one asks about in-project edits instead.
+- **`source FILE` and `. FILE` are keyed like a script too** (`source <script>`), so the same
+  caveat applies. Three shapes that looked like this gap are caught instead: a `git config` write
+  to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters, merge
+  drivers, and the rest of a named list) is ungrantable and asks every time, including the
+  `-c key=value` spelling on any git command; `eval`'s argument is classified the way `bash -c`'s
+  is; and a shell function's body is classified where it is defined, not hidden behind its name.
 - **The shell boundary is best-effort by construction.** A `bash_exec` call is one opaque string.
   The harness strips heredoc bodies, lifts `$(…)`, backticks and process substitutions, splits at
   `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`

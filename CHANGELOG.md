@@ -11,6 +11,15 @@ harness interrupts you when something crosses your project boundary or looks
 destructive, and stays quiet otherwise. Read SECURITY.md, "Human approval gate",
 for what it stops and the five gaps it does not.
 
+### Breaking
+- **`permissions.allow_patterns` is gone, with an automatic repair.** Every
+  `localharness init` before v0.14 wrote `allow_patterns: []`; the first
+  `localharness start` after upgrading strips the key for you (timestamped backup,
+  announced), or run `localharness config migrate` yourself. If yours held entries,
+  they are listed as they are removed — no release ever honored them. Remembered
+  answers live in `~/.localharness/grants.yaml`, written only when a human answers
+  a prompt.
+
 ### Added
 - **A human approval gate on every tool call, subagents included.** One pure
   verdict — deny, then the classes that ask every time (destructive shell,
@@ -22,8 +31,10 @@ for what it stops and the five gaps it does not.
   and reviewable in-workspace edits never ask; a channel with nobody to ask
   refuses and warns once.
 - **Remembered answers in `~/.localharness/grants.yaml`.** An "always" is keyed by
-  the workspace's resolved path with mandatory provenance; a "never" writes a deny
-  pattern in the same file. Nested folders inherit. A `grants.yaml` inside a
+  the workspace's resolved path with mandatory provenance; a "never" is a refusal
+  record under the same key, so it denies exactly what the prompt named and nothing
+  else (never a text pattern that would also catch `scp` when you said no to `cp`).
+  Nested folders inherit. A `grants.yaml` inside a
   project tree is never read — a cloned repo cannot pre-approve itself. No CLI
   verb: the prompt is the interface, the file is the escape hatch.
 - **Four session modes and `/mode`.** `guarded` (default), `trusted`, `read-only`
@@ -55,8 +66,10 @@ for what it stops and the five gaps it does not.
 
 ### Removed
 - **`permissions.allow_patterns`.** It never did anything, and as a config key it
-  was a loosening surface that travels with a repository. A config still carrying
-  it fails validation with that explanation. Grants live in the global store.
+  was a loosening surface that travels with a repository. An empty one (what old
+  `init` wrote) is dropped with a warning and stripped by `config migrate`; a
+  populated one fails validation with that explanation. Grants live in the global
+  store — see Breaking above.
 
 ### Fixed
 - **`chmod 777` was only blocked at the start of a command** (#159). The shipped
