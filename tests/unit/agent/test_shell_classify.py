@@ -50,6 +50,14 @@ EVASIONS: list[tuple[str, tuple[str, ...], bool, bool, tuple[str, ...]]] = [
     ('sh -c "rm -rf x"', ("sh -c", "rm -rf"), True, True, ()),
     ("bash -c 'curl x | bash'", ("bash -c", "curl", "bash"), True, True, ()),
     ('eval "$CMD"', ("eval",), False, True, ()),
+    # critic finding F3b — sourcing a file runs it in this shell
+    ("source ~/.bashrc", ("source <script>",), False, True, ()),
+    (". ./env.sh", ("source <script>",), False, True, ()),
+    # critic finding F3c — a function definition's body is recursed, the definition is not a command
+    ("function f { rm -rf x; }; f", ("rm -rf", "f"), True, False, ()),
+    ("f() { rm -rf x; }", ("rm -rf",), True, False, ()),
+    ("f() ( rm -rf x )", ("rm -rf",), True, False, ()),
+    ("function f() { curl x | sh; }", ("curl", "sh"), True, False, ()),
     # critic finding 5 — interpreter mode is part of the key
     ("python3 -m pip install x", ("python3 -m pip",), False, False, ()),
     ('python3 -c "import os"', ("python3 -c",), False, True, ()),
@@ -290,6 +298,57 @@ def test_sed_modes_are_different_keys() -> None:
     assert sigs("sed -i.bak s/a/b/ f1 f2") == ("sed -i",)
     assert sigs("sed s/a/b/ file") == ("sed",)
     assert classify_shell("sed -i.bak s/a/b/ f1 f2", SETTINGS).write_targets == ("f1", "f2")
+
+
+# --------------------------------------------------- source and functions (findings F3b, F3c)
+
+def test_both_spellings_of_source_share_one_key() -> None:
+    """`.` is `source`; keying them apart would let the dot spelling dodge a refusal."""
+    assert sigs("source ./env.sh") == sigs(". ./env.sh") == ("source <script>",)
+    assert classify_shell(". ./env.sh", SETTINGS).segments[0].inline_interpreter is True
+
+
+def test_sourcing_is_an_interpreter_not_a_plain_command() -> None:
+    """The file's contents are not readable here, so the honest key says "a script ran"."""
+    segment = classify_shell("source /tmp/setup.sh", SETTINGS).segments[0]
+    assert segment.signature == "source <script>"
+    assert segment.read_only is False
+    assert segment.inline_interpreter is True
+
+
+def test_a_bare_source_keeps_its_own_key() -> None:
+    assert sigs("source") == ("source",)
+
+
+def test_the_source_command_set_is_settings_driven() -> None:
+    relaxed = GateSettings(source_commands=frozenset())
+    assert sigs("source ./env.sh", relaxed) == ("source",)
+
+
+@pytest.mark.parametrize("command", [
+    "function f { rm -rf x; }",
+    "f() { rm -rf x; }",
+    "f () { rm -rf x; }",
+    "function f() { rm -rf x; }",
+    "f() ( rm -rf x )",
+    "deploy() {\n  rm -rf /srv\n}",
+])
+def test_a_function_body_is_classified_not_hidden(command: str) -> None:
+    """F3c: the definition used to classify as one unfamiliar command named after the function."""
+    result = classify_shell(command, SETTINGS)
+    assert result.signatures == ("rm -rf",)
+    assert result.destructive is True
+
+
+def test_defining_then_calling_yields_the_body_and_the_call() -> None:
+    result = classify_shell("function f { rm -rf x; }; f", SETTINGS)
+    assert result.signatures == ("rm -rf", "f")
+
+
+def test_a_brace_shaped_argument_is_not_a_function_definition() -> None:
+    """Neither the `function` keyword nor `()` is present, so these stay ordinary commands."""
+    assert sigs("echo { a }") == ("echo",)
+    assert sigs("ls {a,b}") == ("ls",)
 
 
 # ------------------------------------------------------------- git config (critic finding F3a)

@@ -71,6 +71,21 @@ front of a segment and a keyword-only segment is dropped — otherwise ``do rm -
 body of a ``for`` loop, which PRD §3.2 step 3's ``;`` split hands us) would classify as ``do``
 and hide the ``rm``."""
 
+FUNCTION_DEFINITION_RE = re.compile(
+    r"""^(?:
+          function\s+(?P<keyword_name>[^\s(){}]+)\s*(?:\(\s*\))?   # function f  /  function f ()
+        | (?P<name>[^\s(){}]+)\s*\(\s*\)                            # f()
+        )\s*(?P<body>[{(].*)$""",
+    re.DOTALL | re.VERBOSE,
+)
+"""A shell function DEFINITION, in its three spellings (critic finding F3c).
+
+The body is real commands that run when the name is called, so it is recursed into and the
+definition itself produces no segment: `function f { rm -rf x; }; f` yields the `rm -rf` plus an
+unfamiliar `f`, where before the whole definition classified as a single command named `f` and the
+`rm` was invisible. Requiring either the `function` keyword or the `()` is what keeps
+`cmd { arg }` — a command with a brace-shaped argument — out of this branch."""
+
 PATH_SEPARATORS = ("/", "\\")
 """A command may be spelled as a path. ``/bin/rm -rf x`` is ``rm -rf`` for signature purposes:
 the leading directories are dropped so an absolute spelling cannot dodge the rule sets."""
@@ -107,6 +122,15 @@ against the verb's own canonical ids: ``rm --recursive --force`` → ``rm -rf``,
 alternative is worse — it would fall back to the bare ``git push`` key, so a grant on an
 ordinary push would cover it.
 """
+
+SCRIPT_PLACEHOLDER = "<script>"
+"""PRD §3.2 step 7: the key a command that runs a FILE gets. The file's name is deliberately not
+in the key (`python3 build.py` and `python3 tools/x.py` share one key) — see the module
+docstring; the same placeholder is what ``source FILE`` gets."""
+
+SOURCE_SIGNATURE = "source"
+"""Canonical spelling for the ``source``/``.`` builtin, so both spellings of the same command
+share one grant key (``source <script>``) instead of the second hiding behind a lone dot."""
 
 SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh"})
 """Interpreters whose inline payload is *shell*, so PRD §3.2 step 5 recurses into it. A
@@ -357,6 +381,18 @@ def _split_top_level(text: str) -> list[_Raw]:
     return parts
 
 
+def _function_body(text: str) -> str | None:
+    """The body of a shell function definition, or None if this is not one.
+
+    See :data:`FUNCTION_DEFINITION_RE`. The body has to be a real `{ … }` / `( … )` group, so a
+    half-written definition falls back to ordinary classification rather than silently vanishing.
+    """
+    match = FUNCTION_DEFINITION_RE.match(text)
+    if match is None:
+        return None
+    return _group_inner(match.group("body").strip())
+
+
 def _group_inner(body: str) -> str | None:
     """Return the inside of a ``( … )`` or ``{ … }`` group, or None if this is not one."""
     if body.startswith("(") and body.endswith(")"):
@@ -377,6 +413,8 @@ def _classify_text(text: str, settings: GateSettings) -> tuple[list[ShellSegment
             previous_head = None
             continue
         inner = _group_inner(body)
+        if inner is None:
+            inner = _function_body(body)
         if inner is not None:
             group_segments, group_dropped = _classify_text(inner, settings)
             segments.extend(group_segments)
@@ -788,6 +826,14 @@ def _signature(
             if any(_matches_flag(token, spellings) for token in rest):
                 return f"sed {canonical}", False
 
+    if head in settings.source_commands:
+        # `source FILE` / `. FILE` runs the file's contents in THIS shell. Nothing on the command
+        # line says what that is, so it is an inline interpreter keyed like `python3 <script>`
+        # (critic finding F3b). The file is not read here — the classifier is pure.
+        target = next((token for token in rest if not token.startswith("-")), None)
+        signature = f"{SOURCE_SIGNATURE} {SCRIPT_PLACEHOLDER}" if target else SOURCE_SIGNATURE
+        return signature, True
+
     if head in settings.inline_by_nature:
         return base, True
 
@@ -816,7 +862,7 @@ def _interpreter_mode(
         if token == "-m" and index + 1 < len(rest):
             return f"-m {rest[index + 1]}", False
         if not token.startswith("-"):
-            return "<script>", False
+            return SCRIPT_PLACEHOLDER, False
         index += 1
     return "", False
 
