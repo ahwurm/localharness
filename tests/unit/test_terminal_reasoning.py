@@ -38,6 +38,20 @@ async def test_reasoning_prints_complete_lines_and_flushes_tail(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_verbose_implies_the_reasoning_stream(tmp_path):
+    """--verbose / /verbose is the whole detailed view: reasoning shows even with
+    show_reasoning off (the /reasoning switch alone still governs the clean default)."""
+    ch = _channel(tmp_path)
+    assert ch.show_reasoning is False
+    ch.verbose = True
+    await ch.on_reasoning("Plan the search.\n")
+    assert "⋯ Plan the search." in _out(ch)
+    ch.verbose = False
+    await ch.on_reasoning("Hidden again.\n")
+    assert "Hidden again" not in _out(ch)
+
+
+@pytest.mark.asyncio
 async def test_reasoning_long_paragraph_streams_in_pieces(tmp_path):
     ch = _channel(tmp_path)
     ch.show_reasoning = True

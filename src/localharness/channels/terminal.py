@@ -117,10 +117,12 @@ def _fmt_elapsed(seconds: float) -> str:
 # cruncher_exec and agent delegations print one line per call, because each command, write and
 # hand-off is the user's audit trail. The memory family wears the memory hue of the
 # architecture plates (cli/theme.py), so a turn's tool section is no longer one color.
+# `verbose` (--verbose / /verbose) is the opt-out: every call itemized with its arguments.
 LOCAL_READ = frozenset({"read", "glob", "grep", "load_document", "chunk"})
 MEMORY_TOOLS = frozenset({"memory_search", "memory_get", "remember"})
+_UNTRUSTED_NOTE = "web results — UNTRUSTED, treated as data only"
 _BURST_GROUPS: tuple[tuple[frozenset[str], str | None, str], ...] = (
-    (UNTRUSTED_INGEST, "web results — UNTRUSTED, treated as data only", "tool.call"),
+    (UNTRUSTED_INGEST, _UNTRUSTED_NOTE, "tool.call"),
     (frozenset({"tool_result_get"}), None, "tool.call"),
     (LOCAL_READ, None, "tool.call"),
     (MEMORY_TOOLS, None, "memory.call"),
@@ -764,6 +766,11 @@ class TerminalChannel(ChannelAdapter):
         # deltas print. Line-buffered: a complete line (or _REASON_FLUSH_CHARS of one) prints
         # as a dim ⋯ line; the tail flushes when the response's Action arrives.
         self.show_reasoning: bool = False
+        # Verbose view (--verbose / /verbose): the clean default groups read/memory/web calls
+        # into family counters and hides reasoning; verbose itemizes EVERY tool call with its
+        # arguments and its own result line, and implies the reasoning stream. The per-call
+        # truth is always on the bus ledger — this only decides what the screen shows.
+        self.verbose: bool = False
         self._reasoning_buf: str = ""
         self._reasoning_open: bool = False       # a line printed since the last flush
         self._action_handle = None
@@ -917,7 +924,7 @@ class TerminalChannel(ChannelAdapter):
         async with self._output_lock:
             self._stop_thinking()
             self.last_activity_summary = _tool_call_summary(tool_name, arguments)  # tier-2 context
-            group = next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
+            group = None if self.verbose else next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
             if group is None:
                 self._close_burst()
                 if tool_name == "agent":
@@ -990,6 +997,8 @@ class TerminalChannel(ChannelAdapter):
                 self._console.print(f"  [tool.result]{_CHECK} {name}[/tool.result]")
             else:
                 self._console.print(f"  [tool.result]{_CHECK} {name} ({len(lines)} lines)[/tool.result]")
+            if tool_name in UNTRUSTED_INGEST and not is_error:
+                self._print_close_note(_UNTRUSTED_NOTE)  # itemized (verbose) web calls keep the disclosure
 
     async def send_error(
         self,
@@ -1393,11 +1402,17 @@ class TerminalChannel(ChannelAdapter):
             finally:
                 burst.status = None
         self._console.print(self._burst_text(burst, final=True))
-        if burst.close_note and burst.done and burst.close_note not in self._notes_shown:
-            # Once per user turn: narration splits one research burst into several, and the
-            # same disclosure under each of them was a third of the tool section (2026-09-11).
-            self._notes_shown.add(burst.close_note)
-            self._console.print(f"  [tool.result]{_CHECK} {burst.close_note}[/tool.result]")
+        if burst.close_note and burst.done:
+            self._print_close_note(burst.close_note)
+
+    def _print_close_note(self, note: str) -> None:
+        """A family's disclosure line, once per user turn: narration splits one research burst
+        into several, and the same note under each of them was a third of the tool section
+        (2026-09-11). Call with _output_lock held."""
+        if note in self._notes_shown:
+            return
+        self._notes_shown.add(note)
+        self._console.print(f"  [tool.result]{_CHECK} {note}[/tool.result]")
 
     def _start_thinking(self) -> None:
         """Animated indicator while an LLM round-trip is in flight (REPL-02).
@@ -1497,7 +1512,7 @@ class TerminalChannel(ChannelAdapter):
         lines print as they arrive; a long unbroken paragraph prints in _REASON_FLUSH_CHARS
         pieces so a 3-minute think is never silent. Never tears down the box's working glyph
         (thinking continues) — only a classic-mode rich Status, which would glue lines."""
-        if not self.show_reasoning or not text:
+        if not (self.show_reasoning or self.verbose) or not text:
             return
         self._reasoning_buf += text
         lines: list[str] = []
@@ -1513,7 +1528,7 @@ class TerminalChannel(ChannelAdapter):
     async def flush_reasoning(self) -> None:
         """Print whatever reasoning is still buffered (the generation ended)."""
         tail, self._reasoning_buf = self._reasoning_buf, ""
-        if self.show_reasoning and tail.strip():
+        if (self.show_reasoning or self.verbose) and tail.strip():
             await self._print_reasoning_lines([tail])
         self._reasoning_open = False
 

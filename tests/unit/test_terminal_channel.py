@@ -649,6 +649,48 @@ class TestBurstConsolidation:
         assert "◆ memory_search · memory_get · 1/2" in out.getvalue()
 
     @pytest.mark.asyncio
+    async def test_verbose_itemizes_every_call_with_its_arguments(self):
+        """Owner 2026-09-11: the base UI stays clean; --verbose / /verbose is the breakdown —
+        one line per call with its arguments and its own result, no family counters."""
+        ch, out = self._pipe_channel()
+        ch.verbose = True
+        for tool, arg in (
+            ("glob", {"pattern": "*.py"}), ("grep", {"pattern": "import"}),
+            ("web_search", {"query": "spark"}), ("memory_search", {"query": "gpu"}),
+        ):
+            await ch.send_tool_call(tool, arg)
+            await ch.send_tool_result(tool, "hit\nhit2", is_error=False)
+        rendered = out.getvalue()
+        for line in ("◆ glob *.py", "✓ glob (2 lines)", "◆ grep import", "◆ web_search spark",
+                     "✓ web_search (2 lines)", "◆ memory_search gpu"):
+            assert line in rendered
+        assert "· 4/4" not in rendered and "· 1/1" not in rendered
+        assert ch._burst is None
+
+    @pytest.mark.asyncio
+    async def test_verbose_keeps_the_untrusted_disclosure_once_per_turn(self):
+        ch, out = self._pipe_channel()
+        ch.verbose = True
+        for _ in range(2):
+            await ch.send_tool_call("web_fetch", {"url": "u"})
+            await ch.send_tool_result("web_fetch", "page", is_error=False)
+        rendered = out.getvalue()
+        assert rendered.count("✓ web results — UNTRUSTED, treated as data only") == 1
+        assert rendered.index("✓ web_fetch") < rendered.index("UNTRUSTED")  # after the first result
+
+    @pytest.mark.asyncio
+    async def test_verbose_toggled_mid_burst_freezes_the_open_counter_first(self):
+        ch, out = self._pipe_channel()
+        await ch.send_tool_call("glob", {"pattern": "a"})
+        await ch.send_tool_result("glob", "x", is_error=False)
+        ch.verbose = True  # /verbose on while a family burst is open
+        await ch.send_tool_call("grep", {"pattern": "b"})
+        rendered = out.getvalue()
+        assert "◆ glob · 1/1" in rendered
+        assert "◆ grep b" in rendered
+        assert rendered.index("◆ glob · 1/1") < rendered.index("◆ grep b")
+
+    @pytest.mark.asyncio
     async def test_untrusted_note_prints_once_per_user_turn(self):
         """Narration splits one research burst into several; the disclosure prints under the
         first of them only, and again after the next user prompt (a new turn)."""

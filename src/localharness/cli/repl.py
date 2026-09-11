@@ -693,6 +693,36 @@ class OrchestratorREPL:
         )
         await self._channel.send_message(note, metadata={"style": "system.info"})
 
+    async def _handle_verbose_cmd(self, arg: str) -> None:
+        """/verbose [on|off] — the detailed view: every tool call itemized with its arguments
+        and its own result line (the default groups read/memory/web families into one counter
+        line each), plus the reasoning stream. Same as `localharness start --verbose`."""
+        from localharness.channels.terminal import TerminalChannel
+
+        if not isinstance(self._channel, TerminalChannel):
+            await self._channel.send_message(
+                "/verbose is a terminal-channel setting.", metadata={"style": "system.info"},
+            )
+            return
+        if arg in ("on", "off"):
+            state = arg == "on"
+        elif not arg:
+            state = not self._channel.verbose
+        else:
+            await self._channel.send_message(
+                "Usage: /verbose [on|off]", metadata={"style": "system.info"},
+            )
+            return
+        self._channel.verbose = state
+        note = (
+            "Verbose: on — every tool call prints its own line with arguments, and the model's "
+            "reasoning streams as dim ⋯ lines (start with --verbose to begin a session this way)."
+            if state else
+            "Verbose: off — read, memory and web calls group into one counter line per family; "
+            "reasoning follows /reasoning."
+        )
+        await self._channel.send_message(note, metadata={"style": "system.info"})
+
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
         cmd_lower = cmd.lower().strip()
@@ -725,6 +755,10 @@ class OrchestratorREPL:
 
         if cmd_lower == "/reasoning" or cmd_lower.startswith("/reasoning "):
             await self._handle_reasoning_cmd(cmd_lower[len("/reasoning"):].strip())
+            return True
+
+        if cmd_lower == "/verbose" or cmd_lower.startswith("/verbose "):
+            await self._handle_verbose_cmd(cmd_lower[len("/verbose"):].strip())
             return True
 
         if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):

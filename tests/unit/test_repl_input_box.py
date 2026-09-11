@@ -89,6 +89,39 @@ async def _pending_turn(repl):
     repl._current_task = "the running task"
 
 
+class TestVerboseCommand:
+    """/verbose [on|off] flips the terminal channel's detailed view and says what changed."""
+
+    def _terminal(self):
+        from io import StringIO
+        from rich.console import Console
+        from localharness.channels.terminal import TERMINAL_THEME, TerminalChannel
+        from localharness.core.bus import EventBus
+
+        ch = TerminalChannel(EventBus(), {})
+        ch._console = Console(file=StringIO(), force_terminal=False, width=120, theme=TERMINAL_THEME)
+        return ch
+
+    async def test_toggle_then_explicit_on_off(self):
+        ch = self._terminal()
+        repl, _, _ = _repl(channel=ch)
+        assert await repl._handle_slash("/verbose") is True
+        assert ch.verbose is True
+        assert "Verbose: on" in ch._console.file.getvalue()
+        await repl._handle_slash("/verbose off")
+        assert ch.verbose is False
+        assert "Verbose: off" in ch._console.file.getvalue()
+        await repl._handle_slash("/verbose on")
+        assert ch.verbose is True
+
+    async def test_bad_argument_is_usage_not_a_flip(self):
+        ch = self._terminal()
+        repl, _, _ = _repl(channel=ch)
+        await repl._handle_slash("/verbose loud")
+        assert ch.verbose is False
+        assert "Usage: /verbose [on|off]" in ch._console.file.getvalue()
+
+
 class TestSubmitPolicy:
     async def test_idle_submit_starts_turn(self):
         repl, ch, agent = _repl()
