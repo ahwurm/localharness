@@ -11,7 +11,7 @@ Three properties, one file:
 """
 from __future__ import annotations
 
-import warnings
+import logging
 from dataclasses import fields as dataclass_fields
 
 import pytest
@@ -19,6 +19,11 @@ from pydantic import ValidationError
 
 from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS, GateSettings
 from localharness.config.models import AgentConfig, AskConfig, PermissionConfig
+
+# Where config's deprecation notices land now that they are log records rather than
+# `warnings.warn` calls — named once so a module rename cannot leave the assertions passing
+# vacuously against a logger nothing writes to.
+MODELS_LOGGER = "localharness.config.models"
 
 
 # --- (a) mode ---------------------------------------------------------------
@@ -30,18 +35,22 @@ def test_default_mode_is_the_mode_that_asks():
 
 
 @pytest.mark.parametrize("legacy", ["auto", "manual"])
-def test_legacy_mode_spellings_map_to_guarded_with_a_deprecation_warning(legacy):
+def test_legacy_mode_spellings_map_to_guarded_with_a_deprecation_warning(legacy, caplog):
     """Every config written before v0.14 says `auto` (or the unimplemented `manual` stub).
 
     Rejecting them would break those configs; mapping them to `unattended` would ship the gate
     switched off for everyone who already has one. They map to `guarded` and say so.
+
+    The notice is a LOG record, not `warnings.warn`: raised inside a validator (which is what
+    `-W error::DeprecationWarning` does to it) it killed `localharness config migrate`, the
+    repair path for these very configs.
     """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger=MODELS_LOGGER):
         cfg = PermissionConfig(mode=legacy)
     assert cfg.mode == "guarded"
-    assert len(caught) == 1 and issubclass(caught[0].category, DeprecationWarning)
-    message = str(caught[0].message)
+    records = [r for r in caplog.records if "permissions.mode" in r.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
     assert legacy in message and "unattended" in message, (
         "the warning must name both the retired spelling and the escape hatch for a "
         "human-less run"
@@ -79,27 +88,24 @@ def test_allow_patterns_is_rejected_inside_a_full_agent_config():
 
 
 @pytest.mark.parametrize("empty", [[], None], ids=["empty-list", "null"])
-def test_an_empty_allow_patterns_loads_and_is_dropped_with_a_warning(empty):
+def test_an_empty_allow_patterns_loads_and_is_dropped_with_a_warning(empty, caplog):
     """Every pre-v0.14 `localharness init` wrote `allow_patterns: []` (D2).
 
     Rejecting the bare KEY meant no existing install could start, and `config migrate` — the
     documented repair — hit the same validator. An empty value carried no policy, so it loads,
     is dropped, and says so.
     """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger=MODELS_LOGGER):
         cfg = PermissionConfig(allow_patterns=empty)
     assert not hasattr(cfg, "allow_patterns")
-    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert len(deprecations) == 1
-    assert "allow_patterns" in str(deprecations[0].message)
+    notices = [r for r in caplog.records if "allow_patterns" in r.getMessage()]
+    assert len(notices) == 1
+    assert "grants.yaml" in notices[0].getMessage()
 
 
 def test_an_empty_allow_patterns_loads_inside_a_full_agent_config():
     """Nesting again: the old init output is a whole config file, not a bare PermissionConfig."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        cfg = AgentConfig(name="x", role="y", permissions={"mode": "auto", "allow_patterns": []})
+    cfg = AgentConfig(name="x", role="y", permissions={"mode": "auto", "allow_patterns": []})
     assert cfg.permissions.mode == "guarded"
 
 

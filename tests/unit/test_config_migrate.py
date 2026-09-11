@@ -8,7 +8,7 @@ never removing/reordering the user's own entries, and never touching any other k
 """
 from __future__ import annotations
 
-import warnings
+import logging
 from pathlib import Path
 
 import yaml
@@ -317,7 +317,7 @@ def _perms(config_file: Path) -> dict:
     return yaml.safe_load(config_file.read_text())["org"]["permissions"]
 
 
-def test_an_old_init_config_loads_through_the_real_loader(tmp_path):
+def test_an_old_init_config_loads_through_the_real_loader(tmp_path, caplog):
     """The exact shape `init` wrote before v0.14: mode `auto` + `allow_patterns: []` + denies.
 
     Through `HarnessConfig`, not a bare `PermissionConfig` — this is what `start` does, and it
@@ -326,11 +326,15 @@ def test_an_old_init_config_loads_through_the_real_loader(tmp_path):
     from localharness.config.models import HarnessConfig
 
     cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    with caplog.at_level(logging.WARNING, logger="localharness.config.models"):
         loaded = HarnessConfig.model_validate(yaml.safe_load(cfg.read_text()))
     assert loaded.org.permissions.mode == "guarded"
     assert loaded.org.permissions.deny_patterns == OLD_7
+    # The deprecation notice is a LOG record, never `warnings.warn`: a validator that raises
+    # under `-W error::DeprecationWarning` takes `config migrate` — the repair for this exact
+    # config — down with it.
+    notices = "\n".join(r.getMessage() for r in caplog.records)
+    assert "allow_patterns" in notices and "auto" in notices
 
 
 def test_migrate_strips_an_empty_allow_patterns_and_writes(tmp_path):
@@ -454,7 +458,7 @@ def _write_agent_file(config_dir: Path, name: str, *, allow_patterns, subdir: st
     return path
 
 
-def test_migrate_strips_the_dead_key_from_an_agent_file_that_only_warns(tmp_path):
+def test_migrate_strips_the_dead_key_from_an_agent_file_that_only_warns(tmp_path, caplog):
     """R10: `write_agent` stamped every agent file with `allow_patterns: []` too, and migrate
     never looked there — so the file warned on every single load with no repair path."""
     from localharness.config.loader import ConfigLoader
@@ -468,9 +472,11 @@ def test_migrate_strips_the_dead_key_from_an_agent_file_that_only_warns(tmp_path
     assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
     assert len(list((tmp_path / "agents").glob("scout.yaml.bak-*"))) == 1
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
+    with caplog.at_level(logging.WARNING, logger="localharness.config.models"):
         assert ConfigLoader(config_dir=tmp_path).load_agent("scout").name == "scout"
+    assert not [r for r in caplog.records if "allow_patterns" in r.getMessage()], (
+        "the repaired file must load with no deprecation notice left to emit"
+    )
 
 
 def test_migrate_strips_a_populated_dead_key_from_an_agent_file_and_names_it(tmp_path):
