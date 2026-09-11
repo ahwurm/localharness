@@ -49,7 +49,7 @@ async def _pick_then_feed(feed: str, models: list[str] = MODELS) -> list[str]:
             InMemoryHistory(), ">",
             on_submit=subs.append, on_interrupt=lambda: None,
             on_eof=lambda: holder["app"].exit(),
-            hint_fn=lambda: [], pct_fn=lambda: None, status_fn=lambda: [],
+            hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
             model_names_fn=ch._model_names_for_menu,
         )
         holder["app"] = app

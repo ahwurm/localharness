@@ -76,7 +76,7 @@ class TestSlashMenuKeybindings:
                 app = _build_persistent_input_app(
                     InMemoryHistory(), ">",
                     on_submit=on_submit, on_interrupt=lambda: None, on_eof=on_eof,
-                    hint_fn=lambda: [("class:hint", " ")], pct_fn=lambda: None,
+                    hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
                     status_fn=lambda: [],
                 )
                 holder["app"] = app

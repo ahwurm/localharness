@@ -72,7 +72,7 @@ async def _drive(feed: str, model_names_fn=None):
                 InMemoryHistory(), ">",
                 on_submit=subs.append, on_interrupt=lambda: None,
                 on_eof=lambda: holder["app"].exit(),
-                hint_fn=lambda: [("class:hint", " ")], pct_fn=lambda: None,
+                hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
                 status_fn=lambda: [],
                 model_names_fn=model_names_fn,
             )

@@ -1326,6 +1326,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # stays valid across swaps.
             channel.tps_source = llm.gen_speed_snapshot
             channel.progress_source = llm.stream_snapshot  # phase + live token tallies
+            channel.model_source = lambda: llm.config.model  # footer model chip, swap-safe
 
         # --- Startup summary line ---
         # Entity-typed per the localharness.dev architecture plates (cli/theme.py): the
