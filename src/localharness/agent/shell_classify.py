@@ -453,6 +453,18 @@ PAYLOAD_ARGUMENT_SEPARATORS = (":::", "::::")
 """GNU ``parallel`` separates the command from its ARGUMENTS with these (``parallel rm -rf {} :::
 a b``). Everything after one is data for the command, not more command (parallel(1))."""
 
+GIT_PUSH_SIGNATURE = "git push"
+GIT_PUSH_DELETE_SIGNATURE = "git push --delete"
+GIT_REFSPEC_DELETE_PREFIX = ":"
+"""``git push origin :branch`` deletes the remote branch — git's older spelling of
+``git push --delete origin branch``, and the one muscle memory still reaches for
+(git-push(1): "pushing an empty source deletes the ref").
+
+Without this the colon form signed as a plain, non-destructive ``git push``: the two commands do
+exactly the same irreversible thing and only one of them was classified. Canonicalizing it onto
+the ``--delete`` signature means both spellings are one entry in every set that names it — the
+``auto`` blacklist, the ungrantable destructive defaults, and any grant key."""
+
 GIT_CONFIG_SIGNATURE = "git config"
 """The plain ``git config`` key. A write that is not one of
 ``GateSettings.git_config_dangerous_keys`` keeps it (grantable); a dangerous one gets its key
@@ -892,7 +904,10 @@ def _classify_text(
                 and previous_head in settings.pipe_to_shell_sources
                 and head in settings.pipe_to_shell_sinks
             ):
-                host = replace(host, destructive=True, read_only=False)
+                # `pipe_to_shell` rather than the signature is what `auto` reads: the sink's
+                # signature is a bare `sh` or `python3`, which means nothing on its own — the
+                # danger is that the code arriving on the pipe has not been read by anyone.
+                host = replace(host, destructive=True, read_only=False, pipe_to_shell=True)
             segments.append(host)
         segments.extend(extras)
         previous_head = head
@@ -1098,6 +1113,8 @@ def _build(
     force_read_only = False
     if signature == GIT_CONFIG_SIGNATURE:
         signature, force_destructive, force_read_only = _git_config_facts(argv, settings)
+    if signature == GIT_PUSH_SIGNATURE and _pushes_a_ref_deletion(argv):
+        signature = GIT_PUSH_DELETE_SIGNATURE
     if head == "git":
         extras.extend(_git_inline_config_segments(argv, settings))
 
@@ -1178,6 +1195,24 @@ def _make_segment(
         and not destructive
         and not payload_lifted
     )
+    # Owner ruling 2026-09-11: `auto` allows a destructive verb whose danger is entirely its
+    # target when every target lands inside the project. Resolved through the same `cd` tracking
+    # the write targets use, and kept in its OWN fields — `rm` does not write its operands, it
+    # deletes them, and folding the two together would change what `guarded` asks about.
+    operands = destructive_targets(signature, argv, settings) if destructive else None
+    scoped_targets: tuple[str, ...] = ()
+    scoped_unresolvable = False
+    if operands is not None:
+        resolved_operands = [_resolve_target(cwd or _Cwd(), target) for target in operands]
+        scoped_targets = tuple(target for target, _ in resolved_operands)
+        scoped_unresolvable = (
+            not scoped_targets
+            or any(unresolvable for _, unresolvable in resolved_operands)
+            or any(
+                any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS)
+                for target in scoped_targets
+            )
+        )
     return ShellSegment(
         signature=signature,
         argv=argv,
@@ -1188,6 +1223,9 @@ def _make_segment(
         unresolvable_write=any(unresolvable for _, unresolvable in resolved) or any(
             any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS) for target in targets
         ),
+        target_scoped_destructive=operands is not None,
+        destructive_targets=scoped_targets,
+        unresolvable_destructive=scoped_unresolvable,
     )
 
 
@@ -1717,6 +1755,83 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     if head in ("unzip", "tar"):
         return _flag_values(rest, ("-d", "-C", "--directory")) or ["."]
     return []
+
+
+POSIX_OPTION_PREFIX = "-"
+WINDOWS_OPTION_PREFIX = "/"
+"""How the two shells spell an option. POSIX options start with a dash; cmd's start with a
+slash, which on a POSIX host is indistinguishable from an absolute path — ``del /s /q build``
+would otherwise report ``/s`` and ``/q`` as two targets at the filesystem root, and every
+Windows delete would ask. Only a token that is one of the verb's OWN declared slash flags
+(``settings.destructive_flag_verbs``) is dropped, so a genuine ``del C:/x`` is untouched."""
+
+FIND_EXPRESSION_STARTERS: tuple[str, ...] = ("(", "!")
+"""Where ``find``'s path operands stop and its expression begins (find(1)): the first option,
+``(`` or ``!``. Read the operands this way rather than as "every non-option token", or
+``find . -name '*.pyc' -delete`` would report the GLOB ``*.pyc`` as a target, be unresolvable,
+and ask — on the single most ordinary use of the command."""
+
+
+def _pushes_a_ref_deletion(argv: tuple[str, ...]) -> bool:
+    """Does this ``git push`` carry a delete refspec? (:data:`GIT_REFSPEC_DELETE_PREFIX`.)
+
+    A refspec whose SOURCE side is empty — a positional beginning with ``:`` — asks the remote to
+    delete the ref on the other side of the colon. A bare ``:`` (push every matching branch) is
+    not a deletion and is left alone.
+    """
+    return any(
+        token.startswith(GIT_REFSPEC_DELETE_PREFIX) and token != GIT_REFSPEC_DELETE_PREFIX
+        for token in argv[1:]
+    )
+
+
+def destructive_targets(
+    signature: str, argv: tuple[str, ...], settings: GateSettings
+) -> list[str] | None:
+    """The paths a TARGET-SCOPED destructive command operates on, or None when it has none.
+
+    Owner ruling 2026-09-11 ("auto = thinnest interaction; asks only when genuinely dangerous"):
+    deleting ``build/`` inside your own project is routine and deleting ``~/Documents`` is not,
+    and the only thing separating them is where the command points. The verbs in
+    :data:`~localharness.agent.gate_types.TARGET_SCOPED_DESTRUCTIVE_VERBS` therefore report
+    their operands here and ``auto`` judges those against the workspace boundary; every other
+    destructive command returns None, which ``auto`` reads as "irreversible regardless of
+    target — ask".
+
+    The operand reading is deliberately GENEROUS: everything that is not recognisably an option
+    is returned, so ``chmod``'s mode and ``chown``'s owner come back as targets too. They
+    resolve inside the directory the command runs in and therefore can never hide a target that
+    is outside it — whereas a DROPPED path could, which is the failure that matters.
+    """
+    if not argv:
+        return None
+    verb = signature.split(" ", 1)[0]
+    if verb not in settings.target_scoped_destructive_verbs:
+        return None
+    rest = list(argv[1:])
+    if verb == FIND_COMMAND:
+        return _find_operands(rest)
+    slash_flags = {
+        flag.lower() for flag in settings.destructive_flag_verbs.get(verb, ())
+        if flag.startswith(WINDOWS_OPTION_PREFIX)
+    }
+    return [
+        token for token in rest
+        if not token.startswith(POSIX_OPTION_PREFIX) and token.lower() not in slash_flags
+    ]
+
+
+def _find_operands(rest: list[str]) -> list[str]:
+    """``find``'s path operands: every token before the expression starts (find(1)).
+
+    A ``find`` with no operand searches the current directory, which is what the fallback says.
+    """
+    out: list[str] = []
+    for token in rest:
+        if token.startswith(POSIX_OPTION_PREFIX) or token in FIND_EXPRESSION_STARTERS:
+            break
+        out.append(token)
+    return out or [CURRENT_DIRECTORY]
 
 
 def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:

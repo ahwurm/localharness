@@ -37,6 +37,13 @@ WRITE = ToolMeta(group="fs.write")
 
 
 def _gate(tmp_path: Path, **kw) -> PermissionGate:
+    """A gate for the GUARDED suite below — the asking, remembering, event-publishing half.
+
+    ``mode`` is pinned because v0.14.1 moved the default to ``auto`` (owner ruling 2026-09-11),
+    which asks about almost nothing and writes no grants; the effectful machinery these tests
+    exercise only runs when something asks. The ``auto`` semantics are covered by
+    ``tests/unit/agent/test_auto_mode.py``.
+    """
     workspace = kw.pop("workspace", tmp_path / "project")
     workspace.mkdir(exist_ok=True)
     return PermissionGate(
@@ -44,6 +51,7 @@ def _gate(tmp_path: Path, **kw) -> PermissionGate:
         workspace=workspace,
         grants=kw.pop("grants", GrantStore(tmp_path / "grants.yaml")),
         channel_name=kw.pop("channel_name", "test"),
+        mode=kw.pop("mode", "guarded"),
         **kw,
     )
 
