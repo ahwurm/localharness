@@ -1,4 +1,4 @@
-"""All 30 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 32 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -14,6 +14,7 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from localharness.agent.gate_types import DecisionKind
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 
 from .types import AgentID, DivisionID, EventSeq, OrgID, SessionID, ToolCallID  # noqa: F401
@@ -224,6 +225,55 @@ class Escalation(BaseEvent):
     detail: str
     stuck_signature: Optional[str] = None
     iteration_at_escalation: int
+
+
+class PermissionAsked(BaseEvent):
+    """Published when the gate stops a tool call and puts the question to a human (PRD §3.6).
+
+    Rides the same trace files as Action/Observation, which is the whole point: the ask rate —
+    prompts per session, SLO median 0 — is then measurable from traces already on disk, with no
+    extra instrumentation, and the replay script becomes the regression tool for any classifier
+    change. Prompt fatigue is itself a security failure (rubber-stamping), so the rate is a
+    first-class metric rather than a log line.
+
+    `key` is the grant key the answer would be remembered under, and is None for the ungrantable
+    classes (shell-destructive, protected-path, no-boundary), which ask every time.
+    """
+
+    event_type: str = "PermissionAsked"
+    agent_id: AgentID
+    session_id: SessionID
+    tool_name: str
+    klass: str
+    """The AskClass (PRD §3.1). Spelled `klass` because `class` is a keyword."""
+    key: Optional[str] = None
+    channel: str
+
+
+class PermissionResolved(BaseEvent):
+    """Published when the human's answer arrives, or the wait runs out (PRD §3.6).
+
+    Paired with PermissionAsked by (session_id, tool_name, klass, key). `decision` is a
+    DecisionKind (`agent/gate_types.py`): allow_once / allow_always / reject_once /
+    reject_always — the four ACP PermissionOptionKind values every channel maps its UI onto.
+    A timeout resolves as `reject_once` (fail closed, PRD §3.5), so timeout-denies are countable
+    as their own guardrail alongside reject_always, whose rise means the classifier is asking
+    about the wrong things.
+
+    `wrote_grant` records whether the answer became durable state in the global grant store —
+    the difference between a prompt that will recur and one that will not.
+    """
+
+    event_type: str = "PermissionResolved"
+    agent_id: AgentID
+    session_id: SessionID
+    tool_name: str
+    klass: str
+    key: Optional[str] = None
+    decision: DecisionKind
+    latency_ms: Optional[int] = None
+    """Wall time from the ask to the answer. None when nothing was awaited."""
+    wrote_grant: bool = False
 
 
 class Heartbeat(BaseEvent):
@@ -509,6 +559,8 @@ AnyEvent = Union[
     DelegationRequest,
     DelegationResult,
     Escalation,
+    PermissionAsked,
+    PermissionResolved,
     Heartbeat,
     CompactionTriggered,
     ScenarioCompleted,
@@ -542,6 +594,8 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "DelegationRequest": DelegationRequest,
     "DelegationResult": DelegationResult,
     "Escalation": Escalation,
+    "PermissionAsked": PermissionAsked,
+    "PermissionResolved": PermissionResolved,
     "Heartbeat": Heartbeat,
     "CompactionTriggered": CompactionTriggered,
     "ScenarioCompleted": ScenarioCompleted,
