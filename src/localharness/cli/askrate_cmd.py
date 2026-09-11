@@ -11,6 +11,7 @@ from typing import Optional
 
 import typer
 
+from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS
 from localharness.bench.askrate import FIRST_N_SESSIONS_DEFAULT, build_report, render
 
 
@@ -32,13 +33,25 @@ def ask_rate(
         help="Workspace the replay assumes; defaults to the current directory. "
              "Ignored when the traces already carry PermissionAsked events.",
     ),
+    mode: str = typer.Option(
+        DEFAULT_MODE,
+        "--mode",
+        help="Session mode the replay runs under; defaults to the shipped default. "
+             "`--mode auto` measures the blacklist, `--mode guarded` the v0.14.0 "
+             "ask-once behaviour, and the two over one corpus are the before/after. "
+             "Ignored when the traces already carry PermissionAsked events.",
+    ),
 ) -> None:
     """Report how often the permission gate asked, or would have asked, per session."""
     traces_dir = Path(traces).expanduser()
     if not traces_dir.is_dir():
         typer.echo(f"no such traces directory: {traces_dir}", err=True)
         raise typer.Exit(code=2)
-    report = build_report(traces_dir, workspace=workspace, first_n=first)
+    if mode not in MODE_STRICTNESS:
+        known = ", ".join(sorted(MODE_STRICTNESS, key=lambda name: MODE_STRICTNESS[name]))
+        typer.echo(f"unknown mode {mode!r}; choose one of: {known}", err=True)
+        raise typer.Exit(code=2)
+    report = build_report(traces_dir, workspace=workspace, first_n=first, mode=mode)  # type: ignore[arg-type]
     if not report.sessions:
         typer.echo(f"no session files (*.jsonl) under {traces_dir}", err=True)
         raise typer.Exit(code=2)

@@ -26,9 +26,11 @@ from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
 from localharness.agent.gate_types import (
+    DEFAULT_MODE,
     UNGRANTABLE_CLASSES,
     GateSettings,
     Grant,
+    Mode,
     ToolMeta,
     Verdict,
 )
@@ -108,6 +110,11 @@ TOOL_CALL_EVENT = ("Action", "tool_call")
 PERMISSION_ASKED_EVENT = "PermissionAsked"
 PERMISSION_RESOLVED_EVENT = "PermissionResolved"
 """The two v0.14 bus events (PRD §3.6). Their presence switches the report from replay to count."""
+
+AUTO_MODE: Mode = "auto"
+"""The one mode that HAS a blacklist, so the one mode whose report prints which entries fired
+(owner ruling 2026-09-11). Named rather than compared against a literal because the report's
+whole job is to be the evidence the blacklist is curated from."""
 
 DECISION_KINDS: tuple[str, ...] = ("allow_once", "allow_always", "reject_once", "reject_always")
 """The four `DecisionKind` values every channel maps its UI onto (`agent/gate_types.py`)."""
@@ -223,6 +230,18 @@ class AskRateReport:
     boundary: Optional[Path] = None
     unknown_tools: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    mode: Optional[str] = None
+    """The session mode the replay ran under; None for an event-counted corpus, where the mode
+    was whatever the session actually used."""
+
+    blacklist_entries: tuple[tuple[str, int], ...] = ()
+    """`(entry, prompts)` — which :class:`~localharness.agent.gate_types.AutoBlacklist` entry (or
+    protected path) raised each prompt.
+
+    The list ``auto`` is curated from: an entry that never fires over a real corpus is a rule
+    nobody needed, and an entry that fires constantly is either the right rule or the next thing
+    to narrow. Empty in the event-counted path, where the trace records the class and key but not
+    which rule inside it fired."""
 
     @property
     def total_prompts(self) -> int:
@@ -331,12 +350,18 @@ def summarize_from_replay(
     first_n: int,
     traces_dir: Path,
     settings: Optional[GateSettings] = None,
+    mode: Mode = DEFAULT_MODE,
 ) -> AskRateReport:
     """Replay `Action` events through the real verdict with an empty grant store (PRD §3.6, §5).
 
     One workspace is assumed for the whole corpus — the boundary derived from `workspace` — and
     one grant set spans every session, in chronological order: that is the ask-once-per-key rule
     of PRD §3.3 measured over a corpus, and it is what makes the first-N split meaningful.
+
+    ``mode`` is the session mode the replay runs under, and it is the whole point of the report
+    as of v0.14.1: the corpus is the evidence for whether the shipped default asks too much.
+    ``--mode auto`` (the default) measures the blacklist, ``--mode guarded`` measures the
+    v0.14.0 ask-once behaviour, and the two run over the same traces are the before/after.
 
     Honest limits, printed with the report: the DENY tier is not replayed (it needs the config
     that was live at the time), so a call that today's deny patterns would refuse is counted as
@@ -358,7 +383,7 @@ def summarize_from_replay(
         boundary=boundary,
         workspace=workspace,
         grants=lookup,
-        mode="guarded",
+        mode=mode,
         can_ask=True,
         has_review_surface=True,
         deny=None,
@@ -367,6 +392,7 @@ def summarize_from_replay(
     stats: list[SessionStats] = []
     first_ask_keys: list[str] = []
     destructive: Counter[str] = Counter()
+    blacklist_entries: Counter[str] = Counter()
     unknown: set[str] = set()
 
     for session in sessions:
@@ -382,6 +408,12 @@ def summarize_from_replay(
                 continue
             request = result.request
             prompts += 1
+            # WHICH blacklist entry fired — the number the `auto` list is curated from. Shell
+            # entries name themselves; everything else auto still asks about is a protected
+            # path, whose own key is the entry.
+            blacklist_entries[
+                request.auto_entry or f"{request.klass}: {request.key or tool_name}"
+            ] += 1
             if not request.grantable:
                 ungrantable += 1
                 destructive[f"{request.klass}: {request.key or tool_name}"] += 1
@@ -431,6 +463,8 @@ def summarize_from_replay(
         boundary=boundary,
         unknown_tools=tuple(sorted(unknown)),
         notes=tuple(notes),
+        mode=mode,
+        blacklist_entries=tuple(blacklist_entries.most_common()),
     )
 
 
@@ -440,6 +474,7 @@ def build_report(
     workspace: Optional[Path] = None,
     first_n: int = FIRST_N_SESSIONS_DEFAULT,
     settings: Optional[GateSettings] = None,
+    mode: Mode = DEFAULT_MODE,
 ) -> AskRateReport:
     """The ask-rate report for a trace directory (PRD §3.6): counted if it can be, replayed if not."""
     sessions = load_sessions(Path(traces_dir))
@@ -451,6 +486,7 @@ def build_report(
         first_n=first_n,
         traces_dir=Path(traces_dir),
         settings=settings,
+        mode=mode,
     )
 
 
@@ -462,6 +498,7 @@ def render(report: AskRateReport) -> str:
     lines.append(f"ask-rate report — {report.traces_dir}")
     lines.append(f"source: {report.source}")
     if report.source == "replay":
+        lines.append(f"mode:      {report.mode}")
         lines.append(f"workspace: {report.workspace}")
         lines.append(f"boundary:  {report.boundary if report.boundary is not None else '(none)'}")
     lines.append("")
@@ -521,6 +558,17 @@ def render(report: AskRateReport) -> str:
             lines.append(f"  {count:5d}  {signature}")
     else:
         lines.append("  (none)")
+
+    # Only `auto` HAS a blacklist. In every other mode this list would just be "every key that
+    # asked, again" — the sections above already say that, and printing it twice would read as a
+    # rule set those modes consult.
+    if report.mode == AUTO_MODE and report.blacklist_entries:
+        lines.append("")
+        lines.append(
+            f"blacklist entries that fired ({len(report.blacklist_entries)} distinct)"
+        )
+        for entry, count in report.blacklist_entries:
+            lines.append(f"  {count:5d}  {entry}")
 
     if report.unknown_tools:
         lines.append("")

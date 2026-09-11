@@ -903,10 +903,22 @@ def _classify_text(
                 raw.piped
                 and previous_head in settings.pipe_to_shell_sources
                 and head in settings.pipe_to_shell_sinks
+                and not host.inline_interpreter
             ):
                 # `pipe_to_shell` rather than the signature is what `auto` reads: the sink's
                 # signature is a bare `sh` or `python3`, which means nothing on its own — the
                 # danger is that the code arriving on the pipe has not been read by anyone.
+                #
+                # `not host.inline_interpreter` is what separates the two shapes that look
+                # identical in a pipeline. `curl … | python3` and `curl … | sh` read their
+                # PROGRAM from stdin: the download is the code, and nobody has seen it. `curl …
+                # | python3 -c '<program>'` does not — the program is the `-c` argument, right
+                # there on the command line, and the download is its DATA. Without this test the
+                # rule fired on `curl -s localhost:8000/v1/models | python3 -c 'json.load(…)'`,
+                # which was 9 of the 29 prompts a replay of the owner's 384-session corpus
+                # raised in `auto`: a third of the whole ask budget spent on a command whose code
+                # the person could read in the prompt itself. The sink still classifies as
+                # `interpreter-inline`, which is where an inline program belongs.
                 host = replace(host, destructive=True, read_only=False, pipe_to_shell=True)
             segments.append(host)
         segments.extend(extras)

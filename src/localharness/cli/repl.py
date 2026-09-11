@@ -10,6 +10,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
+from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import help_text
 from localharness.core.events import InputRouted, UserMessage
@@ -17,6 +18,8 @@ from localharness.core.events import InputRouted, UserMessage
 log = logging.getLogger(__name__)
 
 MODE_EFFECTS: dict[str, str] = {
+    "auto": "runs everything except a small blacklist — deletes pointing outside this project, "
+            "sudo, pipe-to-shell, force-push and hard-reset, and writes to protected paths",
     "guarded": "asks before a call crosses the workspace boundary or looks destructive, and "
                "remembers your answer",
     "trusted": "allows the rememberable asks outright; destructive and protected-path calls "
@@ -25,13 +28,17 @@ MODE_EFFECTS: dict[str, str] = {
                  "the model can work around",
     "unattended": "allows every ask; only the deny list still holds",
 }
-"""PRD §3.4's table in the words a person reads after typing `/mode`. Keyed by mode name so the
-text and the modes cannot drift apart."""
+"""Each mode in the words a person reads after typing `/mode`. Keyed by mode name so the text and
+the modes cannot drift apart."""
 
-MODE_SETTABLE_NAMES = "guarded, trusted, read-only"
-"""What `/mode` and Discord's `mode` will set. `unattended` is missing on purpose: it allows
-every call without asking, so it is set in config by bench and scheduled jobs and never from a
-prompt (the gate refuses it; this is the same rule, written where it is read)."""
+MODE_SETTABLE_NAMES = ", ".join(sorted(MODE_STRICTNESS, key=lambda name: MODE_STRICTNESS[name]))
+"""What `/mode` and Discord's `mode` will set: every mode, loosest first.
+
+`unattended` used to be left out and refused by the gate, on the reasoning that a chat message
+must not switch the gate off. The owner met that rule the only way anyone does — "I can't swap
+my active localharness session to unattended without exiting" (2026-09-11) — and it is gone: the
+person typing at their own prompt is the person the gate protects. Derived from the strictness
+table rather than typed out, so a mode added there can never go missing here."""
 
 MODE_STATUS_TEMPLATE = "Permission mode: {mode}. Switch with /mode <name> — {settable}."
 MODE_CHANGED_TEMPLATE = "Permission mode: {mode} — {effect}."
@@ -769,11 +776,12 @@ class OrchestratorREPL:
         return self._gate if self._gate is not None else getattr(self._agent, "gate", None)
 
     async def _handle_mode_cmd(self, arg: str) -> None:
-        """`/mode [name]` — read or switch the session permission mode (PRD §3.4).
+        """`/mode [name]` — read or switch the session permission mode.
 
-        With no argument it reports the current mode and what is settable. `unattended` is
-        refused from here by the gate itself: it allows every call without asking, so it is set
-        in config by bench and scheduled jobs and never by someone typing at a prompt.
+        With no argument it reports the current mode and every mode that can be set, `auto` and
+        `unattended` included. Nothing is refused here any more: the person at this prompt is
+        the person the gate protects, and being unable to reach `unattended` without restarting
+        the session was the bug, not the guardrail (owner, 2026-09-11). The gate logs the switch.
         """
         gate = self._session_gate()
         if gate is None:
