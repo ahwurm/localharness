@@ -65,7 +65,14 @@ from acp.schema import (
 
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.errors import NotInteractiveError
-from localharness.core.events import Action, Escalation, Observation, ParseFailed, TurnFailed
+from localharness.core.events import (
+    Action,
+    Escalation,
+    Observation,
+    ParseFailed,
+    TaskComplete,
+    TurnFailed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +300,7 @@ class AcpChannel(ChannelAdapter):
         self._closed = asyncio.Event()
 
         self._turn_task: Optional[asyncio.Task] = None
+        self._streamed_this_turn = False
         self._pending_call: tuple[str, str, dict] | None = None
         self._handles: list[Any] = []
 
@@ -447,6 +455,7 @@ class AcpChannel(ChannelAdapter):
             await self.send_message(self._session_error or BRINGUP_FAILED.format(error="unknown"))
             return PromptResponse(stop_reason="end_turn")
 
+        self._streamed_this_turn = False
         task = asyncio.create_task(self._agent_loop.run_turn(task=text, on_token=self._on_token))
         self._turn_task = task
         try:
@@ -684,6 +693,7 @@ class AcpChannel(ChannelAdapter):
         self._handles = [
             self.bus.subscribe(Action, self.on_action),
             self.bus.subscribe(Observation, self.on_observation),
+            self.bus.subscribe(TaskComplete, self.on_task_complete),
             self.bus.subscribe(TurnFailed, self.on_turn_failed),
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Escalation, self.on_escalation),
@@ -719,6 +729,21 @@ class AcpChannel(ChannelAdapter):
             )
         )
 
+    async def on_task_complete(self, event: TaskComplete) -> None:
+        """The answer, but only when nothing streamed it already.
+
+        The normal path is `on_token`: a streaming provider types the answer into the panel as it
+        generates, and posting the completion summary on top of that would print it twice. But
+        `on_token` is the PROVIDER's promise, not the loop's — a runtime that does not stream, or
+        a turn whose last completion produced no deltas, would otherwise leave a panel showing
+        tool rows and no answer at all. So the summary is the fallback, gated on whether anything
+        actually reached the user this turn. Child turns stay internal, as everywhere else
+        (`channels/base.on_task_complete`): a subagent's summary belongs to its parent.
+        """
+        if getattr(event, "parent_id", None) or self._streamed_this_turn:
+            return
+        await self.send_message(event.summary)
+
     async def on_observation(self, event: Observation) -> None:
         """`Observation` → ACP `tool_call_update`, completed or failed with its output."""
         if self._conn is None or self._session_id is None:
@@ -752,6 +777,7 @@ class AcpChannel(ChannelAdapter):
         guessed at here.
         """
         if token:
+            self._streamed_this_turn = True
             await self._update(update_agent_message_text(token))
 
     async def send_message(
