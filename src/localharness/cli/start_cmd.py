@@ -1401,6 +1401,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel.show_reasoning = show_reasoning or bool(
                 getattr(term_cfg, "show_reasoning", False)
             )
+            # --verbose is the whole-session detailed view: startup detail above, and in the
+            # turn output every tool call itemized with its arguments plus the reasoning
+            # stream (the default view groups read/memory/web calls); /verbose toggles it live.
+            channel.verbose = verbose
             if llm is not None:
                 llm.on_reasoning = channel.on_reasoning
 
@@ -1519,7 +1523,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
 def start_app(
     agent: Annotated[str | None, typer.Option("--agent", "-a", help="Start specific agent")] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show per-component startup detail")] = False,
+    verbose: Annotated[bool, typer.Option(
+        "--verbose", "-v",
+        help="Detailed view: per-component startup detail, the model's reasoning stream, and "
+             "one line per tool call with its arguments (the default groups read/memory/web "
+             "calls into one counter line each); /verbose toggles it live",
+    )] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     config_dir: Annotated[
         str | None,
