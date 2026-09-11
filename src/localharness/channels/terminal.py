@@ -375,6 +375,70 @@ def _menu_float(body) -> FloatContainer:
     )
 
 
+PERMISSION_KEYS_GRANTABLE: dict[str, str] = {
+    "y": "allow_once",
+    "a": "allow_always",
+    "n": "reject_once",
+    "N": "reject_always",
+}
+"""The terminal's rendering of PRD §3.5's four option kinds: `[y]es once / [a]lways here /
+[n]o / [N]ever here`. One keystroke each, lower/upper case distinguishing "this time" from
+"forever" — the shape interactive patch-staging and package-manager prompts already taught
+these fingers."""
+
+PERMISSION_KEYS_UNGRANTABLE: dict[str, str] = {"y": "allow_once", "n": "reject_once"}
+"""PRD §3.5: "ungrantable classes offer only the `_once` pair" — a destructive or protected-path
+call asks every time by construction, so offering "always here" would be a lie."""
+
+PERMISSION_OPTIONS_GRANTABLE = "[y]es once   [a]lways here   [n]o   [N]ever here"
+PERMISSION_OPTIONS_UNGRANTABLE = "[y]es once   [n]o     (asks every time — cannot be remembered)"
+"""The legend under the question. Written out rather than generated from the key maps because
+it is the sentence a human reads at 2am, and the wording is the design."""
+
+PERMISSION_DEFAULT_DECISION = "reject_once"
+"""Enter, Escape and Ctrl+C all mean "no, this once" (PRD §3.5 fail-closed). Never
+`reject_always`: an accidental keystroke must not write durable state."""
+
+PERMISSION_PROMPT_LABEL = "Permission needed"
+
+
+def _build_permission_app(options: str, grantable: bool) -> Application:
+    """A one-keystroke choice for `TerminalChannel.ask_permission` (PRD §3.5).
+
+    Deliberately NOT a `Buffer`/line-editor like the input bubble: there is nothing to type, and
+    a line editor would let a stray Enter on leftover text answer the question. One key, one
+    answer, no history, no completion.
+    """
+    keys = PERMISSION_KEYS_GRANTABLE if grantable else PERMISSION_KEYS_UNGRANTABLE
+    kb = KeyBindings()
+
+    def _bind(key: str, kind: str) -> None:
+        @kb.add(key, eager=True)
+        def _choose(event) -> None:
+            event.app.exit(result=kind)
+
+    for key, kind in keys.items():
+        _bind(key, kind)
+
+    @kb.add("enter")
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    def _default(event) -> None:
+        event.app.exit(result=PERMISSION_DEFAULT_DECISION)
+
+    body = Window(
+        FormattedTextControl([("class:hint", f" {options} ")]),
+        height=1,
+        style="class:frame",
+    )
+    return Application(
+        layout=Layout(body),
+        key_bindings=kb,
+        style=INPUT_STYLE,
+        mouse_support=False,
+    )
+
+
 def _build_input_app(
     history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
     model_names_fn: Callable[[], list[str]] | None = None,
@@ -702,6 +766,21 @@ class TerminalChannel(ChannelAdapter):
 
     channel_id = "terminal"
 
+    has_review_surface = True
+    """PRD §3.1 choice 2: the terminal shows the diff after the fact, so an in-workspace edit is
+    reviewable and never asks."""
+
+    @property
+    def can_ask(self) -> bool:
+        """A question needs a real TTY to answer (PRD §3.5's "non-tty" row).
+
+        The terminal channel also serves piped and `--no-input` runs, where a prompt_toolkit
+        application has nobody to read from; reporting the truth here is what routes those to the
+        fail-closed path with its warning instead of a hang. Same test the persistent input box
+        uses, so the two can never disagree.
+        """
+        return self.can_run_input_box()
+
     def __init__(
         self,
         bus: EventBus,
@@ -738,6 +817,9 @@ class TerminalChannel(ChannelAdapter):
         self.model_names_fn: Callable[[], list[str]] | None = None
         # --- Persistent type-anytime input box (start_input_box); all inert until then ---
         self._box_active: bool = False           # True while the long-lived box owns the terminal
+        # (ctrl_queue, on_interrupt) from start_input_box — ask_permission suspends the box for
+        # one keystroke and needs these to put it back exactly as it was.
+        self._box_restart_args: tuple[Any, Any] | None = None
         self._box_app: Application | None = None
         self._box_task: asyncio.Task | None = None
         self._box_patch = None                   # patch_stdout(raw=True) ctx, held for the box's life
@@ -1076,6 +1158,9 @@ class TerminalChannel(ChannelAdapter):
         # #49: the first prompt carries the guidance hint inside the box; consume it once.
         self._first_box_hint, self.first_prompt_hint = self.first_prompt_hint, ""
         self._box_active = True
+        # ask_permission suspends the box and puts it back; it needs the REPL's own callbacks to
+        # restart it, and this is the only place they exist.
+        self._box_restart_args = (ctrl_queue, on_interrupt)
 
         def _on_submit(text: str) -> None:
             # #49: the guidance hint is shown "until first use" — a submit IS that first use.
@@ -1098,6 +1183,41 @@ class TerminalChannel(ChannelAdapter):
         self._box_patch.__enter__()
         self._box_task = asyncio.create_task(self._box_app.run_async())
         self._box_ticker = asyncio.create_task(self._box_tick())
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Put one permission question to the person at the keyboard (PRD §3.5).
+
+        The question is printed through the ordinary console path — so it lands above the
+        persistent input box like every other line, wrapped and themed — and only the one-line
+        option legend is a prompt_toolkit application. The box is suspended for the keystroke
+        and restarted afterwards: two live applications cannot share one terminal, and
+        suspending rather than tearing down keeps the REPL's queue and interrupt callbacks
+        intact. Ctrl+C, Escape and Enter all answer "no, this once" (fail closed).
+        """
+        from localharness.agent.gate_types import Decision
+
+        restart = self._box_restart_args if self._box_active else None
+        if restart is not None:
+            await self.stop_input_box()
+        try:
+            async with self._output_lock:
+                self._stop_thinking()
+                self._close_burst()
+            self._console.print(
+                f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] {escape(request.display)}"
+            )
+            options = (
+                PERMISSION_OPTIONS_GRANTABLE if request.grantable
+                else PERMISSION_OPTIONS_UNGRANTABLE
+            )
+            try:
+                kind = await _build_permission_app(options, request.grantable).run_async()
+            except (KeyboardInterrupt, EOFError):
+                kind = PERMISSION_DEFAULT_DECISION
+            return Decision(kind=kind or PERMISSION_DEFAULT_DECISION)
+        finally:
+            if restart is not None:
+                await self.start_input_box(*restart)
 
     async def stop_input_box(self) -> None:
         """Tear the box down: stop the ticker, exit the app, release patch_stdout. Idempotent."""

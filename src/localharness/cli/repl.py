@@ -16,6 +16,31 @@ from localharness.core.events import InputRouted, UserMessage
 
 log = logging.getLogger(__name__)
 
+MODE_EFFECTS: dict[str, str] = {
+    "guarded": "asks before a call crosses the workspace boundary or looks destructive, and "
+               "remembers your answer",
+    "trusted": "allows the rememberable asks outright; destructive and protected-path calls "
+               "still ask every time",
+    "read-only": "refuses writes, non-read-only shell and code execution with an explanation "
+                 "the model can work around",
+    "unattended": "allows every ask; only the deny list still holds",
+}
+"""PRD §3.4's table in the words a person reads after typing `/mode`. Keyed by mode name so the
+text and the modes cannot drift apart."""
+
+MODE_SETTABLE_NAMES = "guarded, trusted, read-only"
+"""What `/mode` and Discord's `mode` will set. `unattended` is missing on purpose: it allows
+every call without asking, so it is set in config by bench and scheduled jobs and never from a
+prompt (the gate refuses it; this is the same rule, written where it is read)."""
+
+MODE_STATUS_TEMPLATE = "Permission mode: {mode}. Switch with /mode <name> — {settable}."
+MODE_CHANGED_TEMPLATE = "Permission mode: {mode} — {effect}."
+
+BARE_MODE_COMMAND = "mode"
+BARE_MODE_COMMAND_CHANNELS: frozenset[str] = frozenset({"discord"})
+"""Channels where `mode <name>` as the first word IS the command (PRD §3.4). Discord has no
+slash convention of its own; the terminal does, so there the bare word stays a message."""
+
 
 # Derived from the single-source SLASH_COMMANDS table (shared with the input completion menu).
 HELP_TEXT = help_text()
@@ -135,9 +160,15 @@ class OrchestratorREPL:
         on_agent_deployed: Any = None,
         memory_store: Any = None,
         recall_router: Any = None,
+        gate: Any = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
+        # The session's PermissionGate (PRD §3.4) — what `/mode` switches. Defaults to the
+        # loop's own, which is the same object the loop hands its subagents, so a mode change
+        # here reaches a running child. Passed explicitly by start_cmd; None in tests without a
+        # loop, where /mode says so rather than raising.
+        self._gate = gate
         self._channel = channel
         self._bus = bus
         self._config_dir = config_dir
@@ -286,6 +317,16 @@ class OrchestratorREPL:
         # Slash commands — deterministic, no LLM
         if user_input.startswith("/"):
             if await self._handle_slash(user_input):
+                return None
+
+        # PRD §3.4: Discord has no slash convention of its own, so `mode <name>` as the first
+        # word is the same command there. Terminal users type `/mode`; a terminal line starting
+        # with the bare word stays a message, because "mode" is an ordinary English word and the
+        # terminal already has an unambiguous spelling for the command.
+        if getattr(self._channel, "channel_id", "") in BARE_MODE_COMMAND_CHANNELS:
+            head, _, rest = user_input.strip().partition(" ")
+            if head.lower() == BARE_MODE_COMMAND:
+                await self._handle_mode_cmd(rest.strip())
                 return None
 
         # If a creation workflow is active, drive it
@@ -723,6 +764,41 @@ class OrchestratorREPL:
         )
         await self._channel.send_message(note, metadata={"style": "system.info"})
 
+    def _session_gate(self) -> Any:
+        """The gate `/mode` acts on — the one the running loop and its subagents share."""
+        return self._gate if self._gate is not None else getattr(self._agent, "gate", None)
+
+    async def _handle_mode_cmd(self, arg: str) -> None:
+        """`/mode [name]` — read or switch the session permission mode (PRD §3.4).
+
+        With no argument it reports the current mode and what is settable. `unattended` is
+        refused from here by the gate itself: it allows every call without asking, so it is set
+        in config by bench and scheduled jobs and never by someone typing at a prompt.
+        """
+        gate = self._session_gate()
+        if gate is None:
+            await self._channel.send_message(
+                "No permission gate on this session, so there is no mode to change.",
+                metadata={"style": "system.info"},
+            )
+            return
+        name = (arg or "").strip().lower()
+        if not name:
+            await self._channel.send_message(
+                MODE_STATUS_TEMPLATE.format(mode=gate.mode, settable=MODE_SETTABLE_NAMES),
+                metadata={"style": "system.info"},
+            )
+            return
+        try:
+            gate.set_mode(name, from_channel=True)
+        except ValueError as exc:
+            await self._channel.send_message(str(exc), metadata={"style": "system.error"})
+            return
+        await self._channel.send_message(
+            MODE_CHANGED_TEMPLATE.format(mode=gate.mode, effect=MODE_EFFECTS[gate.mode]),
+            metadata={"style": "system.info"},
+        )
+
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
         cmd_lower = cmd.lower().strip()
@@ -759,6 +835,10 @@ class OrchestratorREPL:
 
         if cmd_lower == "/verbose" or cmd_lower.startswith("/verbose "):
             await self._handle_verbose_cmd(cmd_lower[len("/verbose"):].strip())
+            return True
+
+        if cmd_lower == "/mode" or cmd_lower.startswith("/mode "):
+            await self._handle_mode_cmd(cmd_lower[len("/mode"):].strip())
             return True
 
         if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):

@@ -40,8 +40,6 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
 from localharness.config.grants import GrantStore, new_grant
-from localharness.core.events import PermissionAsked, PermissionResolved
-from localharness.core.types import ToolCall
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +204,8 @@ def deny_fn_from(evaluator: Any, permissions: Any) -> DenyFn:
     """
 
     def _deny(tool_name: str, params: dict) -> PermissionResult:
+        from localharness.core.types import ToolCall
+
         return evaluator.evaluate(ToolCall(name=tool_name, arguments=params or {}), permissions)
 
     return _deny
@@ -426,6 +426,11 @@ class PermissionGate:
         session_id: str,
         tool_timeout_s: Optional[float],
     ) -> GateOutcome:
+        # Imported here, not at module scope: `core/events` imports `agent/gate_types`, which
+        # pulls in the `agent` package, which imports the loop, which imports this module. A
+        # module-level import would close that cycle and break `import localharness.channels`.
+        from localharness.core.events import PermissionAsked, PermissionResolved
+
         await self._publish(
             PermissionAsked(
                 agent_id=agent_id,

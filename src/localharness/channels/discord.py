@@ -90,6 +90,40 @@ def discord_config_from_env() -> dict[str, Any]:
     }
 
 
+PERMISSION_REACTIONS: dict[str, str] = {
+    "✅": "allow_once",
+    "♾️": "allow_always",
+    "❌": "reject_once",
+}
+"""PRD §3.5: "message with the reactions from the allowlisted user".
+
+The PRD writes the middle option as a doubled check; a Discord reaction is ONE emoji, so
+"always here" is the infinity sign — forever, unmistakable next to the single check, and not a
+near-twin of it the way a boxed check would be. There is no "never here" option: the PRD's
+Discord row lists three reactions, and a durable deny written by a mis-tap in a chat window is
+the one answer that cannot be undone from a prompt.
+"""
+
+PERMISSION_REACTIONS_UNGRANTABLE: dict[str, str] = {
+    "✅": "allow_once",
+    "❌": "reject_once",
+}
+"""PRD §3.5: an ungrantable request offers only the `_once` pair — it asks every time by
+construction, so an "always" reaction would be a lie."""
+
+PERMISSION_DEFAULT_DECISION = "reject_once"
+"""Fail closed when there is nowhere to post the question, and what the gate records when the
+wait runs out (PRD §3.5 "deny on timeout")."""
+
+PERMISSION_MESSAGE = "🛑 **Permission needed**\n`{display}`\n{legend}"
+PERMISSION_LEGEND_GRANTABLE = "✅ allow once  ·  ♾️ always in this workspace  ·  ❌ no"
+PERMISSION_LEGEND_UNGRANTABLE = (
+    "✅ allow once  ·  ❌ no    (this one asks every time — it cannot be remembered)"
+)
+"""The message body. Written out rather than generated from the reaction maps because it is the
+sentence someone reads on a phone, and the wording is the design."""
+
+
 class DiscordChannel(ChannelAdapter):
     """Discord gateway channel: messages in, agent replies out.
 
@@ -98,6 +132,13 @@ class DiscordChannel(ChannelAdapter):
     """
 
     channel_id = "discord"
+
+    can_ask = True
+    """PRD §3.5: Discord renders an ASK as reactions on a message."""
+
+    has_review_surface = False
+    """Nothing here shows a diff, so an in-workspace edit asks once per workspace (PRD §3.1
+    choice 2, critic finding 11) instead of never."""
 
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
@@ -111,6 +152,9 @@ class DiscordChannel(ChannelAdapter):
         self._ready: asyncio.Event = asyncio.Event()
         self._current_msg: Any = None  # discord.Message being answered (reply routing target)
         self._handles: list[Any] = []
+        # message id -> queue of emoji, for ask_permission. Push (a gateway reaction event) is
+        # bridged to pull (an awaiting gate) the same way on_message is bridged to read_input.
+        self._reaction_waiters: dict[int, asyncio.Queue] = {}
 
     async def start(self) -> None:
         try:
@@ -154,6 +198,17 @@ class DiscordChannel(ChannelAdapter):
                 return
             await self._queue.put(msg)
 
+        @self._client.event
+        async def on_raw_reaction_add(payload: Any) -> None:
+            # RAW, not on_reaction_add: the raw event needs no message cache, so a permission
+            # question still resolves after a reconnect. The allowlist is the SAME set that
+            # gates inbound messages — one definition of "who may drive this session".
+            if str(getattr(payload, "user_id", "")) not in self._allow_users:
+                return
+            waiter = self._reaction_waiters.get(int(getattr(payload, "message_id", 0) or 0))
+            if waiter is not None:
+                waiter.put_nowait(str(getattr(payload, "emoji", "")))
+
         self._handles = [
             self.bus.subscribe(Action, self.on_action),
             self.bus.subscribe(Observation, self.on_observation),
@@ -191,6 +246,43 @@ class DiscordChannel(ChannelAdapter):
             except Exception:  # noqa: BLE001 — a failed reaction must never drop the turn
                 pass
         return (msg.content or "").strip()
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Post the question and wait for an allowlisted reaction (PRD §3.5).
+
+        No timeout of its own: `PermissionGate` already awaits this under
+        `permissions.ask.timeout_s` (or the tool's own timeout) and records a `reject_once` when
+        it runs out, so a second deadline here would only be a second place to get it wrong. A
+        reaction from anyone not on the allowlist is ignored, not counted as an answer.
+        """
+        from localharness.agent.gate_types import Decision
+
+        target = self._current_msg
+        if target is None or self._client is None:
+            log.warning("discord_permission_no_target", tool=getattr(request, "tool_name", ""))
+            return Decision(kind=PERMISSION_DEFAULT_DECISION)
+
+        options = PERMISSION_REACTIONS if request.grantable else PERMISSION_REACTIONS_UNGRANTABLE
+        legend = (
+            PERMISSION_LEGEND_GRANTABLE if request.grantable else PERMISSION_LEGEND_UNGRANTABLE
+        )
+        sent = await target.channel.send(
+            PERMISSION_MESSAGE.format(display=request.display, legend=legend)
+        )
+        waiter: asyncio.Queue = asyncio.Queue()
+        self._reaction_waiters[int(sent.id)] = waiter
+        try:
+            for emoji in options:
+                try:
+                    await sent.add_reaction(emoji)
+                except Exception:  # noqa: BLE001 — a failed reaction must not drop the question
+                    log.warning("discord_permission_reaction_failed", emoji=emoji)
+            while True:
+                kind = options.get(await waiter.get())
+                if kind is not None:
+                    return Decision(kind=kind)
+        finally:
+            self._reaction_waiters.pop(int(sent.id), None)
 
     async def _send(self, content: str) -> None:
         msg = self._current_msg
