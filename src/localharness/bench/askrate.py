@@ -60,6 +60,11 @@ TOP_KEYS_REPORTED = 15
 order"). The list is the answer to "what did the gate interrupt me about", so it is ordered by
 when each key was first asked, never by frequency — a key is asked exactly once."""
 
+PERCENT_SCALE = 100.0
+"""Fraction → percent. Named because every SLO in this file is stated as a percentage (PRD §3.6)
+and the report prints percentages next to them: a bare ``100.0 * x / y`` reads as a threshold at a
+glance, which is exactly the thing it must not be confused with."""
+
 ZERO_PROMPT_SLO_PCT = 90.0
 """PRD §3.6 SLO: ≥90 % of sessions see zero prompts once a workspace is warm. Printed next to the
 measured rate so a regression is visible in the report itself."""
@@ -240,7 +245,7 @@ def _zero_rate(sessions: Iterable[SessionStats]) -> tuple[int, int, float]:
     """`(zero-prompt sessions, sessions, percent)` — the SLO's own numerator and denominator."""
     rows = list(sessions)
     zero = sum(1 for s in rows if s.prompts == 0)
-    return zero, len(rows), (100.0 * zero / len(rows) if rows else 0.0)
+    return zero, len(rows), (PERCENT_SCALE * zero / len(rows) if rows else 0.0)
 
 
 def _median(values: list[int]) -> float:
@@ -462,7 +467,7 @@ def render(report: AskRateReport) -> str:
 
     total_calls = report.total_calls
     total_prompts = report.total_prompts
-    share = (100.0 * total_prompts / total_calls) if total_calls else 0.0
+    share = (PERCENT_SCALE * total_prompts / total_calls) if total_calls else 0.0
     lines.append(f"sessions:   {len(report.sessions)}")
     lines.append(f"tool calls: {total_calls}")
     lines.append(f"prompts:    {total_prompts}  ({share:.1f}% of tool calls)")
