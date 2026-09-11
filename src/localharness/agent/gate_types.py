@@ -52,6 +52,7 @@ AskClass = Literal[
     "interpreter-inline",
     "code-exec",
     "delegate",
+    "tool-unfamiliar",
     "mcp",
     "network-host",
 ]

@@ -126,10 +126,31 @@ KIND_BY_GROUP: dict[str, str] = {
     "code": "code",
     "delegate": "delegate",
     "web": "network",
+    "fs.read": "allow",
+    "memory": "allow",
 }
 """Fallback classification by ``ToolSchema.group`` (A3, PRD §6) for tools this module does not
 know by name — a plugin's or a future builtin's. Names win when known, because a name pins the
-exact parameter to read; groups are the open extension point."""
+exact parameter to read; groups are the open extension point.
+
+The map is CLOSED: the read tiers (``fs.read``, ``memory``) are listed explicitly, so a group
+that is not here — ``other``, the ``ToolSchema.group`` default, or anything a plugin invents — is
+a family the gate has no rules for and lands in :data:`UNFAMILIAR_TOOL_KIND` rather than in ALLOW.
+The old ``.get(group, "allow")`` default meant every plugin tool, and every tool whose schema
+lookup failed, ran unasked even with ``destructive=True`` on its schema."""
+
+MCP_GROUP_PREFIX = "mcp/"
+"""``tools/mcp.py:81`` names every MCP tool's group ``mcp/<server>``. A call that carries one is
+judged on the MCP path even if ``ToolMeta.is_mcp`` did not survive the trip."""
+
+UNFAMILIAR_TOOL_KIND = "tool-unfamiliar"
+"""The branch for a tool in no known family: a grantable ask keyed on the tool NAME, so it is
+answered once per workspace and then remembered — the same shape as ``code-exec`` and
+``delegate``, which are also keyed by name."""
+
+UNFAMILIAR_TOOL_REASON = "tool not in a known family; asks once per workspace"
+"""What the human reads. It says what the gate knows (nothing about this tool) rather than
+naming a rule, because the answer it wants is "do you want this tool to run here at all"."""
 
 DYNAMIC_COMMAND_NAME_PREFIXES: tuple[str, ...] = ("$", "`")
 """A shell segment whose command NAME is itself a substitution or a variable — ``$(echo rm) -rf
@@ -187,6 +208,7 @@ ASK_SEVERITY_ORDER: tuple[str, ...] = (
     "interpreter-inline",
     "code-exec",
     "delegate",
+    "tool-unfamiliar",
     "mcp",
     "network-host",
 )
@@ -314,7 +336,10 @@ def _kind(tool_name: str, meta: ToolMeta) -> str:
         return "delegate"
     if tool_name in NETWORK_URL_PARAMS:
         return "network"
-    return KIND_BY_GROUP.get(meta.group, "allow")
+    group = meta.group or ""
+    if group.startswith(MCP_GROUP_PREFIX):
+        return "mcp"
+    return KIND_BY_GROUP.get(group, UNFAMILIAR_TOOL_KIND)
 
 
 def _write_target(tool_name: str, params: dict) -> Optional[str]:
@@ -723,7 +748,12 @@ def _evaluate_shell(
 def _evaluate_named(
     tool_name: str, params: dict, ctx: GateContext, *, klass: str, reason: str
 ) -> VerdictResult:
-    """The classes keyed by tool name: ``code-exec`` and ``delegate`` (PRD §3.1)."""
+    """The classes keyed by tool NAME: ``code-exec``, ``delegate`` and ``tool-unfamiliar``.
+
+    PRD §3.1 names the first two. ``tool-unfamiliar`` is the same shape for a tool in no known
+    family — a plugin's, or one whose schema could not be read — so an unknown tool is answered
+    once per workspace and then remembered, instead of running unasked.
+    """
     if ctx.mode == "read-only":
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if ctx.grants(ctx.workspace, klass, tool_name) is not None and not _refused(ctx, klass, tool_name):
@@ -847,6 +877,10 @@ def evaluate(
         )
     if kind == "network":
         return _evaluate_network(tool_name, params, ctx, settings)
+    if kind == UNFAMILIAR_TOOL_KIND:
+        return _evaluate_named(
+            tool_name, params, ctx, klass=UNFAMILIAR_TOOL_KIND, reason=UNFAMILIAR_TOOL_REASON,
+        )
     if ctx.mode == "read-only" and tool_meta.destructive:
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     return VerdictResult(Verdict.ALLOW, "read-tier tool")

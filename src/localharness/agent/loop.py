@@ -30,6 +30,14 @@ from localharness.tools.capabilities import CoResidenceError
 
 log = logging.getLogger("localharness.agent.loop")
 
+UNKNOWN_TOOL_META = ToolMeta(group="other", destructive=True)
+"""What the gate is told about a tool whose schema could not be read (`_tool_facts`).
+
+Fail closed: `group="other"` is no known family, so `verdict.evaluate` raises a grantable
+`tool-unfamiliar` ask keyed on the tool name, and `destructive=True` keeps it out of read-only
+mode. The previous neutral `ToolMeta()` landed such a call in the ALLOW tier — the one place an
+unreadable schema must never put it."""
+
 
 # ---------------------------------------------------------------------------
 # Session
@@ -886,6 +894,8 @@ class AgentLoop:
         self._llm = llm
         self._bus = bus
         self._ctx = context_manager
+        # Tools whose schema could not be read; one warning each per session (_tool_facts).
+        self._unknown_tool_meta_warned: set[str] = set()
         # Dynamic per-call output cap. None = the client's configured max_tokens — which is
         # itself None unless someone configured one, and then no cap is sent at all. Raised by
         # _grow_output_cap after an output-ceiling cut (finish_reason="length") and kept for the
@@ -1012,24 +1022,41 @@ class AgentLoop:
         had — which `PermissionGate` turns into the wait for a human when
         `permissions.ask.timeout_s` is unset (PRD §3.5).
 
-        A registry without a `lookup_tool` (the minimal fakes in the test suite) yields the
-        neutral defaults: the verdict then classifies by tool NAME, which covers every builtin.
+        When the schema cannot be read — no `lookup_tool` on the registry, no such tool, or the
+        lookup itself raised — the facts are UNKNOWN, and the honest unknown is
+        `UNKNOWN_TOOL_META`: group `other`, `destructive=True`. The verdict still classifies by
+        tool NAME first (which covers every builtin), and a name it does not know now asks once
+        per workspace instead of running unasked. The old neutral `ToolMeta()` said "harmless"
+        about a tool nobody could describe, and `destructive=True` on a plugin's own schema was
+        thrown away with it.
         """
         lookup = getattr(self._tools, "lookup_tool", None)
         if lookup is None:
-            return ToolMeta(), None
+            return UNKNOWN_TOOL_META, None
         try:
             tool = lookup(
                 tool_call.name, self._config.name, self._config.division or "", self._config.tools
             )
         except Exception:  # noqa: BLE001 — a lookup failure must never block a turn
-            tool = None
+            self._warn_unknown_tool_meta(tool_call.name)
+            return UNKNOWN_TOOL_META, None
         if tool is None:
-            return ToolMeta(), None
+            return UNKNOWN_TOOL_META, None
         try:
             return tool_meta_from_schema(tool.info()), getattr(tool, "timeout_s", None)
         except Exception:  # noqa: BLE001
-            return ToolMeta(), None
+            self._warn_unknown_tool_meta(tool_call.name)
+            return UNKNOWN_TOOL_META, None
+
+    def _warn_unknown_tool_meta(self, tool_name: str) -> None:
+        """Say once per session that a tool's schema could not be read (it now asks instead)."""
+        if tool_name in self._unknown_tool_meta_warned:
+            return
+        self._unknown_tool_meta_warned.add(tool_name)
+        log.warning(
+            "could not read the schema for tool %r — treating it as unknown and destructive, "
+            "so the permission gate asks about it", tool_name,
+        )
 
     def push_user_nudge(self, text: str) -> None:
         """Queue a user-typed nudge for delivery to the running turn at its next step
