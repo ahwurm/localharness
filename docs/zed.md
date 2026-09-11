@@ -82,6 +82,15 @@ rather than writing to disk — so they land in the review pane where you can ac
 them. That review surface is also why an in-workspace edit does not ask for permission at all:
 you are going to see it.
 
+This routing is all-or-nothing, and it takes **both** ACP filesystem capabilities —
+`fs/read_text_file` *and* `fs/write_text_file`. Every editor-backed write is a read first: ACP
+has no append, so appending rewrites the whole file, and `edit` matches its `old_string` against
+the buffer. A client offering only the write half would therefore append onto (or diff against)
+the stale copy on disk and throw away your unsaved lines, so the harness wires neither hook for
+it: `read`/`write`/`edit` touch the disk exactly as they do in a terminal, there is no review
+surface, and an in-workspace edit asks once per workspace instead. Zed advertises both, so in
+Zed you get the review pane; the fallback is for other ACP clients.
+
 **Cancel works.** The stop button cancels the running turn, the same path `Ctrl-C` takes in the
 terminal.
 

@@ -702,6 +702,52 @@ async def test_write_tool_append_mode(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_write_tool_refuses_a_half_wired_editor_seam(tmp_path: Path):
+    """R5: a write hook without its read hook is a data-loss bug, not a degraded mode.
+
+    An editor-backed append rewrites the WHOLE file (ACP has no append), so without the read
+    half it would write `content` alone and the user's file would be gone. The tool says what is
+    misconfigured and touches nothing."""
+    from localharness.tools.builtin.write_tool import WriteTool
+
+    tool = WriteTool()
+    out = tmp_path / "output.txt"
+    out.write_text("first\n")
+    written: dict[str, str] = {}
+
+    async def _write(path: Path, text: str) -> None:
+        written[str(path)] = text
+
+    tool.file_write_hook = _write
+    result = await tool.run(path=str(out), content="second\n", mode="append")
+
+    assert result.success is False
+    assert "file_read_hook" in (result.error or "")
+    assert written == {}
+    assert out.read_text() == "first\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_refuses_a_half_wired_editor_seam(tmp_path: Path):
+    """R5, the other half: reading DISK while writing the BUFFER silently reverts unsaved work."""
+    from localharness.tools.builtin.edit_tool import EditTool
+
+    tool = EditTool()
+    out = tmp_path / "notes.md"
+    out.write_text("alpha\n")
+
+    async def _write(path: Path, text: str) -> None:  # pragma: no cover - must never run
+        raise AssertionError("the edit wrote through half a seam")
+
+    tool.file_write_hook = _write
+    result = await tool.run(path=str(out), old_string="alpha", new_string="beta")
+
+    assert result.success is False
+    assert "file_read_hook" in (result.error or "")
+    assert out.read_text() == "alpha\n"
+
+
+@pytest.mark.asyncio
 async def test_write_tool_blocks_env_files(tmp_path: Path):
     from localharness.tools.builtin.write_tool import WriteTool
 

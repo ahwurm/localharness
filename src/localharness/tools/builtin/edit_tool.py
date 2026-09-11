@@ -63,6 +63,8 @@ class EditTool(Tool):
 
     async def _execute(self, path: str, old_string: str, new_string: str,
                        replace_all: bool = False) -> ToolResult:
+        if (unpaired := self._editor_hooks_unpaired()) is not None:
+            return unpaired
         target = resolve_user_path(path)
 
         forbidden_suffixes = {".env", ".secret", ".token", ".pem", ".key"}
