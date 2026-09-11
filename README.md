@@ -221,7 +221,7 @@ Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytes
 
 ## Reference architectures
 
-LocalHarness is developed against two maintainer-tested hardware targets. Both must meet
+LocalHarness is developed against three reference hardware targets: one maintainer-tested and two proposed. All must meet
 the practicality bar — **64k of KV-cache headroom and ≥9.5 tok/s single-stream**. Four
 tested configs on architecture A (Qwen 3.8 / 3.6 and DeepSeek V4 Flash across llama.cpp
 and vLLM); the current default:
@@ -241,7 +241,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.13.2, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.14.0, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 

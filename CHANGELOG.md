@@ -4,7 +4,7 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.14.0] — 2026-09-11
 
 The permission spine: one deterministic gate in front of every tool call, so the
 harness interrupts you when something crosses your project boundary or looks
