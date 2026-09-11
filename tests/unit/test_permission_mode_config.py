@@ -3,8 +3,10 @@
 Three properties, one file:
   (a) `permissions.mode` is a SESSION MODE now, defaulting to the mode that asks; the retired
       `auto`/`manual` spellings still load, mapped and warned, so no existing config breaks.
-  (b) `permissions.allow_patterns` is gone and a config that still carries it fails loudly with
-      the reason — config is a repo-travelling surface and must never be able to LOOSEN policy.
+  (b) `permissions.allow_patterns` is gone. A NON-EMPTY one fails loudly with the reason —
+      config is a repo-travelling surface and must never be able to LOOSEN policy. An EMPTY one
+      (what every pre-v0.14 `init` wrote) loads, is dropped, and warns: rejecting it stopped
+      every existing install from starting (D2).
   (c) `permissions.ask` maps onto `GateSettings` without restating a single default.
 """
 from __future__ import annotations
@@ -73,7 +75,32 @@ def test_allow_patterns_is_rejected_inside_a_full_agent_config():
     """The real shape a user's yaml takes — the check must survive nesting, not just a direct
     PermissionConfig() call."""
     with pytest.raises(ValidationError):
-        AgentConfig(name="x", role="y", permissions={"allow_patterns": []})
+        AgentConfig(name="x", role="y", permissions={"allow_patterns": ["bash_exec(*)"]})
+
+
+@pytest.mark.parametrize("empty", [[], None], ids=["empty-list", "null"])
+def test_an_empty_allow_patterns_loads_and_is_dropped_with_a_warning(empty):
+    """Every pre-v0.14 `localharness init` wrote `allow_patterns: []` (D2).
+
+    Rejecting the bare KEY meant no existing install could start, and `config migrate` — the
+    documented repair — hit the same validator. An empty value carried no policy, so it loads,
+    is dropped, and says so.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = PermissionConfig(allow_patterns=empty)
+    assert not hasattr(cfg, "allow_patterns")
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) == 1
+    assert "allow_patterns" in str(deprecations[0].message)
+
+
+def test_an_empty_allow_patterns_loads_inside_a_full_agent_config():
+    """Nesting again: the old init output is a whole config file, not a bare PermissionConfig."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cfg = AgentConfig(name="x", role="y", permissions={"mode": "auto", "allow_patterns": []})
+    assert cfg.permissions.mode == "guarded"
 
 
 # --- (c) ask -> GateSettings ------------------------------------------------

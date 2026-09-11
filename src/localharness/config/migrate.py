@@ -13,10 +13,16 @@ DELIBERATELY deleted is never re-added. Removal-respect is the whole reason it c
 unattended. `init` stamps fresh configs at the current revision, so a new install is never
 touched and any later removal is respected from day one.
 
-Additive only: existing entries are never removed or reordered, and no key other than
-`org.permissions.{deny_patterns,defaults_revision}` is touched. The updated config is validated
-through the real HarnessConfig model before anything is written — a migrate that writes an
-invalid config is worse than none.
+Additive only, with one deliberate exception: existing entries are never removed or reordered,
+and no key other than `org.permissions.{deny_patterns,defaults_revision}` is touched — except
+`org.permissions.allow_patterns`, which v0.14 REMOVED and which every pre-v0.14 `init` wrote as
+`allow_patterns: []`. A config carrying it cannot load at all, so migrate deletes the key; this
+is the documented repair path, and it has to be able to repair the thing that breaks. That
+removal is also why the plan is not purely revision-gated: a config already stamped at the
+current revision still gets a plan when the dead key is present.
+
+The updated config is validated through the real HarnessConfig model before anything is
+written — a migrate that writes an invalid config is worse than none.
 """
 from __future__ import annotations
 
@@ -45,30 +51,45 @@ class MigrationError(Exception):
     """Config could not be read, parsed, or (post-merge) validated."""
 
 
+DEAD_KEY = "allow_patterns"
+"""`org.permissions.allow_patterns`, removed in v0.14 (PRD §3.3). Named here because migrate is
+the only writer allowed to delete a user's key, and the name it deletes should be readable at
+the top of the file rather than quoted inline three times."""
+
+
 @dataclass(frozen=True)
 class MigrationPlan:
-    """A pending additive sync. `added` may be empty (config already has every default but is
-    below the current revision — the stamp still advances). `updated` is the full config dict
-    with the deny list + stamp applied, ready to validate and write."""
+    """A pending sync. `added` may be empty (config already has every default but is below the
+    current revision — the stamp still advances). `removed_allow_patterns` is None when the dead
+    `allow_patterns` key is absent, and otherwise the entries deleted (`[]` for the empty value
+    every pre-v0.14 `init` wrote). `updated` is the full config dict with the deny list, the
+    stamp and the removal applied, ready to validate and write."""
 
     added: list[str]
     from_revision: int
     to_revision: int
     updated: dict
+    removed_allow_patterns: Optional[list] = None
 
 
 def plan(data: dict) -> Optional[MigrationPlan]:
-    """Return a MigrationPlan if `data` is below the current defaults revision, else None.
+    """Return a MigrationPlan if `data` needs work, else None.
 
-    None = already at/above the current revision → nothing to do. This is also the
-    removal-respect path: a stamped-current config is never inspected for missing defaults,
-    so anything the user deleted stays deleted.
+    Work means either below the current defaults revision, or still carrying the removed
+    `org.permissions.allow_patterns` key. The second clause is not decoration: a config with
+    that key fails validation outright, so the repair has to reach it even when the revision
+    stamp is already current.
+
+    None = nothing to do. For the deny list that is also the removal-respect path: a
+    stamped-current config is never inspected for missing defaults, so anything the user
+    deleted stays deleted.
     """
     org = data.get("org") if isinstance(data.get("org"), dict) else {}
     perms = org.get("permissions") if isinstance(org.get("permissions"), dict) else {}
     stamped = perms.get("defaults_revision")
     stamped = stamped if isinstance(stamped, int) else 0
-    if stamped >= CURRENT_DEFAULTS_REVISION:
+    has_dead_key = DEAD_KEY in perms
+    if stamped >= CURRENT_DEFAULTS_REVISION and not has_dead_key:
         return None
 
     user_deny = perms.get("deny_patterns")
@@ -78,11 +99,15 @@ def plan(data: dict) -> Optional[MigrationPlan]:
     updated = dict(data)
     updated_org = dict(org)
     updated_perms = dict(perms)
+    removed = None
+    if has_dead_key:
+        dead = updated_perms.pop(DEAD_KEY)
+        removed = list(dead) if isinstance(dead, list) else []
     updated_perms["deny_patterns"] = [*user_deny, *added]
     updated_perms["defaults_revision"] = CURRENT_DEFAULTS_REVISION
     updated_org["permissions"] = updated_perms
     updated["org"] = updated_org
-    return MigrationPlan(added, stamped, CURRENT_DEFAULTS_REVISION, updated)
+    return MigrationPlan(added, stamped, CURRENT_DEFAULTS_REVISION, updated, removed)
 
 
 def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:

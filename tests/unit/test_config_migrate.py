@@ -8,6 +8,7 @@ never removing/reordering the user's own entries, and never touching any other k
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import yaml
@@ -32,8 +33,15 @@ OLD_7 = [
 ]
 
 
-def _write_config(config_dir: Path, deny: list[str]) -> Path:
-    """Write a valid v0.9.0-shaped config.yaml with the given deny_patterns."""
+_ABSENT = object()
+
+
+def _write_config(config_dir: Path, deny: list[str], *, allow_patterns=_ABSENT) -> Path:
+    """Write a valid v0.9.0-shaped config.yaml with the given deny_patterns.
+
+    `allow_patterns` reproduces the key every pre-v0.14 `init` wrote (D2); left out by default,
+    because most of this file is about the deny list.
+    """
     cfg = {
         "version": "1",
         "provider": {
@@ -62,6 +70,8 @@ def _write_config(config_dir: Path, deny: list[str]) -> Path:
             "log_level": "info",
         },
     }
+    if allow_patterns is not _ABSENT:
+        cfg["org"]["permissions"]["allow_patterns"] = allow_patterns
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / "config.yaml"
     path.write_text(
@@ -292,3 +302,106 @@ def test_start_auto_migrate_failure_does_not_raise(tmp_path, monkeypatch):
     # config untouched, no partial backup
     assert cfg.read_bytes() == before
     assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+# --------------------------------------------------------------------------- #
+# D2 — the v0.14 removal of `org.permissions.allow_patterns`.
+#
+# Every pre-v0.14 `localharness init` wrote `allow_patterns: []`. v0.14 removed the key, which
+# made those configs unloadable — and `config migrate`, the documented repair, failed on the
+# same validator before it could write. These pin both halves: an old-init-shaped config loads
+# through the model, and migrate strips the key and writes.
+# --------------------------------------------------------------------------- #
+
+def _perms(config_file: Path) -> dict:
+    return yaml.safe_load(config_file.read_text())["org"]["permissions"]
+
+
+def test_an_old_init_config_loads_through_the_real_loader(tmp_path):
+    """The exact shape `init` wrote before v0.14: mode `auto` + `allow_patterns: []` + denies.
+
+    Through `HarnessConfig`, not a bare `PermissionConfig` — this is what `start` does, and it
+    is what failed with "Value error, permissions.allow_patterns was removed in v0.14".
+    """
+    from localharness.config.models import HarnessConfig
+
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        loaded = HarnessConfig.model_validate(yaml.safe_load(cfg.read_text()))
+    assert loaded.org.permissions.mode == "guarded"
+    assert loaded.org.permissions.deny_patterns == OLD_7
+
+
+def test_migrate_strips_an_empty_allow_patterns_and_writes(tmp_path):
+    """The repair path: migrate removes the key, the result validates, the file is written."""
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "allow_patterns" not in _perms(cfg)
+    assert "permissions.allow_patterns" in result.output
+    # and the migrated file is loadable — the thing that was broken
+    from localharness.config.models import HarnessConfig
+
+    HarnessConfig.model_validate(yaml.safe_load(cfg.read_text()))
+
+
+def test_migrate_strips_a_populated_allow_patterns_and_names_the_entries(tmp_path):
+    """A non-empty list is a real loosening intent this release does not honor. It is removed
+    too — migrate is the ONLY way past a validator that otherwise blocks every start — and the
+    output says the entries were never honored rather than dropping them silently."""
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=["bash_exec(*)", "write(*)"])
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "allow_patterns" not in _perms(cfg)
+    assert "bash_exec(*)" in result.output and "never honored" in result.output
+
+
+def test_migrate_repairs_the_dead_key_even_when_already_stamped_current(tmp_path):
+    """Revision-gating alone would refuse: `allow_patterns` blocks loading at ANY stamp."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    cfg = _write_config(tmp_path, PermissionConfig().deny_patterns, allow_patterns=[])
+    data = yaml.safe_load(cfg.read_text())
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "allow_patterns" not in _perms(cfg)
+
+
+def test_migrate_carries_the_embedded_chmod_fix_into_an_old_config(tmp_path):
+    r"""#159: `bash_exec(chmod 777 *)` is anchored, so `find . -exec chmod 777 {} \;` passed it.
+
+    The embedded form must actually REACH an old install — which it could not while the same
+    config's `allow_patterns` made migrate refuse to write.
+    """
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
+    result = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "bash_exec(*chmod 777*)" in cfg.read_text()
+
+
+def test_migrate_leaves_other_keys_unchanged_when_stripping_the_dead_key(tmp_path):
+    """The removal is surgical: nothing else in the file moves."""
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
+    before = yaml.safe_load(cfg.read_text())
+    before["org"]["permissions"].pop("allow_patterns")
+    assert _run(tmp_path).exit_code == 0
+
+    after = yaml.safe_load(cfg.read_text())
+    for d in (before, after):
+        d["org"]["permissions"].pop("deny_patterns")
+        d["org"]["permissions"].pop("defaults_revision", None)
+    assert after == before
+
+
+def test_start_auto_migrate_repairs_the_dead_key_before_the_loader_reads_it(tmp_path):
+    """`start` runs the same engine before loading, so an upgrading user never sees the error."""
+    from localharness.cli.start_cmd import _auto_migrate_deny_defaults
+
+    cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
+    _auto_migrate_deny_defaults(cfg)
+    assert "allow_patterns" not in _perms(cfg)
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1

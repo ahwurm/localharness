@@ -63,9 +63,13 @@ def migrate(
     `org.permissions.deny_patterns` into config.yaml, so a later growth of the shipped default
     deny list never reaches an existing install (the follow-up disclosed in the v0.9.1 release
     notes). This appends any missing shipped defaults and stamps the config's defaults
-    revision — additive ONLY: it never removes or reorders your own entries, touches no other
-    key, and (because it is revision-gated) never re-adds a default you deliberately deleted. A
-    timestamped backup is written before the config is updated.
+    revision — additive ONLY: it never reorders your own entries, and (because it is
+    revision-gated) never re-adds a default you deliberately deleted. A timestamped backup is
+    written before the config is updated.
+
+    One key is deleted rather than added: `org.permissions.allow_patterns`, removed in v0.14.
+    Every pre-v0.14 `init` wrote it, and a config still carrying it does not load at all, so
+    this is the repair — run it after upgrading if startup complains about that key.
     """
     config_file = resolve_config_dir(config_dir) / "config.yaml"
 
@@ -94,11 +98,28 @@ def migrate(
         )
         for p in plan.added:
             console.print("  [green]+[/green] " + escape(str(p)), soft_wrap=True)
-    else:
+    elif plan.from_revision < plan.to_revision:
         console.print(
             f"No new deny patterns to add — updating defaults revision "
             f"{plan.from_revision} → {plan.to_revision}."
         )
+
+    # The removed key is announced, never silent: migrate is the ONLY place that deletes a key
+    # the user wrote, and for the non-empty case the entries are shown because they were never
+    # honored and are not coming back (PRD §3.3 — grants live in the global store).
+    if plan.removed_allow_patterns is not None:
+        console.print(
+            "  [red]-[/red] " + escape(f"permissions.{_migrate.DEAD_KEY}")
+            + " [dim](removed in v0.14; grants live in ~/.localharness/grants.yaml)[/dim]",
+            soft_wrap=True,
+        )
+        for entry in plan.removed_allow_patterns:
+            console.print(
+                "      [red]·[/red] " + escape(str(entry))
+                + " [dim]— never honored; removed[/dim]",
+                soft_wrap=True,
+            )
+
     console.print(f"\n[dim]{_NOTE}[/dim]")
 
     if dry_run:
@@ -113,9 +134,14 @@ def migrate(
         )
         raise typer.Exit(1)
 
+    removed_note = (
+        f"; removed permissions.{_migrate.DEAD_KEY}"
+        if plan.removed_allow_patterns is not None
+        else ""
+    )
     console.print(
-        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s); stamped defaults revision "
-        f"{plan.to_revision}.\n  Backup: {backup}"
+        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s){removed_note}; stamped defaults "
+        f"revision {plan.to_revision}.\n  Backup: {backup}"
     )
 
 
