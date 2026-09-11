@@ -1,4 +1,4 @@
-"""Durable "allow always" answers, keyed by workspace realpath (PRD §3.3).
+"""Durable "allow always" and "never here" answers, keyed by workspace realpath (PRD §3.3).
 
 The store lives in the GLOBAL config dir — ``~/.localharness/grants.yaml`` — and NEVER in a
 project tree. That is the whole security property: a cloned repo can add deny patterns, tools
@@ -12,9 +12,14 @@ Nested workspaces inherit (the phase-39 "nested inherits" principle): a grant re
 ``/p`` is honored in ``/p/sub``, because ``/p/sub`` is inside the project you already
 answered for. The walk is upward only — a grant in a CHILD never leaks to the parent.
 
-Provenance (``channel``, ``session_id``, ``granted_at``) is mandatory per PRD §3.3. A record
-missing any of it is not a grant anyone can audit, so it is skipped with a warning rather than
-honored.
+Provenance (``channel``, ``session_id``, ``granted_at`` / ``refused_at``) is mandatory per
+PRD §3.3. A record missing any of it is not an answer anyone can audit, so it is skipped with a
+warning rather than honored.
+
+A "never here" answer lives in the same file as a NEGATIVE GRANT (``refusals:``), filed under
+the same workspace key and the same key space as a grant — the shell signature, the directory,
+the MCP tool the prompt actually named. It is not a text pattern: a refusal of the signature
+``cp`` denies ``cp``, not ``scp``, ``cpio`` or every command whose arguments contain "cp".
 """
 from __future__ import annotations
 
@@ -29,13 +34,13 @@ from localharness.config.overlay import atomic_write_overlay
 from localharness.config.paths import global_config_dir
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from localharness.agent.gate_types import Grant
+    from localharness.agent.gate_types import Grant, Refusal
 
 log = logging.getLogger(__name__)
 
 
-def _grant_type() -> type:
-    """``gate_types.Grant``, imported on first use rather than at module import.
+def _record_type(name: str) -> type:
+    """``gate_types.Grant`` / ``gate_types.Refusal``, imported on first use, not at import time.
 
     ``localharness.agent.__init__`` eagerly pulls in ``agent.loop`` → ``agent.gate`` →
     ``config.grants``, so importing ``agent.gate_types`` from this module's body made
@@ -48,25 +53,27 @@ def _grant_type() -> type:
     ``from __future__ import annotations`` keeps the annotations below string-only, so this is
     the only runtime reference.
     """
-    from localharness.agent.gate_types import Grant
+    import localharness.agent.gate_types as gate_types
 
-    return Grant
+    return getattr(gate_types, name)
 
 GRANTS_FILE = "grants.yaml"
 """PRD §3.3: the file name inside the GLOBAL config dir. Sibling of
 ``trust.WORKSPACE_TRUST_FILE``, same directory, same realpath keying."""
 
 GRANTS_KEY = "grants"
-DENIES_KEY = "denies"
-"""The two lists a workspace entry may hold. "Never here" answers write a deny pattern into the
-same file (PRD §3.3) so one file is the whole memory of what a human answered."""
+REFUSALS_KEY = "refusals"
+"""The two lists a workspace entry may hold. "Never here" answers are written into the same file
+(PRD §3.3) so one file is the whole memory of what a human answered — as a NEGATIVE GRANT in the
+same key space, not as a text pattern: a refusal denies exactly the key the prompt offered."""
 
 GRANT_REQUIRED_FIELDS: tuple[str, ...] = ("key", "class", "granted_at", "channel", "session_id")
 """PRD §3.3 record shape ``{key, class, granted_at, channel, session_id}``. Provenance is
 mandatory: every one of these must be a non-empty string or the record is invalid."""
 
-DENY_REQUIRED_FIELDS: tuple[str, ...] = ("pattern", "added_at", "channel", "session_id")
-"""Same provenance rule for a "never here" answer, with the pattern in place of the grant key."""
+REFUSAL_REQUIRED_FIELDS: tuple[str, ...] = ("key", "class", "refused_at", "channel", "session_id")
+"""Same shape and the same mandatory provenance for a "never here" answer, with ``refused_at``
+in place of ``granted_at`` so a reader can tell the two lists apart at a glance."""
 
 
 def grants_store_path() -> Path:
@@ -162,7 +169,7 @@ class GrantStore:
         for workspace_key in _ancestors(workspace):
             for record in self._records(data, workspace_key, GRANTS_KEY, GRANT_REQUIRED_FIELDS):
                 if record["key"] == key:
-                    return _grant_type()(
+                    return _record_type("Grant")(
                         key=record["key"],
                         klass=record["class"],
                         granted_at=record["granted_at"],
@@ -172,18 +179,28 @@ class GrantStore:
                     )
         return None
 
-    def deny_patterns_for(self, workspace: Path) -> list[str]:
-        """Every "never here" pattern that applies to ``workspace``, nearest first (PRD §3.3).
+    def refused(self, workspace: Path, key: str) -> Optional[Refusal]:
+        """The "never here" answer covering ``key`` in ``workspace``, walking ancestors (PRD §3.3).
 
-        These join the DENY tier, which no grant and no mode can override.
+        The same key space and the same ancestor walk as :meth:`lookup` — a refusal is a
+        negative grant. The caller (``agent/verdict.evaluate``) consults this BEFORE the grant,
+        so a "never" wins over any later "always" on the same key and asks no more; and for a
+        key that is a directory the caller walks the path upward too, so a refusal on ``/tmp/x``
+        covers ``/tmp/x/y/f`` exactly as a directory grant covers its subtree.
         """
         data = self._load()
-        patterns: list[str] = []
         for workspace_key in _ancestors(workspace):
-            for record in self._records(data, workspace_key, DENIES_KEY, DENY_REQUIRED_FIELDS):
-                if record["pattern"] not in patterns:
-                    patterns.append(record["pattern"])
-        return patterns
+            for record in self._records(data, workspace_key, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS):
+                if record["key"] == key:
+                    return _record_type("Refusal")(
+                        key=record["key"],
+                        klass=record["class"],
+                        refused_at=record["refused_at"],
+                        channel=record["channel"],
+                        session_id=record["session_id"],
+                        workspace=workspace_key,
+                    )
+        return None
 
     # ----------------------------------------------------------------- writes
 
@@ -215,27 +232,37 @@ class GrantStore:
         data[workspace_key] = entry
         self._write(data)
 
-    def add_deny(self, workspace: Path, pattern: str, *, channel: str, session_id: str) -> None:
-        """Record a "never here" answer as a deny pattern (PRD §3.3).
+    def add_refusal(self, refusal: Refusal) -> None:
+        """Record a "never here" answer as a negative grant (PRD §3.3).
 
-        Deny wins forever after: the gate's DENY tier reads these before anything else, so this
-        is the one answer a later "allow always" cannot undo from a prompt.
+        Written into the same file, under the same workspace key, in the same key space as a
+        grant — so "never run this command here" is stored as the command's own signature and
+        denies that and nothing else. Replaces any existing refusal for the same key, so
+        re-answering refreshes provenance instead of growing the file.
+
+        A refusal wins forever after: ``agent/verdict.evaluate`` consults refusals ahead of
+        grants and denies without prompting, which is the one answer a later "allow always"
+        cannot undo from a prompt (editing ``grants.yaml`` is the escape hatch).
         """
         data = self._load()
-        workspace_key = _key(workspace)
+        workspace_key = _key(refusal.workspace)
         entry = data.get(workspace_key)
         if not isinstance(entry, dict):
             entry = {}
-        denies = [d for d in entry.get(DENIES_KEY, []) if not (isinstance(d, dict) and d.get("pattern") == pattern)]
-        denies.append(
+        refusals = [
+            r for r in entry.get(REFUSALS_KEY, [])
+            if not (isinstance(r, dict) and r.get("key") == refusal.key)
+        ]
+        refusals.append(
             {
-                "pattern": pattern,
-                "added_at": _now(),
-                "channel": channel,
-                "session_id": session_id,
+                "key": refusal.key,
+                "class": refusal.klass,
+                "refused_at": refusal.refused_at or _now(),
+                "channel": refusal.channel,
+                "session_id": refusal.session_id,
             }
         )
-        entry[DENIES_KEY] = denies
+        entry[REFUSALS_KEY] = refusals
         data[workspace_key] = entry
         self._write(data)
 
@@ -245,10 +272,26 @@ def new_grant(*, key: str, klass: str, workspace: Path | str, channel: str, sess
 
     The one constructor the channels use, so provenance can never be forgotten at a call site.
     """
-    return _grant_type()(
+    return _record_type("Grant")(
         key=key,
         klass=klass,
         granted_at=_now(),
+        channel=channel,
+        session_id=session_id,
+        workspace=_key(workspace),
+    )
+
+
+def new_refusal(*, key: str, klass: str, workspace: Path | str, channel: str, session_id: str) -> Refusal:
+    """Build a :class:`Refusal` with the current timestamp and a realpath workspace (PRD §3.3).
+
+    :func:`new_grant`'s negative twin, and the only constructor the gate uses for a "never here"
+    answer — same reason: provenance cannot be forgotten at a call site.
+    """
+    return _record_type("Refusal")(
+        key=key,
+        klass=klass,
+        refused_at=_now(),
         channel=channel,
         session_id=session_id,
         workspace=_key(workspace),

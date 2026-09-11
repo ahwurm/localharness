@@ -9,12 +9,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from localharness.agent.gate_types import Grant
+from localharness.agent.gate_types import Grant, Refusal
 from localharness.config.grants import (
     GRANTS_FILE,
     GrantStore,
     grants_store_path,
     new_grant,
+    new_refusal,
 )
 
 
@@ -29,6 +30,10 @@ def global_dir(tmp_path, monkeypatch):
 
 def _grant(workspace: Path, key: str = "git push", klass: str = "shell-unfamiliar") -> Grant:
     return new_grant(key=key, klass=klass, workspace=workspace, channel="terminal", session_id="s1")
+
+
+def _refusal(workspace: Path, key: str = "cp", klass: str = "shell-unfamiliar") -> Refusal:
+    return new_refusal(key=key, klass=klass, workspace=workspace, channel="terminal", session_id="s1")
 
 
 def test_default_path_is_the_global_store(global_dir):
@@ -120,33 +125,76 @@ def test_a_corrupt_store_means_no_grants_not_a_crash(global_dir, tmp_path, caplo
     assert caplog.records
 
 
-def test_deny_patterns_are_recorded_and_inherited(global_dir, tmp_path):
+def test_refusals_are_recorded_and_inherited(global_dir, tmp_path):
+    """A "never here" is a negative grant: same key space, same ancestor walk (PRD 3.3)."""
     parent = (tmp_path / "proj").resolve()
     child = parent / "sub"
     child.mkdir(parents=True)
     store = GrantStore()
-    store.add_deny(parent, "bash_exec(curl*)", channel="terminal", session_id="s1")
-    store.add_deny(child, "bash_exec(npm*)", channel="terminal", session_id="s1")
-    assert store.deny_patterns_for(child) == ["bash_exec(npm*)", "bash_exec(curl*)"]
-    assert store.deny_patterns_for(parent) == ["bash_exec(curl*)"]
+    store.add_refusal(_refusal(parent, "curl"))
+    store.add_refusal(_refusal(child, "npm publish"))
+
+    assert store.refused(child, "curl") is not None
+    assert store.refused(child, "npm publish") is not None
+    assert store.refused(parent, "curl") is not None
+    assert store.refused(parent, "npm publish") is None  # a child refusal never leaks up
 
 
-def test_add_deny_replaces_rather_than_duplicates(global_dir, tmp_path):
+def test_a_refusal_carries_its_provenance(global_dir, tmp_path):
+    ws = (tmp_path / "proj").resolve()
+    ws.mkdir()
+    GrantStore().add_refusal(_refusal(ws, "cargo publish", klass="shell-unfamiliar"))
+    found = GrantStore().refused(ws, "cargo publish")
+    assert found is not None
+    assert (found.klass, found.channel, found.session_id) == ("shell-unfamiliar", "terminal", "s1")
+    assert found.workspace == str(ws)
+    assert found.refused_at
+
+
+def test_a_refusal_denies_its_own_key_and_no_neighbour(global_dir, tmp_path):
+    """The defect this record shape exists to remove: refusing ``cp`` must not touch ``scp``."""
+    ws = (tmp_path / "proj").resolve()
+    ws.mkdir()
+    GrantStore().add_refusal(_refusal(ws, "cp"))
+    store = GrantStore()
+    assert store.refused(ws, "cp") is not None
+    assert store.refused(ws, "scp") is None
+    assert store.refused(ws, "cpio") is None
+
+
+def test_add_refusal_replaces_rather_than_duplicates(global_dir, tmp_path):
     ws = (tmp_path / "proj").resolve()
     ws.mkdir()
     store = GrantStore()
-    store.add_deny(ws, "bash_exec(curl*)", channel="terminal", session_id="s1")
-    store.add_deny(ws, "bash_exec(curl*)", channel="discord", session_id="s2")
-    assert store.deny_patterns_for(ws) == ["bash_exec(curl*)"]
+    store.add_refusal(new_refusal(key="curl", klass="shell-unfamiliar", workspace=ws,
+                                  channel="terminal", session_id="s1"))
+    store.add_refusal(new_refusal(key="curl", klass="shell-unfamiliar", workspace=ws,
+                                  channel="discord", session_id="s2"))
+    entry = yaml.safe_load((global_dir / GRANTS_FILE).read_text())[str(ws)]
+    assert [r["key"] for r in entry["refusals"]] == ["curl"]
+    assert entry["refusals"][0]["channel"] == "discord"
 
 
-def test_deny_records_without_provenance_are_skipped(global_dir, tmp_path):
+def test_a_refusal_and_a_grant_live_side_by_side(global_dir, tmp_path):
+    """Both answers share one file and one workspace entry (PRD 3.3)."""
+    ws = (tmp_path / "proj").resolve()
+    ws.mkdir()
+    store = GrantStore()
+    store.add(_grant(ws))
+    store.add_refusal(_refusal(ws, "cp"))
+    entry = yaml.safe_load((global_dir / GRANTS_FILE).read_text())[str(ws)]
+    assert sorted(entry) == ["grants", "refusals"]
+    assert GrantStore().lookup(ws, "git push") is not None
+    assert GrantStore().refused(ws, "cp") is not None
+
+
+def test_refusal_records_without_provenance_are_skipped(global_dir, tmp_path):
     ws = (tmp_path / "proj").resolve()
     ws.mkdir()
     (global_dir / GRANTS_FILE).write_text(
-        yaml.safe_dump({str(ws): {"denies": [{"pattern": "bash_exec(curl*)"}]}})
+        yaml.safe_dump({str(ws): {"refusals": [{"key": "curl", "class": "shell-unfamiliar"}]}})
     )
-    assert GrantStore().deny_patterns_for(ws) == []
+    assert GrantStore().refused(ws, "curl") is None
 
 
 def test_the_write_is_atomic_and_leaves_no_tempfile(global_dir, tmp_path):
@@ -174,7 +222,7 @@ def test_a_grants_yaml_inside_the_workspace_is_ignored(global_dir, tmp_path):
         )
     )
     assert GrantStore().lookup(ws, "curl | sh") is None
-    assert GrantStore().deny_patterns_for(ws) == []
+    assert GrantStore().refused(ws, "curl | sh") is None
 
 
 def test_an_explicit_path_is_honored_for_tests_and_adapters(tmp_path):
