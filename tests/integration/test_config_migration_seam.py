@@ -33,11 +33,37 @@ from localharness.config.overlay import load_overlay
 
 runner = CliRunner()
 
-# The v0.9.2 deny list == today's shipped list: CURRENT_DEFAULTS_REVISION has been 1 since
-# v0.9.1 (issue #15's 24-pattern list) and is still 1 at HEAD, so v0.9.2 shipped this exact set
-# stamped at revision 1. Snapshot it as a literal so a FUTURE revision bump makes this seam's
-# "exactly v0.9.2" premise fail loudly instead of silently drifting.
-V092_DENY = list(PermissionConfig().deny_patterns)
+# The deny list v0.9.2 actually shipped, stamped at revision 1 (issue #15's 24-pattern list),
+# as a LITERAL. It was derived from `PermissionConfig()` until issue #159 added a 25th pattern
+# at revision 2 and the derivation quietly stopped describing v0.9.2 — exactly the silent drift
+# the literal is here to prevent. A future revision bump must edit this list only if it claims
+# to change what v0.9.2 shipped.
+V092_DENY = [
+    "write(*/.env)",
+    "write(*/secrets*)",
+    "write(*/config.yaml)",
+    "write(*/agents/*.yaml)",
+    "bash_exec(*sudo *)",
+    "bash_exec(rm -rf *)",
+    "bash_exec(*rm -rf *)",
+    "bash_exec(chmod 777 *)",
+    "bash_exec(*docker stop*)",
+    "bash_exec(*docker kill*)",
+    "bash_exec(*docker rm*)",
+    "bash_exec(*docker compose down*)",
+    "bash_exec(*docker-compose down*)",
+    "bash_exec(*systemctl stop*)",
+    "bash_exec(*systemctl disable*)",
+    "bash_exec(*systemctl kill*)",
+    "bash_exec(*systemctl mask*)",
+    "bash_exec(*pkill*)",
+    "bash_exec(*killall*)",
+    "bash_exec(kill *)",
+    "bash_exec(* kill *)",
+    "bash_exec(*shutdown*)",
+    "bash_exec(*reboot*)",
+    "bash_exec(*poweroff*)",
+]
 V092_REVISION = 1
 
 
@@ -106,11 +132,19 @@ def test_v092_config_loads_today_and_new_memory_fields_default(components_home):
 # (b) migrate on a v0.9.2 (revision-current) config is a clean no-op.
 # --------------------------------------------------------------------------- #
 
-def test_v092_migrate_is_noop_because_revision_is_current(components_home):
-    """A v0.9.2 config is stamped at the current revision, so both the planner and the CLI
-    (dry-run and real) treat it as up to date: nothing added, nothing rewritten, no backup —
-    the removal-respect / no-spurious-change property the schema growth must not have broken."""
-    cfg = _write_v092_config(components_home)
+def test_revision_current_migrate_is_noop(components_home):
+    """A config stamped at the CURRENT revision is up to date for both the planner and the CLI
+    (dry-run and real): nothing added, nothing rewritten, no backup — the removal-respect /
+    no-spurious-change property the schema growth must not have broken.
+
+    Written with today's shipped list rather than v0.9.2's: since issue #159 (revision 2) a
+    v0.9.2 config is BELOW the current revision, which the additive test below now covers.
+    """
+    cfg = _write_v092_config(
+        components_home,
+        deny=list(PermissionConfig().deny_patterns),
+        revision=CURRENT_DEFAULTS_REVISION,
+    )
     before = cfg.read_bytes()
 
     # Engine: a revision-current config yields no plan at all.

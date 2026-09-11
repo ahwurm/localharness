@@ -37,4 +37,6 @@ DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by defau
 # defaults, then stamp the config to this value. A config with the key absent = revision 0.
 #   0 -> pre-sync (<= v0.9.0's 7-pattern list, or never stamped)
 #   1 -> v0.9.1's 24-pattern list (issue #15: destructive service/process + embedded sudo/rm)
-CURRENT_DEFAULTS_REVISION: int = 1
+#   2 -> v0.14's embedded `chmod 777` form (issue #159: the prefix-anchored pattern missed
+#        `find . -exec chmod 777 {} \;` and `cd x && chmod 777 y`)
+CURRENT_DEFAULTS_REVISION: int = 2

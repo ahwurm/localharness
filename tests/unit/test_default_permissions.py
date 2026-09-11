@@ -100,6 +100,44 @@ def test_embedded_rm_rf_is_denied():
     assert _denied("cd /tmp && rm -rf x", PermissionConfig())
 
 
+# The same anchoring hole, one pattern later: `bash_exec(chmod 777 *)` only ever matched a
+# command that STARTS with `chmod 777 `, while sudo and rm -rf shipped the embedded `*...*`
+# form too. Issue #159; PRD §1 "Shipped deny weakness".
+EMBEDDED_CHMOD_777_COMMANDS = [
+    r"find . -exec chmod 777 {} \;",   # the payload form the classifier lifts (PRD §3.2 step 5)
+    "cd build && chmod 777 out",       # the `cd X && ...` prefix, the corpus's most common shape
+    "chmod 777 /tmp/x",                # the ORIGINAL prefix case must still be denied
+]
+
+
+@pytest.mark.parametrize("cmd", EMBEDDED_CHMOD_777_COMMANDS)
+def test_embedded_chmod_777_is_denied(cmd):
+    assert _denied(cmd, PermissionConfig()), f"world-writable chmod must be denied: {cmd!r}"
+
+
+def test_chmod_777_fix_is_stamped_as_a_defaults_revision():
+    """An EXISTING user only receives a new shipped default when the revision advances
+    (config/migrate.py gates the additive sync on `stamped < current`). A pattern added without
+    the bump reaches new installs only — the fix would silently skip everyone who already has a
+    config."""
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.migrate import plan
+
+    v1_config = {
+        "version": "1",
+        "org": {
+            "permissions": {
+                "deny_patterns": ["bash_exec(chmod 777 *)"],
+                "defaults_revision": 1,
+            }
+        },
+    }
+    migration = plan(v1_config)
+    assert migration is not None, "a revision-1 config must still have a pending migration"
+    assert migration.to_revision == CURRENT_DEFAULTS_REVISION
+    assert "bash_exec(*chmod 777*)" in migration.added
+
+
 # --- (b) opt-in workspace_root confinement ----------------------------------
 
 
