@@ -407,6 +407,50 @@ def test_an_in_workspace_shell_write_target_does_not_add_an_ask(ws, monkeypatch)
     assert result.verdict is Verdict.ALLOW
 
 
+@pytest.mark.parametrize("signature,command", [
+    ("$__lh_subst__", "$(echo rm) -rf build"),
+    ("$RM", '"$RM" -rf build'),
+    ("`echo rm`", "`echo rm` -rf build"),
+])
+def test_a_computed_command_name_asks_every_time_and_cannot_be_remembered(ws, monkeypatch, signature, command):
+    """PRD §3.2 residual gap: one "always" on ``$RM`` would cover every future built command."""
+    fake_shell(monkeypatch, seg(signature))
+    spy = LookupSpy(a_grant(signature))
+    result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws, grants=spy), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "shell-unfamiliar"
+    assert result.request.grantable is False
+    assert result.request.key is None
+    assert "computed at runtime" in result.request.reason
+    assert spy.calls == []
+
+
+@pytest.mark.parametrize("signature", ["$__lh_subst__", "$RM"])
+def test_a_computed_command_name_still_asks_under_trusted(ws, monkeypatch, signature):
+    fake_shell(monkeypatch, seg(signature))
+    spy = LookupSpy(a_grant(signature))
+    result = evaluate("bash_exec", {"command": f"{signature} -rf build"}, SHELL_META,
+                      make_ctx(ws, mode="trusted", grants=spy), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.grantable is False
+    assert spy.calls == []
+
+
+@pytest.mark.parametrize("signature", ["$__lh_subst__", "$RM"])
+def test_a_computed_command_name_is_allowed_under_unattended(ws, monkeypatch, signature):
+    fake_shell(monkeypatch, seg(signature))
+    result = evaluate("bash_exec", {"command": f"{signature} -rf build"}, SHELL_META,
+                      make_ctx(ws, mode="unattended"), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_an_ordinary_signature_is_still_grantable(ws, monkeypatch):
+    """The dynamic-name rule must not swallow the normal shell-unfamiliar path."""
+    fake_shell(monkeypatch, seg("npm install"))
+    result = evaluate("bash_exec", {"command": "npm install"}, SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.request.grantable is True and result.request.key == "npm install"
+
+
 def test_an_empty_command_is_nothing_to_classify(ws):
     assert evaluate("bash_exec", {"command": "   "}, SHELL_META, make_ctx(ws), SETTINGS).verdict is Verdict.ALLOW
 
