@@ -162,7 +162,13 @@ def resolve_workspace_layer(
         return None
 
     trusted = _ask(real, asker)
-    trust.record_trust(found, trusted)
+    # Recorded on the workspace ROOT, not on the `.localharness` directory inside it, so that
+    # ONE answer settles both trust questions (owner ruling 2026-09-11). `session_trust` asks
+    # about the root and looks it up with `is_trusted_tree`, which walks UPWARD — from
+    # `<root>/.localharness` it reaches `<root>`, but never the other way. Keying the child, as
+    # this did before, meant a session with an outside-the-repo workspace answered here and was
+    # then asked the session question all over again a second later.
+    trust.record_trust(real.parent, trusted)
     if trusted:
         log.info("workspace layer: %s (trusted just now)", found)
         return found
@@ -289,13 +295,21 @@ def _notice(message: str) -> None:
 
 
 TRUST_QUESTION = (
-    "The workspace at {parent} is outside the project you are in. Load its agent and config "
-    "files? They define roles, models and tool permissions — treat them like code you are about "
-    "to run."
+    "Trust the workspace at {parent}? It is outside the project you are in. LocalHarness will "
+    "load its .localharness config — agents, models and tool permissions, which you should treat "
+    "like code you are about to run — and run tools there without asking, except for dangerous "
+    "actions."
 )
 """The one-time question. Names what is at stake AND why this workspace is being asked about,
-since the ones inside your own project never are. A module constant now, because a channel that
-is not a terminal renders the same words (PRD §3.5: the trust dialog stops being terminal-only)."""
+since the ones inside your own project never are. A module constant, because a channel that is
+not a terminal renders the same words (PRD §3.5: the trust dialog stops being terminal-only).
+
+v0.14.1 made it the SAME question as ``cli/session_trust.TRUST_QUESTION`` — both halves in one
+sentence — because as of that release it is the same decision and the same record (owner ruling
+2026-09-11: "unify… so there is ONE question and ONE record; trusted = load its config AND
+auto"). It stayed a separate string only because this one fires before any channel exists, on
+the synchronous path that resolves the config layer, and so has to name the directory it found
+rather than the workspace root the session is about."""
 
 
 def _confirm_on_a_tty(question: str) -> bool:

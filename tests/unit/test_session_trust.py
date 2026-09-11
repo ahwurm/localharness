@@ -285,3 +285,102 @@ async def test_the_question_goes_through_the_channels_own_ask_path(tmp_path):
     )
     assert str(project) in request.display
     assert request.call_id is None, "there is no tool call to pair this with"
+
+
+# ------------------------------------------------- exactly one question, per path
+
+def _outside_workspace(tmp_path: Path, monkeypatch, fake_home) -> tuple[Path, Path]:
+    """A project whose `.localharness/` reaches in from OUTSIDE any repository — the one case
+    `resolve_workspace_layer` trust-gates — with a never-seen root, and the cwd deep inside it.
+
+    No `.git` anywhere on purpose: its absence is what makes this "config from outside the tree
+    you opened" rather than your own project's. `tmp_path/proj` is not under the fake home, so
+    the `$HOME` walk stop does not fire before the workspace is found — the same shape
+    `tests/unit/test_resolve_workspace_layer.py` uses, for the same reasons.
+    """
+    home = tmp_path / "home"
+    (home / WORKSPACE_DIR_NAME).mkdir(parents=True)
+    fake_home(home)
+    root = tmp_path / "proj"
+    (root / WORKSPACE_DIR_NAME / "agents").mkdir(parents=True)
+    deep = root / "src" / "pkg"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+    return root, root / WORKSPACE_DIR_NAME
+
+
+@pytest.mark.asyncio
+async def test_the_repl_path_asks_exactly_once_and_then_loads_the_config(tmp_path, monkeypatch, fake_home):
+    """The double-question that v0.14.1 could have shipped: the config-layer question fires on
+    the synchronous startup path, and the session-trust question fires once the channel is live.
+
+    Owner ruling 2026-09-11: "unify… so there is ONE question and ONE record". The layer resolver
+    records the workspace ROOT, and `session_trust` reads the root with `is_trusted_tree`, so the
+    second question finds the first one's answer and never asks. After the yes, the outside
+    config layer IS loaded and the session is still in `auto`.
+    """
+    from localharness.cli.workspace import resolve_workspace_layer
+
+    root, workspace = _outside_workspace(tmp_path, monkeypatch, fake_home)
+    asked: list[str] = []
+
+    def _asker(question: str) -> bool:
+        asked.append(question)
+        return True
+
+    assert resolve_workspace_layer(asker=_asker) == workspace, "the config layer loads"
+
+    gate = _gate(tmp_path, root, asker=_answers("reject_once"))
+    assert await establish_session_trust(gate) == "auto"
+    assert len(asked) == 1, "the session was asked to trust the same workspace twice"
+
+
+@pytest.mark.asyncio
+async def test_the_acp_path_asks_exactly_once_through_request_permission(tmp_path, monkeypatch, fake_home):
+    """Same guarantee on the path with no REPL. ACP injects its own asker into the layer
+    resolver (`acp._trust_asker`) and reaches `establish_session_trust` before `serve()`; both
+    render through `request_permission`, and between them they must draw ONE dialog."""
+    from localharness.cli.workspace import resolve_workspace_layer
+
+    root, workspace = _outside_workspace(tmp_path, monkeypatch, fake_home)
+    dialogs: list[str] = []
+
+    class _AcpLike:
+        """Stands in for the ACP channel at both call sites: a sync asker for the layer
+        resolver, and `ask_permission` for the gate."""
+
+        can_ask = True
+
+        def trust_asker(self):
+            def _ask(question: str) -> bool:
+                dialogs.append(question)
+                return True
+            return _ask
+
+        async def ask_permission(self, request):
+            dialogs.append(request.display)
+            return Decision(kind="allow_once")
+
+    channel = _AcpLike()
+    assert resolve_workspace_layer(asker=channel.trust_asker()) == workspace
+
+    gate = _gate(tmp_path, root)
+    gate.attach_channel(channel)
+    assert await establish_session_trust(gate) == "auto"
+    assert len(dialogs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_declined_config_layer_also_settles_the_session_mode(tmp_path, monkeypatch, fake_home):
+    """The other direction of the same record: saying no to the outside config also means no to
+    running tools there silently, and it is not asked a second time."""
+    from localharness.cli.workspace import resolve_workspace_layer
+
+    root, _workspace = _outside_workspace(tmp_path, monkeypatch, fake_home)
+    asked: list[str] = []
+
+    assert resolve_workspace_layer(asker=lambda q: asked.append(q) or False) is None
+
+    gate = _gate(tmp_path, root, asker=_answers("allow_once"))
+    assert await establish_session_trust(gate) == UNTRUSTED_MODE
+    assert len(asked) == 1

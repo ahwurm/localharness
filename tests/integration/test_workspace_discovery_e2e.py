@@ -424,7 +424,11 @@ def test_layr05_workspace_above_the_repo_root_loads_after_answering_yes(
     assert result.exit_code == 0, result.output
     assert len(asked) == 1
     assert "ws-agent.yaml" in result.output
-    assert trust.is_trusted(workspace_above_repo.ws_dir) is True
+    # The record lands on the workspace ROOT, not on the `.localharness` inside it: v0.14.1 made
+    # this the same record the session-trust question reads (owner ruling 2026-09-11, "ONE
+    # question and ONE record"), and `is_trusted_tree` walks upward from the dotdir to find it.
+    assert trust.is_trusted_tree(workspace_above_repo.ws_dir) is True
+    assert trust.is_trusted(workspace_above_repo.ws_dir.parent) is True
     assert trust.trust_store_path() == (
         workspace_above_repo.global_dir / "trusted_workspaces.yaml"
     )

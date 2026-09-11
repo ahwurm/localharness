@@ -250,11 +250,15 @@ PERMISSION_FALLBACK_DECISION = "reject_once"
 a dismissed dialog means: ACP's `DeniedOutcome{outcome:"cancelled"}` is the user hitting Escape,
 which is a refusal of this call and nothing more."""
 
-TRUST_TOOL_CALL_TITLE = "Load workspace configuration?"
+TRUST_TOOL_CALL_TITLE = "Trust this workspace?"
 """The title on the trust question's `request_permission` payload. The question itself
 (`cli/workspace.TRUST_QUESTION`) is the body; ACP has no dialog primitive other than a permission
 request, so the one-time trust dialog rides on the same mechanism as every other ask (PRD §3.5:
-"the existing workspace-trust dialog becomes the first client of ask_permission")."""
+"the existing workspace-trust dialog becomes the first client of ask_permission").
+
+It said "Load workspace configuration?" until v0.14.1, when the config-layer question and the
+session-permission question became one decision and one record (owner ruling 2026-09-11). A
+title naming only the config half would be describing half of what a yes now does."""
 
 ONE_THREAD_PER_PROCESS = (
     "This localharness process is already serving a thread in {current}. Start a second "
