@@ -423,6 +423,62 @@ def test_an_in_workspace_shell_write_target_does_not_add_an_ask(ws, monkeypatch)
     assert result.verdict is Verdict.ALLOW
 
 
+# ------------------------------------------- the shell call's own working directory
+
+def test_a_relative_shell_target_lands_where_working_dir_points_not_in_the_workspace(ws, monkeypatch):
+    """R2b: ``bash_exec`` takes a ``working_dir``; a relative target resolves against THAT.
+
+    Anchoring at the workspace instead read this call as an in-workspace write and allowed it.
+    """
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=("authorized_keys",)))
+    result = evaluate(
+        "bash_exec", {"command": "echo k >> authorized_keys", "working_dir": "~/.ssh"},
+        SHELL_META, make_ctx(ws), SETTINGS,
+    )
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "protected-path"
+    assert result.request.grantable is False
+    assert result.request.key == str(Path("~/.ssh/authorized_keys").expanduser())
+
+
+def test_a_working_dir_outside_the_boundary_puts_every_relative_target_outside(ws, monkeypatch, tmp_path):
+    outside = (tmp_path / "x").resolve()
+    outside.mkdir()
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=("f",)))
+    result = evaluate(
+        "bash_exec", {"command": "echo k > f", "working_dir": str(outside)},
+        SHELL_META, make_ctx(ws), SETTINGS,
+    )
+    assert result.request.klass == "edit-outside"
+    assert result.request.key == str(outside)
+
+
+def test_without_a_working_dir_relative_targets_still_anchor_at_the_workspace(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=("out.txt",)))
+    for params in ({"command": "echo k > out.txt"}, {"command": "echo k > out.txt", "working_dir": "."}):
+        assert evaluate("bash_exec", params, SHELL_META, make_ctx(ws), SETTINGS).verdict is Verdict.ALLOW
+
+
+def test_an_absolute_target_ignores_the_working_dir(ws, monkeypatch):
+    """The classifier may join a ``cd`` onto a later target, so targets arrive ``~``/``/``-prefixed."""
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=(str(ws / "out.txt"),)))
+    result = evaluate(
+        "bash_exec", {"command": "cd /etc && echo k > out.txt", "working_dir": "/etc"},
+        SHELL_META, make_ctx(ws), SETTINGS,
+    )
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_an_unresolvable_working_dir_makes_relative_targets_outside(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=("f",)))
+    result = evaluate(
+        "bash_exec", {"command": "echo k > f", "working_dir": "$DEST"},
+        SHELL_META, make_ctx(ws), SETTINGS,
+    )
+    assert result.request.klass == "edit-outside"
+    assert result.request.key == "f"
+
+
 @pytest.mark.parametrize("signature,command", [
     ("$__lh_subst__", "$(echo rm) -rf build"),
     ("$RM", '"$RM" -rf build'),
