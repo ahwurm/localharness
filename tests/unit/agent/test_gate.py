@@ -7,12 +7,14 @@ cannot ask denies loudly, and whether the two bus events carry what the ask-rate
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
 
 from localharness.agent.gate import (
     ASK_TIMEOUT_TOOL_MULTIPLE,
+    GATE_ERROR_REASON,
     NO_ASKER_REASON,
     PermissionGate,
     deny_fn_from,
@@ -427,3 +429,32 @@ def test_attach_channel_reads_the_flag_and_defaults_it_off(tmp_path):
     assert gate.ask_holds_dialog is True
     gate.attach_channel(_Expires())
     assert gate.ask_holds_dialog is False
+
+
+# --------------------------------------------------------- the verdict itself raises
+
+@pytest.mark.asyncio
+async def test_a_verdict_that_raises_denies_instead_of_escaping(tmp_path, monkeypatch, caplog):
+    """The gate's own crash is a denial, not a lost turn (`GATE_ERROR_REASON`).
+
+    A null byte in a write path used to raise ValueError out of `evaluate`, through `check`,
+    into the loop — the gate failing open in the worst way: not by allowing the call but by
+    taking the agent down with it.
+    """
+    def _boom(*args, **kwargs):
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr("localharness.agent.gate.evaluate", _boom)
+    gate = _gate(tmp_path, asker=_answer("allow_always"))
+    with caplog.at_level(logging.ERROR):
+        outcome = await _check(gate, "bash_exec", {"command": "ls"})
+    assert outcome.allowed is False and outcome.reason == GATE_ERROR_REASON
+    assert "ValueError" in caplog.text, "the traceback has to reach the log to be fixable"
+
+
+@pytest.mark.asyncio
+async def test_a_null_byte_path_is_decided_not_raised(tmp_path):
+    """End to end through the real verdict: the argument that found this."""
+    gate = _gate(tmp_path, asker=_answer("reject_once"))
+    outcome = await _check(gate, "write", {"path": "/tmp/x\x00y", "content": "x"}, WRITE)
+    assert outcome.allowed is False

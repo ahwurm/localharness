@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from localharness.agent.context import ContextManager
-from localharness.agent.gate import PermissionGate
+from localharness.agent.gate import GATE_ERROR_REASON, PermissionGate
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
@@ -343,3 +343,34 @@ async def test_a_registry_whose_lookup_raises_makes_the_call_ask(bus, tmp_path, 
     assert len(asked) == 1, "an unreadable schema must reach a human, not the allow tier"
     assert (asked[0].klass, asked[0].key) == ("tool-unfamiliar", "peek")
     assert any("could not read the schema" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_gate_that_raises_produces_a_denied_observation(bus, tmp_path):
+    """The gate is injected, so the loop cannot assume it never raises.
+
+    A permission bug must cost one tool call, not the whole turn — so the call site denies with
+    the same sentence the model can re-plan against.
+    """
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    class _Exploding(PermissionGate):
+        async def check(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    tool = _Shell()
+    gate = _Exploding(
+        boundary=workspace, workspace=workspace, grants=GrantStore(tmp_path / "g.yaml"),
+        asker=None, channel_name="test", bus=bus,
+    )
+    summary = await _loop(
+        bus, await _registry(tool), gate, llm=MockLLMClient(_plan("cargo build"))
+    ).run_turn("t")
+
+    assert tool.ran == [], "a call the gate could not decide reached the tool"
+    observations = [
+        e for e in bus.history() if getattr(e, "observation_type", None) == "tool_result"
+    ]
+    assert observations and GATE_ERROR_REASON in (observations[0].error or "")
+    assert summary is not None, "the turn survived the permission bug"
