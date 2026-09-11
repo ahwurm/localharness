@@ -250,12 +250,29 @@ class PermissionAsked(BaseEvent):
     channel: str
 
 
+CANCELLED_RESOLUTION = "cancelled"
+"""The resolution of an ask nobody ever answered because the turn itself went away.
+
+Not a DecisionKind: no human chose it and the gate did not fall back to one — the awaiting task
+was cancelled (Ctrl-C, a channel shutting down, a turn timeout). It exists so every
+PermissionAsked has a PermissionResolved. Without it a cancelled prompt left the pair open
+forever, which reads in a trace exactly like a prompt still waiting for an answer, and silently
+inflates the ask-latency and unanswered-prompt numbers PRD §3.6 measures.
+
+A renderer should treat it as "not allowed": the call did not run."""
+
+ResolutionKind = Union[DecisionKind, Literal["cancelled"]]
+"""How a PermissionAsked ended: one of the four DecisionKinds, or CANCELLED_RESOLUTION."""
+
+
 class PermissionResolved(BaseEvent):
-    """Published when the human's answer arrives, or the wait runs out (PRD §3.6).
+    """Published when the human's answer arrives, the wait runs out, or the turn is cancelled
+    (PRD §3.6).
 
     Paired with PermissionAsked by (session_id, tool_name, klass, key). `decision` is a
     DecisionKind (`agent/gate_types.py`): allow_once / allow_always / reject_once /
-    reject_always — the four ACP PermissionOptionKind values every channel maps its UI onto.
+    reject_always — the four ACP PermissionOptionKind values every channel maps its UI onto —
+    or `cancelled` (CANCELLED_RESOLUTION) when nobody got to answer.
     A timeout resolves as `reject_once` (fail closed, PRD §3.5), so timeout-denies are countable
     as their own guardrail alongside reject_always, whose rise means the classifier is asking
     about the wrong things.
@@ -270,7 +287,7 @@ class PermissionResolved(BaseEvent):
     tool_name: str
     klass: str
     key: Optional[str] = None
-    decision: DecisionKind
+    decision: ResolutionKind
     latency_ms: Optional[int] = None
     """Wall time from the ask to the answer. None when nothing was awaited."""
     wrote_grant: bool = False

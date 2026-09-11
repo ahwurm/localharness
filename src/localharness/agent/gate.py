@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
 
@@ -421,7 +422,7 @@ class PermissionGate:
         # Imported here, not at module scope: `core/events` imports `agent/gate_types`, which
         # pulls in the `agent` package, which imports the loop, which imports this module. A
         # module-level import would close that cycle and break `import localharness.channels`.
-        from localharness.core.events import PermissionAsked, PermissionResolved
+        from localharness.core.events import CANCELLED_RESOLUTION, PermissionAsked
 
         await self._publish(
             PermissionAsked(
@@ -443,9 +444,49 @@ class PermissionGate:
                 decision = await asyncio.wait_for(self.asker(request), timeout)  # type: ignore[misc]
         except asyncio.TimeoutError:
             decision, timed_out = TIMEOUT_DECISION, True
-        latency_ms = int((time.monotonic() - started) * MS_PER_SECOND)
+        except asyncio.CancelledError:
+            # The turn went away mid-prompt (Ctrl-C, a channel closing, a turn timeout). The ask
+            # is still on the bus, so it gets its answer — nobody chose it, hence `cancelled`,
+            # not one of the four DecisionKinds. Without this, a cancelled prompt left the
+            # Asked/Resolved pair open forever and read in a trace like a prompt still waiting.
+            # The publish is best-effort: nothing may stand between a cancellation and its
+            # re-raise.
+            with suppress(Exception):
+                await self._resolved(
+                    request, agent_id=agent_id, session_id=session_id,
+                    decision=CANCELLED_RESOLUTION, started=started, wrote_grant=False,
+                )
+            raise
 
         wrote_grant = self._remember(decision, request, session_id)
+        await self._resolved(
+            request, agent_id=agent_id, session_id=session_id,
+            decision=decision.kind, started=started, wrote_grant=wrote_grant,
+        )
+        if decision.allowed:
+            return GateOutcome(allowed=True, reason=f"approved by a human ({decision.kind})")
+        if timed_out:
+            return GateOutcome(allowed=False, reason=TIMEOUT_REASON.format(seconds=timeout or 0))
+        return GateOutcome(allowed=False, reason=f"refused by a human ({decision.kind})")
+
+    async def _resolved(
+        self,
+        request: PermissionRequest,
+        *,
+        agent_id: str,
+        session_id: str,
+        decision: str,
+        started: float,
+        wrote_grant: bool,
+    ) -> None:
+        """Publish the answer half of the pair (PRD §3.6). One builder, three exits.
+
+        Every path out of :meth:`_ask` that published a :class:`PermissionAsked` has to publish
+        this, so the two events are built in exactly one place and a new exit cannot forget a
+        field.
+        """
+        from localharness.core.events import PermissionResolved
+
         await self._publish(
             PermissionResolved(
                 agent_id=agent_id,
@@ -453,16 +494,11 @@ class PermissionGate:
                 tool_name=request.tool_name,
                 klass=request.klass,
                 key=request.key if request.grantable else None,
-                decision=decision.kind,
-                latency_ms=latency_ms,
+                decision=decision,
+                latency_ms=int((time.monotonic() - started) * MS_PER_SECOND),
                 wrote_grant=wrote_grant,
             )
         )
-        if decision.allowed:
-            return GateOutcome(allowed=True, reason=f"approved by a human ({decision.kind})")
-        if timed_out:
-            return GateOutcome(allowed=False, reason=TIMEOUT_REASON.format(seconds=timeout or 0))
-        return GateOutcome(allowed=False, reason=f"refused by a human ({decision.kind})")
 
     def _remember(
         self, decision: Decision, request: PermissionRequest, session_id: str
