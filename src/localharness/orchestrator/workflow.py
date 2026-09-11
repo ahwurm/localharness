@@ -89,8 +89,9 @@ def validate_agent_yaml(yaml_str: str) -> str | None:
 
     Returns None when the YAML is a deployable AgentConfig, else a SHORT, URL-free human
     error. The REPL calls this BEFORE the confirm prompt so a user never approves YAML that
-    then explodes at deploy with a raw Pydantic wall (live: permissions.mode: read_only,
-    legal values auto|manual). Deploy still re-validates — this is the pre-confirm gate.
+    then explodes at deploy with a raw Pydantic wall (live: permissions.mode: read_only, whose
+    legal values were auto|manual then and are the v0.14 session modes now). Deploy still
+    re-validates — this is the pre-confirm gate.
     """
     import yaml as _yaml
     from localharness.config.models import AgentConfig

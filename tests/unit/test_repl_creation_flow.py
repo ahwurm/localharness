@@ -330,7 +330,10 @@ def test_generation_prompt_states_enum_legal_values():
     from the Pydantic Literal so it can't drift from AgentConfig."""
     from localharness.cli.repl import _generation_system_prompt
     prompt = _generation_system_prompt()
-    assert "auto" in prompt and "manual" in prompt  # permissions.mode legal values
+    # permissions.mode legal values — the v0.14 session modes (PRD §3.4), not the retired
+    # auto/manual pair. Read off the Literal, so this asserts the prompt tracks the schema.
+    for mode in ("guarded", "trusted", "read-only", "unattended"):
+        assert mode in prompt
 
 
 class RaisingLLM:
