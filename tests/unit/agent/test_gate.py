@@ -25,7 +25,11 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.grants import GrantStore, new_refusal
 from localharness.config.models import PermissionConfig
 from localharness.core.bus import EventBus
-from localharness.core.events import PermissionAsked, PermissionResolved
+from localharness.core.events import (
+    CANCELLED_RESOLUTION,
+    PermissionAsked,
+    PermissionResolved,
+)
 from localharness.tools import ToolSchema
 
 SHELL = ToolMeta(group="shell")
@@ -458,3 +462,48 @@ async def test_a_null_byte_path_is_decided_not_raised(tmp_path):
     gate = _gate(tmp_path, asker=_answer("reject_once"))
     outcome = await _check(gate, "write", {"path": "/tmp/x\x00y", "content": "x"}, WRITE)
     assert outcome.allowed is False
+
+
+# --------------------------------------------------------------------- cancelled
+
+@pytest.mark.asyncio
+async def test_a_cancelled_ask_still_resolves_on_the_bus(tmp_path):
+    """Every PermissionAsked gets a PermissionResolved, cancellation included (PRD §3.6).
+
+    Ctrl-C, a channel closing, a turn timeout: the awaiting task is cancelled while a human is
+    still looking at the prompt. `_ask` caught TimeoutError and nothing else, so the pair stayed
+    open forever and read in a trace exactly like a prompt still waiting for an answer.
+    """
+    bus = EventBus()
+
+    async def _never(request):
+        await asyncio.sleep(10)
+        return Decision(kind="allow_always")
+
+    gate = _gate(tmp_path, asker=_never, bus=bus, ask_holds_dialog=True)
+    task = asyncio.create_task(_check(gate, "bash_exec", {"command": "cargo build"}))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(bus.history(event_types=[PermissionAsked])) == 1
+    resolved = bus.history(event_types=[PermissionResolved])
+    assert [e.decision for e in resolved] == [CANCELLED_RESOLUTION]
+    assert resolved[0].wrote_grant is False
+    assert gate.grants.lookup(gate.workspace, "shell-unfamiliar", "cargo build") is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_re_raised_not_swallowed(tmp_path):
+    """A cancelled turn stays cancelled — the resolve is bookkeeping, not a rescue."""
+    async def _never(request):
+        await asyncio.sleep(10)
+        return Decision(kind="allow_always")
+
+    gate = _gate(tmp_path, asker=_never, ask_holds_dialog=True)  # no bus: nothing to publish
+    task = asyncio.create_task(_check(gate, "bash_exec", {"command": "cargo build"}))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
