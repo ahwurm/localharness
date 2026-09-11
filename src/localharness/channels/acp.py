@@ -85,19 +85,28 @@ AGENT_NAME = "localharness"
 
 ACP_MODES: tuple[SessionMode, ...] = (
     SessionMode(
+        id="auto",
+        name="Auto",
+        description=(
+            "Stay out of the way: ordinary work never asks. A dialog appears only for a "
+            "protected or system path, a destructive command aimed outside this project, or an "
+            "irreversible one like sudo, a force push or a reset --hard. Nothing is remembered."
+        ),
+    ),
+    SessionMode(
         id="guarded",
         name="Guarded",
         description=(
-            "Ask before anything leaves this project folder, touches a protected path, or runs "
-            "a command this workspace has never allowed. Reads never ask."
+            "Ask once about each new thing and remember the answer: anything that leaves this "
+            "project folder, touches a protected path, or runs a command this workspace has "
+            "never allowed. Reads never ask."
         ),
     ),
     SessionMode(
         id="trusted",
         name="Trusted",
         description=(
-            "Allow anything that could have been remembered with 'always'. Destructive shell "
-            "commands and protected paths still ask every time."
+            "Like Auto, but a destructive command whose target is inside this project asks too."
         ),
     ),
     SessionMode(
@@ -110,6 +119,11 @@ ACP_MODES: tuple[SessionMode, ...] = (
     ),
 )
 """The modes Zed's mode picker offers, with the human names and descriptions from PRD §3.4.
+
+`auto` is first because it is the default a session starts in (v0.14.1): the v0.14.0 default,
+`guarded`, asked during ordinary work often enough that people stopped reading the questions, so
+the ask-once classes are silent in `auto` and only the genuinely dangerous ones still stop you.
+`guarded` stays on the picker for anyone who wants the ask-once-and-remember behaviour back.
 
 `unattended` is deliberately absent. It turns every ASK into an ALLOW, so it is set in config by
 bench and scheduled jobs and is never reachable from a picker — the same rule

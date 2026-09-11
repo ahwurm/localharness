@@ -311,11 +311,11 @@ async def test_initialize_advertises_no_auth_and_protocol_v1(tmp_path, monkeypat
 
 
 async def test_new_session_returns_the_mode_picker(tmp_path, monkeypatch, keep_cwd):
-    """PRD §3.4: guarded is the default and `unattended` is never on the picker."""
+    """PRD §3.4: auto is the default (v0.14.1) and `unattended` is never on the picker."""
     session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
     modes = session.new_session_response.modes
-    assert modes.current_mode_id == "guarded"
-    assert [m.id for m in modes.available_modes] == ["guarded", "trusted", "read-only"]
+    assert modes.current_mode_id == "auto"
+    assert [m.id for m in modes.available_modes] == ["auto", "guarded", "trusted", "read-only"]
     assert all(m.name and m.description for m in modes.available_modes)
 
 
@@ -356,7 +356,7 @@ async def test_setting_a_mode_on_another_session_is_refused(tmp_path, monkeypatc
     session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
     with pytest.raises(RequestError):
         await session.conn.set_session_mode(session_id="not-a-session", mode_id="trusted")
-    assert session.agent._current_mode_id() == "guarded"
+    assert session.agent._current_mode_id() == "auto"
 
 
 async def test_cancel_for_another_session_does_nothing(tmp_path, monkeypatch, keep_cwd):
@@ -1042,7 +1042,7 @@ async def test_subprocess_agent_answers_initialize_and_new_session(tmp_path, kee
         assert init.auth_methods == []
         new = await asyncio.wait_for(conn.new_session(cwd=str(project)), 60)
         assert new.session_id
-        assert new.modes.current_mode_id == "guarded"
+        assert new.modes.current_mode_id == "auto"
 
 
 @pytest.mark.skipif(
