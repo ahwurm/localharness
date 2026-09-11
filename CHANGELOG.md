@@ -4,6 +4,62 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+The permission spine: one deterministic gate in front of every tool call, so the
+harness interrupts you when something crosses your project boundary or looks
+destructive, and stays quiet otherwise. Read SECURITY.md, "Human approval gate",
+for what it stops and the five gaps it does not.
+
+### Added
+- **A human approval gate on every tool call, subagents included.** One pure
+  verdict — deny, then the classes that ask every time (destructive shell,
+  protected paths, no boundary at all), then your remembered answers, then the
+  ask-once classes, then allow. The boundary is derived from where you stand
+  (nearest in-project `.localharness/`, else the git top level, else the current
+  directory), never configured; config may only narrow it. `$HOME` or above means
+  there is no boundary, said out loud rather than pretended away. Network reads
+  and reviewable in-workspace edits never ask; a channel with nobody to ask
+  refuses and warns once.
+- **Remembered answers in `~/.localharness/grants.yaml`.** An "always" is keyed by
+  the workspace's resolved path with mandatory provenance; a "never" writes a deny
+  pattern in the same file. Nested folders inherit. A `grants.yaml` inside a
+  project tree is never read — a cloned repo cannot pre-approve itself. No CLI
+  verb: the prompt is the interface, the file is the escape hatch.
+- **Four session modes and `/mode`.** `guarded` (default), `trusted`, `read-only`
+  switchable per session from the terminal (`/mode <name>`) or Discord
+  (`mode <name>`); `unattended` — every ask becomes an allow, which is exactly how
+  v0.13 behaved — is config-only and never a default. Bench pins it, so scores are
+  unmoved by the gate.
+- **`localharness ask-rate --traces DIR`** (hidden): prompts per session over a
+  trace corpus, counted from the new `PermissionAsked` / `PermissionResolved` bus
+  events, or replayed through the real verdict for traces that predate them. It
+  prints the SLO next to the measured rate and its own caveats.
+- **`ToolSchema.group`** — every builtin now names its family (`fs.read`,
+  `fs.write`, `shell`, `code`, `delegate`, `web`, `memory`, `mcp/<server>`). The
+  gate reads it, and it is the seed of the v0.14 exposure taxonomy.
+- **Zed / ACP adapter** — TODO(next agent): `localharness acp`, what Zed shows,
+  and how the gate renders there.
+
+### Changed
+- **`permissions.mode: auto` and `manual` are deprecated.** Both load as `guarded`
+  with a warning. A project layer may only raise strictness — an agent file asking
+  for a looser mode or a wider `workspace_root` is ignored with a warning, the same
+  narrow-only union `deny_patterns` already used.
+
+### Removed
+- **`permissions.allow_patterns`.** It never did anything, and as a config key it
+  was a loosening surface that travels with a repository. A config still carrying
+  it fails validation with that explanation. Grants live in the global store.
+
+### Fixed
+- **`chmod 777` was only blocked at the start of a command** (#159). The shipped
+  deny list anchored `chmod 777 *`, so `find . -exec chmod 777 {} \;` and
+  `cd build && chmod 777 out` walked past it — `sudo` and `rm -rf` already shipped
+  both the bare and embedded forms, `chmod` did not. The embedded pattern is added
+  and the defaults revision bumped, so an existing `config.yaml` picks it up on the
+  next start.
+
 ## [0.13.3] — 2026-09-09
 
 The orchestrator's out-of-the-box path, dogfooded on a real multi-file drafting
