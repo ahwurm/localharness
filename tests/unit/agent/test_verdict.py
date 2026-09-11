@@ -45,36 +45,48 @@ class LookupSpy:
     """A ``GrantLookup`` that records every call — the probe for "grants were not consulted"."""
 
     def __init__(self, grant: Grant | None = None) -> None:
-        self.calls: list[tuple[Path, str]] = []
+        self.calls: list[tuple[Path, str, str]] = []
         self.grant = grant
 
-    def __call__(self, workspace: Path, key: str) -> Grant | None:
-        self.calls.append((workspace, key))
+    def __call__(self, workspace: Path, klass: str, key: str) -> Grant | None:
+        self.calls.append((workspace, klass, key))
         return self.grant
 
 
-def no_grants(workspace: Path, key: str) -> Grant | None:
+def no_grants(workspace: Path, klass: str, key: str) -> Grant | None:
     return None
 
 
-def a_grant(key: str = "k") -> Grant:
+def a_grant(key: str = "k", klass: str = "shell-unfamiliar") -> Grant:
     return Grant(
-        key=key, klass="shell-unfamiliar", granted_at="2026-09-11T00:00:00+00:00",
+        key=key, klass=klass, granted_at="2026-09-11T00:00:00+00:00",
         channel="terminal", session_id="s1", workspace="/w",
     )
 
 
-def a_refusal(key: str) -> Refusal:
+def granting(*pairs: tuple[str, str]):
+    """A ``GrantLookup`` that grants exactly these ``(class, key)`` pairs.
+
+    Keys are unique only inside their own class's key space (PRD §3.3), so a stand-in that
+    matched the key alone would let an answer about one question satisfy another — the very
+    defect these tests exist to catch.
+    """
+    def _lookup(workspace: Path, klass: str, key: str) -> Grant | None:
+        return a_grant(key, klass) if (klass, key) in pairs else None
+    return _lookup
+
+
+def a_refusal(key: str, klass: str = "shell-unfamiliar") -> Refusal:
     return Refusal(
-        key=key, klass="shell-unfamiliar", refused_at="2026-09-11T00:00:00+00:00",
+        key=key, klass=klass, refused_at="2026-09-11T00:00:00+00:00",
         channel="terminal", session_id="s1", workspace="/w",
     )
 
 
 def refusing(*keys: str):
     """A ``RefusalLookup`` that refuses exactly these keys — nothing fuzzy, nothing globbed."""
-    def _refused(workspace: Path, key: str) -> Refusal | None:
-        return a_refusal(key) if key in keys else None
+    def _refused(workspace: Path, klass: str, key: str) -> Refusal | None:
+        return a_refusal(key, klass) if key in keys else None
     return _refused
 
 
@@ -175,7 +187,7 @@ def test_in_workspace_edit_without_a_review_surface_asks_once_per_workspace(ws):
 
 
 def test_edit_unreviewed_is_silenced_by_its_grant(ws):
-    ctx = make_ctx(ws, has_review_surface=False, grants=lambda w, k: a_grant(k) if k == str(ws) else None)
+    ctx = make_ctx(ws, has_review_surface=False, grants=granting(("edit-unreviewed", str(ws))))
     result = evaluate("write", {"path": str(ws / "a.py"), "content": "x"}, WRITE_META, ctx, SETTINGS)
     assert result.verdict is Verdict.ALLOW
 
@@ -194,7 +206,7 @@ def test_a_write_outside_the_boundary_asks_with_the_parent_dir_as_key(ws, tmp_pa
 def test_an_edit_outside_grant_silences_that_directory(ws, tmp_path):
     outside = (tmp_path / "elsewhere").resolve()
     outside.mkdir()
-    ctx = make_ctx(ws, grants=lambda w, k: a_grant(k) if k == str(outside) else None)
+    ctx = make_ctx(ws, grants=granting(("edit-outside", str(outside))))
     result = evaluate("write", {"path": str(outside / "f.txt"), "content": "x"}, WRITE_META, ctx, SETTINGS)
     assert result.verdict is Verdict.ALLOW
 
@@ -381,7 +393,7 @@ def test_an_unfamiliar_signature_asks_once_and_the_grant_silences_it(ws, monkeyp
     assert result.verdict is Verdict.ASK
     assert (result.request.klass, result.request.key) == ("shell-unfamiliar", "npm install")
 
-    granted = make_ctx(ws, grants=lambda w, k: a_grant(k) if k == "npm install" else None)
+    granted = make_ctx(ws, grants=granting(("shell-unfamiliar", "npm install")))
     assert evaluate("bash_exec", {"command": "npm install"}, SHELL_META, granted, SETTINGS).verdict is Verdict.ALLOW
 
 
@@ -552,7 +564,7 @@ def test_code_and_delegate_ask_once_per_tool_name(ws, tool_name, klass, meta):
     assert (result.request.klass, result.request.key) == (klass, tool_name)
     assert result.request.grantable is True
 
-    granted = make_ctx(ws, grants=lambda w, k: a_grant(k) if k == tool_name else None)
+    granted = make_ctx(ws, grants=granting((klass, tool_name)))
     assert evaluate(tool_name, {"code": "print(1)"}, meta, granted, SETTINGS).verdict is Verdict.ALLOW
 
 
@@ -578,7 +590,7 @@ def test_network_reads_are_silent_by_default_and_per_host_when_asked_for(ws):
     result = evaluate("web_fetch", params, meta, make_ctx(ws), settings)
     assert (result.request.klass, result.request.key) == ("network-host", "example.com")
 
-    granted = make_ctx(ws, grants=lambda w, k: a_grant(k) if k == "example.com" else None)
+    granted = make_ctx(ws, grants=granting(("network-host", "example.com")))
     assert evaluate("web_fetch", params, meta, granted, settings).verdict is Verdict.ALLOW
 
 
@@ -694,8 +706,8 @@ def test_trusted_mode_needs_every_ask_grantable(ws, monkeypatch):
 def test_a_granted_key_drops_out_of_the_collected_asks(ws, monkeypatch, tmp_path):
     outside = (tmp_path / "elsewhere").resolve()
 
-    def granted(workspace: Path, key: str):
-        return a_grant(key) if key == "mkdir" else None
+    def granted(workspace: Path, klass: str, key: str):
+        return a_grant(key, klass) if key == "mkdir" else None
 
     fake_shell(monkeypatch, seg("mkdir", write_targets=(str(outside / "y"),)), seg("touch"))
     request = evaluate(
@@ -714,8 +726,8 @@ def test_a_grant_on_a_directory_covers_a_deeper_target(ws, tmp_path):
     vocabularies", arriving through paths)."""
     outside = (tmp_path / "elsewhere").resolve()
 
-    def granted(workspace: Path, key: str):
-        return a_grant(key) if key == str(outside) else None
+    def granted(workspace: Path, klass: str, key: str):
+        return a_grant(key, klass) if (klass, key) == ("edit-outside", str(outside)) else None
 
     deep = outside / "a" / "b" / "f.txt"
     result = evaluate("write", {"path": str(deep), "content": "x"}, WRITE_META,
@@ -727,8 +739,8 @@ def test_a_grant_on_a_sibling_directory_covers_nothing(ws, tmp_path):
     """The walk goes UP, never sideways or down."""
     outside = (tmp_path / "elsewhere").resolve()
 
-    def granted(workspace: Path, key: str):
-        return a_grant(key) if key == str(outside / "a") else None
+    def granted(workspace: Path, klass: str, key: str):
+        return a_grant(key, klass) if key == str(outside / "a") else None
 
     result = evaluate("write", {"path": str(outside / "b" / "f.txt"), "content": "x"}, WRITE_META,
                       make_ctx(ws, grants=granted), SETTINGS)
@@ -743,8 +755,8 @@ def test_a_grant_on_home_does_not_cover_a_protected_path(ws, tmp_path):
     home = (tmp_path / "home").resolve()
     (home / ".ssh").mkdir(parents=True, exist_ok=True)
 
-    def granted(workspace: Path, key: str):
-        return a_grant(key)  # every key is granted — the widest possible grant
+    def granted(workspace: Path, klass: str, key: str):
+        return a_grant(key, klass)  # every key is granted — the widest possible grant
 
     result = evaluate("write", {"path": str(home / ".ssh" / "authorized_keys"), "content": "x"},
                       WRITE_META, make_ctx(ws, grants=granted), SETTINGS)
@@ -757,13 +769,49 @@ def test_the_subtree_grant_reaches_shell_write_targets(ws, monkeypatch, tmp_path
     target check, so it inherits the walk."""
     outside = (tmp_path / "elsewhere").resolve()
 
-    def granted(workspace: Path, key: str):
-        return a_grant(key) if key in (str(outside), "touch") else None
+    def granted(workspace: Path, klass: str, key: str):
+        return a_grant(key, klass) if key in (str(outside), "touch") else None
 
     fake_shell(monkeypatch, seg("touch", write_targets=(str(outside / "sub" / "x"),)))
     result = evaluate("bash_exec", {"command": "touch sub/x"}, SHELL_META,
                       make_ctx(ws, grants=granted), SETTINGS)
     assert result.verdict is Verdict.ALLOW
+
+
+# ------------------------------------------ a grant answers ONE class (R3)
+
+def test_a_shell_grant_does_not_satisfy_the_tool_of_the_same_name(ws):
+    """R3: "always" on the shell command ``python_exec`` must not pre-approve the TOOL.
+
+    Both are spelled ``python_exec`` and they are different questions: one ran a command in a
+    subshell, the other runs code in this process.
+    """
+    granted = make_ctx(ws, grants=granting(("shell-unfamiliar", "python_exec")))
+    result = evaluate("python_exec", {"code": "print(1)"},
+                      ToolMeta(destructive=True, group="code"), granted, SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert (result.request.klass, result.request.key) == ("code-exec", "python_exec")
+
+
+def test_a_shell_signature_that_looks_like_a_path_grants_no_directory(ws, tmp_path):
+    """R3: the ancestor walk is for path-keyed classes only, never a shell signature.
+
+    A signature is an arbitrary string; one that reads as a path (``/usr/local/bin/deploy``, or
+    plainly ``/tmp``) used to satisfy every write under that directory via the walk.
+    """
+    outside = (tmp_path / "elsewhere").resolve()
+    granted = make_ctx(ws, grants=granting(("shell-unfamiliar", str(outside))))
+    result = evaluate("write", {"path": str(outside / "a" / "f.txt"), "content": "x"},
+                      WRITE_META, granted, SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert (result.request.klass, result.request.key) == ("edit-outside", str(outside / "a"))
+
+
+def test_the_grant_lookup_is_asked_with_the_class_it_is_deciding(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("cp", write_targets=()))
+    spy = LookupSpy()
+    evaluate("bash_exec", {"command": "cp a b"}, SHELL_META, make_ctx(ws, grants=spy), SETTINGS)
+    assert (ws, "shell-unfamiliar", "cp") in spy.calls
 
 
 # ------------------------------------------------------------------- refusals
@@ -790,7 +838,7 @@ def test_a_refusal_beats_a_grant_on_the_same_key(ws, monkeypatch):
     """A tightening always wins, whichever answer was recorded last (PRD §3.3)."""
     fake_shell(monkeypatch, seg("cargo publish"))
     result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
-                      make_ctx(ws, grants=lambda w, k: a_grant(k),
+                      make_ctx(ws, grants=lambda w, c, k: a_grant(k, c),
                                refusals=refusing("cargo publish")), SETTINGS)
     assert result.verdict is Verdict.DENY
 

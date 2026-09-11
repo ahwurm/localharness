@@ -92,7 +92,7 @@ async def test_ungrantable_allow_always_never_writes_a_grant(tmp_path):
         assert outcome.allowed
     assert len(seen) == 2
     assert seen[0].grantable is False
-    assert gate.grants.lookup(gate.workspace, "rm -rf") is None
+    assert gate.grants.lookup(gate.workspace, "shell-destructive", "rm -rf") is None
 
 
 @pytest.mark.asyncio
@@ -102,7 +102,7 @@ async def test_reject_always_writes_a_refusal_that_then_denies_without_asking(tm
     first = await _check(gate, "bash_exec", {"command": "cargo publish"})
     assert not first.allowed
 
-    refusal = gate.grants.refused(gate.workspace, "cargo publish")
+    refusal = gate.grants.refused(gate.workspace, "shell-unfamiliar", "cargo publish")
     assert refusal is not None
     assert (refusal.klass, refusal.channel, refusal.session_id) == ("shell-unfamiliar", "test", "s")
 
@@ -135,8 +135,8 @@ async def test_reject_always_refuses_every_key_the_call_asked_about(tmp_path):
     command = f"cargo publish && touch {outside}/f"
     assert not (await _check(gate, "bash_exec", {"command": command})).allowed
 
-    assert gate.grants.refused(gate.workspace, "cargo publish") is not None
-    assert gate.grants.refused(gate.workspace, str(outside)) is not None
+    assert gate.grants.refused(gate.workspace, "shell-unfamiliar", "cargo publish") is not None
+    assert gate.grants.refused(gate.workspace, "edit-outside", str(outside)) is not None
 
 
 @pytest.mark.asyncio
@@ -160,7 +160,7 @@ async def test_a_refusal_beats_a_grant_already_written_for_the_same_key(tmp_path
     """A "never" is a tightening, so it wins over any grant on the key, in either order."""
     gate = _gate(tmp_path, asker=_answer("allow_always"))
     assert (await _check(gate, "bash_exec", {"command": "cargo publish"})).allowed
-    assert gate.grants.lookup(gate.workspace, "cargo publish") is not None
+    assert gate.grants.lookup(gate.workspace, "shell-unfamiliar", "cargo publish") is not None
 
     gate.grants.add_refusal(
         new_refusal(key="cargo publish", klass="shell-unfamiliar", workspace=gate.workspace,
@@ -175,7 +175,7 @@ async def test_an_ungrantable_reject_always_refuses_its_primary_key(tmp_path):
     """A destructive call asks every time, but a "never" on it still sticks (PRD §3.3)."""
     gate = _gate(tmp_path, asker=_answer("reject_always"))
     assert not (await _check(gate, "bash_exec", {"command": "rm -rf build"})).allowed
-    assert gate.grants.refused(gate.workspace, "rm -rf") is not None
+    assert gate.grants.refused(gate.workspace, "shell-destructive", "rm -rf") is not None
 
     asked: list[PermissionRequest] = []
     gate.asker = _answer("allow_once", asked)
@@ -241,7 +241,7 @@ async def test_timeout_denies_as_reject_once_and_says_so_on_the_bus(tmp_path):
     resolved = bus.history(event_types=[PermissionResolved])
     assert [e.decision for e in resolved] == ["reject_once"]
     assert resolved[0].wrote_grant is False
-    assert gate.grants.refused(gate.workspace, "cargo build") is None
+    assert gate.grants.refused(gate.workspace, "shell-unfamiliar", "cargo build") is None
 
 
 def test_ask_timeout_derives_from_the_tool_timeout(tmp_path):
@@ -322,12 +322,12 @@ async def test_a_keyless_request_writes_nothing_either_way(tmp_path):
     gate = _gate(tmp_path, asker=_answer("reject_always"))
     outcome = await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})
     assert not outcome.allowed
-    assert gate.grants.refused(gate.workspace, "bash_exec") is None
+    assert gate.grants.refused(gate.workspace, "shell-unfamiliar", "bash_exec") is None
     assert not (tmp_path / "grants.yaml").exists()
 
     gate.asker = _answer("allow_always")
     assert (await _check(gate, "bash_exec", {"command": "$(echo rm) -rf build"})).allowed
-    assert gate.grants.lookup(gate.workspace, "bash_exec") is None
+    assert gate.grants.lookup(gate.workspace, "shell-unfamiliar", "bash_exec") is None
 
 
 # ------------------------------------------------------------ derivation helpers

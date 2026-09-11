@@ -20,6 +20,12 @@ A "never here" answer lives in the same file as a NEGATIVE GRANT (``refusals:``)
 the same workspace key and the same key space as a grant — the shell signature, the directory,
 the MCP tool the prompt actually named. It is not a text pattern: a refusal of the signature
 ``cp`` denies ``cp``, not ``scp``, ``cpio`` or every command whose arguments contain "cp".
+
+Both answers are filed and matched under ``(class, key)``, never the key alone. Each ask class
+has its OWN key space — a shell signature, a directory, a tool name — and the same string means
+different things in different ones (``python_exec`` is both a shell signature and the
+``code-exec`` tool). Matching the string alone let an answer to one question stand in for
+another.
 """
 from __future__ import annotations
 
@@ -159,16 +165,23 @@ class GrantStore:
                 )
         return out
 
-    def lookup(self, workspace: Path, key: str) -> Optional[Grant]:
-        """The grant covering ``key`` in ``workspace``, walking ancestors (PRD §3.3).
+    def lookup(self, workspace: Path, klass: str, key: str) -> Optional[Grant]:
+        """The grant covering ``(klass, key)`` in ``workspace``, walking ancestors (PRD §3.3).
 
         Nearest workspace wins; a parent's grant is inherited by a nested workspace. Returns
         None when nothing is recorded — the caller (``agent/verdict.evaluate``) then asks.
+
+        The CLASS is half the identity. Keys are only unique within their own key space: the
+        shell signature ``python_exec`` and the ``code-exec`` tool ``python_exec`` are the same
+        string, and matching on the string alone let an "always" on the shell command satisfy the
+        interpreter tool. A record is an answer to one question, so it is honored only for that
+        question. A record with no ``class`` is invalid (:data:`GRANT_REQUIRED_FIELDS`) and is
+        skipped with a warning — fail closed, ask again.
         """
         data = self._load()
         for workspace_key in _ancestors(workspace):
             for record in self._records(data, workspace_key, GRANTS_KEY, GRANT_REQUIRED_FIELDS):
-                if record["key"] == key:
+                if record["key"] == key and record["class"] == klass:
                     return _record_type("Grant")(
                         key=record["key"],
                         klass=record["class"],
@@ -179,19 +192,22 @@ class GrantStore:
                     )
         return None
 
-    def refused(self, workspace: Path, key: str) -> Optional[Refusal]:
-        """The "never here" answer covering ``key`` in ``workspace``, walking ancestors (PRD §3.3).
+    def refused(self, workspace: Path, klass: str, key: str) -> Optional[Refusal]:
+        """The "never here" answer covering ``(klass, key)`` in ``workspace`` (PRD §3.3).
 
         The same key space and the same ancestor walk as :meth:`lookup` — a refusal is a
         negative grant. The caller (``agent/verdict.evaluate``) consults this BEFORE the grant,
         so a "never" wins over any later "always" on the same key and asks no more; and for a
         key that is a directory the caller walks the path upward too, so a refusal on ``/tmp/x``
         covers ``/tmp/x/y/f`` exactly as a directory grant covers its subtree.
+
+        Matched on ``(class, key)`` for :meth:`lookup`'s reason: a key identifies a call only
+        inside its own class's key space.
         """
         data = self._load()
         for workspace_key in _ancestors(workspace):
             for record in self._records(data, workspace_key, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS):
-                if record["key"] == key:
+                if record["key"] == key and record["class"] == klass:
                     return _record_type("Refusal")(
                         key=record["key"],
                         klass=record["class"],
@@ -218,7 +234,10 @@ class GrantStore:
         entry = data.get(workspace_key)
         if not isinstance(entry, dict):
             entry = {}
-        grants = [g for g in entry.get(GRANTS_KEY, []) if not (isinstance(g, dict) and g.get("key") == grant.key)]
+        grants = [
+            g for g in entry.get(GRANTS_KEY, [])
+            if not (isinstance(g, dict) and g.get("key") == grant.key and g.get("class") == grant.klass)
+        ]
         grants.append(
             {
                 "key": grant.key,
@@ -251,7 +270,7 @@ class GrantStore:
             entry = {}
         refusals = [
             r for r in entry.get(REFUSALS_KEY, [])
-            if not (isinstance(r, dict) and r.get("key") == refusal.key)
+            if not (isinstance(r, dict) and r.get("key") == refusal.key and r.get("class") == refusal.klass)
         ]
         refusals.append(
             {
