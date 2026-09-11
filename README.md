@@ -31,7 +31,9 @@ Frontier coding agents are great when you're driving them. But metering and rate
 - **Always on.** No quota or rate caps to budget around for unattended runs.
 - **Familiar.** Same agent, tool, and permission model as the cloud tools, just local.
 
-**One setting a cron job needs.** From v0.14 the permission gate is on by default (`guarded`), and a run with nobody to answer a prompt refuses the call instead of allowing it — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
+**The gate asks about your workspace, not about your work.** From v0.14.1 the default mode is `auto`: the first time a session opens a project, LocalHarness asks once whether you trust it, and after that it only interrupts you for genuinely dangerous things — writes to protected or system paths, a destructive command aimed outside the project, and irreversible operations like `sudo`, `curl … | sh`, a force push or `git reset --hard`. Decline the trust question and the session runs `guarded`, the v0.14.0 behavior: ask once about each new thing, remember the answer.
+
+**One setting a cron job still needs.** A run with nobody to answer a question refuses the call instead of allowing it — including the trust question — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking anything. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
 
 A frontier agent like Claude Code is still the easy way to set the harness up and compose a bespoke subagent for a task. The split that works: frontier to design, local to run.
 
@@ -44,7 +46,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Memory that learns from use** — per-agent SQLite memory with an automatic write gate (lessons captured from failure→recovery signals, zero extra model calls), activation-ranked recall in pure SQL, cancellable idle consolidation, and a persisted gist/schema hierarchy over document analyses; conflicting facts supersede, never overwrite
 - **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` names the file behind every effective key, and `doctor` names both layers and every key the project overrides
 - **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
-- **Deny-first permissions** — policies inherit down the hierarchy and can only narrow
+- **Deny-first permissions** — one deterministic gate in front of every tool call; policies inherit down the hierarchy and can only narrow
 - **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
 - **MCP support** — connect Model Context Protocol servers and expose their tools to agents
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
@@ -55,9 +57,11 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
 **♾️ always allow this in this workspace** (an "always" is written to `grants.yaml` and holds in
-the terminal and Zed too), and **❌ no, this once**. Only a user on `LOCALHARNESS_DISCORD_ALLOW`
-can answer, and some prompts — destructive shell commands, protected paths — offer only ✅ and ❌
-because they ask every single time. Unlike the terminal, a Discord question expires: if nobody
+the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode this is rare: the
+workspace trust question on a new project, and then only the dangerous list — protected and system
+paths, destructive commands aimed outside the project, irreversible operations — which offer only
+✅ and ❌ because they ask every single time. `♾️` appears in `guarded`, where answers are
+remembered. Only a user on `LOCALHARNESS_DISCORD_ALLOW` can answer. Unlike the terminal, a Discord question expires: if nobody
 reacts before `permissions.ask.timeout_s`, the call is denied and the message is edited to say
 so. React after that and nothing happens; ask again instead.
 

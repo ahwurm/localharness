@@ -4,6 +4,61 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.14.1] — 2026-09-11
+
+### Changed
+- **The default permission mode is now `auto`, and it asks about the
+  workspace instead of about your work.** v0.14.0 defaulted to `guarded`,
+  which asked once about each new thing and remembered the answer; used for
+  real, it stopped people repeatedly during ordinary work, and a gate that
+  interrupts ordinary work is one you learn to click through. The thinnest
+  interaction that is still honest is the product: the first time a session
+  opens a workspace, LocalHarness asks **once** whether you trust it — the
+  same `~/.localharness/trusted_workspaces.yaml` record that already decided
+  whether a project's own `.localharness/` config is loaded — and after that
+  everything runs except a named blacklist. Decline, and the session runs
+  `guarded`; a channel that cannot ask and has no record for that workspace
+  runs `guarded` too. In Zed the question is the permission dialog, once per
+  project.
+- **What still asks in `auto`, every time, with no answer remembered.**
+  Writes to a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, credential
+  files, shell rc files, `~/.localharness`, and in-project `.git/**`,
+  `.localharness/**`, `.env*`, key files) and now also the system
+  directories below; a destructive file operation (`rm -rf`, `chmod -R`,
+  `find -delete`, the Windows deletes) whose target is outside the project
+  or cannot be resolved; and an irreversible operation wherever it points —
+  `sudo`/`su`, `curl … | sh`, `git push --force`/`--delete`,
+  `git reset --hard`, `git clean -f`, `git checkout --`/`git restore`
+  discards, `git stash drop`/`clear`, `git branch -D`, `git filter-branch`,
+  `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, disk
+  formatting, and `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/
+  `compose up`/`compose down`. Recorded refusals still deny in `auto`, and
+  your deny patterns still deny before the gate speaks at all.
+- **New protected paths: the system directories.** `/etc`, `/usr`, `/bin`,
+  `/sbin`, `/lib*`, `/boot`, `/var` (except `/var/tmp`), `/opt`, `/root`,
+  `/srv`, macOS `/System`, `/Library`, `/Applications`, and Windows
+  `C:\Windows`, `C:\Program Files*`, `C:\ProgramData`. A mode that allows
+  ordinary writes needs the places a mistaken write is unrecoverable named
+  explicitly; they are `permissions.ask.protected_paths_system`.
+- **A session in `$HOME` no longer asks about every write.** With no project
+  boundary there is nothing to cross, so `auto` treats the directory you
+  started in as the target boundary for the destructive-file rule and lets
+  ordinary writes through; protected paths and irreversible operations still
+  ask there.
+- **`guarded` is the old behaviour and is now opt-in** —
+  `permissions.mode: guarded` in config, or `/mode guarded` for one session.
+  It is unchanged: ask once per new thing, remember the answer in
+  `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for
+  destructive operations aimed **inside** the project; `read-only` and
+  `unattended` are unchanged, and `unattended` is still what a scheduled job
+  writes in its config. Strictness now orders `unattended` < `auto` <
+  `trusted` < `guarded` < `read-only`, and a project layer may still only
+  raise it.
+- **`mode: auto` in an older config is now simply the real mode.** It used to
+  load as `guarded` with a deprecation warning; the name it always wanted
+  exists, so it loads as itself and the warning is gone. `manual` still maps
+  to `guarded`.
+
 ## [0.14.0] — 2026-09-11
 
 The permission spine: one deterministic gate in front of every tool call, so the
