@@ -250,10 +250,12 @@ the management groups whose members the destructive defaults name: ``docker syst
 ``docker volume rm``, ``docker network rm``. Without this the group would be the whole key and a
 grant on ``docker volume`` would cover ``rm`` (docker(1) "Management Commands").
 
-``container`` and ``image`` are here for the key, not for a verdict: their destructive members
-(``docker container rm``, ``docker image rm``) are the management spellings of ``docker rm`` and
-``docker rmi`` and are NOT in the destructive defaults, so they are grantable — but at least the
-grant is for that one operation rather than for the whole group."""
+``container`` and ``image`` are here for both: their destructive members (``docker container rm``,
+``docker container exec/run``, ``docker image rm``) are the management spellings of ``docker rm``,
+``docker exec/run`` and ``docker rmi``, and they are in the destructive defaults too (``370513d``),
+so neither spelling of one operation is grantable while the other is not. The key still matters
+for the rest of the group: ``docker container ls`` is a read nobody needs protection from, and a
+grant on it is a grant on that one operation and not on ``container``."""
 
 SUBCOMMAND_OPERATION_WORDS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "git branch": (

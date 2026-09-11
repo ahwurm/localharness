@@ -357,9 +357,14 @@ and its push/pop/apply, ``git checkout BRANCH``, ``git switch``, ``git worktree 
 ``format`` and ``diskpart`` are bare names for the same reason ``mkfs`` is: each does exactly one
 thing, and it is not recoverable (Windows Commands reference).
 
-Residual, named rather than hidden: docker's management-command spellings of the same operations
-(``docker container rm``, ``docker container exec/run``, ``docker image rm``) are NOT in this set,
-so they classify as unfamiliar and can be granted. They are aliases for entries that are here."""
+Docker's management-command spellings ARE in this set (``370513d``): ``docker container rm`` and
+``docker container exec/run/start/restart/stop/kill``, ``docker image rm``, and the ``prune`` of
+each group are the same operations as the short spellings beside them, so they are ungrantable for
+the same reason. The residual is narrower than it was, and named: a management group holds reads
+too — ``docker container ls``, ``docker image ls``, ``docker network inspect`` — and those are
+neither in this set nor in the read-only tier above, so they classify as unfamiliar and can be
+granted, one operation at a time, which is what :data:`NESTED_SUBCOMMAND_GROUPS` in the classifier
+buys."""
 
 DESTRUCTIVE_FLAG_VERBS_DEFAULT: dict[str, tuple[str, ...]] = {
     "rm": ("r", "f"),
@@ -579,10 +584,29 @@ PROTECTED_PATHS_HOME_DEFAULT: tuple[str, ...] = (
     "~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube", "~/.docker",
     "~/.bashrc", "~/.zshrc", "~/.profile", "~/.bash_profile", "~/.zprofile",
     "~/.localharness",
+    "~/.git-credentials", "~/.netrc", "~/.npmrc", "~/.pypirc",
+    "~/.config/gcloud", "~/.azure",
+    "~/AppData/Roaming/GitHub CLI", "~/AppData/Local/Microsoft/Credentials",
+    "~/Documents/PowerShell", "~/Documents/WindowsPowerShell",
 )
 """PRD §3.1 ``protected-path`` (ungrantable). ``~/.localharness`` is protected because writing it
 changes what the harness does next; the harness's own runtime store under it is exempted by the
-verdict (A2). Source: Claude Code "protected paths" tier + PRD critic finding 1."""
+verdict (A2). Source: Claude Code "protected paths" tier + PRD critic finding 1.
+
+The second block is the credential files the first one missed (v0.14 critic A6), each one a
+plaintext token store for a service that can publish or deploy: ``~/.git-credentials`` (git's own
+``store`` helper, git-credential-store(1)), ``~/.netrc`` (curl, wget and git fall back to it,
+netrc(5)), ``~/.npmrc`` and ``~/.pypirc`` (the npm and PyPI upload tokens — a write here
+redirects a publish to another registry, npmrc(5), distutils "The .pypirc file"), and
+``~/.config/gcloud`` / ``~/.azure`` (the two cloud SDK credential stores that were missing beside
+``~/.aws``). ``~/.docker`` already covers ``~/.docker/config.json``: a directory entry protects
+its subtree.
+
+The third block is the same tier on Windows, where the owner also dogfoods: GitHub CLI's token
+store, the Windows Credential Manager's file backing, and the two PowerShell profile directories —
+whose ``profile.ps1`` runs on every new session, the way ``~/.bashrc`` does (about_Profiles).
+They are written under ``~`` like every other entry, which is platform-agnostic and harmless
+where the directory does not exist."""
 
 PROTECTED_PATHS_WORKSPACE_DEFAULT: tuple[str, ...] = (
     ".git", ".localharness", ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*",
