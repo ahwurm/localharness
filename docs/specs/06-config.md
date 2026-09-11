@@ -80,9 +80,22 @@ printed on stderr.
 
 From v0.14.1 that same record carries the permission half of trust. In the default `auto` mode a
 workspace is asked about once — trust this workspace? — and a yes means both things: its config
-layer loads, and its tool calls run without asking except for the dangerous blacklist (SECURITY.md,
-"Human approval gate"). A no, and a run that cannot ask and has no record, runs the session in
-`guarded` instead. One question, one file, one answer.
+layer loads, and its tool calls run without asking except for `AUTO_BLACKLIST` (SECURITY.md,
+"Human approval gate"). One question, one file, one answer. `cli/session_trust.py` settles it
+before the first turn, in this order:
+
+1. **A recorded decision** for this root or any directory above it (`trust.is_trusted_tree`), so
+   nested folders inherit. A recorded no runs the session in `guarded`.
+2. **Evidence of prior use** — any `agents/*/sessions/*.jsonl` under the workspace's own
+   `.localharness/`, or under the global config directory for a session rooted at `$HOME` with no
+   project. The trust is recorded and one line says the workspace was recognized. The global store
+   counts only for the home-rooted case, so one old home session never vouches for a project.
+3. **The question**, through the channel's own ask path. Yes records trust forever; no records the
+   refusal and runs `guarded`.
+
+A session that cannot ask and has no record runs `guarded` and **records nothing**, leaving the
+question for the next interactive run. A `permissions.mode` set explicitly to anything other than
+`auto` skips all of it.
 
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
@@ -1275,18 +1288,25 @@ them moves nothing. They are declarative leftovers, kept only so an older config
 **The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
 default since v0.14.1, asks once whether you trust this workspace — only for a folder this machine
 has never run a session in; one with earlier sessions behind it is recognized and never asked — and
-then allows everything except **`AUTO_BLACKLIST`**: a delete or recursive permission change
-(`rm -rf`, `find -delete`, the Windows deletes, `chmod -R`, `chown -R`) whose target is outside the
-project or unresolvable; `git push --force`/`--delete`, `git reset --hard`, `git clean -f`;
-`sudo`/`su`; a download piped into a shell; `dd`, `mkfs`, `shred`, `format`; writes to a secret
-store (`~/.ssh`, `~/.aws`, `~/.gnupg`, credential files, shell rc files, `~/.localharness`) or a
-system directory; and writes to `.git/**` or `.localharness/**` inside the project. Everything else
-runs without asking — docker, `git branch`/`stash`/`checkout`/`restore`, `.env` and key files
-inside the project, interpreters, subagents, MCP and plugin tools, network reads, and writes
-anywhere else. It remembers nothing beyond the trust answer. **There is no allow-list in `auto`** —
-nothing is enumerated as safe, so `AUTO_BLACKLIST` is the one surface to curate: it is assembled
-from the `permissions.ask.*` rule sets below, which a project layer may only extend, never
-shorten. `guarded`, the v0.14.0 default and now opt-in, also
+then allows everything except **`AUTO_BLACKLIST`** (`agent/gate_types.py`), one structure with
+four fields: `target_scoped_verbs` (`rm`, `rmdir`, `chmod`, `chown`, `chgrp`, `truncate`, `find`,
+and the Windows `Remove-Item`/`ri`/`del`/`erase`/`rd` spellings) when the target is outside the
+project, protected, or unresolvable; `irreversible_signatures` wherever they point (`sudo`, `su`,
+`doas`, `dd`, `mkfs`, `shred`, `format`, `diskpart`, `git push --force`, `git push --delete`,
+`git reset --hard`, `git clean -f`); `protected_paths_workspace`, which in `auto` is `.git` plus
+the behaviour-changing files of `.localharness/` (`config.yaml`, `overrides.yaml`, `plugins/**`),
+with `protected_paths_home` and `protected_paths_system` applying in full; and `pipe_to_shell`, a
+download whose sink takes its **program** from stdin (`curl … | sh`; `curl … | python3 -c '…'` is
+not one). A call the gate cannot read at all — a non-string command or path — asks as well; a
+command *name* computed at runtime (`eval "$(direnv hook bash)"`, `$VAR …`) does not. Everything
+else runs without asking — docker, every other git subcommand, `.env` and key files inside the
+project, interpreters, subagents, MCP and plugin tools, network reads, and writes anywhere else. It
+remembers nothing beyond the trust answer. **There is no allow-list in `auto`** — nothing is
+enumerated as safe, so `AUTO_BLACKLIST` is the one surface to curate, and it is deliberately
+**not** reachable from `permissions.ask.*`: every field of it either loosens the mode when extended
+or is the list that decides whether the default is safe at all, and config travels with a
+repository. `localharness ask-rate --traces DIR --mode auto` reports which entries fired over your
+own traces (`--mode guarded` measures the v0.14.0 behaviour over the same corpus). `guarded`, the v0.14.0 default and now opt-in, also
 asks a human before a call crosses the workspace boundary or is unfamiliar, and remembers the
 answer; it is what a declined workspace, and a run that cannot ask and has no trust record, fall
 back to. `trusted` is `auto` plus a prompt for destructive operations aimed inside the project.
@@ -1324,7 +1344,13 @@ holds the system directories a mistaken write cannot be taken back from — `/et
 `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library`,
 `/Applications`, Windows `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
 `C:\ProgramData` — because a default that allows ordinary writes has to name those explicitly.
-`protected_paths_system_exempt` carves `/tmp` and `/var/tmp` back out. The two dict-shaped tables (`destructive_flag_verbs`,
+`protected_paths_system_exempt` carves `/tmp` and `/var/tmp` back out. The harness's own
+directories are protected by file rather than wholesale: under `~/.localharness` only
+`config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
+`declined_workspace_offers.yaml` and `plugins/**` — the files that change what the harness does
+next — and in a project the same shape, `.localharness/config.yaml`, `overrides.yaml` and
+`plugins/**`. Agents, tools, session state, memory, history and the audit log under either are
+bookkeeping and are not protected. The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 

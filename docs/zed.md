@@ -57,15 +57,18 @@ progress can actually be shown. A warm server costs nothing; a cold one streams 
 
 | Mode | What it does |
 |---|---|
-| **Auto** (default) | Asks once whether you trust a project you have never opened here, then stays out of the way. A dialog appears only for the short blacklist: a delete aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … \| sh`, `dd`/`mkfs`/`shred`, a write to a secret store or a system directory, and a write to `.git/` or `.localharness/`. Nothing is remembered. |
+| **Auto** (default) | Asks once whether you trust a project you have never worked in here, then stays out of the way. A dialog appears only for the short blacklist: a delete or recursive `chmod`/`chown` aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … \| sh`, `dd`/`mkfs`/`shred`, a write to a secret store or a system directory, and a write to `.git/` or your config files under `.localharness/`. Nothing is remembered. |
 | **Guarded** | The v0.14.0 default: asks once about each new thing — anything leaving the project folder, a protected path, a command this workspace has never allowed — and remembers the answer. Reads and web fetches never ask. |
 | **Trusted** | Auto plus one prompt: a destructive command whose target is inside the project asks too. |
 | **Unattended** | Never asks: every question becomes a yes, leaving only your deny patterns. |
 | **Read only** | Writes, edits, code execution and non-read-only shell commands are refused with an explanation the model can re-plan against. |
 
 **What to expect in Auto.** Opening a folder LocalHarness has never worked in, the first dialog is
-the trust question: trust this workspace? A project you have already used is recognized and never
-asks. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
+the trust question — **Trust this workspace?**, with two buttons: *Trust this workspace* and *Not
+now*. Unlike every other dialog here the answer is permanent, which is why the buttons say so; it
+goes in `~/.localharness/trusted_workspaces.yaml` and covers both halves of trust (the project's
+config layer loads, and its tool calls run without asking). A project with earlier sessions behind
+it is recognized and never asked at all. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
 a docker command, an MCP tool, a subagent — never raises another dialog. Answer no and the thread
 runs in Guarded, which asks about each new thing and remembers it. After that the only dialogs you
 should see are the blacklist entries in the table above, and they come back every time, because an
@@ -85,11 +88,12 @@ offer only the two "once" buttons, because they are designed to ask every single
 keyed by this workspace, and it holds in the terminal and Discord too — one gate, one memory.
 Dismissing the dialog with Escape refuses that one call and remembers nothing.
 
-The first time you open a project, you get the workspace trust dialog described above. It is one
-question covering both halves of trust: whether that workspace's `.localharness/` config is loaded
-— it defines roles, models and tool permissions, so treat it like code you are about to run — and
-whether its tool calls run without asking. Answered once, permanently, in
-`~/.localharness/trusted_workspaces.yaml`.
+The first time you open a project LocalHarness has not worked in, you get the workspace trust
+dialog described above. It is one question covering both halves of trust: whether that workspace's
+`.localharness/` config is loaded — it defines roles, models and tool permissions, so treat it like
+code you are about to run — and whether its tool calls run without asking. Answered once,
+permanently, in `~/.localharness/trusted_workspaces.yaml`; *Not now* is recorded too and runs the
+thread in Guarded.
 
 **Edits go through Zed.** Because Zed advertises filesystem access, `read` sees the buffer you
 are actually looking at (unsaved edits included) and `write`/`edit` hand their changes to Zed
