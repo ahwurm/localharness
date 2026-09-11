@@ -160,8 +160,10 @@ def test_a_workspace_root_outside_the_project_is_dropped(layers, tmp_path, caplo
     with caplog.at_level(logging.WARNING):
         perms = _permissions(global_dir, ws)
 
-    # Dropped back to the 5c default: the project folder containing `.localharness/`.
-    assert Path(perms.workspace_root) == ws.parent
+    # Dropped back to the GLOBAL layer's value, which here is no root at all. That used to be the
+    # 5c default (the project folder containing `.localharness/`); since v0.14.1 nothing invents a
+    # root, so a dropped project-layer value leaves the session unconfined and gate-guarded.
+    assert perms.workspace_root is None
     warning = "\n".join(r.getMessage() for r in caplog.records)
     assert "workspace_root" in warning and str(outside) in warning
 
@@ -193,8 +195,10 @@ def test_the_global_layer_may_still_name_a_root_anywhere(layers, tmp_path) -> No
     assert Path(_permissions(global_dir, ws).workspace_root) == scratch
 
 
-def test_the_5c_default_still_applies_when_nothing_sets_a_root(layers) -> None:
-    """CONF-01 regression: the confinement leash that comes free with the workspace layer must
-    survive the new check — it runs in the same block."""
+def test_nothing_sets_a_root_when_nobody_asked_for_one(layers) -> None:
+    """The narrow-only check runs in the block that used to hold the 5c default, so this is where
+    a resurrected default would land. There is no default: with `auto` as the mode, a leash
+    nobody configured meant `bash_exec("cat > /tmp/x")` ran while `write(path="/tmp/x")` was hard-
+    refused in the same session, so the boundary belongs to the gate and only to the gate."""
     global_dir, ws = layers
-    assert Path(_permissions(global_dir, ws).workspace_root) == ws.parent
+    assert _permissions(global_dir, ws).workspace_root is None

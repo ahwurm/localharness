@@ -927,23 +927,26 @@ class ConfigLoader:
         if overlay_agent:
             merged = deep_merge(overlay_agent, merged)
 
-        # 5c. CONF-01 (v0.13): the confinement leash comes free with the workspace layer. When a
-        # workspace applies and nothing else set a root, default it to the folder CONTAINING
-        # `.localharness/` — the project you are standing in, not the dotdir. Placed AFTER 5b so it
-        # sees the fully resolved value: an explicit `workspace_root` from the agent's own yaml OR
-        # from the overlay's `agent:` section still wins, and this only fills the gap. Nothing is
-        # written to any file — the default exists only in the effective AgentConfig. With no
-        # workspace layer this is inert and `None` still means UNCONFINED (models.py's contract).
+        # 5c. The project-layer narrowing (PRD §3.3). It used to also auto-fill
+        # `permissions.workspace_root` with the folder containing `.localharness/` (v0.13
+        # CONF-01, "the confinement leash comes free with the workspace layer"). That default is
+        # GONE as of v0.14.1, and the reason is a live end-to-end run: with `auto` as the mode,
+        # `bash_exec("cat > /tmp/notes/x")` ran and `write(path="/tmp/notes/x")` was hard-refused
+        # — same file, same session, opposite answers. The refusal came from the per-tool leash
+        # (`tools/base.Tool._outside_workspace`), which this line had switched on without anyone
+        # asking for it, while the shell tool's own string never reached it.
         #
-        # Both halves of the guard are load-bearing. `self._local_dir is not None` keeps a
-        # workspace-less session byte-identical (LAYR-03) and is what makes `.parent` safe. The
-        # falsy check is what makes explicit config win; falsy-not-None is deliberate, since an
-        # empty-string root is a mistake rather than a confinement and the project root is the
-        # better answer than a leash around "".
+        # The gate owns the boundary now. It DERIVES it from where you stand
+        # (`verdict.derive_boundary`), applies it to every tool the same way, and `auto`'s
+        # contract is that a write outside the project runs unless it lands somewhere protected.
+        # A second, invisible, tool-shaped copy of the same idea could only disagree with it.
+        #
+        # An EXPLICIT `permissions.workspace_root` is untouched and still a hard confinement:
+        # the tool returns permission_denied, no prompt, no mode that overrides it. That is what
+        # harness-run evals set, and it is now the only way the leash switches on — a human wrote
+        # it down.
         if self._local_dir is not None:
             self._narrow_project_layer_permissions(merged, path.stem, div_name)
-            if not merged.get("permissions", {}).get("workspace_root"):
-                merged.setdefault("permissions", {})["workspace_root"] = str(self._local_dir.parent)
 
         # 6. Validate merged dict
         line_map = _build_line_map(text)
