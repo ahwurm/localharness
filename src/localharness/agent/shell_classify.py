@@ -630,6 +630,8 @@ def _build(
 
     if head in SHELL_INTERPRETERS:
         payload_texts = _inline_payloads(argv, settings)
+    elif head in settings.inline_by_nature:
+        payload_texts = _inline_by_nature_payload(argv)
 
     for payload in payload_argvs:
         segment, more, _, _ = _build(payload, settings, [])
@@ -783,6 +785,19 @@ def _inline_payloads(argv: list[str], settings: GateSettings) -> list[str]:
         if _inline_flag(token, flags) and index + 1 < len(argv):
             payloads.append(argv[index + 1])
     return payloads
+
+
+def _inline_by_nature_payload(argv: list[str]) -> list[str]:
+    """``eval ARGS`` → the shell text it will run (critic finding F4).
+
+    ``eval`` takes its code as plain arguments and joins them with a space before running them,
+    exactly as ``bash -c`` runs its one string — so the arguments are joined and recursed into by
+    the same path. ``eval "rm -rf /"`` is an `rm -rf` segment plus the `eval`; an argument that is
+    only a variable (``eval $CMD``) recurses to an unfamiliar segment, which is what ``bash -c
+    "$CMD"`` already does, because neither one can be resolved without running it.
+    """
+    text = " ".join(argv[1:]).strip()
+    return [text] if text else []
 
 
 def _inline_flag(token: str, flags: tuple[str, ...]) -> str | None:

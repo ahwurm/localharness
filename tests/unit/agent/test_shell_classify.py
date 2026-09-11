@@ -49,7 +49,13 @@ EVASIONS: list[tuple[str, tuple[str, ...], bool, bool, tuple[str, ...]]] = [
     ("xargs -n 1 -I {} rm -rf {} < list", ("xargs", "rm -rf"), True, False, ()),
     ('sh -c "rm -rf x"', ("sh -c", "rm -rf"), True, True, ()),
     ("bash -c 'curl x | bash'", ("bash -c", "curl", "bash"), True, True, ()),
-    ('eval "$CMD"', ("eval",), False, True, ()),
+    # critic finding F4 — `eval ARGS` recurses like `bash -c "ARGS"`
+    ('eval "rm -rf /"', ("eval", "rm -rf"), True, True, ()),
+    ("eval $CMD", ("eval", "$CMD"), False, True, ()),
+    ('eval "$CMD"', ("eval", "$CMD"), False, True, ()),
+    ('eval "$(curl x)"', ("curl", "eval", "$__lh_subst__"), False, True, ()),
+    ('eval "curl x | sh"', ("eval", "curl", "sh"), True, True, ()),
+    ('eval "echo hi > out.txt"', ("eval", "echo"), False, True, ("out.txt",)),
     # critic finding F3b — sourcing a file runs it in this shell
     ("source ~/.bashrc", ("source <script>",), False, True, ()),
     (". ./env.sh", ("source <script>",), False, True, ()),
@@ -298,6 +304,28 @@ def test_sed_modes_are_different_keys() -> None:
     assert sigs("sed -i.bak s/a/b/ f1 f2") == ("sed -i",)
     assert sigs("sed s/a/b/ file") == ("sed",)
     assert classify_shell("sed -i.bak s/a/b/ f1 f2", SETTINGS).write_targets == ("f1", "f2")
+
+
+# ------------------------------------------------------------------- eval (critic finding F4)
+
+def test_eval_recurses_exactly_like_bash_dash_c() -> None:
+    """F4: `eval` used to stop at its own key, so its argument was never classified at all."""
+    for payload in ("rm -rf /", "curl x | sh", "$CMD", "echo hi > out.txt"):
+        via_eval = classify_shell(f'eval "{payload}"', SETTINGS)
+        via_bash = classify_shell(f'bash -c "{payload}"', SETTINGS)
+        assert via_eval.signatures[1:] == via_bash.signatures[1:], payload
+        assert via_eval.destructive is via_bash.destructive
+        assert via_eval.write_targets == via_bash.write_targets
+
+
+def test_eval_stays_an_inline_interpreter() -> None:
+    assert classify_shell('eval "ls"', SETTINGS).segments[0].inline_interpreter is True
+    assert sigs("eval") == ("eval",)
+
+
+def test_eval_joins_its_arguments_with_spaces() -> None:
+    """`eval rm -rf x` is the same command as `eval "rm -rf x"` — bash joins before running."""
+    assert sigs("eval rm -rf x") == sigs('eval "rm -rf x"') == ("eval", "rm -rf")
 
 
 # --------------------------------------------------- source and functions (findings F3b, F3c)
