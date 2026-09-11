@@ -182,27 +182,64 @@ def _stdin_is_a_terminal() -> bool:
     return sys.stdin is not None and sys.stdin.isatty()
 
 
-# The offer `start` makes when a project has no workspace at all (owner ruling 2026-09-04). The
-# missing step users hit is not "how do I create a workspace" — it is not knowing they could —
-# and the moment they would want one is the moment they start the harness inside a project.
-# One question, default no, asked only where a person is there to answer it.
-OFFER_PROMPT = "No workspace here — create ./.localharness for this project?"
+# The ONE question `start` asks in a project it has never seen (owner bar, 2026-09-11: a live
+# end-to-end run met two prompts in a row — "No workspace here — create ./.localharness for this
+# project?" and then "Trust this workspace?" — and the bar is one).
+#
+# They were always one decision wearing two hats. Creating the state store and trusting the place
+# are both "yes, I mean to work here"; nobody says yes to one and no to the other, and asking
+# twice teaches a person to hit return without reading, which is the failure the whole release is
+# about. So there is one sentence, and it says all three things a yes does.
+OFFER_PROMPT = (
+    "Trust this workspace? LocalHarness will keep its state in ./.localharness here, load that "
+    "config, and run tools without asking except for dangerous actions."
+)
+
+TRUST_ONLY_PROMPT = (
+    "Trust this workspace? LocalHarness will load its .localharness config and run tools here "
+    "without asking, except for dangerous actions."
+)
+"""The same question where ``.localharness`` already exists, so there is nothing to create. Kept
+as its own string rather than composed, because the sentence a person reads at 2am is the design
+and a half-sentence about creating a directory that is already there reads as a bug."""
 
 
-def offer_workspace_creation(
+def settle_startup_trust(
     config_dir: Optional[Union[str, Path]] = None,
     *,
     interactive: Optional[bool] = None,
 ) -> Optional[Path]:
-    """Offer to scaffold `./.localharness` for this project; return the new layer, or None.
+    """The ONE startup question: do you trust this workspace? Returns a CREATED layer, or None.
 
-    Every guard below is a case where the offer would be wrong, not merely unhelpful:
+    The return value is narrow on purpose: it is the workspace this call brought into existence,
+    and nothing else. Whether an ALREADY-existing workspace's config should load is
+    :func:`resolve_workspace_layer`'s answer and only its — returning one from here would have
+    handed the caller a workspace whose config the trust gate had just declined.
+
+    Named for what it decides rather than for what it creates, because as of v0.14.1 it decides
+    both. It was `offer_workspace_creation` — "No workspace here — create ./.localharness for
+    this project?" — and a live end-to-end run met it and then met the trust question a second
+    later. The owner's bar is one prompt (2026-09-11), and they were always one decision: nobody
+    says yes to keeping state here and no to working here.
+
+    So one sentence, and a yes does all of it — creates `./.localharness` when there is none,
+    records the workspace ROOT as trusted (which is the key `cli/session_trust` reads later, so
+    that question finds this answer and never fires), and lets the session stay in `auto`. A no
+    creates nothing, records the root as untrusted so the session runs `guarded`, and — when
+    there was a directory to offer — keeps the create-offer's own "asked once, ever" memory in
+    `declined_workspace_offers.yaml`.
+
+    It runs on the synchronous startup path, BEFORE any session store is opened. That order is
+    what makes the recognition check honest: the files it counts as "earlier sessions" cannot
+    include this one's, which is the bug that had a brand-new project trusting itself.
+
+    Every guard below is a case where the question would be wrong, not merely unhelpful:
 
     1. An explicit `--config-dir` or either env var is a FULL replacement (LAYR-02) — that run
        asked for one specific directory and a project layer is not what it wants.
-    2. A workspace already found up-tree means the answer to "is there a workspace here" is yes,
-       whatever the trust gate then decided about loading it. Offering to create a second one
-       beside a declined first is how you end up with two.
+    2. A workspace already found up-tree means there is nothing to CREATE — the question loses
+       that clause (`TRUST_ONLY_PROMPT`) and asks only about trust. Offering to create a second
+       one beside an existing one is how you end up with two.
     3. No terminal, or a caller that said `--no-input`: silence. A prompt that fires in a script,
        a hook or CI is a hang, and this one WRITES — it must never fire where nobody is watching.
        EOF answers no for the same reason.
@@ -232,16 +269,14 @@ def offer_workspace_creation(
 
     if config_dir is not None or config_dir_env_override() is not None:
         return None
-    if discover_workspace_dir() is not None:
-        return None
+    existing = discover_workspace_dir()
     if interactive is None:
         interactive = _stdin_is_a_terminal()
-    if not interactive:
-        return None
     try:
-        target = Path.cwd().resolve() / WORKSPACE_DIR_NAME
+        here = Path.cwd().resolve()
     except OSError:  # the directory was deleted under this process — nowhere to create anything
         return None
+    target = here / WORKSPACE_DIR_NAME
 
     # Both privates deliberately: `_is_the_global_config_dir` is the ONE realpath-keyed answer to
     # "is this the machine's own dir" (init_cmd) and `_home_stop` is the ONE home the walks stop
@@ -252,13 +287,39 @@ def offer_workspace_creation(
     home = _home_stop()
     if _is_the_global_config_dir(target) or (home is not None and target.parent == home):
         return None
-    if trust.offer_was_declined(target):
+
+    # The workspace ROOT is what the trust decision is about — the project you are standing in,
+    # not the dotdir inside it — and it is the key `session_trust` reads later with
+    # `is_trusted_tree`, so one answer here settles that question too.
+    root = existing.resolve().parent if existing is not None else here
+    decided = trust.is_trusted_tree(root)
+    if decided is not None:
+        return None
+    if trust.prior_session_count(root / WORKSPACE_DIR_NAME) > 0:
+        # Recognized: work has happened here before this run started. Record it so the answer is
+        # explicit from now on, and say so — quietly, once (owner: "it should recognize I've been
+        # in this environment before, used X tools etc.").
+        trust.record_trust(root, True)
+        _notice(RECOGNIZED_NOTICE.format(root=root))
+        return None
+    if not interactive:
+        # Nobody to ask. Record nothing: an unasked question has not been answered, and the gate
+        # falls back to `guarded` for this run (cli/session_trust).
+        return None
+    if existing is None and trust.offer_was_declined(target):
         return None
 
-    answer = _ask_create()
-    if answer is not True:
-        if answer is False:  # a person said no; EOF (None) is not an answer and records nothing
+    answer = _ask_create(TRUST_ONLY_PROMPT if existing is not None else OFFER_PROMPT)
+    if answer is None:
+        return None  # EOF is not an answer; nothing recorded, nothing created
+    trust.record_trust(root, answer)
+    if not answer:
+        if existing is None:
+            # The create-offer's own memory, kept: a "no" is not re-asked as an offer either.
             trust.record_offer_decline(target)
+        _notice(DECLINED_NOTICE.format(root=root))
+        return None
+    if existing is not None:
         return None
     try:
         _scaffold_workspace(endpoint=None, model=None, config_dir=None, next_steps=False)
@@ -270,7 +331,14 @@ def offer_workspace_creation(
     return target
 
 
-def _ask_create() -> Optional[bool]:
+RECOGNIZED_NOTICE = "Recognized this workspace ({root}) — trusted."
+DECLINED_NOTICE = (
+    "Workspace {root} is not trusted — this session asks before boundary-crossing and "
+    "destructive calls."
+)
+
+
+def _ask_create(prompt: str = OFFER_PROMPT) -> Optional[bool]:
     """The offer itself: yes, no, or None for "there was nobody to answer".
 
     `Text` so a project path in the rendered line can never be read as rich markup. EOF behaves
@@ -282,7 +350,7 @@ def _ask_create() -> Optional[bool]:
     from rich.text import Text
 
     try:
-        return bool(Confirm.ask(Text(OFFER_PROMPT), console=_notice_console, default=False))
+        return bool(Confirm.ask(Text(prompt), console=_notice_console, default=False))
     except EOFError:
         return None
 

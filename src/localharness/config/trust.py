@@ -15,6 +15,7 @@ Undecided is None, not False: a declined-in-a-script session must not become a p
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -99,30 +100,49 @@ in this environment before, used X tools etc."). Nothing is opened and nothing i
 question is "has work happened here", the file's existence is the answer, and a startup that
 reads 384 session transcripts to decide whether to print one line is a startup nobody wants."""
 
-LEGACY_SESSION_EVIDENCE_GLOB = "agents/*/history.jsonl"
-"""The same evidence in an older store, which kept one rolling history per agent instead of a
-directory of sessions. A user who has been running the harness since before the sessions
-directory existed has been in this environment before, and the recognition must say so."""
+PROCESS_STARTED_AT = time.time()
+"""When this process first imported the trust store — the cutoff for "EARLIER session".
+
+The bug this closes, found by a live end-to-end run against the real model: a brand-new project
+printed "recognized this workspace (1 earlier session)", trusted itself and wrote the record,
+with nobody asked. The evidence it recognized was the file the RUNNING session had just written.
+
+A rolling per-agent ``history.jsonl`` used to be counted too, and that is why it no longer is:
+one file, appended to by every session including this one, with no way to ask "was any of this
+here before I started". It could not be made safe, so it is gone — a pre-sessions-dir install is
+simply asked its one question. Per-session files can be judged, and are: a file whose mtime is
+at or after this moment is this run's own and is not evidence of anything.
+
+Captured at import rather than passed in, because the earliest thing that touches this module is
+the startup path that asks the question, and a cutoff that arrives later than the writes it has
+to exclude is not a cutoff. The real defence is ORDER — ``cli/workspace.settle_startup_trust``
+runs before any session store is opened — and this is the belt to that pair of braces, for the
+channels (ACP, Discord) whose question cannot be drawn until later."""
 
 
-def prior_session_count(state_dir: Path) -> int:
-    """How many sessions this state store has already recorded.
+def prior_session_count(state_dir: Path, before: Optional[float] = None) -> int:
+    """How many sessions this state store recorded BEFORE this one.
 
     Zero for a store that does not exist, and zero for one that exists but has never run
-    anything — which is the case a bare ``localharness init`` leaves behind, and the reason the
-    ``memory.db`` file is deliberately NOT counted: init creates it empty, so its presence would
-    say "you have been here before" about a directory nobody has worked in.
+    anything — the case a bare ``localharness init`` leaves behind, and the reason ``memory.db``
+    is deliberately not counted: init creates it empty, so its presence would say "you have been
+    here before" about a directory nobody has worked in.
+
+    ``before`` defaults to :data:`PROCESS_STARTED_AT`. A file the current run wrote is not
+    evidence that the current run should be trusted.
     """
     store = Path(state_dir)
     if not store.is_dir():
         return 0
-    sessions = list(store.glob(SESSION_EVIDENCE_GLOB))
-    if sessions:
-        return len(sessions)
-    return sum(
-        1 for history in store.glob(LEGACY_SESSION_EVIDENCE_GLOB)
-        if history.is_file() and history.stat().st_size > 0
-    )
+    cutoff = PROCESS_STARTED_AT if before is None else before
+    count = 0
+    for session in store.glob(SESSION_EVIDENCE_GLOB):
+        try:
+            if session.is_file() and session.stat().st_mtime < cutoff:
+                count += 1
+        except OSError:  # a file that vanished between the glob and the stat is not evidence
+            continue
+    return count
 
 
 def record_trust(workspace_dir: Path, trusted: bool) -> None:

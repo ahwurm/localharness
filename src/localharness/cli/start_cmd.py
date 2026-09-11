@@ -446,16 +446,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # dir. None whenever --config-dir/LOCALHARNESS_DIR/LOCALHARNESS_HOME was explicit, nothing was
     # found, or trust was withheld — in which case this is byte-identical to v0.12 (LAYR-03).
     # The RAW flag value, not cfg_path: "was this explicit" does not survive resolution.
-    from localharness.cli.workspace import offer_workspace_creation, resolve_workspace_layer
+    from localharness.cli.workspace import resolve_workspace_layer, settle_startup_trust
     interactive = False if no_input else None
     workspace = resolve_workspace_layer(config_dir, interactive=interactive)
+    # The ONE startup question (owner bar 2026-09-11). It settles trust for this workspace root
+    # and, when the project has no state store at all, creates one — the moment a person is
+    # demonstrably in a project and about to work in it (owner ruling 2026-09-04). Every guard
+    # for "don't ask" lives inside it, including the ones that make it silent in scripts.
+    #
+    # It runs whether or not a layer was found, and it runs HERE rather than after the channel is
+    # live, for two reasons: it is the only point before any session store is opened (so the
+    # "have I been here before" check cannot count this run's own files), and a yes has to return
+    # a layer that is active for THIS session. `cli/session_trust` reads the record it writes and
+    # asks nothing; on a channel that cannot use stdin — Zed, Discord — this is silent and that
+    # one asks instead.
+    settled = settle_startup_trust(config_dir, interactive=interactive)
     if workspace is None:
-        # No layer applies. If that is because this project has none at all, offer to make one —
-        # the one moment a person is demonstrably in a project and about to work in it (owner
-        # ruling 2026-09-04). Every guard for "don't ask" lives in the offer itself, including
-        # the ones that make it silent in scripts; a yes returns a layer that is active for THIS
-        # session, which is the whole reason it is asked here and not printed as advice.
-        workspace = offer_workspace_creation(config_dir, interactive=interactive)
+        workspace = settled
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
     if workspace is not None:
         # markup=False, like the model list above: a folder named `[old] proj` is legal
