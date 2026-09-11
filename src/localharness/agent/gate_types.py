@@ -57,7 +57,8 @@ AskClass = Literal[
 ]
 
 UNGRANTABLE_CLASSES: frozenset[str] = frozenset({"shell-destructive", "protected-path", "no-boundary"})
-"""PRD §3.1 ungrantable tier: asks every time in guarded and trusted, DENY in unattended.
+"""PRD §3.1 ungrantable tier: asks every time in guarded and trusted; allowed in unattended,
+which is v0.13's behavior by definition (only the DENY tier holds there, PRD §3.4).
 
 Checked before any grant lookup (critic finding 12) so an old benign grant can never cover a
 destructive variant.
@@ -189,6 +190,30 @@ class Grant:
     session_id: str
     workspace: str
     """Realpath of the workspace the grant belongs to; nested workspaces inherit."""
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """PRD §3.3: a remembered "never here" — a grant's negative twin, same key space.
+
+    A "never" is STRUCTURAL, not a text pattern: it is filed under the very key the prompt
+    offered ("this shell signature", "this directory", "this MCP tool"), so it denies exactly
+    the calls that key names and nothing else. The earlier shape turned a refusal into an
+    fnmatch DENY pattern (``bash_exec(*cp*)``), which also banned ``scp``, ``cpio`` and any
+    command mentioning a path containing "cp" — far more than the human answered.
+
+    Provenance is mandatory, exactly as for :class:`Grant`. A refusal wins over any grant on
+    the same key, in any mode, and cannot be undone from a prompt (edit ``grants.yaml``).
+    """
+
+    key: str
+    klass: str
+    refused_at: str
+    """ISO-8601 UTC."""
+    channel: str
+    session_id: str
+    workspace: str
+    """Realpath of the workspace the refusal belongs to; nested workspaces inherit."""
 
 
 # --------------------------------------------------------------------------- settings
