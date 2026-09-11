@@ -46,14 +46,25 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.config.paths import ARCHIVE_DB_NAME, global_config_dir
 
-GrantLookup = Callable[[Path, str], Optional[Grant]]
-"""``(workspace, key) -> Grant | None`` — ``config.grants.GrantStore.lookup`` in production."""
+GrantLookup = Callable[[Path, str, str], Optional[Grant]]
+"""``(workspace, klass, key) -> Grant | None`` — ``config.grants.GrantStore.lookup`` in
+production.
 
-RefusalLookup = Callable[[Path, str], Optional[Refusal]]
-"""``(workspace, key) -> Refusal | None`` — ``config.grants.GrantStore.refused`` in production.
+The CLASS is part of the question, not decoration. Every ask class has its own key space and the
+same string lives in several of them: ``python_exec`` is a shell signature AND the ``code-exec``
+tool name; a shell signature can look exactly like a directory. Asking with the key alone let an
+"always" on the shell command ``python_exec`` satisfy the ``python_exec`` TOOL, and let a shell
+signature that happened to read as a path pre-approve a whole directory subtree through
+:func:`_granted_directory`'s ancestor walk. A grant answers one question; it is consulted for
+that question only."""
+
+RefusalLookup = Callable[[Path, str, str], Optional[Refusal]]
+"""``(workspace, klass, key) -> Refusal | None`` — ``config.grants.GrantStore.refused`` in
+production.
 
 A refusal is a grant's negative twin in the same key space (PRD §3.3), so "never here" is
-consulted with the same call shape as "always here" and denies exactly the key it names."""
+consulted with the same call shape as "always here" and denies exactly the (class, key) it
+names."""
 
 REFUSAL_DENY_REASON = "refused by a human in this workspace (never here)"
 """PRD §3.3: what the model and the person watching are told when a stored "never" decides the
@@ -556,14 +567,14 @@ def _refused(ctx: GateContext, klass: str, key: Optional[str]) -> Optional[Refus
     if klass in PATH_KEYED_CLASSES:
         here = Path(key)
         for candidate in (here, *here.parents):
-            refusal = ctx.refusals(ctx.workspace, str(candidate))
+            refusal = ctx.refusals(ctx.workspace, klass, str(candidate))
             if refusal is not None:
                 return refusal
         return None
-    return ctx.refusals(ctx.workspace, key)
+    return ctx.refusals(ctx.workspace, klass, key)
 
 
-def _granted_directory(ctx: GateContext, directory: Path) -> bool:
+def _granted_directory(ctx: GateContext, klass: str, directory: Path) -> bool:
     """Is this directory — or any directory above it — already granted? (PRD §3.1 edit-outside.)
 
     An ``edit-outside`` grant is keyed on the target's parent directory, and a human who
@@ -577,9 +588,15 @@ def _granted_directory(ctx: GateContext, directory: Path) -> bool:
     cannot widen a grant into a protected path either: :func:`_target_asks` classifies a
     protected target before it ever reaches here (PRD §3.1's fixed order), so a grant on ``~``
     does not cover ``~/.ssh``.
+
+    ``klass`` is always a PATH-KEYED class (:data:`PATH_KEYED_CLASSES`; ``edit-outside`` is the
+    only one that consults grants) and is passed through to the lookup, so the walk can only
+    ever find grants a human gave about directories. Without it, a shell-signature grant whose
+    key happened to read as a path — ``/usr/local/bin/deploy``, or simply ``/tmp`` — pre-approved
+    every write under that directory.
     """
     for candidate in (directory, *directory.parents):
-        if ctx.grants(ctx.workspace, str(candidate)) is not None:
+        if ctx.grants(ctx.workspace, klass, str(candidate)) is not None:
             return True
     return False
 
@@ -613,10 +630,10 @@ def _target_asks(
             continue
         if resolved is not None:
             key, where = str(resolved.parent), str(resolved)
-            granted = _granted_directory(ctx, resolved.parent)
+            granted = _granted_directory(ctx, "edit-outside", resolved.parent)
         else:
             key, where = raw, f"{raw} (unresolvable)"
-            granted = ctx.grants(ctx.workspace, key) is not None
+            granted = ctx.grants(ctx.workspace, "edit-outside", key) is not None
         if granted and _refused(ctx, "edit-outside", key) is None:
             continue
         asks.append(_ask_record(
@@ -637,7 +654,7 @@ def _evaluate_write(
     asks = _target_asks(ctx, settings, target)
     if not asks and not ctx.has_review_surface:
         key = str(Path(ctx.workspace).expanduser().resolve())
-        if ctx.grants(ctx.workspace, key) is None or _refused(ctx, "edit-unreviewed", key):
+        if ctx.grants(ctx.workspace, "edit-unreviewed", key) is None or _refused(ctx, "edit-unreviewed", key):
             asks.append(_ask_record(
                 "edit-unreviewed", key, "this channel shows no diff to review the edit in",
             ))
@@ -694,7 +711,7 @@ def _evaluate_shell(
             else ("shell-unfamiliar",
                   f"shell command not seen in this workspace before ({segment.signature})")
         )
-        granted = ctx.grants(ctx.workspace, segment.signature) is not None
+        granted = ctx.grants(ctx.workspace, klass, segment.signature) is not None
         if granted and _refused(ctx, klass, segment.signature) is None:
             continue
         asks.append(_ask_record(klass, segment.signature, reason))
@@ -709,7 +726,7 @@ def _evaluate_named(
     """The classes keyed by tool name: ``code-exec`` and ``delegate`` (PRD §3.1)."""
     if ctx.mode == "read-only":
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
-    if ctx.grants(ctx.workspace, tool_name) is not None and not _refused(ctx, klass, tool_name):
+    if ctx.grants(ctx.workspace, klass, tool_name) is not None and not _refused(ctx, klass, tool_name):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
         ctx, tool_name, params, [_ask_record(klass, tool_name, reason)],
@@ -733,7 +750,7 @@ def _evaluate_network(
     host = urlparse(url).hostname
     if not host:
         return VerdictResult(Verdict.ALLOW, "network call names no host")
-    if ctx.grants(ctx.workspace, host) is not None and not _refused(ctx, "network-host", host):
+    if ctx.grants(ctx.workspace, "network-host", host) is not None and not _refused(ctx, "network-host", host):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {host}")
     return _decide(
         ctx, tool_name, params,
@@ -757,7 +774,7 @@ def _evaluate_mcp(
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if server and server in settings.mcp_trusted_servers:
         return VerdictResult(Verdict.ALLOW, f"trusted MCP server: {server}")
-    if ctx.grants(ctx.workspace, key) is not None and not _refused(ctx, "mcp", key):
+    if ctx.grants(ctx.workspace, "mcp", key) is not None and not _refused(ctx, "mcp", key):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {key}")
     return _decide(
         ctx, tool_name, params,

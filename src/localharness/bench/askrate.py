@@ -348,10 +348,11 @@ def summarize_from_replay(
     workspace = Path(workspace).expanduser().resolve()
     boundary = derive_boundary(workspace, None, None, Path.home())
 
-    granted: dict[str, Grant] = {}
+    granted: dict[tuple[str, str], Grant] = {}
 
-    def lookup(_workspace: Path, key: str) -> Optional[Grant]:
-        return granted.get(key)
+    def lookup(_workspace: Path, klass: str, key: str) -> Optional[Grant]:
+        """A replay grant answers ONE class (PRD §3.3): keys are unique only within a class."""
+        return granted.get((klass, key))
 
     ctx = GateContext(
         boundary=boundary,
@@ -387,7 +388,7 @@ def summarize_from_replay(
                 continue
             key = request.key
             if isinstance(key, str) and key:
-                granted[key] = Grant(
+                granted[(request.klass, key)] = Grant(
                     key=key,
                     klass=request.klass,
                     granted_at=REPLAY_PROVENANCE,

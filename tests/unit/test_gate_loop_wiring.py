@@ -265,7 +265,7 @@ async def test_a_two_class_command_asks_once_and_runs_in_the_same_call(bus, tmp_
     assert len(asked[0].grant_keys) >= 3
     assert {k for klass, k in asked[0].grant_keys if klass == "shell-unfamiliar"} == {"mkdir", "touch"}
     for klass, key in asked[0].grant_keys:
-        assert grants.lookup(workspace, key) is not None, f"no grant written for {klass} {key}"
+        assert grants.lookup(workspace, klass, key) is not None, f"no grant written for {klass} {key}"
 
     await _loop(bus, registry, gate, llm=MockLLMClient(_plan(command))).run_turn("t")
     assert len(asked) == 1, "the grants were written but the identical call asked again"
