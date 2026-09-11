@@ -927,22 +927,25 @@ def build_session() -> PromptSession:
 A line starting with `/` is a REPL command, not a task. The list is defined once, in
 `cli/slash_commands.py`, and `/help` renders it from there.
 
-**`/mode <name>` switches the session's permission mode.** `/mode guarded`, `/mode trusted` or
-`/mode read-only` changes it for this session only — nothing is persisted, and the next start reads
-`permissions.mode` from config again. `guarded` is the default:
-the gate asks before a call crosses the workspace boundary or looks destructive, and remembers an
-"always" in `~/.localharness/grants.yaml`. `trusted` allows the remembered-once classes without
-asking while destructive and protected-path calls still prompt. `read-only` refuses writes,
+**`/mode <name>` switches the session's permission mode.** `/mode auto`, `/mode guarded`,
+`/mode trusted` or `/mode read-only` changes it for this session only — nothing is persisted, and
+the next start reads `permissions.mode` from config again. `auto` is the default since v0.14.1: the
+workspace is trusted once, and after that everything runs except the blacklist — protected paths,
+destructive file operations aimed outside the project, irreversible operations — which asks every
+time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
+the workspace boundary or is unfamiliar, and remembers an
+"always" in `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for destructive
+operations aimed inside the project. `read-only` refuses writes,
 non-read-only shell and code execution, returning a message the model can re-plan against. The
-fourth mode, `unattended`, is **config-only and deliberately not settable here**: it turns every ask
+fifth mode, `unattended`, is **config-only and deliberately not settable here**: it turns every ask
 into an allow, so it is written in the config file of a bench run or a scheduled job, where a human
-has decided that in advance. Discord takes the same three names as a plain `mode <name>` message.
+has decided that in advance. Discord takes the same four names as a plain `mode <name>` message.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
 
 **`--no-input` is not a permission switch.** It governs one question only — whether to load an
-untrusted workspace's config layer — and has no effect on the gate. A `--no-input` run is still
-`guarded` unless config says otherwise, and because such a run usually has nobody to answer, an
-ask there is **refused**, not allowed. `permissions.mode: unattended` in config is the only thing
+untrusted workspace's config layer — and never loosens the gate. A `--no-input` run with no trust
+record for this workspace runs `guarded`, not `auto`, and because such a run usually has nobody to
+answer, an ask there is **refused**, not allowed. `permissions.mode: unattended` in config is the only thing
 that turns gate asks into allows.
 
 ### Streaming Output

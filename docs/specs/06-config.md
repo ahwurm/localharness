@@ -78,6 +78,12 @@ the workspace itself. The answer is permanent; edit that file to change it. When
 terminal to ask — a script, a cron job, CI — that workspace layer is ignored and a notice is
 printed on stderr.
 
+From v0.14.1 that same record carries the permission half of trust. In the default `auto` mode a
+workspace is asked about once — trust this workspace? — and a yes means both things: its config
+layer loads, and its tool calls run without asking except for the dangerous blacklist (SECURITY.md,
+"Human approval gate"). A no, and a run that cannot ask and has no record, runs the session in
+`guarded` instead. One question, one file, one answer.
+
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
 
@@ -107,8 +113,8 @@ answer that question on your behalf, once, forever — a decision about trust ma
 happened to run first. `--no-input` makes the run declare that it is not the right process to be
 asked. It is also the honest way to script these commands: the run still works, it just works
 without that layer. (`agent create --no-input` additionally refuses to guess a target layer: pass
-`--global` or `--project`.) It does **not** touch the permission gate: a `--no-input` run is still
-`guarded` unless config says otherwise, and a gate ask with nobody to answer it is refused rather
+`--global` or `--project`.) It does **not** loosen the permission gate: a `--no-input` run with no trust record for this
+workspace runs `guarded`, not `auto`, and a gate ask with nobody to answer it is refused rather
 than allowed. `permissions.mode: unattended` is the only setting that turns gate asks into allows.
 
 **Three current behaviors worth knowing before you rely on the walk.** These are what the code does
@@ -499,21 +505,24 @@ class PermissionConfig(BaseModel):
     """
     Permission policy for an agent.
 
-    Default mode is 'guarded': the harness asks a human before a call crosses the workspace
-    boundary or looks destructive, and remembers the answer (PRD §3.4). An agent can only
-    narrow its inherited permission policy, never broaden it.
+    Default mode is 'auto' (v0.14.1): the workspace is trusted once, and after that every call
+    runs except the dangerous blacklist — protected paths, destructive file operations aimed
+    outside the project, irreversible operations (PRD §3.4). An agent can only narrow its
+    inherited permission policy, never broaden it.
     """
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    mode: Mode = Field(   # Mode = Literal["guarded", "trusted", "read-only", "unattended"]
-        default=DEFAULT_MODE,  # "guarded", from agent/gate_types.py
+    mode: Mode = Field(   # Mode = Literal["auto", "guarded", "trusted", "read-only", "unattended"]
+        default=DEFAULT_MODE,  # "auto", from agent/gate_types.py
         description=(
-            "Session permission mode. 'guarded' (default): deny patterns win, then the gate "
-            "asks a human about boundary-crossing and destructive calls and remembers the "
-            "answer. 'trusted': grantable asks become allow. 'read-only': writes, non-read-only "
-            "shell and code execution are refused. 'unattended': every ask becomes allow — the "
-            "pre-v0.14 behaviour, for bench and scheduled jobs. The legacy 'auto'/'manual' "
-            "spellings load as 'guarded' with a deprecation warning."
+            "Session permission mode. 'auto' (default): deny patterns win, then the blacklist "
+            "asks every time and remembers nothing, and everything else runs once the workspace "
+            "is trusted. 'guarded': the gate also asks once about each boundary-crossing or "
+            "unfamiliar call and remembers the answer — the v0.14.0 default. 'trusted': 'auto' "
+            "plus a prompt for destructive operations inside the project. 'read-only': writes, "
+            "non-read-only shell and code execution are refused. 'unattended': every ask becomes "
+            "allow — the pre-v0.14 behaviour, for bench and scheduled jobs. The legacy 'manual' "
+            "spelling loads as 'guarded' with a deprecation warning; 'auto' is now a real mode."
         ),
     )
 
@@ -1224,7 +1233,7 @@ list — every field is declared there with its own description.
 | `tools.add` | list[string] | `[]` | registered tool names | Tools to add |
 | `tools.deny` | list[string] | `[]` | tool names or globs | Tools to deny |
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
-| `permissions.mode` | string | `"guarded"` | guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness |
+| `permissions.mode` | string | `"auto"` | auto, guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness (`unattended` < `auto` < `trusted` < `guarded` < `read-only`) |
 | `permissions.ask.network_hosts` | bool | `false` | — | Ask before a network tool reaches a host with no grant |
 | `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
@@ -1263,17 +1272,25 @@ store derives all three paths from the agent's own directory (`memory.db`, `hist
 `MEMORY.md` under `<config-dir>/agents/<name>/`, or under the workspace when one applies). Setting
 them moves nothing. They are declarative leftovers, kept only so an older config still loads.
 
-**The permission gate keys.** `permissions.mode` picks one of four modes (PRD §3.4). `guarded`, the
-default, asks a human before a call crosses the workspace boundary or looks destructive and
-remembers the answer. `trusted` allows the remembered-once classes outright while destructive and
-protected-path calls still ask. `read-only` refuses writes, non-read-only shell and code execution
+**The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
+default since v0.14.1, asks once whether you trust this workspace and then allows everything except
+a blacklist: writes to protected paths (home, in-project and system), destructive file operations
+whose target is outside the project or unresolvable, and irreversible operations wherever they
+point. It remembers nothing beyond the trust answer. **There is no allow-list in `auto`** — nothing
+is enumerated as safe, so the blacklist is the surface to curate (the `permissions.ask.*` rule sets
+below, which a project layer may only extend). `guarded`, the v0.14.0 default and now opt-in, also
+asks a human before a call crosses the workspace boundary or is unfamiliar, and remembers the
+answer; it is what a declined workspace, and a run that cannot ask and has no trust record, fall
+back to. `trusted` is `auto` plus a prompt for destructive operations aimed inside the project.
+`read-only` refuses writes, non-read-only shell and code execution
 with an observation the model can re-plan against. `unattended` turns every ask into an allow,
 leaving only `deny_patterns` — how the harness behaved before v0.14, named honestly; it is never a
 default and cannot be set from a channel command, so bench runs and scheduled jobs write it in
-config. A **project layer may only raise strictness**: a workspace agent file that asks for
+config. A **project layer may only raise strictness**, ordered `unattended` < `auto` < `trusted` <
+`guarded` < `read-only`: a workspace agent file that asks for
 `trusted` while your own config says `guarded` is ignored with a warning, the same narrow-only union
-`deny_patterns` and `workspace_root` use. The v0.13 spellings `auto` and `manual` still load — both
-resolve to `guarded` with a deprecation warning — and `permissions.allow_patterns` is **removed**,
+`deny_patterns` and `workspace_root` use. The v0.13 spelling `auto` is now the real mode and loads
+as itself with no deprecation notice; `manual` still resolves to `guarded` with one. `permissions.allow_patterns` is **removed**,
 because config travels with a repository and grants must not. An EMPTY `allow_patterns` (`[]` or
 null) — what `localharness init` wrote before v0.14, so almost every existing config — is dropped
 with a deprecation warning and still loads, and `localharness config migrate` strips the key.
@@ -1293,11 +1310,19 @@ default in `agent/gate_types.py`", which is where the defaults and their sources
 `read_only_signatures`, `destructive_signatures`, `pipe_to_shell_sources`, `pipe_to_shell_sinks`,
 `interpreter_commands`, `inline_by_nature`, `wrapper_commands`, `dropped_commands`,
 `subcommand_tools`, `payload_commands`, `write_shaped_commands`, `protected_paths_home`,
-`protected_paths_workspace`. The two dict-shaped tables (`destructive_flag_verbs`,
+`protected_paths_workspace`, `protected_paths_system`. The last of those is new in v0.14.1 and
+holds the system directories a mistaken write cannot be taken back from — `/etc`, `/usr`, `/bin`,
+`/sbin`, `/lib*`, `/boot`, `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`,
+`/Library`, `/Applications`, Windows `C:\Windows`, `C:\Program Files*`, `C:\ProgramData` — because
+a default that allows ordinary writes has to name those explicitly. The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 
-**The grant store (`~/.localharness/grants.yaml`).** Remembered answers are not config. They live in
+**The grant store (`~/.localharness/grants.yaml`).** Remembered answers are not config. **The
+default mode neither reads this file nor writes it**: `auto` asks only about blacklist classes,
+which are never remembered, so grants are what `guarded` accumulates. Recorded refusals are the
+exception and apply in every mode, `auto` included — a "never" you have given still denies, without
+prompting. They live in
 one file in the global config directory, keyed by the workspace's resolved path, written only when a
 human answers a prompt, and **never read from a project tree** — a cloned repository must not be
 able to pre-approve its own commands. Nested folders inherit the nearest ancestor's entry.
@@ -1310,8 +1335,9 @@ any other missing provenance field) is skipped with a warning and the call asks 
 
 One ask class is the catch-all: **`tool-unfamiliar`**, keyed by the tool's name, for a tool in no
 family the gate has rules for — a plugin's tool, or one whose schema could not be read. It is
-grantable, so it asks once per workspace and `trusted` mode allows it outright; the point is that a
-tool nobody can describe is never silently in the allow tier.
+grantable, so in `guarded` it asks once per workspace, while `auto` and `trusted` allow it
+outright; the point is that in the mode that asks, a tool nobody can describe is never silently in
+the allow tier.
 
 A "never here" answer lives in the same file as a **negative grant**: same workspace entry, same key
 space, same mandatory provenance. It is not a text pattern — a refusal of the signature `cp` denies
@@ -1856,7 +1882,7 @@ tools:
       timeout_seconds: 30.0
 
 permissions:
-  mode: guarded
+  mode: auto
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"
@@ -1912,7 +1938,7 @@ tools:
   mcp_servers: []
 
 permissions:
-  mode: guarded
+  mode: auto
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"
@@ -1946,7 +1972,7 @@ default_temperature: 0.6
 default_max_tokens: null   # null = no cap sent; the model stops when it is done
 
 permissions:
-  mode: guarded
+  mode: auto
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"
