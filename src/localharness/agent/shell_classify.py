@@ -56,6 +56,17 @@ REDIRECT_ONLY_SIGNATURE = ">"
 """Signature for a segment that is nothing but a redirection (``> file``). It is a write with
 no command; step 8 still has to report its target."""
 
+HERE_STRING_OPERATOR = "<<<"
+"""``<<<WORD`` feeds one WORD to stdin. It is an OPERAND, not a heredoc: there is no body and no
+delimiter line. Scanning it as a heredoc is the R1 bug — the scanner skipped ``<<<`` at its first
+``<`` and then read the SECOND ``<`` as the start of a ``<<`` operator, took the rest of the line
+as a delimiter word, and swallowed every following line as a body (bash(1) "Here Strings")."""
+
+ARITHMETIC_OPENERS = ("$((", "((")
+"""``$((expr))`` and ``((expr))`` are arithmetic, where ``<<`` is the left-shift OPERATOR. Their
+contents are never scanned for heredoc operators, so ``echo $((1<<2)); rm -rf x`` keeps the ``rm``
+visible instead of feeding it to a phantom heredoc body (bash(1) "Arithmetic Expansion")."""
+
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 """``K=V`` prefix form. PRD §3.2 step 4: ``env`` skips these before the wrapped command."""
 
@@ -248,7 +259,13 @@ def _strip_heredocs(command: str) -> str:
 
 
 def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
-    """Strip ``<<WORD`` / ``<<-WORD`` / ``<<'WORD'`` from one line, returning the delimiters."""
+    """Strip ``<<WORD`` / ``<<-WORD`` / ``<<'WORD'`` from one line, returning the delimiters.
+
+    Three shapes carry a ``<<`` that does NOT open a heredoc and must be stepped over whole,
+    or the scan invents a delimiter and eats the rest of the command as its body (finding R1):
+    the here-string :data:`HERE_STRING_OPERATOR`, the arithmetic left shift inside
+    :data:`ARITHMETIC_OPENERS`, and a quoted literal ``<<`` (handled by the quote state below).
+    """
     out: list[str] = []
     delimiters: list[tuple[str, bool]] = []
     index = 0
@@ -270,7 +287,22 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
             out.append(char)
             index += 1
             continue
-        if line[index : index + 2] == "<<" and line[index : index + 3] != "<<<":
+        opener = next((o for o in ARITHMETIC_OPENERS if line.startswith(o, index)), None)
+        if opener is not None:
+            end = _matching(line, index + len(opener) - 2)
+            out.append(line[index : end + 1])
+            index = end + 1
+            continue
+        if line.startswith(HERE_STRING_OPERATOR, index):
+            index += len(HERE_STRING_OPERATOR)
+            out.append(HERE_STRING_OPERATOR)
+            while index < len(line) and line[index] in " \t":
+                out.append(line[index])
+                index += 1
+            word, index = _read_word(line, index)
+            out.append(word)
+            continue
+        if line[index : index + 2] == "<<":
             index += 2
             dash = line[index : index + 1] == "-"
             if dash:
