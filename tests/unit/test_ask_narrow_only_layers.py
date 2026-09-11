@@ -500,3 +500,25 @@ def test_no_org_ask_leaves_the_shipped_gate_untouched(layers) -> None:
     """LAYR-03 shape: a config that declares no `ask` at all is byte-identical to the default."""
     global_dir, _ws = layers
     assert _gate(global_dir) == SHIPPED
+
+
+def test_a_project_layer_may_add_a_protected_config_dir_entry(layers) -> None:
+    """v0.14.1: the entry list inside a harness config dir tightens like every other protected
+    set — a repo that keeps something behaviour-deciding under its own `.localharness/` gets to
+    say so, and one that deletes `plugins` from the list changes nothing."""
+    global_dir, ws = layers
+    _project_ask(ws, {"protected_config_dir_entries": ["policy.yaml"]})
+
+    entries = _gate(global_dir, ws).protected_config_dir_entries
+    assert "policy.yaml" in entries
+    assert set(SHIPPED.protected_config_dir_entries) <= set(entries)
+
+
+def test_a_project_layer_cannot_unprotect_the_harness_config(layers, caplog) -> None:
+    global_dir, ws = layers
+    _project_ask(ws, {"protected_config_dir_entries": ["policy.yaml"]})
+
+    with caplog.at_level(logging.WARNING):
+        entries = _gate(global_dir, ws).protected_config_dir_entries
+
+    assert "config.yaml" in entries and "grants.yaml" in entries and "plugins" in entries

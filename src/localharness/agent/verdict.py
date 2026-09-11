@@ -48,7 +48,7 @@ from localharness.agent.gate_types import (
     VerdictResult,
 )
 from localharness.agent.permissions import PermissionResult
-from localharness.config.paths import ARCHIVE_DB_NAME, global_config_dir
+from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 
 GrantLookup = Callable[[Path, str, str], Optional[Grant]]
 """``(workspace, klass, key) -> Grant | None`` — ``config.grants.GrantStore.lookup`` in
@@ -180,9 +180,21 @@ build``, ``"$RM" -rf build``. The classifier lifts the substitution into its own
 cannot say what the outer segment will actually RUN, so its signature is not a stable identity.
 
 PRD §3.2 "named residual gaps": a grant is a memory of a decision, and there is nothing here to
-remember — one "always" on ``$RM`` would cover every future dynamically-built command. So the
-call asks every time, ungrantably (``grantable=False``, ``key=None``), and the grant store is
-never consulted for it. Found by replaying the real corpus through the shipped rules."""
+remember — one "always" on ``$RM`` would cover every future dynamically-built command. So in
+``guarded`` and ``trusted`` the call asks every time, ungrantably (``grantable=False``,
+``key=None``), and the grant store is never consulted for it. Found by replaying the real corpus
+through the shipped rules.
+
+``auto`` ALLOWS it (owner ruling 2026-09-11, on the replay evidence). The most ordinary thing
+this rule catches is ``eval "$(direnv hook bash)"`` — a line that is in a large share of the
+world's shell profiles — and the classifier does not merely shrug at it: the substitution is
+lifted into its own segment and checked against the blacklist like any other command, so
+``$(curl http://x)`` and ``$(rm -rf /etc)`` are seen. What is left unchecked is the OUTER
+position, whose identity will only exist once the substitution has run. That residual is named
+here rather than hidden: a command deliberately assembled to hide its verb —
+``$(echo rm) -rf /etc`` — has a benign inner segment and an outer one ``auto`` now waves
+through. It is a real hole, it is the price of not asking about ``direnv``, and ``guarded`` is
+one ``/mode`` away for anyone who wants the other trade."""
 
 DYNAMIC_COMMAND_NAME_REASON = "command name is computed at runtime; cannot be remembered"
 """The reason string for :data:`DYNAMIC_COMMAND_NAME_PREFIXES` — it is what the human reads in
@@ -191,26 +203,6 @@ the prompt, so it says why there is no "always" option rather than naming a rule
 UNRESOLVABLE_TARGET_CHARS: tuple[str, ...] = ("$", "*", "?", "`")
 """PRD §3.2 step 8: a write target carrying a variable, a glob or a substitution cannot be
 resolved at classification time, and "unresolvable targets are treated as outside"."""
-
-HARNESS_RUNTIME_STORE_NAMES: tuple[str, ...] = (
-    ARCHIVE_DB_NAME,
-    "KILL",
-    "audit.jsonl",
-    "speed_stats.json",
-    ".repl_history",
-)
-"""PRD §3.1: ``~/.localharness`` is a protected path "except the harness's own runtime store".
-
-These are the entries under the GLOBAL config dir the harness WRITES while it runs, rather than
-the config it READS to decide what to do next — so touching one cannot change the harness's
-behavior and gating them would only add prompts to the harness's own bookkeeping. Sources, in
-order: ``config/paths.ARCHIVE_DB_NAME``; ``config/models.py:166`` (``kill_file`` default
-``KILL``); ``config/models.py:1719`` (``audit_log_path`` default ``audit.jsonl``);
-``provider/speed_stats.py:44``; ``cli/start_cmd.py:1305`` (the REPL history file). Everything
-else under the config dir — ``config.yaml``, ``overrides.yaml``, ``agents/``, ``plugins/``,
-``trusted_workspaces.yaml``, ``grants.yaml`` — is behavior-changing and stays protected.
-A config-relocated kill file or audit log (an absolute path elsewhere) is outside this dir and
-is judged by the ordinary boundary rules."""
 
 READ_ONLY_DENIED_KINDS: frozenset[str] = frozenset({"write", "code", "delegate"})
 """PRD §3.4's read-only list, as branches of :func:`_kind`: write/edit (and anything in the
@@ -487,19 +479,28 @@ def _within(base: Optional[Path], path: Path) -> bool:
     return path == base or base in path.parents
 
 
-def _exempt_runtime_store(path: Path) -> bool:
-    """Is this one of the harness's own runtime files under the global config dir?
+def _config_dir_verdict(
+    relative: tuple[str, ...], settings: GateSettings
+) -> Optional[bool]:
+    """Is a path inside a harness config directory protected? None when it is not inside one.
 
-    PRD §3.1's "except the harness's own runtime store" exemption; see
-    :data:`HARNESS_RUNTIME_STORE_NAMES` for what counts and why.
+    ``relative`` is the path's parts BELOW the config directory. The first of them decides
+    (:data:`~localharness.agent.gate_types.PROTECTED_CONFIG_DIR_ENTRIES`), so a directory entry
+    covers its whole subtree — ``plugins/**`` is one word — and nothing deeper can re-open the
+    question: a file called ``config.yaml`` sitting inside ``agents/`` is an agent's file, not
+    the harness's config.
+
+    Returning False rather than falling through to the workspace patterns is deliberate. Inside a
+    config directory, this list is the whole answer: the alternative would let ``*.key`` or
+    ``.env.*`` re-protect ``.localharness/tools/deploy.key``, which is exactly the kind of
+    incidental re-protection the narrowing removed.
+
+    The empty tuple — the config directory ITSELF — is not protected: creating or replacing the
+    directory is what ``localharness init`` does.
     """
-    try:
-        config_dir = global_config_dir().resolve()
-    except (OSError, ValueError):
+    if not relative:
         return False
-    if not _within(config_dir, path) or path == config_dir:
-        return False
-    return path.relative_to(config_dir).parts[0] in HARNESS_RUNTIME_STORE_NAMES
+    return relative[0] in settings.protected_config_dir_entries
 
 
 def _system_root_matches(path: Path, raw: str) -> bool:
@@ -544,19 +545,26 @@ def _protected_system(path: Path, settings: GateSettings) -> bool:
 def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     """Does this resolved target land on a protected path? (PRD §3.1 ``protected-path``.)
 
-    Three sets: absolute home paths (``~/.ssh``, shell rc files, the harness's own config dir),
-    the machine's own directories (``/etc``, ``/usr``, ``C:/Windows`` — :func:`_protected_system`),
-    and names matched at any depth inside the workspace (``.git``, ``.env*``, ``*.pem``). A
-    directory entry protects its subtree, so ``.git/hooks/pre-commit`` is protected via
-    ``.git``. The harness's runtime store is exempted (:func:`_exempt_runtime_store`).
+    Four sets, in order:
 
-    The system set is what makes ``auto`` safe to ship as the default (owner ruling 2026-09-11:
-    "auto = thinnest interaction; asks only when genuinely dangerous"): ``auto`` allows a write
-    outside the project silently, and without this set "outside the project" would include
-    ``/etc/hosts``.
+    * the machine's own directories (``/etc``, ``/usr``, ``C:/Windows`` —
+      :func:`_protected_system`), which is what makes ``auto`` safe to ship as the default:
+      ``auto`` allows a write outside the project silently, and without this set "outside the
+      project" would include ``/etc/hosts``;
+    * absolute home paths (``~/.ssh``, the credential files, the shell rc files);
+    * the few behaviour-deciding entries inside a harness config directory — the global one and
+      any in-project ``.localharness/`` (:func:`_config_dir_verdict`);
+    * names matched at any depth inside the workspace (``.git``, ``.env*``, ``*.pem``), where a
+      directory entry protects its subtree so ``.git/hooks/pre-commit`` is protected via ``.git``.
+
+    The third set used to be "the whole config directory, minus five hand-listed runtime files".
+    It is now the inverse — the protected entries are named and everything else is allowed —
+    because a replay of the owner's 384-session corpus showed 14 of the 20 prompts ``auto``
+    raised were the orchestrator writing ``~/.localharness/agents/*.yaml`` and
+    ``~/.localharness/tools/*``: creating an agent and dropping a tool script, which is the
+    harness being used (owner ruling 2026-09-11, "only hard blacklists… and even then very
+    minimal").
     """
-    if _exempt_runtime_store(path):
-        return False
     if _protected_system(path, settings):
         return True
     for raw in settings.protected_paths_home:
@@ -570,12 +578,12 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
         config_dir = global_config_dir().resolve()
     except (OSError, ValueError):
         config_dir = None
-    if config_dir is not None and (path == config_dir or _within(config_dir, path)):
-        return True
-    # `auto` keeps only the in-project names whose CONTENTS decide what runs next (owner ruling
-    # 2026-09-11): `.git` — hooks and config — and `.localharness`. Writing your own project's
-    # `.env` is ordinary work, and the key material the other patterns guard lives under the home
-    # set, which applies in every mode. `guarded` keeps the full set.
+    if config_dir is not None and _within(config_dir, path):
+        return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
+    # `auto` keeps only the in-project name whose CONTENTS decide what runs next (owner ruling
+    # 2026-09-11): `.git` — hooks and config. Writing your own project's `.env` is ordinary work,
+    # and the key material the other patterns guard lives under the home set, which applies in
+    # every mode. `guarded` keeps the full set.
     patterns = (
         settings.auto_blacklist.protected_paths_workspace if ctx.mode == "auto"
         else settings.protected_paths_workspace
@@ -586,7 +594,13 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
         container = Path(container).expanduser().resolve()
         if not _within(container, path):
             continue
-        for part in path.relative_to(container).parts:
+        relative = path.relative_to(container).parts
+        if WORKSPACE_DIR_NAME in relative:
+            # An in-project `.localharness/` is the same kind of thing as the global config dir
+            # and answers by the same list, at whatever depth it appears.
+            index = relative.index(WORKSPACE_DIR_NAME)
+            return bool(_config_dir_verdict(relative[index + 1:], settings))
+        for part in relative:
             if any(fnmatch.fnmatch(part, pattern) for pattern in patterns):
                 return True
     return False
@@ -638,12 +652,15 @@ def _ask_record(
     ``allowed_in_auto`` defaults to the blacklist rule of owner ruling 2026-09-11 ("auto =
     thinnest interaction; asks only when genuinely dangerous"): ``auto`` asks when the class is
     in :data:`~localharness.agent.gate_types.AUTO_ASK_CLASSES`, and otherwise when the ask
-    carries NO key — which is exactly the set of calls the gate could not read well enough to
-    check against the blacklist at all (an unreadable ``command``, a command name computed at
-    runtime, a path argument that is not a string). Allowing those would be allowing a call
-    BECAUSE it could not be classified, which inverts the rule. It is passed explicitly only by
-    the shell branch, where a destructive command that points entirely inside the project is
-    allowed (:func:`_destructive_stays_inside`).
+    carries NO key — which is the set of calls the gate could not read at all (a ``command``
+    that is not a string, a path argument that is not a string). Allowing those would be
+    allowing a call BECAUSE it could not be classified, which inverts the rule.
+
+    It is passed explicitly at two sites. The shell branch allows a destructive command that
+    points entirely inside the project (:func:`_auto_blacklisted`); and it allows a command name
+    computed at runtime (:data:`DYNAMIC_COMMAND_NAME_PREFIXES`), which is the one keyless ask
+    where the gate DID read the call — the substitution's own segments were lifted and checked —
+    and could only not name the outer verb.
     """
     return _Ask(
         klass=klass,
@@ -993,6 +1010,7 @@ def _evaluate_shell(
             asks.append(_ask_record(
                 "shell-unfamiliar", None, DYNAMIC_COMMAND_NAME_REASON,
                 grantable=False, detail=segment.signature,
+                allowed_in_auto=True,
             ))
             continue
         klass, reason = (
