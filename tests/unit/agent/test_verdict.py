@@ -632,3 +632,63 @@ def test_a_granted_key_drops_out_of_the_collected_asks(ws, monkeypatch, tmp_path
     ).request
     assert ("shell-unfamiliar", "mkdir") not in request.grant_keys
     assert ("shell-unfamiliar", "touch") in request.grant_keys
+
+
+# --------------------------------------------- a directory grant covers its subtree (D4)
+
+def test_a_grant_on_a_directory_covers_a_deeper_target(ws, tmp_path):
+    """Verification A defect D4: `grant '/tmp'` did not cover `touch /tmp/sub/x`, so every
+    fresh subdirectory under an approved root paid a first-exposure prompt (PRD §8's "growing
+    vocabularies", arriving through paths)."""
+    outside = (tmp_path / "elsewhere").resolve()
+
+    def granted(workspace: Path, key: str):
+        return a_grant(key) if key == str(outside) else None
+
+    deep = outside / "a" / "b" / "f.txt"
+    result = evaluate("write", {"path": str(deep), "content": "x"}, WRITE_META,
+                      make_ctx(ws, grants=granted), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_a_grant_on_a_sibling_directory_covers_nothing(ws, tmp_path):
+    """The walk goes UP, never sideways or down."""
+    outside = (tmp_path / "elsewhere").resolve()
+
+    def granted(workspace: Path, key: str):
+        return a_grant(key) if key == str(outside / "a") else None
+
+    result = evaluate("write", {"path": str(outside / "b" / "f.txt"), "content": "x"}, WRITE_META,
+                      make_ctx(ws, grants=granted), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "edit-outside"
+    assert result.request.key == str(outside / "b")
+
+
+def test_a_grant_on_home_does_not_cover_a_protected_path(ws, tmp_path):
+    """Protected paths are classified before any grant is consulted (PRD §3.1, finding 12), so
+    widening the grant walk cannot open `~/.ssh`."""
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True, exist_ok=True)
+
+    def granted(workspace: Path, key: str):
+        return a_grant(key)  # every key is granted — the widest possible grant
+
+    result = evaluate("write", {"path": str(home / ".ssh" / "authorized_keys"), "content": "x"},
+                      WRITE_META, make_ctx(ws, grants=granted), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "protected-path" and result.request.grantable is False
+
+
+def test_the_subtree_grant_reaches_shell_write_targets(ws, monkeypatch, tmp_path):
+    """The verifier's probe: `grant '/tmp'` vs `touch /tmp/sub/x` — the shell path uses the same
+    target check, so it inherits the walk."""
+    outside = (tmp_path / "elsewhere").resolve()
+
+    def granted(workspace: Path, key: str):
+        return a_grant(key) if key in (str(outside), "touch") else None
+
+    fake_shell(monkeypatch, seg("touch", write_targets=(str(outside / "sub" / "x"),)))
+    result = evaluate("bash_exec", {"command": "touch sub/x"}, SHELL_META,
+                      make_ctx(ws, grants=granted), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
