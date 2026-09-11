@@ -423,3 +423,80 @@ def test_no_overlay_file_is_a_pure_noop(layers) -> None:
     loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
 
     assert loader.overlay_builtin_config("explore", base) is base
+
+
+# ---------------------------------------------------------------------------
+# C1: the global `org.permissions.ask` block reaches the agent WITHOUT a workspace
+# ---------------------------------------------------------------------------
+
+def _org_ask(global_dir: Path, ask: dict) -> None:
+    """Write the global config.yaml with this `org.permissions.ask` block — what `init` writes."""
+    _write_yaml(global_dir / "config.yaml", {
+        **_MINIMAL, "org": {"permissions": {"ask": ask}},
+    })
+
+
+def test_a_global_org_ask_reaches_an_agent_with_no_workspace(layers) -> None:
+    """The C1 repro: an operator's global `ask` block was silently inert off the workspace path.
+
+    `load_agent_file` unioned `org.permissions.deny_patterns` into every agent and resolved the
+    scalars, but `permissions.ask` came from the agent file alone — so this config was stored,
+    echoed back by `config show`, and never reached the gate. `network_hosts` in particular
+    defaulted to False while the file said true.
+    """
+    global_dir, _ws = layers
+    _org_ask(global_dir, {"destructive_signatures": ["my_cmd"], "network_hosts": True})
+
+    gate = _gate(global_dir)
+    assert "my_cmd" in gate.destructive_signatures
+    assert gate.ask_network_hosts is True
+
+
+def test_an_agent_file_ask_overrides_the_org_block_key_by_key(layers) -> None:
+    """Agent > org, per key: the agent's own rule set wins, and the key it is silent about still
+    inherits the org's. `ask` is a block of independent knobs, not one value."""
+    global_dir, _ws = layers
+    _org_ask(global_dir, {"destructive_signatures": ["org_cmd"], "network_hosts": True})
+    _write_yaml(global_dir / "agents" / "deployer.yaml", {
+        "name": "deployer", "role": "Deploy agent",
+        "permissions": {"ask": {"destructive_signatures": ["agent_cmd"]}},
+    })
+
+    gate = _gate(global_dir)
+    assert gate.destructive_signatures == frozenset({"agent_cmd"})
+    assert gate.ask_network_hosts is True
+
+
+def test_the_org_ask_baseline_is_identical_with_and_without_a_workspace(layers) -> None:
+    """The two paths must agree on the GLOBAL baseline.
+
+    Before the fix they did not: with a workspace layer the org block reached the agent as
+    `_narrow_project_layer_ask`'s baseline, and without one it reached nothing — so whether an
+    operator's own policy applied depended on which directory they happened to be standing in.
+    """
+    global_dir, ws = layers
+    _org_ask(global_dir, {"destructive_signatures": ["my_cmd"], "network_hosts": True})
+
+    workspaceless, workspaced = _gate(global_dir), _gate(global_dir, ws)
+    assert workspaceless == workspaced
+    assert "my_cmd" in workspaced.destructive_signatures and workspaced.ask_network_hosts is True
+
+
+def test_a_project_layer_still_cannot_subtract_from_the_org_ask(layers, caplog) -> None:
+    """The cascade is a baseline, not a bypass: step 5c's narrow-only union runs on top of it,
+    so a repo emptying a rule set the OPERATOR declared globally is still refused."""
+    global_dir, ws = layers
+    _org_ask(global_dir, {"destructive_signatures": ["my_cmd"]})
+    _project_ask(ws, {"destructive_signatures": []})
+
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+
+    assert "my_cmd" in gate.destructive_signatures
+    assert "destructive_signatures" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_no_org_ask_leaves_the_shipped_gate_untouched(layers) -> None:
+    """LAYR-03 shape: a config that declares no `ask` at all is byte-identical to the default."""
+    global_dir, _ws = layers
+    assert _gate(global_dir) == SHIPPED

@@ -885,6 +885,32 @@ class ConfigLoader:
             resolved_budget = {k: v for k, v in resolved_budget.items() if v is not None}
             perms_merged["budget"] = resolved_budget
 
+        # `permissions.ask` cascades like every other permission key — and did not (C1). Step 4
+        # resolves the scalars, the union above resolves `deny_patterns`, and `ask` had NOTHING:
+        # `perms_merged` starts as the AGENT file's own permissions, so an `org.permissions.ask`
+        # in the config.yaml `init` writes reached a merged agent only when a workspace layer
+        # happened to apply, as `_narrow_project_layer_ask`'s baseline. Without one — the default
+        # install — a globally declared `destructive_signatures` or `network_hosts: true` was
+        # stored, read back by `config show`, and never reached `AskConfig.to_gate_settings()`.
+        # A tightening the operator asked for and silently did not get is the worst direction for
+        # this particular block to fail in.
+        #
+        # The same agent > division > org > overlay cascade, merged PER KEY (`ask` is a block of
+        # independent knobs, not one value), read from the GLOBAL layer alone and applied
+        # unconditionally. The agent file AT THIS PATH layers on top, because it may be a
+        # workspace file that `_global_layer_ask` deliberately cannot see — and step 5c's
+        # narrow-only union then runs on the result exactly as before, dropping only the keys the
+        # project layer moved AWAY from this baseline.
+        cascaded_ask = self._global_layer_ask(path.stem, div_name)
+        agent_ask = agent_perms.get("ask") if isinstance(agent_perms, dict) else None
+        if isinstance(agent_ask, dict):
+            cascaded_ask = {
+                **cascaded_ask,
+                **{k: v for k, v in agent_ask.items() if v is not None},
+            }
+        if cascaded_ask:
+            perms_merged["ask"] = cascaded_ask
+
         perms_merged["deny_patterns"] = union_deny
         merged["permissions"] = perms_merged
 
