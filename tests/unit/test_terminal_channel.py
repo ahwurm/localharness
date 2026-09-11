@@ -268,7 +268,7 @@ class TestThinkingIndicator:
     async def test_tool_output_stops_thinking_indicator(self):
         ch = self._channel()
         await ch.on_heartbeat(self._heartbeat())
-        await ch.send_tool_call("glob", {"pattern": "*.py"})
+        await ch.send_tool_call("bash_exec", {"command": "ls"})  # itemized tool: no burst opens
         assert ch._thinking is None
         await ch.on_heartbeat(self._heartbeat())   # per-iteration rhythm: restarts
         assert ch._thinking is not None
@@ -496,12 +496,12 @@ class TestBurstConsolidation:
         ):
             await ch.send_tool_call(tool, arg)
             await ch.send_tool_result(tool, "ok", is_error=False)
-        await ch.send_tool_call("memory_search", {"query": "spark"})
+        await ch.send_tool_call("bash_exec", {"command": "ls"})
         rendered = out.getvalue()
         assert rendered.count(self.WEB_FROZEN) == 1
         assert "✓ web results — UNTRUSTED, treated as data only" in rendered
         assert "✓ web_search" not in rendered  # per-call results absorbed
-        assert rendered.index(self.WEB_FROZEN) < rendered.index("memory_search")
+        assert rendered.index(self.WEB_FROZEN) < rendered.index("bash_exec")
 
     @pytest.mark.asyncio
     async def test_errors_absorbed_and_annotated(self):
@@ -605,13 +605,65 @@ class TestBurstConsolidation:
         assert "✓ web_fetch" in out.getvalue()
 
     @pytest.mark.asyncio
-    async def test_non_family_tools_keep_per_call_lines(self):
+    async def test_side_effecting_tools_keep_per_call_lines(self):
+        """bash_exec / write / edit / python_exec / agent stay itemized: each command, write and
+        hand-off is the user's audit trail, never folded into a counter."""
         ch, out = self._pipe_channel()
-        await ch.send_tool_call("glob", {"pattern": "*.py"})
-        await ch.send_tool_result("glob", "a.py", is_error=False)
+        await ch.send_tool_call("bash_exec", {"command": "ls -la"})
+        await ch.send_tool_result("bash_exec", "a.py", is_error=False)
+        await ch.send_tool_call("write", {"path": "x.py", "content": "a\nb"})
+        await ch.send_tool_result("write", "Written 4 bytes", is_error=False)
         rendered = out.getvalue()
-        assert "◆ glob *.py" in rendered
-        assert "✓ glob (1 lines)" in rendered
+        assert "◆ bash_exec ls -la" in rendered
+        assert "✓ bash_exec (1 lines)" in rendered
+        assert "◆ write x.py (2 lines)" in rendered
+        assert "· 1/1" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_local_read_walk_is_one_line(self):
+        """Owner 2026-09-11: a glob/grep/read walk was two purple lines per call — the
+        'all blue/purple eyesore'. Read-only local tools burst like the web family."""
+        ch, out = self._pipe_channel()
+        for tool, arg in (
+            ("glob", {"pattern": "*.py"}), ("glob", {"pattern": "**/*.py"}),
+            ("grep", {"pattern": "import"}), ("read", {"path": "a.py"}),
+        ):
+            await ch.send_tool_call(tool, arg)
+            await ch.send_tool_result(tool, "hit", is_error=False)
+        await ch.send_message("done")
+        rendered = out.getvalue()
+        assert "◆ glob · grep · read · 4/4" in rendered
+        assert "✓ glob" not in rendered and "◆ glob *.py" not in rendered
+        assert "UNTRUSTED" not in rendered  # local reads carry no ingest disclosure
+
+    @pytest.mark.asyncio
+    async def test_memory_family_bursts_in_the_memory_hue(self):
+        ch, out = self._pipe_channel()
+        await ch.send_tool_call("memory_search", {"query": "spark"})
+        await ch.send_tool_result("memory_search", "3 facts", is_error=False)
+        await ch.send_tool_call("memory_get", {"id": "abc"})
+        burst = ch._burst
+        assert burst is not None and burst.style == "memory.call"
+        assert "[memory.call]◆ memory_search · memory_get[/memory.call]" in ch._burst_text(burst, final=False)
+        await ch.send_message("done")
+        assert "◆ memory_search · memory_get · 1/2" in out.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_untrusted_note_prints_once_per_user_turn(self):
+        """Narration splits one research burst into several; the disclosure prints under the
+        first of them only, and again after the next user prompt (a new turn)."""
+        ch, out = self._pipe_channel()
+        note = "✓ web results — UNTRUSTED, treated as data only"
+        for _ in range(3):
+            await ch.send_tool_call("web_search", {"query": "q"})
+            await ch.send_tool_result("web_search", "ok", is_error=False)
+            await ch.send_message("narration")  # closes the burst
+        assert out.getvalue().count(note) == 1
+        await ch.box_echo_prompt("next question")
+        await ch.send_tool_call("web_fetch", {"url": "u"})
+        await ch.send_tool_result("web_fetch", "ok", is_error=False)
+        await ch.send_message("answer")
+        assert out.getvalue().count(note) == 2
 
 
 class TestMarkupSafetyAndCompactCalls:

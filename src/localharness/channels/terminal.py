@@ -14,12 +14,15 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.buffer import Buffer, CompletionState
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.filters import Condition, has_completions
+from prompt_toolkit.formatted_text.utils import fragment_list_width
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.layout.processors import AppendAutoSuggestion, BeforeInput
+from prompt_toolkit.layout.processors import (
+    AfterInput, AppendAutoSuggestion, BeforeInput, ConditionalProcessor,
+)
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
@@ -108,9 +111,19 @@ def _fmt_elapsed(seconds: float) -> str:
 # timings) stays on the bus ledger (bus-events.jsonl); this is display-only. Family
 # membership reuses the capability metadata. (Descriptive labels dropped 2026-07-14 —
 # owner: cleaner without; the close_note security disclosure stays.)
-_BURST_GROUPS: tuple[tuple[frozenset[str], str | None], ...] = (
-    (UNTRUSTED_INGEST, "web results — UNTRUSTED, treated as data only"),
-    (frozenset({"tool_result_get"}), None),
+# Display families (owner, 2026-09-11: "group similar tools like web search — the all-purple
+# wall"): the read-only local tools and the memory tools collapse the same way. Side-effecting
+# tools stay ITEMIZED on purpose — bash_exec / write / edit / python_exec (HOST_DANGEROUS),
+# cruncher_exec and agent delegations print one line per call, because each command, write and
+# hand-off is the user's audit trail. The memory family wears the memory hue of the
+# architecture plates (cli/theme.py), so a turn's tool section is no longer one color.
+LOCAL_READ = frozenset({"read", "glob", "grep", "load_document", "chunk"})
+MEMORY_TOOLS = frozenset({"memory_search", "memory_get", "remember"})
+_BURST_GROUPS: tuple[tuple[frozenset[str], str | None, str], ...] = (
+    (UNTRUSTED_INGEST, "web results — UNTRUSTED, treated as data only", "tool.call"),
+    (frozenset({"tool_result_get"}), None, "tool.call"),
+    (LOCAL_READ, None, "tool.call"),
+    (MEMORY_TOOLS, None, "memory.call"),
 )
 
 
@@ -118,7 +131,8 @@ _BURST_GROUPS: tuple[tuple[frozenset[str], str | None], ...] = (
 class _Burst:
     """Consolidation state for one open family burst (display-only)."""
     family: frozenset[str]
-    close_note: str | None       # ✓ line printed once on close (None = no note)
+    close_note: str | None       # ✓ line printed once per user turn on close (None = no note)
+    style: str = "tool.call"     # rich style of the counter line: the family's entity hue
     tools: list[str] = field(default_factory=list)  # first-use order, deduped
     calls: int = 0
     done: int = 0
@@ -131,10 +145,12 @@ class _Burst:
 # (a PromptSession bottom_toolbar would pin it to the screen bottom instead).
 INPUT_STYLE = Style.from_dict({
     "frame": "ansibrightblack",
-    "caret": "ansicyan bold",
+    "caret": f"bold {SITE_INK}",           # ❯ in the box = ❯ of the echoed line in scrollback (one glyph, one ink)
     "input": "ansidefault",                # typed text: terminal default fg (else inherits the dim frame class)
     "auto-suggestion": "ansibrightblack",  # ghost history completion stays dim
+    "placeholder": "ansibrightblack italic",  # empty-box guidance (the #49 first-run hint)
     "hint": "ansibrightblack italic",
+    "model": ENTITY_STYLES["provider"],    # footer model chip: the model is the provider's name (cli/theme.py)
     # context meter — GSD thresholds (green → yellow → orange → red at compaction)
     "ctx-low": "ansigreen",
     "ctx-mid": "ansiyellow",
@@ -435,8 +451,9 @@ def _build_persistent_input_app(
     on_interrupt: Callable[[], None],
     on_eof: Callable[[], None],
     hint_fn: Callable[[], list[tuple[str, str]]],
-    pct_fn: Callable[[], float | None],
+    right_fn: Callable[[], list[tuple[str, str]]],
     status_fn: Callable[[], list[tuple[str, str]]],
+    placeholder_fn: Callable[[], str] = lambda: "",
     model_names_fn: Callable[[], list[str]] | None = None,
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
@@ -445,9 +462,11 @@ def _build_persistent_input_app(
       1. Enter SUBMITS without exiting — it hands the line to on_submit and resets the buffer,
          so the same Application services every submission for the whole session (run once via
          asyncio.create_task(app.run_async()) alongside the turn, under patch_stdout(raw=True)).
-      2. The bottom-border hint + context meter are DYNAMIC FormattedTextControl callables
-         (hint_fn / pct_fn) refreshed by app.invalidate() — the seam `queued (N)` and the
-         routing-decision flash render through (the working glyph moved to the status row).
+      2. A FOOTER row under the closed box carries DYNAMIC FormattedTextControl callables
+         refreshed by app.invalidate(): left, hint_fn (the key legend for the box's current
+         mode / `queued (N)` / the routing-decision flash); right, right_fn (the local-model
+         instrument cluster: model · measured tok/s · context meter). placeholder_fn is the
+         dim guidance shown inside the box while it is empty.
       3. A one-line working/activity STATUS ROW sits ABOVE the frame (status_fn), so it reads
          as the last line of the log area, not a glyph in the box border (FIX 2). A
          ConditionalContainer collapses it to zero height when status_fn returns [] (idle).
@@ -461,6 +480,10 @@ def _build_persistent_input_app(
         buffer=buf,
         input_processors=[
             BeforeInput([("class:caret", f" {prompt} ")]),
+            ConditionalProcessor(  # PromptSession's placeholder, re-created for the hand-built box
+                AfterInput(lambda: [("class:placeholder", placeholder_fn())]),
+                filter=Condition(lambda: not buf.text),
+            ),
             AppendAutoSuggestion(),
         ],
     )
@@ -513,34 +536,22 @@ def _build_persistent_input_app(
     def _wall(char: str) -> Window:
         return Window(width=1, char=char)
 
-    def _meter_frags() -> list[tuple[str, str]]:
-        pct = pct_fn()
-        if pct is None:
-            return []
-        frags, _ = _ctx_segments(pct)
-        return frags
+    def _right_width() -> int:
+        return fragment_list_width(right_fn())
 
-    def _meter_width() -> int:
-        pct = pct_fn()
-        if pct is None:
-            return 0
-        _, w = _ctx_segments(pct)
-        return w
-
-    bottom = [
-        _wall("╰"),
-        Window(char="─", height=1, width=1),
-        Window(FormattedTextControl(hint_fn), height=1),
-        Window(char="─", height=1),  # stretchy filler right-aligns the meter
-        Window(FormattedTextControl(_meter_frags), width=_meter_width, height=1),
-        Window(char="─", height=1, width=1),
-        _wall("╯"),
-    ]
     frame = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
         VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
-        VSplit(bottom),
+        VSplit([_wall("╰"), Window(char="─", height=1), _wall("╯")]),
     ], style="class:frame")
+    # Footer UNDER the closed box — where Claude Code / Codex / Gemini / Cline put the key hints
+    # and the context readout. The border used to carry them, and a width-less hint Window
+    # stretched to half the row and padded it with spaces: a hole in the frame. The right
+    # cluster is width-fitted (fragment_list_width), so it right-aligns with no padding.
+    footer = VSplit([
+        Window(FormattedTextControl(hint_fn), height=1),
+        Window(FormattedTextControl(right_fn), width=_right_width, height=1),
+    ])
     # FIX 2: working/activity status row, ABOVE the frame, so it reads as the last line of the
     # log area (where the tool/agent lines land) rather than a glyph crammed into the box
     # border. The ConditionalContainer collapses it to zero height when status_fn returns []
@@ -551,7 +562,7 @@ def _build_persistent_input_app(
         Window(FormattedTextControl(status_fn), height=1, dont_extend_height=True),
         filter=Condition(lambda: bool(status_fn())),
     )
-    body = HSplit([status_row, frame])
+    body = HSplit([status_row, frame, footer])
 
     app = Application(
         layout=Layout(_menu_float(body), focused_element=control),
@@ -581,6 +592,7 @@ TERMINAL_THEME = Theme({
     "agent.name":   f"bold {ENTITY_STYLES['agent']}",
     "agent.text":   "white",
     "tool.call":    ENTITY_STYLES["tool"],
+    "memory.call":  ENTITY_STYLES["memory"],   # memory-family burst lines (memory_search/get/remember)
     "tool.result":  f"dim {ENTITY_STYLES['tool']}",
     "tool.error":   "bold red",
     "system.info":  f"dim {ENTITY_STYLES['infra']}",
@@ -739,6 +751,10 @@ class TerminalChannel(ChannelAdapter):
         # Decode-speed supplier (start_cmd wires LLMClient.gen_speed_snapshot): () -> (tok/s,
         # verified) | None. Drives the colored tok/s readout in the status row / thinking label.
         self.tps_source: Callable[[], tuple[float, bool] | None] | None = None
+        # Model-name supplier (start_cmd wires `lambda: llm.config.model`, which every /model
+        # swap path reassigns): the footer's model chip.
+        self.model_source: Callable[[], str | None] | None = None
+        self._notes_shown: set[str] = set()      # burst close notes already printed this user turn
         # Live-request supplier (start_cmd wires LLMClient.stream_snapshot): () -> {phase,
         # thinking_tokens, answer_tokens, tool_call_tokens, elapsed, silent} | None. Drives the
         # phase + tallies in the status row's working text; None → the plain "working".
@@ -917,10 +933,10 @@ class TerminalChannel(ChannelAdapter):
                     no_wrap=True, overflow="ellipsis",
                 )
                 return
-            family, note = group
+            family, note, style = group
             if self._burst is None or self._burst.family is not family:
                 self._close_burst()
-                self._burst = _Burst(family=family, close_note=note)
+                self._burst = _Burst(family=family, close_note=note, style=style)
             burst = self._burst
             if tool_name not in burst.tools:
                 burst.tools.append(tool_name)
@@ -1007,6 +1023,7 @@ class TerminalChannel(ChannelAdapter):
             self._stop_thinking()
             self._close_burst()  # freeze any open counter before the input bubble draws
         self._state = "WAITING_INPUT"
+        self._notes_shown.clear()  # a new user turn gets the close notes again
         # #49: the first prompt carries the guidance hint in the bubble's bottom border;
         # consume it so later prompts don't repeat it.
         hint, self.first_prompt_hint = self.first_prompt_hint, ""
@@ -1062,10 +1079,10 @@ class TerminalChannel(ChannelAdapter):
             ctrl_queue.put_nowait(("eof", None))
 
         self._box_app = _build_persistent_input_app(
-            self._history, ">",
+            self._history, _PROMPT_GLYPH,
             on_submit=_on_submit, on_interrupt=on_interrupt, on_eof=_on_eof,
-            hint_fn=self._box_hint_frags, pct_fn=lambda: self._context_pct,
-            status_fn=self._box_status_frags,
+            hint_fn=self._box_hint_frags, right_fn=self._box_instrument_frags,
+            status_fn=self._box_status_frags, placeholder_fn=self._box_placeholder,
             model_names_fn=self._model_names_for_menu,
         )
         self._box_patch = patch_stdout(raw=True)
@@ -1106,19 +1123,47 @@ class TerminalChannel(ChannelAdapter):
         self._box_app = None
 
     def _box_hint_frags(self) -> list[tuple[str, str]]:
-        """Dynamic bottom-border content — INPUT metadata only now (the working glyph moved to
-        the status row, FIX 2): the transient routing-decision flash, the persistent
-        `queued (N)`, or the first-run guidance hint."""
-        parts: list[tuple[str, str]] = []
+        """Footer-left: the transient routing-decision flash, else the key legend for the box's
+        CURRENT mode — the type-anytime semantics are invisible otherwise. While a turn runs:
+        `queued (N)` when lines wait, then the two keys that matter (alt+enter forces a nudge,
+        ctrl+c stops the turn); idle: tab lists the commands. (The first-run hint moved into
+        the box as its placeholder — _box_placeholder.)"""
         if self._decision_flash:
-            parts.append(("class:caret", f" {self._decision_flash} "))
-        elif self._queued_count:
-            parts.append(("class:hint", f" queued ({self._queued_count}) "))
-        elif self._first_box_hint:
-            parts.append(("class:hint", f" {self._first_box_hint} "))
-        if not parts:
-            parts.append(("class:hint", "  "))
-        return parts
+            return [("class:caret", f"  {self._decision_flash}")]
+        parts: list[str] = []
+        if self._queued_count:
+            parts.append(f"queued ({self._queued_count})")
+        parts.append("alt+enter nudge · ctrl+c stop" if self._box_working else "tab commands · /help")
+        return [("class:hint", "  " + " · ".join(parts))]
+
+    def _box_placeholder(self) -> str:
+        """Dim text inside the empty box: the #49 guidance hint until first use, then nothing."""
+        return self._first_box_hint
+
+    def _box_instrument_frags(self) -> list[tuple[str, str]]:
+        """Footer-right: the local-model instrument cluster — `model · 25.3 tok/s · ██░░░░░░░░ 8%`.
+        The numbers a local-inference user actually watches, always at the input (no cloud CLI
+        shows throughput at all; ours shows the MEASURED rate). The rate here is the RESTING
+        one: verified, and only between turns — while a turn runs the status row above owns the
+        readout (live `~` rate mid-stream, last verified rate between requests), so one number
+        never shows twice on screen. Every supplier is optional and exception-proof."""
+        sep = ("class:hint", " · ")
+        frags: list[tuple[str, str]] = []
+        model = None
+        if self.model_source is not None:
+            try:
+                model = self.model_source()
+            except Exception:
+                model = None
+        if model:
+            frags.append(("class:model", model))
+        rate = self._tps_text()
+        if rate is not None and rate[2] and not self._box_working:
+            frags += [sep] * bool(frags) + [(rate[0], rate[1])]
+        if self._context_pct is not None:
+            meter, _ = _ctx_segments(self._context_pct)
+            frags += [sep] * bool(frags) + meter
+        return frags
 
     def _box_status_frags(self) -> list[tuple[str, str]]:
         """FIX 2: content of the one-line status row rendered ABOVE the box (so it reads as the
@@ -1185,19 +1230,24 @@ class TerminalChannel(ChannelAdapter):
         carries `~` (chunk-approximate while streaming — self-corrects to the exact rate at
         stream end); a verified rate is plain. Bands per speed_stats.tps_band (>30 green,
         20–30 yellow, <20 red). Never raises — the status row must never take the app down."""
+        rate = self._tps_text()
+        return [] if rate is None else [(rate[0], f"· {rate[1]} ")]
+
+    def _tps_text(self) -> tuple[str, str, bool] | None:
+        """(style class, `25.3 tok/s` | `~25 tok/s`, verified) from tps_source; None when unknown."""
         if self.tps_source is None:
-            return []
+            return None
         try:
             snap = self.tps_source()
         except Exception:
-            return []
+            return None
         if not snap:
-            return []
+            return None
         from localharness.provider.speed_stats import tps_band
 
         tps, verified = snap
-        text = f"· {tps:.1f} tok/s " if verified else f"· ~{tps:.0f} tok/s "
-        return [(f"class:tps-{tps_band(tps)}", text)]
+        text = f"{tps:.1f} tok/s" if verified else f"~{tps:.0f} tok/s"
+        return f"class:tps-{tps_band(tps)}", text, verified
 
     def _invalidate_box(self) -> None:
         if self._box_app is not None and self._box_active:
@@ -1276,6 +1326,7 @@ class TerminalChannel(ChannelAdapter):
         if annotation:
             line += f"  [muted]{_NARRATE} {escape(annotation)}[/muted]"
         async with self._output_lock:
+            self._notes_shown.clear()  # a new user turn gets the close notes again
             self._console.print(line)
 
     def box_notify_working(self, working: bool) -> None:
@@ -1305,7 +1356,7 @@ class TerminalChannel(ChannelAdapter):
     def _burst_text(self, burst: _Burst, final: bool) -> str:
         """Render the burst counter line: ◆ tools · done/calls [· N errors]."""
         head = f"{_DIAMOND} {escape(' · '.join(burst.tools))}"
-        line = f"  [tool.call]{head}[/tool.call] [muted]· {burst.done}/{burst.calls}[/muted]"
+        line = f"  [{burst.style}]{head}[/{burst.style}] [muted]· {burst.done}/{burst.calls}[/muted]"
         if final and burst.errors:
             plural = "s" if burst.errors > 1 else ""
             line += f" [tool.error]· {burst.errors} error{plural}[/tool.error]"
@@ -1342,7 +1393,10 @@ class TerminalChannel(ChannelAdapter):
             finally:
                 burst.status = None
         self._console.print(self._burst_text(burst, final=True))
-        if burst.close_note and burst.done:
+        if burst.close_note and burst.done and burst.close_note not in self._notes_shown:
+            # Once per user turn: narration splits one research burst into several, and the
+            # same disclosure under each of them was a third of the tool section (2026-09-11).
+            self._notes_shown.add(burst.close_note)
             self._console.print(f"  [tool.result]{_CHECK} {burst.close_note}[/tool.result]")
 
     def _start_thinking(self) -> None:

@@ -77,16 +77,23 @@ class TestHintFrame:
         ch = _channel()
         ch._box_active = True
         ch._first_box_hint = "Describe a task, or /help for commands."
-        assert "Describe a task" in self._text(ch._box_hint_frags())
+        # The first-run hint is the box's PLACEHOLDER now (dim text inside the empty box, the
+        # Claude Code / Cline idiom), not a label in the border.
+        assert ch._box_placeholder() == "Describe a task, or /help for commands."
+        assert "tab commands" in self._text(ch._box_hint_frags()), "idle legend in the footer"
 
         ch.box_set_queued(2)
         assert "queued (2)" in self._text(ch._box_hint_frags())
 
         # FIX 2: the working glyph moved OUT of the bottom border into the status row above
-        # the box. The border keeps input-metadata (queued / decision flash / hint) only.
+        # the box. The footer keeps input-metadata (queued / decision flash / legend) only.
         ch.box_notify_working(True)
-        assert "working" not in self._text(ch._box_hint_frags()), "border no longer carries it"
+        assert "working" not in self._text(ch._box_hint_frags()), "footer no longer carries it"
         assert "working" in self._text(ch._box_status_frags()), "status row does"
+        # the legend follows the mode: a running turn is when nudge/stop matter
+        assert "queued (2) · alt+enter nudge · ctrl+c stop" in self._text(ch._box_hint_frags())
+        ch.box_notify_working(False)
+        assert "nudge" not in self._text(ch._box_hint_frags())
 
     async def test_first_hint_is_consumed_on_the_first_submit(self):
         """#49 says the hint shows "until first use" — submitting IS that use. It used to be set
@@ -99,10 +106,10 @@ class TestHintFrame:
         with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
             await ch.start_input_box(q, on_interrupt=lambda: None)
             try:
-                assert "Describe a task" in self._text(ch._box_hint_frags())
+                assert "Describe a task" in ch._box_placeholder()
                 inp.send_text("hello\r")
                 assert await asyncio.wait_for(q.get(), timeout=10.0) == ("submit", "hello")
-                assert "Describe a task" not in self._text(ch._box_hint_frags())
+                assert ch._box_placeholder() == ""
             finally:
                 await ch.stop_input_box()
 
@@ -113,6 +120,62 @@ class TestHintFrame:
         assert "nudging" in self._text(ch._box_hint_frags())
         ch._decision_flash = ""  # simulate the timed clear
         assert "nudging" not in self._text(ch._box_hint_frags())
+
+
+class TestFooterInstruments:
+    """Footer-right: the local-model instrument cluster (model · measured tok/s · context
+    meter). Suppliers are optional; the rate shown at rest is only ever the VERIFIED one — the
+    live `~` rate belongs to the status row, so a number never appears twice on screen."""
+
+    def _text(self, frags) -> str:
+        return "".join(t for _style, t in frags)
+
+    def test_full_cluster_model_rate_meter(self):
+        ch = _channel()
+        ch.model_source = lambda: "qwen3.8-27b"
+        ch.tps_source = lambda: (25.3, True)
+        ch._context_pct = 42.0
+        frags = ch._box_instrument_frags()
+        assert self._text(frags) == "qwen3.8-27b · 25.3 tok/s · ████░░░░░░ 42%"
+        assert ("class:model", "qwen3.8-27b") in frags
+        assert ("class:tps-yellow", "25.3 tok/s") in frags
+
+    def test_unverified_rate_stays_on_the_status_row_only(self):
+        ch = _channel()
+        ch.model_source = lambda: "m"
+        ch.tps_source = lambda: (28.0, False)
+        assert self._text(ch._box_instrument_frags()) == "m"
+        ch._box_working = True
+        assert ("class:tps-yellow", "· ~28 tok/s ") in ch._box_status_frags()
+
+    async def test_rate_leaves_the_footer_while_a_turn_runs(self):
+        """Between requests of a running turn (a tool executing) the rate is verified — the
+        status row's burst line shows it, so the footer must not, or it reads twice."""
+        ch = _channel()
+        ch._box_active = True
+        ch.tps_source = lambda: (24.9, True)
+        assert self._text(ch._box_instrument_frags()) == "24.9 tok/s"
+        await ch.send_tool_call("web_fetch", {"url": "u"})  # opens a burst → working
+        assert ("class:tps-green", "· 24.9 tok/s ") not in ch._box_status_frags()  # 24.9 is yellow
+        assert "24.9 tok/s" in self._text(ch._box_status_frags())
+        assert ch._box_instrument_frags() == []
+        await ch.stop()
+
+    def test_no_suppliers_is_an_empty_cluster(self):
+        ch = _channel()
+        assert ch._box_instrument_frags() == []
+        ch._context_pct = 8.0
+        assert self._text(ch._box_instrument_frags()) == "░░░░░░░░░░ 8%"
+
+    def test_broken_model_source_never_breaks_the_footer(self):
+        ch = _channel()
+
+        def boom() -> str:
+            raise RuntimeError("no client")
+
+        ch.model_source = boom
+        ch._context_pct = 8.0
+        assert self._text(ch._box_instrument_frags()) == "░░░░░░░░░░ 8%"
 
 
 class TestStatusRow:
@@ -220,7 +283,7 @@ class TestPersistentAppKeybindings:
                 app = _build_persistent_input_app(
                     InMemoryHistory(), ">",
                     on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
-                    hint_fn=lambda: [("class:hint", " ")], pct_fn=lambda: None,
+                    hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
                     status_fn=lambda: [],
                     model_names_fn=(lambda: list(models)) if models is not None else None,
                 )
@@ -314,7 +377,7 @@ class TestModelPickerBox:
             app = _build_persistent_input_app(
                 InMemoryHistory(), ">",
                 on_submit=lambda t: None, on_interrupt=lambda: None, on_eof=lambda: None,
-                hint_fn=lambda: [], pct_fn=lambda: None, status_fn=lambda: [],
+                hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
                 model_names_fn=ch._model_names_for_menu,
             )
             ch._box_app = app
