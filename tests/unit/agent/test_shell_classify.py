@@ -495,6 +495,34 @@ def test_eval_recurses_exactly_like_bash_dash_c() -> None:
         assert via_eval.write_targets == via_bash.write_targets
 
 
+AWK_PROGRAMS = [
+    "awk '{print $1}' f",
+    "gawk -F, '{system(\"rm -rf x\")}' f",
+    "mawk 'BEGIN{print > \"out\"}' f",
+]
+
+
+@pytest.mark.parametrize("command", AWK_PROGRAMS, ids=AWK_PROGRAMS)
+def test_an_awk_program_is_inline_but_not_reparsed_as_shell(command: str) -> None:
+    """A5: the program can call `system()`, so the segment says it runs code — and only that.
+
+    Recursing into it the way `eval` is recursed would feed awk's braces and fields back through
+    the shell splitter and invent segments out of them, which is a false ask on a read.
+    """
+    result = classify_shell(command, SETTINGS)
+    assert len(result.signatures) == 1
+    assert result.segments[0].inline_interpreter is True
+    assert result.segments[0].destructive is False
+
+
+def test_an_inline_perl_or_ruby_keeps_its_mode_in_the_key() -> None:
+    """The flagged half of the same class — verified, not assumed (A5)."""
+    assert sigs("perl -e 'unlink 1'") == ("perl -e",)
+    assert sigs("ruby -e 'x'") == ("ruby -e",)
+    assert classify_shell("perl -e 'x'", SETTINGS).inline_interpreter is True
+    assert sigs("perl script.pl") == ("perl <script>",)
+
+
 def test_eval_stays_an_inline_interpreter() -> None:
     assert classify_shell('eval "ls"', SETTINGS).segments[0].inline_interpreter is True
     assert sigs("eval") == ("eval",)

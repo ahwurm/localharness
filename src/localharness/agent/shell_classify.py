@@ -22,6 +22,23 @@ Two conventions the PRD leaves open, decided here and kept consistent:
   is ``uv run python -c``, and the inner command's destructive / inline / write-target facts
   propagate to the composed segment. Peeling would erase the runner; ignoring the inner
   command would let ``uv run rm -rf x`` read as a plain ``uv run``.
+
+**Residual gaps**, stated here rather than discovered later. Each one ends in an ask, never in a
+silent allow, but an ask is grantable and a grant on one of these keys is broader than it looks:
+
+* **Inline program text is not parsed.** The payload of ``python3 -c``, ``ruby -e``, ``perl -e``,
+  ``awk '{…}'`` and ``powershell -EncodedCommand <base64>`` is another language (or base64), and
+  none of it is read. These commands classify as ``interpreter-inline``, which says truthfully
+  "this runs code the gate cannot see" — and says nothing about what the code does.
+  ``system("rm -rf /")`` inside an awk program is invisible here.
+* **A PowerShell or cmd payload is re-parsed as shell**, which is an approximation of two
+  grammars that are not shell (see :data:`NON_SHELL_INTERPRETERS`).
+* **Signatures are case-sensitive**, except where a shell's own rule says otherwise (the Windows
+  verbs and flags of :data:`CASE_FOLDED_FLAG_INTERPRETERS` and :data:`SPELLED_FLAG_LEADERS`). A
+  differently-cased spelling of a rule-set entry reads as unfamiliar — it asks, rather than
+  matching the read-only or destructive tier.
+* **A script's contents are not read**, by design: the classifier is pure. ``python3 build.py``
+  and ``source ./env.sh`` are keyed as ``<script>`` and whatever the file does is not here.
 """
 
 from __future__ import annotations
@@ -375,6 +392,16 @@ Deriving the behavior from the spelling keeps one table for both worlds — see
 def _is_shell_interpreter(head: str, settings: GateSettings) -> bool:
     """Is this command's inline payload shell text? See :data:`NON_SHELL_INTERPRETERS`."""
     return head in settings.interpreter_commands and head not in NON_SHELL_INTERPRETERS
+
+OPAQUE_INLINE_PROGRAMS = frozenset({"awk", "gawk", "mawk"})
+"""Members of ``settings.inline_by_nature`` whose argument is a program in ANOTHER language.
+
+``eval`` joins its arguments and runs them as SHELL, so they are recursed into. An ``awk``
+program is awk, and feeding ``'{print $1}'`` back through the shell splitter invents segments out
+of its braces and fields — false asks on a command that is usually a read. These keep the
+``inline_interpreter`` flag (the honest part: the command runs code, and ``system("rm -rf x")``
+inside a program nobody parsed is exactly why) and lose the recursion. The same split
+:data:`NON_SHELL_INTERPRETERS` makes for ``python3 -c``."""
 
 COMPOSING_RUNNERS = frozenset({"uv run"})
 """Commands that run another command in a changed environment. PRD §3.2 step 7 lists
@@ -1074,7 +1101,7 @@ def _build(
 
     if _is_shell_interpreter(head, settings):
         payload_texts = _inline_payloads(argv, settings)
-    elif head in settings.inline_by_nature:
+    elif head in settings.inline_by_nature and head not in OPAQUE_INLINE_PROGRAMS:
         payload_texts = _inline_by_nature_payload(argv)
 
     if head in WRAPPER_INLINE_COMMAND_FLAGS:

@@ -456,10 +456,18 @@ the classifier matches these rows that way too and returns the canonical spellin
 would file the same command under a second key (powershell(1) / pwsh(1) "-Command",
 "-EncodedCommand", "-File"; cmd(1) "/c", "/k")."""
 
-INLINE_BY_NATURE_DEFAULT: frozenset[str] = frozenset({"eval"})
+INLINE_BY_NATURE_DEFAULT: frozenset[str] = frozenset({"eval", "awk", "gawk", "mawk"})
 """Commands that are inline interpreters with no flag at all (PRD §3.1 ``interpreter-inline``,
 grantable per owner ruling 2026-09-11 §9.3). ``eval`` takes its code as plain arguments, so
-there is no mode flag to key on — the command itself is the signature."""
+there is no mode flag to key on — the command itself is the signature.
+
+The ``awk`` family is here for the same reason and with one difference (v0.14 critic A5): its
+first positional is a PROGRAM, in awk's own language, and that program can call ``system()`` or
+write through ``print > "file"``. So ``awk`` is an inline interpreter — the segment carries
+``inline_interpreter`` and the human is told this command runs code — but the program text is NOT
+recursed into as shell, because it is not shell (the classifier's ``OPAQUE_INLINE_PROGRAMS`` names
+that half). ``perl -e`` and ``ruby -e`` reach the same class through their flags instead, being
+interpreters with a mode. Source: awk(1) ``system()`` and output redirection."""
 
 WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "env", "nohup", "time", "nice", "ionice", "command", "builtin", "exec", "timeout", "stdbuf",
