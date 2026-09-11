@@ -162,6 +162,16 @@ BRINGUP_FAILED = "The session could not be started: {error}"
 """What the user sees when `_start_async` refuses (no config, an unreachable provider, a model
 the server does not serve). The real reason, verbatim — a Zed panel has no stderr."""
 
+BRINGUP_EXITED = (
+    "The session could not be started — localharness stopped during startup (exit {code}). "
+    "The reason was printed to the agent server's log: in Zed, open the agent panel's menu and "
+    "choose 'View Server Logs'. Common causes: no config yet (`localharness init`), a config the "
+    "current version rejects, or the model server not answering."
+)
+"""`typer.Exit` carries only a number, and startup's real explanation goes to stderr through the
+rich consoles `start_cmd` prints with. Repeating "1" into the panel would be a message that says
+nothing, so this names where the sentence actually is and what usually causes it."""
+
 PERMISSION_OPTION_NAMES: dict[str, str] = {
     "allow_once": "Allow once",
     "allow_always": "Always allow in this workspace",
@@ -512,7 +522,12 @@ class AcpChannel(ChannelAdapter):
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 — typer.Exit included; the panel gets the reason
-            self._session_error = BRINGUP_FAILED.format(error=exc)
+            code = getattr(exc, "exit_code", None)
+            self._session_error = (
+                BRINGUP_EXITED.format(code=code)
+                if code is not None
+                else BRINGUP_FAILED.format(error=exc)
+            )
             log.exception("acp session bring-up failed")
         finally:
             # Set unconditionally: a failed bring-up must release the waiting prompt, or the
