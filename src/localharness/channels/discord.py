@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator
 
 import structlog
 
-from localharness.channels.base import ChannelAdapter
+from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import ChannelStartError
 from localharness.core.bus import EventBus
 from localharness.core.events import (
@@ -273,7 +273,7 @@ class DiscordChannel(ChannelAdapter):
             PERMISSION_LEGEND_GRANTABLE if request.grantable else PERMISSION_LEGEND_UNGRANTABLE
         )
         sent = await target.channel.send(
-            PERMISSION_MESSAGE.format(display=request.display, legend=legend)
+            PERMISSION_MESSAGE.format(display=sanitize_for_display(request.display), legend=legend)
         )
         waiter: asyncio.Queue = asyncio.Queue()
         self._reaction_waiters[int(sent.id)] = waiter
