@@ -37,6 +37,11 @@ EVASIONS: list[tuple[str, tuple[str, ...], bool, bool, tuple[str, ...]]] = [
     ("timeout 30 rm -rf x", ("rm -rf",), True, False, ()),
     ("nice -n 10 rm -rf x", ("rm -rf",), True, False, ()),
     ("sudo rm -rf /", ("sudo",), True, False, ()),
+    # v0.14 critic A1 — the two shell builtins whose option shapes the shared table got wrong
+    ("command -p rm -rf x", ("rm -rf",), True, False, ()),  # -p is a boolean, not a value flag
+    ("command -v rm", ("rm",), False, False, ()),  # a lookup, not a delete: never destructive
+    ("exec -a NAME rm -rf x", ("rm -rf",), True, False, ()),  # -a DOES take a value
+    ("exec rm -rf x", ("rm -rf",), True, False, ()),
     ("A=1 rm -rf x", ("rm -rf",), True, False, ()),  # the assignment prefix, without env
     ("/bin/rm -rf x", ("rm -rf",), True, False, ()),  # an absolute spelling is still rm
     ("for f in *; do rm -rf $f; done", ("f", "rm -rf"), True, False, ()),  # loop body
