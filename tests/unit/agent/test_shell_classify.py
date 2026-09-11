@@ -423,6 +423,48 @@ def test_find_is_read_only_only_without_a_payload() -> None:
     assert classify_shell("find . -delete", SETTINGS).segments[0].read_only is False
 
 
+@pytest.mark.parametrize("command,signature,targets", [
+    # the review repro: the cluster test read only the first letter, so these signed as a plain
+    # read `sed` and their in-place write was never reported.
+    ("sed -Ei 's/a/b/' f", "sed -i", ("f",)),
+    ("sed -ni 's/a/b/' f", "sed -i", ("f",)),
+    ("sed -ri 's/a/b/' f", "sed -i", ("f",)),
+    ("sed -i 's/a/b/' f", "sed -i", ("f",)),
+    ("sed -i.bak 's/a/b/' f", "sed -i", ("f",)),
+    ("sed --in-place=.bak s/a/b/ f", "sed -i", ("f",)),
+    ("sed -Ei.bak 's/a/b/' f", "sed -i", ("f",)),
+    # a boolean cluster with no `i` is still a read
+    ("sed -nE 'p' f", "sed -n", ()),
+    ("sed -En 'p' f", "sed -n", ()),
+    ("sed 's/a/b/' f", "sed", ()),
+    # `i` inside an ATTACHED script is the script's, not a flag (sed -e takes its value attached)
+    ("sed -e's/i/x/' f", "sed", ()),
+])
+def test_a_short_option_cluster_still_carries_its_flags(
+    command: str, signature: str, targets: tuple[str, ...]
+) -> None:
+    result = classify_shell(command, SETTINGS)
+    assert result.signatures == (signature,)
+    assert result.write_targets == targets
+
+
+@pytest.mark.parametrize("command,signature", [
+    ("rm -fr x", "rm -rf"),
+    ("rm -vrf x", "rm -rf"),
+    ("rm -rfv x", "rm -rf"),
+    ("rm -if x", "rm -f"),
+    ("chmod -Rv 777 x", "chmod -R"),
+    ("git clean -xfd", "git clean -f"),
+])
+def test_a_destructive_flag_inside_a_cluster_is_canonicalized(
+    command: str, signature: str
+) -> None:
+    """Same cluster rule on the verbs whose flag IS the danger (finding R7)."""
+    segment = classify_shell(command, SETTINGS).segments[0]
+    assert segment.signature == signature
+    assert segment.destructive is True
+
+
 def test_sed_modes_are_different_keys() -> None:
     assert sigs("sed -n '1,5p' file") == ("sed -n",)
     assert sigs("sed -i.bak s/a/b/ f1 f2") == ("sed -i",)

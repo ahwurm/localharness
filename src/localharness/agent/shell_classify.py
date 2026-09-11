@@ -263,6 +263,11 @@ SED_SCRIPT_FLAGS = frozenset({"-e", "--expression", "-f", "--file"})
 """When present, every positional argument of ``sed`` is a file; otherwise the first
 positional is the script and the rest are files."""
 
+SED_ATTACHED_VALUE_LETTERS = "efl"
+"""sed's short options whose argument may be written ATTACHED (``-e's/a/b/``, ``-f script``,
+``-l 70``). Inside a cluster, everything after one of these letters is that argument, so
+``sed -e's/i/x/'`` is not read as an in-place edit (sed(1))."""
+
 
 # --------------------------------------------------------------------------- public API
 
@@ -1009,7 +1014,9 @@ def _signature(
 
     if head == "sed":
         for canonical, spellings in SED_MODE_FLAGS:
-            if any(_matches_flag(token, spellings) for token in rest):
+            if any(
+                _matches_flag(token, spellings, SED_ATTACHED_VALUE_LETTERS) for token in rest
+            ):
                 return f"sed {canonical}", False
 
     if head in settings.source_commands:
@@ -1186,13 +1193,31 @@ def _destructive_flags(base: str, rest: list[str], settings: GateSettings) -> st
     return suffix + "".join(f" --{flag}" for flag in longs)
 
 
-def _matches_flag(token: str, spellings: tuple[str, ...]) -> bool:
-    """A flag matches its own spelling or a long form with an attached value/suffix."""
-    return any(
-        token == spelling or token.startswith(f"{spelling}=") or
-        (len(spelling) == 2 and spelling == "-i" and token.startswith("-i"))
-        for spelling in spellings
-    )
+def _matches_flag(token: str, spellings: tuple[str, ...], attached_value_letters: str = "") -> bool:
+    """Does this token carry one of these flags — exact, long-with-value, or inside a cluster?
+
+    Short options cluster, so ``sed -Ei`` is ``sed -i`` with extended regexes. The old test was
+    ``token.startswith("-i")``, which saw only the cluster's FIRST letter: ``-Ei``, ``-ni`` and
+    ``-ri`` all signed as a plain read ``sed`` with no write target (finding R7).
+
+    ``attached_value_letters`` are the letters whose argument may be attached (sed's ``-e``,
+    ``-f``, ``-l``): everything after one of them is that argument, not more flags, so
+    ``sed -e's/i/x/'`` is not an in-place edit. A flag's own attached suffix is still its own —
+    ``-i.bak`` is ``-i`` (sed(1)).
+    """
+    for spelling in spellings:
+        if token == spelling or token.startswith(f"{spelling}="):
+            return True
+        if len(spelling) != 2 or not spelling.startswith("-"):
+            continue
+        if not token.startswith("-") or token.startswith("--"):
+            continue
+        for letter in token[1:]:
+            if letter == spelling[1]:
+                return True
+            if letter in attached_value_letters:
+                break
+    return False
 
 
 # --------------------------------------------------------------------------- step 8
