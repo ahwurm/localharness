@@ -227,6 +227,77 @@ def test_the_base_channel_cannot_ask_and_says_so_loudly():
 
 
 @pytest.mark.asyncio
+async def test_the_question_is_drawn_under_patch_stdout_and_never_blocks_a_writer():
+    """D6: every other output path is protected from concurrent writers; this one was not.
+
+    A turn does not stop while a human thinks. Subagents keep streaming, and each of those writes
+    went straight onto the terminal the option legend was painting, corrupting the line the
+    person answers from. Two things have to hold at once, and one of them is a trap:
+
+    1. `patch_stdout(raw=True)` is active while the legend is up, so a concurrent write renders
+       ABOVE the application instead of through it.
+    2. `_output_lock` is NOT held across the wait. It is the lock every writer takes, so holding
+       it until a human answers would freeze the whole session behind the dialog — the obvious
+       fix and the wrong one.
+    """
+    import sys
+
+    from prompt_toolkit.patch_stdout import StdoutProxy
+
+    async def _tokens():
+        for token in ("sub", "agent"):
+            yield token
+
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        before = sys.stdout
+        task = asyncio.create_task(ch.ask_permission(_request()))
+        for _ in range(100):  # let the app reach its first paint
+            await asyncio.sleep(0.01)
+            if isinstance(sys.stdout, StdoutProxy):
+                break
+        assert isinstance(sys.stdout, StdoutProxy), "the question ran outside patch_stdout"
+
+        # The load-bearing half: a subagent streaming mid-question must not wait for the human.
+        streamed = await asyncio.wait_for(ch.send_streaming(_tokens(), agent_id="child"), 5.0)
+        assert streamed == "subagent"
+
+        inp.send_text("y")
+        assert (await asyncio.wait_for(task, timeout=10.0)).kind == "allow_once"
+        assert sys.stdout is before, "patch_stdout outlived the question"
+
+    printed = ch._console.file.getvalue()
+    assert "Permission needed" in printed and "subagent" in printed
+
+
+@pytest.mark.asyncio
+async def test_a_redirected_transcript_keeps_the_question_off_the_pipe(monkeypatch):
+    """The patch replaces `sys.stderr` too and routes it into the app session's output — which
+    on the redirected path IS the pipe. So the stdout-only guard is part of the fix, not an
+    oversight: `localharness start > file` must still draw the question on the terminal."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    ch = _channel()
+    ch._console = Console(file=StringIO(), force_terminal=False, width=120, theme=TERMINAL_THEME)
+    err = StringIO()
+    ch._err_console = Console(file=err, force_terminal=True, width=120, theme=TERMINAL_THEME)
+    assert ch.can_run_input_box() is False
+
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        monkeypatch.setattr(
+            "prompt_toolkit.output.defaults.create_output", lambda **kw: DummyOutput()
+        )
+        inp.send_text("n")
+        decision = await asyncio.wait_for(ch.ask_permission(_request()), timeout=10.0)
+
+    assert decision.kind == "reject_once"
+    assert "cargo publish" in err.getvalue(), "the question must go to the terminal, not the pipe"
+    assert ch._console.file.getvalue() == ""
+
+
+@pytest.mark.asyncio
 async def test_the_persistent_box_is_restored_after_a_question():
     """The box and the question cannot both own the terminal; the box must come back."""
     ch = _channel()

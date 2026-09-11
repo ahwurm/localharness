@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -114,6 +115,22 @@ construction, so an "always" reaction would be a lie."""
 PERMISSION_DEFAULT_DECISION = "reject_once"
 """Fail closed when there is nowhere to post the question, and what the gate records when the
 wait runs out (PRD §3.5 "deny on timeout")."""
+
+PERMISSION_TIMEOUT_LINE = "⌛ No answer within {seconds:.0f}s — **denied**. Ask again to retry."
+"""What the 🛑 message says once the gate's deadline has passed (D7).
+
+Until this, an expired question stayed on screen exactly as it looked when it was asked: three
+reactions, no answer, no sign it had stopped mattering. Someone coming back to their phone ten
+minutes later tapped ✅ and nothing happened — the waiter was gone, so the tap was a silent
+no-op, and the only visible evidence pointed the other way. The line closes the message: the
+answer is recorded, the call was denied, and the way to change that is to ask again."""
+
+PERMISSION_TIMEOUT_POST_TIMEOUT_S = 10.0
+"""How long the expiry annotation may take before it is abandoned.
+
+It is posted while the gate is already cancelling this coroutine, so it must not be able to
+hold the turn open: a wedged gateway costs the annotation, never the session. Ten seconds is
+Discord's own REST timeout order — long enough that an ordinary edit always lands."""
 
 PERMISSION_MESSAGE = "🛑 **Permission needed**\n`{display}`\n{legend}"
 PERMISSION_LEGEND_GRANTABLE = "✅ allow once  ·  ♾️ always in this workspace  ·  ❌ no"
@@ -260,6 +277,13 @@ class DiscordChannel(ChannelAdapter):
         `permissions.ask.timeout_s` (or the tool's own timeout) and records a `reject_once` when
         it runs out, so a second deadline here would only be a second place to get it wrong. A
         reaction from anyone not on the allowlist is ignored, not counted as an answer.
+
+        The gate's deadline arrives here as a cancel, and the message is annotated on the way out
+        (:data:`PERMISSION_TIMEOUT_LINE`) before the cancel is re-raised. That annotation is the
+        only thing standing between an expired question and a lie: the 🛑 message and its three
+        reactions look identical whether the answer is still wanted or was recorded as a denial
+        five minutes ago, and a late tap on ✅ does nothing at all, because the waiter it would
+        have reached is gone.
         """
         from localharness.agent.gate_types import Decision
 
@@ -272,11 +296,13 @@ class DiscordChannel(ChannelAdapter):
         legend = (
             PERMISSION_LEGEND_GRANTABLE if request.grantable else PERMISSION_LEGEND_UNGRANTABLE
         )
-        sent = await target.channel.send(
-            PERMISSION_MESSAGE.format(display=sanitize_for_display(request.display), legend=legend)
+        body = PERMISSION_MESSAGE.format(
+            display=sanitize_for_display(request.display), legend=legend
         )
+        sent = await target.channel.send(body)
         waiter: asyncio.Queue = asyncio.Queue()
         self._reaction_waiters[int(sent.id)] = waiter
+        asked_at = time.monotonic()
         try:
             for emoji in options:
                 try:
@@ -287,8 +313,38 @@ class DiscordChannel(ChannelAdapter):
                 kind = options.get(await waiter.get())
                 if kind is not None:
                     return Decision(kind=kind)
+        except asyncio.CancelledError:
+            await self._annotate_expired(sent, body, time.monotonic() - asked_at)
+            raise
         finally:
             self._reaction_waiters.pop(int(sent.id), None)
+
+    async def _annotate_expired(self, sent: Any, body: str, waited_s: float) -> None:
+        """Mark the 🛑 message as expired and denied (D7).
+
+        An edit rather than a new message, so the annotation is attached to the question it
+        answers — someone scrolling back reads one closed exchange, not a question here and a
+        verdict thirty lines later. A channel where the bot cannot edit (someone else's message,
+        a permissions change) falls back to a reply, and a failure of both is logged and dropped:
+        this runs during the gate's cancellation and must never become the reason a turn hangs
+        or raises something other than the cancel it was given.
+
+        The seconds are MEASURED, not the configured deadline — what the person actually waited
+        is the honest number, and this coroutine is never told what the gate's budget was.
+        """
+        line = PERMISSION_TIMEOUT_LINE.format(seconds=waited_s)
+        try:
+            await asyncio.wait_for(
+                self._edit_or_reply(sent, body, line), PERMISSION_TIMEOUT_POST_TIMEOUT_S
+            )
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — never mask the cancel
+            log.warning("discord_permission_timeout_note_failed", message_id=getattr(sent, "id", None))
+
+    async def _edit_or_reply(self, sent: Any, body: str, line: str) -> None:
+        try:
+            await sent.edit(content=f"{body}\n{line}")
+        except Exception:  # noqa: BLE001 — fall back to saying it somewhere the person will see
+            await sent.reply(line)
 
     async def _send(self, content: str) -> None:
         msg = self._current_msg
