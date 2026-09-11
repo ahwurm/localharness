@@ -225,25 +225,53 @@ READ_ONLY_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git remote",
     "sed -n", "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "readlink",
     "id", "whoami", "hostname", "nproc", "free", "uptime", "ps", "ss", "lsof",
+    "docker ps", "docker logs", "docker images", "docker inspect", "docker version", "docker info",
 })
 """PRD §3.1 ALLOW tier for shell. Union of Claude Code's built-in read-only Bash set
 (code.claude.com/docs/en/permissions) and the read-only tokens observed in the 384-session
 dogfood corpus (PRD §5). ``find`` is read-only only without ``-exec``/``-delete`` (the classifier
-lifts those payloads, PRD §3.2 step 5)."""
+lifts those payloads, PRD §3.2 step 5).
+
+The docker row is the other half of narrowing the destructive set below: asking about
+``docker ps`` is the fatigue the ASK tier exists to avoid (docker-ps(1), docker-logs(1),
+docker-images(1), docker-inspect(1) — all report, none of them start, stop or remove anything)."""
 
 DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "rm -r", "rm -f", "rm -rf",
     "git push --force", "git reset --hard", "git clean -f",
     "chmod -R", "chown", "chgrp",
     "sudo", "su", "doas",
-    "docker", "docker compose", "docker-compose",
+    "docker exec", "docker run", "docker start", "docker restart", "docker stop", "docker kill",
+    "docker rm", "docker rmi", "docker system prune",
+    "docker volume rm", "docker volume prune", "docker network rm",
+    "docker compose up", "docker compose down", "docker compose exec", "docker compose run",
+    "docker compose rm",
+    "docker-compose up", "docker-compose down", "docker-compose exec", "docker-compose run",
+    "docker-compose rm",
     "dd", "mkfs", "shred", "truncate",
     "find -delete",
 })
 """PRD §3.1 ungrantable ``shell-destructive`` class: matched on the canonical signature
 (flags included, PRD §3.2 step 7), before any grant lookup. Sources: PRD §3.1 table; Claude Code
 auto-mode block list (force push, ``git reset --hard``, recursive delete); the project's own
-shipped deny defaults (sudo, ``rm -rf``, docker). Pipe-to-shell is a separate rule below."""
+shipped deny defaults (sudo, ``rm -rf``, docker). Pipe-to-shell is a separate rule below.
+
+A BARE name here condemns every spelling of it — right for ``sudo``, ``su``, ``doas``, ``dd``,
+``mkfs`` and ``shred``, which do only one thing. Docker is not like that, so it is enumerated by
+subcommand instead (owner ruling on review finding R9): the entries above are the ones that run
+code on the host (``exec``, ``run``, ``compose up/run/exec``) or destroy state (``stop``,
+``kill``, ``rm``, ``rmi``, ``prune``, ``compose down``), and both spellings of compose carry
+their own subcommand. Everything else docker does is left where it belongs — ``ps``, ``logs``,
+``images``, ``inspect``, ``version`` and ``info`` are reads in the ALLOW tier above, and
+``build``, ``pull``, ``push``, ``tag``, ``login`` are ordinary unfamiliar commands the human can
+grant once. The bare ``docker`` entry this replaces made every one of those ungrantable, which is
+ask-fatigue on commands nobody needs protection from. The shipped deny defaults still hard-deny
+the worst of these first (stop, kill, rm, ``compose down``): DENY is a tier above ASK, not a
+substitute for these entries.
+
+Residual, named rather than hidden: docker's management-command spellings of the same operations
+(``docker container rm``, ``docker container exec/run``, ``docker image rm``) are NOT in this set,
+so they classify as unfamiliar and can be granted. They are aliases for entries that are here."""
 
 DESTRUCTIVE_FLAG_VERBS_DEFAULT: dict[str, tuple[str, ...]] = {
     "rm": ("r", "f"),
@@ -331,9 +359,13 @@ authorized_keys`` is a write to ``~/.ssh/authorized_keys``, review finding R2a).
 them unfamiliar commands that asked."""
 
 SUBCOMMAND_TOOLS_DEFAULT: frozenset[str] = frozenset({
-    "git", "uv", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "docker", "cargo", "make", "gh", "kubectl",
+    "git", "uv", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "docker", "docker-compose",
+    "cargo", "make", "gh", "kubectl",
 })
-"""PRD §3.2 step 7: the signature includes the first subcommand (``git status`` ≠ ``git push``)."""
+"""PRD §3.2 step 7: the signature includes the first subcommand (``git status`` ≠ ``git push``).
+
+``docker-compose`` is the old standalone spelling of ``docker compose`` and needs the same
+treatment, or ``docker-compose up`` and ``docker-compose ps`` would share one key."""
 
 PAYLOAD_COMMANDS_DEFAULT: frozenset[str] = frozenset({"find", "xargs", "parallel"})
 """PRD §3.2 step 5: ``find -exec/-execdir/-ok CMD``, ``xargs CMD`` and ``parallel CMD ::: args``

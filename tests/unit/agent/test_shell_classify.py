@@ -735,10 +735,66 @@ def test_a_bare_ssh_is_still_an_inline_interpreter() -> None:
     assert segment.inline_interpreter is True
 
 
-def test_docker_stays_ungrantable_under_every_subcommand() -> None:
-    """`docker` is in the destructive defaults; the subcommand key used to escape it."""
-    for command in ("docker exec c ls", "docker run -it x", "docker ps", "docker compose up"):
-        assert classify_shell(command, SETTINGS).destructive is True, command
+DOCKER: list[tuple[str, str, bool, bool]] = [
+    # (command, signature, read-only, destructive) — docker is enumerated by subcommand: a bare
+    # `docker` entry made `docker ps` ungrantable, which is ask-fatigue on a read.
+    ("docker ps -a", "docker ps", True, False),
+    ("docker logs -f c", "docker logs", True, False),
+    ("docker images", "docker images", True, False),
+    ("docker inspect c", "docker inspect", True, False),
+    ("docker version", "docker version", True, False),
+    ("docker info", "docker info", True, False),
+    ("docker build .", "docker build", False, False),
+    ("docker pull alpine", "docker pull", False, False),
+    ("docker push my/image", "docker push", False, False),
+    ("docker tag a b", "docker tag", False, False),
+    ("docker login", "docker login", False, False),
+    ("docker run -it alpine", "docker run", False, True),
+    ("docker start c", "docker start", False, True),
+    ("docker restart c", "docker restart", False, True),
+    ("docker stop c", "docker stop", False, True),
+    ("docker kill c", "docker kill", False, True),
+    ("docker rm c", "docker rm", False, True),
+    ("docker rmi i", "docker rmi", False, True),
+    ("docker system prune -a", "docker system prune", False, True),
+    ("docker volume rm v", "docker volume rm", False, True),
+    ("docker volume prune", "docker volume prune", False, True),
+    ("docker volume ls", "docker volume ls", False, False),
+    ("docker network rm n", "docker network rm", False, True),
+    ("docker compose up -d", "docker compose up", False, True),
+    ("docker compose down", "docker compose down", False, True),
+    ("docker compose run svc x", "docker compose run", False, True),
+    ("docker compose rm", "docker compose rm", False, True),
+    ("docker compose ps", "docker compose ps", False, False),
+    ("docker-compose up -d", "docker-compose up", False, True),
+    ("docker-compose down", "docker-compose down", False, True),
+    ("docker-compose ps", "docker-compose ps", False, False),
+]
+
+
+@pytest.mark.parametrize("command,signature,read_only,destructive", DOCKER,
+                         ids=[case[0] for case in DOCKER])
+def test_docker_is_judged_by_its_subcommand(
+    command: str, signature: str, read_only: bool, destructive: bool
+) -> None:
+    segment = classify_shell(command, SETTINGS).segments[0]
+    assert segment.signature == signature
+    assert segment.read_only is read_only
+    assert segment.destructive is destructive
+
+
+def test_docker_exec_is_ungrantable_and_its_payload_is_still_argv() -> None:
+    """`docker exec` runs code on the host, and it execs argv — no shell to re-quote through."""
+    result = classify_shell("docker exec c sh -c 'rm -rf /'", SETTINGS)
+    assert result.signatures == ("docker exec", "sh -c", "rm -rf")
+    assert result.segments[0].destructive is True
+    assert result.destructive is True
+
+
+def test_a_management_group_is_not_the_whole_key() -> None:
+    """A grant on `docker volume` must not cover `docker volume rm`."""
+    assert sigs("docker volume rm v") != sigs("docker volume ls")
+    assert sigs("docker container rm c") == ("docker container rm",)
 
 
 def test_a_flagged_destructive_entry_does_not_condemn_the_plain_verb() -> None:

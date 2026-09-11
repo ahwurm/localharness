@@ -199,7 +199,10 @@ one positional — the host or the container — stands between the options and 
 last field is the difference between the two: ``ssh`` concatenates its remaining arguments with
 spaces and hands the string to the remote user's shell, so the payload is shell TEXT; ``docker
 exec`` execs the argv it is given with no shell at all, so the payload is argv and
-``docker exec c sh -c 'rm -rf /srv'`` keeps its quoting (ssh(1), docker-exec(1))."""
+``docker exec c sh -c 'rm -rf /srv'`` keeps its quoting (ssh(1), docker-exec(1)).
+
+``docker compose exec`` is not lifted here — one prefix per command — but it is in the
+destructive defaults under its own signature, so it is ungrantable and the human sees it."""
 
 SUBCOMMAND_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "git": frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
@@ -207,6 +210,22 @@ SUBCOMMAND_VALUE_FLAGS: dict[str, frozenset[str]] = {
 """Global flags that take a value *before* the subcommand. Without this,
 ``git -c core.sshCommand=x push --force`` would read its subcommand as the ``-c`` value
 (PRD §3.2 step 7)."""
+
+NESTED_SUBCOMMAND_GROUPS: dict[str, frozenset[str]] = {
+    "docker": frozenset({"compose", "system", "volume", "network", "container", "image"}),
+}
+"""Subcommands that are a GROUP rather than a command, so the signature takes one more word.
+
+``docker compose`` is not a thing anyone runs — ``docker compose up`` and ``docker compose ps``
+are, and they are not the same command (one starts containers, the other lists them). Same for
+the management groups whose members the destructive defaults name: ``docker system prune``,
+``docker volume rm``, ``docker network rm``. Without this the group would be the whole key and a
+grant on ``docker volume`` would cover ``rm`` (docker(1) "Management Commands").
+
+``container`` and ``image`` are here for the key, not for a verdict: their destructive members
+(``docker container rm``, ``docker image rm``) are the management spellings of ``docker rm`` and
+``docker rmi`` and are NOT in the destructive defaults, so they are grantable — but at least the
+grant is for that one operation rather than for the whole group."""
 
 FLAG_ALIASES: dict[str, tuple[str, ...]] = {
     "r": ("r", "R"),
@@ -1184,9 +1203,14 @@ def _signature(
 
     base = head
     if head in settings.subcommand_tools:
-        subcommand = _first_subcommand(head, rest)
-        if subcommand:
+        found = _first_subcommand(head, rest)
+        if found:
+            subcommand, after = found
             base = f"{head} {subcommand}"
+            if subcommand in NESTED_SUBCOMMAND_GROUPS.get(head, frozenset()):
+                nested = _first_subcommand(head, after)
+                if nested:
+                    base = f"{base} {nested[0]}"
 
     if head == "sed":
         for canonical, spellings in SED_MODE_FLAGS:
@@ -1332,8 +1356,12 @@ def _is_dangerous_git_key(key: str, settings: GateSettings) -> bool:
     )
 
 
-def _first_subcommand(head: str, rest: list[str]) -> str | None:
-    """First positional argument, skipping global flags and their values (PRD §3.2 step 7)."""
+def _first_subcommand(head: str, rest: list[str]) -> tuple[str, list[str]] | None:
+    """First positional argument and what follows it, skipping global flags and their values.
+
+    The tail is what lets a group take one more word (:data:`NESTED_SUBCOMMAND_GROUPS`); PRD
+    §3.2 step 7.
+    """
     value_flags = SUBCOMMAND_VALUE_FLAGS.get(head, frozenset())
     index = 0
     while index < len(rest):
@@ -1341,7 +1369,7 @@ def _first_subcommand(head: str, rest: list[str]) -> str | None:
         if token.startswith("-"):
             index += 2 if token in value_flags else 1
             continue
-        return token
+        return token, rest[index + 1:]
     return None
 
 
