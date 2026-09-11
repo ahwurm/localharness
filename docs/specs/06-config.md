@@ -100,23 +100,27 @@ question for the next interactive run. A `permissions.mode` set explicitly to an
 `--config-dir`, `LOCALHARNESS_DIR` and `LOCALHARNESS_HOME` replace the config directory outright
 and skip discovery entirely: no workspace layer applies when any of them is set.
 
-**`start` offers to create one when a project has none.** Standing in a project with no
-`.localharness/` anywhere above you, an interactive `localharness start` asks once: `No workspace
-here — create ./.localharness for this project?`, default no. Answer yes and the directory is
-created by the same scaffolder `init --workspace` uses — and the session you are starting is
-already layered on it, with no second command to run. **A "no" is remembered**, per directory,
-forever: the answer goes in `~/.localharness/declined_workspace_offers.yaml`, keyed by the
-resolved path exactly as the trust store is, and that directory is never asked again. It is a
-sibling file rather than an entry in `trusted_workspaces.yaml` because it records a preference,
-not a trust boundary. Delete the entry (or the file) to be asked again; `init --workspace` and
-creating the directory by hand ignore the store entirely, so a recorded no never stands between
-you and a workspace you went and asked for. Only an answered prompt records: an EOF, or any run
-that could not ask, leaves the store untouched. The offer is silent, and creates nothing,
-wherever asking would be wrong: no terminal, `--no-input`, an explicit `--config-dir` or either env
-var (a full replacement is not a project), a workspace already found up-tree (whatever the trust
-gate then decided about loading it), `$HOME` or the machine's global config directory, which are
-not projects, and any directory whose offer was already declined. It is the one prompt in the harness that writes to disk, so those guards are the
-design rather than a detail of it.
+**One startup question, and a "yes" also creates the workspace.** Standing in a project with no
+`.localharness/` anywhere above you, an interactive session asks the trust question and nothing
+else — the separate `No workspace here — create ./.localharness for this project?` offer is gone,
+because two questions about the same folder at the same moment is exactly the fatigue v0.14.1
+removes. Answer yes and two things happen: the trust is recorded in
+`~/.localharness/trusted_workspaces.yaml`, and `./.localharness` is created by the same scaffolder
+`init --workspace` uses, so this project's sessions, memory and state live with the project from
+this session on. Answer no and **nothing is created**, the session runs `guarded`, and the answer
+is recorded so the question is not asked here again. Where `./.localharness` already exists only
+the trust half applies: there is nothing to create, and a recognized workspace is not asked about
+at all.
+
+**Recognition reads EARLIER sessions only.** The evidence that makes a workspace familiar is
+session files written before this one; the session asking the question never counts itself, so a
+first run in a new folder cannot recognize itself into being trusted.
+
+Asking is skipped, and nothing is created, wherever asking would be wrong: no terminal,
+`--no-input`, an explicit `--config-dir` or either env var (a full replacement is not a project),
+`$HOME` or the machine's global config directory, which are not projects. `init --workspace` and
+creating the directory by hand ignore all of this — a recorded no never stands between you and a
+workspace you went and asked for.
 
 **`--no-input`, for runs with nobody watching.** `start`, `doctor`, `validate` and `agent create`
 take `--no-input`: never ask about an untrusted workspace, skip that layer, say on stderr that it was
@@ -623,17 +627,28 @@ Because these are unioned into every agent at resolution time, a config that dec
 the live list at run time, so what the CLI tells you cannot drift from what ships; the number in
 this page is prose, and drifts the moment a default is added without editing here.
 
+**Two shipped defaults decide more than their size suggests.** `bash_exec(rm -rf *)` and
+`bash_exec(*rm -rf *)` (a v0.13 default, unchanged in v0.14.1) refuse `rm -rf` **outright, inside
+the project or outside it** — embedded spellings like `cd /tmp && rm -rf x` included — before the
+permission gate classifies the call at all, so `auto`'s "a delete inside the project runs silently"
+never applies to `rm -rf` unless you remove that entry from your own `deny_patterns`. `write(*/.env)`
+does the same for `.env` writes, which is why `.env` is not on `AUTO_BLACKLIST`: it is already
+denied a tier earlier.
+
 **`workspace_root` confines where files are written.** Set it and every `write`/`edit` target path
 and every `bash_exec` working directory must resolve inside that directory — symlinks followed
 first — or the tool returns `permission_denied`.
 
-Its resolved value depends on whether a workspace layer applies:
+**Unset means unconfined, workspace or no workspace** — that is the shipped default, and from
+v0.14.1 the loader no longer fills it in with the project folder when a workspace layer applies.
+The gate owns the boundary now (it derives one from where you stand and decides what asks), so
+having a second, silent notion of "the project folder" in config was one place too many.
+LocalHarness is a local agent harness whose whole point is acting on your machine, so writing files
+is a feature, not an escape.
 
-- **No workspace** — unset means **unconfined**, and that is the shipped default. LocalHarness is a
-  local agent harness whose whole point is acting on your machine, so writing files is a feature,
-  not an escape.
-- **Inside a workspace** — an agent that sets nothing gets the project folder (the directory holding
-  `.localharness/`) filled in by the loader. A value you write yourself always wins, in either case.
+**A value you write yourself is a hard confinement**, and it is enforced as a refusal rather than a
+prompt: the tool returns `permission_denied`, and no grant, mode or answer lifts it. It is the one
+filesystem confinement the harness has, so set it when you want one.
 
 Read it at its own size: it is **not a sandbox**. It constrains those tool arguments, not the
 process — a command run through `bash_exec` can still leave the folder, and the deny patterns remain
@@ -1252,7 +1267,7 @@ list — every field is declared there with its own description.
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
 | `permissions.deny_patterns` | list[string] | 25 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
-| `permissions.workspace_root` | string or null | null, or the project folder inside a workspace | abs or `~/…` path | Filesystem confinement for write/edit/bash_exec. Null and no workspace = unconfined |
+| `permissions.workspace_root` | string or null | `null` | abs or `~/…` path | Hard filesystem confinement for write/edit/bash_exec, enforced as `permission_denied`. Null (the default, workspace or not, since v0.14.1) = unconfined |
 | `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
 | `permissions.budget.max_duration_minutes` | float or null | `null` | 0.1–1440 | Max turn duration; null (the default since 0.13.3) = no time limit. A `config.yaml` written by an older `init` still carries `30.0` and still pins it |
 | `permissions.budget.max_tool_calls` | int or null | null | 0+ | Separate ceiling on dispatched tool calls; null = `max_actions` alone governs |

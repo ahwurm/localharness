@@ -70,13 +70,18 @@ memory learned inside an untrusted repository can reach your global memory **if 
 The harness never promotes anything on its own — nothing runs it, nothing suggests it — and the
 promoted copy records which project it came from, so you can see the origin and undo the copy.
 
-**Inside a workspace, file writes and commands default to the project folder.** When a workspace
-layer applies, the write and edit tools and the working directory for `bash_exec` default to the
-folder that contains `.localharness/` — the project you are standing in. Outside a workspace the
-default is unchanged and those tools are unconfined, exactly as before. A `workspace_root` you set
-in your own config still wins either way. Read this honestly: it is a default that narrows what the
-tools reach by accident, not a sandbox. A command run through `bash_exec` can still leave that
-folder, and the deny patterns remain the mechanism that stops specific actions.
+**`workspace_root` is yours to set, and nothing sets it for you.** v0.13 quietly filled it in with
+the project folder whenever a workspace layer applied, so "where files are written" was decided in
+two places at once — a silent config default and the gate. It is one place now: the gate derives
+the boundary from where you stand and decides what asks, and the loader fills nothing in.
+`permissions.workspace_root` written in your own config is still a **hard confinement**, and the
+strictest thing in this document: every `write`/`edit` target path and every `bash_exec` working
+directory must resolve inside it, symlinks followed first, or the tool returns `permission_denied`
+— a refusal, not a question, with no prompt and no grant that can lift it. Unset is the default,
+inside a workspace and out, and means unconfined. Read that honestly: unconfined is the shipped
+posture, and the gate — not a path check — is what stands in front of a tool call. Even when you do
+set it, it is not a sandbox: a command run through `bash_exec` can still leave the folder, and the
+deny patterns remain the mechanism that stops specific actions.
 
 ## Human approval gate
 
@@ -126,7 +131,15 @@ was interrupting people, and because a list of ways to lose data irreversibly is
 read and argue with. Each step below says what it does in `auto`.
 
 1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
-   grant, not a mode.
+   grant, not a mode. Two shipped defaults matter for how the rest of this section reads, and both
+   are v0.13 entries that v0.14.1 did not touch: **`bash_exec(rm -rf *)` and
+   `bash_exec(*rm -rf *)` refuse `rm -rf` outright** — inside your project or outside it, embedded
+   in a `cd x && rm -rf y` or not — before the gate classifies anything, and `write(*/.env)` does
+   the same for `.env` writes. So "a delete inside the project runs without asking" below means the
+   deletes this list has not already refused; a plain `rm -rf build` is *denied*, not allowed and
+   not asked about. If you want in-project `rm -rf` to run, remove that entry from
+   `permissions.deny_patterns` — it is your list, and the gate's blacklist will then ask about the
+   ones that point outside the project.
 2. **`AUTO_BLACKLIST`: ask, and no answer is remembered.** In a trusted workspace this is the
    **whole** of what still asks. Everything not on it runs without asking. It is one structure in
    `agent/gate_types.py` with four fields, listed here in that order:
@@ -136,7 +149,10 @@ read and argue with. Each step below says what it does in `auto`.
      `ri`, `del`, `erase`, `rd`. Nothing about these verbs is dangerous on its own — `rm -rf
      build` is what a build script does — so only the target decides, and a target the classifier
      cannot place (a variable, a glob, a substitution, a `cd` it could not follow, or no target at
-     all) counts as outside: the whole narrowing rests on knowing where the command points.
+     all) counts as outside: the whole narrowing rests on knowing where the command points. Note
+     what step 1 already did: with the shipped deny patterns in place, `rm -rf` never reaches this
+     rule at all — it is refused outright either way — so in practice this rule governs the other
+     verbs, and `rm -rf` only for someone who removed that pattern.
    - **`irreversible_signatures` — commands that ask wherever they point.** `sudo`, `su`, `doas`;
      `dd`, `mkfs`, `shred`, `format`, `diskpart`; `git push --force`, `git push --delete`,
      `git reset --hard`, `git clean -f`. Matched on the canonical signature, so `git push -f` and
@@ -295,8 +311,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   is made of. Delete the entry in `trusted_workspaces.yaml` to be asked again, and remember that a
   `.localharness/` you did not create is a reason to look before you run.
 - **`auto` trusts the project directory.** A destructive command whose target resolves inside the
-  project runs without asking: `rm -rf build`, a `chmod -R` over the tree, an `rm -rf .` at its
-  top. That is the price of a default that stays quiet during ordinary work, and it is a real
+  project runs without asking: a `chmod -R` over the tree, a `find -delete`, a `truncate`, a
+  `Remove-Item -Recurse` — and `rm -rf` too, for anyone who removed the shipped deny pattern that
+  refuses it outright. That is the price of a default that stays quiet during ordinary work, and it is a real
   price — a wrong `rm -rf` inside your repo is on the model, and **git is your undo**, so what you
   actually lose is uncommitted work and untracked files. Commit before you hand a session a big
   refactor. `trusted` adds the prompt back for exactly this case; `guarded` adds it back for
