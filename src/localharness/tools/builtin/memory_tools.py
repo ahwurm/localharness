@@ -256,7 +256,10 @@ class MemoryRememberTool(Tool):
                 },
                 "required": ["name", "content"],
             },
-            destructive=False,
+            # It mutates the store — a write, and one that supersedes an existing name. The flag
+            # feeds the permission gate alone (`agent/verdict`), where it is what keeps `remember`
+            # out of read-only mode; the memory group still keeps it out of every ask tier.
+            destructive=True,
             estimated_tokens=200,
         )
 

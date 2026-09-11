@@ -18,10 +18,12 @@ Three properties this file is responsible for, each closing a critic finding fro
   any grant lookup, so an old benign grant can never cover a destructive variant (finding 12),
   and write-shaped shell targets are re-checked on every call (finding 2).
 
-Known gap, named rather than hidden: ``read-only`` mode denies the kinds PRD §3.4 enumerates
-(write-shaped, non-read-only shell, code, delegate) plus anything a tool schema marks
-``destructive``; an MCP tool that mutates without that flag is only gated by its once-per-tool
-ask, not by read-only mode.
+``read-only`` mode is decided ONCE, before the branches (:func:`_read_only_denies`), over the
+kinds PRD §3.4 enumerates (write-shaped, non-read-only shell, code, delegate) plus anything a
+tool schema marks ``destructive``. Known gap, named rather than hidden: a tool that mutates
+without setting that flag — an MCP tool, a plugin's — is gated only by its once-per-tool ask,
+not by read-only mode. The flag is the only thing a tool says about itself, so a tool that
+misdescribes itself is believed.
 """
 from __future__ import annotations
 
@@ -189,6 +191,12 @@ else under the config dir — ``config.yaml``, ``overrides.yaml``, ``agents/``, 
 ``trusted_workspaces.yaml``, ``grants.yaml`` — is behavior-changing and stays protected.
 A config-relocated kill file or audit log (an absolute path elsewhere) is outside this dir and
 is judged by the ordinary boundary rules."""
+
+READ_ONLY_DENIED_KINDS: frozenset[str] = frozenset({"write", "code", "delegate"})
+"""PRD §3.4's read-only list, as branches of :func:`_kind`: write/edit (and anything in the
+``fs.write`` group), ``python_exec``/``cruncher_exec`` (and the ``code`` group), and subagent
+dispatch (the ``delegate`` group). Shell is judged per segment, not by kind
+(:func:`_read_only_denies`), because most shell calls are reads."""
 
 READ_ONLY_DENY_REASON = "not permitted in read-only mode"
 """PRD §3.4: the soft-deny text. It is returned to the model AS the tool observation, so the
@@ -670,9 +678,9 @@ def _target_asks(
 def _evaluate_write(
     tool_name: str, params: dict, ctx: GateContext, settings: GateSettings
 ) -> VerdictResult:
-    """``write`` / ``edit`` and any tool in the ``fs.write`` group (PRD §3.1)."""
-    if ctx.mode == "read-only":
-        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
+    """``write`` / ``edit`` and any tool in the ``fs.write`` group (PRD §3.1).
+
+    Read-only mode is handled up front in :func:`evaluate`, not here."""
     raw = _write_target(tool_name, params)
     target = ((raw, _resolve(raw, ctx.workspace)),) if raw else ((MISSING_TARGET_DISPLAY, None),)
     salient = raw or ""
@@ -704,8 +712,6 @@ def _evaluate_shell(
 
     classified = classify_shell(command, settings)
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
-    if ctx.mode == "read-only" and (non_read_only or classified.write_targets):
-        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
 
     asks: list[_Ask] = []
     destructive = {s.signature for s in classified.segments if s.destructive}
@@ -753,9 +759,9 @@ def _evaluate_named(
     PRD §3.1 names the first two. ``tool-unfamiliar`` is the same shape for a tool in no known
     family — a plugin's, or one whose schema could not be read — so an unknown tool is answered
     once per workspace and then remembered, instead of running unasked.
+
+    Read-only mode is handled up front in :func:`evaluate`, not here.
     """
-    if ctx.mode == "read-only":
-        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if ctx.grants(ctx.workspace, klass, tool_name) is not None and not _refused(ctx, klass, tool_name):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
@@ -800,8 +806,6 @@ def _evaluate_mcp(
     server = meta.mcp_server or ""
     bare = tool_name.split("__", 1)[1] if server and tool_name.startswith(f"{server}__") else tool_name
     key = f"mcp/{server}/{bare}"
-    if ctx.mode == "read-only" and meta.destructive:
-        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if server and server in settings.mcp_trusted_servers:
         return VerdictResult(Verdict.ALLOW, f"trusted MCP server: {server}")
     if ctx.grants(ctx.workspace, "mcp", key) is not None and not _refused(ctx, "mcp", key):
@@ -811,6 +815,43 @@ def _evaluate_mcp(
         [_ask_record("mcp", key, f"first use of {key} in this workspace")],
         salient=_first_string(params),
     )
+
+
+def _read_only_denies(
+    kind: str, tool_name: str, params: dict, meta: ToolMeta, settings: GateSettings
+) -> bool:
+    """Does ``read-only`` mode refuse this call? (PRD §3.4, one place.)
+
+    A SHELL call is judged on its segments and nothing else: ``bash_exec``'s schema is marked
+    ``destructive`` as a whole (``bash_tool.py:240``), and most shell calls are reads, so the
+    flag would refuse ``ls`` — PRD §3.4 refuses the *non-read-only* shell. Any other call is
+    refused when
+
+    * its branch is one of :data:`READ_ONLY_DENIED_KINDS` — write, code, delegate — which covers
+      both the builtins by name and any tool declaring those groups; or
+    * the tool's own schema says ``destructive``. That flag is the only thing a tool can tell the
+      gate about itself, and read-only is where it has to count: ``remember`` mutates the memory
+      store, so it carries the flag and is refused here.
+
+    This used to be re-checked by hand inside each branch, and the branches disagreed: the
+    network branch never checked, so a plugin ``web`` tool with ``destructive=True`` ran; the
+    read-tier tail checked only the flag, so ``remember`` (group ``memory``,
+    ``destructive=False`` at the time) wrote memory in read-only mode. One check, consulted
+    before the branches, is what makes the mode a property of the MODE.
+
+    The shell branch classifies the command again after this returns False. That is one extra
+    parse, only in read-only mode, only for a command that turned out to be all reads.
+    """
+    if kind == "shell":
+        command = params.get(SHELL_COMMAND_PARAMS.get(tool_name, "command"))
+        if not isinstance(command, str) or not command.strip():
+            return False
+
+        from localharness.agent.shell_classify import classify_shell
+
+        classified = classify_shell(command, settings)
+        return bool(any(not s.read_only for s in classified.segments) or classified.write_targets)
+    return meta.destructive or kind in READ_ONLY_DENIED_KINDS
 
 
 def _first_string(params: dict) -> str:
@@ -859,6 +900,8 @@ def evaluate(
             return VerdictResult(Verdict.DENY, denied.reason or "matches a deny pattern")
 
     kind = _kind(tool_name, tool_meta)
+    if ctx.mode == "read-only" and _read_only_denies(kind, tool_name, params, tool_meta, settings):
+        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if kind == "mcp":
         return _evaluate_mcp(tool_name, params, tool_meta, ctx, settings)
     if kind == "write":
@@ -881,6 +924,4 @@ def evaluate(
         return _evaluate_named(
             tool_name, params, ctx, klass=UNFAMILIAR_TOOL_KIND, reason=UNFAMILIAR_TOOL_REASON,
         )
-    if ctx.mode == "read-only" and tool_meta.destructive:
-        return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     return VerdictResult(Verdict.ALLOW, "read-tier tool")
