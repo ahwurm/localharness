@@ -147,6 +147,8 @@ WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
                               "--description", "--uid", "--gid", "--nice", "--working-directory",
                               "-M", "--machine", "--on-active", "--on-calendar"}),
     "uvx": frozenset({"--from", "--with", "--python", "-p", "--project", "--directory"}),
+    "command": frozenset(),
+    "exec": frozenset({"-a"}),
 }
 """Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
 
@@ -154,7 +156,15 @@ Replacing rather than extending is the point: the same letter means different th
 different wrappers. ``flock -n`` is ``--nonblock``, a boolean — reading it as a value flag (which
 it is for ``nice``) would eat the lock file and peel to the wrong token. Sources: watch(1),
 flock(1), chroot(1), caffeinate(8), systemd-run(1), `uvx` (uv docs). A ``--flag=value`` spelling
-needs no entry."""
+needs no entry.
+
+``command`` and ``exec`` are the two shell builtins in the wrapper set, and the default table is
+wrong for both (v0.14 critic A1). ``command``'s options — ``-p``, ``-v``, ``-V`` — are all
+booleans, so the shared ``-p`` entry ate the wrapped command and ``command -p rm -rf x`` peeled
+to the signature ``x``: a destructive delete filed as an unfamiliar command named after its own
+argument. ``exec``'s ``-a NAME`` is the opposite mistake: it DOES take a value (the argv[0] the
+wrapped command is given), so ``exec -a NAME rm -rf x`` peeled to ``NAME``. Sources: bash(1)
+SHELL BUILTIN COMMANDS (``command [-pVv]``, ``exec [-cl] [-a name]``)."""
 
 WRAPPER_POSITIONAL_SKIPS: dict[str, int] = {"flock": 1, "chroot": 1}
 """Wrappers whose first positional is an OPERAND, not the wrapped command: ``flock LOCKFILE CMD``
