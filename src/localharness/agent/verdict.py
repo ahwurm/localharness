@@ -92,6 +92,20 @@ KIND_BY_GROUP: dict[str, str] = {
 know by name — a plugin's or a future builtin's. Names win when known, because a name pins the
 exact parameter to read; groups are the open extension point."""
 
+DYNAMIC_COMMAND_NAME_PREFIXES: tuple[str, ...] = ("$", "`")
+"""A shell segment whose command NAME is itself a substitution or a variable — ``$(echo rm) -rf
+build``, ``"$RM" -rf build``. The classifier lifts the substitution into its own segment but
+cannot say what the outer segment will actually RUN, so its signature is not a stable identity.
+
+PRD §3.2 "named residual gaps": a grant is a memory of a decision, and there is nothing here to
+remember — one "always" on ``$RM`` would cover every future dynamically-built command. So the
+call asks every time, ungrantably (``grantable=False``, ``key=None``), and the grant store is
+never consulted for it. Found by replaying the real corpus through the shipped rules."""
+
+DYNAMIC_COMMAND_NAME_REASON = "command name is computed at runtime; cannot be remembered"
+"""The reason string for :data:`DYNAMIC_COMMAND_NAME_PREFIXES` — it is what the human reads in
+the prompt, so it says why there is no "always" option rather than naming a rule."""
+
 UNRESOLVABLE_TARGET_CHARS: tuple[str, ...] = ("$", "*", "?", "`")
 """PRD §3.2 step 8: a write target carrying a variable, a glob or a substitution cannot be
 resolved at classification time, and "unresolvable targets are treated as outside"."""
@@ -323,14 +337,21 @@ def _ask(
     key: Optional[str],
     salient: str,
     reason: str,
+    grantable: Optional[bool] = None,
 ) -> VerdictResult:
     """Build an ASK, after applying the mode effects of PRD §3.4.
 
     ``unattended`` turns every ASK into ALLOW (today's behavior, named honestly — bench and
     scheduled jobs pin it, critic finding 7). ``trusted`` allows the grantable classes only;
     the ungrantable ones still ask. DENY is never reached from here.
+
+    ``grantable`` defaults to the class's tier (``UNGRANTABLE_CLASSES``) and is overridden only
+    where a normally-grantable class has nothing rememberable to key on — a shell segment whose
+    command NAME is computed at runtime (:data:`DYNAMIC_COMMAND_NAME_PREFIXES`). Mode handling
+    follows ``grantable``, not the class name, so such a call still asks under ``trusted``.
     """
-    grantable = klass not in UNGRANTABLE_CLASSES
+    if grantable is None:
+        grantable = klass not in UNGRANTABLE_CLASSES
     if ctx.mode == "unattended":
         return VerdictResult(Verdict.ALLOW, f"unattended mode: {klass} allowed without asking")
     if grantable and ctx.mode == "trusted":
@@ -454,6 +475,12 @@ def _evaluate_shell(
         return result
 
     for segment in non_read_only:
+        if segment.signature.startswith(DYNAMIC_COMMAND_NAME_PREFIXES):
+            return _ask(
+                ctx, tool_name, params,
+                klass="shell-unfamiliar", key=None, grantable=False, salient=command,
+                reason=DYNAMIC_COMMAND_NAME_REASON,
+            )
         klass = "interpreter-inline" if segment.inline_interpreter else "shell-unfamiliar"
         if ctx.grants(ctx.workspace, segment.signature) is not None:
             continue
