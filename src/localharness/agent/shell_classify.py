@@ -45,6 +45,12 @@ UNRESOLVABLE_TARGET_CHARS = ("$", "*", "?", "`")
 """PRD §3.2 step 8: a target containing any of these cannot be resolved to a path here, so
 it is treated as outside the boundary."""
 
+REDIRECTION_OPERATOR_CHARS = "<>&|"
+"""Characters that may follow the first ``<``/``>`` of a redirection operator: ``>>``, ``>|``,
+``>&``, ``<&``, ``<<<``, ``&>>``. Consumed as one unit by the splitter so an fd duplication is
+never mistaken for the ``&`` separator, and by the redirection parser so ``N>&M`` is read as a
+duplication rather than a write."""
+
 REDIRECT_ONLY_SIGNATURE = ">"
 """Signature for a segment that is nothing but a redirection (``> file``). It is a write with
 no command; step 8 still has to report its target."""
@@ -288,6 +294,16 @@ def _split_top_level(text: str) -> list[_Raw]:
             continue
         if depth == 0:
             pair = text[index : index + 2]
+            if char in "<>" or (char == "&" and text[index + 1 : index + 2] == ">"):
+                # A redirection operator, fd duplication included: the `&` of `2>&1` or
+                # `&> log` belongs to the operator, not to the `&` separator. Splitting
+                # there invented a phantom `1` command and an empty write target.
+                buffer.append(char)
+                index += 1
+                while index < len(text) and text[index] in REDIRECTION_OPERATOR_CHARS:
+                    buffer.append(text[index])
+                    index += 1
+                continue
             if pair in ("&&", "||"):
                 flush(False)
                 index += 2
@@ -903,20 +919,33 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
             out.append(char)
             index += 1
             continue
-        if char in "<>":
-            while out and out[-1].isdigit():
-                out.pop()
-            if out and out[-1] == "&":
-                out.pop()
-            operator = char
+        if char in "<>" or (char == "&" and text[index + 1 : index + 2] == ">"):
+            operator = ""
+            if char == "&":
+                operator = "&"
+                index += 1
+                char = text[index]
+            else:
+                # A leading fd number is part of the operator (`2>log`), not of the word
+                # before it; `&>log` reaches us with the `&` already buffered.
+                while out and out[-1].isdigit():
+                    out.pop()
+                if out and out[-1] == "&":
+                    out.pop()
+                    operator = "&"
+            operator += char
             index += 1
-            while index < len(text) and text[index] in "<>&|":
+            duplicates_fd = False
+            while index < len(text) and text[index] in REDIRECTION_OPERATOR_CHARS:
+                duplicates_fd = duplicates_fd or text[index] == "&"
                 operator += text[index]
                 index += 1
             while index < len(text) and text[index] in " \t":
                 index += 1
             word, index = _read_word(text, index)
-            if operator.startswith(">") and "&" not in operator and not word.startswith("&"):
+            # `N>&M`, `>&M`, `<&M`, `N>&-` move a file descriptor — no file is named, and the
+            # operand (`1`, `-`) is not a command. `&>FILE` and `N>FILE` do name a file.
+            if ">" in operator and not duplicates_fd and word and not word.startswith("&"):
                 targets.append(_unquote(word))
             out.append(" ")
             continue

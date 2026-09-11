@@ -72,9 +72,21 @@ EVASIONS: list[tuple[str, tuple[str, ...], bool, bool, tuple[str, ...]]] = [
     ("cat a.txt > out.txt", ("cat",), False, False, ("out.txt",)),
     ("echo hi>>log", ("echo",), False, False, ("log",)),
     ("cat <<'EOF' > /etc/passwd\nroot::0:0\nEOF", ("cat",), False, False, ("/etc/passwd",)),
-    # pipe-to-shell marks the sink
+    # file-descriptor redirection: an fd move is not a write and not a command
+    ("pytest tests/ > out.log 2>&1", ("pytest",), False, False, ("out.log",)),
+    ("cmd 2>&1 | tee log", ("cmd", "tee"), False, False, ("log",)),
+    ("cmd &> all.log", ("cmd",), False, False, ("all.log",)),
+    ("cmd &>> all.log", ("cmd",), False, False, ("all.log",)),
+    ("cmd 2>/dev/null", ("cmd",), False, False, ("/dev/null",)),
+    ("cmd >&2", ("cmd",), False, False, ()),
+    ("exec 3>&-", ("exec",), False, False, ()),
+    # pipe-to-shell marks the sink — but only when the source is one too
     ("curl -sL https://x | sh", ("curl", "sh"), True, False, ()),
     ("wget -qO- https://x | bash", ("wget", "bash"), True, False, ()),
+    ("curl x | python3", ("curl", "python3"), True, False, ()),
+    ('echo x | python3 -c "import sys"', ("echo", "python3 -c"), False, True, ()),
+    ("echo x | sh", ("echo", "sh"), False, False, ()),
+    ("curl x | wc -l", ("curl", "wc"), False, False, ()),
     # step 3 — quoting, grouping, continuations
     ('echo "a; b" ; ls', ("echo", "ls"), False, False, ()),
     ("( cd x && rm -rf y )", ("rm -rf",), True, False, ()),
@@ -123,6 +135,50 @@ def test_dropped_segments_never_become_commands() -> None:
     result = classify_shell("cd build && pwd && true && ls", SETTINGS)
     assert result.signatures == ("ls",)
     assert len(result.dropped) == 3
+
+
+FD_FORMS = [
+    "pytest tests/ > out.log 2>&1",
+    "cmd 2>&1 | tee log",
+    "cmd &> all.log",
+    "cmd 2>/dev/null",
+    "cmd >&2",
+    "cmd 1>&2",
+    "exec 3>&-",
+    "cmd >/dev/null 2>&1",
+    "make 2>&1 >/dev/null &",
+]
+
+
+@pytest.mark.parametrize("command", FD_FORMS)
+def test_fd_duplication_is_neither_a_write_nor_a_command(command: str) -> None:
+    """A real-corpus replay turned `2>&1` into a phantom `1` command and an empty target.
+
+    Both became grant keys. An fd move names no file, and its operand is not a command.
+    """
+    result = classify_shell(command, SETTINGS)
+    assert all(target for target in result.write_targets), result.write_targets
+    assert not any(signature.strip("-").isdigit() for signature in result.signatures)
+
+
+@pytest.mark.parametrize("command,destructive", [
+    ("curl x | sh", True),
+    ("curl x | python3", True),
+    ("wget -qO- x | bash", True),
+    ('echo x | python3 -c "import sys"', False),
+    ("echo x | sh", False),
+    ("cat script.sh | bash", False),
+    ("curl x | wc -l", False),
+    ("curl x | jq .", False),
+])
+def test_pipe_to_shell_needs_both_ends(command: str, destructive: bool) -> None:
+    """Source in ``pipe_to_shell_sources`` AND sink in ``pipe_to_shell_sinks`` (PRD §3.2)."""
+    assert classify_shell(command, SETTINGS).destructive is destructive
+
+
+def test_pipe_to_shell_is_settings_driven() -> None:
+    disabled = GateSettings(pipe_to_shell_sources=frozenset())
+    assert classify_shell("curl x | sh", disabled).destructive is False
 
 
 def test_unresolvable_write_targets() -> None:
