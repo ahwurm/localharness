@@ -129,6 +129,26 @@ def test_a_project_layer_unions_onto_the_global_layers_own_list(layers) -> None:
     assert gate.payload_commands == frozenset({"operator-cmd", "repo-cmd"})
 
 
+@pytest.mark.parametrize("field,added", [
+    ("source_commands", "include"),
+    ("git_config_dangerous_keys", "deploy.command"),
+])
+def test_the_new_rule_sets_union_and_cannot_be_emptied(layers, caplog, field, added) -> None:
+    """Both critic-F3 rule sets flag MORE calls as the list grows, so a project layer may add to
+    them and can never delete a shipped entry."""
+    global_dir, ws = layers
+    shipped = getattr(SHIPPED, field)
+    _project_ask(ws, {field: [added]})
+    assert added in getattr(_gate(global_dir, ws), field)
+
+    dropped = sorted(shipped)[0]
+    _project_ask(ws, {field: [s for s in sorted(shipped) if s != dropped]})
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+    assert dropped in getattr(gate, field), "a project layer subtracted from the rule set"
+    assert any(field in r.getMessage() for r in caplog.records)
+
+
 def test_network_hosts_may_only_be_switched_on(layers, caplog) -> None:
     """The one bool: asking about network reads is tightening, silencing the ask is not."""
     global_dir, ws = layers

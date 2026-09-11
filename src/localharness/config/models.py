@@ -211,7 +211,8 @@ class AskConfig(BaseModel):
 
     * tighten-only — `destructive_signatures`, `protected_paths_home`,
       `protected_paths_workspace`, `write_shaped_commands`, `payload_commands`,
-      `pipe_to_shell_sources`, `pipe_to_shell_sinks`, `interpreter_commands`, `inline_by_nature`:
+      `pipe_to_shell_sources`, `pipe_to_shell_sinks`, `interpreter_commands`, `inline_by_nature`,
+      `source_commands`, `git_config_dangerous_keys`:
       a project layer may ADD entries (the result is the union with the global layer's list, or
       with the shipped default) and can never delete one. `network_hosts` may only be set True.
     * global-only — `read_only_signatures`, `dropped_commands`, `wrapper_commands`,
@@ -290,6 +291,21 @@ class AskConfig(BaseModel):
     )
     protected_paths_workspace: Optional[list[str]] = Field(
         default=None, description="Override the ungrantable protected names inside a workspace."
+    )
+    source_commands: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Override the builtins that run a FILE in the current shell (`source`, `.`). They "
+            "sign as `source <script>` and count as inline interpreters (PRD §3.2 step 7)."
+        ),
+    )
+    git_config_dangerous_keys: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Override the git config keys whose value is a command git runs later (hooks, pager, "
+            "credential helpers, aliases, includes). Writing one is ungrantable "
+            "shell-destructive; `*` globs the rest of the key (PRD §3.1, critic finding F3a)."
+        ),
     )
 
     def to_gate_settings(self) -> GateSettings:

@@ -306,6 +306,8 @@ ASK_TIGHTEN_ONLY_FIELDS: frozenset[str] = frozenset({
     "pipe_to_shell_sinks",
     "interpreter_commands",
     "inline_by_nature",
+    "source_commands",
+    "git_config_dangerous_keys",
 })
 """The `permissions.ask` rule sets a project layer may ADD to (PRD §3.3).
 
