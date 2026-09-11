@@ -1312,9 +1312,10 @@ default in `agent/gate_types.py`", which is where the defaults and their sources
 `subcommand_tools`, `payload_commands`, `write_shaped_commands`, `protected_paths_home`,
 `protected_paths_workspace`, `protected_paths_system`. The last of those is new in v0.14.1 and
 holds the system directories a mistaken write cannot be taken back from — `/etc`, `/usr`, `/bin`,
-`/sbin`, `/lib*`, `/boot`, `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`,
-`/Library`, `/Applications`, Windows `C:\Windows`, `C:\Program Files*`, `C:\ProgramData` — because
-a default that allows ordinary writes has to name those explicitly. The two dict-shaped tables (`destructive_flag_verbs`,
+`/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library`,
+`/Applications`, Windows `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
+`C:\ProgramData` — because a default that allows ordinary writes has to name those explicitly.
+`protected_paths_system_exempt` carves `/tmp` and `/var/tmp` back out. The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 
