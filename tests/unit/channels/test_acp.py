@@ -171,6 +171,24 @@ def _plan(*calls: tuple[str, dict]) -> list[FakeLLMResponse]:
     ] + [FakeLLMResponse(content="Done.")]
 
 
+def _request(**fields: Any):
+    """A `PermissionRequest`, tolerant of fields this branch has not grown yet.
+
+    `grant_keys` (every key an "always" would remember) is landing separately. The adapter never
+    reads it — the gate owns grant writing — so these tests fill it in only if the dataclass
+    declares it, rather than pinning themselves to whichever side merges first.
+    """
+    import dataclasses
+
+    from localharness.agent.gate_types import PermissionRequest
+
+    declared = {f.name for f in dataclasses.fields(PermissionRequest)}
+    if "grant_keys" in declared and "grant_keys" not in fields:
+        key = fields.get("key")
+        fields["grant_keys"] = ((fields["klass"], key),) if key else ()
+    return PermissionRequest(**fields)
+
+
 class Session:
     """One connected agent+client pair, plus the objects the fake session build made."""
 
@@ -431,6 +449,60 @@ async def test_allow_always_writes_a_grant_and_the_second_call_does_not_ask(
     ]
     assert session.tools["bash_exec"].ran == ["frobnicate --all", "frobnicate --all"]
     assert (tmp_path / "grants.yaml").exists(), "allow_always wrote no grant"
+
+
+async def test_zed_holds_the_dialog_so_the_gate_puts_no_deadline_on_it():
+    """PRD §3.5, Zed row: "Timeout: none". A deadline here would turn a user who stepped away
+    from their editor into a refusal — and one that reads, in the ask-rate report, like a channel
+    that could not reach anybody."""
+    assert AcpChannel.ask_holds_dialog is True
+
+
+async def test_a_multi_line_reason_becomes_a_title_and_a_body(tmp_path, monkeypatch, keep_cwd):
+    """One command can carry several reasons, and the gate renders them as a short multi-line
+    `display`. ACP's title is one row, so the rest has to ride as content or it is lost."""
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    session.client.answers = ["allow_once"]
+    # The channel has a live connection and session id from `_start`; call the asker directly,
+    # because the multi-line display comes from the verdict, not from anything a turn does here.
+    decision = await session.agent.ask_permission(
+        _request(
+            tool_name="bash_exec",
+            tool_params={"command": "cp a b"},
+            klass="shell-unfamiliar",
+            key="cp",
+            grantable=True,
+            reason="unfamiliar",
+            display="bash: cp a b\n  · writes outside the project\n  · unfamiliar command",
+        )
+    )
+    assert decision.kind == "allow_once"
+    tool_call, options = session.client.permission_requests[-1]
+    assert tool_call.title == "bash: cp a b", "a newline leaked into the one-row title"
+    assert tool_call.content and "unfamiliar command" in tool_call.content[0].content.text
+    assert [o.kind for o in options] == [
+        "allow_once", "allow_always", "reject_once", "reject_always",
+    ]
+
+
+async def test_a_single_line_reason_carries_no_body(tmp_path, monkeypatch, keep_cwd):
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    session.client.answers = ["reject_once"]
+    await session.agent.ask_permission(
+        _request(
+            tool_name="bash_exec",
+            tool_params={"command": "cp a b"},
+            klass="shell-destructive",
+            key=None,
+            grantable=False,
+            reason="destructive",
+            display="bash: cp a b  (destructive, asks every time)",
+        )
+    )
+    tool_call, options = session.client.permission_requests[-1]
+    assert tool_call.title == "bash: cp a b  (destructive, asks every time)"
+    assert tool_call.content is None
+    assert [o.kind for o in options] == ["allow_once", "reject_once"]
 
 
 async def test_a_dismissed_dialog_is_a_refusal_of_this_call_only(tmp_path, monkeypatch, keep_cwd):
