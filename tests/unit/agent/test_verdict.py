@@ -26,6 +26,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import (
+    NON_STRING_SHELL_COMMAND_REASON,
     READ_ONLY_DENY_REASON,
     REFUSAL_DENY_REASON,
     GateContext,
@@ -955,4 +956,106 @@ def test_without_a_refusal_lookup_nothing_is_refused(ws, monkeypatch):
     fake_shell(monkeypatch, seg("cargo publish"))
     result = evaluate("bash_exec", {"command": "cargo publish"}, SHELL_META,
                       make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+
+
+# --------------------------------------------------- arguments the gate cannot read
+
+@pytest.mark.parametrize("command", [["rm", "-rf", "/"], {"cmd": "rm -rf /"}, 7])
+def test_a_non_string_shell_command_asks_ungrantably(ws, command):
+    """Present-but-unreadable is not the same question as absent (it used to ALLOW).
+
+    No classifier stand-in here on purpose: the guard must fire BEFORE ``classify_shell`` is
+    reached, since the classifier only takes strings.
+    """
+    result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "shell-unfamiliar"
+    assert result.request.grantable is False and result.request.key is None
+    assert result.request.grant_keys == ()
+    assert result.reason == NON_STRING_SHELL_COMMAND_REASON
+
+
+def test_a_non_string_shell_command_never_reaches_the_grant_store(ws):
+    """Ungrantable means ungrantable: no lookup, so no old "always" can cover it."""
+    spy = LookupSpy(a_grant())
+    result = evaluate("bash_exec", {"command": ["rm", "-rf", "/"]}, SHELL_META,
+                      make_ctx(ws, grants=spy), SETTINGS)
+    assert result.verdict is Verdict.ASK and spy.calls == []
+
+
+def test_a_non_string_shell_command_asks_in_trusted_too(ws):
+    """``trusted`` allows only requests where every ask is grantable (PRD §3.4)."""
+    result = evaluate("bash_exec", {"command": ["rm", "-rf", "/"]}, SHELL_META,
+                      make_ctx(ws, mode="trusted"), SETTINGS)
+    assert result.verdict is Verdict.ASK
+
+
+def test_a_non_string_shell_command_is_allowed_unattended(ws):
+    """Documented, not an oversight: ``unattended`` turns EVERY ask into an allow (PRD §3.4),
+    ungrantable ones included, and an unclassifiable command is no exception — carving one out
+    would make bench and cron behave differently here than they do for ``rm -rf``."""
+    result = evaluate("bash_exec", {"command": ["rm", "-rf", "/"]}, SHELL_META,
+                      make_ctx(ws, mode="unattended"), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_a_non_string_shell_command_is_denied_read_only(ws):
+    """A command that cannot be read cannot be shown to be a read (PRD §3.4)."""
+    result = evaluate("bash_exec", {"command": ["rm", "-rf", "/"]}, SHELL_META,
+                      make_ctx(ws, mode="read-only"), SETTINGS)
+    assert result.verdict is Verdict.DENY and result.reason == READ_ONLY_DENY_REASON
+
+
+@pytest.mark.parametrize("params", [{}, {"command": None}, {"command": "   "}])
+def test_an_absent_or_empty_shell_command_still_allows(ws, params):
+    """The unchanged half of the split: nothing to run is nothing to gate."""
+    result = evaluate("bash_exec", params, SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+@pytest.mark.parametrize("path", [["/etc/passwd"], {"p": "/etc/passwd"}, 7])
+def test_a_non_string_write_path_asks_ungrantably(ws, path):
+    """It used to ask GRANTABLY on the literal ``<no path argument>`` key, so one "always here"
+    pre-approved every future write whose target the gate could not read."""
+    result = evaluate("write", {"path": path, "content": "x"}, WRITE_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.grantable is False and result.request.key is None
+    assert result.request.grant_keys == ()
+    assert "not a string" in result.reason
+
+
+def test_a_non_string_working_dir_does_not_anchor_writes_in_the_workspace(ws, monkeypatch):
+    """An unreadable ``working_dir`` is unresolvable, and PRD §3.2 step 8 treats unresolvable as
+    outside — anchoring at the workspace would have read an unplaceable write as in-workspace."""
+    fake_shell(monkeypatch, seg("tee out.txt", read_only=False, write_targets=("out.txt",)))
+    result = evaluate("bash_exec", {"command": "echo hi | tee out.txt", "working_dir": ["/tmp"]},
+                      SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "edit-outside"
+
+
+# ------------------------------------------------- paths that cannot be realpathed
+
+def test_a_null_byte_in_a_write_path_asks_instead_of_raising(ws):
+    r"""``Path("/tmp/x\x00y").resolve()`` raises ValueError, not OSError — it used to escape
+    ``evaluate`` and crash the turn at the loop's gate call."""
+    result = evaluate("write", {"path": "/tmp/x\x00y", "content": "x"}, WRITE_META,
+                      make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.klass == "edit-outside"
+
+
+def test_a_null_byte_in_a_shell_write_target_asks_instead_of_raising(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("tee", read_only=False, write_targets=("/tmp/a\x00b",)))
+    result = evaluate("bash_exec", {"command": "echo hi | tee /tmp/a\x00b"}, SHELL_META,
+                      make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+
+
+def test_a_null_byte_in_a_shell_working_dir_asks_instead_of_raising(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("tee", read_only=False, write_targets=("out.txt",)))
+    result = evaluate("bash_exec",
+                      {"command": "echo hi | tee out.txt", "working_dir": "/tmp/x\x00y"},
+                      SHELL_META, make_ctx(ws), SETTINGS)
     assert result.verdict is Verdict.ASK
