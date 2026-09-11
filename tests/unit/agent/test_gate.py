@@ -15,6 +15,7 @@ import pytest
 from localharness.agent.gate import (
     ASK_TIMEOUT_TOOL_MULTIPLE,
     GATE_ERROR_REASON,
+    MODE_SET_FROM_CHANNEL_LOG,
     NO_ASKER_REASON,
     PermissionGate,
     deny_fn_from,
@@ -312,12 +313,24 @@ def test_set_mode_validates_the_name(tmp_path):
         gate.set_mode("yolo")
 
 
-def test_channel_can_never_set_unattended(tmp_path):
+def test_a_human_can_set_unattended_from_their_own_channel(tmp_path, caplog):
+    """``/mode unattended`` is accepted, and the switch is logged rather than refused.
+
+    Until v0.14.1 the gate raised on this, on the reasoning that a channel must not be able to
+    switch the gate off. The owner met that rule from the other side (2026-09-11: "I can't swap
+    my active localharness session to unattended without exiting"): the person typing ``/mode``
+    in their own terminal IS the person the gate protects, and making them restart to make that
+    decision was the bug. What replaces the refusal is an audit line, so a session that spent
+    part of its life with the gate off says so in its own log.
+    """
     gate = _gate(tmp_path)
-    with pytest.raises(ValueError, match="cannot be set from a channel"):
-        gate.set_mode("unattended", from_channel=True)
-    assert gate.mode == "guarded"
-    assert gate.set_mode("unattended") == "unattended"  # config still can
+    with caplog.at_level(logging.INFO, logger="localharness.agent.gate"):
+        assert gate.set_mode("unattended", from_channel=True) == "unattended"
+    assert gate.mode == "unattended"
+
+    logged = [r for r in caplog.records if r.msg == MODE_SET_FROM_CHANNEL_LOG]
+    assert len(logged) == 1
+    assert logged[0].getMessage() == MODE_SET_FROM_CHANNEL_LOG % ("guarded", "unattended", "test")
 
 
 @pytest.mark.asyncio

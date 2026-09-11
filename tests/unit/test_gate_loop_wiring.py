@@ -15,7 +15,7 @@ import pytest
 
 from localharness.agent.context import ContextManager
 from localharness.agent.gate import GATE_ERROR_REASON, PermissionGate
-from localharness.agent.gate_types import Decision, PermissionRequest
+from localharness.agent.gate_types import DEFAULT_MODE, Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.grants import GrantStore
@@ -59,11 +59,20 @@ async def _registry(tool: Tool) -> ToolRegistry:
 
 
 def _gate(tmp_path: Path, workspace: Path, **kw) -> PermissionGate:
+    """The gate every test in this file wires into the loop, started in GUARDED.
+
+    ``mode`` is pinned rather than left to :data:`DEFAULT_MODE`: v0.14.1 moved the default to
+    ``auto`` (owner ruling 2026-09-11), which asks about almost nothing and remembers nothing.
+    These tests are about the GUARDED ask path being reachable from a real ``AgentLoop`` — that
+    a question reaches a human, that the answer reaches the tool, that a grant makes the second
+    call silent — so the mode that asks is the one they have to run in.
+    """
     return PermissionGate(
         boundary=kw.pop("boundary", workspace),
         workspace=workspace,
         grants=kw.pop("grants", GrantStore(tmp_path / "grants.yaml")),
         channel_name="test",
+        mode=kw.pop("mode", "guarded"),
         **kw,
     )
 
@@ -136,7 +145,7 @@ async def test_the_asker_sees_the_tool_timeout(bus, tmp_path):
 
     gate = _Recording(
         boundary=workspace, workspace=workspace, grants=GrantStore(tmp_path / "g.yaml"),
-        asker=asker, channel_name="test", bus=bus,
+        asker=asker, channel_name="test", bus=bus, mode="guarded",
     )
     await _loop(
         bus, await _registry(_Shell()), gate, llm=MockLLMClient(_plan("cargo build"))
@@ -185,7 +194,7 @@ async def test_a_loop_built_without_a_gate_still_has_one(bus, tmp_path, monkeypa
     loop = _loop(bus, await _registry(_Shell()), None, llm=MockLLMClient(_plan("x")))
     assert loop.gate is not None
     assert loop.gate.asker is None, "a default gate must never be able to approve anything"
-    assert loop.gate.mode == "guarded"
+    assert loop.gate.mode == DEFAULT_MODE, "the fallback gate invented a mode of its own"
 
 
 # --------------------------------------------------------------------- subagents
