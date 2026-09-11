@@ -483,6 +483,11 @@ async def test_run_turn_stops_on_budget_exceeded(mock_llm_client, bus):
         name="budget-agent",
         role="Test.",
         permissions=PermissionConfig(
+            # This test is about the BUDGET, so the calls have to actually run: the fake
+            # registry has no schema for `bash`, which the gate reads as an unfamiliar tool and
+            # (with no channel to ask) denies — and a denied call is not an action taken, so
+            # `max_actions` would never be reached.
+            mode="unattended",
             deny_patterns=[],
             budget=BudgetConfig(max_actions=1, max_duration_minutes=30.0),
         ),

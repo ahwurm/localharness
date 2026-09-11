@@ -16,7 +16,7 @@ import pytest
 from localharness.agent.context import ContextManager
 from localharness.agent.gate import GATE_ERROR_REASON, PermissionGate
 from localharness.agent.gate_types import Decision, PermissionRequest
-from localharness.agent.loop import AgentLoop
+from localharness.agent.loop import AgentLoop, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.grants import GrantStore
 from localharness.config.models import AgentConfig
@@ -395,3 +395,59 @@ async def test_the_loop_hands_the_gate_the_tool_calls_own_id(bus, tmp_path):
 
     assert [r.call_id for r in asked] == ["tc-0"]
     assert [r.agent_id for r in asked] == ["test-agent"]
+
+
+# ------------------------------------------------------- a denied call is not an action
+
+@pytest.mark.asyncio
+async def test_a_denied_call_does_not_count_as_an_action_taken(bus, tmp_path):
+    """`actions_taken` used to increment BEFORE the gate, so a call nobody approved spent the
+    task's action budget and showed up in the "completed N tool calls" line."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    tool = _Shell()
+    gate = _gate(tmp_path, workspace, asker=None, bus=bus)  # cannot ask → every ASK denies
+    loop = _loop(bus, await _registry(tool), gate, llm=MockLLMClient(_plan("cargo build")))
+    session = Session(agent_id="test-agent", session_id="s", messages=[])
+
+    await loop._execute_loop(session, "t", None)
+    assert tool.ran == []
+    assert session.actions_taken == 0
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_call_still_counts(bus, tmp_path):
+    """The other half: the counter has to keep counting the calls that did run."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    tool = _Shell()
+
+    async def asker(request: PermissionRequest) -> Decision:
+        return Decision(kind="allow_once")
+
+    gate = _gate(tmp_path, workspace, asker=asker, bus=bus)
+    loop = _loop(bus, await _registry(tool), gate, llm=MockLLMClient(_plan("cargo build")))
+    session = Session(agent_id="test-agent", session_id="s", messages=[])
+
+    await loop._execute_loop(session, "t", None)
+    assert tool.ran == ["cargo build"]
+    assert session.actions_taken == 1
+
+
+@pytest.mark.asyncio
+async def test_step_excludes_denied_calls_from_tool_calls_executed(bus, tmp_path):
+    """`step()` counted the denied branch as executed, so a step whose every call was refused
+    reported the same number as one where every call ran."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    tool = _Shell()
+    gate = _gate(tmp_path, workspace, asker=None, bus=bus)
+    loop = _loop(bus, await _registry(tool), gate, llm=MockLLMClient(_plan("cargo build")))
+    session = Session(agent_id="test-agent", session_id="s", messages=[])
+    session.push({"role": "user", "content": "t"})
+
+    result = await loop.step(session)
+    assert result.action == "tool_calls"
+    assert result.tool_calls_executed == 0
+    assert session.actions_taken == 0
+    assert tool.ran == []
