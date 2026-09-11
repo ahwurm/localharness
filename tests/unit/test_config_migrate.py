@@ -9,6 +9,7 @@ never removing/reordering the user's own entries, and never touching any other k
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -86,6 +87,20 @@ def _run(config_dir: Path, *args: str):
     )
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(output: str) -> str:
+    """`result.output` with the escape codes removed.
+
+    Rich's highlighter colors parentheses and filenames, so `bash_exec(*sudo *)` is emitted as
+    `bash_exec` + an escape + `(` + an escape + … — a literal substring that is present on screen
+    and absent from the string. Whether color is on depends on what the runner thinks stdout is,
+    which is not what any of these assertions are about: they are about the words the user reads.
+    """
+    return _ANSI.sub("", output)
+
+
 def _deny(config_file: Path) -> list[str]:
     return yaml.safe_load(config_file.read_text())["org"]["permissions"]["deny_patterns"]
 
@@ -151,7 +166,7 @@ def test_migrate_dry_run_writes_nothing(tmp_path):
     assert cfg.read_bytes() == before
     assert list(tmp_path.glob("config.yaml.bak-*")) == []
     # still reports the patterns it WOULD add
-    assert "bash_exec(*sudo *)" in result.output
+    assert "bash_exec(*sudo *)" in _plain(result.output)
 
 
 def test_migrate_writes_backup_with_premigration_bytes(tmp_path):
@@ -343,7 +358,7 @@ def test_migrate_strips_an_empty_allow_patterns_and_writes(tmp_path):
     result = _run(tmp_path)
     assert result.exit_code == 0, result.output
     assert "allow_patterns" not in _perms(cfg)
-    assert "permissions.allow_patterns" in result.output
+    assert "permissions.allow_patterns" in _plain(result.output)
     # and the migrated file is loadable — the thing that was broken
     from localharness.config.models import HarnessConfig
 
@@ -358,7 +373,7 @@ def test_migrate_strips_a_populated_allow_patterns_and_names_the_entries(tmp_pat
     result = _run(tmp_path)
     assert result.exit_code == 0, result.output
     assert "allow_patterns" not in _perms(cfg)
-    assert "bash_exec(*)" in result.output and "never honored" in result.output
+    assert "bash_exec(*)" in _plain(result.output) and "never honored" in _plain(result.output)
 
 
 def test_migrate_repairs_the_dead_key_even_when_already_stamped_current(tmp_path):
@@ -468,7 +483,7 @@ def test_migrate_strips_the_dead_key_from_an_agent_file_that_only_warns(tmp_path
 
     result = _run(tmp_path)
     assert result.exit_code == 0, result.output
-    assert "scout.yaml" in result.output
+    assert "scout.yaml" in _plain(result.output)
     assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
     assert len(list((tmp_path / "agents").glob("scout.yaml.bak-*"))) == 1
 
@@ -489,7 +504,7 @@ def test_migrate_strips_a_populated_dead_key_from_an_agent_file_and_names_it(tmp
 
     result = _run(tmp_path)
     assert result.exit_code == 0, result.output
-    assert "scout.yaml" in result.output and "bash_exec(*)" in result.output
+    assert "scout.yaml" in _plain(result.output) and "bash_exec(*)" in _plain(result.output)
     assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
     assert ConfigLoader(config_dir=tmp_path).load_agent("scout").name == "scout"
 

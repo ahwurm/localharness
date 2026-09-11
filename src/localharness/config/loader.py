@@ -25,6 +25,7 @@ from .models import (
 from localharness.config.overlay import (
     deep_merge,
     load_overlay,
+    restrict_config_file,
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
@@ -1438,6 +1439,9 @@ class ConfigLoader:
             dest.rename(bak)
         yaml_text = to_yaml_str(config)
         dest.write_text(yaml_text, encoding="utf-8")
+        # Owner-only, like every other config file this package writes: an agent yaml carries the
+        # deny list, the ask rule sets and the kill file — the policy the session is gated by.
+        restrict_config_file(dest)
         return dest
 
     def reload(self) -> None:

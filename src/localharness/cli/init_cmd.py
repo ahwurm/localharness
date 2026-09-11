@@ -17,6 +17,7 @@ from localharness.agent.context import response_reserve
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader
+from localharness.config.overlay import restrict_config_file
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
 from localharness.config.models import (
     ContextConfig,
@@ -603,6 +604,9 @@ def init_app(
         server=server_config,
     )
     config_file.write_text(to_yaml_str(harness), encoding="utf-8")
+    # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
+    # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.
+    restrict_config_file(config_file)
     # #53: create the agents directory alongside the config. doctor names `init` as the remedy
     # for a missing agents dir, so init must actually create it (previously only `start` and
     # `doctor --fix` did, which left that remedy non-functional).

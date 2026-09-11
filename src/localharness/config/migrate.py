@@ -39,6 +39,7 @@ written — a migrate that writes an invalid config is worse than none.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,9 @@ import yaml
 
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
+from localharness.config.overlay import restrict_config_file
+
+log = logging.getLogger(__name__)
 
 
 # The backup file IS the durable record of a migration — no separate state is written, and its own
@@ -62,6 +66,20 @@ BACKUP_INFIX = ".bak-"
 migrate writes — config.yaml and the agent/division sidecars alike — so `BACKUP_PREFIX` below
 and a sidecar's backup name cannot drift apart."""
 BACKUP_PREFIX = "config.yaml" + BACKUP_INFIX
+
+BACKUP_RETENTION = 5
+"""How many timestamped backups of ONE file migrate keeps, newest first.
+
+A backup is written on every migration and nothing ever removed one, so the count grew with the
+number of releases a user had installed — eleven beside a single config.yaml on the machine this
+was found on, each a full copy of a file that may carry `provider.api_key`. Unbounded copies of a
+secret are their own exposure, and they bury the one backup a person actually wants to read.
+
+Five, because a backup's whole job is the undo for a migration you have just noticed went wrong,
+and the horizon for noticing is a session or two — not eleven releases. Deliberately generous
+against that: it keeps every intermediate state of a user who upgrades several versions at once,
+which is the case where the oldest copy is the one worth having.
+"""
 
 
 class MigrationError(Exception):
@@ -246,11 +264,58 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
 
 
 def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
-    """Timestamped backup of `original` beside `path`, then `updated` dumped over `path`."""
+    """Timestamped backup of `original` beside `path`, then `updated` dumped over `path`.
+
+    Both files get `CONFIG_FILE_MODE`: the backup is a byte-for-byte copy of a config.yaml that
+    may carry `provider.api_key`, so leaving IT at the umask default would hand out the secret the
+    rewritten file no longer exposes. Older backups of this same file are pruned afterwards
+    (:data:`BACKUP_RETENTION`).
+    """
     stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
     backup = path.with_name(f"{path.name}{BACKUP_INFIX}{stamp}")
     backup.write_bytes(original)
+    restrict_config_file(backup)
     path.write_text(
         yaml.safe_dump(updated, default_flow_style=False, sort_keys=False), encoding="utf-8"
     )
+    restrict_config_file(path)
+    _prune_backups(path, keep=backup)
     return backup
+
+
+def _prune_backups(path: Path, *, keep: Path) -> None:
+    """Delete all but the newest :data:`BACKUP_RETENTION` backups of `path`. Best effort.
+
+    Scoped as tightly as deleting files in a user's config directory deserves. A candidate must
+    be a FILE, sit in the same directory, and be named exactly `<path.name>.bak-<stamp>` where
+    `<stamp>` parses under :data:`BACKUP_STAMP_FORMAT` — so a hand-kept `config.yaml.bak-before-
+    the-upgrade` is not one of ours and is never touched, and neither is a backup of a DIFFERENT
+    file in the same folder. The backup just written is excluded explicitly as well as by age:
+    the undo for the migration that is happening right now is the one copy that must survive
+    whatever the retention number says.
+
+    Lexicographic order on `BACKUP_STAMP_FORMAT` is chronological (that is why the format is
+    zero-padded and big-endian), so the name is the sort key and no file needs stat-ing.
+
+    A failed unlink is logged and shrugged off: migrate's job is the config rewrite, which has
+    already succeeded by the time this runs, and a read-only leftover must not turn a successful
+    migration into a failed one.
+    """
+    prefix = f"{path.name}{BACKUP_INFIX}"
+    ours: list[Path] = []
+    for sibling in path.parent.glob(f"{prefix}*"):
+        if not sibling.is_file():
+            continue
+        try:
+            datetime.strptime(sibling.name[len(prefix):], BACKUP_STAMP_FORMAT)
+        except ValueError:
+            continue  # not a backup this module wrote — leave it alone
+        ours.append(sibling)
+
+    for stale in sorted(ours, key=lambda p: p.name)[:-BACKUP_RETENTION]:
+        if stale == keep:
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            log.debug("could not prune stale config backup %s", stale, exc_info=True)
