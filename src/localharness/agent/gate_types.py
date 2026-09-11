@@ -13,6 +13,7 @@ constant: the sets are the enumerated policy the PRD ratified, and each is overr
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Literal
@@ -257,8 +258,47 @@ The docker row is the other half of narrowing the destructive set below: asking 
 ``docker ps`` is the fatigue the ASK tier exists to avoid (docker-ps(1), docker-logs(1),
 docker-images(1), docker-inspect(1) — all report, none of them start, stop or remove anything)."""
 
-DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
+WINDOWS_DESTRUCTIVE_FLAG_VERBS: dict[str, tuple[str, ...]] = {
+    "Remove-Item": ("-Recurse", "-Force"),
+    "ri": ("-Recurse", "-Force"),
+    "del": ("/s", "/q"),
+    "erase": ("/s", "/q"),
+    "rd": ("/s", "/q"),
+    "rmdir": ("/s", "/q"),
+}
+"""The Windows half of :data:`DESTRUCTIVE_FLAG_VERBS_DEFAULT`, spelled the way Windows spells it.
+
+``bash_exec`` on Windows runs git-bash, and git-bash will happily start ``powershell`` or ``cmd``
+(v0.14 critic A4), so the delete verbs on the other side of that door need the same treatment
+``rm`` gets: the flag that makes them recursive is in the signature, and the plain verb is a
+different key. ``Remove-Item`` and its alias ``ri`` are the PowerShell cmdlets; ``del``/``erase``
+and ``rd``/``rmdir`` are the cmd builtins (about_Remove-Item, del(1)/rmdir(1) in the Windows
+Commands reference).
+
+The flags carry their own lead character because the two shells disagree about it — PowerShell
+uses one dash and a whole word, cmd uses a slash — and the classifier matches them the way each
+shell does: a dash flag case-insensitively by prefix (``-Recurse``, ``-recurse``, ``-rec``,
+``-r`` are one flag), a slash flag case-insensitively but whole. The third delete verb,
+``rm``, needs no entry: it is PowerShell's alias for ``Remove-Item`` too, and ``rm -Recurse``
+already canonicalizes to ``rm -r`` through the POSIX cluster rule."""
+
+WINDOWS_DESTRUCTIVE_SIGNATURES: frozenset[str] = frozenset(
+    " ".join((verb, *combination))
+    for verb, flags in WINDOWS_DESTRUCTIVE_FLAG_VERBS.items()
+    for size in range(1, len(flags) + 1)
+    for combination in itertools.combinations(flags, size)
+)
+"""Every flag combination of :data:`WINDOWS_DESTRUCTIVE_FLAG_VERBS`, derived rather than typed.
+
+The classifier emits the flags it found in the verb's own canonical order, so ``del /s /q`` and
+``del /q`` and ``del /s`` are three different signatures and all three have to be in the
+destructive set — exactly the shape ``rm -r`` / ``rm -f`` / ``rm -rf`` has above. Deriving them
+from the one flag table is what keeps the two in step: a flag added there can never go missing
+here."""
+
+DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = WINDOWS_DESTRUCTIVE_SIGNATURES | frozenset({
     "rm -r", "rm -f", "rm -rf",
+    "format", "diskpart",
     "git push --force", "git reset --hard", "git clean -f",
     "git branch -D", "git branch -d", "git branch -M",
     "git remote set-url", "git remote remove", "git remote rm", "git remote prune",
@@ -314,6 +354,9 @@ in it. Everything else git does stays grantable on its own key: ``git remote add
 and its push/pop/apply, ``git checkout BRANCH``, ``git switch``, ``git worktree add``,
 ``git submodule update``.
 
+``format`` and ``diskpart`` are bare names for the same reason ``mkfs`` is: each does exactly one
+thing, and it is not recoverable (Windows Commands reference).
+
 Residual, named rather than hidden: docker's management-command spellings of the same operations
 (``docker container rm``, ``docker container exec/run``, ``docker image rm``) are NOT in this set,
 so they classify as unfamiliar and can be granted. They are aliases for entries that are here."""
@@ -326,6 +369,7 @@ DESTRUCTIVE_FLAG_VERBS_DEFAULT: dict[str, tuple[str, ...]] = {
     "git clean": ("f",),
     "git worktree remove": ("force",),
     "git submodule deinit": ("force",),
+    **WINDOWS_DESTRUCTIVE_FLAG_VERBS,
 }
 """Verbs whose destructive variant is a flag. The classifier canonicalizes only these flags
 into the signature (``rm -r -f x`` → ``rm -rf``; ``git push -f`` → ``git push --force``) so a grant on
@@ -337,20 +381,35 @@ The two three-word git keys are the operations that are only destructive when fo
 until ``--force`` is passed, so the unforced spelling stays grantable and the forced one is in the
 ungrantable set above (git-worktree(1), git-submodule(1))."""
 
-PIPE_TO_SHELL_SOURCES_DEFAULT: frozenset[str] = frozenset({"curl", "wget"})
+PIPE_TO_SHELL_SOURCES_DEFAULT: frozenset[str] = frozenset({
+    "curl", "wget", "iwr", "Invoke-WebRequest",
+})
 """The fetch side of the pipe-to-shell rule: a segment with one of these signatures piped into a
-sink below makes the SINK destructive (PRD §3.1; Claude Code block list). Two entries because
-these are the two fetchers the dogfood corpus (PRD §5) actually used; the rule is overridable
-from ``permissions.ask.pipe_to_shell_sources`` for anyone whose install ships another."""
+sink below makes the SINK destructive (PRD §3.1; Claude Code block list). ``curl`` and ``wget``
+are the two fetchers the dogfood corpus (PRD §5) actually used; the rule is overridable from
+``permissions.ask.pipe_to_shell_sources`` for anyone whose install ships another.
 
-PIPE_TO_SHELL_SINKS_DEFAULT: frozenset[str] = frozenset({"sh", "bash", "zsh", "python", "python3"})
+``iwr`` and its full spelling ``Invoke-WebRequest`` are the PowerShell fetcher, added with the
+rest of the Windows row (v0.14 critic A4) — ``iwr http://x | iex`` is the download-and-run idiom
+every PowerShell install instruction uses, and it is the same rule, on the other shell. (On
+Windows, ``curl`` and ``wget`` are aliases for this cmdlet, so those two already carried.)"""
+
+PIPE_TO_SHELL_SINKS_DEFAULT: frozenset[str] = frozenset({
+    "sh", "bash", "zsh", "python", "python3",
+    "powershell", "pwsh", "cmd", "iex", "Invoke-Expression",
+})
 """The execute side of the same rule: ``curl … | sh`` and friends, where the sink segment is
 destructive (PRD §3.1; Claude Code block list). Read with the sources above — neither half means
-anything alone, and a bare ``sh`` is an interpreter, not a destructive command."""
+anything alone, and a bare ``sh`` is an interpreter, not a destructive command.
+
+The second row is PowerShell's and cmd's half of the same idiom (v0.14 critic A4). ``iex`` is the
+alias for ``Invoke-Expression``, which runs a string as code — the exact sink ``sh`` is, spelled
+in the shell the owner's Windows machine actually runs."""
 
 INTERPRETER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "python", "python3", "bash", "sh", "zsh", "node", "uv run", "ruby", "perl",
     "fish", "ksh", "dash", "script",
+    "powershell", "pwsh", "cmd",
 })
 """Commands whose SIGNATURE carries an interpreter mode (PRD §3.2 step 7, critic finding 5).
 
@@ -362,7 +421,14 @@ second signature nearly every workspace is asked about.
 ``fish``, ``ksh`` and ``dash`` are here because a shell the list forgets is a shell the gate
 never opens — their ``-c`` payload is recursed into like ``bash -c``'s (review finding R9).
 ``script`` is in the same row for the same reason: ``script -c CMD FILE`` runs CMD through a
-shell to record the session (script(1))."""
+shell to record the session (script(1)).
+
+``powershell``, ``pwsh`` and ``cmd`` are the Windows row (v0.14 critic A4). ``bash_exec`` on
+Windows runs git-bash, which can start either of them, and
+``powershell -Command "Remove-Item -Recurse -Force X"`` signed as a bare, grantable
+``powershell`` — one "always" on which covered every future command line the model cared to put
+behind it. They are interpreters exactly as ``bash`` is, so the mode goes in the key and the
+payload is opened."""
 
 INLINE_CODE_FLAGS_DEFAULT: dict[str, tuple[str, ...]] = {
     "python": ("-c",), "python3": ("-c",), "uv run": ("-c",),
@@ -370,6 +436,9 @@ INLINE_CODE_FLAGS_DEFAULT: dict[str, tuple[str, ...]] = {
     "fish": ("-c",), "ksh": ("-c",), "dash": ("-c",), "script": ("-c",),
     "node": ("-e", "--eval", "-p", "--print"),
     "ruby": ("-e",), "perl": ("-e", "-E"),
+    "powershell": ("-Command", "-EncodedCommand", "-File"),
+    "pwsh": ("-Command", "-EncodedCommand", "-File"),
+    "cmd": ("/c", "/k"),
 }
 """Per-interpreter flags that mean "the code is on the command line" (PRD §3.2 step 7).
 
@@ -377,7 +446,15 @@ The table that turns a command into the ``interpreter-inline`` class and puts th
 grant key. Each row is that interpreter's own documented inline flags — ``node`` carries four
 because ``-p``/``--print`` evaluate too. Deliberately NOT overridable from config (see
 ``AskConfig``): it is a canonicalization table, and a wrong row silently changes what a grant
-key means."""
+key means.
+
+The Windows rows carry only the CANONICAL spelling of each mode on purpose (v0.14 critic A4).
+PowerShell and cmd match their options case-insensitively and accept any unambiguous prefix, so
+the classifier matches these rows that way too and returns the canonical spelling — ``-c``,
+``-command``, ``-Comm`` and ``-Command`` are one mode and therefore one grant key, and
+``/C`` is ``/c``. Listing the abbreviations here would do the opposite: an exact hit on ``-c``
+would file the same command under a second key (powershell(1) / pwsh(1) "-Command",
+"-EncodedCommand", "-File"; cmd(1) "/c", "/k")."""
 
 INLINE_BY_NATURE_DEFAULT: frozenset[str] = frozenset({"eval"})
 """Commands that are inline interpreters with no flag at all (PRD §3.1 ``interpreter-inline``,
@@ -387,7 +464,7 @@ there is no mode flag to key on — the command itself is the signature."""
 WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "env", "nohup", "time", "nice", "ionice", "command", "builtin", "exec", "timeout", "stdbuf",
     "watch", "flock", "setsid", "chroot", "busybox", "caffeinate", "unbuffer", "systemd-run",
-    "poetry", "pipx", "uvx",
+    "poetry", "pipx", "uvx", "wsl",
 })
 """PRD §3.2 step 4: peeled so the signature is the wrapped command's. ``sudo`` is NOT a wrapper
 (destructive before peeling).
@@ -396,7 +473,14 @@ The second row is the review's finding R9: every one of these runs its argument 
 before they were peeled ``watch cp x ~/.ssh/authorized_keys`` signed as an unfamiliar ``watch``
 with no write target at all. Their per-command argument shapes (``watch -n N``, ``flock`` and
 ``chroot``'s leading operand, ``poetry run`` / ``pipx run``'s required subcommand) live with the
-peeling logic in ``shell_classify``, which is where the other canonicalization tables are."""
+peeling logic in ``shell_classify``, which is where the other canonicalization tables are.
+
+``wsl`` is the Windows door in the other direction (v0.14 critic A4): from git-bash it starts a
+command inside the Linux VM, and ``wsl rm -rf x`` / ``wsl -e rm -rf x`` / ``wsl -- rm -rf x``
+all signed as a bare, grantable ``wsl``. It is a wrapper rather than an interpreter because its
+payload is argv and not a string — peeling reaches the real ``rm -rf`` key, which is a better
+answer than an opaque ``wsl -e``. The Linux side of that VM is not this workspace; the boundary
+check on the peeled command's targets is what decides, exactly as it does for ``chroot``."""
 
 DROPPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "cd", "pushd", "popd", "export", "pwd", "true", ":",

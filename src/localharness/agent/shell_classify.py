@@ -149,6 +149,7 @@ WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "uvx": frozenset({"--from", "--with", "--python", "-p", "--project", "--directory"}),
     "command": frozenset(),
     "exec": frozenset({"-a"}),
+    "wsl": frozenset({"-d", "--distribution", "-u", "--user", "--cd", "--shell-type"}),
 }
 """Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
 
@@ -331,7 +332,44 @@ Everything else in that set has its ``-c`` string recursed into as shell text (P
 Naming the exceptions rather than the shells is what makes the knob real (finding R9b): the
 hardcoded ``{"sh", "bash", "zsh"}`` it replaces meant adding ``fish`` to ``interpreter_commands``
 changed the signature but left ``fish -c 'rm -rf x'`` unopened. A ``python3 -c`` payload is
-python and is not re-parsed as shell."""
+python and is not re-parsed as shell.
+
+``powershell``, ``pwsh`` and ``cmd`` are deliberately NOT listed as exceptions, which means their
+inline payload IS re-parsed as shell (v0.14 critic A4). That is an APPROXIMATION, named here
+rather than hidden: PowerShell and cmd are not POSIX shells, but they separate commands with the
+same ``;`` and ``|`` (and PowerShell with ``&&``), and quote with the same ``'`` and ``"``, which
+is enough for the one job this classifier has on that payload — finding the command names and
+their flags. What it does NOT model is PowerShell's own grammar: a pipeline into a cmdlet that
+takes a scriptblock, backtick escapes, ``@()``/``$()`` subexpressions, and cmd's ``^`` escape.
+A payload that leans on those reads as unfamiliar segments, which ask."""
+
+
+CASE_FOLDED_FLAG_INTERPRETERS = frozenset({"powershell", "pwsh", "cmd"})
+"""Interpreters whose options are matched the way THEY match them, not the way POSIX does.
+
+Two differences, both of which let a command line past the gate unread (v0.14 critic A4):
+
+* Their options are case-insensitive and accept any unambiguous PREFIX, so ``-Command``,
+  ``-command``, ``-Comm`` and ``-c`` are one flag — matched folded and by prefix, returning the
+  canonical spelling from ``settings.inline_code_flags`` so all of them share ONE grant key.
+* The inline flag does not have to come first. ``powershell -ExecutionPolicy Bypass -Command
+  "…"`` puts a value-taking option in front of it, and ``cmd /c`` does not start with a dash at
+  all — either one ended the ordinary scan at the first non-option token and filed the command
+  as ``<script>`` with its payload unopened. For these heads every token is scanned for the
+  inline flag before the positional rule applies.
+
+Over-matching a prefix is the safe direction: it puts the command in the ``interpreter-inline``
+class, which asks (powershell(1), cmd(1))."""
+
+SPELLED_FLAG_LEADERS = ("-", "/")
+"""A ``destructive_flag_verbs`` entry that already carries its own lead character is a Windows
+flag spelled in full (``-Recurse``, ``/s``), not a POSIX letter to be clustered into ``-rf``.
+
+The lead character IS the rule: PowerShell's one-dash-one-word options are matched folded and by
+prefix, cmd's slash options folded and whole, and the suffix is emitted verbatim and
+space-separated (``Remove-Item -Recurse -Force``) instead of through the POSIX cluster format.
+Deriving the behavior from the spelling keeps one table for both worlds — see
+``WINDOWS_DESTRUCTIVE_FLAG_VERBS`` in ``gate_types``."""
 
 
 def _is_shell_interpreter(head: str, settings: GateSettings) -> bool:
@@ -1262,9 +1300,10 @@ def _command_payload(argv: list[str]) -> list[str]:
 def _inline_payloads(argv: list[str], settings: GateSettings) -> list[str]:
     """PRD §3.2 step 5: the string after ``sh -c`` / ``bash -c`` / ``zsh -c``, to recurse into."""
     flags = settings.inline_code_flags.get(argv[0], ())
+    fold = argv[0] in CASE_FOLDED_FLAG_INTERPRETERS
     payloads: list[str] = []
     for index, token in enumerate(argv[1:], start=1):
-        if _inline_flag(token, flags) and index + 1 < len(argv):
+        if _inline_flag(token, flags, fold=fold) and index + 1 < len(argv):
             payloads.append(argv[index + 1])
     return payloads
 
@@ -1282,14 +1321,22 @@ def _inline_by_nature_payload(argv: list[str]) -> list[str]:
     return [text] if text else []
 
 
-def _inline_flag(token: str, flags: tuple[str, ...]) -> str | None:
+def _inline_flag(token: str, flags: tuple[str, ...], *, fold: bool = False) -> str | None:
     """The inline-code flag this token carries, or None.
 
     Short flags cluster: ``bash -lc "rm -rf x"`` is ``bash -c`` with a login shell, and reading
     only exact matches would file it as ``bash <script>`` and never recurse into the payload.
+
+    ``fold`` switches to the Windows shells' own matching — case-insensitive, any unambiguous
+    prefix, canonical spelling returned (:data:`CASE_FOLDED_FLAG_INTERPRETERS`).
     """
     if token in flags:
         return token
+    if fold:
+        lowered = token.lower()
+        if len(token) < 2:
+            return None
+        return next((flag for flag in flags if flag.lower().startswith(lowered)), None)
     if token.startswith("-") and not token.startswith("--"):
         for flag in flags:
             if len(flag) == 2 and flag[1] in token[1:]:
@@ -1352,8 +1399,9 @@ def _signature(
             return f"{key} {mode}", inline
         return key, False
 
+    verb, _ = _destructive_verb(base, settings)
     flags = _destructive_flags(base, rest, settings)
-    return base + flags, False
+    return verb + flags, False
 
 
 def _interpreter_mode(
@@ -1361,6 +1409,16 @@ def _interpreter_mode(
 ) -> tuple[str, bool]:
     """``-c`` (inline), ``-m MOD``, ``<script>`` or nothing — the four keys of critic finding 5."""
     inline_flags = settings.inline_code_flags.get(key, ())
+    if key in CASE_FOLDED_FLAG_INTERPRETERS:
+        # The inline flag can sit behind an option that takes a value, and need not start with a
+        # dash at all (`cmd /c`), so it is looked for everywhere before the positional rule.
+        found = next(
+            (flag for flag in (_inline_flag(token, inline_flags, fold=True) for token in rest)
+             if flag),
+            None,
+        )
+        if found:
+            return found, True
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -1500,11 +1558,60 @@ def _operation_word(base: str, after: list[str]) -> str:
     return ""
 
 
+def _destructive_verb(base: str, settings: GateSettings) -> tuple[str, tuple[str, ...]]:
+    """The ``destructive_flag_verbs`` entry for this command — (canonical verb, its flags).
+
+    The verb is returned because it may be spelled differently from ``base``: PowerShell and cmd
+    are case-insensitive about command names as well as flags, so ``remove-item -recurse -force x``
+    is ``Remove-Item -Recurse -Force`` and has to reach the same key (v0.14 critic A4). Folding is
+    limited to the entries whose flags carry their own lead character (:data:`SPELLED_FLAG_LEADERS`)
+    — the POSIX verbs stay case-sensitive, where ``R`` and ``r`` are different flags and ``RM`` is
+    not ``rm``.
+    """
+    canonical = settings.destructive_flag_verbs.get(base)
+    if canonical is not None:
+        return base, canonical
+    lowered = base.lower()
+    for verb, flags in settings.destructive_flag_verbs.items():
+        if verb.lower() == lowered and _is_spelled_flag_verb(flags):
+            return verb, flags
+    return base, ()
+
+
+def _is_spelled_flag_verb(canonical: tuple[str, ...]) -> bool:
+    """Does this entry spell its flags in full, lead character included? :data:`SPELLED_FLAG_LEADERS`"""
+    return bool(canonical) and all(flag[:1] in SPELLED_FLAG_LEADERS for flag in canonical)
+
+
+def _spelled_flags(canonical: tuple[str, ...], rest: list[str]) -> str:
+    """Windows flag suffix: the flags found, in the verb's own order, spelled as the table spells
+    them (``Remove-Item -Recurse -Force``).
+
+    A dash flag matches case-insensitively by PREFIX, because PowerShell accepts any unambiguous
+    abbreviation (``-r``, ``-rec``, ``-Recurse``); a slash flag matches folded but whole, because
+    cmd's do not abbreviate. A bare ``-`` matches nothing.
+    """
+    found = [
+        flag for flag in canonical
+        if any(_matches_spelled_flag(token, flag) for token in rest)
+    ]
+    return "".join(f" {flag}" for flag in found)
+
+
+def _matches_spelled_flag(token: str, flag: str) -> bool:
+    """One token against one fully-spelled Windows flag (see :func:`_spelled_flags`)."""
+    if flag.startswith("-"):
+        return len(token) > 1 and flag.lower().startswith(token.lower())
+    return token.lower() == flag.lower()
+
+
 def _destructive_flags(base: str, rest: list[str], settings: GateSettings) -> str:
     """Canonical flag suffix for a verb in ``settings.destructive_flag_verbs``, else ``""``."""
-    canonical = settings.destructive_flag_verbs.get(base)
+    _, canonical = _destructive_verb(base, settings)
     if not canonical:
         return ""
+    if _is_spelled_flag_verb(canonical):
+        return _spelled_flags(canonical, rest)
     found: set[str] = set()
     for token in rest:
         if not token.startswith("-") or token == "-":
