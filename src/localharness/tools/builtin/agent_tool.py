@@ -34,6 +34,7 @@ class AgentTool(Tool):
         agent_list = ", ".join(self._available_agents) if self._available_agents else "none configured"
         return ToolSchema(
             name="agent",
+            group="delegate",
             description=(
                 f"Delegate a task to a subagent. Available agents: {agent_list}. "
                 "Use this when a specialized agent would handle the task better than you. "

@@ -16,6 +16,7 @@ class ToolResultGetTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="tool_result_get",
+            group="fs.read",
             description=(
                 "Restore the full body of a previously evicted tool result. When you see a "
                 "stub like \"[tool result evicted — ~N tokens — call tool_result_get('<id>') "

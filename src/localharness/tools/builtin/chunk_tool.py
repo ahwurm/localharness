@@ -56,6 +56,7 @@ class ChunkTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="chunk",
+            group="fs.read",
             description=(
                 "Split a large body you hold as a handle (an eviction-stub id, a 'pg-N' page, or a "
                 "granted handle) into smaller numbered pieces, each retained under its own handle. "

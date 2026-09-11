@@ -27,6 +27,7 @@ class ReadTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="read",
+            group="fs.read",
             description=(
                 "Read file contents. Returns the file as a string with line numbers "
                 "prepended (format: 'N\\t<line>'). Supports optional line range. Refuses "

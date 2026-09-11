@@ -77,6 +77,7 @@ class GrepTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="grep",
+            group="fs.read",
             description=(
                 "Search LOCAL FILE contents on disk for a regex pattern. Returns matching "
                 "lines with file path and line number. Searches recursively if path is a "

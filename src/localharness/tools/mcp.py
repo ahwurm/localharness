@@ -76,6 +76,9 @@ class MCPToolWrapper(Tool):
             scope="mcp",
             destructive=True,
             version="mcp-discovered",
+            # One group per SERVER (PRD §6): what an MCP tool does is unknowable from here, so
+            # the server it came from is the honest unit of both the ask and, in v0.14, exposure.
+            group=f"mcp/{self._server_name}",
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

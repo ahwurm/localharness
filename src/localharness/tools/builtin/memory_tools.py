@@ -85,6 +85,7 @@ class MemorySearchTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="memory_search",
+            group="memory",
             description=(
                 "Search your persistent memory (fact names, values, tags) for a query string. "
                 "Returns matching fact names with a short snippet. Use memory_get(name) for a "
@@ -228,6 +229,7 @@ class MemoryRememberTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="remember",
+            group="memory",
             description=(
                 "Save one durable fact to your persistent memory so future sessions can use it. "
                 "Use a short stable name (e.g. 'deploy-requires-vpn') and a self-contained "
@@ -314,6 +316,7 @@ class MemoryGetTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="memory_get",
+            group="memory",
             description=(
                 "Return the full body of one persistent fact by its exact name (the name shown "
                 "in the memory index or returned by memory_search). Pass history=true to see "

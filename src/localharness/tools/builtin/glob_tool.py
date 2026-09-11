@@ -10,6 +10,7 @@ class GlobTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="glob",
+            group="fs.read",
             description=(
                 "Find files matching a glob pattern. Returns newline-separated "
                 "absolute paths. Use ** for recursive matching (a trailing bare "
