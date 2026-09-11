@@ -188,5 +188,9 @@ def test_without_an_asker_a_non_tty_run_stays_inert(outside_workspace):
 
 
 def test_the_trust_question_is_one_named_string():
+    """One string, and as of v0.14.1 it names BOTH halves of what a yes does — the config layer
+    loads AND tools run without asking (owner ruling 2026-09-11, "trusted = load its config AND
+    auto"). A question that named only the config half would be describing half the answer."""
     assert "{parent}" in TRUST_QUESTION
-    assert "treat them like code you are about to run" in TRUST_QUESTION
+    assert "treat like code you are about to run" in TRUST_QUESTION
+    assert "without asking" in TRUST_QUESTION

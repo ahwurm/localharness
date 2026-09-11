@@ -349,7 +349,11 @@ def test_undecided_prompt_yes_trusts_and_returns_path(project, monkeypatch):
     _question, kwargs = asked[0]
     assert kwargs["console"].stderr is True  # the prompt itself is on stderr
     assert kwargs["default"] is False  # answering blind declines
-    assert trust.is_trusted(project) is True
+    # Recorded on the workspace ROOT, not on the `.localharness` directory: v0.14.1 made this
+    # the SAME record the session-trust question reads (owner ruling 2026-09-11, "ONE question
+    # and ONE record"), and `is_trusted_tree` walks upward, so the root answers for both.
+    assert trust.is_trusted_tree(project) is True
+    assert trust.is_trusted(project.parent) is True
 
 
 def test_undecided_prompt_no_records_false_and_returns_none(project, monkeypatch, capsys):
@@ -359,7 +363,8 @@ def test_undecided_prompt_no_records_false_and_returns_none(project, monkeypatch
 
     assert resolve_workspace_layer(interactive=True) is None
     assert len(asked) == 1
-    assert trust.is_trusted(project) is False
+    assert trust.is_trusted_tree(project) is False
+    assert trust.is_trusted(project.parent) is False
     assert _squash(str(project)) in _squash(capsys.readouterr().err)
 
 
@@ -394,7 +399,7 @@ def test_all_notices_go_to_stderr_not_stdout(project, monkeypatch, capsys):
     assert declined.out == ""
     assert declined.err != ""
 
-    assert trust.is_trusted(project) is False
+    assert trust.is_trusted_tree(project) is False
     assert resolve_workspace_layer(interactive=True) is None  # stored no
     stored = capsys.readouterr()
     assert stored.out == ""
