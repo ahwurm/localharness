@@ -93,6 +93,12 @@ block so `localharness start` restarts it after reboots and the REPL `/model` co
 can swap between downloaded models. What does **not** work out of the box yet (context budgets,
 timeouts, concurrency) is itemized in [gaps.md](gaps.md).
 
+**Running a job on one of these boxes with nobody watching?** The permission gate defaults to
+`guarded` from v0.14, and a channel with nobody to ask refuses the call rather than allowing it,
+so a cron, nightly or otherwise unattended run needs `permissions.mode: unattended` in the config
+it runs under — the pre-v0.14 behavior, named honestly. It cannot be set from a session command;
+see [SECURITY.md](../../SECURITY.md).
+
 ## Runtime support commitment
 
 vLLM, llama.cpp and Ollama must all work out of the box harness-wide:

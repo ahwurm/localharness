@@ -9,7 +9,7 @@ All notable changes to LocalHarness are documented here. The format follows
 The permission spine: one deterministic gate in front of every tool call, so the
 harness interrupts you when something crosses your project boundary or looks
 destructive, and stays quiet otherwise. Read SECURITY.md, "Human approval gate",
-for what it stops and the five gaps it does not.
+for what it stops and the named gaps it does not.
 
 ### Breaking
 - **`permissions.allow_patterns` is gone, with an automatic repair.** Every
@@ -57,6 +57,10 @@ for what it stops and the five gaps it does not.
   that ask every time. The mode picker offers guarded, trusted and read-only; stop
   cancels the turn. Setup and an honest "not yet" list are in
   [docs/zed.md](docs/zed.md).
+- **Permission prompts in Discord are answered with a reaction.** The bot posts the
+  question and the three reactions it accepts: ✅ allow once, ♾️ always in this
+  workspace, ❌ no. A call in a class that cannot be remembered shows only ✅ and ❌,
+  with the legend saying so.
 
 ### Changed
 - **`permissions.mode: auto` and `manual` are deprecated.** Both load as `guarded`
@@ -78,6 +82,59 @@ for what it stops and the five gaps it does not.
   both the bare and embedded forms, `chmod` did not. The embedded pattern is added
   and the defaults revision bumped, so an existing `config.yaml` picks it up on the
   next start.
+
+The rest of this section is the gate's own pre-release hardening. None of it was ever
+in a release — the gate itself ships here for the first time — and it is listed so the
+shipped behavior is on the record rather than discovered.
+
+**What the shell classifier now sees:**
+- `docker` is judged by its subcommand instead of its name: the operations that run
+  code on the host or destroy state ask every time, `ps`/`logs`/`images`/`inspect` are
+  reads, and `build`/`pull`/`push`/`tag`/`login` are ordinary commands you can grant
+  once. A bare `docker` entry made all of them ungrantable.
+- Wrapper flags no longer hide the command behind them — `command -p ls` and
+  `exec -a name cmd` are peeled like the wrappers they are, so the signature is the
+  real command's.
+- `git`'s destructive subcommands are named individually (`branch -D`, `remote remove`,
+  `stash drop`/`clear`, `checkout`, `restore`), and the destination of `git clone`,
+  `git init` and `git worktree add` is checked as a write target like any other path.
+- `powershell`, `pwsh`, `cmd` and `wsl` are classified as interpreters, with their
+  destructive verbs on a named list — the Windows side of the same boundary. The list
+  is enumerated, not parsed; SECURITY.md, "Named gaps", says what that misses.
+- More paths are protected: `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`, the
+  cloud CLI credential directories, and the Windows credential stores.
+
+**Fail closed, not open:**
+- A tool parameter that is not a string is refused rather than stringified into a
+  verdict about something the gate never inspected.
+- An error inside the gate denies the call and tells the model why, instead of raising
+  and ending the turn.
+- `grants.yaml` is written under a lock, so two sessions answering prompts at the same
+  time cannot lose one another's answers.
+- `org.permissions.ask` set at the org level is honored outside a workspace too; it
+  was read only when a workspace layer applied.
+- Config files are written `0600` — a grants file and a config file both carry
+  security decisions and neither should be world-readable.
+- `config migrate` keeps the five newest backups and prunes the rest, instead of
+  leaving one timestamped copy per upgrade forever.
+- A config deprecation notice is a log record, not a `DeprecationWarning`: under
+  `-W error` or `PYTHONWARNINGS=error` the warning became an exception inside
+  validation, which broke `config migrate` — the documented repair for exactly those
+  configs.
+
+**Prompts and what they report:**
+- A cancelled prompt publishes its resolved event, so `ask-rate` counts the session
+  correctly instead of leaving a question open forever.
+- A prompt raised by a subagent names that subagent, so it is clear who is asking.
+- A denied call no longer counts against the turn's action budget; refusing work
+  should not consume the budget for doing it.
+- Zed (ACP): MCP servers passed in by the editor are announced as unsupported rather
+  than silently ignored; an `@`-mention in the prompt is announced rather than dropped;
+  `SIGTERM` tears the session down cleanly; and the permission dialog is paired to its
+  call by id, so two prompts in flight cannot answer each other.
+- The terminal draws its permission prompt under the output lock, so a streaming reply
+  cannot overwrite the question.
+- A Discord prompt that times out says so in the channel instead of going quiet.
 
 ## [0.13.3] — 2026-09-09
 

@@ -87,8 +87,8 @@ workspace always gets the same answer. It runs in a fixed order and the first ma
 1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
    grant, not a mode.
 2. **Ask, and no answer is remembered.** Destructive shell commands (`rm -rf`, `git push --force`,
-   `git reset --hard`, `chmod -R`, `sudo`, `curl … | sh`, `find -delete`, `docker`, `dd` and the
-   rest), any write whose target is a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+   `git reset --hard`, `chmod -R`, `sudo`, `curl … | sh`, `find -delete`, `dd` and the rest),
+   any write whose target is a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
    your shell rc files, `~/.localharness`, and inside the project `.git/**`, `.localharness/**`,
    `.env*`, `*.pem`, `id_*`), and every write-shaped call made when there is no workspace boundary
    at all. These ask **every time**, on purpose. The flags are part of what is matched, so `rm file`
@@ -105,6 +105,15 @@ workspace always gets the same answer. It runs in a fixed order and the first ma
    `cat`, `head`, `tail`, `grep`, `rg`, `find` without `-exec`/`-delete`, `git status`/`diff`/`log`,
    `sed -n`, and their kin), network reads, and edits inside the project when the channel can show
    you the diff.
+
+**`docker` is judged by its subcommand, not by its name.** The ungrantable step-2 set names the
+docker operations that run code on the host or destroy state — `exec`, `run`, `start`, `restart`,
+`stop`, `kill`, `rm`, `rmi`, `system prune`, `compose up/down/exec/run/rm` (and the old
+`docker-compose` spelling), plus the `docker container …` / `docker image …` management spellings
+of the same operations and the `volume`/`network` removals. `docker ps`, `logs`, `images`,
+`inspect`, `version` and `info` are reads and never ask; `build`, `pull`, `push`, `tag` and `login`
+are ordinary unfamiliar commands you can grant once. A bare `docker` entry made all of those
+ungrantable, which is ask-fatigue on commands nobody needs protection from.
 
 **The boundary is derived from where you stand, never configured.** It is the folder holding the
 nearest in-project `.localharness/`, else the git top level, else the directory you started in,
@@ -181,6 +190,21 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   cannot be resolved before the shell expands it, so it asks as an out-of-project write — and once
   you answer "always" for that unresolved shape, a later expansion of the same shape to a different
   path passes on that grant.
+- **Program text handed to a non-shell interpreter is never read.** `python3 -c`, `perl -e`, an
+  `awk` program, a PowerShell `-Command` string: these are keyed as inline interpreters — the class
+  that asks once and can then be granted — and what the program says is not parsed, because parsing
+  five languages to decide one prompt is not a thing this gate does. Only shell payloads are
+  recursed into (`bash -c`, `sh -c`, `eval`, `find -exec`, `xargs`, `ssh host CMD`). So an "always"
+  on `perl -e` covers every later `perl -e` in that workspace, whatever it contains. This is the
+  same hole as the granted-interpreter gap at the top of this list, restated for the languages
+  people forget are interpreters.
+- **On Windows the shell is git-bash, and a PowerShell or cmd invocation is keyed by a named verb
+  list.** `bash_exec` runs commands through Git for Windows' `bash.exe`; a `powershell`, `pwsh`,
+  `cmd` or `wsl` command reached from there is classified as an inline interpreter, and the
+  destructive ones are recognized from an enumerated list of verbs. An enumerated list is not a
+  parser: a destructive spelling that is not on it — an alias, an encoded command, a cmdlet nobody
+  listed — classifies as an ordinary inline interpreter and can be granted. The same "best-effort
+  by construction" caveat as the POSIX shell boundary applies, with a shorter list behind it.
 - **There is still no OS sandbox.** Everything above is a policy boundary, enforced by this process
   in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
   program that has already started running.
