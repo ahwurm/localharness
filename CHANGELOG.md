@@ -38,8 +38,14 @@ for what it stops and the five gaps it does not.
 - **`ToolSchema.group`** — every builtin now names its family (`fs.read`,
   `fs.write`, `shell`, `code`, `delegate`, `web`, `memory`, `mcp/<server>`). The
   gate reads it, and it is the seed of the v0.14 exposure taxonomy.
-- **Zed / ACP adapter** — TODO(next agent): `localharness acp`, what Zed shows,
-  and how the gate renders there.
+- **`localharness acp` — LocalHarness in Zed's agent panel.** An Agent Client
+  Protocol server over stdin/stdout: text streams as it generates, tool calls tick
+  with the right icon, edits go through Zed so they land in the review pane (and
+  therefore never ask), and the permission gate renders as Zed's own dialog with
+  *allow once / always here / no / never here* — two buttons only for the classes
+  that ask every time. The mode picker offers guarded, trusted and read-only; stop
+  cancels the turn. Setup and an honest "not yet" list are in
+  [docs/zed.md](docs/zed.md).
 
 ### Changed
 - **`permissions.mode: auto` and `manual` are deprecated.** Both load as `guarded`
