@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,18 @@ import yaml
 from localharness.agent.gate_types import Grant, Refusal
 from localharness.config.grants import (
     GRANTS_FILE,
+    GRANTS_LOCK_SUFFIX,
     GrantStore,
     grants_store_path,
     new_grant,
     new_refusal,
 )
+
+
+IMPORT_SUBPROCESS_TIMEOUT_S = 30
+"""Ceiling on the fresh-interpreter import probe below. A cold `import localharness.agent` is a
+second or two; thirty is that with room for a cold page cache, and small enough that an import
+which hangs fails this test instead of the whole suite."""
 
 
 @pytest.fixture
@@ -259,7 +267,12 @@ def test_the_write_is_atomic_and_leaves_no_tempfile(global_dir, tmp_path):
     ws = (tmp_path / "proj").resolve()
     ws.mkdir()
     GrantStore().add(_grant(ws))
-    assert [p.name for p in global_dir.iterdir()] == [GRANTS_FILE]
+    # The store and its write lock, and nothing else: no half-written temp file survives the
+    # atomic rename. The lock is a permanent, empty sidecar (`_locked`), not debris.
+    assert sorted(p.name for p in global_dir.iterdir()) == sorted(
+        [GRANTS_FILE, GRANTS_FILE + GRANTS_LOCK_SUFFIX]
+    )
+    assert (global_dir / (GRANTS_FILE + GRANTS_LOCK_SUFFIX)).stat().st_size == 0
     assert isinstance(yaml.safe_load((global_dir / GRANTS_FILE).read_text()), dict)
 
 
@@ -330,5 +343,83 @@ def test_spine_module_imports_first_in_a_fresh_interpreter(module):
         [sys.executable, "-c", f"import {module}"],
         capture_output=True,
         text=True,
+        # A bounded wait: an import that hangs (a module opening a socket, waiting on a lock)
+        # would otherwise hang the whole suite with no output rather than failing this test.
+        timeout=IMPORT_SUBPROCESS_TIMEOUT_S,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ------------------------------------------------------------------- concurrency
+
+CONCURRENT_WRITERS = 20
+"""Enough writers to lose records reliably without the lock — the count that found this. One
+session per terminal, Zed window and Discord instance answering prompts at once is the real
+shape; twenty is that with the margin a race test needs."""
+
+
+def _add_concurrently(store: GrantStore, workspace: Path, write) -> None:
+    """Run ``write(i)`` on CONCURRENT_WRITERS threads released together by a barrier.
+
+    Threads, not processes: POSIX `flock` locks the open file DESCRIPTION, so two threads
+    holding two handles exclude each other exactly as two processes do — the barrier is what
+    makes them collide, not the process boundary.
+    """
+    ready = threading.Barrier(CONCURRENT_WRITERS)
+
+    def _run(i: int) -> None:
+        ready.wait()
+        write(i)
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in range(CONCURRENT_WRITERS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def test_concurrent_grants_are_all_kept(tmp_path):
+    """Read-modify-write with no lock kept ONE of twenty: every writer loaded the same "before"
+    state and the last atomic rename won. A human's answer vanishing is the one failure a
+    permission store cannot have."""
+    store = GrantStore(tmp_path / "grants.yaml")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    _add_concurrently(store, workspace, lambda i: store.add(_grant(workspace, key=f"cmd-{i}")))
+
+    missing = [
+        i for i in range(CONCURRENT_WRITERS)
+        if store.lookup(workspace, "shell-unfamiliar", f"cmd-{i}") is None
+    ]
+    assert missing == []
+
+
+def test_concurrent_refusals_are_all_kept(tmp_path):
+    """The same race on the negative side — and losing a "never here" is the worse half."""
+    store = GrantStore(tmp_path / "grants.yaml")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    _add_concurrently(
+        store, workspace, lambda i: store.add_refusal(_refusal(workspace, key=f"cmd-{i}"))
+    )
+
+    missing = [
+        i for i in range(CONCURRENT_WRITERS)
+        if store.refused(workspace, "shell-unfamiliar", f"cmd-{i}") is None
+    ]
+    assert missing == []
+
+
+def test_re_answering_the_same_key_still_replaces_rather_than_appends(tmp_path):
+    """The lock must not have turned replace-in-place into an append-only log."""
+    store = GrantStore(tmp_path / "grants.yaml")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    store.add(_grant(workspace, key="git push"))
+    store.add(_grant(workspace, key="git push"))
+
+    data = yaml.safe_load((tmp_path / "grants.yaml").read_text(encoding="utf-8"))
+    assert len(data[str(workspace.resolve())]["grants"]) == 1
