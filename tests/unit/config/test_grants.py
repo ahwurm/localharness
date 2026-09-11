@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -192,3 +194,35 @@ def test_new_grant_stamps_full_provenance(tmp_path):
     assert g.workspace == str(ws)
     assert g.channel == "acp" and g.session_id == "s9"
     assert g.granted_at.startswith("20") and g.granted_at.endswith("+00:00")
+
+
+# --------------------------------------------------------------------------- #
+# import order (D5)
+# --------------------------------------------------------------------------- #
+
+#: Modules of the permission spine that a script, plugin or new test module may reasonably reach
+#: for BEFORE anything else in the package. Each must import cleanly as the very first
+#: `localharness` import in a fresh interpreter: `config.grants` once could not, because
+#: `agent/__init__.py` pulls in `agent.loop` → `agent.gate` → back into the half-built
+#: `config.grants` (PRD §3.3 store, wired by A4).
+SPINE_ENTRY_MODULES = (
+    "localharness.config.grants",
+    "localharness.agent.verdict",
+    "localharness.agent.gate_types",
+    "localharness.agent.shell_classify",
+)
+
+
+@pytest.mark.parametrize("module", SPINE_ENTRY_MODULES)
+def test_spine_module_imports_first_in_a_fresh_interpreter(module):
+    """No import cycle when this module is the first `localharness` import of the process.
+
+    A subprocess, not an `importlib.import_module` call: conftest has already imported
+    `localharness.agent` in this interpreter, which is exactly what hid the cycle from the suite.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

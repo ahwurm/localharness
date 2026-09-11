@@ -21,15 +21,36 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import yaml
 
-from localharness.agent.gate_types import Grant
 from localharness.config.overlay import atomic_write_overlay
 from localharness.config.paths import global_config_dir
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from localharness.agent.gate_types import Grant
+
 log = logging.getLogger(__name__)
+
+
+def _grant_type() -> type:
+    """``gate_types.Grant``, imported on first use rather than at module import.
+
+    ``localharness.agent.__init__`` eagerly pulls in ``agent.loop`` → ``agent.gate`` →
+    ``config.grants``, so importing ``agent.gate_types`` from this module's body made
+    ``from localharness.config.grants import GrantStore`` fail in a fresh interpreter with a
+    partially-initialised-module ImportError: the store could only be imported by someone who
+    had already imported ``localharness.agent``. The test suite never saw it (conftest imports
+    the agent package first), but any script, plugin or new test module reaching for the grant
+    store first did. Deferring the import to call time breaks the cycle without moving the type,
+    which stays where the contract puts it (``agent/gate_types.py``, the shared-types module).
+    ``from __future__ import annotations`` keeps the annotations below string-only, so this is
+    the only runtime reference.
+    """
+    from localharness.agent.gate_types import Grant
+
+    return Grant
 
 GRANTS_FILE = "grants.yaml"
 """PRD §3.3: the file name inside the GLOBAL config dir. Sibling of
@@ -141,7 +162,7 @@ class GrantStore:
         for workspace_key in _ancestors(workspace):
             for record in self._records(data, workspace_key, GRANTS_KEY, GRANT_REQUIRED_FIELDS):
                 if record["key"] == key:
-                    return Grant(
+                    return _grant_type()(
                         key=record["key"],
                         klass=record["class"],
                         granted_at=record["granted_at"],
@@ -224,7 +245,7 @@ def new_grant(*, key: str, klass: str, workspace: Path | str, channel: str, sess
 
     The one constructor the channels use, so provenance can never be forgotten at a call site.
     """
-    return Grant(
+    return _grant_type()(
         key=key,
         klass=klass,
         granted_at=_now(),
