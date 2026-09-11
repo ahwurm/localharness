@@ -84,23 +84,73 @@ From v0.14 every tool call of every agent — subagents included — passes one 
 before it runs. The function is code, not a judgment call by a model: the same call in the same
 workspace always gets the same answer. It runs in a fixed order and the first match wins.
 
+**The default mode is `auto`: one question about the workspace, then a blacklist.** v0.14.0
+shipped `guarded` as the default — ask once about each new thing, remember the answer — and in
+real use it stopped people during ordinary work. A gate that interrupts ordinary work trains you
+to approve without reading, so from v0.14.1 the shape is different: the first time a session opens
+a workspace you are asked **once** whether you trust it, and after that everything runs except a
+named list of dangerous operations.
+
+**The trust question.** It is the same record as the one that decides whether a project's own
+`.localharness/` config is loaded, kept in `~/.localharness/trusted_workspaces.yaml`, global,
+answered once and remembered forever. Trusting a workspace means both halves: its config layer is
+loaded, and its tool calls run without asking. Answer no and the session runs in `guarded`, which
+asks once about each new thing and remembers the answer. A channel that cannot ask and has no
+record for this workspace runs `guarded` too — failing closed is still the rule, and
+`permissions.mode: unattended` is still the explicit way a scheduled job opts out of all of it. In
+Zed the question arrives as the permission dialog, once per project.
+
+**There is no allow-list in `auto`.** Nothing is enumerated as safe; everything is allowed unless
+it is on the blacklist in step 2 below, and that list is the thing to curate. This is deliberate
+and it is the honest weakness: a whitelist fails closed on the operation nobody thought of, and a
+blacklist runs it. We chose the blacklist because a whitelist of "ordinary work" is the thing that
+was interrupting people, and because a list of ways to lose data irreversibly is short enough to
+read and argue with. Each step below says what it does in `auto`.
+
 1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
    grant, not a mode.
-2. **Ask, and no answer is remembered.** Destructive shell commands (`rm -rf`, `git push --force`,
-   `git reset --hard`, `chmod -R`, `sudo`, `curl … | sh`, `find -delete`, `dd` and the rest),
-   any write whose target is a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
-   your shell rc files, `~/.localharness`, and inside the project `.git/**`, `.localharness/**`,
-   `.env*`, `*.pem`, `id_*`), and every write-shaped call made when there is no workspace boundary
-   at all. These ask **every time**, on purpose. The flags are part of what is matched, so `rm file`
-   and `rm -rf dir` are different things and an answer about one is never an answer about the other.
-3. **Grants.** A remembered "always" for this workspace. Checked only after step 2, so an old
-   permissive answer can never cover a destructive variant.
-4. **Ask once, then remember.** A write or shell write target outside the project folder (keyed by
-   the target's parent directory), a shell command whose signature this workspace has not seen
-   before, an inline interpreter (`python3 -c`, `bash -c`, `eval`, `xargs`), `python_exec` and
-   `cruncher_exec`, the `agent` tool, each MCP tool, and any tool in no family the gate knows —
-   a plugin's tool, or one whose schema could not be read — keyed by the tool's name, because a
-   tool nobody can describe is asked about rather than allowed.
+2. **The blacklist: ask, and no answer is remembered.** This is what `auto` stops you for, **every
+   time**, on purpose — in a trusted workspace it is the whole of what still asks:
+   - **A write whose target is a protected path.** `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+     credential files, your shell rc files, `~/.localharness`, and inside the project `.git/**`,
+     `.localharness/**`, `.env*`, `*.pem`, `id_*` — and, from v0.14.1, the system directories:
+     `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/var` (except `/var/tmp`), `/opt`,
+     `/root`, `/srv`, macOS `/System`, `/Library` and `/Applications`, and Windows `C:\Windows`,
+     `C:\Program Files*` and `C:\ProgramData`.
+   - **A destructive file operation whose target is outside the project, or cannot be resolved.**
+     `rm -rf`, `chmod -R`, `find -delete`, and the Windows delete spellings. Inside the project
+     they run without asking — that is a named gap below, not an oversight.
+   - **An irreversible operation, wherever it points.** `sudo` and `su`, `curl … | sh`,
+     `git push --force` and `git push --delete`, `git reset --hard`, `git clean -f`, discarding
+     changes with `git checkout --` or `git restore`, `git stash drop`/`clear`, `git branch -D`,
+     `git filter-branch`, `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, `format`
+     and the other disk formatters, and
+     `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/`compose up`/`compose down`.
+
+   Two more things bind in `auto` and are not questions at all: a refusal you have already recorded
+   denies outright (step 3), and so does anything your `deny_patterns` name (step 1).
+
+   The flags are part of what is matched, so `rm file` and `rm -rf dir` are different things and an
+   answer about one is never an answer about the other. `guarded` adds one class to this step:
+   every write-shaped call made when there is no workspace boundary at all.
+
+   **Curate this list rather than the allow side.** Each rule set behind it is a
+   `permissions.ask.<name>` field you may extend — `destructive_signatures`,
+   `protected_paths_home`, `protected_paths_workspace`, `protected_paths_system` and the rest (spec
+   06 has the full set); a project layer may only tighten it, never shorten it.
+   `localharness ask-rate --traces DIR --mode auto` replays your own traces and reports which
+   blacklist entries actually fired, which is the evidence for adding one.
+3. **Grants.** A remembered "always" for this workspace. `auto` neither reads them nor writes them
+   — it remembers nothing, because it asks about nothing that could be remembered. In `guarded`
+   they are checked only after step 2, so an old permissive answer can never cover a destructive
+   variant. A recorded "never" is consulted in **every** mode, `auto` included: a refusal you have
+   already given still denies, without prompting.
+4. **Ask once, then remember — in `guarded`. Silently allowed in `auto`.** A write or shell write
+   target outside the project folder (keyed by the target's parent directory), a shell command whose
+   signature this workspace has not seen before, an inline interpreter (`python3 -c`, `bash -c`,
+   `eval`, `xargs`), `python_exec` and `cruncher_exec`, the `agent` tool, each MCP tool, and any
+   tool in no family the gate knows — a plugin's tool, or one whose schema could not be read —
+   keyed by the tool's name, because a tool nobody can describe is asked about rather than allowed.
 5. **Allow.** Everything else: reads, search, memory, `chunk`, the read-only shell commands (`ls`,
    `cat`, `head`, `tail`, `grep`, `rg`, `find` without `-exec`/`-delete`, `git status`/`diff`/`log`,
    `sed -n`, and their kin), network reads, and edits inside the project when the channel can show
@@ -112,15 +162,24 @@ docker operations that run code on the host or destroy state — `exec`, `run`, 
 `docker-compose` spelling), plus the `docker container …` / `docker image …` management spellings
 of the same operations and the `volume`/`network` removals. `docker ps`, `logs`, `images`,
 `inspect`, `version` and `info` are reads and never ask; `build`, `pull`, `push`, `tag` and `login`
-are ordinary unfamiliar commands you can grant once. A bare `docker` entry made all of those
-ungrantable, which is ask-fatigue on commands nobody needs protection from.
+are ordinary unfamiliar commands — `auto` runs them, `guarded` asks once. A bare `docker` entry
+made all of those ungrantable, which is ask-fatigue on commands nobody needs protection from.
+Four of them never reach the gate at all: the shipped deny patterns hard-deny `docker stop`,
+`docker kill`, `docker rm`/`rmi` and `docker compose down`, so those are refused outright rather
+than asked about — an agent killing the model server it is running on is the incident that put
+them there.
 
 **The boundary is derived from where you stand, never configured.** It is the folder holding the
 nearest in-project `.localharness/`, else the git top level, else the directory you started in,
 resolved through symlinks. A `permissions.workspace_root` in your config may only *narrow* it; a
 value outside it is ignored with a warning. **If that folder turns out to be your home directory or
 anything above it, there is no boundary** — the harness says so rather than pretending your whole
-home is one project, and every write-shaped call then asks without a remembered answer.
+home is one project. In `guarded` every write-shaped call then asks, without a remembered answer.
+In `auto` it does not: a session started in `$HOME` used to ask about every single write, which is
+the shape of ask-fatigue rather than the shape of safety, so the directory you started in serves as
+the target boundary for the destructive-file-operation rule and ordinary writes run silently. The
+protected paths and the irreversible operations still ask there, and `~/.ssh` and friends are
+exactly the things a boundary-less session is most likely to reach.
 
 **Two things deliberately never ask, and both are a judgment you should check against your own
 threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`) are silent: seven in ten
@@ -129,9 +188,12 @@ real tool calls are web fetches, and a prompt per host would fire in a third of 
 instead — an agent that ingests untrusted text holds no host-mutating tools (see the prompt-injection
 section below). Edits inside the project are silent when the channel shows you the change: in Zed
 they land in the review pane with per-hunk accept/reject, in the terminal the diff is printed after
-the fact. A channel with no review surface asks once per workspace instead.
+the fact. A channel with no review surface asks once per workspace in `guarded`; in `auto` it does
+not ask at all.
 
-**Answers live in your global config, and a repository can only tighten.** An "always" is written to
+**Answers live in your global config, and a repository can only tighten.** The default mode writes
+nothing here — `auto` asks only about classes that are never remembered — so this is the file
+`guarded` fills, and the refusals in it that still bind every mode. An "always" is written to
 `~/.localharness/grants.yaml`, keyed by the workspace's resolved path, with the channel, session and
 timestamp that produced it; a "never" is written to the same file as a negative grant, under the same
 key, and denies exactly that key — refusing the command `cp` does not touch `scp` — beating any later
@@ -144,12 +206,20 @@ because every one of those tools passes this same gate, what it has added are th
 not things that run. Edit `grants.yaml` to change an answer; there is no CLI verb for it, the prompt
 is the interface and the file is the escape hatch.
 
-**Four modes, set in config or switched mid-session with `/mode`.** `guarded` is the default and is
-the list above. `trusted` turns step 4 into allow while step 2 still asks. `read-only` refuses
-writes, non-read-only shell, and code execution with a message the model can re-plan against.
-`unattended` turns every ask into allow, leaving only your deny patterns — **this is exactly how the
-harness behaved before v0.14**, named honestly. It is never a default and cannot be set from a chat
-or terminal command; write it in config, which is what the benchmark runner and scheduled jobs do.
+**Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
+trust question per workspace, then everything runs except the step-2 blacklist, and nothing is
+remembered beyond that one answer. A workspace you declined, and a session with nobody to ask and
+no record, run `guarded` instead. `guarded` —
+the v0.14.0 default, now opt-in with `permissions.mode: guarded` or `/mode guarded` — asks once
+about each step-4 class and remembers your answer, and asks about every write when there is no
+boundary. `trusted` is `auto` plus one thing: a destructive file operation aimed **inside** the
+project asks too. `read-only` refuses writes, non-read-only shell, and code execution with a
+message the model can re-plan against. `unattended` turns every ask into allow, leaving only your
+deny patterns — **this is exactly how the harness behaved before v0.14**, named honestly. It is
+never a default and cannot be set from a chat or terminal command; write it in config, which is
+what the benchmark runner and scheduled jobs do. Ordered from most permissive to strictest —
+`unattended` < `auto` < `trusted` < `guarded` < `read-only` — because a project layer may only
+raise strictness, never lower it.
 
 **A channel that cannot ask denies.** Bench runs, cron jobs, a piped non-tty session: if a call
 reaches step 2 or 4 and there is nobody to answer, it is refused, the model is told "needs human
@@ -158,11 +228,24 @@ closed is the rule; the warning is what keeps it from being a silent regression 
 
 **Named gaps. Read these before you rely on any of it.**
 
-- **A granted interpreter runs anything.** Answer "always" to `python3 -c` and every later
-  `python3 -c` in that workspace runs unasked, including one that deletes a tree. `python -c` is the
-  second signature nearly every workspace is asked about, so this is the widest hole by design and
-  by frequency. `python_exec` is the tool to prefer; `trusted` mode is the honest alternative to
-  granting interpreters one at a time.
+- **Trusting a workspace trusts everything but the blacklist.** One dialog, answered once,
+  forever, is what stands between a project and an unasked tool call — and it is a question about
+  the folder, not about the call. The blacklist is what limits the blast radius after it, so read
+  it as the actual policy.
+- **`auto` trusts the project directory.** A destructive command whose target resolves inside the
+  project runs without asking: `rm -rf build`, a `chmod -R` over the tree, an `rm -rf .` at its
+  top. That is the price of a default that stays quiet during ordinary work, and it is a real
+  price — a wrong `rm -rf` inside your repo is on the model, and **git is your undo**, so what you
+  actually lose is uncommitted work and untracked files. Commit before you hand a session a big
+  refactor. `trusted` adds the prompt back for exactly this case; `guarded` adds it back for
+  everything else as well.
+- **An interpreter runs anything, and in `auto` nothing asked you first.** `python3 -c`, `bash -c`,
+  `perl -e` and their kin are a step-4 class, so the default allows them outright — including one
+  that deletes a tree outside the project, which the gate would have caught had it been spelled
+  `rm -rf`. In `guarded` the same hole opens one answer later: say "always" to `python3 -c` and
+  every later `python3 -c` in that workspace runs unasked. `python -c` is the second signature
+  nearly every workspace is asked about, so this is the widest hole by design and by frequency in
+  either mode. `python_exec` is the tool to prefer.
 - **A granted `python3 <script>` covers a script the agent just wrote.** `python3 build.py` is one
   signature, and the file it names sits inside the project, where writing it does not ask when your
   channel shows you the diff. So an agent can write `build.py` and then run it under an answer you
