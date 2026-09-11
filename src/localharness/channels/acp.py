@@ -228,6 +228,23 @@ UNGRANTABLE_OPTION_KINDS: tuple[str, ...] = ("allow_once", "reject_once")
 """PRD §3.5: a request that cannot be remembered offers only the `_once` pair — an "always"
 button on a class that asks every time by construction would be a lie."""
 
+WORKSPACE_TRUST_KLASS = "workspace-trust"
+"""The one ask whose answer is permanent (`cli/session_trust`), and the one that must not be
+drawn with the ungrantable buttons."""
+
+TRUST_OPTION_NAMES: dict[str, str] = {
+    "allow_always": "Trust this workspace",
+    "reject_once": "Not now",
+}
+TRUST_OPTION_KINDS: tuple[str, ...] = ("allow_always", "reject_once")
+"""The workspace-trust question's own two buttons.
+
+It arrives `grantable=False` — there is no "once" and no "always" to tell apart, because yes IS
+always — and the generic ungrantable pair would then label a permanent decision "Allow once",
+which is the opposite of what it does. `allow_always` is the kind that reads as permanent in
+Zed's UI; the gate writes no grant for an ungrantable request whatever kind comes back, and
+`session_trust` records the trust itself, so the label is the only thing this changes."""
+
 PERMISSION_FALLBACK_DECISION = "reject_once"
 """Fail closed (SECURITY.md "deny on doubt") when there is nowhere to put the question, and what
 a dismissed dialog means: ACP's `DeniedOutcome{outcome:"cancelled"}` is the user hitting Escape,
@@ -784,8 +801,10 @@ class AcpChannel(ChannelAdapter):
 
         No timeout: Zed holds the dialog open, and the gate passes none for this channel. The
         options are the four ACP kinds, or the `_once` pair when the request cannot be
-        remembered. A dismissed dialog (`DeniedOutcome`) is a refusal of this call only — never
-        a durable "never", which the user did not say.
+        remembered — and the workspace-trust question's own pair, because its answer is the one
+        ungrantable answer that IS kept (`WORKSPACE_TRUST_KLASS`). A dismissed dialog
+        (`DeniedOutcome`) is a refusal of this call only — never a durable "never", which the
+        user did not say.
         """
         from localharness.agent.gate_types import Decision
 
@@ -793,7 +812,12 @@ class AcpChannel(ChannelAdapter):
             log.warning("acp permission with no connection: %s", getattr(request, "display", ""))
             return Decision(kind=PERMISSION_FALLBACK_DECISION)
 
-        kinds = GRANTABLE_OPTION_KINDS if request.grantable else UNGRANTABLE_OPTION_KINDS
+        if getattr(request, "klass", "") == WORKSPACE_TRUST_KLASS:
+            kinds, names = TRUST_OPTION_KINDS, TRUST_OPTION_NAMES
+        elif request.grantable:
+            kinds, names = GRANTABLE_OPTION_KINDS, PERMISSION_OPTION_NAMES
+        else:
+            kinds, names = UNGRANTABLE_OPTION_KINDS, PERMISSION_OPTION_NAMES
         params = dict(getattr(request, "tool_params", {}) or {})
         tool_name = getattr(request, "tool_name", "")
         title, body = split_display(sanitize_for_display(request.display))
@@ -807,10 +831,7 @@ class AcpChannel(ChannelAdapter):
                 content=[tool_content(text_block(body))] if body else None,
                 raw_input=params,
             ),
-            options=[
-                PermissionOption(option_id=k, name=PERMISSION_OPTION_NAMES[k], kind=k)
-                for k in kinds
-            ],
+            options=[PermissionOption(option_id=k, name=names[k], kind=k) for k in kinds],
         )
         chosen = getattr(response.outcome, "option_id", None)
         if chosen in kinds:

@@ -655,20 +655,94 @@ async def test_set_session_mode_unattended_reaches_the_gate(tmp_path, monkeypatc
 
     The picker entry is only half of it — a mode advertised here and refused by
     `PermissionGate.set_mode(from_channel=True)` would be accepted before the first prompt and
-    then blow up on it, which is why this drives a prompt afterwards.
+    then blow up on it, which is why this drives a prompt afterwards and reads the gate's own
+    mode rather than the adapter's pending one.
     """
     session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
     await session.conn.set_session_mode(session_id=session.session_id, mode_id="unattended")
     assert session.agent._current_mode_id() == "unattended"
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("hello")])
+    assert session.gate is not None and session.gate.mode == "unattended"
 
-    gate = PermissionGate(
-        boundary=tmp_path,
-        workspace=tmp_path,
-        grants=GrantStore(tmp_path / "gate-grants.yaml"),
-        mode="auto",
-        bus=EventBus(),
+
+async def test_the_workspace_trust_question_offers_a_permanent_yes(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """The trust question is ungrantable but its answer IS kept, so the generic `_once` pair
+    would label a permanent decision "Allow once" (v0.14.1 owner ruling).
+
+    `cli/session_trust` builds this request; the adapter is what turns it into two honest
+    buttons, and what the user clicks has to come back as an `allowed` decision or a session in
+    a workspace they just trusted would run guarded anyway.
+    """
+    from localharness.agent.gate_types import PermissionRequest
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=[FakeLLMResponse(content="hi")],
+        client=FakeClient(answers=["allow_always"]),
     )
-    assert gate.set_mode("unattended", from_channel=True) == "unattended"
+    request = PermissionRequest(
+        tool_name="workspace",
+        tool_params={"workspace": str(tmp_path)},
+        klass="workspace-trust",
+        key=str(tmp_path),
+        grantable=False,
+        reason="Trust this workspace?",
+        display="Trust this workspace?\nAnswering yes records it and this is not asked again.",
+        options_legend="[y]es, trust it   [n]o, ask me (guarded)",
+    )
+
+    decision = await session.agent.ask_permission(request)
+
+    assert decision.allowed
+    tool_call, options = session.client.permission_requests[-1]
+    assert [(o.option_id, o.name) for o in options] == [
+        ("allow_always", "Trust this workspace"),
+        ("reject_once", "Not now"),
+    ]
+    assert tool_call.title == "Trust this workspace?"
+    body = "".join(getattr(c.content, "text", "") for c in (tool_call.content or []))
+    assert "not asked again" in body
+
+
+async def test_declining_the_workspace_trust_question_is_a_refusal(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """"Not now" is `reject_once`, and `session_trust` reads exactly that to fall back to
+    guarded — an ordinary ungrantable request is unaffected and still gets the `_once` pair."""
+    from localharness.agent.gate_types import PermissionRequest
+
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=[FakeLLMResponse(content="hi")],
+        client=FakeClient(answers=["reject_once", "reject_once"]),
+    )
+    trust = PermissionRequest(
+        tool_name="workspace",
+        tool_params={"workspace": str(tmp_path)},
+        klass="workspace-trust",
+        key=str(tmp_path),
+        grantable=False,
+        reason="Trust this workspace?",
+        display="Trust this workspace?\nAnswering no runs this session in guarded mode.",
+    )
+    assert not (await session.agent.ask_permission(trust)).allowed
+
+    destructive = PermissionRequest(
+        tool_name="bash_exec",
+        tool_params={"command": "rm -rf /tmp/elsewhere"},
+        klass="shell-destructive",
+        key=None,
+        grantable=False,
+        reason="destructive",
+        display="bash: rm -rf /tmp/elsewhere",
+    )
+    await session.agent.ask_permission(destructive)
+    _call, options = session.client.permission_requests[-1]
+    assert [o.option_id for o in options] == ["allow_once", "reject_once"]
 
 
 # ------------------------------------------------------------------ no boundary
