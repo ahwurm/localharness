@@ -21,6 +21,16 @@ console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
 
+NO_BOUNDARY_NOTICE = (
+    "No project folder here, so there is no workspace boundary: every write, edit and "
+    "non-read-only shell command will ask, every time. Run localharness from inside a project "
+    "(a folder with a .git or .localharness in it) to get the quiet path."
+)
+"""PRD §3.1 / critic finding 1: when the project root resolves to $HOME or above there is no
+boundary, and the honest answer is to say so once at startup rather than let the person
+discover it one prompt at a time. It names the fix, because "ask every time" with no
+explanation is the prompt fatigue the ask-rate SLO exists to prevent."""
+
 
 def _first_prompt_hint(is_returning: bool) -> str:
     """The guidance shown in the first interactive input bubble (#49). First-run gets the
@@ -1218,6 +1228,36 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         perm_eval = PermissionEvaluator()
 
+        # --- the human-approval gate (PRD §3.1, §3.5) ------------------------------------
+        # The boundary is DERIVED from where you stand, never read from config: the workspace
+        # layer v0.13 discovery applied, else the nearest checkout, else the cwd. Config's
+        # `permissions.workspace_root` may only NARROW it; a value outside it is ignored with a
+        # warning, because a repo that could move the boundary could approve its own writes.
+        from localharness.agent.gate import PermissionGate, derive_session_boundary, settings_from
+        from localharness.agent.verdict import narrow_boundary
+        from localharness.config.grants import GrantStore
+
+        _derived = derive_session_boundary(cwd=Path.cwd(), local_dir=workspace)
+        _boundary, _boundary_warning = narrow_boundary(
+            _derived, getattr(agent_config.permissions, "workspace_root", None)
+        )
+        if _boundary_warning:
+            console.print(f"[yellow]{_boundary_warning}[/yellow]")
+        if _boundary is None:
+            console.print(f"[dim]{NO_BOUNDARY_NOTICE}[/dim]")
+        gate = PermissionGate(
+            boundary=_boundary,
+            workspace=Path.cwd(),
+            grants=GrantStore(),
+            mode=agent_config.permissions.mode,
+            asker=None,  # attached to the channel below, once it exists
+            channel_name="none",
+            has_review_surface=False,
+            deny=None,  # AgentLoop hands its own agent's deny tier in on every check
+            settings=settings_from(agent_config.permissions),
+            bus=bus,
+        )
+
         # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
         # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
         # is a standalone capability (route a user's "re-check X" straight to it); the web-researcher
@@ -1233,6 +1273,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             bus=bus,
             base_registry=tool_registry,
             permission_evaluator=perm_eval,
+            # The SAME gate object the orchestrator holds (PRD §3.4): a /mode switch and a fresh
+            # grant reach a running child, and a child's boundary crossing surfaces in the same
+            # prompt as the parent's.
+            gate=gate,
             get_parent_session_id=lambda: agent_loop.current_session_id,
             # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
             load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
@@ -1287,6 +1331,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             context_manager=ctx_mgr,
             tool_registry=tool_registry,
             permission_evaluator=perm_eval,
+            gate=gate,
             memory_loader=memory_store,
             recall_router=recall_router,
             kill_file_path=kill_file_path,
@@ -1304,6 +1349,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel = TerminalChannel(
                 bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir))
             )
+        # PRD §3.5: the channel decides how an ASK is rendered and whether it can be rendered at
+        # all. A channel that cannot ask leaves the gate with no asker, which is the fail-closed
+        # path — every ASK denies with a reason the model can re-plan against, and the gate logs
+        # the fix (`permissions.mode: unattended`) once.
+        gate.attach_channel(channel)
 
         # --- Determine returning user ---
         is_returning = events_path.exists() and events_path.stat().st_size > 0
@@ -1419,6 +1469,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             workspace=workspace,
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
+            gate=gate,  # what /mode switches; the same object the loop and subagents hold
             memory_store=memory_store,
             # 42-04: `/memory promote` borrows the router's global handle. The SAME router the
             # loop and the read tools got — one owner, one connection, closed by the finally below.

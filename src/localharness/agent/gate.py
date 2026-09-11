@@ -299,6 +299,20 @@ class PermissionGate:
         self._config_deny = deny
         self._warned_cannot_ask = False
 
+    def attach_channel(self, channel: Any) -> None:
+        """Point the gate at the channel that will render its questions (PRD §3.5).
+
+        Separate from ``__init__`` because the session's boundary, grant store and mode are known
+        before the channel is built, and because the ACP adapter (phase B) attaches itself the
+        same way once the client has told it whether it can show a diff. A channel that leaves
+        ``can_ask`` False contributes no asker, which is exactly the fail-closed path — its
+        ``ask_permission`` is never called, so a mismatch between the flag and the method cannot
+        hang a turn.
+        """
+        self.channel_name = getattr(channel, "channel_id", "none")
+        self.has_review_surface = bool(getattr(channel, "has_review_surface", False))
+        self.asker = channel.ask_permission if getattr(channel, "can_ask", False) else None
+
     # ---------------------------------------------------------------- modes
 
     def set_mode(self, name: str, *, from_channel: bool = False) -> Mode:

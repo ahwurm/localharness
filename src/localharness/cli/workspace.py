@@ -54,11 +54,16 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from rich.console import Console
 
 log = logging.getLogger(__name__)
+
+TrustAsker = Callable[[str], bool]
+"""``(question_text) -> bool`` — how a non-terminal channel puts the one-time trust question
+(PRD §3.5). Synchronous; see :func:`resolve_workspace_layer` for why, and for the bridge an
+async client uses."""
 
 # F6. `--json` already forces the non-interactive path, but `doctor`, `validate` and `agent
 # create` have no machine-output mode — so a hook or CI job running them in a directory with an
@@ -85,8 +90,24 @@ def resolve_workspace_layer(
     config_dir: Optional[Union[str, Path]] = None,
     *,
     interactive: Optional[bool] = None,
+    asker: Optional[TrustAsker] = None,
 ) -> Optional[Path]:
-    """The workspace layer for this invocation, or None. See the module docstring's table."""
+    """The workspace layer for this invocation, or None. See the module docstring's table.
+
+    ``asker`` is how a channel that is not a terminal puts the trust question (PRD §3.5: "the
+    existing workspace-trust dialog becomes the first client of ask_permission"). It is
+    SYNCHRONOUS on purpose — every one of this function's eight callers is ordinary synchronous
+    CLI code, and making them async to accommodate one caller would be a large change unrelated
+    to permissions. An async client (the ACP adapter, phase B) bridges with
+    ``await asyncio.to_thread(resolve_workspace_layer, asker=...)`` and, inside its asker,
+    ``asyncio.run_coroutine_threadsafe(self.request_permission(text), loop).result()``.
+
+    Passing an asker implies there IS someone to ask, so it also satisfies ``interactive``:
+    Zed is not a TTY, and under the letter of phase 39 every ACP session would otherwise
+    silently ignore an outside workspace forever. With no asker the phase-39 semantics are
+    exactly as before — a non-interactive run stays inert and records nothing, so a later
+    interactive session in the same directory still gets asked once.
+    """
     from localharness.config import trust
     from localharness.config.paths import (
         config_dir_env_override,
@@ -123,7 +144,8 @@ def resolve_workspace_layer(
         return None
 
     if interactive is None:
-        interactive = _stdin_is_a_terminal()
+        # An injected asker IS someone to ask, whether or not stdin is a terminal (PRD §3.5).
+        interactive = asker is not None or _stdin_is_a_terminal()
     if not interactive:
         # Fail closed (SECURITY.md: deny on doubt) but do NOT record — a later interactive
         # session in this directory still gets asked once.
@@ -134,7 +156,7 @@ def resolve_workspace_layer(
         )
         return None
 
-    trusted = _ask(real)
+    trusted = _ask(real, asker)
     trust.record_trust(found, trusted)
     if trusted:
         log.info("workspace layer: %s (trusted just now)", found)
@@ -261,17 +283,28 @@ def _notice(message: str) -> None:
     _notice_console.print(message, style="dim", markup=False)
 
 
-def _ask(found: Path) -> bool:
-    """The one-time question. Names what is at stake AND why this workspace is being asked about,
-    since the ones inside your own project never are. Takes the RESOLVED workspace so a symlinked
-    dotdir names the tree the files actually come from — "the workspace at ./" is not a question
-    anyone can answer."""
+TRUST_QUESTION = (
+    "The workspace at {parent} is outside the project you are in. Load its agent and config "
+    "files? They define roles, models and tool permissions — treat them like code you are about "
+    "to run."
+)
+"""The one-time question. Names what is at stake AND why this workspace is being asked about,
+since the ones inside your own project never are. A module constant now, because a channel that
+is not a terminal renders the same words (PRD §3.5: the trust dialog stops being terminal-only)."""
+
+
+def _confirm_on_a_tty(question: str) -> bool:
+    """The default :data:`TrustAsker`: today's `rich` prompt on the terminal, unchanged."""
     from rich.prompt import Confirm
     from rich.text import Text
 
-    question = Text(
-        f"The workspace at {found.parent} is outside the project you are in. Load its agent "
-        "and config files? They define roles, models and tool permissions — treat them like "
-        "code you are about to run."
-    )
-    return bool(Confirm.ask(question, console=_notice_console, default=False))
+    return bool(Confirm.ask(Text(question), console=_notice_console, default=False))
+
+
+def _ask(found: Path, asker: Optional[TrustAsker] = None) -> bool:
+    """Put the trust question to whoever is listening.
+
+    Takes the RESOLVED workspace so a symlinked dotdir names the tree the files actually come
+    from — "the workspace at ./" is not a question anyone can answer.
+    """
+    return bool((asker or _confirm_on_a_tty)(TRUST_QUESTION.format(parent=found.parent)))
