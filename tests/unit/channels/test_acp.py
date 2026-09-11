@@ -236,6 +236,7 @@ async def _start(
     fs_write: bool = False,
     cwd: Path | None = None,
     mode: str = "guarded",
+    mcp_servers: list[Any] | None = None,
 ) -> Session:
     """Bring up an ACP session over the real protocol: initialize, then session/new."""
     from acp.schema import ClientCapabilities, FileSystemCapabilities
@@ -286,7 +287,7 @@ async def _start(
             fs=FileSystemCapabilities(read_text_file=fs_read, write_text_file=fs_write)
         ),
     )
-    response = await conn.new_session(cwd=str(workspace))
+    response = await conn.new_session(cwd=str(workspace), mcp_servers=mcp_servers)
     session.session_id = response.session_id  # type: ignore[attr-defined]
     session.new_session_response = response  # type: ignore[attr-defined]
     return session
@@ -659,10 +660,20 @@ async def test_set_session_mode_unattended_is_refused(tmp_path, monkeypatch, kee
 
 async def test_home_directory_gets_the_notice_and_no_turn(tmp_path, monkeypatch, keep_cwd):
     """PRD §3.1 / critic finding 1: standing in $HOME there is no boundary, so say so once
-    instead of asking about every write for the rest of the session."""
+    instead of asking about every write for the rest of the session.
+
+    The home directory is a FAKE one under `tmp_path`, the same way the subprocess test builds
+    it (D8). Using the real `Path.home()` made this test chdir the whole suite into the
+    developer's home directory and derive a boundary from whatever happened to be there — a
+    `.localharness/` or a git checkout above `$HOME` would have made it pass or fail for reasons
+    that have nothing to do with the adapter.
+    """
     from localharness.cli.start_cmd import NO_BOUNDARY_NOTICE
 
-    home = Path.home()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     session = await _start(
         tmp_path, monkeypatch, responses=[FakeLLMResponse(content="should not run")], cwd=home
     )
@@ -840,6 +851,156 @@ async def test_cancel_during_a_turn_stops_it_with_stop_reason_cancelled(
     assert response.stop_reason == "cancelled"
 
 
+# ------------------------------------------------ what the editor sends and we cannot use
+
+
+async def test_editor_passed_mcp_servers_are_announced_not_dropped(
+    tmp_path, monkeypatch, keep_cwd, caplog
+):
+    """D1: `session/new` carries the editor's own MCP servers and this version connects none.
+
+    The user is waiting for those tools. Saying nothing left them waiting forever with no
+    explanation anywhere — the panel, the log, or the model's own view of what it has.
+    """
+    from acp.schema import McpServerStdio
+
+    from localharness.channels.acp import MCP_SERVERS_NOT_CONNECTED_LOG
+
+    caplog.set_level("WARNING", logger="localharness.channels.acp")
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=[FakeLLMResponse(content="hi")],
+        mcp_servers=[
+            McpServerStdio(name="github", command="gh-mcp", args=[], env=[]),
+            McpServerStdio(name="postgres", command="pg-mcp", args=[], env=[]),
+        ],
+    )
+
+    logged = caplog.text
+    assert MCP_SERVERS_NOT_CONNECTED_LOG.split("%")[0].strip() in logged
+    assert "github" in logged and "postgres" in logged, "the log must name each server"
+
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("hello")])
+    notice = [c for c in session.client.chunks() if "MCP server" in c]
+    assert len(notice) == 1, "the panel is told once, on the first prompt"
+    assert "github, postgres" in notice[0]
+    assert "tools.mcp_servers" in notice[0], "say where MCP servers DO come from"
+
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("again")])
+    assert len([c for c in session.client.chunks() if "MCP server" in c]) == 1, "repeated notice"
+
+
+async def test_a_session_with_no_mcp_servers_says_nothing(tmp_path, monkeypatch, keep_cwd):
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("hello")])
+    assert not [c for c in session.client.chunks() if "MCP server" in c]
+
+
+async def test_an_at_mention_reaches_the_model_as_a_visible_placeholder(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """D2: a Zed @-file-mention is a `ResourceContentBlock` — baseline protocol, not an exotic
+    case — and it used to be dropped in silence. The user saw the editor attach a file; the model
+    saw a bare sentence with a dangling "this" and answered about nothing."""
+    from acp.schema import ImageContentBlock, ResourceContentBlock
+
+    from localharness.channels.acp import ATTACHMENT_PLACEHOLDER
+
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="I cannot read that.")]
+    )
+    await session.conn.prompt(
+        session_id=session.session_id,
+        prompt=[
+            text_block("summarise"),
+            ResourceContentBlock(type="resource_link", name="notes.md", uri="file:///notes.md"),
+            ImageContentBlock(type="image", data="AAAA", mime_type="image/png"),
+            text_block("please"),
+        ],
+    )
+
+    sent = session.llm.seen_messages[0]
+    task = "\n".join(str(m.get("content") or "") for m in sent)
+    assert ATTACHMENT_PLACEHOLDER.format(label="notes.md") in task
+    assert ATTACHMENT_PLACEHOLDER.format(label="image") in task
+    assert task.index("summarise") < task.index("notes.md") < task.index("please"), (
+        "the placeholder must sit where the block was sent"
+    )
+
+
+async def test_the_prompt_text_keeps_every_block_in_order():
+    """The same fact at the unit the wire cannot show: nothing is silently discarded."""
+    from acp.schema import EmbeddedResourceContentBlock, TextResourceContents
+
+    from localharness.channels.acp import ATTACHMENT_PLACEHOLDER, _prompt_text
+
+    class Nameless:
+        """A block from a client this version has never heard of."""
+
+    embedded = EmbeddedResourceContentBlock(
+        type="resource",
+        resource=TextResourceContents(uri="file:///x.py", text="print('hi')"),
+    )
+
+    assert _prompt_text([]) == ""
+    assert _prompt_text([text_block("a"), text_block("b")]) == "a\nb"
+    # An embedded resource carries its uri one level down, and its text is NOT read: v1 reads
+    # the prompt's own text only, and pretending otherwise is the drop this fix exists to stop.
+    assert _prompt_text([embedded]) == ATTACHMENT_PLACEHOLDER.format(label="file:///x.py")
+    assert _prompt_text([Nameless()]).startswith("[attachment:")
+
+
+# ------------------------------------------------------------------ dialog pairing
+
+
+async def test_two_identical_calls_in_flight_pair_with_the_right_row(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """D4: one shared slot meant the newer `Action` overwrote the older one, so the older call's
+    dialog attached to the NEWER call's row — a person approving one command while reading
+    another. The map is keyed by call id, and the request's own id wins when it carries one."""
+    import types
+
+    from localharness.core.events import Action, Observation
+
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("warm up")])
+    agent = session.agent
+
+    params = {"command": "cargo publish"}
+    for call_id in ("tc-first", "tc-second"):
+        await agent.on_action(Action(
+            agent_id="a", session_id="s", action_type="tool_call", tool_call_id=call_id,
+            tool_name="bash_exec", tool_params=params,
+        ))
+
+    def _ask(**extra):
+        return types.SimpleNamespace(
+            tool_name="bash_exec", tool_params=params, grantable=True,
+            display="bash_exec: cargo publish", **extra,
+        )
+
+    before = len(session.client.permission_requests)
+    await agent.ask_permission(_ask(call_id="tc-first"))
+    tool_call, _options = session.client.permission_requests[before]
+    assert tool_call.tool_call_id == "tc-first", "the request's own call id must win"
+
+    # No call id (the pre-lane-B shape): the heuristic picks the newest matching pending call.
+    await agent.ask_permission(_ask())
+    tool_call, _options = session.client.permission_requests[before + 1]
+    assert tool_call.tool_call_id == "tc-second"
+
+    # A finished call can pair with nothing: its row is closed and the map drops it.
+    await agent.on_observation(Observation(
+        agent_id="a", session_id="s", observation_type="tool_result",
+        tool_call_id="tc-second", tool_name="bash_exec", output="ok",
+    ))
+    await agent.ask_permission(_ask())
+    tool_call, _options = session.client.permission_requests[before + 2]
+    assert tool_call.tool_call_id == "tc-first"
+
+
 # ------------------------------------------------------------------ the real command
 
 
@@ -882,4 +1043,58 @@ async def test_subprocess_agent_answers_initialize_and_new_session(tmp_path, kee
         new = await asyncio.wait_for(conn.new_session(cwd=str(project)), 60)
         assert new.session_id
         assert new.modes.current_mode_id == "guarded"
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("signal"), "SIGTERM"),
+    reason="SIGTERM is POSIX; the Windows path is the signal.signal fallback",
+)
+async def test_sigterm_tears_the_session_down_and_exits_clean(tmp_path, keep_cwd):
+    """D3: closing Zed's agent panel sends SIGTERM, and the process used to die of it.
+
+    Exit -15 meant `serve()` never returned, so `_start_async`'s `finally` never ran: MCP servers
+    were left running, memory consolidation and the WAL checkpoint never happened, and the last
+    minutes of the session were simply lost. A signal now cancels the protocol task so the same
+    teardown runs as on EOF, and the exit code says so.
+    """
+    import signal
+
+    from acp.schema import ClientCapabilities
+    from acp.stdio import spawn_agent_process
+
+    from localharness.cli.acp_cmd import SHUTDOWN_NOTICE
+
+    command = Path(sys.executable).parent / "localharness"
+    if not command.exists():  # pragma: no cover — installed console script is the norm here
+        pytest.skip("localharness console script not on this interpreter's path")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+
+    async with spawn_agent_process(
+        FakeClient(),
+        str(command),
+        "acp",
+        "--config-dir",
+        str(tmp_path / "config"),
+        env=env,
+        cwd=str(project),
+    ) as (conn, process):
+        await asyncio.wait_for(
+            conn.initialize(protocol_version=1, client_capabilities=ClientCapabilities()), 60
+        )
+        await asyncio.wait_for(conn.new_session(cwd=str(project)), 60)
+
+        process.send_signal(signal.SIGTERM)
+        stderr = await asyncio.wait_for(process.stderr.read(), 60)
+        assert await asyncio.wait_for(process.wait(), 60) == 0, "SIGTERM killed the process"
+
+    logged = stderr.decode("utf-8", "replace")
+    assert SHUTDOWN_NOTICE.split("%")[0].strip() in logged, (
+        f"no orderly-shutdown line on stderr: {logged[-2000:]}"
+    )
+    assert "SIGTERM" in logged
     assert process.returncode is None or process.returncode == 0

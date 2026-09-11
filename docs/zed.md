@@ -51,7 +51,7 @@ directory. Nothing runs until you do.
 **The first message takes as long as your model server does.** Zed gets a session id
 immediately; the model server and the agent come up on your first prompt, which is where
 progress can actually be shown. A warm server costs nothing; a cold one streams a
-`Starting the model server — 40s so far…` line every fifteen seconds until it is ready.
+`Starting the session — 40s so far…` line every fifteen seconds until it is ready.
 
 **Three modes, in Zed's mode picker.**
 
@@ -114,8 +114,15 @@ Honest list of what this adapter does not do in its first version.
   agent server entry in `settings.json` for the second thread.
 - **Zed's terminal capability is unused.** `bash_exec` runs the command itself; it does not
   appear as a Zed terminal you can watch or kill.
-- **Images and attachments in a prompt are ignored.** Only the text blocks of a prompt reach the
-  agent.
+- **@-mentions and attachments are announced, not read.** Only the text of a prompt reaches the
+  agent. Everything else — an `@file` mention, a pasted image, an attached resource — arrives as
+  one line saying `[attachment: <name> — not read by this agent]`, in the place you put it. So
+  the agent knows something was attached and can ask you for it (paste the text, or give it the
+  path and let `read` open it), instead of answering about a file it never saw.
+- **MCP servers Zed passes with the thread are not connected.** Zed hands its own MCP server list
+  to the agent when a thread opens; this version does not start them, and says so in the panel on
+  your first message and in the server log. LocalHarness connects the MCP servers declared in its
+  own config (`tools.mcp_servers`), which are shared by Zed, the terminal and Discord alike.
 - **Not in the ACP registry yet**, so this is a manual `settings.json` entry rather than a
   one-click install. That is a later phase.
 - **No per-turn token usage** is reported back to Zed.

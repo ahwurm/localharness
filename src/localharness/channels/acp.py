@@ -165,7 +165,14 @@ PROVIDER_BRINGUP_NOTICE_EVERY_S = 15.0
 two-minute vLLM load produces a handful of lines rather than a wall, short enough that the panel
 never looks frozen."""
 
-BRINGUP_STATUS = "Starting the model server — {seconds:.0f}s so far…"
+BRINGUP_STATUS = "Starting the session — {seconds:.0f}s so far…"
+"""The status line the first prompt streams while the session is being built.
+
+It says "the session", not "the model server", because this wait covers the WHOLE of
+`_start_async` — config load, memory open, MCP servers, the subagent fleet — and only
+sometimes a cold model server. Naming the model server was wrong on a warm box, where the
+provider answers its probe instantly and the seconds being counted are somebody else's."""
+
 BRINGUP_FAILED = "The session could not be started: {error}"
 """What the user sees when `_start_async` refuses (no config, an unreachable provider, a model
 the server does not serve). The real reason, verbatim — a Zed panel has no stderr."""
@@ -241,6 +248,37 @@ shutdown budget and long enough for a WAL checkpoint."""
 TOOL_TITLE_ARG_CHARS = 80
 """How much of a tool call's leading argument goes into the `tool_call` title Zed renders on one
 row. Long enough for a path or a short command, short enough not to wrap the panel."""
+
+MCP_SERVERS_NOT_CONNECTED_LOG = "acp session/new: %d editor-passed MCP server(s) not connected: %s"
+"""Logged to stderr (the agent-server log Zed shows under 'View Server Logs') the moment the
+editor hands over servers this version will not start — named one by one, so the line answers
+"which of my servers is missing?" without a second round trip."""
+
+MCP_SERVERS_NOT_CONNECTED_NOTICE = (
+    "Note: this editor passed {count} MCP server(s) with the thread ({servers}), and this "
+    "version of LocalHarness does not connect them — none of their tools are available here. "
+    "LocalHarness starts the MCP servers declared in its own config (`tools.mcp_servers` in your "
+    "agent or org YAML); a server listed there is available in Zed, the terminal and Discord "
+    "alike."
+)
+"""The same fact in the panel, once, on the first prompt of the session.
+
+The stderr line alone would be invisible: a Zed user watches the panel, not the server log, and
+a model that never sees the tools cannot explain their absence either. So the person is told in
+the one place they are looking, and told where MCP servers actually come from — the drop is a
+v1 limitation (docs/zed.md's "not yet" list), not a failure to report."""
+
+ATTACHMENT_PLACEHOLDER = "[attachment: {label} — not read by this agent]"
+"""What a non-text prompt block becomes in the task text (D2).
+
+Zed's @-file-mentions, images and pasted resources arrive as blocks with no `.text`, and this
+adapter reads text only. Dropping them silently is the worst of the three options: the user
+believes the file was read, and the model answers about a mention it never saw. A placeholder
+line makes the gap visible to BOTH — the model can say "I cannot see that file, paste it or tell
+me the path" instead of inventing its contents."""
+
+ATTACHMENT_UNNAMED_LABEL = "unnamed"
+"""The label when a block carries no name, uri or type at all — nothing is still worth a line."""
 
 
 def split_display(display: str) -> tuple[str, Optional[str]]:
@@ -337,7 +375,11 @@ class AcpChannel(ChannelAdapter):
 
         self._turn_task: Optional[asyncio.Task] = None
         self._streamed_this_turn = False
-        self._pending_call: tuple[str, str, dict] | None = None
+        # call id -> (tool_name, params) for every tool call Zed has a row for and no result yet.
+        # A map rather than one slot: subagents run concurrently on this bus, so two identical
+        # calls can be in flight at once (D4).
+        self._pending_calls: dict[str, tuple[str, dict]] = {}
+        self._pending_notice: Optional[str] = None
         self._handles: list[Any] = []
 
     # ------------------------------------------------------------ ACP: agent side
@@ -407,6 +449,11 @@ class AcpChannel(ChannelAdapter):
         its state directory from the working directory, so one process serves one project folder
         and one thread (:data:`ONE_THREAD_PER_PROCESS`). A second `session/new` — another folder
         or the same one — is `invalid_params`, not a second session sharing the first one's loop.
+
+        `mcp_servers` is the editor's own MCP list, and this version does not connect it. That is
+        said out loud twice — once to the server log here, once into the panel on the first
+        prompt (:data:`MCP_SERVERS_NOT_CONNECTED_NOTICE`) — because dropping it silently leaves a
+        user waiting for tools that will never appear, with nothing anywhere to explain it.
         """
         from acp.core import RequestError
 
@@ -441,6 +488,7 @@ class AcpChannel(ChannelAdapter):
             self._session_id = None
             self._cwd = None
             raise
+        self._note_unconnected_mcp_servers(mcp_servers)
         log.info("acp session %s: cwd=%s boundary=%s", session_id, self._cwd, self._boundary)
 
         return NewSessionResponse(
@@ -448,6 +496,27 @@ class AcpChannel(ChannelAdapter):
             modes=SessionModeState(
                 current_mode_id=self._current_mode_id(), available_modes=list(ACP_MODES)
             ),
+        )
+
+    def _note_unconnected_mcp_servers(self, mcp_servers: Optional[list[Any]]) -> None:
+        """Say — twice — that the editor's MCP servers are not connected (D1).
+
+        `session/new` carries the servers the EDITOR manages, and connecting them would mean
+        starting processes on the user's machine that the harness's own config never authorized,
+        outside the tool policy that governs everything else. Not doing it is the defensible
+        v1 answer; doing it silently is not. The log line reaches the server log now, the notice
+        is queued for the first prompt, where there is a panel to print it in.
+        """
+        servers = list(mcp_servers or [])
+        if not servers:
+            return
+        names = [
+            (getattr(s, "name", "") or "").strip() or ATTACHMENT_UNNAMED_LABEL for s in servers
+        ]
+        joined = ", ".join(names)
+        log.warning(MCP_SERVERS_NOT_CONNECTED_LOG, len(names), joined)
+        self._pending_notice = MCP_SERVERS_NOT_CONNECTED_NOTICE.format(
+            count=len(names), servers=joined
         )
 
     async def set_session_mode(
@@ -497,6 +566,11 @@ class AcpChannel(ChannelAdapter):
         """
         self._require_live_session(session_id)
         text = _prompt_text(prompt)
+
+        # First prompt only: whatever `session/new` could not say because there was no panel yet.
+        if self._pending_notice is not None:
+            notice, self._pending_notice = self._pending_notice, None
+            await self.send_message(notice)
 
         if self._boundary is None:
             from localharness.cli.start_cmd import NO_BOUNDARY_NOTICE
@@ -701,7 +775,7 @@ class AcpChannel(ChannelAdapter):
         response = await self._conn.request_permission(
             self._session_id,
             ToolCallUpdate(
-                tool_call_id=self._pending_call_id(tool_name, params),
+                tool_call_id=self._pending_call_id(request, tool_name, params),
                 title=title,
                 kind=acp_kind_for_group(self._group_for(tool_name)),
                 status="pending",
@@ -784,7 +858,9 @@ class AcpChannel(ChannelAdapter):
         call_id = event.tool_call_id or uuid.uuid4().hex
         # The gate asks AFTER this event is published (`agent/loop.py`), so remembering the call
         # here is what lets `ask_permission` attach its dialog to the row Zed already drew.
-        self._pending_call = (call_id, name, params)
+        # Keyed by call id and dropped in `on_observation`, so concurrent calls coexist and the
+        # map cannot grow for the life of the session.
+        self._pending_calls[call_id] = (name, params)
         group = self._group_for(name)
         target = _first_path(params) if group.startswith("fs.") else None
         await self._update(
@@ -820,6 +896,7 @@ class AcpChannel(ChannelAdapter):
         call_id = event.tool_call_id
         if not call_id:
             return
+        self._pending_calls.pop(call_id, None)  # the call is over; it can pair with nothing now
         output = event.output or event.error or ""
         await self._update(
             update_tool_call(
@@ -934,29 +1011,71 @@ class AcpChannel(ChannelAdapter):
         except Exception:  # noqa: BLE001 — a broken schema must not block the dialog
             return ACP_KIND_DEFAULT
 
-    def _pending_call_id(self, tool_name: str, params: dict) -> str:
-        """The id of the `tool_call` this ask belongs to.
+    def _pending_call_id(self, request: Any, tool_name: str, params: dict) -> str:
+        """The id of the `tool_call` this ask belongs to (D4).
 
-        The loop publishes `Action` before it consults the gate and executes tool calls one at a
-        time, so the last one seen IS the pending call — matched on name and arguments so a
-        mismatch (a subagent sharing this bus) falls back to a fresh id and Zed draws its own
-        row rather than attaching the dialog to the wrong one.
+        The request's own `call_id` is the answer whenever the gate carries one: it is the id the
+        loop published the `Action` under, so the dialog lands on exactly the row Zed drew, with
+        no inference at all. `getattr` because that field is arriving separately — this works
+        before and after it lands.
+
+        Without it, the fallback is the old heuristic, now over a MAP rather than one slot: the
+        newest pending call whose name and arguments match. One slot was wrong the moment two
+        calls were in flight at once (subagents share this bus), because the second `Action`
+        overwrote the first and the first call's dialog then attached to the second call's row —
+        a user approving one command while reading another. Matching still cannot separate two
+        identical calls, so a fresh id (Zed draws its own row) remains the honest last resort.
         """
-        pending = self._pending_call
-        if pending is not None and pending[1] == tool_name and pending[2] == params:
-            return pending[0]
+        call_id = getattr(request, "call_id", None)
+        if isinstance(call_id, str) and call_id:
+            return call_id
+        for known_id, (name, known_params) in reversed(list(self._pending_calls.items())):
+            if name == tool_name and known_params == params:
+                return known_id
         return f"ask-{uuid.uuid4().hex}"
 
 
-def _prompt_text(blocks: list[Any]) -> str:
-    """The user's turn as text: every text block in the prompt, joined.
+def _block_label(block: Any) -> str:
+    """What to call a prompt block this adapter cannot read — its name, else its uri, else its
+    type. `ResourceContentBlock` (a Zed @-mention) carries `name` and `uri`; an embedded
+    resource carries them one level down under `resource`; an image block has only its type."""
+    for attr in ("name", "uri"):
+        value = getattr(block, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    resource = getattr(block, "resource", None)
+    if resource is not None:
+        for attr in ("name", "uri"):
+            value = getattr(resource, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    kind = getattr(block, "type", None)
+    return kind.strip() if isinstance(kind, str) and kind.strip() else ATTACHMENT_UNNAMED_LABEL
 
-    ACP prompts can carry images, audio and resource links; the harness's `run_turn` takes a
-    string, so v1 reads the text and says so in docs/zed.md rather than pretending to have seen
-    a screenshot.
+
+def _prompt_text(blocks: list[Any]) -> str:
+    """The user's turn as text: every text block, and a placeholder line for everything else.
+
+    ACP prompts can carry images, audio, resource links and embedded resources — a Zed
+    @-file-mention is a `ResourceContentBlock`, part of the BASELINE protocol, so it arrives in
+    ordinary use rather than as an exotic case. The harness's `run_turn` takes a string and this
+    adapter reads none of those, but a block that vanishes silently is the failure that costs
+    most: the user watched the editor attach a file and assumes it was read, and the model
+    answers about text it never received.
+
+    So every non-text block becomes one :data:`ATTACHMENT_PLACEHOLDER` line, in the position it
+    was sent. The model sees exactly what was dropped and can ask for it; the user sees the same
+    sentence quoted back. Reading attachments is a later phase (docs/zed.md's "not yet" list).
     """
-    parts = [b.text for b in (blocks or []) if isinstance(getattr(b, "text", None), str)]
-    return "\n".join(p for p in parts if p)
+    parts: list[str] = []
+    for block in blocks or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            if text:
+                parts.append(text)
+            continue
+        parts.append(ATTACHMENT_PLACEHOLDER.format(label=_block_label(block)))
+    return "\n".join(parts)
 
 
 LocalHarnessAcpAgent = AcpChannel
