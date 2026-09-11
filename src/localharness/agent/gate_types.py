@@ -302,9 +302,17 @@ WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
 """PRD §3.2 step 4: peeled so the signature is the wrapped command's. ``sudo`` is NOT a wrapper
 (destructive before peeling)."""
 
-DROPPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({"cd", "export", "pwd", "true", ":"})
+DROPPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
+    "cd", "pushd", "popd", "export", "pwd", "true", ":",
+})
 """PRD §3.2 step 6: dropped only when the segment is exactly this command with no substitution
-inside. ``cd`` was the most frequent first token in the corpus, always as ``cd X && …``."""
+inside. ``cd`` was the most frequent first token in the corpus, always as ``cd X && …``.
+
+Dropped does not mean ignored: navigation moves the shell, so the classifier tracks the
+directory across the sequence and joins relative write targets onto it (``cd ~/.ssh && echo x >>
+authorized_keys`` is a write to ``~/.ssh/authorized_keys``, review finding R2a). ``pushd`` and
+``popd`` are here for the same reason ``cd`` is — they are navigation, and leaving them out made
+them unfamiliar commands that asked."""
 
 SUBCOMMAND_TOOLS_DEFAULT: frozenset[str] = frozenset({
     "git", "uv", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "docker", "cargo", "make", "gh", "kubectl",
