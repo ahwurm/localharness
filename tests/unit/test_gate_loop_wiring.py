@@ -374,3 +374,24 @@ async def test_a_gate_that_raises_produces_a_denied_observation(bus, tmp_path):
     ]
     assert observations and GATE_ERROR_REASON in (observations[0].error or "")
     assert summary is not None, "the turn survived the permission bug"
+
+
+@pytest.mark.asyncio
+async def test_the_loop_hands_the_gate_the_tool_calls_own_id(bus, tmp_path):
+    """`request.call_id` is only useful if the real loop supplies it (the ACP adapter pairs its
+    dialog with a `tool_call` the client already knows — `_plan` numbers them `tc-0`, `tc-1`)."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    asked: list[PermissionRequest] = []
+
+    async def asker(request: PermissionRequest) -> Decision:
+        asked.append(request)
+        return Decision(kind="allow_once")
+
+    gate = _gate(tmp_path, workspace, asker=asker, bus=bus)
+    await _loop(
+        bus, await _registry(_Shell()), gate, llm=MockLLMClient(_plan("cargo build"))
+    ).run_turn("t")
+
+    assert [r.call_id for r in asked] == ["tc-0"]
+    assert [r.agent_id for r in asked] == ["test-agent"]

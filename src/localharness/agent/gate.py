@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -116,6 +117,19 @@ argument the verdict could not handle, and the arguments are the evidence."""
 MS_PER_SECOND = 1000
 """Unit conversion for ``PermissionResolved.latency_ms`` — ``time.monotonic()`` returns seconds
 and the event, like its siblings on the bus, reports milliseconds."""
+
+SUBAGENT_DISPLAY_PREFIX = "[{agent_id}] "
+"""How a subagent's ask is labelled in the one line every channel renders (PRD §3.5).
+
+One gate serves the orchestrator and every subagent it dispatches (PRD §3.4), so the person
+answering sees prompts from several agents on one surface with nothing to tell them apart — and
+"approve `rm -rf build`" is a different question depending on which agent asked it. The
+orchestrator's own asks are NOT prefixed: they are the common case, and a label on every line
+would be noise that trains the eye to skip it.
+
+It goes on ``display`` rather than being left to each renderer because ``display`` is the one
+thing every channel is guaranteed to show; ``PermissionRequest.agent_id`` carries the same fact
+structurally for a channel that wants to render it its own way."""
 
 MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` gives every MCP tool the group ``mcp/<server>``. That group IS how the
@@ -246,6 +260,7 @@ class PermissionGate:
         deny: Optional[DenyFn] = None,
         settings: Optional[GateSettings] = None,
         bus: Any = None,
+        owner_agent_id: Optional[str] = None,
     ) -> None:
         self.boundary = boundary
         self.workspace = Path(workspace)
@@ -261,6 +276,16 @@ class PermissionGate:
         self.has_review_surface = has_review_surface
         self.settings = settings or GateSettings()
         self.bus = bus
+        self.owner_agent_id = owner_agent_id
+        """Whose prompts are the UNLABELLED ones: the session's own agent, everything else being
+        a subagent sharing this gate (PRD §3.4).
+
+        Passed in by the session's entry point when it knows the orchestrator's id. When it does
+        not, the FIRST agent to call :meth:`check` becomes the owner — the orchestrator runs
+        before it can dispatch anything, so the first caller is the orchestrator by construction,
+        and the alternative (labelling every prompt, the orchestrator's included) is noise that
+        trains the eye to skip the label."""
+
         self._config_deny = deny
         self._warned_cannot_ask = False
 
@@ -348,6 +373,7 @@ class PermissionGate:
         *,
         agent_id: str,
         session_id: str,
+        call_id: Optional[str] = None,
         tool_timeout_s: Optional[float] = None,
         deny: Optional[DenyFn] = None,
     ) -> GateOutcome:
@@ -361,7 +387,13 @@ class PermissionGate:
         ``deny`` is the CALLING agent's own deny tier (``AgentLoop._deny_fn``). It is per call
         rather than per gate because one shared gate serves an orchestrator and its subagents,
         and each of those resolved its own deny-pattern union from its own config layers.
+
+        ``call_id`` is the tool call's own id, carried through to
+        :attr:`PermissionRequest.call_id` so a channel can pair the question with the call it is
+        about (ACP renders its dialog against a ``tool_call`` it already knows).
         """
+        if self.owner_agent_id is None:
+            self.owner_agent_id = agent_id  # see the attribute's docstring: first caller owns
         try:
             result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
         except Exception:  # noqa: BLE001 — a verdict that crashes must deny, never escape
@@ -378,7 +410,8 @@ class PermissionGate:
             self._warn_cannot_ask(tool_name)
             return GateOutcome(allowed=False, reason=NO_ASKER_REASON)
         return await self._ask(
-            request, agent_id=agent_id, session_id=session_id, tool_timeout_s=tool_timeout_s
+            request, agent_id=agent_id, session_id=session_id, call_id=call_id,
+            tool_timeout_s=tool_timeout_s,
         )
 
     def _warn_cannot_ask(self, tool_name: str) -> None:
@@ -417,6 +450,7 @@ class PermissionGate:
         *,
         agent_id: str,
         session_id: str,
+        call_id: Optional[str] = None,
         tool_timeout_s: Optional[float],
     ) -> GateOutcome:
         # Imported here, not at module scope: `core/events` imports `agent/gate_types`, which
@@ -424,6 +458,7 @@ class PermissionGate:
         # module-level import would close that cycle and break `import localharness.channels`.
         from localharness.core.events import CANCELLED_RESOLUTION, PermissionAsked
 
+        request = self._attributed(request, agent_id=agent_id, call_id=call_id)
         await self._publish(
             PermissionAsked(
                 agent_id=agent_id,
@@ -468,6 +503,22 @@ class PermissionGate:
         if timed_out:
             return GateOutcome(allowed=False, reason=TIMEOUT_REASON.format(seconds=timeout or 0))
         return GateOutcome(allowed=False, reason=f"refused by a human ({decision.kind})")
+
+    def _attributed(
+        self, request: PermissionRequest, *, agent_id: str, call_id: Optional[str]
+    ) -> PermissionRequest:
+        """Stamp WHO is asking and WHICH call onto the request the channels will see.
+
+        The verdict is pure and knows nothing about sessions, so it builds the request without
+        either; they are facts about the call site, and this is the call site. A subagent's ask
+        also gets :data:`SUBAGENT_DISPLAY_PREFIX` on ``display``, because one gate serves the
+        orchestrator and every child it dispatches (PRD §3.4) and the person answering sees them
+        all on one surface.
+        """
+        display = request.display
+        if agent_id and agent_id != self.owner_agent_id:
+            display = SUBAGENT_DISPLAY_PREFIX.format(agent_id=agent_id) + display
+        return replace(request, agent_id=agent_id, call_id=call_id, display=display)
 
     async def _resolved(
         self,

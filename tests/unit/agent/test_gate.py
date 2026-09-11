@@ -507,3 +507,71 @@ async def test_cancellation_is_re_raised_not_swallowed(tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ------------------------------------------------------------------- who is asking
+
+@pytest.mark.asyncio
+async def test_a_subagents_ask_is_labelled_and_the_owners_is_not(tmp_path):
+    """One gate serves the orchestrator and every child (PRD §3.4), so the line has to say
+    which of them is asking — but only when it is not the session's own agent."""
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, asker=_answer("allow_once", seen), owner_agent_id="orchestrator")
+
+    await gate.check("bash_exec", {"command": "cargo build"}, SHELL,
+                     agent_id="orchestrator", session_id="s")
+    await gate.check("bash_exec", {"command": "cargo test"}, SHELL,
+                     agent_id="researcher", session_id="s")
+
+    assert seen[0].agent_id == "orchestrator"
+    assert not seen[0].display.startswith("[")
+    assert seen[1].agent_id == "researcher"
+    assert seen[1].display.startswith("[researcher] ")
+
+
+@pytest.mark.asyncio
+async def test_the_first_agent_to_check_becomes_the_owner(tmp_path):
+    """`start_cmd` does not pass an owner yet, so the gate derives one: the orchestrator runs
+    before it can dispatch anything, so the first caller is the orchestrator by construction."""
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, asker=_answer("allow_once", seen))
+    assert gate.owner_agent_id is None
+
+    await gate.check("bash_exec", {"command": "cargo build"}, SHELL,
+                     agent_id="main", session_id="s")
+    assert gate.owner_agent_id == "main"
+
+    await gate.check("bash_exec", {"command": "cargo test"}, SHELL,
+                     agent_id="child", session_id="s")
+    assert seen[0].display.startswith("bash_exec")
+    assert seen[1].display.startswith("[child] ")
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_call_still_claims_ownership(tmp_path):
+    """The owner is whoever called FIRST, not whoever asked first — otherwise an orchestrator
+    whose own calls all passed would be labelled as a subagent the moment one asked."""
+    gate = _gate(tmp_path, asker=_answer("allow_once"))
+    await gate.check("read", {"path": "x"}, ToolMeta(group="fs.read"),
+                     agent_id="main", session_id="s")
+    assert gate.owner_agent_id == "main"
+
+
+@pytest.mark.asyncio
+async def test_the_call_id_travels_to_the_request(tmp_path):
+    """The ACP adapter pairs its dialog with a `tool_call` it already knows (`request.call_id`)."""
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, asker=_answer("allow_once", seen))
+    await gate.check("bash_exec", {"command": "cargo build"}, SHELL,
+                     agent_id="a", session_id="s", call_id="tc-7")
+    assert seen[0].call_id == "tc-7"
+
+
+@pytest.mark.asyncio
+async def test_a_request_built_by_hand_needs_neither_field(tmp_path):
+    """Both default to None so nothing that constructs a request itself had to change."""
+    request = PermissionRequest(
+        tool_name="bash_exec", tool_params={}, klass="shell-unfamiliar", key="k",
+        grantable=True, reason="r", display="d",
+    )
+    assert request.agent_id is None and request.call_id is None
