@@ -5,6 +5,7 @@ import typer
 
 from localharness import resolved_version
 
+from localharness.cli.acp_cmd import acp_cmd
 from localharness.cli.agent_cmd import agent_app
 from localharness.cli.askrate_cmd import ask_rate
 from localharness.cli.autoresearch_cmd import autoresearch_app
@@ -38,6 +39,9 @@ app.command("validate")(validate)
 app.command("model")(model)
 app.command("propose")(propose)
 app.command("update")(update)
+# The Zed / Agent Client Protocol server (PRD §4). Visible: it is the verb a Zed
+# `agent_servers` entry runs, and a hidden command cannot be discovered from `--help`.
+app.command("acp")(acp_cmd)
 # Internal instrument for the permission classifier, not a marketed verb (PRD §10).
 app.command("ask-rate", hidden=True)(ask_rate)
 app.add_typer(agent_app, name="agent")

@@ -71,21 +71,27 @@ class ReadTool(Tool):
 
         loop = asyncio.get_running_loop()
         try:
-            raw = await loop.run_in_executor(None, target.read_bytes)
+            # PRD §4: with an editor attached, read the BUFFER, not the disk — otherwise the
+            # agent reasons about a version of the file the user is no longer looking at. The
+            # binary sniff is a disk-path guard: a client that hands back text has already
+            # decided the file is text, and an editor cannot open a SQLite database as a buffer.
+            if self.file_read_hook is not None:
+                text = await self.file_read_hook(target)
+            else:
+                raw = await loop.run_in_executor(None, target.read_bytes)
+                if _looks_binary(raw[:BINARY_SNIFF_BYTES]):
+                    return self.err(
+                        f"{target} looks like a binary file (a NUL byte in the first "
+                        f"{BINARY_SNIFF_BYTES} bytes) — refusing to read it as text. For a "
+                        "SQLite database, use bash_exec with sqlite3 (e.g. "
+                        "`sqlite3 <path> '.schema'`) instead of read.",
+                        error_type="validation_error",
+                    )
+                text = raw.decode("utf-8", "replace")
         except PermissionError:
             return self.err(f"Permission denied: {target}", error_type="permission_denied")
         except OSError as exc:
             return self.err(str(exc))
-
-        if _looks_binary(raw[:BINARY_SNIFF_BYTES]):
-            return self.err(
-                f"{target} looks like a binary file (a NUL byte in the first "
-                f"{BINARY_SNIFF_BYTES} bytes) — refusing to read it as text. For a SQLite "
-                "database, use bash_exec with sqlite3 (e.g. `sqlite3 <path> '.schema'`) "
-                "instead of read.",
-                error_type="validation_error",
-            )
-        text = raw.decode("utf-8", "replace")
 
         all_lines = text.splitlines()
         total_lines = len(all_lines)

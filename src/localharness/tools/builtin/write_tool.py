@@ -89,7 +89,12 @@ class WriteTool(Tool):
             old_bytes = None
             if target.exists():
                 try:
-                    old_bytes = await loop.run_in_executor(None, target.read_bytes)
+                    # PRD §4: with an editor attached the "is this already written?" question is
+                    # about the BUFFER — a disk read would call an unsaved edit a no-op.
+                    if self.file_read_hook is not None:
+                        old_bytes = (await self.file_read_hook(target)).encode()
+                    else:
+                        old_bytes = await loop.run_in_executor(None, target.read_bytes)
                 except OSError:
                     old_bytes = None
             if old_bytes == new_bytes:  # only True when the file existed AND matched
@@ -120,9 +125,18 @@ class WriteTool(Tool):
 
         open_mode = "a" if mode == "append" else "w"
         try:
-            await loop.run_in_executor(
-                None, lambda: target.open(open_mode, encoding="utf-8").write(content)
-            )
+            if self.file_write_hook is not None:
+                # ACP's fs/write_text_file replaces the WHOLE file — there is no append mode in
+                # the protocol (PRD §4) — so append becomes read-then-concatenate through the
+                # same editor-backed pair rather than a silent disk write behind the buffer.
+                text = content
+                if mode == "append" and target.exists() and self.file_read_hook is not None:
+                    text = await self.file_read_hook(target) + content
+                await self.file_write_hook(target, text)
+            else:
+                await loop.run_in_executor(
+                    None, lambda: target.open(open_mode, encoding="utf-8").write(content)
+                )
         except PermissionError:
             return self.err(f"Permission denied: {target}", error_type="permission_denied")
         except OSError as exc:

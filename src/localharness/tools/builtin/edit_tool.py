@@ -82,7 +82,11 @@ class EditTool(Tool):
 
         loop = asyncio.get_running_loop()
         try:
-            text = await loop.run_in_executor(None, target.read_text, "utf-8")
+            # PRD §4: an editor-backed session edits the buffer the user is looking at.
+            if self.file_read_hook is not None:
+                text = await self.file_read_hook(target)
+            else:
+                text = await loop.run_in_executor(None, target.read_text, "utf-8")
         except PermissionError:
             return self.err(f"Permission denied: {target}", error_type="permission_denied")
         except (OSError, UnicodeDecodeError) as exc:
@@ -100,7 +104,10 @@ class EditTool(Tool):
 
         updated = text.replace(old_string, new_string)
         try:
-            await loop.run_in_executor(None, target.write_text, updated, "utf-8")
+            if self.file_write_hook is not None:
+                await self.file_write_hook(target, updated)
+            else:
+                await loop.run_in_executor(None, target.write_text, updated, "utf-8")
         except PermissionError:
             return self.err(f"Permission denied: {target}", error_type="permission_denied")
         except OSError as exc:
