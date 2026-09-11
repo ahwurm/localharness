@@ -371,8 +371,20 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
-                       no_input: bool = False, show_reasoning: bool = False) -> None:
-    """Async entry point: discover agent, wire dependencies, run REPL."""
+                       no_input: bool = False, show_reasoning: bool = False,
+                       acp_channel: Any = None) -> None:
+    """Async entry point: discover agent, wire dependencies, run REPL.
+
+    `acp_channel` is the Zed/ACP adapter (`channels/acp.AcpChannel`) when this session is being
+    driven over the Agent Client Protocol. It is passed IN rather than built here because the
+    protocol handshake happens long before a session exists — `initialize` and `session/new` must
+    answer immediately, and only the first `session/prompt` calls this function (PRD §4). When it
+    is set, it replaces the channel and, at the end, replaces the REPL: ACP turns arrive as
+    JSON-RPC requests instead of lines pulled from `read_input`. Everything between — config
+    layers, provider bring-up, memory, MCP, the tool registry, the permission gate, the subagent
+    fleet — is the same path a terminal or Discord session takes, which is the point of passing
+    the channel in rather than forking a third session builder.
+    """
     import time as _time
     import uuid
 
@@ -1346,7 +1358,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
         )
-        if channel_mode == "discord":
+        if acp_channel is not None:
+            # Built at the ACP handshake (it had to answer `initialize` before any of this
+            # existed); the gate attaches to it below exactly like any other channel.
+            channel = acp_channel
+        elif channel_mode == "discord":
             from localharness.channels.discord import DiscordChannel, discord_config_from_env
             channel = DiscordChannel(bus=bus, config=discord_config_from_env())
             console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
@@ -1465,6 +1481,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel.verbose = verbose
             if llm is not None:
                 llm.on_reasoning = channel.on_reasoning
+
+        if acp_channel is not None:
+            # ACP's turn loop is the protocol itself: `session/prompt` requests run turns
+            # directly on this loop, so there is no line to pull and no REPL. `serve()` returns
+            # when the connection closes, and the ordered teardown in `finally` runs unchanged.
+            await acp_channel.serve(
+                bus=bus, agent_loop=agent_loop, gate=gate, tool_registry=tool_registry
+            )
+            return
 
         repl = OrchestratorREPL(
             orchestrator=orchestrator,

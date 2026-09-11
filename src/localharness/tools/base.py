@@ -1,10 +1,19 @@
 """Tool base types: ToolProtocol, Tool ABC, ToolSchema, ToolParameter, ToolResult, ToolVetoed."""
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
+
+FileReadHook = Callable[[Path], Awaitable[str]]
+"""Read a file's text through something other than the disk (PRD §4: Zed's `fs/read_text_file`,
+so the agent sees the buffer the user is actually looking at, unsaved edits included)."""
+
+FileWriteHook = Callable[[Path, str], Awaitable[None]]
+"""Replace a file's whole text through something other than the disk (PRD §4:
+`fs/write_text_file`, which is what puts the change in Zed's review pane)."""
 
 
 class ToolParameter(BaseModel):
@@ -79,6 +88,26 @@ class Tool(ABC):
 
     timeout_s: float | None = None
     workspace_root: str | None = None  # opt-in write/exec confinement; None = unconfined (default)
+
+    file_read_hook: "FileReadHook | None" = None
+    file_write_hook: "FileWriteHook | None" = None
+    """Optional editor-backed file I/O for `read`/`write`/`edit` (PRD §4, "Edits through the
+    editor"). None — the default and the only value in a terminal session — means the tool
+    touches the disk exactly as it always has.
+
+    Set to a coroutine by a channel that owns a real editor: the ACP adapter points them at
+    Zed's `fs/read_text_file` / `fs/write_text_file` so the agent sees UNSAVED buffers and every
+    write lands in Zed's review pane instead of on disk behind the user's back. They are plain
+    instance attributes rather than constructor arguments deliberately — the hooks are known
+    only after the ACP client has advertised its capabilities, which is long after
+    `register_builtin_tools()` ran, and threading an optional argument through that factory and
+    its three callers would have made every call site carry a parameter only one of them can
+    ever use. The channel sets them on the registered instances instead
+    (`channels/acp.py:_wire_editor_file_io`).
+
+    Contract: `read(path) -> str` raises `OSError` when the client cannot produce the file;
+    `write(path, text) -> None` replaces the whole file (ACP has no append mode, so `write`'s
+    append branch reads-then-concatenates through the same pair)."""
 
     def __init__(self, workspace_root: str | None = None) -> None:
         # Filesystem-touching tools (write/edit/bash_exec) accept an optional confinement root.
