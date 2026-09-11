@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import warnings
+from dataclasses import fields as dataclass_fields
 from typing import Any, Literal, Optional
 
 from pydantic import (
@@ -12,7 +14,23 @@ from pydantic import (
     model_validator,
 )
 
+from localharness.agent.gate_types import DEFAULT_MODE, GateSettings, Mode
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, MAX_CONFIGURABLE_MAX_TOKENS
+
+# The pre-v0.14 spellings of `permissions.mode`, and what each becomes. `auto` was
+# "allow everything except deny_patterns" and `manual` was an unimplemented stub, so both
+# describe a session that never asked a human anything. They map to `guarded` — the mode that
+# DOES ask — rather than to `unattended`, which would silently preserve today's behaviour and
+# keep the gate switched off for every existing config (PRD §3.4).
+LEGACY_MODE_ALIASES: dict[str, Mode] = {"auto": DEFAULT_MODE, "manual": DEFAULT_MODE}
+
+# `AskConfig` field name -> the `GateSettings` field it feeds, where the two differ. Config
+# reads `permissions.ask.timeout_s` / `.network_hosts` (the block already says "ask"), while
+# GateSettings carries the `ask_` prefix because its names sit in one flat namespace.
+ASK_TO_GATE_FIELD: dict[str, str] = {
+    "network_hosts": "ask_network_hosts",
+    "timeout_s": "ask_timeout_s",
+}
 
 
 class ToolConfig(BaseModel):
@@ -175,22 +193,141 @@ class BudgetConfig(BaseModel):
     )
 
 
+class AskConfig(BaseModel):
+    """Tunables of the human-approval gate — the config face of `GateSettings` (PRD §3.1, §3.5).
+
+    Three session knobs (whether network reads ask, how long a channel waits, which MCP servers
+    skip the once-per-tool ask) plus an optional override for each of the gate's RULE SETS. Every
+    rule set defaults to None, meaning "use the shipped default in `agent/gate_types.py`" — the
+    defaults live there, with their sources, and are never restated here.
+
+    The gate's two DICT-shaped rule sets (`destructive_flag_verbs`, `inline_code_flags`) are
+    deliberately not overridable from config: they are flag canonicalization tables, not policy
+    lists, and a wrong entry silently changes what a grant key means (PRD §3.2 step 7).
+    """
+
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    network_hosts: bool = Field(
+        default=False,
+        description=(
+            "Ask before a network tool reaches a host not yet granted. PRD §3.1 choice 1 / owner "
+            "ruling §9.4: network reads are silent by default, because asking about every fetch "
+            "is the prompt-fatigue failure the ask-rate SLO exists to prevent."
+        ),
+    )
+    timeout_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "How long a channel waits for a human answer before denying (PRD §3.5). None derives "
+            "the wait from the tool's own timeout at the call site — the terminal and Zed hold "
+            "their dialog open, so this binds on Discord."
+        ),
+    )
+    mcp_trusted_servers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "MCP servers whose tools skip the once-per-(server, tool) ask (PRD §3.1). Names, not "
+            "globs. Trusting a server here is a grant you write yourself — the repo cannot add "
+            "one (PRD §3.3)."
+        ),
+    )
+
+    read_only_signatures: Optional[list[str]] = Field(
+        default=None, description="Override the shell signatures that ALLOW outright (PRD §3.1)."
+    )
+    destructive_signatures: Optional[list[str]] = Field(
+        default=None,
+        description="Override the shell signatures in the ungrantable shell-destructive class.",
+    )
+    pipe_to_shell_sources: Optional[list[str]] = Field(
+        default=None, description="Override the `curl`/`wget` side of the pipe-to-shell rule."
+    )
+    pipe_to_shell_sinks: Optional[list[str]] = Field(
+        default=None, description="Override the `| sh` side of the pipe-to-shell rule."
+    )
+    interpreter_commands: Optional[list[str]] = Field(
+        default=None, description="Override the commands whose signature carries an interpreter mode."
+    )
+    inline_by_nature: Optional[list[str]] = Field(
+        default=None, description="Override the commands that are inline interpreters unconditionally."
+    )
+    wrapper_commands: Optional[list[str]] = Field(
+        default=None, description="Override the wrappers peeled before signing a segment."
+    )
+    dropped_commands: Optional[list[str]] = Field(
+        default=None, description="Override the no-op segments dropped before classification."
+    )
+    subcommand_tools: Optional[list[str]] = Field(
+        default=None, description="Override the tools whose signature includes their subcommand."
+    )
+    payload_commands: Optional[list[str]] = Field(
+        default=None, description="Override the commands whose arguments carry a lifted payload."
+    )
+    write_shaped_commands: Optional[list[str]] = Field(
+        default=None, description="Override the commands whose arguments name a write target."
+    )
+    protected_paths_home: Optional[list[str]] = Field(
+        default=None, description="Override the ungrantable protected paths under $HOME."
+    )
+    protected_paths_workspace: Optional[list[str]] = Field(
+        default=None, description="Override the ungrantable protected names inside a workspace."
+    )
+
+    def to_gate_settings(self) -> GateSettings:
+        """This config block as the gate's settings object (PRD §3.1).
+
+        Each override is rebuilt in the container type the dataclass itself DECLARES, read off
+        `GateSettings`'s own field defaults rather than a second list of names kept in step here:
+        a rule set added to `GateSettings` needs only its `AskConfig` field, and a rule set left
+        at None never reaches the constructor, so the shipped default stands.
+        """
+        overrides: dict[str, Any] = {}
+        for gate_field in dataclass_fields(GateSettings):
+            ask_name = _GATE_TO_ASK_FIELD.get(gate_field.name, gate_field.name)
+            if not hasattr(self, ask_name):
+                continue
+            value = getattr(self, ask_name)
+            if value is None:
+                continue
+            default = gate_field.default
+            overrides[gate_field.name] = (
+                type(default)(value) if isinstance(default, (frozenset, tuple)) else value
+            )
+        return GateSettings(**overrides)
+
+
+_GATE_TO_ASK_FIELD: dict[str, str] = {v: k for k, v in ASK_TO_GATE_FIELD.items()}
+
+
 class PermissionConfig(BaseModel):
     """
     Permission policy for an agent.
 
-    Default mode is 'auto': allow everything except the deny_patterns list.
-    An agent can only narrow its inherited permission policy, never broaden it.
+    Default mode is 'guarded': the harness asks a human before a call crosses the workspace
+    boundary or looks destructive, and remembers the answer (PRD §3.4). An agent can only narrow
+    its inherited permission policy, never broaden it.
     """
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    mode: Literal["auto", "manual"] = Field(
-        default="auto",
+    mode: Mode = Field(
+        default=DEFAULT_MODE,
         description=(
-            "'auto': allow all tool calls except those matching deny_patterns. "
-            "'manual': deny all tool calls that are not in explicit allow_patterns "
-            "(v2 feature — not implemented in v1)."
+            "Session permission mode (PRD §3.4). 'guarded' (default): deny patterns win, then the "
+            "gate asks a human about boundary-crossing and destructive calls and remembers the "
+            "answer. 'trusted': grantable asks become allow; destructive/protected-path calls "
+            "still ask. 'read-only': writes, non-read-only shell and code execution are refused "
+            "with an observation the model can re-plan against. 'unattended': every ask becomes "
+            "allow (deny patterns unchanged) — today's pre-v0.14 behaviour, named honestly; never "
+            "a default, set it explicitly for bench and scheduled jobs. The legacy 'auto' and "
+            "'manual' spellings load as 'guarded' with a deprecation warning."
         ),
+    )
+
+    ask: "AskConfig" = Field(
+        default_factory=lambda: AskConfig(),
+        description="Tunables of the human-approval gate (PRD §3.1, §3.5).",
     )
 
     deny_patterns: list[str] = Field(
@@ -248,14 +385,6 @@ class PermissionConfig(BaseModel):
         ),
     )
 
-    allow_patterns: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Explicit allow list for 'manual' mode (v2). "
-            "In 'auto' mode, this field is ignored."
-        ),
-    )
-
     workspace_root: Optional[str] = Field(
         default=None,
         description=(
@@ -285,6 +414,49 @@ class PermissionConfig(BaseModel):
             "once stamped current, the sync adds nothing (deliberate removals are respected)."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_allow_patterns(cls, data: Any) -> Any:
+        """`allow_patterns` is gone, and its absence is load-bearing (PRD §3.3).
+
+        It was an unused stub for the unimplemented 'manual' mode. Repurposing it would have made
+        config a LOOSENING surface, and config travels with the repo: a cloned project could then
+        pre-approve its own `curl | sh`. Grants live in the global store (`~/.localharness/
+        grants.yaml`), written only by a human answering a prompt. `extra="forbid"` would reject
+        the key anyway — this says why, so an upgrading user is told where their grants went
+        instead of reading "extra inputs are not permitted".
+        """
+        if isinstance(data, dict) and "allow_patterns" in data:
+            raise ValueError(
+                "permissions.allow_patterns was removed in v0.14. Permission GRANTS live in the "
+                "global store (~/.localharness/grants.yaml) and are written only when a human "
+                "answers a prompt — never in config, which travels with a repo and could then "
+                "pre-approve itself (PRD §3.3). Delete the key; to stop being asked, answer "
+                "'always' once, or set permissions.mode explicitly."
+            )
+        return data
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def map_legacy_mode(cls, value: Any) -> Any:
+        """Load the pre-v0.14 `auto`/`manual` spellings as `guarded`, loudly (PRD §3.4).
+
+        Rejecting them would break every config written before the gate existed; silently keeping
+        them as "allow everything" would ship the gate switched off. Mapped and warned instead.
+        """
+        alias = LEGACY_MODE_ALIASES.get(value) if isinstance(value, str) else None
+        if alias is None:
+            return value
+        warnings.warn(
+            f"permissions.mode: {value!r} is deprecated and now loads as {alias!r} — the harness "
+            "asks a human before boundary-crossing and destructive calls and remembers the "
+            "answer. Set permissions.mode explicitly ('unattended' restores the old "
+            "never-ask behaviour for bench and scheduled jobs).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return alias
 
     @field_validator("deny_patterns")
     @classmethod

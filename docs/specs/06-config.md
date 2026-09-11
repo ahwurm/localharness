@@ -497,18 +497,27 @@ class PermissionConfig(BaseModel):
     """
     Permission policy for an agent.
 
-    Default mode is 'auto': allow everything except the deny_patterns list.
-    An agent can only narrow its inherited permission policy, never broaden it.
+    Default mode is 'guarded': the harness asks a human before a call crosses the workspace
+    boundary or looks destructive, and remembers the answer (PRD §3.4). An agent can only
+    narrow its inherited permission policy, never broaden it.
     """
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    mode: Literal["auto", "manual"] = Field(
-        default="auto",
+    mode: Mode = Field(   # Mode = Literal["guarded", "trusted", "read-only", "unattended"]
+        default=DEFAULT_MODE,  # "guarded", from agent/gate_types.py
         description=(
-            "'auto': allow all tool calls except those matching deny_patterns. "
-            "'manual': deny all tool calls that are not in explicit allow_patterns "
-            "(v2 feature — not implemented in v1)."
+            "Session permission mode. 'guarded' (default): deny patterns win, then the gate "
+            "asks a human about boundary-crossing and destructive calls and remembers the "
+            "answer. 'trusted': grantable asks become allow. 'read-only': writes, non-read-only "
+            "shell and code execution are refused. 'unattended': every ask becomes allow — the "
+            "pre-v0.14 behaviour, for bench and scheduled jobs. The legacy 'auto'/'manual' "
+            "spellings load as 'guarded' with a deprecation warning."
         ),
+    )
+
+    ask: AskConfig = Field(
+        default_factory=lambda: AskConfig(),
+        description="Tunables of the human-approval gate — the config face of GateSettings.",
     )
 
     deny_patterns: list[str] = Field(
@@ -530,13 +539,10 @@ class PermissionConfig(BaseModel):
         ),
     )
 
-    allow_patterns: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Explicit allow list for 'manual' mode (v2). "
-            "In 'auto' mode, this field is ignored."
-        ),
-    )
+    # allow_patterns was REMOVED in v0.14. Grants live in the global store
+    # (~/.localharness/grants.yaml) and are written only when a human answers a prompt —
+    # never in config, which travels with a repo and could otherwise pre-approve itself.
+    # A config that still carries the key fails validation with that explanation.
 
     workspace_root: Optional[str] = Field(
         default=None,
@@ -1212,7 +1218,11 @@ list — every field is declared there with its own description.
 | `tools.add` | list[string] | `[]` | registered tool names | Tools to add |
 | `tools.deny` | list[string] | `[]` | tool names or globs | Tools to deny |
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
-| `permissions.mode` | string | `"auto"` | auto or manual | Permission mode |
+| `permissions.mode` | string | `"guarded"` | guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness |
+| `permissions.ask.network_hosts` | bool | `false` | — | Ask before a network tool reaches a host with no grant |
+| `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel waits for an answer; null derives it from the tool timeout |
+| `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
+| `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
 | `permissions.deny_patterns` | list[string] | 24 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
 | `permissions.workspace_root` | string or null | null, or the project folder inside a workspace | abs or `~/…` path | Filesystem confinement for write/edit/bash_exec. Null and no workspace = unconfined |
 | `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
@@ -1765,7 +1775,7 @@ tools:
       timeout_seconds: 30.0
 
 permissions:
-  mode: auto
+  mode: guarded
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"
@@ -1821,7 +1831,7 @@ tools:
   mcp_servers: []
 
 permissions:
-  mode: auto
+  mode: guarded
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"
@@ -1855,7 +1865,7 @@ default_temperature: 0.6
 default_max_tokens: null   # null = no cap sent; the model stops when it is done
 
 permissions:
-  mode: auto
+  mode: guarded
   deny_patterns:
     - "write(*/.env)"
     - "write(*/secrets*)"

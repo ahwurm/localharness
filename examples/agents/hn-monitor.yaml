@@ -32,12 +32,17 @@ tools:
   # add: [<registered-or-mcp-tool>]   # e.g. a web-fetch MCP tool to pull HN live
 
 # --- Permissions (deny-first) ---
-# Mode `auto` allows every tool call except the deny patterns. These are ADDED
-# to the deny patterns inherited from the org/division (which already block
-# things like writing .env/secrets and `sudo`/`rm -rf` shell calls) — an agent
-# can only ever narrow its policy, never broaden it. Pattern form: tool(arg_glob).
+# Mode `guarded` (the default) denies the deny patterns outright, then asks a human
+# before anything that leaves the workspace or looks destructive, remembering each
+# answer. The deny patterns below are ADDED to the ones inherited from the
+# org/division (which already block things like writing .env/secrets and
+# `sudo`/`rm -rf` shell calls) — an agent can only ever narrow its policy, never
+# broaden it. Pattern form: tool(arg_glob).
+# A scheduled, human-less run of this agent wants `mode: unattended` instead: every
+# ask becomes an allow (deny patterns unchanged), which is what the harness did
+# before v0.14, named honestly.
 permissions:
-  mode: auto
+  mode: guarded
   deny_patterns:
     - "write(*/.env)"
     - "write(*.secret)"
