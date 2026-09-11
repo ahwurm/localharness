@@ -270,17 +270,24 @@ anything alone, and a bare ``sh`` is an interpreter, not a destructive command."
 
 INTERPRETER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "python", "python3", "bash", "sh", "zsh", "node", "uv run", "ruby", "perl",
+    "fish", "ksh", "dash", "script",
 })
 """Commands whose SIGNATURE carries an interpreter mode (PRD §3.2 step 7, critic finding 5).
 
 ``python3 -c``, ``python3 -m MOD``, ``python3 <script>`` and bare ``python3`` are four different
 grant keys, so answering "always" about an inline one-liner is never an answer about a script.
 The list is the interpreters present in the dogfood corpus (PRD §5), where ``python3`` is the
-second signature nearly every workspace is asked about."""
+second signature nearly every workspace is asked about.
+
+``fish``, ``ksh`` and ``dash`` are here because a shell the list forgets is a shell the gate
+never opens — their ``-c`` payload is recursed into like ``bash -c``'s (review finding R9).
+``script`` is in the same row for the same reason: ``script -c CMD FILE`` runs CMD through a
+shell to record the session (script(1))."""
 
 INLINE_CODE_FLAGS_DEFAULT: dict[str, tuple[str, ...]] = {
     "python": ("-c",), "python3": ("-c",), "uv run": ("-c",),
     "bash": ("-c",), "sh": ("-c",), "zsh": ("-c",),
+    "fish": ("-c",), "ksh": ("-c",), "dash": ("-c",), "script": ("-c",),
     "node": ("-e", "--eval", "-p", "--print"),
     "ruby": ("-e",), "perl": ("-e", "-E"),
 }
@@ -299,9 +306,17 @@ there is no mode flag to key on — the command itself is the signature."""
 
 WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "env", "nohup", "time", "nice", "ionice", "command", "builtin", "exec", "timeout", "stdbuf",
+    "watch", "flock", "setsid", "chroot", "busybox", "caffeinate", "unbuffer", "systemd-run",
+    "poetry", "pipx", "uvx",
 })
 """PRD §3.2 step 4: peeled so the signature is the wrapped command's. ``sudo`` is NOT a wrapper
-(destructive before peeling)."""
+(destructive before peeling).
+
+The second row is the review's finding R9: every one of these runs its argument as a command, so
+before they were peeled ``watch cp x ~/.ssh/authorized_keys`` signed as an unfamiliar ``watch``
+with no write target at all. Their per-command argument shapes (``watch -n N``, ``flock`` and
+``chroot``'s leading operand, ``poetry run`` / ``pipx run``'s required subcommand) live with the
+peeling logic in ``shell_classify``, which is where the other canonicalization tables are."""
 
 DROPPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "cd", "pushd", "popd", "export", "pwd", "true", ":",
@@ -320,9 +335,15 @@ SUBCOMMAND_TOOLS_DEFAULT: frozenset[str] = frozenset({
 })
 """PRD §3.2 step 7: the signature includes the first subcommand (``git status`` ≠ ``git push``)."""
 
-PAYLOAD_COMMANDS_DEFAULT: frozenset[str] = frozenset({"find", "xargs"})
-"""PRD §3.2 step 5: ``find -exec/-execdir/-ok CMD`` and ``xargs CMD`` lift CMD into its own
-segment (critic finding 4)."""
+PAYLOAD_COMMANDS_DEFAULT: frozenset[str] = frozenset({"find", "xargs", "parallel"})
+"""PRD §3.2 step 5: ``find -exec/-execdir/-ok CMD``, ``xargs CMD`` and ``parallel CMD ::: args``
+lift CMD into its own segment (critic finding 4).
+
+The set is a real knob (review finding R9b): any command listed here has its payload read as
+"the first non-option token onward", so an install whose runner is not in this row can add it in
+config without a code change. GNU ``parallel`` is in the defaults because it is the runner the
+review used as its example — ``parallel rm -rf {} ::: a b`` signed as an unfamiliar
+``parallel``."""
 
 WRITE_SHAPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "tee", "cp", "mv", "install", "rsync", "dd", "curl", "wget", "ln", "touch", "mkdir", "unzip", "tar",
