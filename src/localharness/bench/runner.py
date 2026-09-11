@@ -365,7 +365,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         ContextManager,
         TokenCounter,
     )
-    from localharness.agent.gate import PermissionGate, settings_from
+    from localharness.agent.gate import PermissionGate, deny_fn_from, settings_from
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.config.grants import GrantStore
     from localharness.config.models import AgentConfig
@@ -504,7 +504,9 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         asker=None,
         channel_name="bench",
         has_review_surface=False,
-        deny=None,  # AgentLoop hands its own agent's deny tier in on every check
+        # AgentLoop hands its own agent's deny tier in on every check; this is the fallback for
+        # anything else that consults the gate, so the DENY tier can never be skipped.
+        deny=deny_fn_from(perm_evaluator, getattr(agent_config, "permissions", None)),
         settings=settings_from(getattr(agent_config, "permissions", None)),
         bus=bus,
     )
