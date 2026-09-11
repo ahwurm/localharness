@@ -1297,6 +1297,17 @@ one file in the global config directory, keyed by the workspace's resolved path,
 human answers a prompt, and **never read from a project tree** — a cloned repository must not be
 able to pre-approve its own commands. Nested folders inherit the nearest ancestor's entry.
 
+Every record is filed and matched under **both** its class and its key. A key is unique only inside
+its own class's key space, and the same string lives in several of them — `python_exec` is a shell
+signature *and* the name of the `code-exec` tool, and a shell signature can read exactly like a
+directory — so an answer about one question never satisfies another. A record with no `class` (or
+any other missing provenance field) is skipped with a warning and the call asks again.
+
+One ask class is the catch-all: **`tool-unfamiliar`**, keyed by the tool's name, for a tool in no
+family the gate has rules for — a plugin's tool, or one whose schema could not be read. It is
+grantable, so it asks once per workspace and `trusted` mode allows it outright; the point is that a
+tool nobody can describe is never silently in the allow tier.
+
 A "never here" answer lives in the same file as a **negative grant**: same workspace entry, same key
 space, same mandatory provenance. It is not a text pattern — a refusal of the signature `cp` denies
 `cp` and leaves `scp`, `cpio` and any command whose arguments merely contain "cp" alone. Refusals are

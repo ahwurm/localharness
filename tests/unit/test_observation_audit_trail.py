@@ -15,6 +15,7 @@ import pytest
 from localharness.agent.context import ContextManager
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
+from localharness.config.models import PermissionConfig
 from localharness.config.models import AgentConfig
 from localharness.core.events import Observation
 from localharness.memory.sqlite import MemoryStore
@@ -24,7 +25,11 @@ from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 
 def _loop(llm, bus, registry) -> AgentLoop:
     return AgentLoop(
-        config=AgentConfig(name="test-agent", role="Test agent."),
+        # Unattended: these tests are about the observation trail, and their fake registries
+        # expose no schema, so every tool call is "unfamiliar" to the gate and would otherwise
+        # be denied (no channel can ask). See tests/unit/agent/test_verdict.py for that rule.
+        config=AgentConfig(name="test-agent", role="Test agent.",
+                           permissions=PermissionConfig(mode="unattended")),
         llm=llm,
         bus=bus,
         context_manager=ContextManager(),

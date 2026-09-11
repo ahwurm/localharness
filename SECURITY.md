@@ -98,7 +98,9 @@ workspace always gets the same answer. It runs in a fixed order and the first ma
 4. **Ask once, then remember.** A write or shell write target outside the project folder (keyed by
    the target's parent directory), a shell command whose signature this workspace has not seen
    before, an inline interpreter (`python3 -c`, `bash -c`, `eval`, `xargs`), `python_exec` and
-   `cruncher_exec`, the `agent` tool, and each MCP tool.
+   `cruncher_exec`, the `agent` tool, each MCP tool, and any tool in no family the gate knows —
+   a plugin's tool, or one whose schema could not be read — keyed by the tool's name, because a
+   tool nobody can describe is asked about rather than allowed.
 5. **Allow.** Everything else: reads, search, memory, `chunk`, the read-only shell commands (`ls`,
    `cat`, `head`, `tail`, `grep`, `rg`, `find` without `-exec`/`-delete`, `git status`/`diff`/`log`,
    `sed -n`, and their kin), network reads, and edits inside the project when the channel can show

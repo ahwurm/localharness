@@ -270,3 +270,76 @@ async def test_a_two_class_command_asks_once_and_runs_in_the_same_call(bus, tmp_
     await _loop(bus, registry, gate, llm=MockLLMClient(_plan(command))).run_turn("t")
     assert len(asked) == 1, "the grants were written but the identical call asked again"
     assert tool.ran == [command, command]
+
+
+# ------------------------------------ an unreadable tool schema asks, never allows (R4)
+
+class _Reader(Tool):
+    """A read-tier tool by its own schema — so if the schema is readable, it is ALLOWed."""
+
+    def info(self) -> ToolSchema:
+        return ToolSchema(
+            name="peek",
+            description="Read something.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            group="fs.read",
+        )
+
+    async def _execute(self, **kwargs: Any) -> ToolResult:
+        return self.ok("peeked")
+
+
+def _call_peek() -> list[FakeLLMResponse]:
+    return [
+        FakeLLMResponse(content=None, tool_calls=[FakeToolCall(id="tc-0", name="peek", arguments={})]),
+        FakeLLMResponse(content="Done."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_readable_schema_keeps_a_read_tier_tool_silent(bus, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    asked: list[PermissionRequest] = []
+
+    async def asker(request: PermissionRequest) -> Decision:
+        asked.append(request)
+        return Decision(kind="allow_once")
+
+    gate = _gate(tmp_path, workspace, asker=asker, bus=bus)
+    await _loop(bus, await _registry(_Reader()), gate, llm=MockLLMClient(_call_peek())).run_turn("t")
+    assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_registry_whose_lookup_raises_makes_the_call_ask(bus, tmp_path, caplog):
+    """R4: `_tool_facts` swallowed the exception and returned a NEUTRAL `ToolMeta`, which landed
+    the call in the ALLOW tier — the one place a tool nobody can describe must not go.
+
+    Same tool as the test above, same schema; only the lookup is broken, and the verdict flips
+    from silent to asking.
+    """
+    import logging
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    registry = await _registry(_Reader())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("registry is confused")
+
+    registry.lookup_tool = _boom  # type: ignore[method-assign]
+
+    asked: list[PermissionRequest] = []
+
+    async def asker(request: PermissionRequest) -> Decision:
+        asked.append(request)
+        return Decision(kind="allow_once")
+
+    gate = _gate(tmp_path, workspace, asker=asker, bus=bus)
+    with caplog.at_level(logging.WARNING):
+        await _loop(bus, registry, gate, llm=MockLLMClient(_call_peek())).run_turn("t")
+
+    assert len(asked) == 1, "an unreadable schema must reach a human, not the allow tier"
+    assert (asked[0].klass, asked[0].key) == ("tool-unfamiliar", "peek")
+    assert any("could not read the schema" in r.getMessage() for r in caplog.records)

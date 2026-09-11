@@ -324,7 +324,12 @@ def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_
                      session_id=None, memory_loader=None, context_manager=None):
     """Helper to construct an AgentLoop with mock dependencies."""
     from localharness.config.models import AgentConfig
-    cfg = config or AgentConfig(name="test-agent", role="Test agent.")
+    # Unattended by default: these tests drive fake registries that expose no tool schema, so
+    # the gate would class every call "tool-unfamiliar" and deny it for want of a channel to
+    # ask on. Permission behaviour has its own tests (tests/unit/agent/test_verdict.py).
+    from localharness.config.models import PermissionConfig
+    cfg = config or AgentConfig(name="test-agent", role="Test agent.",
+                                permissions=PermissionConfig(mode="unattended"))
     llm = mock_llm_client_factory(responses)
     ctx = context_manager or ContextManager()
     perm = PermissionEvaluator()

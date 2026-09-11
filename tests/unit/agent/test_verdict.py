@@ -778,6 +778,51 @@ def test_the_subtree_grant_reaches_shell_write_targets(ws, monkeypatch, tmp_path
     assert result.verdict is Verdict.ALLOW
 
 
+# ------------------------------------------- a tool in no known family (R4)
+
+def test_a_plugin_tool_in_no_known_family_asks_once_per_workspace(ws):
+    """R4: ``ToolSchema.group`` defaults to ``other``, and ``other`` used to mean ALLOW.
+
+    Every plugin tool — including one whose own schema says ``destructive=True`` — therefore ran
+    unasked. An unknown family is now a grantable ask keyed on the tool name.
+    """
+    meta = ToolMeta(destructive=True, group="other")
+    result = evaluate("deploy", {"target": "prod"}, meta, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert (result.request.klass, result.request.key) == ("tool-unfamiliar", "deploy")
+    assert result.request.grantable is True
+
+    granted = make_ctx(ws, grants=granting(("tool-unfamiliar", "deploy")))
+    assert evaluate("deploy", {"target": "prod"}, meta, granted, SETTINGS).verdict is Verdict.ALLOW
+
+
+def test_an_unfamiliar_tool_is_grantable_so_trusted_allows_it(ws):
+    """It is a grantable class, so ``trusted`` allows it outright (PRD §3.4)."""
+    meta = ToolMeta(destructive=True, group="other")
+    result = evaluate("deploy", {"target": "prod"}, meta, make_ctx(ws, mode="trusted"), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_an_unfamiliar_tool_can_be_refused_forever(ws):
+    ctx = make_ctx(ws, refusals=refusing("deploy"))
+    result = evaluate("deploy", {"target": "prod"}, ToolMeta(group="other"), ctx, SETTINGS)
+    assert result.verdict is Verdict.DENY
+    assert REFUSAL_DENY_REASON in result.reason
+
+
+@pytest.mark.parametrize("group", ["fs.read", "memory"])
+def test_the_read_tier_groups_stay_in_the_allow_tier(ws, group):
+    """The group map is closed, so the read families are listed rather than defaulted into."""
+    result = evaluate("some_reader", {"q": "x"}, ToolMeta(group=group), make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_an_mcp_group_is_judged_on_the_mcp_path_even_without_the_flag(ws):
+    meta = ToolMeta(destructive=True, group="mcp/linear", mcp_server="linear")
+    result = evaluate("linear__create_issue", {"title": "x"}, meta, make_ctx(ws), SETTINGS)
+    assert (result.request.klass, result.request.key) == ("mcp", "mcp/linear/create_issue")
+
+
 # ------------------------------------------ a grant answers ONE class (R3)
 
 def test_a_shell_grant_does_not_satisfy_the_tool_of_the_same_name(ws):
