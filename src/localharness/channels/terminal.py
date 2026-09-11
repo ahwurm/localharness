@@ -405,6 +405,31 @@ PERMISSION_DEFAULT_DECISION = "reject_once"
 
 PERMISSION_PROMPT_LABEL = "Permission needed"
 
+PERMISSION_ANSWER_LINES: dict[str, str] = {
+    "allow_once": "✓ allowed once",
+    "allow_always": "✓ always here",
+    "reject_once": "✗ denied",
+    "reject_always": "✗ never here",
+}
+"""What stays on screen after the keystroke — one short line, keyed by `DecisionKind` so the
+confirmation and the four options cannot drift apart.
+
+The owner's complaint, 2026-09-11: "I don't like how it persists a chat box every time I answer
+(a) (y) or whatever; it should just record my input." Answering used to leave THREE artifacts in
+the scrollback — the dead input box the question suspended, the option legend, and then a fresh
+live box — so a session with six prompts in it had six dead boxes to scroll past. Now the two
+applications erase themselves (:data:`ERASE_APPLICATIONS_WHEN_DONE`) and this line is what is
+left: the question above it, the answer below it, nothing else."""
+
+ERASE_APPLICATIONS_WHEN_DONE = True
+"""Whether a prompt_toolkit application clears its own drawing when it exits.
+
+prompt_toolkit's default is False, which leaves the last frame painted into the scrollback
+forever — right for a `prompt()` whose line IS the transcript, wrong for both applications here:
+the permission legend is a menu, not a record, and the persistent input box is a live surface
+that gets suspended and restarted several times in one turn. Erasing is what makes an answered
+prompt collapse to its one confirmation line."""
+
 CANNOT_ASK_NOTICE = (
     "permission prompts are disabled on this channel: {why}; asks will be denied — set "
     "`permissions.mode: unattended` in config for unattended runs"
@@ -480,6 +505,7 @@ def _build_permission_app(options: str, grantable: bool, output: Any = None) -> 
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,
+        erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
         **({"output": output} if output is not None else {}),
     )
 
@@ -680,6 +706,7 @@ def _build_persistent_input_app(
         key_bindings=kb,
         style=INPUT_STYLE,
         mouse_support=False,
+        erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
     )
     app._lh_input_buffer = buf  # box_open_model_menu pre-fills + pops the picker through this
     return app
@@ -1271,6 +1298,13 @@ class TerminalChannel(ChannelAdapter):
         suspending rather than tearing down keeps the REPL's queue and interrupt callbacks
         intact. Ctrl+C, Escape and Enter all answer "no, this once" (fail closed).
 
+        What the keystroke LEAVES on screen is the question and one confirmation line
+        (:data:`PERMISSION_ANSWER_LINES`) — nothing else. Both applications erase their own
+        drawing on exit (:data:`ERASE_APPLICATIONS_WHEN_DONE`), which is what the owner asked
+        for on 2026-09-11: "I don't like how it persists a chat box every time I answer (a) (y)
+        or whatever; it should just record my input." Before that, one answer left a dead input
+        box, a dead legend and then a new live box in the scrollback, three times per prompt.
+
         When stdout is redirected (`| tee`, `> file`) the question and its legend go to stderr
         instead, so the person at the keyboard still sees what they are answering — defect D6:
         `can_ask` follows stdin, and a question drawn into a pipe would be a question nobody
@@ -1327,7 +1361,13 @@ class TerminalChannel(ChannelAdapter):
                     ).run_async()
                 except (KeyboardInterrupt, EOFError):
                     kind = PERMISSION_DEFAULT_DECISION
-            return Decision(kind=kind or PERMISSION_DEFAULT_DECISION)
+                kind = kind or PERMISSION_DEFAULT_DECISION
+                # The keystroke erased the legend; this is what replaces it. Printed INSIDE the
+                # patch, before the box is restarted, so it lands in the scrollback directly
+                # under the question it answers rather than above a freshly redrawn box.
+                async with self._output_lock:
+                    console.print(f"[system.info]{PERMISSION_ANSWER_LINES[kind]}[/system.info]")
+            return Decision(kind=kind)
         finally:
             if restart is not None:
                 await self.start_input_box(*restart)

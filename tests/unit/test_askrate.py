@@ -65,7 +65,7 @@ def test_replay_counts_prompts_and_remembers_each_key(tmp_path: Path) -> None:
     traces.mkdir()
     _replay_corpus(traces, workspace)
 
-    report = build_report(traces, workspace=workspace, first_n=2)
+    report = build_report(traces, workspace=workspace, first_n=2, mode="guarded")
 
     assert report.source == "replay"
     assert [s.session_id for s in report.sessions] == ["a-first", "b-second", "c-third"]
@@ -85,7 +85,7 @@ def test_replay_asks_once_per_key_across_sessions(tmp_path: Path) -> None:
     traces.mkdir()
     _replay_corpus(traces, workspace)
 
-    report = build_report(traces, workspace=workspace, first_n=2)
+    report = build_report(traces, workspace=workspace, first_n=2, mode="guarded")
     second = next(s for s in report.sessions if s.session_id == "b-second")
     assert second.prompts == 0
 
@@ -98,7 +98,7 @@ def test_replay_flags_edits_outside_the_boundary(tmp_path: Path) -> None:
     traces.mkdir()
     _write_session(traces, "s", [_action(0, "2026-09-01T09:00:00Z", "write", {"path": str(outside)})])
 
-    report = build_report(traces, workspace=workspace)
+    report = build_report(traces, workspace=workspace, mode="guarded")
     assert report.total_prompts == 1
     assert report.first_ask_keys == (str(outside.parent),)
 
@@ -170,7 +170,7 @@ def test_render_reports_slo_lines_and_caveats(tmp_path: Path) -> None:
     traces.mkdir()
     _replay_corpus(traces, workspace)
 
-    text = render(build_report(traces, workspace=workspace, first_n=FIRST_N_SESSIONS_DEFAULT))
+    text = render(build_report(traces, workspace=workspace, first_n=FIRST_N_SESSIONS_DEFAULT, mode="guarded"))
     assert "zero-prompt sessions: 2/3 (66.7%; SLO ≥90%)" in text
     assert "median prompts: 0 (SLO 0)" in text
     assert "ungrantable prompts — asked every time (1)" in text
@@ -192,3 +192,52 @@ def test_cli_command_is_hidden_and_runs(tmp_path: Path) -> None:
 
     assert "ask-rate" not in runner.invoke(app, ["--help"]).output
     assert runner.invoke(app, ["ask-rate", "--traces", str(tmp_path / "missing")]).exit_code == 2
+
+
+# ------------------------------------------------------------------- auto mode
+
+def test_the_replay_honours_the_mode_and_names_the_blacklist_entry(tmp_path: Path) -> None:
+    """`--mode auto` is what the v0.14.1 default rests on (owner ruling 2026-09-11).
+
+    Same corpus, two modes. `guarded` asks about the first-exposure command AND about the
+    delete, wherever it points. `auto` asks about neither the command nor `rm -rf build`, which
+    is inside the project and is what a build script does — only about the one pointing outside
+    it, and it names WHICH blacklist entry raised it, which is how the list gets curated from
+    evidence rather than from fear.
+    """
+    workspace = tmp_path / "project"
+    (workspace / ".git").mkdir(parents=True)
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    _replay_corpus(traces, workspace)
+    _write_session(traces, "d-outside", [
+        _action(0, "2026-09-04T09:00:00Z", "bash_exec",
+                {"command": f"rm -rf {tmp_path / 'elsewhere'}"}),
+    ])
+
+    guarded = build_report(traces, workspace=workspace, mode="guarded")
+    auto = build_report(traces, workspace=workspace, mode="auto")
+
+    assert auto.mode == "auto"
+    assert auto.total_prompts < guarded.total_prompts
+    assert auto.first_ask_keys == (), "auto consults and writes no grants, so it has no keys"
+    assert auto.blacklist_entries == (("rm -rf", 1),), (
+        "only the delete pointing OUTSIDE the project is on the blacklist"
+    )
+
+
+def test_the_blacklist_section_is_only_printed_for_auto(tmp_path: Path) -> None:
+    """In every other mode the list would be "every key that asked, again" — the sections above
+    already say that, and printing it twice reads as a rule set those modes consult."""
+    workspace = tmp_path / "project"
+    (workspace / ".git").mkdir(parents=True)
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    _write_session(traces, "s", [
+        _action(0, "2026-09-01T09:00:00Z", "bash_exec", {"command": "sudo systemctl restart x"}),
+    ])
+
+    assert "blacklist entries that fired" in render(
+        build_report(traces, workspace=workspace, mode="auto"))
+    assert "blacklist entries that fired" not in render(
+        build_report(traces, workspace=workspace, mode="guarded"))
