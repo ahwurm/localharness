@@ -138,6 +138,44 @@ MISSING_TARGET_DISPLAY = "<no path argument>"
 """A write-shaped call that names no target at all. It cannot be resolved, so PRD §3.2 step 8's
 "unresolvable targets are treated as outside" applies — the call asks rather than passing."""
 
+ASK_SEVERITY_ORDER: tuple[str, ...] = (
+    "shell-destructive",
+    "protected-path",
+    "no-boundary",
+    "edit-outside",
+    "edit-unreviewed",
+    "shell-unfamiliar",
+    "interpreter-inline",
+    "code-exec",
+    "delegate",
+    "mcp",
+    "network-host",
+)
+"""PRD §3.1's two ASK tables read top to bottom: the ungrantable tier first, then the grantable
+one, each in the order the PRD lists it.
+
+One call can raise several asks at once (``mkdir -p /tmp/x/y && touch /tmp/x/y/f`` raises two
+first-exposure commands and two outside-the-boundary directories). They are asked TOGETHER, in
+one request, and this order decides which one is the request's primary ``klass``/``key`` — the
+most severe thing the call does is what the question is named after."""
+
+GROUPED_REASON_BY_CLASS: dict[str, str] = {
+    "shell-destructive": "destructive shell commands: {details}",
+    "protected-path": "writes protected paths: {details}",
+    "no-boundary": "no workspace boundary here, so every write asks: {details}",
+    "edit-outside": "writes outside the workspace boundary: {details}",
+    "shell-unfamiliar": "commands not seen in this workspace before: {details}",
+    "interpreter-inline": "runs code inline through interpreters: {details}",
+}
+"""How several asks of the SAME class read on one line (PRD §3.5: the request renders as one
+line). Used only when a call raises more than one ask of a class — a single ask keeps its own
+sentence — so the human reads "commands not seen in this workspace before: mkdir, touch"
+instead of the same sentence twice. Any class not listed falls back to ``<class>: <details>``."""
+
+GROUPED_REASON_FALLBACK = "{klass}: {details}"
+"""The shape for a class with no entry in :data:`GROUPED_REASON_BY_CLASS`; every class that can
+plausibly repeat within one call has one, so this is the honest default rather than a stub."""
+
 DISPLAY_ARG_MAX_CHARS = 80
 """PRD §3.5: the request renders as ONE line in a prompt_toolkit prompt, a Discord message and
 a Zed dialog. 80 is the conventional terminal width, and the full arguments travel on
@@ -328,91 +366,149 @@ def _truncate(text: str) -> str:
     return flat[: DISPLAY_ARG_MAX_CHARS - 1] + _ELLIPSIS
 
 
-def _ask(
+@dataclass(frozen=True)
+class _Ask:
+    """One thing a call would have to ask about, before the asks are merged into a request.
+
+    A call raises a LIST of these — every unsatisfied class it touches — and :func:`_decide`
+    turns the list into the single :class:`PermissionRequest` a human answers once (PRD §7:
+    "'always' → the same command never asks again in that workspace"). ``detail`` is the short
+    identity of this one ask (a shell signature, a directory) used when several asks of the
+    same class are collapsed onto one line.
+    """
+
+    klass: str
+    key: Optional[str]
+    grantable: bool
+    reason: str
+    detail: str = ""
+
+
+def _ask_record(
+    klass: str, key: Optional[str], reason: str, *, grantable: Optional[bool] = None,
+    detail: Optional[str] = None,
+) -> _Ask:
+    """One ask, with ``grantable`` defaulting to the class's tier (``UNGRANTABLE_CLASSES``).
+
+    It is overridden only where a normally-grantable class has nothing rememberable to key on —
+    a shell segment whose command NAME is computed at runtime
+    (:data:`DYNAMIC_COMMAND_NAME_PREFIXES`).
+    """
+    return _Ask(
+        klass=klass,
+        key=key,
+        grantable=(klass not in UNGRANTABLE_CLASSES) if grantable is None else grantable,
+        reason=reason,
+        detail=detail if detail is not None else (key or ""),
+    )
+
+
+def _ordered_unique(asks: list[_Ask]) -> list[_Ask]:
+    """Deduplicate on ``(klass, key)`` and sort by :data:`ASK_SEVERITY_ORDER` (stable)."""
+    seen: dict[tuple[str, Optional[str]], _Ask] = {}
+    for ask in asks:
+        seen.setdefault((ask.klass, ask.key), ask)
+    order = {klass: i for i, klass in enumerate(ASK_SEVERITY_ORDER)}
+    return sorted(seen.values(), key=lambda a: order.get(a.klass, len(order)))
+
+
+def _grouped_reasons(asks: list[_Ask]) -> list[tuple[str, str]]:
+    """``[(klass, one readable phrase)]`` — one entry per class, in the order given."""
+    out: list[tuple[str, str]] = []
+    for klass in dict.fromkeys(a.klass for a in asks):
+        members = [a for a in asks if a.klass == klass]
+        if len(members) == 1:
+            out.append((klass, members[0].reason))
+            continue
+        details = ", ".join(dict.fromkeys(a.detail for a in members if a.detail))
+        template = GROUPED_REASON_BY_CLASS.get(klass, GROUPED_REASON_FALLBACK)
+        out.append((klass, template.format(klass=klass, details=details)))
+    return out
+
+
+def _decide(
     ctx: GateContext,
     tool_name: str,
     params: dict,
+    asks: list[_Ask],
     *,
-    klass: str,
-    key: Optional[str],
     salient: str,
-    reason: str,
-    grantable: Optional[bool] = None,
 ) -> VerdictResult:
-    """Build an ASK, after applying the mode effects of PRD §3.4.
+    """Merge every ask one call raised into ONE verdict, applying PRD §3.4's mode effects.
 
-    ``unattended`` turns every ASK into ALLOW (today's behavior, named honestly — bench and
-    scheduled jobs pin it, critic finding 7). ``trusted`` allows the grantable classes only;
-    the ungrantable ones still ask. DENY is never reached from here.
+    This is the shape the milestone is for: a human answers a tool call once, not once per
+    class it touches. The most severe ask (:data:`ASK_SEVERITY_ORDER`) names the request; every
+    grantable ask's key travels on ``grant_keys`` so one "always here" remembers all of them;
+    and ONE ungrantable ask makes the whole request ungrantable — the call asks every time and
+    no grant is written, because a single "always" must never quietly remember a destructive or
+    protected-path exposure that was bundled with a benign one.
 
-    ``grantable`` defaults to the class's tier (``UNGRANTABLE_CLASSES``) and is overridden only
-    where a normally-grantable class has nothing rememberable to key on — a shell segment whose
-    command NAME is computed at runtime (:data:`DYNAMIC_COMMAND_NAME_PREFIXES`). Mode handling
-    follows ``grantable``, not the class name, so such a call still asks under ``trusted``.
+    ``unattended`` turns every ASK into ALLOW (today's behavior named honestly — bench and
+    scheduled jobs pin it, critic finding 7). ``trusted`` allows a request only when every ask
+    in it is grantable. DENY is never reached from here.
     """
-    if grantable is None:
-        grantable = klass not in UNGRANTABLE_CLASSES
+    ordered = _ordered_unique(asks)
+    primary = ordered[0]
+    grantable = all(a.grantable for a in ordered)
     if ctx.mode == "unattended":
-        return VerdictResult(Verdict.ALLOW, f"unattended mode: {klass} allowed without asking")
+        return VerdictResult(Verdict.ALLOW, f"unattended mode: {primary.klass} allowed without asking")
     if grantable and ctx.mode == "trusted":
-        return VerdictResult(Verdict.ALLOW, f"trusted mode: {klass} allowed without asking")
-    display = f"{tool_name}: {_truncate(salient)}  ({klass} — {reason})" if salient else f"{tool_name}  ({klass} — {reason})"
+        return VerdictResult(Verdict.ALLOW, f"trusted mode: {primary.klass} allowed without asking")
+    groups = _grouped_reasons(ordered)
+    reason = "; ".join(text for _, text in groups)
+    body = "; ".join(f"{klass} — {text}" for klass, text in groups)
+    display = f"{tool_name}: {_truncate(salient)}  ({body})" if salient else f"{tool_name}  ({body})"
     return VerdictResult(
         verdict=Verdict.ASK,
         reason=reason,
         request=PermissionRequest(
             tool_name=tool_name,
             tool_params=params,
-            klass=klass,
-            key=key,
+            klass=primary.klass,
+            key=primary.key,
             grantable=grantable,
             reason=reason,
             display=display,
+            grant_keys=tuple((a.klass, a.key) for a in ordered if a.grantable and a.key),
         ),
     )
 
 
-def _check_targets(
+def _target_asks(
     ctx: GateContext,
     settings: GateSettings,
-    tool_name: str,
-    params: dict,
     targets: tuple[tuple[str, Optional[Path]], ...],
-    salient: str,
-) -> Optional[VerdictResult]:
-    """The write-shaped checks, in PRD §3.1 table order, across every target of one call.
+) -> list[_Ask]:
+    """The write-shaped checks of PRD §3.1, run over EVERY target of one call.
 
-    Passes in class order — protected-path, then no-boundary (both ungrantable), then
-    edit-outside — so the strictest class a call touches is the one that is asked about, no
-    matter which target triggered it. Returns None when every target is in-boundary and clean.
+    Each target is classified once, in class order — protected-path, then no-boundary (both
+    ungrantable), then edit-outside — and every unsatisfied target contributes its own ask, so
+    a command that writes two new places outside the boundary asks about both at once instead
+    of once per turn. A target already covered by a grant contributes nothing.
     """
+    asks: list[_Ask] = []
     for raw, resolved in targets:
         if resolved is not None and _protected(resolved, ctx, settings):
-            return _ask(
-                ctx, tool_name, params,
-                klass="protected-path", key=str(resolved), salient=salient,
-                reason=f"writes a protected path ({resolved})",
-            )
-    if ctx.boundary is None and targets:
-        raw, resolved = targets[0]
-        return _ask(
-            ctx, tool_name, params,
-            klass="no-boundary", key=str(resolved or raw), salient=salient,
-            reason="no workspace boundary here (the project root is your home directory or above)",
-        )
-    for raw, resolved in targets:
+            asks.append(_ask_record(
+                "protected-path", str(resolved), f"writes a protected path ({resolved})",
+            ))
+            continue
+        if ctx.boundary is None:
+            asks.append(_ask_record(
+                "no-boundary", str(resolved or raw),
+                "no workspace boundary here (the project root is your home directory or above)",
+            ))
+            continue
         if resolved is not None and _within(ctx.boundary, resolved):
             continue
         key = str(resolved.parent) if resolved is not None else raw
         where = str(resolved) if resolved is not None else f"{raw} (unresolvable)"
         if ctx.grants(ctx.workspace, key) is not None:
             continue
-        return _ask(
-            ctx, tool_name, params,
-            klass="edit-outside", key=key, salient=salient,
-            reason=f"writes outside the workspace boundary ({where})",
-        )
-    return None
+        asks.append(_ask_record(
+            "edit-outside", key, f"writes outside the workspace boundary ({where})",
+        ))
+    return asks
 
 
 def _evaluate_write(
@@ -424,18 +520,16 @@ def _evaluate_write(
     raw = _write_target(tool_name, params)
     target = ((raw, _resolve(raw, ctx.workspace)),) if raw else ((MISSING_TARGET_DISPLAY, None),)
     salient = raw or ""
-    result = _check_targets(ctx, settings, tool_name, params, target, salient)
-    if result is not None:
-        return result
-    if not ctx.has_review_surface:
+    asks = _target_asks(ctx, settings, target)
+    if not asks and not ctx.has_review_surface:
         key = str(Path(ctx.workspace).expanduser().resolve())
         if ctx.grants(ctx.workspace, key) is None:
-            return _ask(
-                ctx, tool_name, params,
-                klass="edit-unreviewed", key=key, salient=salient,
-                reason="this channel shows no diff to review the edit in",
-            )
-    return VerdictResult(Verdict.ALLOW, "in-workspace edit")
+            asks.append(_ask_record(
+                "edit-unreviewed", key, "this channel shows no diff to review the edit in",
+            ))
+    if not asks:
+        return VerdictResult(Verdict.ALLOW, "in-workspace edit")
+    return _decide(ctx, tool_name, params, asks, salient=salient)
 
 
 def _evaluate_shell(
@@ -457,43 +551,43 @@ def _evaluate_shell(
     if ctx.mode == "read-only" and (non_read_only or classified.write_targets):
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
 
-    for segment in classified.segments:
-        if segment.destructive:
-            return _ask(
-                ctx, tool_name, params,
-                klass="shell-destructive", key=segment.signature, salient=command,
-                reason=f"destructive shell command ({segment.signature})",
-            )
+    asks: list[_Ask] = []
+    destructive = {s.signature for s in classified.segments if s.destructive}
+    for signature in sorted(destructive):
+        asks.append(_ask_record(
+            "shell-destructive", signature, f"destructive shell command ({signature})",
+        ))
 
-    targets = tuple(
+    asks += _target_asks(ctx, settings, tuple(
         (target, _resolve(target, ctx.workspace))
         for segment in classified.segments
         for target in segment.write_targets
-    )
-    result = _check_targets(ctx, settings, tool_name, params, targets, command)
-    if result is not None:
-        return result
+    ))
 
     for segment in non_read_only:
+        if segment.signature in destructive:
+            continue  # already asked about, under the stricter class
         if segment.signature.startswith(DYNAMIC_COMMAND_NAME_PREFIXES):
-            return _ask(
-                ctx, tool_name, params,
-                klass="shell-unfamiliar", key=None, grantable=False, salient=command,
-                reason=DYNAMIC_COMMAND_NAME_REASON,
-            )
-        klass = "interpreter-inline" if segment.inline_interpreter else "shell-unfamiliar"
+            asks.append(_ask_record(
+                "shell-unfamiliar", None, DYNAMIC_COMMAND_NAME_REASON,
+                grantable=False, detail=segment.signature,
+            ))
+            continue
         if ctx.grants(ctx.workspace, segment.signature) is not None:
             continue
-        reason = (
-            f"runs code inline through an interpreter ({segment.signature})"
-            if segment.inline_interpreter
-            else f"shell command not seen in this workspace before ({segment.signature})"
-        )
-        return _ask(
-            ctx, tool_name, params,
-            klass=klass, key=segment.signature, salient=command, reason=reason,
-        )
-    return VerdictResult(Verdict.ALLOW, "read-only shell")
+        if segment.inline_interpreter:
+            asks.append(_ask_record(
+                "interpreter-inline", segment.signature,
+                f"runs code inline through an interpreter ({segment.signature})",
+            ))
+        else:
+            asks.append(_ask_record(
+                "shell-unfamiliar", segment.signature,
+                f"shell command not seen in this workspace before ({segment.signature})",
+            ))
+    if not asks:
+        return VerdictResult(Verdict.ALLOW, "read-only shell")
+    return _decide(ctx, tool_name, params, asks, salient=command)
 
 
 def _evaluate_named(
@@ -504,8 +598,10 @@ def _evaluate_named(
         return VerdictResult(Verdict.DENY, READ_ONLY_DENY_REASON)
     if ctx.grants(ctx.workspace, tool_name) is not None:
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
-    salient = _first_string(params)
-    return _ask(ctx, tool_name, params, klass=klass, key=tool_name, salient=salient, reason=reason)
+    return _decide(
+        ctx, tool_name, params, [_ask_record(klass, tool_name, reason)],
+        salient=_first_string(params),
+    )
 
 
 def _evaluate_network(
@@ -526,10 +622,10 @@ def _evaluate_network(
         return VerdictResult(Verdict.ALLOW, "network call names no host")
     if ctx.grants(ctx.workspace, host) is not None:
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {host}")
-    return _ask(
+    return _decide(
         ctx, tool_name, params,
-        klass="network-host", key=host, salient=url,
-        reason=f"first fetch from {host} in this workspace",
+        [_ask_record("network-host", host, f"first fetch from {host} in this workspace")],
+        salient=url,
     )
 
 
@@ -550,10 +646,10 @@ def _evaluate_mcp(
         return VerdictResult(Verdict.ALLOW, f"trusted MCP server: {server}")
     if ctx.grants(ctx.workspace, key) is not None:
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {key}")
-    return _ask(
+    return _decide(
         ctx, tool_name, params,
-        klass="mcp", key=key, salient=_first_string(params),
-        reason=f"first use of {key} in this workspace",
+        [_ask_record("mcp", key, f"first use of {key} in this workspace")],
+        salient=_first_string(params),
     )
 
 
@@ -574,12 +670,19 @@ def evaluate(
     ctx: GateContext,
     settings: GateSettings,
 ) -> VerdictResult:
-    """The whole verdict for one tool call (PRD §3.1), pure and first-match-wins.
+    """The whole verdict for one tool call (PRD §3.1), pure, and asked ONCE.
 
     Order, fixed: **DENY → ungrantable ASK → grant lookup → grantable ASK → ALLOW**, with the
-    mode effects of PRD §3.4 applied at the ASK (:func:`_ask`). Deny is never overridden by a
-    grant or a mode. The ungrantable checks (shell-destructive, protected-path, no-boundary)
-    run before any grant is consulted — critic finding 12.
+    mode effects of PRD §3.4 applied when the asks are merged (:func:`_decide`). Deny is never
+    overridden by a grant or a mode. The ungrantable checks (shell-destructive, protected-path,
+    no-boundary) run before any grant is consulted — critic finding 12.
+
+    The tiers decide precedence, not how many questions a human answers: every unsatisfied ask
+    a call raises is COLLECTED and returned as one :class:`PermissionRequest` carrying all of
+    their keys (``grant_keys``), so ``mkdir -p /tmp/x/y && touch /tmp/x/y/f`` prompts once and
+    one "always here" remembers the lot. Asking per class was the shipped behaviour and it cost
+    a whole turn per class (verification A, defect D1); PRD §7's acceptance line and §3.6's
+    median-zero SLO are properties of the CALL, not of the class.
 
     ``unattended`` mode turns every ASK into ALLOW, including the ungrantable ones: that is
     today's shipped behavior named honestly, and it is what bench and scheduled jobs pin

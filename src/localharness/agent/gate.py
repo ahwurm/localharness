@@ -491,6 +491,11 @@ class PermissionGate:
     ) -> bool:
         """Make an "always" answer durable (PRD §3.3). Returns whether anything was written.
 
+        One request can carry several keys (``PermissionRequest.grant_keys``): a call that
+        raised two first-exposure commands and an outside-the-boundary directory asked once, so
+        an "always here" has to remember all three or the identical call asks again next turn
+        (verification A, defect D1). ``grant_keys`` empty means the one primary key.
+
         An ungrantable request never writes a grant even if a channel hands back
         ``allow_always``: those requests ask every time by construction, so the answer is
         downgraded to ``allow_once`` here rather than trusted to every channel's UI to get
@@ -511,15 +516,16 @@ class PermissionGate:
         if decision.kind == "allow_always":
             if not request.grantable:
                 return False
-            self.grants.add(
-                new_grant(
-                    key=request.key,
-                    klass=request.klass,
-                    workspace=self.workspace,
-                    channel=self.channel_name,
-                    session_id=session_id,
+            for klass, key in request.grant_keys or ((request.klass, request.key),):
+                self.grants.add(
+                    new_grant(
+                        key=key,
+                        klass=klass,
+                        workspace=self.workspace,
+                        channel=self.channel_name,
+                        session_id=session_id,
+                    )
                 )
-            )
             return True
         self.grants.add_deny(
             self.workspace,

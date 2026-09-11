@@ -549,3 +549,86 @@ def test_a_long_argument_is_truncated_to_one_line(ws):
                        make_ctx(ws, boundary=None), SETTINGS).request
     assert len(request.display.split("  (")[0]) <= len("write: ") + 80
     assert request.tool_params["path"] == long_path
+
+
+# ------------------------------------------------------- one call, one question (D1)
+
+def test_one_call_collects_every_ask_into_one_request(ws, monkeypatch, tmp_path):
+    """PRD §7: "'always' → the same command never asks again". Verification A defect D1: the
+    shipped verdict returned the FIRST unsatisfied class, so a two-verb command asked once per
+    class, each prompt costing a whole turn."""
+    outside = (tmp_path / "elsewhere").resolve()
+    fake_shell(
+        monkeypatch,
+        seg("mkdir", write_targets=(str(outside / "y"),)),
+        seg("touch", write_targets=(str(outside / "y" / "f"),)),
+    )
+    result = evaluate(
+        "bash_exec", {"command": "mkdir -p x ; touch y"}, SHELL_META, make_ctx(ws), SETTINGS
+    )
+    assert result.verdict is Verdict.ASK
+    request = result.request
+    assert request.grantable is True
+    assert set(request.grant_keys) == {
+        ("edit-outside", str(outside)),
+        ("edit-outside", str(outside / "y")),
+        ("shell-unfamiliar", "mkdir"),
+        ("shell-unfamiliar", "touch"),
+    }
+    assert request.klass == "edit-outside", "the most severe ask names the request"
+    assert "\n" not in request.display
+    assert "mkdir, touch" in request.display, request.display
+
+
+def test_the_verifiers_repro_asks_once_with_both_signatures(ws, tmp_path):
+    """The exact command from VERIFICATION-A, through the REAL classifier."""
+    pytest.importorskip("localharness.agent.shell_classify")
+    outside = (tmp_path / "x").resolve()
+    command = f"mkdir -p {outside}/y ; touch {outside}/y/f"
+    request = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws), SETTINGS).request
+    assert request.grantable is True
+    signatures = {k for klass, k in request.grant_keys if klass == "shell-unfamiliar"}
+    directories = {k for klass, k in request.grant_keys if klass == "edit-outside"}
+    assert signatures == {"mkdir", "touch"}
+    assert str(outside) in directories
+
+
+def test_one_ungrantable_ask_makes_the_whole_request_ungrantable(ws, monkeypatch, tmp_path):
+    """Precedence is unchanged: a destructive segment bundled with a benign first-exposure one
+    must not be quietly remembered by a single "always here"."""
+    outside = (tmp_path / "elsewhere").resolve()
+    fake_shell(
+        monkeypatch,
+        seg("rm -rf", destructive=True),
+        seg("cp", write_targets=(str(outside / "f"),)),
+    )
+    request = evaluate(
+        "bash_exec", {"command": "rm -rf build ; cp a b"}, SHELL_META, make_ctx(ws), SETTINGS
+    ).request
+    assert request.klass == "shell-destructive" and request.grantable is False
+    assert "edit-outside" in request.display
+
+
+def test_trusted_mode_needs_every_ask_grantable(ws, monkeypatch):
+    """PRD §3.4: trusted allows the grantable classes; one ungrantable ask still asks."""
+    fake_shell(monkeypatch, seg("rm -rf", destructive=True), seg("npm install"))
+    result = evaluate(
+        "bash_exec", {"command": "rm -rf build ; npm install"}, SHELL_META,
+        make_ctx(ws, mode="trusted"), SETTINGS,
+    )
+    assert result.verdict is Verdict.ASK and result.request.grantable is False
+
+
+def test_a_granted_key_drops_out_of_the_collected_asks(ws, monkeypatch, tmp_path):
+    outside = (tmp_path / "elsewhere").resolve()
+
+    def granted(workspace: Path, key: str):
+        return a_grant(key) if key == "mkdir" else None
+
+    fake_shell(monkeypatch, seg("mkdir", write_targets=(str(outside / "y"),)), seg("touch"))
+    request = evaluate(
+        "bash_exec", {"command": "mkdir -p y ; touch f"}, SHELL_META,
+        make_ctx(ws, grants=granted), SETTINGS,
+    ).request
+    assert ("shell-unfamiliar", "mkdir") not in request.grant_keys
+    assert ("shell-unfamiliar", "touch") in request.grant_keys
