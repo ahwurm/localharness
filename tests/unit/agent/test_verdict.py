@@ -379,6 +379,41 @@ def test_read_only_still_allows_reads(ws, monkeypatch):
                     make_ctx(ws, mode="read-only"), SETTINGS).verdict is Verdict.ALLOW
 
 
+def test_read_only_denies_a_shell_write_target_even_when_every_segment_reads(ws, monkeypatch):
+    fake_shell(monkeypatch, seg("ls", read_only=True, write_targets=(str(ws / "out.txt"),)))
+    result = evaluate("bash_exec", {"command": "ls > out.txt"}, SHELL_META,
+                      make_ctx(ws, mode="read-only"), SETTINGS)
+    assert result.verdict is Verdict.DENY and result.reason == READ_ONLY_DENY_REASON
+
+
+@pytest.mark.parametrize(
+    "tool_name,params,meta",
+    [
+        # R8: `remember` writes the memory store, and its group put it in the read tier, where
+        # the old per-branch check only looked at `destructive` — which it did not set.
+        ("remember", {"name": "x", "content": "y"}, ToolMeta(destructive=True, group="memory")),
+        # R8: `_evaluate_network` had no mode check at all, so a destructive plugin web tool ran.
+        ("deploy_hook", {"url": "https://example.com/deploy"}, ToolMeta(destructive=True, group="web")),
+        # R8: and a destructive plugin tool in no known family.
+        ("deploy", {"target": "prod"}, ToolMeta(destructive=True, group="other")),
+    ],
+)
+def test_read_only_denies_every_tool_that_declares_itself_destructive(ws, tool_name, params, meta):
+    """One check before the branches: the mode is a property of the MODE, not of each branch."""
+    result = evaluate(tool_name, params, meta, make_ctx(ws, mode="read-only"), SETTINGS)
+    assert result.verdict is Verdict.DENY
+    assert result.reason == READ_ONLY_DENY_REASON
+
+
+def test_read_only_still_allows_a_network_read_and_a_memory_read(ws):
+    for name, params, meta in [
+        ("web_fetch", {"url": "https://example.com"}, ToolMeta(group="web")),
+        ("memory_search", {"query": "x"}, ToolMeta(group="memory")),
+    ]:
+        result = evaluate(name, params, meta, make_ctx(ws, mode="read-only"), SETTINGS)
+        assert result.verdict is Verdict.ALLOW, name
+
+
 # ------------------------------------------------------------------------ shell
 
 def test_read_only_shell_signatures_never_ask(ws, monkeypatch):
