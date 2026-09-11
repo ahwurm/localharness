@@ -770,6 +770,12 @@ class TerminalChannel(ChannelAdapter):
     """PRD §3.1 choice 2: the terminal shows the diff after the fact, so an in-workspace edit is
     reviewable and never asks."""
 
+    ask_holds_dialog = True
+    """PRD §3.5, terminal row: "Timeout: none". The question sits in the terminal until the
+    person answers it, so the gate must not put a deadline on it — verification A defect D3,
+    where an unanswered prompt auto-denied after the tool's own timeout while three docs
+    promised it would not. A walk-away must cost a wait, never a silent denial."""
+
     @property
     def can_ask(self) -> bool:
         """A question needs a real TTY to answer (PRD §3.5's "non-tty" row).

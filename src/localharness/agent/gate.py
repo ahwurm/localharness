@@ -69,9 +69,15 @@ The human is given exactly the wall time the tool call itself was allowed. Ratio
 it is not a bare number: the gate must not make a turn take longer than it already could, and
 one tool timeout is the only budget at the call site that is already tuned to this workspace's
 tools. A multiple above 1.0 would let one unanswered prompt outlast the work it guards; below
-1.0 would deny answers that arrive while the tool would still have been running. When both the
-config value and the tool timeout are None nothing is awaited under a deadline — the terminal
-and Zed hold their dialog open (PRD §3.5 "Timeout: none")."""
+1.0 would deny answers that arrive while the tool would still have been running.
+
+It binds only on channels that cannot hold the question open (``ChannelAdapter.
+ask_holds_dialog`` False — Discord and anything message-shaped). A terminal and a Zed dialog
+have a person in front of them and PRD §3.5 gives both "Timeout: none", so the gate awaits
+those with no deadline at all — verification A defect D3, where an unanswered terminal prompt
+auto-denied after the tool's own timeout while three separate docs promised it would not.
+Nothing is awaited under a deadline either when both the config value and the tool timeout are
+None."""
 
 TIMEOUT_DECISION = Decision(kind="reject_once")
 """PRD §3.5: "deny on timeout", and §3.6: a timeout resolves as ``reject_once`` so
@@ -79,6 +85,10 @@ timeout-denies are countable as their own guardrail. Never ``reject_always`` —
 so nothing durable may be written."""
 
 TIMEOUT_REASON = "no answer within {seconds:.0f}s; denied"
+
+MS_PER_SECOND = 1000
+"""Unit conversion for ``PermissionResolved.latency_ms`` — ``time.monotonic()`` returns seconds
+and the event, like its siblings on the bus, reports milliseconds."""
 
 MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` gives every MCP tool the group ``mcp/<server>``. That group IS how the
@@ -280,6 +290,7 @@ class PermissionGate:
         mode: Mode = DEFAULT_MODE,
         asker: Optional[Asker] = None,
         channel_name: str = "none",
+        ask_holds_dialog: bool = False,
         has_review_surface: bool = False,
         deny: Optional[DenyFn] = None,
         settings: Optional[GateSettings] = None,
@@ -293,6 +304,9 @@ class PermissionGate:
         :meth:`set_mode` from anything a human drives."""
         self.asker = asker
         self.channel_name = channel_name
+        self.ask_holds_dialog = ask_holds_dialog
+        """PRD §3.5: True when the channel keeps the question open itself, so :meth:`check`
+        awaits the answer with no deadline. Set from the channel by :meth:`attach_channel`."""
         self.has_review_surface = has_review_surface
         self.settings = settings or GateSettings()
         self.bus = bus
@@ -307,10 +321,13 @@ class PermissionGate:
         same way once the client has told it whether it can show a diff. A channel that leaves
         ``can_ask`` False contributes no asker, which is exactly the fail-closed path — its
         ``ask_permission`` is never called, so a mismatch between the flag and the method cannot
-        hang a turn.
+        hang a turn. ``ask_holds_dialog`` comes from the channel for the same reason the other
+        two do: whether a question can sit open until somebody answers is a fact about the
+        surface it is drawn on, not about the call (PRD §3.5's Timeout column).
         """
         self.channel_name = getattr(channel, "channel_id", "none")
         self.has_review_surface = bool(getattr(channel, "has_review_surface", False))
+        self.ask_holds_dialog = bool(getattr(channel, "ask_holds_dialog", False))
         self.asker = channel.ask_permission if getattr(channel, "can_ask", False) else None
 
     # ---------------------------------------------------------------- modes
@@ -417,7 +434,15 @@ class PermissionGate:
         log.warning(NO_ASKER_WARNING, tool_name, NO_ASKER_REASON)
 
     def _timeout_s(self, tool_timeout_s: Optional[float]) -> Optional[float]:
-        """How long to wait for a human (PRD §3.5; see :data:`ASK_TIMEOUT_TOOL_MULTIPLE`)."""
+        """How long to wait for a human (PRD §3.5; see :data:`ASK_TIMEOUT_TOOL_MULTIPLE`).
+
+        None means "no deadline": :meth:`_ask` then awaits the answer without
+        ``asyncio.wait_for``. That is what a channel holding the dialog open gets — a terminal
+        or Zed, per PRD §3.5's "Timeout: none" — because the deadline exists for a question
+        posted where nobody may be looking, not for one a person is staring at.
+        """
+        if self.ask_holds_dialog:
+            return None
         if self.settings.ask_timeout_s is not None:
             return self.settings.ask_timeout_s
         if tool_timeout_s is None:
@@ -465,7 +490,7 @@ class PermissionGate:
                 decision = await asyncio.wait_for(self.asker(request), timeout)  # type: ignore[misc]
         except asyncio.TimeoutError:
             decision, timed_out = TIMEOUT_DECISION, True
-        latency_ms = int((time.monotonic() - started) * 1000)
+        latency_ms = int((time.monotonic() - started) * MS_PER_SECOND)
 
         wrote_grant = self._remember(decision, request, session_id)
         await self._publish(

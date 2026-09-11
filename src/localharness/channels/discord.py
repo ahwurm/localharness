@@ -140,6 +140,12 @@ class DiscordChannel(ChannelAdapter):
     """Nothing here shows a diff, so an in-workspace edit asks once per workspace (PRD §3.1
     choice 2, critic finding 11) instead of never."""
 
+    ask_holds_dialog = False
+    """PRD §3.5, Discord row: a message nobody reacts to has to expire, so the gate keeps its
+    deadline here (`permissions.ask.timeout_s`, else the tool-timeout derivation) and a timeout
+    resolves as `reject_once`. Stated explicitly rather than inherited: this is the one channel
+    the timeout is FOR."""
+
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
         self._token: str = config.get("token") or ""

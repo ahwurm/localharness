@@ -48,6 +48,17 @@ class ChannelAdapter(ABC):
     ACP adapter.
     """
 
+    ask_holds_dialog: bool = False
+    """Does this channel hold the question open until a human answers it? (PRD §3.5.)
+
+    True for a channel with a person in front of it — a terminal, or Zed's permission dialog —
+    where PRD §3.5's table says "Timeout: none": the gate awaits the answer with no deadline,
+    so stepping away from the keyboard does not silently turn into a denial. False for Discord
+    and for anything message-shaped, where a question nobody reacts to has to expire; the gate
+    then applies `permissions.ask.timeout_s` (or the tool-timeout derivation) and records a
+    `reject_once`. False is the safe default: a new channel that says nothing gets the deadline.
+    """
+
     has_review_surface: bool = False
     """Does an in-workspace edit land somewhere a human will see it? (PRD §3.1 choice 2.)
 

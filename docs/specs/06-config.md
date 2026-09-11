@@ -542,7 +542,8 @@ class PermissionConfig(BaseModel):
     # allow_patterns was REMOVED in v0.14. Grants live in the global store
     # (~/.localharness/grants.yaml) and are written only when a human answers a prompt —
     # never in config, which travels with a repo and could otherwise pre-approve itself.
-    # A config that still carries the key fails validation with that explanation.
+    # An empty list (what `init` used to write) is dropped with a deprecation warning;
+    # a non-empty one fails validation with that explanation.
 
     workspace_root: Optional[str] = Field(
         default=None,
@@ -1220,7 +1221,7 @@ list — every field is declared there with its own description.
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
 | `permissions.mode` | string | `"guarded"` | guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness |
 | `permissions.ask.network_hosts` | bool | `false` | — | Ask before a network tool reaches a host with no grant |
-| `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel waits for an answer; null derives it from the tool timeout |
+| `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
 | `permissions.deny_patterns` | list[string] | 24 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
@@ -1267,15 +1268,21 @@ default and cannot be set from a channel command, so bench runs and scheduled jo
 config. A **project layer may only raise strictness**: a workspace agent file that asks for
 `trusted` while your own config says `guarded` is ignored with a warning, the same narrow-only union
 `deny_patterns` and `workspace_root` use. The v0.13 spellings `auto` and `manual` still load — both
-resolve to `guarded` with a deprecation warning — and `permissions.allow_patterns` is **removed**: a
-config carrying it fails validation, because config travels with a repository and grants must not.
-Permission grants live in the global store below.
+resolve to `guarded` with a deprecation warning — and `permissions.allow_patterns` is **removed**,
+because config travels with a repository and grants must not. An EMPTY `allow_patterns` (`[]` or
+null) — what `localharness init` wrote before v0.14, so almost every existing config — is dropped
+with a deprecation warning and still loads, and `localharness config migrate` strips the key.
+A NON-EMPTY list is a real attempt to pre-approve calls from config, so it fails validation with
+that explanation. Permission grants live in the global store below.
 
 `permissions.ask` holds the gate's tunables. Three are session knobs: `network_hosts` (default
 `false` — network reads never ask, since seven in ten real tool calls are web fetches; `true` asks
 once per host), `timeout_s` (how long a channel waits for an answer; `null` derives it from the
-tool's own timeout, and it binds on Discord — the terminal and Zed hold their dialog open), and
-`mcp_trusted_servers` (server names whose tools skip the once-per-tool ask). The rest are optional
+tool's own timeout) and `mcp_trusted_servers` (server names whose tools skip the once-per-tool
+ask). `timeout_s` binds only on a channel that cannot hold its question open — Discord, where a
+message nobody reacts to has to expire. The terminal and Zed hold the dialog open
+(`ChannelAdapter.ask_holds_dialog`), so the gate awaits those with no deadline at all and a
+`timeout_s` in config does not reach them. The rest are optional
 overrides for one of the gate's rule sets, each defaulting to `null`, meaning "use the shipped
 default in `agent/gate_types.py`", which is where the defaults and their sources are documented:
 `read_only_signatures`, `destructive_signatures`, `pipe_to_shell_sources`, `pipe_to_shell_sinks`,
