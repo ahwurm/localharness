@@ -78,6 +78,97 @@ in your own config still wins either way. Read this honestly: it is a default th
 tools reach by accident, not a sandbox. A command run through `bash_exec` can still leave that
 folder, and the deny patterns remain the mechanism that stops specific actions.
 
+## Human approval gate
+
+From v0.14 every tool call of every agent — subagents included — passes one decision function
+before it runs. The function is code, not a judgment call by a model: the same call in the same
+workspace always gets the same answer. It runs in a fixed order and the first match wins.
+
+1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
+   grant, not a mode.
+2. **Ask, and no answer is remembered.** Destructive shell commands (`rm -rf`, `git push --force`,
+   `git reset --hard`, `chmod -R`, `sudo`, `curl … | sh`, `find -delete`, `docker`, `dd` and the
+   rest), any write whose target is a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+   your shell rc files, `~/.localharness`, and inside the project `.git/**`, `.localharness/**`,
+   `.env*`, `*.pem`, `id_*`), and every write-shaped call made when there is no workspace boundary
+   at all. These ask **every time**, on purpose. The flags are part of what is matched, so `rm file`
+   and `rm -rf dir` are different things and an answer about one is never an answer about the other.
+3. **Grants.** A remembered "always" for this workspace. Checked only after step 2, so an old
+   permissive answer can never cover a destructive variant.
+4. **Ask once, then remember.** A write or shell write target outside the project folder (keyed by
+   the target's parent directory), a shell command whose signature this workspace has not seen
+   before, an inline interpreter (`python3 -c`, `bash -c`, `eval`, `xargs`), `python_exec` and
+   `cruncher_exec`, the `agent` tool, and each MCP tool.
+5. **Allow.** Everything else: reads, search, memory, `chunk`, the read-only shell commands (`ls`,
+   `cat`, `head`, `tail`, `grep`, `rg`, `find` without `-exec`/`-delete`, `git status`/`diff`/`log`,
+   `sed -n`, and their kin), network reads, and edits inside the project when the channel can show
+   you the diff.
+
+**The boundary is derived from where you stand, never configured.** It is the folder holding the
+nearest in-project `.localharness/`, else the git top level, else the directory you started in,
+resolved through symlinks. A `permissions.workspace_root` in your config may only *narrow* it; a
+value outside it is ignored with a warning. **If that folder turns out to be your home directory or
+anything above it, there is no boundary** — the harness says so rather than pretending your whole
+home is one project, and every write-shaped call then asks without a remembered answer.
+
+**Two things deliberately never ask, and both are a judgment you should check against your own
+threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`) are silent: seven in ten
+real tool calls are web fetches, and a prompt per host would fire in a third of all sessions. Set
+`permissions.ask.network_hosts: true` for a per-host prompt. Exfiltration is handled structurally
+instead — an agent that ingests untrusted text holds no host-mutating tools (see the prompt-injection
+section below). Edits inside the project are silent when the channel shows you the change: in Zed
+they land in the review pane with per-hunk accept/reject, in the terminal the diff is printed after
+the fact. A channel with no review surface asks once per workspace instead.
+
+**Answers live in your global config, and a repository can only tighten.** An "always" is written to
+`~/.localharness/grants.yaml`, keyed by the workspace's resolved path, with the channel, session and
+timestamp that produced it; a "never" writes a deny pattern into the same file. Nested folders
+inherit the parent project's grants. A `grants.yaml` **inside a project tree is never read** — a
+cloned repository must not be able to pre-approve its own `curl … | sh` — and `permissions.mode` and
+`permissions.workspace_root` coming from a project layer may only make the policy stricter, never
+looser. `permissions.allow_patterns` is gone rather than repurposed; it was a loosening surface.
+What a repository *can* still add is deny patterns, MCP servers, and agents with more tools — and
+because every one of those tools passes this same gate, what it has added are things that **ask**,
+not things that run. Edit `grants.yaml` to change an answer; there is no CLI verb for it, the prompt
+is the interface and the file is the escape hatch.
+
+**Four modes, set in config or switched mid-session with `/mode`.** `guarded` is the default and is
+the list above. `trusted` turns step 4 into allow while step 2 still asks. `read-only` refuses
+writes, non-read-only shell, and code execution with a message the model can re-plan against.
+`unattended` turns every ask into allow, leaving only your deny patterns — **this is exactly how the
+harness behaved before v0.14**, named honestly. It is never a default and cannot be set from a chat
+or terminal command; write it in config, which is what the benchmark runner and scheduled jobs do.
+
+**A channel that cannot ask denies.** Bench runs, cron jobs, a piped non-tty session: if a call
+reaches step 2 or 4 and there is nobody to answer, it is refused, the model is told "needs human
+approval; this channel cannot ask", and the session prints one warning naming the fix. Failing
+closed is the rule; the warning is what keeps it from being a silent regression in a scheduled job.
+
+**Named gaps. Read these before you rely on any of it.**
+
+- **A granted interpreter runs anything.** Answer "always" to `python3 -c` and every later
+  `python3 -c` in that workspace runs unasked, including one that deletes a tree. `python -c` is the
+  second signature nearly every workspace is asked about, so this is the widest hole by design and
+  by frequency. `python_exec` is the tool to prefer; `trusted` mode is the honest alternative to
+  granting interpreters one at a time.
+- **The shell boundary is best-effort by construction.** A `bash_exec` call is one opaque string.
+  The harness strips heredoc bodies, lifts `$(…)`, backticks and process substitutions, splits at
+  `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`
+  payloads, and canonicalizes destructive flags — that is an enumerated set of known shapes, not a
+  proof. The ask-once on an unfamiliar signature is the backstop for whatever the list misses.
+- **A command whose name comes from a substitution or a variable is unfamiliar, not destructive.**
+  `$(echo rm) -rf build` and `"$RM" -rf build` cannot be signed at classification time, so they are
+  asked about as unknown commands rather than as destructive ones, and a grant on that placeholder
+  covers the next command built the same way. The prompt still happens; the label on it understates
+  what may run.
+- **A write target containing a variable, a glob or a substitution is treated as outside.** It
+  cannot be resolved before the shell expands it, so it asks as an out-of-project write — and once
+  you answer "always" for that unresolved shape, a later expansion of the same shape to a different
+  path passes on that grant.
+- **There is still no OS sandbox.** Everything above is a policy boundary, enforced by this process
+  in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
+  program that has already started running.
+
 ## What `localharness start` writes without asking
 
 Two things happen on a start that are worth knowing about, because both write into your config
@@ -126,7 +217,9 @@ scope still needs a per-tool ingestion tag to be caught.
 
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
-the roadmap. Until it ships, the separation above is the containment — so **run the
+the roadmap. The human approval gate above is not a substitute: it decides whether a call
+starts, in this process, against an enumerated set of shapes — it cannot constrain a program
+once it is running. Until a sandbox ships, the separation above is the containment — so **run the
 harness as a non-privileged user**, and isolate it in a container or VM if it will
 process untrusted content on a machine you care about.
 
