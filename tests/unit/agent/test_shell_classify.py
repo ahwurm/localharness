@@ -200,6 +200,61 @@ def test_pipe_to_shell_is_settings_driven() -> None:
     assert classify_shell("curl x | sh", disabled).destructive is False
 
 
+# ----------------------------------------- relative writes follow the `cd` (finding R2a)
+
+CD_TARGETS: list[tuple[str, tuple[str, ...]]] = [
+    # the review repro: the `cd` was dropped, so the verdict resolved `authorized_keys` at the
+    # workspace and the write to the protected file asked for nothing.
+    ("cd ~/.ssh && echo x >> authorized_keys", ("~/.ssh/authorized_keys",)),
+    ("cd /tmp && touch a", ("/tmp/a",)),
+    ("cd /tmp; cd sub && touch a", ("/tmp/sub/a",)),
+    ("cd ~/.ssh\nsed -i s/a/b/ config", ("~/.ssh/config",)),
+    ("cd build && cp a b", ("build/b",)),
+    ("cd /tmp && cp a /etc/x", ("/etc/x",)),  # an absolute target keeps its own root
+    ("cd /tmp && cd /etc && tee hosts", ("/etc/hosts",)),  # the last `cd` wins
+    ("pushd ~/.ssh && echo x > authorized_keys", ("~/.ssh/authorized_keys",)),
+    ("cd /tmp/./x && touch a", ("/tmp/x/a",)),
+]
+
+
+@pytest.mark.parametrize("command,targets", CD_TARGETS,
+                         ids=[case[0].replace("\n", "\\n") for case in CD_TARGETS])
+def test_a_relative_write_is_joined_onto_the_directory(
+    command: str, targets: tuple[str, ...]
+) -> None:
+    assert classify_shell(command, SETTINGS).write_targets == targets
+
+
+def test_a_subshell_cd_does_not_outlive_the_subshell() -> None:
+    result = classify_shell("(cd /etc && echo x > hosts); echo y > local", SETTINGS)
+    assert result.write_targets == ("/etc/hosts", "local")
+
+
+def test_a_brace_group_cd_does_outlive_the_group() -> None:
+    """`{ … }` runs in THIS shell, so its `cd` moves everything after it (bash(1))."""
+    result = classify_shell("{ cd /etc; }; echo y > hosts", SETTINGS)
+    assert result.write_targets == ("/etc/hosts",)
+
+
+@pytest.mark.parametrize("command", [
+    "cd $D && echo x > f",
+    'cd "$(cat where)" && echo x > f',
+    "cd `cat where` && touch f",
+    "cd - && echo x > f",
+    "pushd /etc; popd; echo x > f",
+])
+def test_a_directory_nobody_can_read_makes_the_write_unresolvable(command: str) -> None:
+    """An unknown directory is treated as outside the boundary, never as the workspace."""
+    result = classify_shell(command, SETTINGS)
+    assert result.unresolvable_write is True, command
+
+
+def test_an_absolute_cd_recovers_from_an_unresolvable_one() -> None:
+    result = classify_shell("cd $D && cd /etc && echo x > hosts", SETTINGS)
+    assert result.write_targets == ("/etc/hosts",)
+    assert result.unresolvable_write is False
+
+
 def test_unresolvable_write_targets() -> None:
     for command in ("tee $OUT", "cp a $DEST", "cp a *.bak", "curl -o `date`.txt x"):
         result = classify_shell(command, SETTINGS)
@@ -516,7 +571,6 @@ COMPOSABLE = [
     "cat a.txt > out.txt",
     "python3 -c 'print(1)'",
     r"find . -exec chmod 777 {} \;",
-    "cd x",
     "echo 'a; b'",
 ]
 
@@ -527,6 +581,18 @@ def test_and_composes(left: str, right: str) -> None:
     """``classify("a && b").segments == classify("a").segments + classify("b").segments``."""
     joined = classify_shell(f"{left} && {right}", SETTINGS).segments
     assert joined == classify_shell(left, SETTINGS).segments + classify_shell(right, SETTINGS).segments
+
+
+def test_a_cd_is_the_one_thing_that_does_not_compose() -> None:
+    """`cd` is state, not a command: it changes where everything after it writes (finding R2a).
+
+    The composition property above holds for every command that is not navigation; this case is
+    the deliberate exception, pinned so nobody "fixes" it back into workspace-relative writes.
+    """
+    joined = classify_shell("cd x && cat a.txt > out.txt", SETTINGS)
+    alone = classify_shell("cat a.txt > out.txt", SETTINGS)
+    assert joined.write_targets == ("x/out.txt",)
+    assert alone.write_targets == ("out.txt",)
 
 
 @pytest.mark.parametrize("command", COMPOSABLE)

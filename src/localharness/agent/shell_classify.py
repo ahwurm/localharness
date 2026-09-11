@@ -27,6 +27,7 @@ Two conventions the PRD leaves open, decided here and kept consistent:
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 import re
 import shlex
 from dataclasses import replace
@@ -41,6 +42,28 @@ SUBSTITUTION_SENTINEL = "$__lh_subst__"
 It carries a ``$`` on purpose: whatever the substitution produced is unknown at
 classification time, so any write target built from it is ``unresolvable_write`` (step 8).
 """
+
+DIRECTORY_CHANGE_COMMANDS = frozenset({"cd", "pushd"})
+"""Commands that move the shell, so every LATER segment of the same sequence writes somewhere
+else (finding R2a). ``cd ~/.ssh && echo x >> authorized_keys`` used to drop the ``cd`` and report
+the bare ``authorized_keys``, which the verdict then resolved against the workspace — the write
+landed on the protected file with nothing asked. Both spellings move; ``pushd`` also stacks."""
+
+DIRECTORY_RESTORE_COMMANDS = frozenset({"popd"})
+"""``popd`` returns to whatever ``pushd`` stacked. The classifier does not model that stack, so a
+pop makes the directory unknown and every later relative write unresolvable — the safe direction
+(an unresolvable target is treated as outside the boundary, PRD §3.2 step 8)."""
+
+HOME_DIRECTORY = "~"
+"""Where a bare ``cd`` goes (bash(1)). Written as a tilde, like every other target: expanding it
+is the verdict's job (PRD §3.1), not the classifier's — it never touches the environment."""
+
+PREVIOUS_DIRECTORY = "-"
+"""``cd -`` returns to ``$OLDPWD``, which is not knowable from the command text alone."""
+
+ABSOLUTE_PATH_RE = re.compile(r"^(/|~|[A-Za-z]:[\\/])")
+"""A target that already names its own root — POSIX, a tilde (the verdict expands it), or a
+Windows drive (the owner dogfoods on Windows). Nothing is joined onto these."""
 
 UNRESOLVABLE_TARGET_CHARS = ("$", "*", "?", "`")
 """PRD §3.2 step 8: a target containing any of these cannot be resolved to a path here, so
@@ -229,6 +252,72 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     text = text.replace("\\\n", "")
     segments, dropped = _classify_text(text, settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
+
+
+# ------------------------------------------------------- working directory (finding R2a)
+
+class _Cwd:
+    """The directory the next segment runs in, carried along one top-level sequence.
+
+    ``path`` is the directory as WRITTEN (``~/.ssh``, ``/tmp``, or a relative ``build``), or None
+    for "wherever the command started" — the workspace, which is what the verdict resolves a bare
+    relative target against. ``unresolvable`` means a ``cd`` whose target cannot be read off the
+    command text (``cd $D``, ``cd "$(…)"``, ``popd``), which makes every later relative write
+    unresolvable rather than silently workspace-local.
+
+    Mutable on purpose: ``;``/``&&``/``||``/newline continue one shell, so a ``cd`` in front
+    changes what follows it. A ``( … )`` subshell and a function body get a :meth:`copy`, because
+    their ``cd`` does not outlive them; a ``{ … }`` group shares this object, because its does.
+    """
+
+    __slots__ = ("path", "unresolvable")
+
+    def __init__(self, path: str | None = None, unresolvable: bool = False) -> None:
+        self.path = path
+        self.unresolvable = unresolvable
+
+    def copy(self) -> _Cwd:
+        return _Cwd(self.path, self.unresolvable)
+
+
+def _apply_cd(cwd: _Cwd, argv: list[str]) -> None:
+    """Move ``cwd`` the way this ``cd``/``pushd`` moves the shell (PRD §3.2 step 6, finding R2a)."""
+    arguments = [
+        token for token in argv[1:]
+        if token == PREVIOUS_DIRECTORY or not token.startswith("-")
+    ]
+    target = arguments[0] if arguments else None
+    if target is None:
+        cwd.path, cwd.unresolvable = HOME_DIRECTORY, False
+        return
+    if target == PREVIOUS_DIRECTORY or any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS):
+        cwd.unresolvable = True
+        return
+    if ABSOLUTE_PATH_RE.match(target):
+        cwd.path, cwd.unresolvable = _normalize(target), False
+    elif not cwd.unresolvable:
+        cwd.path = _normalize(posixpath.join(cwd.path, target) if cwd.path else target)
+
+
+def _resolve_target(cwd: _Cwd, target: str) -> tuple[str, bool]:
+    """Join a write target onto the directory it is written in — (target, unresolvable).
+
+    PRD §3.2 step 8 reports targets as written; this only supplies the directory the shell is
+    standing in, so the verdict resolves ``~/.ssh/authorized_keys`` rather than a bare
+    ``authorized_keys`` it would place in the workspace (finding R2a).
+    """
+    if not target or ABSOLUTE_PATH_RE.match(target):
+        return target, False
+    if cwd.unresolvable:
+        return target, True
+    if cwd.path is None:
+        return target, False
+    return _normalize(posixpath.join(cwd.path, target)), False
+
+
+def _normalize(path: str) -> str:
+    """Collapse ``.`` and ``..`` in a joined path, keeping the spelling (tilde included)."""
+    return posixpath.normpath(path) if path else path
 
 
 # --------------------------------------------------------------------------- step 1
@@ -434,28 +523,39 @@ def _group_inner(body: str) -> str | None:
     return None
 
 
-def _classify_text(text: str, settings: GateSettings) -> tuple[list[ShellSegment], list[str]]:
-    """Steps 2-8 over a already-heredoc-stripped string; recursive for groups and payloads."""
+def _classify_text(
+    text: str, settings: GateSettings, cwd: _Cwd | None = None
+) -> tuple[list[ShellSegment], list[str]]:
+    """Steps 2-8 over a already-heredoc-stripped string; recursive for groups and payloads.
+
+    ``cwd`` carries the directory a leading ``cd`` moved the shell to (finding R2a); a fresh one
+    means "wherever the command started".
+    """
     segments: list[ShellSegment] = []
     dropped: list[str] = []
     previous_head: str | None = None
+    cwd = _Cwd() if cwd is None else cwd
     for raw in _split_top_level(text):
         body = raw.text.strip()
         if not body:
             previous_head = None
             continue
         inner = _group_inner(body)
+        subshell = inner is not None and body.startswith("(")
         if inner is None:
             inner = _function_body(body)
+            subshell = True  # a definition's `cd` runs when the function is CALLED, not here
         if inner is not None:
-            group_segments, group_dropped = _classify_text(inner, settings)
+            group_segments, group_dropped = _classify_text(
+                inner, settings, cwd.copy() if subshell else cwd
+            )
             segments.extend(group_segments)
             dropped.extend(group_dropped)
             previous_head = None
             continue
-        residual, lifted = _lift_substitutions(body, settings)
+        residual, lifted = _lift_substitutions(body, settings, cwd)
         segments.extend(lifted)
-        host, extras, host_dropped, head = _classify_one(residual, settings)
+        host, extras, host_dropped, head = _classify_one(residual, settings, cwd)
         dropped.extend(host_dropped)
         if host is not None:
             if (
@@ -473,7 +573,7 @@ def _classify_text(text: str, settings: GateSettings) -> tuple[list[ShellSegment
 # --------------------------------------------------------------------------- step 2
 
 def _lift_substitutions(
-    text: str, settings: GateSettings
+    text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[str, list[ShellSegment]]:
     """PRD §3.2 step 2: lift ``$(…)``, backticks, ``<(…)`` and ``>(…)`` into their own segments.
 
@@ -487,7 +587,8 @@ def _lift_substitutions(
     in_double = False
 
     def recurse(inner: str) -> None:
-        inner_segments, _ = _classify_text(inner, settings)
+        # A substitution runs in a subshell: it inherits the directory and cannot change ours.
+        inner_segments, _ = _classify_text(inner, settings, (cwd or _Cwd()).copy())
         lifted.extend(inner_segments)
 
     while index < len(text):
@@ -573,13 +674,14 @@ def _matching(text: str, open_index: int) -> int:
 # --------------------------------------------------------------------------- steps 4-8
 
 def _classify_one(
-    text: str, settings: GateSettings
+    text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[ShellSegment | None, list[ShellSegment], list[str], str | None]:
     """One command: redirections, drop rule, wrapper peel, payload lift, signature, targets.
 
     Returns ``(host segment or None if dropped, lifted payload segments, dropped texts,
-    head token)``. PRD §3.2 steps 4-8.
+    head token)``. PRD §3.2 steps 4-8. A ``cd`` here moves ``cwd`` for the segments after it.
     """
+    cwd = _Cwd() if cwd is None else cwd
     command_text, redirect_targets = _extract_redirections(text)
     argv = _strip_prefixes(_tokenize(command_text))
     if argv:
@@ -587,7 +689,16 @@ def _classify_one(
     if not argv:
         if not redirect_targets:
             return None, [], [text.strip()] if text.strip() else [], None
-        return _make_segment(REDIRECT_ONLY_SIGNATURE, (), settings, redirect_targets), [], [], None
+        return (
+            _make_segment(REDIRECT_ONLY_SIGNATURE, (), settings, redirect_targets, cwd=cwd),
+            [], [], None,
+        )
+
+    # The directory moves whether or not the segment is dropped (finding R2a).
+    if argv[0] in DIRECTORY_CHANGE_COMMANDS:
+        _apply_cd(cwd, argv)
+    elif argv[0] in DIRECTORY_RESTORE_COMMANDS:
+        cwd.unresolvable = True
 
     # Step 6 — drop only the exact no-op segments; after step 2 no substitution survives here.
     if argv[0] in settings.dropped_commands and not redirect_targets:
@@ -596,7 +707,7 @@ def _classify_one(
     argv = _peel(argv, settings)
     if not argv:
         return None, [], [text.strip()], None
-    return _build(argv, settings, redirect_targets)
+    return _build(argv, settings, redirect_targets, cwd)
 
 
 def _strip_prefixes(argv: list[str]) -> list[str]:
@@ -619,19 +730,20 @@ def _basename(token: str) -> str:
 
 
 def _build(
-    argv: list[str], settings: GateSettings, redirect_targets: list[str]
+    argv: list[str], settings: GateSettings, redirect_targets: list[str], cwd: _Cwd | None = None
 ) -> tuple[ShellSegment | None, list[ShellSegment], list[str], str | None]:
     """Signature + payload lifting for a peeled argv (PRD §3.2 steps 5, 7, 8)."""
     argv = [_basename(argv[0]), *argv[1:]]
     head = argv[0]
     extras: list[ShellSegment] = []
+    cwd = _Cwd() if cwd is None else cwd
 
     runner = _composing_runner(argv, settings)
     if runner is not None:
         prefix, inner_argv = runner
-        host, inner_extras, _, _ = _build(inner_argv, settings, redirect_targets)
+        host, inner_extras, _, _ = _build(inner_argv, settings, redirect_targets, cwd)
         if host is None:  # pragma: no cover - inner argv is non-empty by construction
-            host = _make_segment(prefix, tuple(argv), settings, redirect_targets)
+            host = _make_segment(prefix, tuple(argv), settings, redirect_targets, cwd=cwd)
         else:
             host = replace(
                 host,
@@ -666,12 +778,12 @@ def _build(
         payload_texts = _inline_by_nature_payload(argv)
 
     for payload in payload_argvs:
-        segment, more, _, _ = _build(payload, settings, [])
+        segment, more, _, _ = _build(payload, settings, [], cwd)
         if segment is not None:
             extras.append(segment)
         extras.extend(more)
     for payload_text in payload_texts:
-        inner_segments, _ = _classify_text(payload_text, settings)
+        inner_segments, _ = _classify_text(payload_text, settings, cwd.copy())
         extras.extend(inner_segments)
 
     host = _make_segment(
@@ -679,6 +791,7 @@ def _build(
         tuple(argv),
         settings,
         redirect_targets,
+        cwd=cwd,
         inline=inline,
         payload_lifted=bool(payload_argvs or payload_texts),
         force_destructive=force_destructive,
@@ -693,6 +806,7 @@ def _make_segment(
     settings: GateSettings,
     redirect_targets: list[str],
     *,
+    cwd: _Cwd | None = None,
     inline: bool = False,
     payload_lifted: bool = False,
     force_destructive: bool = False,
@@ -705,7 +819,9 @@ def _make_segment(
     core.hooksPath`` is destructive and ``git config --get x`` is read-only, and neither key can be
     enumerated in advance.
     """
-    targets = list(redirect_targets) + _write_targets(signature, argv, settings)
+    written = list(redirect_targets) + _write_targets(signature, argv, settings)
+    resolved = [_resolve_target(cwd or _Cwd(), target) for target in written]
+    targets = [target for target, _ in resolved]
     destructive = force_destructive or signature in settings.destructive_signatures
     read_only = (
         (force_read_only or signature in settings.read_only_signatures)
@@ -719,7 +835,7 @@ def _make_segment(
         destructive=destructive,
         inline_interpreter=inline,
         write_targets=tuple(targets),
-        unresolvable_write=any(
+        unresolvable_write=any(unresolvable for _, unresolvable in resolved) or any(
             any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS) for target in targets
         ),
     )
