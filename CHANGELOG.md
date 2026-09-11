@@ -20,24 +20,23 @@ All notable changes to LocalHarness are documented here. The format follows
   `guarded`; a channel that cannot ask and has no record for that workspace
   runs `guarded` too. In Zed the question is the permission dialog, once per
   project.
-- **What still asks in `auto`, every time, with no answer remembered.**
-  Writes to a protected path (`~/.ssh`, `~/.aws`, `~/.gnupg`, credential
-  files, shell rc files, `~/.localharness`, and in-project `.git/**`,
-  `.localharness/**`, `.env*`, key files) and now also the system
-  directories below; a destructive file operation (`rm -rf`, `chmod -R`,
-  `find -delete`, the Windows deletes) whose target is outside the project
-  or cannot be resolved; and an irreversible operation wherever it points —
-  `sudo`/`su`, `curl … | sh`, `git push --force`/`--delete`,
-  `git reset --hard`, `git clean -f`, `git checkout --`/`git restore`
-  discards, `git stash drop`/`clear`, `git branch -D`, `git filter-branch`,
-  `git reflog expire`, `git gc --prune`, `dd`, `mkfs`, `shred`, disk
-  formatting, and `docker run`/`exec`/`rm`/`kill`/`stop`/`prune`/
-  `compose up`/`compose down`. It also asks about a call it could not
-  classify at all — a command it could not read, a name computed at runtime
-  (`$RM -rf build`), a path argument that is not a string — because the rest
-  of the rule rests on having classified the call. Recorded refusals still
-  deny in `auto`, and your deny patterns still deny before the gate speaks at
-  all.
+- **What still asks in `auto`, every time, with no answer remembered —
+  `AUTO_BLACKLIST`, and nothing else.** A delete or recursive permission
+  change whose target is outside the project or cannot be resolved
+  (`rm -rf`, `find -delete`, the Windows deletes, `chmod -R`, `chown -R`);
+  `git push --force`/`--delete`, `git reset --hard`, `git clean -f`;
+  `sudo`/`su`; a download piped into a shell (`curl … | sh`); `dd`, `mkfs`,
+  `shred`, `format`; writes to a secret store (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, credential files, shell rc files, `~/.localharness`) or a
+  system directory; and, inside the project, writes to `.git/**` and
+  `.localharness/**`. **Everything else runs without asking.** Deliberately
+  not on the list: `docker` in any form (the shipped deny patterns already
+  refuse `docker stop`/`kill`/`rm`/`compose down` outright), `git branch`,
+  `git stash`, `git checkout`, `git restore`, `.env` and key files inside
+  the project (a deny pattern covers `.env`), interpreters, `python_exec`,
+  subagents, MCP and plugin tools, network reads, and writes anywhere else —
+  including elsewhere in your home directory. Recorded refusals still deny in
+  `auto`, and your deny patterns still deny before the gate speaks at all.
 - **New protected paths: the system directories.** `/etc`, `/usr`, `/bin`,
   `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`,
   `/srv`, macOS `/System`, `/Library`, `/Applications`, and Windows
@@ -45,6 +44,15 @@ All notable changes to LocalHarness are documented here. The format follows
   `C:\ProgramData`; `/tmp` and `/var/tmp` are exempt. A mode that allows
   ordinary writes needs the places a mistaken write is unrecoverable named
   explicitly; they are `permissions.ask.protected_paths_system`.
+- **A folder you have already worked in is never asked about.** The trust
+  question is for a folder this machine has never run a session in; a
+  workspace with earlier LocalHarness sessions behind it is recognized and
+  trusted without a dialog.
+- **`unattended` is settable from a channel.** `/mode unattended` in the
+  terminal, `mode unattended` in Discord, and the Zed picker now reach it,
+  alongside `/mode auto`. It used to be config-only; a session that turns its
+  own gate off is a decision a person can make out loud, and a scheduled job
+  still writes `permissions.mode: unattended` in its config.
 - **A session in `$HOME` no longer asks about every write.** With no project
   boundary there is nothing to cross, so `auto` treats the directory you
   started in as the target boundary for the destructive-file rule and lets

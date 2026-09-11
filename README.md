@@ -31,7 +31,7 @@ Frontier coding agents are great when you're driving them. But metering and rate
 - **Always on.** No quota or rate caps to budget around for unattended runs.
 - **Familiar.** Same agent, tool, and permission model as the cloud tools, just local.
 
-**The gate asks about your workspace, not about your work.** From v0.14.1 the default mode is `auto`: the first time a session opens a project, LocalHarness asks once whether you trust it, and after that it only interrupts you for genuinely dangerous things — writes to protected or system paths, a destructive command aimed outside the project, and irreversible operations like `sudo`, `curl … | sh`, a force push or `git reset --hard`. Decline the trust question and the session runs `guarded`, the v0.14.0 behavior: ask once about each new thing, remember the answer.
+**The gate asks about your workspace, not about your work.** From v0.14.1 the default mode is `auto`: the first time a session opens a folder this machine has never worked in, LocalHarness asks once whether you trust it — a project you have already used is recognized and never asked — and after that everything runs except a short blacklist: a delete aimed outside the project, `git push --force`, `git reset --hard`, `git clean -f`, `sudo`, `curl … | sh`, `dd`/`mkfs`/`shred`, writes to your secret stores or the system directories, and writes to `.git/` or `.localharness/`. Nothing else interrupts you — not docker, not interpreters, not MCP tools, not writes elsewhere. Decline the trust question and the session runs `guarded`, the v0.14.0 behavior: ask once about each new thing, remember the answer.
 
 **One setting a cron job still needs.** A run with nobody to answer a question refuses the call instead of allowing it — including the trust question — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking anything. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
 
@@ -58,9 +58,8 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
 **♾️ always allow this in this workspace** (an "always" is written to `grants.yaml` and holds in
 the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode this is rare: the
-workspace trust question on a new project, and then only the dangerous list — protected and system
-paths, destructive commands aimed outside the project, irreversible operations — which offer only
-✅ and ❌ because they ask every single time. `♾️` appears in `guarded`, where answers are
+workspace trust question the first time you use a folder, and then only the short blacklist above,
+which offers only ✅ and ❌ because those ask every single time. `♾️` appears in `guarded`, where answers are
 remembered. Only a user on `LOCALHARNESS_DISCORD_ALLOW` can answer. Unlike the terminal, a Discord question expires: if nobody
 reacts before `permissions.ask.timeout_s`, the call is denied and the message is edited to say
 so. React after that and nothing happens; ask again instead.

@@ -315,7 +315,13 @@ async def test_new_session_returns_the_mode_picker(tmp_path, monkeypatch, keep_c
     session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
     modes = session.new_session_response.modes
     assert modes.current_mode_id == "auto"
-    assert [m.id for m in modes.available_modes] == ["auto", "guarded", "trusted", "read-only"]
+    assert [m.id for m in modes.available_modes] == [
+        "auto",
+        "guarded",
+        "trusted",
+        "unattended",
+        "read-only",
+    ]
     assert all(m.name and m.description for m in modes.available_modes)
 
 
@@ -644,15 +650,25 @@ async def test_set_session_mode_read_only_soft_denies_an_edit(tmp_path, monkeypa
     assert target.read_text(encoding="utf-8") == "alpha\n"
 
 
-async def test_set_session_mode_unattended_is_refused(tmp_path, monkeypatch, keep_cwd):
-    """PRD §3.4: `unattended` turns every ASK into an ALLOW, so a picker must never reach it."""
-    from acp.core import RequestError
+async def test_set_session_mode_unattended_reaches_the_gate(tmp_path, monkeypatch, keep_cwd):
+    """v0.14.1 owner ruling: `unattended` is settable from a channel, Zed's picker included.
 
+    The picker entry is only half of it — a mode advertised here and refused by
+    `PermissionGate.set_mode(from_channel=True)` would be accepted before the first prompt and
+    then blow up on it, which is why this drives a prompt afterwards.
+    """
     session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
-    with pytest.raises(RequestError):
-        await session.conn.set_session_mode(
-            session_id=session.session_id, mode_id="unattended"
-        )
+    await session.conn.set_session_mode(session_id=session.session_id, mode_id="unattended")
+    assert session.agent._current_mode_id() == "unattended"
+
+    gate = PermissionGate(
+        boundary=tmp_path,
+        workspace=tmp_path,
+        grants=GrantStore(tmp_path / "gate-grants.yaml"),
+        mode="auto",
+        bus=EventBus(),
+    )
+    assert gate.set_mode("unattended", from_channel=True) == "unattended"
 
 
 # ------------------------------------------------------------------ no boundary
