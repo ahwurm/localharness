@@ -38,7 +38,7 @@ from localharness.agent.gate_types import (
     Verdict,
 )
 from localharness.agent.permissions import PermissionResult
-from localharness.agent.verdict import DenyFn, GateContext, evaluate
+from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
 from localharness.config.grants import GrantStore, new_grant
 from localharness.core.events import PermissionAsked, PermissionResolved
 from localharness.core.types import ToolCall
@@ -132,6 +132,68 @@ def deny_pattern_for(tool_name: str, klass: str, key: Optional[str]) -> str:
     if klass in SUBSTRING_DENY_CLASSES:
         return f"{tool_name}(*{key}*)"
     return tool_name
+
+
+def derive_session_boundary(
+    cwd: Optional[Path] = None, local_dir: Optional[Path] = None
+) -> Optional[Path]:
+    """The workspace boundary for a session standing in ``cwd`` (PRD §3.1).
+
+    The three inputs of :func:`verdict.derive_boundary` gathered from the running process:
+    where you stand, the workspace layer v0.13 discovery applied (``ConfigLoader._local_dir``,
+    when one applied), and the nearest git checkout. The git walk is
+    ``config/paths._nearest_repo_root`` — the repo's existing marker-file walk, which handles a
+    linked worktree's ``.git`` FILE and stops at ``$HOME``, and which runs no subprocess. It is
+    imported rather than re-implemented so "what counts as your project" has one definition.
+    """
+    from localharness.config.paths import _nearest_repo_root
+
+    here = Path(cwd) if cwd is not None else Path.cwd()
+    home = Path.home()
+    try:
+        git_toplevel = _nearest_repo_root(here, home)
+    except OSError:
+        git_toplevel = None
+    return derive_boundary(cwd=here, local_dir=local_dir, git_toplevel=git_toplevel, home=home)
+
+
+def settings_from(permissions: Any) -> GateSettings:
+    """``permissions.ask.to_gate_settings()``, tolerant of a config object that has no ask
+    block (a hand-built stub in a test, or a plugin's own permission object)."""
+    ask = getattr(permissions, "ask", None)
+    to_settings = getattr(ask, "to_gate_settings", None)
+    return to_settings() if callable(to_settings) else GateSettings()
+
+
+def fail_closed_gate(
+    *,
+    permissions: Any,
+    deny: Optional[DenyFn] = None,
+    bus: Any = None,
+    workspace: Optional[Path] = None,
+    local_dir: Optional[Path] = None,
+) -> PermissionGate:
+    """The gate an :class:`~localharness.agent.loop.AgentLoop` builds when its caller passed none.
+
+    CONTRACTS A4: "if a caller passes none, construct a fail-closed gate (no asker, mode from
+    config) so nothing silently runs ungated". No asker means every ASK denies with
+    :data:`NO_ASKER_REASON` and logs the fix once — a call site that forgot the gate degrades
+    loudly instead of running unguarded, which is the inverse of the failure this phase exists
+    to remove.
+    """
+    ws = Path(workspace) if workspace is not None else Path.cwd()
+    return PermissionGate(
+        boundary=derive_session_boundary(cwd=ws, local_dir=local_dir),
+        workspace=ws,
+        grants=GrantStore(),
+        mode=getattr(permissions, "mode", DEFAULT_MODE),
+        asker=None,
+        channel_name="none",
+        has_review_surface=False,
+        deny=deny,
+        settings=settings_from(permissions),
+        bus=bus,
+    )
 
 
 def deny_fn_from(evaluator: Any, permissions: Any) -> DenyFn:
@@ -260,15 +322,20 @@ class PermissionGate:
 
     # ----------------------------------------------------------------- deny
 
-    def _deny(self, tool_name: str, params: dict) -> PermissionResult:
+    def _deny(
+        self, tool_name: str, params: dict, config_deny: Optional[DenyFn] = None
+    ) -> PermissionResult:
         """The DENY tier: the config deny patterns, then the workspace's "never here" answers.
 
-        The config half is the existing evaluator, untouched. The stored half is re-read on
-        every call (``GrantStore`` reloads), so a ``reject_always`` answered one minute ago wins
-        the next minute without a restart.
+        The config half is the existing evaluator, untouched — and it belongs to the CALLING
+        agent, not to the session: a subagent may tighten its own deny list, so
+        :meth:`check` passes that agent's deny function in and it wins over the gate's own.
+        The stored half is re-read on every call (``GrantStore`` reloads), so a
+        ``reject_always`` answered one minute ago wins the next minute without a restart.
         """
-        if self._config_deny is not None:
-            result = self._config_deny(tool_name, params)
+        deny = config_deny if config_deny is not None else self._config_deny
+        if deny is not None:
+            result = deny(tool_name, params)
             if result.denied:
                 return result
         for pattern in self.grants.deny_patterns_for(self.workspace):
@@ -278,7 +345,7 @@ class PermissionGate:
                 )
         return PermissionResult(denied=False)
 
-    def context(self) -> GateContext:
+    def context(self, deny: Optional[DenyFn] = None) -> GateContext:
         """The :class:`GateContext` for one call, gathered from this session's state."""
         return GateContext(
             boundary=self.boundary,
@@ -287,7 +354,7 @@ class PermissionGate:
             mode=self.mode,
             can_ask=self.asker is not None,
             has_review_surface=self.has_review_surface,
-            deny=self._deny,
+            deny=lambda name, params: self._deny(name, params, deny),
         )
 
     # ---------------------------------------------------------------- check
@@ -301,6 +368,7 @@ class PermissionGate:
         agent_id: str,
         session_id: str,
         tool_timeout_s: Optional[float] = None,
+        deny: Optional[DenyFn] = None,
     ) -> GateOutcome:
         """Decide one tool call, asking a human when the verdict says to (PRD §3.1, §3.5).
 
@@ -308,8 +376,12 @@ class PermissionGate:
         :class:`PermissionAsked`, awaiting the answer under a deadline, publishing
         :class:`PermissionResolved`, and making an "always" answer durable — or, when no channel
         can ask, fails closed with :data:`NO_ASKER_REASON`.
+
+        ``deny`` is the CALLING agent's own deny tier (``AgentLoop._deny_fn``). It is per call
+        rather than per gate because one shared gate serves an orchestrator and its subagents,
+        and each of those resolved its own deny-pattern union from its own config layers.
         """
-        result = evaluate(tool_name, tool_params, tool_meta, self.context(), self.settings)
+        result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
         if result.verdict is Verdict.ALLOW:
             return GateOutcome(allowed=True, reason=result.reason)
         if result.verdict is Verdict.DENY:

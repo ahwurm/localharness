@@ -176,14 +176,28 @@ def test_loop_composes_the_evaluator_with_load_agents_permissions() -> None:
     permissions. This proves the loop is what hands it those — if `agent/loop.py` ever stops
     passing `self._config.permissions`, the test above becomes a test of an object nobody uses,
     and nothing else would notice.
+
+    v0.14: the evaluator is now the DENY TIER of the permission gate rather than the whole
+    permission check, so the composition moved into `AgentLoop._deny_fn` and the two call sites
+    hand that function to `gate.check(...)`. The property under guard is unchanged and is why
+    the deny function lives on the LOOP and not on the (session-shared) gate: one gate serves an
+    orchestrator and its subagents, and each of those resolved its own deny-pattern union.
     """
     loop_py = Path(__file__).resolve().parents[2] / "src" / "localharness" / "agent" / "loop.py"
     source = loop_py.read_text(encoding="utf-8")
     assert source, f"read nothing from {loop_py}"
-    call = "self._permissions.evaluate(tool_call, self._config.permissions)"
-    assert source.count(call) >= 2, (
-        f"{loop_py} no longer composes the evaluator with load_agent()'s permissions at both "
-        "call sites — the enforcement test above is now testing an unused object"
+    composition = (
+        "return self._permissions.evaluate(\n"
+        "            ToolCall(name=tool_name, arguments=params or {}), self._config.permissions\n"
+        "        )"
+    )
+    assert composition in source, (
+        f"{loop_py} no longer composes the evaluator with load_agent()'s permissions — the "
+        "enforcement test above is now testing an unused object"
+    )
+    assert source.count("deny=self._deny_fn,") >= 2, (
+        f"{loop_py} no longer hands that composition to the gate at both tool-call sites — a "
+        "subagent's tightened deny list would stop being enforced"
     )
 
 
