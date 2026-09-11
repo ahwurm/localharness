@@ -428,6 +428,48 @@ SED_MODE_FLAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
 ``READ_ONLY_SIGNATURES_DEFAULT``, ``sed -i`` edits its file arguments in place. First match
 wins, so ``sed -n -i`` is a write (PRD §3.2 steps 7-8)."""
 
+CURRENT_DIRECTORY = "."
+"""Where a destination-less ``git init`` puts the repository it creates (git-init(1))."""
+
+GIT_CLONE_VALUE_FLAGS = frozenset({
+    "-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--reference",
+    "--reference-if-able", "--depth", "--separate-git-dir", "-c", "--config", "-j", "--jobs",
+    "--template", "--shallow-since", "--shallow-exclude", "--filter", "--server-option",
+    "--bundle-uri",
+})
+GIT_INIT_VALUE_FLAGS = frozenset({
+    "--template", "--separate-git-dir", "-b", "--initial-branch", "--object-format", "--ref-format",
+})
+GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason"})
+GIT_SUBMODULE_ADD_VALUE_FLAGS = frozenset({"-b", "--branch", "--name", "--reference", "--depth"})
+"""Options of the four git subcommands that create something on disk, whose next token is a
+VALUE and not the destination. Without them ``git clone -b main URL`` would report a write to
+``main`` (git-clone(1), git-init(1), git-worktree(1), git-submodule(1))."""
+
+GIT_DESTINATION_FIRST = "first"
+GIT_DESTINATION_FIRST_OR_CWD = "first-or-cwd"
+GIT_DESTINATION_LAST_OR_URL = "last-or-url"
+"""How a git subcommand names the directory it creates: the first positional, the first with the
+current directory as the default, or the last of two — falling back to the repository name inside
+the URL when only the source is given."""
+
+GIT_DESTINATION_SHAPES: dict[str, tuple[frozenset[str], str]] = {
+    "git clone": (GIT_CLONE_VALUE_FLAGS, GIT_DESTINATION_LAST_OR_URL),
+    "git init": (GIT_INIT_VALUE_FLAGS, GIT_DESTINATION_FIRST_OR_CWD),
+    "git worktree add": (GIT_WORKTREE_ADD_VALUE_FLAGS, GIT_DESTINATION_FIRST),
+    "git submodule add": (GIT_SUBMODULE_ADD_VALUE_FLAGS, GIT_DESTINATION_LAST_OR_URL),
+}
+"""PRD §3.2 step 8 for git: the four subcommands whose argument names a DIRECTORY THEY CREATE.
+
+``git clone https://x ~/.ssh`` writes a whole repository into ``~/.ssh`` — including a
+``.git/hooks`` directory whose contents git will later execute — and reported no write target at
+all, so the protected-path tier never saw it (v0.14 critic A3). Same for ``git init ~/.ssh``,
+``git worktree add DEST`` and ``git submodule add URL DEST``.
+
+Per-subcommand because git spells the destination four different ways; the shapes are named above
+rather than written as three branches, and the value-flag tables keep an option's argument from
+being read as the destination."""
+
 COPY_COMMANDS = ("cp", "mv", "install", "rsync")
 """PRD §3.2 step 8: the commands whose destination is a positional argument."""
 
@@ -1520,6 +1562,8 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
         return _sed_files(list(argv))
     if head not in settings.write_shaped_commands:
         return []
+    if head == "git":
+        return _git_targets(signature, argv)
     rest = list(argv[1:])
     positionals = [token for token in rest if not token.startswith("-")]
     if head in ("tee", "touch", "mkdir"):
@@ -1537,6 +1581,43 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     if head in ("unzip", "tar"):
         return _flag_values(rest, ("-d", "-C", "--directory")) or ["."]
     return []
+
+
+def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:
+    """The directory a ``git`` subcommand creates (:data:`GIT_DESTINATION_SHAPES`), or nothing.
+
+    Every other git signature returns no target: git writes inside the repository it is already
+    in, which the workspace boundary already covers — these four choose where the repository goes.
+    """
+    shape = GIT_DESTINATION_SHAPES.get(signature)
+    if shape is None:
+        return []
+    value_flags, rule = shape
+    rest = list(argv[1:])
+    for word in signature.split()[1:]:  # step past `clone` / `worktree add` / `submodule add`
+        if word in rest:
+            rest = rest[rest.index(word) + 1:]
+    positionals = _positionals(rest, value_flags)
+    if rule == GIT_DESTINATION_FIRST:
+        return positionals[:1]
+    if rule == GIT_DESTINATION_FIRST_OR_CWD:
+        return positionals[:1] or [CURRENT_DIRECTORY]
+    if len(positionals) >= 2:
+        return positionals[-1:]
+    return [_repository_name(positionals[0])] if positionals else []
+
+
+def _repository_name(source: str) -> str:
+    """The directory ``git clone URL`` makes in the cwd: the URL's last component without ``.git``.
+
+    ``https://host/org/tool.git`` → ``tool``, matching git's own default (git-clone(1)). A source
+    that resolves to nothing (a bare host, a substitution) keeps the sentinel so the write is
+    reported as unresolvable rather than silently dropped.
+    """
+    leaf = _leaf(source.split("?", 1)[0].split("#", 1)[0])
+    if leaf.endswith(".git"):
+        leaf = leaf[: -len(".git")]
+    return leaf or SUBSTITUTION_SENTINEL
 
 
 def _copy_targets(head: str, rest: list[str]) -> list[str]:

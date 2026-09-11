@@ -410,11 +410,20 @@ review used as its example — ``parallel rm -rf {} ::: a b`` signed as an unfam
 ``parallel``."""
 
 WRITE_SHAPED_COMMANDS_DEFAULT: frozenset[str] = frozenset({
-    "tee", "cp", "mv", "install", "rsync", "dd", "curl", "wget", "ln", "touch", "mkdir", "unzip", "tar",
+    "tee", "cp", "mv", "install", "rsync", "dd", "curl", "wget", "ln", "touch", "mkdir", "unzip",
+    "tar", "git",
 })
 """PRD §3.2 step 8 (critic finding 2): commands whose arguments name a write target, checked
 against the boundary and the protected set on every call. Redirections ``>``/``>>`` apply to any
-segment."""
+segment.
+
+``git`` is here for the four subcommands that choose where a repository goes — ``clone``, ``init``,
+``worktree add``, ``submodule add`` (v0.14 critic A3). ``git clone https://x ~/.ssh`` reported no
+write target at all, so nothing checked the destination against the protected set, and a clone
+writes a ``.git/hooks`` directory git will later execute. Every other git signature names no
+target: git writes inside the repository it is already in, which the boundary already covers. The
+per-subcommand destination table lives with the other canonicalization tables in
+``shell_classify``."""
 
 GIT_CONFIG_DANGEROUS_KEYS_DEFAULT: tuple[str, ...] = (
     "core.hooksPath", "core.sshCommand", "core.fsmonitor", "core.pager", "core.editor",
