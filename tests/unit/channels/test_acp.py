@@ -62,13 +62,15 @@ class StreamingLLM(MockLLMClient):
     def __init__(self, responses: list[FakeLLMResponse]) -> None:
         super().__init__(responses)
         self.seen_messages: list[list[dict]] = []
+        self.streams = True
+        """Set False to stand in for a runtime that returns a completion with no deltas."""
 
     async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
         self.seen_messages.append(list(messages or []))
         result = await super().stream_complete(messages, tools, on_token=on_token, **kwargs)
         message = result[0] if isinstance(result, tuple) else result
         content = getattr(message, "content", None)
-        if on_token is not None and content:
+        if self.streams and on_token is not None and content:
             await on_token(content)
         return result
 
@@ -310,6 +312,35 @@ async def test_prompt_streams_chunks_and_ends_the_turn(tmp_path, monkeypatch, ke
     )
     assert response.stop_reason == "end_turn"
     assert any("Hello from the harness." in c for c in session.client.chunks())
+
+
+async def test_a_non_streaming_provider_still_delivers_the_answer(tmp_path, monkeypatch, keep_cwd):
+    """`on_token` is the provider's promise, not the loop's.
+
+    A runtime that returns a completion without deltas would otherwise leave the panel showing
+    tool rows and no answer, so `TaskComplete` is the fallback — and exactly once.
+    """
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="Quiet answer.")]
+    )
+    session.llm.streams = False
+    response = await session.conn.prompt(
+        session_id=session.session_id, prompt=[text_block("say something")]
+    )
+    assert response.stop_reason == "end_turn"
+    said = [c for c in session.client.chunks() if "Quiet answer." in c]
+    assert len(said) == 1, f"expected the answer exactly once, got {said}"
+
+
+async def test_a_streamed_answer_is_not_repeated_by_the_completion_summary(
+    tmp_path, monkeypatch, keep_cwd
+):
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="Streamed answer.")]
+    )
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("say something")])
+    said = [c for c in session.client.chunks() if "Streamed answer." in c]
+    assert len(said) == 1, f"the answer was printed twice: {said}"
 
 
 async def test_a_tool_call_mirrors_to_tool_call_and_tool_call_update(tmp_path, monkeypatch, keep_cwd):
