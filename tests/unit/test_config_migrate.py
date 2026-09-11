@@ -337,19 +337,27 @@ def test_an_old_init_config_loads_through_the_real_loader(tmp_path, caplog):
 
     Through `HarnessConfig`, not a bare `PermissionConfig` — this is what `start` does, and it
     is what failed with "Value error, permissions.allow_patterns was removed in v0.14".
+
+    The mode those files carry has had two lives. v0.14.0 read `auto` as the retired v0.13
+    spelling and remapped it onto `guarded` with a deprecation notice; the owner ruling of
+    2026-09-11 made `auto` a real mode and the shipped default, so the same word in the same
+    old file now loads as itself and says nothing. Either way the property this test is for is
+    unchanged: an untouched pre-v0.14 config still starts.
     """
+    from localharness.agent.gate_types import DEFAULT_MODE
     from localharness.config.models import HarnessConfig
 
     cfg = _write_config(tmp_path, OLD_7, allow_patterns=[])
     with caplog.at_level(logging.WARNING, logger="localharness.config.models"):
         loaded = HarnessConfig.model_validate(yaml.safe_load(cfg.read_text()))
-    assert loaded.org.permissions.mode == "guarded"
+    assert loaded.org.permissions.mode == DEFAULT_MODE == "auto"
     assert loaded.org.permissions.deny_patterns == OLD_7
     # The deprecation notice is a LOG record, never `warnings.warn`: a validator that raises
     # under `-W error::DeprecationWarning` takes `config migrate` — the repair for this exact
     # config — down with it.
     notices = "\n".join(r.getMessage() for r in caplog.records)
-    assert "allow_patterns" in notices and "auto" in notices
+    assert "allow_patterns" in notices and "grants.yaml" in notices
+    assert "permissions.mode" not in notices, "a real mode was reported as a retired spelling"
 
 
 def test_migrate_strips_an_empty_allow_patterns_and_writes(tmp_path):

@@ -137,6 +137,15 @@ class PermissionRequest:
     ``PermissionGate`` also prefixes ``display`` with it when the asker is not the session's own
     agent, so a channel that renders nothing but the one line still shows who asked."""
 
+    options_legend: str | None = None
+    """A replacement for the channel's own key legend, for a question that is not a tool call.
+
+    The workspace-trust question (``cli/session_trust``) is the one user of it: it is rendered
+    through this same request shape so it lands where every other permission question lands, but
+    the ungrantable legend ends "(asks every time — cannot be remembered)" and this answer is
+    precisely the one that IS remembered. None everywhere else, and a channel that does not read
+    it simply draws its own two options — the same question with plainer buttons."""
+
     auto_entry: str | None = None
     """Which :class:`AutoBlacklist` entry raised this, when ``auto`` is the mode.
 

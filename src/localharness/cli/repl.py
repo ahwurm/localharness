@@ -291,6 +291,7 @@ class OrchestratorREPL:
     async def _run_classic(self) -> None:
         """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
         await self._channel.start()
+        await self._establish_workspace_trust()
         try:
             while True:
                 try:
@@ -380,6 +381,7 @@ class OrchestratorREPL:
         (cancel the turn) and Ctrl+D (exit). Turn completion posts a 'turn_done' event via the
         task's done-callback, so everything funnels through one queue — no races."""
         await self._channel.start()
+        await self._establish_workspace_trust()
         self._box_ctrl_q = asyncio.Queue()
         self._turn_task = None
         self._fifo.clear()
@@ -770,6 +772,36 @@ class OrchestratorREPL:
             "reasoning follows /reasoning."
         )
         await self._channel.send_message(note, metadata={"style": "system.info"})
+
+    async def _establish_workspace_trust(self) -> None:
+        """Settle this session's workspace trust before the first turn (owner ruling 2026-09-11).
+
+        Called once, right after the channel starts and before anything can be typed, because
+        that is the first moment the question can be DRAWN — the gate is attached long before
+        the channel is live. A recognized or already-recorded workspace says one quiet line or
+        nothing at all; only a root nobody has worked in asks.
+
+        Failures are swallowed on purpose, loudly in the log: a trust store that cannot be read
+        must not be the reason a session refuses to start. The mode it leaves behind in that
+        case is whatever config asked for, which is the same place a pre-v0.14.1 session began.
+        """
+        gate = self._session_gate()
+        if gate is None:
+            return
+        from localharness.cli.session_trust import establish_session_trust
+
+        async def _notice_later(text: str) -> None:
+            await self._channel.send_message(text, metadata={"style": "system.info"})
+
+        pending: list[str] = []
+        try:
+            await establish_session_trust(gate, pending.append)
+        except Exception:  # noqa: BLE001 — a broken trust store costs a notice, never the session
+            log.warning("could not settle workspace trust; leaving the configured mode alone",
+                        exc_info=True)
+            return
+        for text in pending:
+            await _notice_later(text)
 
     def _session_gate(self) -> Any:
         """The gate `/mode` acts on — the one the running loop and its subagents share."""

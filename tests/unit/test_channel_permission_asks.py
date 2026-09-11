@@ -20,6 +20,7 @@ from localharness.channels.discord import (
     PERMISSION_REACTIONS_UNGRANTABLE,
     DiscordChannel,
 )
+from localharness.cli.repl import MODE_EFFECTS, MODE_SETTABLE_NAMES
 from localharness.config.grants import GrantStore
 from localharness.core.bus import EventBus
 
@@ -143,7 +144,12 @@ async def test_an_unrelated_reaction_is_not_an_answer():
 
 @pytest.mark.asyncio
 async def test_the_gate_times_the_wait_out_and_denies(tmp_path):
-    """PRD §3.5: the deadline lives in the gate, and a timeout is a `reject_once`."""
+    """PRD §3.5: the deadline lives in the gate, and a timeout is a `reject_once`.
+
+    ``mode`` is pinned to ``guarded`` because this test is about the ask machinery: v0.14.1
+    moved the default to ``auto`` (owner ruling 2026-09-11), which allows an unfamiliar
+    ``cargo publish`` silently and so would never open a question to time out.
+    """
     from localharness.agent.gate_types import GateSettings, ToolMeta
 
     ch = _discord_channel()
@@ -155,6 +161,7 @@ async def test_the_gate_times_the_wait_out_and_denies(tmp_path):
         grants=GrantStore(tmp_path / "grants.yaml"),
         asker=ch.ask_permission,
         channel_name="discord",
+        mode="guarded",
         settings=GateSettings(ask_timeout_s=0.05),
     )
     outcome = await gate.check(
@@ -329,11 +336,18 @@ def _repl(channel, gate):
 
 
 def _gate(tmp_path) -> PermissionGate:
+    """The gate the `/mode` tests below drive, started in GUARDED.
+
+    ``mode`` is pinned rather than left to :data:`DEFAULT_MODE`: v0.14.1 moved the default to
+    ``auto`` (owner ruling 2026-09-11), and these tests read the mode back to prove a command
+    either did or did NOT change it — which needs a known, named starting point that is not
+    whatever the default happens to be that release.
+    """
     workspace = tmp_path / "project"
     workspace.mkdir(exist_ok=True)
     return PermissionGate(
         boundary=workspace, workspace=workspace, grants=GrantStore(tmp_path / "g.yaml"),
-        channel_name="terminal",
+        channel_name="terminal", mode="guarded",
     )
 
 
@@ -351,23 +365,32 @@ async def test_slash_mode_switches_and_reports(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_slash_mode_refuses_unattended(tmp_path):
-    """PRD §3.4: a chat message must never be able to switch off asking."""
+async def test_slash_mode_sets_unattended_and_says_what_it_means(tmp_path):
+    """`/mode unattended` goes through, and the REPL reports the mode it just entered.
+
+    It was refused until v0.14.1, on the reasoning that a chat message must never switch off
+    asking. The owner met that rule from inside his own terminal — "I can't swap my active
+    localharness session to unattended without exiting" (2026-09-11) — and the person typing
+    `/mode` there is the person the gate protects. What must not change is that the human is
+    TOLD what they just turned off, so the reported line carries this mode's own effect text.
+    """
     channel, gate = _RecordingChannel(), _gate(tmp_path)
     repl = _repl(channel, gate)
 
     await repl._handle_slash("/mode read-only")
     await repl._handle_slash("/mode unattended")
-    assert gate.mode == "read-only", "unattended was settable from a channel command"
-    assert "cannot be set from a channel" in channel.sent[-1]
+    assert gate.mode == "unattended"
+    assert MODE_EFFECTS["unattended"] in channel.sent[-1]
+    assert "unattended" in channel.sent[-1]
 
 
 @pytest.mark.asyncio
 async def test_slash_mode_rejects_an_unknown_name(tmp_path):
     channel, gate = _RecordingChannel(), _gate(tmp_path)
     await _repl(channel, gate)._handle_slash("/mode yolo")
-    assert gate.mode == "guarded"
-    assert "unknown mode" in channel.sent[-1]
+    assert gate.mode == "guarded", "an unknown name changed the mode"
+    # Loosest-first, from the strictness table: the list a person is offered after a typo.
+    assert f"unknown mode 'yolo'; choose one of: {MODE_SETTABLE_NAMES}" in channel.sent[-1]
 
 
 @pytest.mark.asyncio

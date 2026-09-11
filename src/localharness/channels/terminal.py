@@ -1340,7 +1340,9 @@ class TerminalChannel(ChannelAdapter):
                 self._close_burst()
             on_stdout = self.can_run_input_box()
             console = self._console if on_stdout else self._err_console
-            options = (
+            # A request may carry its own legend (the workspace-trust question does — its answer
+            # IS remembered, which the ungrantable legend's tail says the opposite of).
+            options = getattr(request, "options_legend", None) or (
                 PERMISSION_OPTIONS_GRANTABLE if request.grantable
                 else PERMISSION_OPTIONS_UNGRANTABLE
             )

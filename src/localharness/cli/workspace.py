@@ -135,7 +135,12 @@ def resolve_workspace_layer(
         log.info("workspace layer: %s (in project)", found)
         return found
 
-    decision = trust.is_trusted(found)
+    # `is_trusted_tree`, not `is_trusted`: v0.14.1 added a second place a trust decision can be
+    # recorded — the session question records the workspace ROOT, this one records the
+    # `.localharness` directory inside it — and one yes has to answer both (owner ruling
+    # 2026-09-11: "it asks to trust the workspace… trusted = load its config AND auto"). The
+    # walk goes upward only, so trusting a project never trusts the directory above it.
+    decision = trust.is_trusted_tree(found)
     if decision is True:
         log.info("workspace layer: %s (trusted)", found)
         return found
