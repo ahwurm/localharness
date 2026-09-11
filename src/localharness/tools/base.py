@@ -33,6 +33,13 @@ class ToolSchema(BaseModel):
     estimated_tokens: int | None = None
     version: str = "1.0.0"
     destructive: bool = False
+    # What KIND of thing this tool does, as one dotted name: fs.read, fs.write, shell, code,
+    # delegate, web, memory, or `mcp/<server>` for a discovered MCP tool. The permission gate
+    # keys its ask classes on this rather than on tool names (PRD §3.1), and it is the seed of
+    # the v0.14 exposure taxonomy, where a GROUP — not a tool — is the unit an agent is granted
+    # (PRD §6, .planning/scope-hierarchical-tools-v0.12.md). "other" means unclassified: every
+    # registered builtin names its group, and a test asserts none of them is left at the default.
+    group: str = "other"
 
 
 class ToolResult(BaseModel):

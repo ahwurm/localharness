@@ -207,6 +207,7 @@ class BashExecTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="bash_exec",
+            group="shell",
             description=(
                 "Execute a bash command and return combined stdout+stderr. "
                 "Working directory is the harness working directory. "

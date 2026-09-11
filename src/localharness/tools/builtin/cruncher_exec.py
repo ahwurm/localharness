@@ -113,6 +113,7 @@ class CruncherExecTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="cruncher_exec",
+            group="code",
             description=(
                 "Run restricted Python over your GRANTED handle bodies (clean-origin only) for "
                 "joins/aggregation/index the verbs can't express. Bodies are pre-bound as h0, h1, … "

@@ -86,6 +86,7 @@ class WebSearchTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="web_search",
+            group="web",
             description=(
                 "Search the web (DuckDuckGo, no API key). Returns ranked results as "
                 "title / URL / snippet. Use this for current information, news, docs, or "
@@ -152,6 +153,7 @@ class WebFetchTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="web_fetch",
+            group="web",
             description=(
                 "Fetch a URL and return its readable text content (HTML stripped). Output is "
                 "CLIPPED to a character window so large pages can't overflow context. To read "
@@ -270,6 +272,7 @@ class WebPageQueryTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="web_page_query",
+            group="web",
             description=(
                 "Search the FULL retained text of a page previously fetched with web_fetch (lossless "
                 "— not the clipped inline preview). Pass the fetch_id from a web_fetch result plus a "

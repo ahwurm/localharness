@@ -31,6 +31,7 @@ class WriteTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="write",
+            group="fs.write",
             description=(
                 "Write or overwrite a file. Creates parent directories if needed. "
                 "Returns the absolute path written and byte count. For a large file, write "

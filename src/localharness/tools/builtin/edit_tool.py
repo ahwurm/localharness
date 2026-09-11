@@ -35,6 +35,7 @@ class EditTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="edit",
+            group="fs.write",
             description=(
                 "Make a surgical edit to a file by replacing an exact string. Prefer this over "
                 "`write` for changing an existing file — you emit only the changed snippet, not the "

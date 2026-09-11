@@ -29,6 +29,7 @@ class PythonExecTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="python_exec",
+            group="code",
             description=(
                 "Execute Python in a STATEFUL REPL. The namespace PERSISTS across calls "
                 "this session — variables, imports, and function definitions you create "

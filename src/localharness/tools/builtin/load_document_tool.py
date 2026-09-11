@@ -27,6 +27,7 @@ class LoadDocumentTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="load_document",
+            group="fs.read",
             description=(
                 "Load a large local document and retain its FULL text under a handle WITHOUT pulling "
                 "it into context. Returns the handle + a short stub. Use for a document too big to "
