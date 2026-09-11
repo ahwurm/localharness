@@ -335,7 +335,9 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
 
     Runs the SAME engine as `localharness config migrate`, revision-gated: silent with zero
     writes when the config is already at the current defaults revision (the common path, and
-    the removal-respect path — a deliberately-deleted default stays deleted). Best-effort: a
+    the removal-respect path — a deliberately-deleted default stays deleted). It also fires on
+    a config still carrying v0.14's removed `permissions.allow_patterns`, whatever the stamp:
+    running BEFORE the loader is what lets that key be repaired instead of read. Best-effort: a
     migration failure NEVER blocks startup — we warn once and continue with the on-disk config.
     """
     from localharness.config import migrate as _migrate
@@ -360,9 +362,13 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     # escape(): `backup` is a path under the user's config dir and the exception text above quotes
     # one too. Both reach rich as data — this receipt fires on the FIRST start after an upgrade,
     # so under a markup-named config dir it crashed every session until the config was hand-edited.
+    removed_note = (
+        f"; removed permissions.{_migrate.DEAD_KEY} (gone in v0.14 — grants live in the global "
+        "store)" if plan.removed_allow_patterns is not None else ""
+    )
     console.print(
         f"[cyan]i[/cyan]  Security defaults updated (revision {plan.from_revision} → "
-        f"{plan.to_revision}): added {len(plan.added)} deny pattern(s) — additive only; "
+        f"{plan.to_revision}): added {len(plan.added)} deny pattern(s){removed_note} — "
         + escape(f"backup at {backup}"),
         soft_wrap=True,
     )

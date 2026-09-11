@@ -426,8 +426,19 @@ class PermissionConfig(BaseModel):
         grants.yaml`), written only by a human answering a prompt. `extra="forbid"` would reject
         the key anyway — this says why, so an upgrading user is told where their grants went
         instead of reading "extra inputs are not permitted".
+
+        EMPTY is not the same as populated. Every pre-v0.14 `localharness init` wrote
+        `allow_patterns: []` into config.yaml, so rejecting the bare key stopped every existing
+        install from starting — and `config migrate`, the documented repair, failed on the same
+        validator. An empty value (`[]` or null) carried nothing, so it is dropped with a
+        DeprecationWarning and the config loads. A NON-EMPTY value is a real loosening intent
+        that this release does not honor, and silently dropping it would be the dangerous
+        reading: it still fails, with the message above.
         """
-        if isinstance(data, dict) and "allow_patterns" in data:
+        if not isinstance(data, dict) or "allow_patterns" not in data:
+            return data
+        value = data["allow_patterns"]
+        if value:
             raise ValueError(
                 "permissions.allow_patterns was removed in v0.14. Permission GRANTS live in the "
                 "global store (~/.localharness/grants.yaml) and are written only when a human "
@@ -435,7 +446,15 @@ class PermissionConfig(BaseModel):
                 "pre-approve itself (PRD §3.3). Delete the key; to stop being asked, answer "
                 "'always' once, or set permissions.mode explicitly."
             )
-        return data
+        warnings.warn(
+            "permissions.allow_patterns was removed in v0.14 and is ignored. Yours is empty, so "
+            "nothing changed — `localharness config migrate` deletes the key for you. Permission "
+            "grants live in the global store (~/.localharness/grants.yaml) and are written only "
+            "when a human answers a prompt (PRD §3.3).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {k: v for k, v in data.items() if k != "allow_patterns"}
 
     @field_validator("mode", mode="before")
     @classmethod
