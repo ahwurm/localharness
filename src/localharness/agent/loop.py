@@ -1969,8 +1969,6 @@ class AgentLoop:
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
 
-                session.actions_taken += 1
-
                 # Publish tool_call action for terminal display
                 await self._bus.publish(Action(
                     agent_id=session.agent_id,
@@ -2003,6 +2001,15 @@ class AgentLoop:
                     ))
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
+
+                # Counted only now, on the ALLOWED side of the gate. A call a human refused is
+                # not an action the agent took: it never ran, so it must not spend the task's
+                # action budget, must not appear in the "completed N tool calls" line, and must
+                # not push the turn toward max_actions — which is exactly what the dispatch-cap
+                # comment above already promises for a budget refusal. The stuck detector still
+                # sees every refusal, so a model that keeps retrying a disallowed call is still
+                # caught by the stuck ladder.
+                session.actions_taken += 1
 
                 # Dispatch the tool call against the agent's registry.
                 result_content = ""
@@ -2414,16 +2421,18 @@ class AgentLoop:
 
         executed = 0
         for tool_call in tool_calls:
-            session.actions_taken += 1
             perm = await self._gate_check(session, tool_call)
             if not perm.allowed:
+                # Neither counter moves for a refused call: it did not run. `executed` fed
+                # `StepResult.tool_calls_executed`, so a turn whose every call was denied
+                # reported the same number as one where every call ran.
                 session.push({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": f"{DENIED_OBSERVATION_PREFIX}{perm.reason}",
                 })
-                executed += 1
                 continue
+            session.actions_taken += 1
             result_content = ""
             if self._tools is not None:
                 try:
