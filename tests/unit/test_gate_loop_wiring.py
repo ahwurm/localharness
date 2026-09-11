@@ -232,3 +232,41 @@ async def test_subagent_dispatch_shares_the_parent_gate(bus, tmp_path):
         monkey.undo()
     assert captured["gate"] is gate
     assert inspect.signature(subagent.dispatch_explore_subagent).parameters["gate"]
+
+
+# ------------------------------------------------- one call, one prompt (defect D1)
+
+@pytest.mark.asyncio
+async def test_a_two_class_command_asks_once_and_runs_in_the_same_call(bus, tmp_path):
+    """Verification A defect D1, at the level the human feels it.
+
+    `mkdir -p <outside>/y && touch <outside>/y/f` raises four asks (two first-exposure commands,
+    two directories outside the boundary). PRD §7 wants ONE question, the tool running in that
+    same iteration, and the identical call never asking again.
+    """
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    outside = (tmp_path / "outside").resolve()
+    command = f"mkdir -p {outside}/y ; touch {outside}/y/f"
+    asked: list[PermissionRequest] = []
+
+    async def asker(request: PermissionRequest) -> Decision:
+        asked.append(request)
+        return Decision(kind="allow_always")
+
+    tool = _Shell()
+    grants = GrantStore(tmp_path / "grants.yaml")
+    gate = _gate(tmp_path, workspace, asker=asker, grants=grants, bus=bus)
+    registry = await _registry(tool)
+
+    await _loop(bus, registry, gate, llm=MockLLMClient(_plan(command))).run_turn("t")
+    assert len(asked) == 1, f"one call must raise one question, got {[r.display for r in asked]}"
+    assert tool.ran == [command], "the approved call must run in the same iteration"
+    assert len(asked[0].grant_keys) >= 3
+    assert {k for klass, k in asked[0].grant_keys if klass == "shell-unfamiliar"} == {"mkdir", "touch"}
+    for klass, key in asked[0].grant_keys:
+        assert grants.lookup(workspace, key) is not None, f"no grant written for {klass} {key}"
+
+    await _loop(bus, registry, gate, llm=MockLLMClient(_plan(command))).run_turn("t")
+    assert len(asked) == 1, "the grants were written but the identical call asked again"
+    assert tool.ran == [command, command]

@@ -77,6 +77,16 @@ class PermissionRequest:
     display: str
     """One-line human rendering, e.g. ``bash: rm -rf build/  (destructive, asks every time)``."""
 
+    grant_keys: tuple[tuple[str, str], ...] = ()
+    """Every ``(klass, key)`` an ``allow_always`` answer should remember, not just the primary.
+
+    One tool call can raise several asks at once (two unfamiliar commands writing into two new
+    directories). They are merged into ONE request — ``klass``/``key`` name the most severe of
+    them — and this carries the rest, so a single "always here" ends the whole call's asking
+    (PRD §7: "the same command never asks again in that workspace"). Empty means "just
+    ``(klass, key)``". Ignored when ``grantable`` is False: one ungrantable ask makes the whole
+    request ungrantable and nothing durable is written."""
+
 
 @dataclass(frozen=True)
 class VerdictResult:
