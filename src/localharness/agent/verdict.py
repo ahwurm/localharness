@@ -474,6 +474,27 @@ def _decide(
     )
 
 
+def _granted_directory(ctx: GateContext, directory: Path) -> bool:
+    """Is this directory — or any directory above it — already granted? (PRD §3.1 edit-outside.)
+
+    An ``edit-outside`` grant is keyed on the target's parent directory, and a human who
+    answered "always here" for ``/tmp/x`` meant the place, not that one path segment.
+    Verification A defect D4: the lookup checked only the immediate parent, so a project
+    writing into fresh subdirectories under an already-approved root paid a first-exposure
+    prompt forever — PRD §8's "growing vocabularies" risk arriving through paths.
+
+    The walk goes from the parent UPWARD to the filesystem root and stops at the first hit, so
+    it can only ever find a grant a human gave on a wider directory; it never invents one. It
+    cannot widen a grant into a protected path either: :func:`_target_asks` classifies a
+    protected target before it ever reaches here (PRD §3.1's fixed order), so a grant on ``~``
+    does not cover ``~/.ssh``.
+    """
+    for candidate in (directory, *directory.parents):
+        if ctx.grants(ctx.workspace, str(candidate)) is not None:
+            return True
+    return False
+
+
 def _target_asks(
     ctx: GateContext,
     settings: GateSettings,
@@ -501,9 +522,13 @@ def _target_asks(
             continue
         if resolved is not None and _within(ctx.boundary, resolved):
             continue
-        key = str(resolved.parent) if resolved is not None else raw
-        where = str(resolved) if resolved is not None else f"{raw} (unresolvable)"
-        if ctx.grants(ctx.workspace, key) is not None:
+        if resolved is not None:
+            key, where = str(resolved.parent), str(resolved)
+            granted = _granted_directory(ctx, resolved.parent)
+        else:
+            key, where = raw, f"{raw} (unresolvable)"
+            granted = ctx.grants(ctx.workspace, key) is not None
+        if granted:
             continue
         asks.append(_ask_record(
             "edit-outside", key, f"writes outside the workspace boundary ({where})",
