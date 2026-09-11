@@ -627,6 +627,40 @@ def test_a_git_operation_is_in_its_own_key(
     assert segment.read_only is read_only
 
 
+# (command, write targets) — the A3 repro: a clone writes a whole repository, `.git/hooks`
+# included, and named no target at all, so the protected-path tier never looked at where it landed.
+GIT_DESTINATIONS: list[tuple[str, tuple[str, ...]]] = [
+    ("git clone https://x ~/.ssh", ("~/.ssh",)),
+    ("git clone -b main https://x/y.git ~/.ssh", ("~/.ssh",)),
+    ("git clone https://x/y.git", ("y",)),
+    ("git clone git@host:org/tool.git", ("tool",)),
+    ("git clone --depth 1 https://x/y.git", ("y",)),
+    ("git init ~/.ssh", ("~/.ssh",)),
+    ("git init", (".",)),
+    ("git init -b main ~/.ssh", ("~/.ssh",)),
+    ("git worktree add /tmp/x", ("/tmp/x",)),
+    ("git worktree add -b feature /tmp/x main", ("/tmp/x",)),
+    ("git submodule add https://x/y.git vendor/y", ("vendor/y",)),
+    ("git submodule add https://x/y.git", ("y",)),
+    # every other git subcommand writes inside the repository the boundary already covers
+    ("git status", ()),
+    ("git worktree list", ()),
+    ("git submodule update --init", ()),
+]
+
+
+@pytest.mark.parametrize("command,targets", GIT_DESTINATIONS, ids=[c[0] for c in GIT_DESTINATIONS])
+def test_a_git_subcommand_that_creates_a_repository_names_its_destination(
+    command: str, targets: tuple[str, ...]
+) -> None:
+    assert classify_shell(command, SETTINGS).write_targets == targets
+
+
+def test_a_git_destination_follows_the_cd() -> None:
+    """The destination is a path like any other: it resolves against where the shell stands."""
+    assert classify_shell("cd ~ && git clone https://x/y.git", SETTINGS).write_targets == ("~/y",)
+
+
 def test_a_grant_on_the_bare_git_subcommand_never_covers_its_operations() -> None:
     """The A2 bar: the listing key and the destroying key are different keys."""
     assert sigs("git branch") != sigs("git branch -D x")
