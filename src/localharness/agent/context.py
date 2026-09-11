@@ -1381,14 +1381,14 @@ def _write_compact_md(path: Path, content: str) -> None:
     import os
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     os.replace(str(tmp), str(path))
 
 
 def load_compact_md(compact_md_path: Path) -> Message | None:
     """Load compact.md from disk and return as a system message, or None if not found."""
     if compact_md_path.exists():
-        content = compact_md_path.read_text().strip()
+        content = compact_md_path.read_text(encoding="utf-8").strip()
         if content:
             return {"role": "system", "content": f"[Prior Session Context]\n{content}"}
     return None
