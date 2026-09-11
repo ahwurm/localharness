@@ -237,6 +237,65 @@ grant on ``docker volume`` would cover ``rm`` (docker(1) "Management Commands").
 ``docker rmi`` and are NOT in the destructive defaults, so they are grantable — but at least the
 grant is for that one operation rather than for the whole group."""
 
+SUBCOMMAND_OPERATION_WORDS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "git branch": (
+        ("-D", ("-D",)), ("-d", ("-d", "--delete")), ("-M", ("-M",)), ("-m", ("-m", "--move")),
+        ("-C", ("-C",)), ("-c", ("-c", "--copy")),
+    ),
+    "git remote": (
+        ("set-url", ("set-url",)), ("remove", ("remove",)), ("rm", ("rm",)),
+        ("prune", ("prune",)), ("rename", ("rename",)), ("add", ("add",)),
+        ("set-head", ("set-head",)), ("set-branches", ("set-branches",)),
+        ("update", ("update",)), ("get-url", ("get-url",)), ("show", ("show",)),
+    ),
+    "git stash": (
+        ("drop", ("drop",)), ("clear", ("clear",)), ("pop", ("pop",)), ("apply", ("apply",)),
+        ("push", ("push",)), ("save", ("save",)), ("branch", ("branch",)),
+        ("create", ("create",)), ("store", ("store",)), ("list", ("list",)), ("show", ("show",)),
+    ),
+    "git checkout": (("--", ("--", ".")),),
+    "git restore": (("--worktree", ("--worktree", "-W")), ("--staged", ("--staged", "-S"))),
+    "git worktree": (
+        ("remove", ("remove",)), ("move", ("move",)), ("prune", ("prune",)), ("add", ("add",)),
+        ("lock", ("lock",)), ("unlock", ("unlock",)), ("repair", ("repair",)), ("list", ("list",)),
+    ),
+    "git submodule": (
+        ("deinit", ("deinit",)), ("add", ("add",)), ("update", ("update",)), ("init", ("init",)),
+        ("sync", ("sync",)), ("foreach", ("foreach",)), ("set-url", ("set-url",)),
+        ("set-branch", ("set-branch",)), ("absorbgitdirs", ("absorbgitdirs",)),
+        ("summary", ("summary",)), ("status", ("status",)),
+    ),
+    "git reflog": (
+        ("expire", ("expire",)), ("delete", ("delete",)), ("exists", ("exists",)),
+        ("show", ("show",)),
+    ),
+    "git gc": (("--prune", ("--prune",)),),
+    "git push": (("--delete", ("--delete", "-d")),),
+}
+"""The OPERATION a two-word signature is missing, when the operation is a third word or a flag.
+
+``git branch`` lists branches and is in the ALLOW tier; ``git branch -D x`` deletes one and is
+ungrantable. Both signed as the bare ``git branch``, so the read-only verdict covered the delete —
+and the same collapse hid ``git remote set-url`` (repoint a remote at an attacker's host) behind
+``git remote``, ``git stash drop`` behind ``git stash``, and ``git restore``'s worktree discard
+behind a key that says nothing (v0.14 critic A2). This table restores the distinction the way
+:data:`NESTED_SUBCOMMAND_GROUPS` does for docker's management groups, except that git spells some
+of its operations as a FLAG (``branch -D``, ``restore --staged``, ``gc --prune``), which a
+positional scan cannot see.
+
+Each entry is (canonical suffix, the spellings that mean it), matched by :func:`_matches_flag`, so
+``--flag=value`` and a short-option cluster (``git branch -vD``) both land. **First match in TABLE
+order wins, not in command-line order** — the same rule as :data:`SED_MODE_FLAGS` — so the more
+destructive reading is chosen when a command carries two: ``git restore --staged --worktree`` does
+discard the worktree, and signs as ``git restore --worktree``.
+
+Deliberate approximations, named rather than hidden: ``--delete --force`` on a branch spells the
+same thing as ``-D`` but signs as ``-d`` (both are destructive, so nothing escapes); ``git
+checkout``'s discard is recognized only in its two documented spellings (``--`` and a bare ``.``),
+so ``git checkout ./src`` — a pathspec that is also a discard — still signs as the grantable
+``git checkout``. Source: git-branch(1), git-remote(1), git-stash(1), git-checkout(1),
+git-restore(1), git-worktree(1), git-submodule(1), git-reflog(1), git-gc(1), git-push(1)."""
+
 FLAG_ALIASES: dict[str, tuple[str, ...]] = {
     "r": ("r", "R"),
     "R": ("R", "r"),
@@ -1221,6 +1280,10 @@ def _signature(
                 nested = _first_subcommand(head, after)
                 if nested:
                     base = f"{base} {nested[0]}"
+            else:
+                operation = _operation_word(base, after)
+                if operation:
+                    base = f"{base} {operation}"
 
     if head == "sed":
         for canonical, spellings in SED_MODE_FLAGS:
@@ -1381,6 +1444,18 @@ def _first_subcommand(head: str, rest: list[str]) -> tuple[str, list[str]] | Non
             continue
         return token, rest[index + 1:]
     return None
+
+
+def _operation_word(base: str, after: list[str]) -> str:
+    """The operation this two-word signature is missing, or ``""`` (:data:`SUBCOMMAND_OPERATION_WORDS`).
+
+    ``after`` is everything past the subcommand. Table order decides, not command-line order, so
+    the destructive reading wins when a command carries two spellings.
+    """
+    for canonical, spellings in SUBCOMMAND_OPERATION_WORDS.get(base, ()):
+        if any(_matches_flag(token, spellings) for token in after):
+            return canonical
+    return ""
 
 
 def _destructive_flags(base: str, rest: list[str], settings: GateSettings) -> str:

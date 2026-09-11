@@ -223,6 +223,7 @@ READ_ONLY_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "tree", "which", "env", "printenv",
     "stat", "file", "du", "df", "date", "uname", "pwd", "echo", "true", "false", "type",
     "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git remote",
+    "git remote show", "git remote get-url", "git stash list", "git stash show",
     "sed -n", "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "readlink",
     "id", "whoami", "hostname", "nproc", "free", "uptime", "ps", "ss", "lsof",
     "docker ps", "docker logs", "docker images", "docker inspect", "docker version", "docker info",
@@ -239,6 +240,12 @@ docker-images(1), docker-inspect(1) — all report, none of them start, stop or 
 DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "rm -r", "rm -f", "rm -rf",
     "git push --force", "git reset --hard", "git clean -f",
+    "git branch -D", "git branch -d", "git branch -M",
+    "git remote set-url", "git remote remove", "git remote rm", "git remote prune",
+    "git stash drop", "git stash clear",
+    "git checkout --", "git restore", "git restore --worktree",
+    "git reflog expire", "git gc --prune", "git filter-branch", "git push --delete",
+    "git worktree remove --force", "git submodule deinit --force",
     "chmod -R", "chown", "chgrp",
     "sudo", "su", "doas",
     "docker exec", "docker run", "docker start", "docker restart", "docker stop", "docker kill",
@@ -273,6 +280,20 @@ ask-fatigue on commands nobody needs protection from. The shipped deny defaults 
 the worst of these first (stop, kill, rm, ``compose down``): DENY is a tier above ASK, not a
 substitute for these entries.
 
+The git block is the same judgement applied to git's own operations (v0.14 critic A2). ``git
+branch`` and ``git remote`` are READS in the ALLOW tier above, and every operation they carry as a
+third word or a flag used to collapse onto those two keys — so the read-only verdict covered
+``git branch -D``, and ``git remote set-url origin http://attacker/`` (every later push and pull
+redirected) asked nothing at all. The entries here are the ones that destroy work that is not
+recoverable from the repository itself: a deleted branch or stash, a discarded worktree change
+(``git checkout --``, ``git restore`` with no ``--staged``), an expired reflog or pruned object
+(``git reflog expire``, ``git gc --prune`` — the two commands that throw away the copies the other
+deletes are recoverable FROM), a rewritten history (``git filter-branch``), a deleted remote
+branch (``git push --delete``), and a forced removal of a worktree or submodule with whatever was
+in it. Everything else git does stays grantable on its own key: ``git remote add``, ``git stash``
+and its push/pop/apply, ``git checkout BRANCH``, ``git switch``, ``git worktree add``,
+``git submodule update``.
+
 Residual, named rather than hidden: docker's management-command spellings of the same operations
 (``docker container rm``, ``docker container exec/run``, ``docker image rm``) are NOT in this set,
 so they classify as unfamiliar and can be granted. They are aliases for entries that are here."""
@@ -283,11 +304,18 @@ DESTRUCTIVE_FLAG_VERBS_DEFAULT: dict[str, tuple[str, ...]] = {
     "git push": ("force",),
     "git reset": ("hard",),
     "git clean": ("f",),
+    "git worktree remove": ("force",),
+    "git submodule deinit": ("force",),
 }
 """Verbs whose destructive variant is a flag. The classifier canonicalizes only these flags
 into the signature (``rm -r -f x`` → ``rm -rf``; ``git push -f`` → ``git push --force``) so a grant on
 ``rm`` never covers ``rm -rf`` (critic finding 12). Long forms map: ``--recursive``→r,
-``--force``→f/force, ``--recursive`` for chmod→R."""
+``--force``→f/force, ``--recursive`` for chmod→R.
+
+The two three-word git keys are the operations that are only destructive when forced:
+``git worktree remove`` and ``git submodule deinit`` both refuse to throw away uncommitted work
+until ``--force`` is passed, so the unforced spelling stays grantable and the forced one is in the
+ungrantable set above (git-worktree(1), git-submodule(1))."""
 
 PIPE_TO_SHELL_SOURCES_DEFAULT: frozenset[str] = frozenset({"curl", "wget"})
 """The fetch side of the pipe-to-shell rule: a segment with one of these signatures piped into a
