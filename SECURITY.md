@@ -91,19 +91,32 @@ to approve without reading, so from v0.14.1 the shape is different: the first ti
 a workspace you are asked **once** whether you trust it, and after that everything runs except a
 named list of dangerous operations.
 
-**The trust question.** It is the same record as the one that decides whether a project's own
-`.localharness/` config is loaded, kept in `~/.localharness/trusted_workspaces.yaml`, global,
-answered once and remembered forever. Trusting a workspace means both halves: its config layer is
-loaded, and its tool calls run without asking. Answer no and the session runs in `guarded`, which
-asks once about each new thing and remembers the answer. A channel that cannot ask and has no
-record for this workspace runs `guarded` too — failing closed is still the rule, and
-`permissions.mode: unattended` is still the explicit way a scheduled job opts out of all of it. In
-Zed the question arrives as the permission dialog, once per project.
+**The trust question, and the three ways a session gets past it.** They are tried in this order,
+and only the last one is a prompt (`cli/session_trust.py`):
 
-**A folder you have already worked in is not asked about.** A workspace with earlier LocalHarness
-sessions behind it — its own `.localharness/`, its state and history — is recognized and trusted
-without a question; only a folder this machine has never run a session in gets the one dialog. The
-prompt exists for the repository you just cloned, not for the project you have been living in.
+1. **A recorded decision.** `~/.localharness/trusted_workspaces.yaml` is consulted for this root
+   and every directory above it, so a nested folder inherits its project's answer. A recorded
+   "no" is honored too: the session runs `guarded`.
+2. **Evidence that you have already worked here.** Any `agents/*/sessions/*.jsonl` under the
+   workspace's own `.localharness/` — or under the global store, for a session rooted at `$HOME`
+   with no project — counts as prior use. A place you have worked in is not a place to be asked
+   about, so the harness records the trust, prints one line saying it recognized the workspace,
+   and moves on. (The global store only vouches for the home-rooted case; one old home session
+   can never vouch for a project directory nobody has opened.)
+3. **The question**, asked through whatever channel you are on: inline in the terminal, a dialog
+   in Zed, a message in Discord. A "yes" writes the trust record and is never asked here again —
+   one record, both halves: the project's `.localharness/` config loads, and its tool calls run
+   under `auto`. A "no" is recorded too, and the session runs `guarded`.
+
+**A session that cannot ask and has no record runs `guarded` and records nothing** — fail closed,
+and leave the question for the next interactive session in that directory rather than answering it
+on that person's behalf. **An explicitly configured `permissions.mode` skips all of this**:
+`guarded` and `read-only` already ask or refuse, and `trusted` and `unattended` are deliberate
+loosenings someone typed into a config, so confirming a decision you just made is exactly the
+fatigue this release removes.
+
+In Zed the question is a permission dialog with two buttons — *Trust this workspace* and *Not
+now* — because its answer is permanent, unlike every other dialog the gate raises there.
 
 **There is no allow-list in `auto`.** Nothing is enumerated as safe; everything is allowed unless
 it is on the blacklist in step 2 below, and that list is the thing to curate. This is deliberate
@@ -115,48 +128,67 @@ read and argue with. Each step below says what it does in `auto`.
 1. **Deny.** Your deny patterns, unchanged from earlier versions. Nothing overrides them — not a
    grant, not a mode.
 2. **`AUTO_BLACKLIST`: ask, and no answer is remembered.** In a trusted workspace this is the
-   **whole** of what still asks. Everything not on it runs without asking.
-   - **A delete or a recursive permission change whose target is outside the project, or cannot be
-     resolved.** `rm -rf`, `find -delete`, the Windows delete spellings, `chmod -R`, `chown -R`.
-     Inside the project they run — that is a named gap below, not an oversight — and a target the
-     gate cannot resolve (a variable, a glob, a command it could not read) counts as outside,
-     because the rule rests on knowing where the command points.
-   - **Git commands that throw away committed or published work.** `git push --force`,
-     `git push --delete`, `git reset --hard`, `git clean -f`.
-   - **Running as another user.** `sudo`, `su`.
-   - **Piping a download into a shell.** `curl … | sh` and its kin.
-   - **Writing raw devices.** `dd`, `mkfs`, `shred`, `format`.
-   - **Writes to a secret store.** `~/.ssh`, `~/.aws`, `~/.gnupg`, credential files, your shell rc
-     files, `~/.localharness`.
-   - **Writes to a system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`),
-     `/boot`, `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
+   **whole** of what still asks. Everything not on it runs without asking. It is one structure in
+   `agent/gate_types.py` with four fields, listed here in that order:
+   - **`target_scoped_verbs` — a delete or a recursive permission change whose target is outside
+     the project, protected, or unresolvable.** `rm`, `rmdir`, `chmod`, `chown`, `chgrp`,
+     `truncate`, `find` (with `-delete` or `-exec`), and the Windows spellings `Remove-Item`,
+     `ri`, `del`, `erase`, `rd`. Nothing about these verbs is dangerous on its own — `rm -rf
+     build` is what a build script does — so only the target decides, and a target the classifier
+     cannot place (a variable, a glob, a substitution, a `cd` it could not follow, or no target at
+     all) counts as outside: the whole narrowing rests on knowing where the command points.
+   - **`irreversible_signatures` — commands that ask wherever they point.** `sudo`, `su`, `doas`;
+     `dd`, `mkfs`, `shred`, `format`, `diskpart`; `git push --force`, `git push --delete`,
+     `git reset --hard`, `git clean -f`. Matched on the canonical signature, so `git push -f` and
+     `git push --force-with-lease` are the one `git push --force` entry.
+   - **`protected_paths_workspace` — in-project writes to `.git/**` and the behaviour-changing
+     files of `.localharness/`** (`config.yaml`, `overrides.yaml`, `plugins/**`). Those are the
+     files that change what the next run executes. The rest of a project's `.localharness/` —
+     agents, tools, state, memory — is ordinary project content and is not protected, and neither
+     are `.env` files or keys inside your own repository, which `guarded` still asks about.
+     The home and system protected sets apply in full on top of this: `~/.ssh`, `~/.aws`,
+     `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
+     `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files, the
+     Windows credential folders — and, under `~/.localharness`, the same behaviour-changing
+     shortlist: `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
+     `declined_workspace_offers.yaml` and `plugins/**`. The harness's own bookkeeping under that
+     directory (agents, tools, session state, memory, history, the audit log, the kill file) is
+     not protected: writing it cannot change what the harness does next.
+   - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
+     `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
-   - **Writes inside the project to `.git/**` or `.localharness/**`.** The two directories that
-     change what the next run does.
-
-   The flags are part of what is matched, so `rm file` and `rm -rf dir` are different things.
+   - **`pipe_to_shell` — a download piped into a shell.** `curl … | sh` and its PowerShell twin,
+     where the code being run has been read by nobody. It is the sink that decides, and only when
+     the sink takes its **program** from standard input: `curl x | sh`, `curl x | python3` with no
+     script argument, `… | iex`. `curl x | python3 -c '…'` is not pipe-to-shell — the program is
+     the `-c` string, and the pipe only feeds it data.
+   - **A call the gate could not read at all.** A `command` that is present but not a string
+     (`{"command": ["rm", "-rf", "/"]}`), a path argument that is not a string: unreadable is not
+     the same as absent, so it asks, ungrantably, with no identity to remember. A command *name*
+     computed at runtime is **not** this and does not ask in `auto` — `eval "$(direnv hook bash)"`
+     and `"$VAR" …` are ordinary work in a workspace you have trusted.
 
    **What is deliberately NOT on the list**, and therefore runs without asking in a trusted
    workspace: `docker` in any form (your own deny patterns already refuse `docker stop`, `kill`,
    `rm`/`rmi` and `compose down` outright, which is where that protection belongs); `git branch`,
-   `git stash`, `git checkout` and `git restore`, including their discarding spellings; `.env` and
-   key files inside the project (a `write(*/.env)` deny pattern ships by default and refuses those
-   outright, and a key checked into your own repo is the repo's problem, not the gate's);
-   interpreters (`python3 -c`, `bash -c`, `perl -e`), `python_exec` and `cruncher_exec`; subagents;
-   MCP and plugin tools; network reads; and writes anywhere else at all — including elsewhere in
-   your home directory.
+   `git stash`, `git checkout`, `git restore`, `git filter-branch`, `git reflog expire`, and every
+   other git subcommand; `.env` and key files inside the project (a `write(*/.env)` deny pattern
+   ships by default and refuses those outright); interpreters (`python3 -c`, `bash -c`, `perl -e`),
+   `python_exec` and `cruncher_exec`; subagents; MCP and plugin tools; network reads; and writes
+   anywhere else at all — including elsewhere in your home directory.
 
    Two more things bind in `auto` and are not questions: a refusal you have already recorded denies
    outright (step 3), and so does anything your `deny_patterns` name (step 1). `guarded` adds the
-   classes in step 4, and one of its own: every write-shaped call made when there is no workspace
-   boundary at all.
+   classes in step 4, its own fuller rule sets, and one class of its own: every write-shaped call
+   made when there is no workspace boundary at all.
 
-   **Curate this list, because there is no other surface to curate.** It is one structure —
-   `AUTO_BLACKLIST` — assembled from the `permissions.ask.*` rule sets (`destructive_signatures`,
-   `protected_paths_home`, `protected_paths_workspace`, `protected_paths_system` and the rest; spec
-   06 has the full set), and a project layer may only extend it, never shorten it.
-   `localharness ask-rate --traces DIR --mode auto` replays your own traces and reports which
-   entries actually fired, which is the evidence for adding one.
+   **Curate this list, because there is no other surface to curate.** `AUTO_BLACKLIST` is
+   deliberately **not** reachable from `permissions.ask.*` — every field of it either loosens the
+   mode when extended or is the one list deciding whether the default is safe at all, and config
+   travels with a repository. `localharness ask-rate --traces DIR --mode auto` replays your own
+   traces and reports which entries actually fired (`--mode guarded` measures the v0.14.0
+   behaviour over the same corpus, which is the before/after), and that is the evidence a change
+   to the list should rest on.
 3. **Grants.** A remembered "always" for this workspace. `auto` neither reads them nor writes them
    — it remembers nothing, because it asks about nothing that could be remembered. In `guarded`
    they are checked only after step 2, so an old permissive answer can never cover a destructive
@@ -250,6 +282,13 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   forever, is what stands between a project and an unasked tool call — and it is a question about
   the folder, not about the call. The blacklist is what limits the blast radius after it, so read
   it as the actual policy.
+- **Prior use is taken as consent.** A workspace with earlier LocalHarness sessions in its state
+  store is trusted without ever being asked about, and the trust is then recorded. That is the
+  behaviour the owner asked for — being re-asked about the project you live in is the fatigue this
+  release removes — but state it plainly: sessions that ran under an older version, or under
+  `guarded`, or that someone else's run left behind in a shared checkout, are what that evidence
+  is made of. Delete the entry in `trusted_workspaces.yaml` to be asked again, and remember that a
+  `.localharness/` you did not create is a reason to look before you run.
 - **`auto` trusts the project directory.** A destructive command whose target resolves inside the
   project runs without asking: `rm -rf build`, a `chmod -R` over the tree, an `rm -rf .` at its
   top. That is the price of a default that stays quiet during ordinary work, and it is a real
