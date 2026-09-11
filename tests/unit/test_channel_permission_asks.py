@@ -362,6 +362,22 @@ async def test_slash_mode_switches_and_reports(tmp_path):
 
     assert await repl._handle_slash("/mode") is True
     assert "Permission mode: read-only" in channel.sent[-1]
+    # the bare command lists everything settable, loosest first — `auto` included, which is the
+    # mode a person switching BACK from read-only wants and could not name before v0.14.1
+    assert MODE_SETTABLE_NAMES in channel.sent[-1]
+    assert "auto" in MODE_SETTABLE_NAMES and "unattended" in MODE_SETTABLE_NAMES
+
+
+@pytest.mark.asyncio
+async def test_slash_mode_accepts_auto_the_new_default(tmp_path):
+    """`auto` is a real mode as of v0.14.1 and has to be reachable by name: a session that got
+    tightened mid-task has to be able to get back."""
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+
+    assert await repl._handle_slash("/mode auto") is True
+    assert gate.mode == "auto"
+    assert MODE_EFFECTS["auto"] in channel.sent[-1]
 
 
 @pytest.mark.asyncio

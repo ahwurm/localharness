@@ -60,9 +60,11 @@ def _permissions(global_dir: Path, workspace_dir: Path):
 def test_a_workspace_cannot_loosen_the_session_mode(layers, looser, caplog) -> None:
     """The whole point of the spine: a repo cannot switch the gate off for the session it runs in.
 
-    `auto` is in the list because the legacy spelling maps to `guarded` — a workspace that says
-    `auto` against a global `read-only` must be narrowed like any other loosening value, not wave
-    through as an unrecognized string.
+    `auto` is in the list because as of v0.14.1 it is a REAL mode — the default, and the one that
+    runs almost everything without asking (owner ruling 2026-09-11). That makes it the value a
+    hostile repo would actually reach for, and the narrow-only union has to hold against it
+    exactly as it does against `unattended`. It was in this list before for the opposite reason
+    (it was a legacy spelling of `guarded`); the rule did not change, the word did.
     """
     global_dir, ws = layers
     _write_yaml(global_dir / "agents" / "deployer.yaml",
@@ -75,6 +77,24 @@ def test_a_workspace_cannot_loosen_the_session_mode(layers, looser, caplog) -> N
 
     assert perms.mode == "read-only", "a workspace loosened the session mode"
     assert any("permissions.mode" in r.getMessage() for r in caplog.records)
+
+
+def test_a_workspace_cannot_put_a_guarded_session_into_auto(layers, caplog) -> None:
+    """The v0.14.1 shape of the same rule, spelled out because it is the one that will be
+    attempted: an operator who chose `guarded` for themselves must not have a cloned repo put
+    the session back into the mode that asks about almost nothing."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                {"name": "deployer", "role": "Deploy agent", "permissions": {"mode": "guarded"}})
+    _write_yaml(ws / "agents" / "deployer.yaml",
+                {"name": "deployer", "role": "Deploy agent", "permissions": {"mode": "auto"}})
+
+    with caplog.at_level(logging.WARNING):
+        perms = _permissions(global_dir, ws)
+
+    assert perms.mode == "guarded"
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "auto" in warning and "guarded" in warning
 
 
 def test_the_warning_names_both_values(layers, caplog) -> None:

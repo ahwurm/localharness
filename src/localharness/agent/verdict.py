@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 from localharness.agent.gate_types import (
     AUTO_ASK_CLASSES,
     DEFAULT_MODE,
+    DOTTED_VARIANT_SEPARATOR,
     UNGRANTABLE_CLASSES,
     GateSettings,
     Grant,
@@ -921,6 +922,9 @@ def _auto_blacklisted(
     verb = signature.split(" ", 1)[0]
     if verb in blacklist.irreversible_signatures:
         return verb
+    family = verb.partition(DOTTED_VARIANT_SEPARATOR)[0]
+    if family and family != verb and family in blacklist.irreversible_signatures:
+        return verb  # `mkfs.ext4` is the `mkfs` entry; see the constant's docstring
     if verb not in blacklist.target_scoped_verbs:
         return None
     if segment.unresolvable_destructive:
