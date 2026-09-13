@@ -682,3 +682,28 @@ def test_permission_resolved_rejects_a_decision_that_is_not_a_decision_kind():
             agent_id=AgentID("a"), session_id=SessionID("s"),
             tool_name="bash_exec", klass="mcp", decision="maybe",
         )
+
+
+def test_a_staged_call_survives_the_session_log_roundtrip():
+    """The bus writes every event with model_dump_json(); a PendingCall carries a nested
+    PermissionRequest dataclass, so this is the one event whose roundtrip is not trivially true."""
+    import time
+
+    from localharness.agent.gate_types import PendingCall, PermissionRequest
+    from localharness.core.events import PermissionStaged
+
+    request = PermissionRequest(
+        tool_name="bash_exec", tool_params={"command": "rm -rf ~/old-notes"},
+        klass="shell-destructive", key="rm -rf", grantable=False, reason="outside the workspace",
+        display="bash: rm -rf ~/old-notes",
+    )
+    pending = PendingCall(
+        id=1, request=request, rendering=request.display, agent_label="", session_id="s",
+        created_at=time.time(),
+    )
+    event = PermissionStaged(agent_id=AgentID("a"), session_id=SessionID("s"), pending=pending,
+                             total=1, channel="terminal")
+    restored = PermissionStaged.model_validate_json(event.model_dump_json())
+    assert restored.pending.id == 1
+    assert restored.pending.request.tool_params == {"command": "rm -rf ~/old-notes"}
+    assert restored.total == 1

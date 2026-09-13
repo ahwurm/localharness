@@ -528,16 +528,11 @@ class PermissionGate:
         if self.owner_agent_id is None:
             self.owner_agent_id = agent_id  # see the attribute's docstring: first caller owns
         identity = call_identity(tool_name, tool_params)
-        if identity in self._approved_once:
-            # A human answered `/approve` for exactly this call. The ticket is spent here, before
-            # the deny tier is consulted, so it can never be stockpiled — but the deny tier still
-            # wins, because `permissions.deny_patterns` is the owner's own never-run list and no
-            # channel answer is above it (it may also have CHANGED since the call was staged).
-            pending_id = self._approved_once.pop(identity)
-            if not self._deny(tool_name, tool_params, deny).denied:
-                return GateOutcome(
-                    allowed=True, reason=APPROVED_ONCE_REASON.format(id=pending_id)
-                )
+        # A human answered `/approve` for exactly this call. The ticket is spent on sight, so it
+        # can never be stockpiled — but it only turns an ASK into an ALLOW below: a DENY from the
+        # verdict (the owner's `permissions.deny_patterns`, or a refusal recorded since the call
+        # was staged) still wins, because no channel answer is above either.
+        ticket = self._approved_once.pop(identity, None)
         try:
             result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
         except Exception:  # noqa: BLE001 — a verdict that crashes must deny, never escape
@@ -550,6 +545,8 @@ class PermissionGate:
 
         request = result.request
         assert request is not None  # evaluate() always attaches one to an ASK
+        if ticket is not None:
+            return GateOutcome(allowed=True, reason=APPROVED_ONCE_REASON.format(id=ticket))
         if self.asker is None:
             # Checked BEFORE staging on purpose: staging is a promise that a human can be
             # reached, and a channel that cannot ask cannot keep it. A bench or cron run would
