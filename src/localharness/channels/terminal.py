@@ -34,7 +34,6 @@ from rich.text import Text
 from rich.theme import Theme
 
 from localharness.channels.base import (
-    PENDING_NOTICE_LINE,
     PERMISSION_DENIED_LINE,
     ChannelAdapter,
     sanitize_for_display,
