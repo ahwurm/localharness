@@ -321,6 +321,11 @@ class PermissionResolved(BaseEvent):
     latency_ms: Optional[int] = None
     """Wall time from the ask to the answer. None when nothing was awaited."""
     wrote_grant: bool = False
+    pending_id: Optional[int] = None
+    """The parked decision this answer closes (`PermissionGate.pending`), when the call was
+    staged in auto mode rather than asked. Two parked calls of the same tool and class (two
+    `rm -rf` targets) share every pairing field above, so a channel annotating the right
+    notice needs the id, not the class."""
 
 
 class Heartbeat(BaseEvent):

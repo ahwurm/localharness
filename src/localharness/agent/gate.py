@@ -695,6 +695,7 @@ class PermissionGate:
                 decision="allow_once" if approved else "reject_once",
                 latency_ms=int((time.time() - staged.created_at) * MS_PER_SECOND),
                 wrote_grant=False,
+                pending_id=staged.id,
             )
         )
         return staged
