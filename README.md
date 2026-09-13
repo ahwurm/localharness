@@ -33,6 +33,8 @@ Frontier coding agents are great when you're driving them. But metering and rate
 
 **The gate asks about your workspace, not about your work.** From v0.14.1 the default mode is `auto`: the first time a session opens a folder this machine has never worked in, LocalHarness asks once whether you trust it — a project with earlier sessions behind it is recognized and never asked, and the answer, once given, is recorded forever — and after that everything runs except a short blacklist: a delete or a recursive `chmod`/`chown` aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … | sh`, `dd`/`mkfs`/`shred`, writes to your secret stores or the system directories, and writes to `.git/` or your config files under `.localharness/`. Nothing else interrupts you — not docker, not interpreters, not subagents, not MCP tools, not writes elsewhere. Decline the trust question and the session runs `guarded`, the v0.14.0 behavior: ask once about each new thing, remember the answer. A session with nobody to ask and no record runs `guarded` too.
 
+**And nothing on that blacklist stops the agent.** From v0.14.2 a blacklisted call in `auto` is parked as a pending decision instead of being put to you as a prompt: the model is told to carry on without that step and to name the pending number in its answer, and the turn keeps running. You answer whenever you get back. `/pending` lists what is waiting, `/approve N` runs one and `/deny N` drops one, with the oldest as the default; in the terminal `ctrl+y` and `ctrl+n` answer the oldest, and in Discord the notice carries ✅ and ❌. An approval covers that one call with those exact arguments, once, and is not remembered. `guarded` and `trusted` still ask with a blocking prompt, because that is what they are for.
+
 **One setting a cron job still needs.** A run with nobody to answer a question refuses the call instead of allowing it — including the trust question — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking anything. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
 
 A frontier agent like Claude Code is still the easy way to set the harness up and compose a bespoke subagent for a task. The split that works: frontier to design, local to run.
@@ -57,12 +59,13 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
 **♾️ always allow this in this workspace** (an "always" is written to `grants.yaml` and holds in
-the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode this is rare: the
-workspace trust question the first time you use a folder, and then only the short blacklist above,
-which offers only ✅ and ❌ because those ask every single time. `♾️` appears in `guarded`, where answers are
-remembered. Only a user on `LOCALHARNESS_DISCORD_ALLOW` can answer. Unlike the terminal, a Discord question expires: if nobody
-reacts before `permissions.ask.timeout_s`, the call is denied and the message is edited to say
-so. React after that and nothing happens; ask again instead.
+the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode the only
+question that blocks is the workspace trust question, the first time you use a folder. A blacklisted call is
+posted as a pending decision instead, with ✅ (run it), ❌ (skip it) and the `/approve N` spelling in the text;
+answering it resolves the call and holds nothing up, and it does not expire. `♾️` appears in `guarded` and
+`trusted`, where answers are remembered. Only a user on `LOCALHARNESS_DISCORD_ALLOW` can answer. A blocking
+question in those two modes does expire: if nobody reacts before `permissions.ask.timeout_s`, the call is denied
+and the message is edited to say so. React after that and nothing happens; ask again instead.
 
 ## How it compares
 

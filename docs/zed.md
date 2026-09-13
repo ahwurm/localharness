@@ -57,7 +57,7 @@ progress can actually be shown. A warm server costs nothing; a cold one streams 
 
 | Mode | What it does |
 |---|---|
-| **Auto** (default) | Asks once whether you trust a project you have never worked in here, then stays out of the way. A dialog appears only for the short blacklist: a delete or recursive `chmod`/`chown` aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … \| sh`, `dd`/`mkfs`/`shred`, a write to a secret store or a system directory, and a write to `.git/` or your config files under `.localharness/`. Nothing is remembered. |
+| **Auto** (default) | Asks once whether you trust a project you have never worked in here, then stays out of the way. After that no dialog appears at all: a call on the short blacklist is parked for you as a pending decision and the thread keeps working (see **Pending decisions** below). The blacklist is a delete or recursive `chmod`/`chown` aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … \| sh`, `dd`/`mkfs`/`shred`, a write to a secret store or a system directory, and a write to `.git/` or your config files under `.localharness/`. Nothing is remembered. |
 | **Guarded** | The v0.14.0 default: asks once about each new thing — anything leaving the project folder, a protected path, a command this workspace has never allowed — and remembers the answer. Reads and web fetches never ask. |
 | **Trusted** | Auto plus one prompt: a destructive command whose target is inside the project asks too. |
 | **Unattended** | Never asks: every question becomes a yes, leaving only your deny patterns. |
@@ -72,23 +72,35 @@ config layer loads, and its tool calls run without asking). In a project that ha
 and state live with the project instead of in your global directory; *Not now* creates nothing. A project with earlier sessions behind
 it is recognized and never asked at all. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
 a docker command, an MCP tool, a subagent — never raises another dialog. Answer no and the thread
-runs in Guarded, which asks about each new thing and remembers it. After that the only dialogs you
-should see are the blacklist entries in the table above, and they come back every time, because an
-"always" on them would be a lie. If you are getting more than that, treat it as a defect worth
-reporting.
+runs in Guarded, which asks about each new thing and remembers it. After a yes you should see no
+further dialogs at all: the blacklist entries in the table above are parked as pending decisions
+instead, and the thread carries on without them. If a dialog does appear in Auto after the trust
+question, treat it as a defect worth reporting.
 
 **Unattended** is the fifth entry in the picker: it turns every question into a yes, leaving only
 your deny patterns — the pre-v0.14 behaviour. A scheduled job sets it as `permissions.mode:
 unattended` in config; in Zed it is one click, for a session you are watching and have decided
 about.
 
-**The permission dialog.** When the gate decides a call needs a human, Zed shows its own
-permission dialog with up to four buttons: *Allow once*, *Always allow in this workspace*, *No*,
+**The permission dialog (Guarded and Trusted).** In those two modes, when the gate decides a call
+needs a human, Zed shows its own permission dialog with up to four buttons: *Allow once*, *Always allow in this workspace*, *No*,
 *Never allow in this workspace*. Some calls — destructive shell commands, protected paths —
 offer only the two "once" buttons, because they are designed to ask every single time and an
 "always" there would be a lie. An "always" answer is written to `~/.localharness/grants.yaml`,
 keyed by this workspace, and it holds in the terminal and Discord too — one gate, one memory.
-Dismissing the dialog with Escape refuses that one call and remembers nothing.
+Dismissing the dialog with Escape refuses that one call and remembers nothing. In Auto this dialog
+is not used; the workspace trust question below is the one dialog Auto still raises.
+
+**Pending decisions (Auto).** A blacklisted call in Auto never opens a dialog and never holds the
+thread. The gate parks it, tells the model to continue without that step and to name the pending
+number in its answer, and sends you one line of agent text saying what is waiting. You answer in
+the prompt box like any other message: `/pending` lists the queue, `/approve N` runs one and
+`/deny N` drops one, and with no number they take the oldest. An approval is good for that one
+call with those exact arguments, once, and nothing is written to `grants.yaml`; approving
+`rm -rf ~/notes` does not cover `rm -rf ~/photos`. Two honest limits. The queue lives in the
+running session, so a restart drops whatever was pending. And the model has been working the whole
+time, so by the time you approve it may already have routed around the step, which is why the
+approval it receives says to run the call only if it is still useful.
 
 The first time you open a project LocalHarness has not worked in, you get the workspace trust
 dialog described above. It is one question covering both halves of trust: whether that workspace's

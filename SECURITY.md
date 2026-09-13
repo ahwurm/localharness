@@ -140,8 +140,13 @@ read and argue with. Each step below says what it does in `auto`.
    not asked about. If you want in-project `rm -rf` to run, remove that entry from
    `permissions.deny_patterns` — it is your list, and the gate's blacklist will then ask about the
    ones that point outside the project.
-2. **`AUTO_BLACKLIST`: ask, and no answer is remembered.** In a trusted workspace this is the
-   **whole** of what still asks. Everything not on it runs without asking. It is one structure in
+2. **`AUTO_BLACKLIST`: parked for a human, never a blocking prompt, and no answer is
+   remembered.** In a trusted workspace this is the **whole** of what still needs a person.
+   Everything not on it runs without asking. Since 0.14.2 a hit here does not stop the loop: the
+   call is staged as a pending decision (`/pending`, `/approve N`, `/deny N`; ctrl+y / ctrl+n in
+   the terminal, ✅ / ❌ on the Discord notice), the model is told to continue without that step,
+   and an approval is a one-shot pass for that exact call — tool plus arguments — so approving
+   one `rm -rf` target never covers another. The queue lives in the session and is not persisted. It is one structure in
    `agent/gate_types.py` with four fields, listed here in that order:
    - **`target_scoped_verbs` — a delete or a recursive permission change whose target is outside
      the project, protected, or unresolvable.** `rm`, `rmdir`, `chmod`, `chown`, `chgrp`,
@@ -211,7 +216,7 @@ read and argue with. Each step below says what it does in `auto`.
    behaviour over the same corpus, which is the before/after), and that is the evidence a change
    to the list should rest on.
 3. **Grants.** A remembered "always" for this workspace. `auto` neither reads them nor writes them
-   — it remembers nothing, because it asks about nothing that could be remembered. In `guarded`
+   — it remembers nothing, because it parks nothing that could be remembered. In `guarded`
    they are checked only after step 2, so an old permissive answer can never cover a destructive
    variant. A recorded "never" is consulted in **every** mode, `auto` included: a refusal you have
    already given still denies, without prompting.
@@ -260,7 +265,7 @@ the fact. A channel with no review surface asks once per workspace in `guarded`;
 not ask at all.
 
 **Answers live in your global config, and a repository can only tighten.** The default mode writes
-nothing here — `auto` asks only about classes that are never remembered — so this is the file
+nothing here — `auto` parks only classes that are never remembered — so this is the file
 `guarded` fills, and the refusals in it that still bind every mode. An "always" is written to
 `~/.localharness/grants.yaml`, keyed by the workspace's resolved path, with the channel, session and
 timestamp that produced it; a "never" is written to the same file as a negative grant, under the same
@@ -335,7 +340,8 @@ closed is the rule; the warning is what keeps it from being a silent regression 
 - **`source FILE` and `. FILE` are keyed like a script too** (`source <script>`), so the same
   caveat applies. Three shapes that looked like this gap are caught instead: a `git config` write
   to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters, merge
-  drivers, and the rest of a named list) is ungrantable and asks every time, including the
+  drivers, and the rest of a named list) is ungrantable — parked in `auto`, asked every time in
+  `guarded` — including the
   `-c key=value` spelling on any git command; `eval`'s argument is classified the way `bash -c`'s
   is; and a shell function's body is classified where it is defined, not hidden behind its name.
 - **The shell boundary is best-effort by construction.** A `bash_exec` call is one opaque string.
@@ -349,7 +355,8 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   covers the next command built the same way. The prompt still happens; the label on it understates
   what may run.
 - **A write target containing a variable, a glob or a substitution is treated as outside.** It
-  cannot be resolved before the shell expands it, so it asks as an out-of-project write — and once
+  cannot be resolved before the shell expands it, so it is treated as an out-of-project write
+  (parked in `auto`, asked in `guarded`) — and once
   you answer "always" for that unresolved shape, a later expansion of the same shape to a different
   path passes on that grant.
 - **Program text handed to a non-shell interpreter is never read.** `python3 -c`, `perl -e`, an

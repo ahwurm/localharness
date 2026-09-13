@@ -4,6 +4,72 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.14.2] — unreleased
+
+### Changed
+- **In `auto`, a call on the blacklist no longer stops the agent. It is parked
+  for a human, and the turn carries on.** Until now the gate asked, and a
+  terminal or Zed question waits with no deadline, so a turn stopped dead the
+  moment nobody was at the keyboard. `auto` is the mode you get without picking
+  one, and a prompt that can hold the loop open for an hour is the wrong shape
+  for it. The gate now records the call as a pending decision, hands the model
+  "needs a human (pending #N); continue without this step, work around it if
+  you can, and mention pending #N in your final answer", and lets the turn run
+  on. The same call staged a second time is told "already pending as #N; do not
+  retry it". Nothing waits for you. The queue does.
+- **You answer whenever you get back: `/pending` lists, `/approve [N]` runs
+  one, `/deny [N]` drops one.** With no number they take the oldest. An
+  approval is a one-shot pass for that one call, not a remembered answer:
+  nothing is written to `grants.yaml`, and the model is told "human approved
+  #N, run it now if it is still useful", so the agent loop stays the only thing
+  that ever dispatches a tool. The queue is keyed by the whole call, the tool
+  plus its exact arguments, and not by the command class, so approving
+  `rm -rf ~/notes` never covers `rm -rf ~/photos`. All three commands work in
+  the terminal, as plain text from Discord, and typed into Zed's prompt box.
+- **The terminal shows what is waiting under the input box.** One line,
+  `⏸ 1 decision pending  #3  bash: rm -rf ~/old-notes   ctrl+y run · ctrl+n skip
+  · /pending`. `ctrl+y` approves the oldest right away and `ctrl+n` skips it;
+  mid-turn the model picks up an approval on its next step. The bell is tied to
+  whether you are there: if you typed within the last five minutes, which is
+  the idle window your desktop uses, it rings once when something is parked; if
+  you were away it stays quiet, and your first keystroke back prints "while you
+  were away: N decisions pending".
+- **Discord carries the two answers on the notice itself.** The message gets a
+  ✅ (run it) and a ❌ (skip it) reaction plus the `/approve N` spelling in the
+  text. Reacting resolves the decision and blocks nothing, and there is no
+  timeout on it, because nothing is being held open to time out.
+- **Zed's native permission dialog is no longer used in `auto`.** The notice
+  arrives as one line of agent text, and `/approve N` typed in the prompt box
+  answers it. `guarded` and `trusted` still raise the dialog, because being
+  asked is what those modes are for.
+- **A hard refusal now tells the model that nobody can approve it.** The
+  ungrantable deny list, `sudo`, the shipped `rm -rf` deny defaults, the
+  destructive docker commands, was refused with the word "denied" and nothing
+  else, so the model could not tell it apart from a question still waiting and
+  stopped to write prose asking the human to run the command by hand. The
+  refusal now says it is on the never-run list, that no one can lift it, and to
+  continue without the step.
+- **Unchanged.** `guarded` and `trusted` still ask with a blocking prompt,
+  because someone who chose them wants the dialogs. `unattended` is untouched.
+  The one trust question per never-seen workspace at startup is untouched, and
+  it still blocks, because there is no session to carry on with until it is
+  answered. `permissions.ask.timeout_s` now only has an effect in `guarded` and
+  `trusted`.
+
+### Known limitations (named, not hidden)
+- The pending queue lives in the running session and is not persisted. Restart
+  and whatever was parked is gone.
+- A `/approve` typed into the terminal box while a turn is running is queued by
+  the input router and lands after the turn ends. The hotkeys are the path that
+  reaches a running turn.
+- The model may already have worked around the step by the time you approve it,
+  which is why the approval reads "if it is still useful" rather than "run it".
+- The shipped deny default still refuses `rm -rf` inside your own project
+  before the queue is ever reached, and no `/approve` lifts a deny. Whether
+  that default should change is a separate ruling, still open.
+- Answering from Discord by reaction needs the REPL wiring that ships in this
+  same release. It is not something an older session picks up.
+
 ## [0.14.1] — 2026-09-11
 
 ### Changed
