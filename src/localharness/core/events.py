@@ -328,6 +328,18 @@ class PermissionResolved(BaseEvent):
     notice needs the id, not the class."""
 
 
+PENDING_APPROVED_NUDGE = (
+    "Human approved pending #{id} ({rendering}). Run it now if it is still useful, then continue."
+)
+PENDING_DENIED_NUDGE = "Human declined pending #{id} ({rendering}); do not retry it."
+"""What the MODEL hears when a parked call is answered, from any channel.
+
+One home for both sentences because three surfaces say them (the REPL for the terminal and
+Discord, the ACP channel for Zed) and `channels` may not import `cli` or `agent`. "If it is still
+useful": by the time a human answers, the model may already have worked around the step, and an
+approval is a one-shot pass on that exact call, not an order to run it."""
+
+
 class Heartbeat(BaseEvent):
     """Published periodically by each running agent."""
 

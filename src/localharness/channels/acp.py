@@ -67,6 +67,8 @@ from acp.schema import (
 from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.events import (
+    PENDING_APPROVED_NUDGE,
+    PENDING_DENIED_NUDGE,
     Action,
     Escalation,
     Observation,
@@ -302,17 +304,6 @@ says "it runs when the model re-issues it" rather than "ran": `PermissionGate.ap
 answer and dispatches nothing — the call is re-issued by the MODEL, which may have finished the
 task another way by the time a human gets round to the queue."""
 
-PENDING_APPROVED_NUDGE = (
-    "Human approved pending #{id} ({rendering}). Run it now if it is still useful, then continue."
-)
-PENDING_DENIED_NUDGE = "Human declined pending #{id} ({rendering}); do not retry it."
-"""The sentence the MODEL reads, word for word the pair `cli/repl` sends.
-
-An approval reaches the model as WORDS — a nudge into the running turn, or an ordinary user turn
-when the session is idle — so the agent loop stays the only thing that ever dispatches a tool.
-The wording is duplicated from the REPL rather than imported because `channels` must not depend
-on `cli`; the model has to read the same sentence whichever surface took the answer, so the two
-copies belong in one home the day a third surface needs them."""
 
 PENDING_COMMAND_VERBS: frozenset[str] = frozenset({"/pending", "/approve", "/deny"})
 """The three commands a Zed prompt can be instead of a turn (:func:`_pending_command`)."""
