@@ -34,6 +34,7 @@ from rich.text import Text
 from rich.theme import Theme
 
 from localharness.channels.base import (
+    PENDING_NOTICE_LINE,
     PERMISSION_DENIED_LINE,
     ChannelAdapter,
     sanitize_for_display,
@@ -51,6 +52,7 @@ from localharness.core.events import (
     Heartbeat,
     Observation,
     ParseFailed,
+    PermissionStaged,
     TaskComplete,
     TurnFailed,
 )
@@ -99,6 +101,42 @@ _PHASE_ICONS = {"waiting": "…", "thinking": "⋯", "writing": "✎", "tool_cal
 _PHASE_LABELS = {"waiting": "waiting", "thinking": "thinking", "writing": "writing",
                  "tool_call": "tool call"}
 _SILENCE_NOTE_SECONDS = 10.0   # no delta for this long mid-stream → say so on the row
+
+# --- The parked-call row, under the bottom bar (`auto` staging, owner ruling 2026-09-12) ---
+BOX_PENDING_ROW = "⏸ {count} {noun} pending  #{id}  {rendering}   ctrl+y run · ctrl+n skip · /pending"
+"""The one line a staged call gets at the input, in the owner's own words for it: "ignore or
+move to background (under the bottom bar, one decision pending)".
+
+It sits BELOW the footer for exactly that reason — a parked call is not a question holding the
+turn open, it is a note the person may leave sitting there all session — and it names the
+OLDEST call, which is the one both hotkeys answer, with the rest as a count. Everything needed
+to answer it is on the line: the number, the command that was read, and the three ways to
+reply."""
+
+BOX_PENDING_NOUNS = ("decision", "decisions")
+"""Singular/plural for the row and the away-return line, indexed by ``count != 1``. One tuple so
+the two lines can never disagree about how English works."""
+
+PRESENCE_WINDOW_S = 300.0
+"""How long after the last keystroke somebody still counts as being at this keyboard.
+
+Source: the freedesktop/GNOME session idle default (``org.gnome.desktop.session idle-delay`` =
+300 s) — the desktop's own definition of "the person stepped away", which is the same question
+asked about the same person at the same machine, so it is the number to borrow rather than one
+invented here. It decides two things and nothing else: whether a staged call rings the bell, and
+whether coming back to the keyboard earns the away-return line. Derivable from config later if a
+real workflow disagrees with the desktop; it is not a knob today, because nobody has asked for
+one and an unused knob is a promise to keep it working."""
+
+AWAY_RETURN_LINE = (
+    "while you were away: {count} {noun} pending — ctrl+y runs the oldest, /pending lists them"
+)
+"""Printed once when the first keystroke arrives after a :data:`PRESENCE_WINDOW_S` gap and
+something is parked.
+
+The bell only helps somebody who was there to hear it. Whoever walks back to a finished turn has
+a screenful of scrollback and a one-line bar to notice, so the return itself is the moment to
+say it — once, at the top of what they are about to type, not on every key."""
 
 
 def _fmt_tokens(n: int) -> str:
@@ -608,6 +646,9 @@ def _build_persistent_input_app(
     status_fn: Callable[[], list[tuple[str, str]]],
     placeholder_fn: Callable[[], str] = lambda: "",
     model_names_fn: Callable[[], list[str]] | None = None,
+    pending_fn: Callable[[], list[tuple[str, str]]] = lambda: [],
+    on_pending_answer: Callable[[bool], None] = lambda _approve: None,
+    on_keystroke: Callable[[], None] = lambda: None,
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
@@ -626,6 +667,10 @@ def _build_persistent_input_app(
       4. Ctrl+C (empty buffer) / Ctrl+D (empty buffer) call back into REPL policy (on_interrupt
          / on_eof) rather than raising out of run_async — the box owns raw mode for the whole
          session, so these are the only path a signal-suppressed terminal has to interrupt/exit.
+      5. A PENDING ROW sits under the footer (pending_fn), collapsing to zero height the same
+         way the status row does, and Ctrl+Y / Ctrl+N answer the call it names through
+         on_pending_answer. Every key press also stamps on_keystroke, which is how the channel
+         knows whether anybody is still at the keyboard.
     """
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
                  completer=SlashCommandCompleter(model_names_fn), complete_while_typing=True)
@@ -686,6 +731,21 @@ def _build_persistent_input_app(
         if not buf.text:
             on_eof()
 
+    @kb.add("c-y")
+    def _approve_pending(event) -> None:
+        # Ctrl+Y / Ctrl+N answer the call named on the pending row — NOW. A slash command typed
+        # while a turn runs is queued and replayed after it (`_route_during_turn`), which is the
+        # exact wait staging exists to remove: a person sitting there watching the turn should be
+        # able to unblock the step it skipped without waiting for the turn to end. Both keys are
+        # free here — this app loads only the bindings above (no emacs/vi defaults, where they
+        # would be yank and next-history) — and both are dead when nothing is parked, which the
+        # channel decides, because the box does not own the queue.
+        on_pending_answer(True)
+
+    @kb.add("c-n")
+    def _deny_pending(event) -> None:
+        on_pending_answer(False)
+
     def _wall(char: str) -> Window:
         return Window(width=1, char=char)
 
@@ -715,7 +775,14 @@ def _build_persistent_input_app(
         Window(FormattedTextControl(status_fn), height=1, dont_extend_height=True),
         filter=Condition(lambda: bool(status_fn())),
     )
-    body = HSplit([status_row, frame, footer])
+    # The parked-call row, UNDER the footer (BOX_PENDING_ROW): the last line of the input area,
+    # furthest from the work, because a staged call is a note to answer whenever — not a prompt.
+    # Same zero-height collapse as the status row, so an empty queue costs no line at all.
+    pending_row = ConditionalContainer(
+        Window(FormattedTextControl(pending_fn), height=1, dont_extend_height=True),
+        filter=Condition(lambda: bool(pending_fn())),
+    )
+    body = HSplit([status_row, frame, footer, pending_row])
 
     app = Application(
         layout=Layout(_menu_float(body), focused_element=control),
@@ -725,6 +792,12 @@ def _build_persistent_input_app(
         erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
     )
     app._lh_input_buffer = buf  # box_open_model_menu pre-fills + pops the picker through this
+    # Presence, stamped on EVERY key press. Deliberately the key_processor's own hook and not a
+    # `@kb.add("<any>")` catch-all: prompt_toolkit sorts the bindings matching a key with the
+    # Any-matches LAST and calls `matches[-1]` (KeyProcessor._process), so a catch-all here would
+    # take Enter, Ctrl+C and every printable character away from the bindings above rather than
+    # passing them through. before_key_press observes; it decides nothing.
+    app.key_processor.before_key_press += lambda _sender: on_keystroke()
     return app
 
 
@@ -924,6 +997,12 @@ class TerminalChannel(ChannelAdapter):
         self._box_dreaming: bool = False         # background consolidation ("dreaming") pass → status row (#20)
         self._box_activity: str = ""             # transient status-row note (e.g. /model swap loading line)
         self._queued_count: int = 0              # `queued (N)` shown in the box frame
+        # The calls `auto` parked for a human, oldest first — pushed in by the REPL
+        # (box_set_pending), read by the row under the footer and by both hotkeys.
+        self._pending: list[Any] = []
+        # When a key last reached the box (monotonic). 0.0 = nobody has typed yet, which reads as
+        # AWAY until start_input_box stamps it: opening the box is somebody being there.
+        self._last_keystroke_at: float = 0.0
         self._decision_flash: str = ""           # transient routing-decision line in the box frame
         self._decision_flash_task: asyncio.Task | None = None
         self._first_box_hint: str = ""           # #49 guidance hint, shown in the box until first use
@@ -960,6 +1039,7 @@ class TerminalChannel(ChannelAdapter):
         self._turn_failed_handle = None
         self._consolidation_started_handle = None
         self._consolidation_finished_handle = None
+        self._permission_staged_handle = None
 
     async def start(self) -> None:
         """Initialize input history, say so if we cannot ask, and subscribe to bus events."""
@@ -983,6 +1063,11 @@ class TerminalChannel(ChannelAdapter):
             CompactionTriggered, self.on_compaction_triggered
         )
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
+        # The only way a channel hears that `auto` parked a call (core/events.PermissionStaged):
+        # the loop holds no channel handle, and a queue notice is not about one tool result.
+        self._permission_staged_handle = self.bus.subscribe(
+            PermissionStaged, self.on_permission_staged
+        )
         self._consolidation_started_handle = self.bus.subscribe(
             ConsolidationStarted, self.on_consolidation_started
         )
@@ -1003,6 +1088,7 @@ class TerminalChannel(ChannelAdapter):
             self._heartbeat_handle,
             self._consolidation_started_handle,
             self._consolidation_finished_handle,
+            self._permission_staged_handle,
         ):
             if handle is not None:
                 self.bus.unsubscribe(handle)
@@ -1202,6 +1288,77 @@ class TerminalChannel(ChannelAdapter):
                 f"  [tool.error]{PERMISSION_DENIED_LINE.format(tool_name=escape(tool_name), reason=escape(reason))}[/tool.error]"
             )
 
+    async def _print_notice_line(self, text: str) -> None:
+        """One indented, muted line in the transcript — `send_permission_denied`'s shape, without
+        its error color. Shared by the parked-call notice and the away-return line."""
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()
+            self._console.print(f"  [system.info]{escape(text)}[/system.info]")
+
+    async def send_pending_notice(self, pending: Any, total: int) -> None:
+        """One inline line saying a call was parked for the human (:data:`PENDING_NOTICE_LINE`).
+
+        The bar under the box already shows the queue, and the bar is the thing that CLEARS —
+        answered, or gone with the next staged call taking its place. This is the transcript's
+        permanent copy: scroll back a day later and the turn still says which step it skipped
+        and why it could not take it.
+        """
+        await self._print_notice_line(
+            PENDING_NOTICE_LINE.format(id=pending.id, rendering=pending.rendering, total=total)
+        )
+
+    async def on_permission_staged(self, event: Any) -> None:
+        """PermissionStaged → the transcript line, plus ONE bell if somebody is at the keyboard.
+
+        The bell is what presence tracking is for. A staged call is the one thing in a turn the
+        harness cannot finish by itself, and it lands in the middle of streaming output that a
+        person watching the screen is not reading word by word. Nobody there, no bell: a terminal
+        beeping into an empty room is noise for whoever walks past it, and the away-return line
+        (:data:`AWAY_RETURN_LINE`) is what greets the person who actually comes back.
+        """
+        await self.send_pending_notice(event.pending, event.total)
+        if self._present():
+            self._ring_bell()
+
+    def _present(self) -> bool:
+        """Is somebody at this keyboard right now — a key within :data:`PRESENCE_WINDOW_S`?"""
+        return (time.monotonic() - self._last_keystroke_at) < PRESENCE_WINDOW_S
+
+    def _ring_bell(self) -> None:
+        """Ring the terminal bell once, through the box's own output (never a raw print).
+
+        Exception-proof like every other box side effect: a terminal that cannot beep must not be
+        the reason a staged call takes the session down.
+        """
+        app = self._box_app
+        if app is None or not self._box_active:
+            return
+        try:
+            app.output.bell()
+        except Exception:
+            pass
+
+    def _note_keystroke(self) -> None:
+        """Stamp the presence clock, and welcome somebody back to a queue they never saw.
+
+        Called from the box app's `before_key_press` hook (see `_build_persistent_input_app`), so
+        it sees every key — not only the ones that change the buffer. The stamp is taken BEFORE
+        the gap is judged, which is what makes the return line print once per return rather than
+        once per key: the second key is a hundred milliseconds after the first, not five minutes.
+        """
+        now = time.monotonic()
+        away_for = now - self._last_keystroke_at
+        self._last_keystroke_at = now
+        if away_for < PRESENCE_WINDOW_S or not self._pending:
+            return
+        count = len(self._pending)
+        line = AWAY_RETURN_LINE.format(count=count, noun=BOX_PENDING_NOUNS[count != 1])
+        try:
+            asyncio.get_running_loop().create_task(self._print_notice_line(line))
+        except RuntimeError:
+            pass  # no loop (a unit context): the stamp still moved, which is the part that counts
+
     async def send_error(
         self,
         error: str,
@@ -1287,17 +1444,30 @@ class TerminalChannel(ChannelAdapter):
             # Without this the box border keeps repeating it all session, while the classic
             # read_input path consumes it after one prompt (the two modes disagreed).
             self._first_box_hint = ""
+            self._last_keystroke_at = time.monotonic()  # a submit is presence, whatever fed it
             ctrl_queue.put_nowait(("submit", text))
 
         def _on_eof() -> None:
             ctrl_queue.put_nowait(("eof", None))
 
+        def _on_pending_answer(approve: bool) -> None:
+            # Ctrl+Y / Ctrl+N. Dead when nothing is parked — a key that silently does something
+            # invisible is worse than one that does nothing — and otherwise a control event, so
+            # the REPL (which owns the gate) answers it inside its one serialized loop.
+            if self._pending:
+                ctrl_queue.put_nowait(("approve_pending" if approve else "deny_pending", None))
+
+        # Opening the box IS somebody being there: the person just typed the command that got
+        # here. Without this the first staged call of a session would ring no bell.
+        self._last_keystroke_at = time.monotonic()
         self._box_app = _build_persistent_input_app(
             self._history, _PROMPT_GLYPH,
             on_submit=_on_submit, on_interrupt=on_interrupt, on_eof=_on_eof,
             hint_fn=self._box_hint_frags, right_fn=self._box_instrument_frags,
             status_fn=self._box_status_frags, placeholder_fn=self._box_placeholder,
             model_names_fn=self._model_names_for_menu,
+            pending_fn=self._box_pending_frags, on_pending_answer=_on_pending_answer,
+            on_keystroke=self._note_keystroke,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
@@ -1438,6 +1608,23 @@ class TerminalChannel(ChannelAdapter):
             parts.append(f"queued ({self._queued_count})")
         parts.append("alt+enter nudge · ctrl+c stop" if self._box_working else "tab commands · /help")
         return [("class:hint", "  " + " · ".join(parts))]
+
+    def _box_pending_frags(self) -> list[tuple[str, str]]:
+        """Content of the row UNDER the footer: what `auto` parked while the turn carried on.
+
+        One muted line (:data:`BOX_PENDING_ROW`) naming the OLDEST parked call — the one both
+        hotkeys answer — and counting the rest. Styled like the key legend, not like an error:
+        nothing failed, the model was told to continue without the step. Returns [] when nothing
+        is parked, so the ConditionalContainer collapses the row to zero height.
+        """
+        if not self._pending:
+            return []
+        oldest = self._pending[0]
+        count = len(self._pending)
+        return [("class:hint", "  " + BOX_PENDING_ROW.format(
+            count=count, noun=BOX_PENDING_NOUNS[count != 1],
+            id=oldest.id, rendering=oldest.rendering,
+        ))]
 
     def _box_placeholder(self) -> str:
         """Dim text inside the empty box: the #49 guidance hint until first use, then nothing."""
@@ -1591,6 +1778,18 @@ class TerminalChannel(ChannelAdapter):
     def box_set_queued(self, n: int) -> None:
         """Persistent `queued (N)` count shown in the box frame."""
         self._queued_count = max(0, n)
+        self._invalidate_box()
+
+    def box_set_pending(self, items: list[Any]) -> None:
+        """The calls `auto` parked, OLDEST FIRST — what the row under the box reads.
+
+        A setter rather than a callback into the gate, to match how the REPL already feeds this
+        box its other queue (`box_set_queued(len(self._fifo))`): the REPL owns the gate, and a
+        pull callback would make `channels` reach into `agent` for a type it deliberately does
+        not import (see `ChannelAdapter.send_pending_notice` on why these are typed `Any`).
+        Safe in any mode — without the box it just keeps the list.
+        """
+        self._pending = list(items)
         self._invalidate_box()
 
     def box_flash_decision(self, text: str, seconds: float = 2.0) -> None:

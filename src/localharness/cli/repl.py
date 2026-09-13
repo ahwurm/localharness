@@ -13,7 +13,14 @@ from typing import Any, Optional
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import help_text
-from localharness.core.events import InputRouted, UserMessage
+from localharness.core.events import (
+    PENDING_APPROVED_NUDGE,
+    PENDING_DENIED_NUDGE,
+    InputRouted,
+    PermissionResolved,
+    PermissionStaged,
+    UserMessage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -65,15 +72,16 @@ PENDING_ANSWERED_LINE = "Pending #{id} {verb}: {rendering}"
 command it answered, because a bare "done" after a number typed from memory is how the wrong
 call gets approved quietly."""
 
-PENDING_APPROVED_NUDGE = (
-    "Human approved pending #{id} ({rendering}). Run it now if it is still useful, then continue."
-)
-PENDING_DENIED_NUDGE = "Human declined pending #{id} ({rendering}); do not retry it."
-"""The sentence the MODEL gets. It is a nudge (`AgentLoop.push_user_nudge`) when a turn is in
-flight and an ordinary user turn when the session is idle — either way it reaches the model as
-words, never as a second path into tool dispatch. "if it is still useful" is doing real work:
-the turn was told to carry on without the step and may well have finished the task another way
-by the time the answer lands."""
+
+PENDING_HOTKEYS: dict[str, bool] = {"approve_pending": True, "deny_pending": False}
+"""The box's two hotkey control events (ctrl+y / ctrl+n), mapped to "is this an approval".
+
+They travel the CONTROL queue, not the slash path, and that is the whole reason they exist: a
+slash command typed while a turn runs is queued and replayed after it (`_route_during_turn`), so
+a person sitting at the keyboard watching the turn could not unblock the step it had just
+skipped until the turn was over — the very wait staging removes for the model, still there for
+the human. The box cannot answer the gate itself; the REPL owns it, and one serialized loop
+answering it is what keeps the queue race-free."""
 
 BARE_MODE_COMMAND = "mode"
 BARE_MODE_COMMAND_CHANNELS: frozenset[str] = frozenset({"discord"})
@@ -241,6 +249,10 @@ class OrchestratorREPL:
         self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
         self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
         self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
+        # Bus handles for the staging queue (PermissionStaged / PermissionResolved) — the REPL
+        # is the only object holding all three pieces this needs: the bus, the gate whose queue
+        # is the truth, and the channel that draws it.
+        self._pending_handles: list[Any] = []
         self._ctrl_ready_at: float = 0.0                      # when the coordinator last went idle
         # #93: bounded grace on exit for an in-flight turn to reach its own finalization
         # (TurnCompleted publish + ledger flush) before it is cancelled — never hangs exit.
@@ -300,14 +312,64 @@ class OrchestratorREPL:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
         (kill-switch: terminal.inputbox_enabled), else today's classic read_input sequencing."""
         self._model_prefetch = asyncio.create_task(self._prefetch_model_cache())
+        self._subscribe_pending()
         try:
             if self._use_input_box():
                 await self._run_with_box()
             else:
                 await self._run_classic()
         finally:
+            self._unsubscribe_pending()
             if self._model_prefetch is not None and not self._model_prefetch.done():
                 self._model_prefetch.cancel()
+
+    def _subscribe_pending(self) -> None:
+        """Watch the staging queue change, so the row under the input box can follow it.
+
+        The ROW is the REPL's to draw and nothing else is: it shows the whole queue, oldest
+        first, and the gate is the only thing that knows what is left after an answer — an object
+        `channels` deliberately cannot import. The transcript LINE stays the channel's own,
+        drawn from the channel's own PermissionStaged subscription like every other event a
+        person reads, so a channel that already says it (Discord, ACP) never says it twice
+        because the REPL is hosting it.
+        """
+        self._pending_handles = [
+            self._bus.subscribe(PermissionStaged, self._on_pending_changed),
+            self._bus.subscribe(PermissionResolved, self._on_pending_changed),
+        ]
+        # A channel that answers a parked call out of band (a Discord reaction) gets the same
+        # path the hotkeys take, so the gate records it and the model hears it as words.
+        if getattr(self._channel, "_pending_resolver", "absent") is None:
+            self._channel._pending_resolver = self._resolve_pending_from_channel
+
+    async def _resolve_pending_from_channel(self, action: str, pending_id: int) -> None:
+        await self._answer_pending(str(pending_id), approve=(action == "approve"))
+
+    def _unsubscribe_pending(self) -> None:
+        for handle in self._pending_handles:
+            try:
+                self._bus.unsubscribe(handle)
+            except Exception:  # noqa: BLE001 — a stale handle must never fail the exit path
+                pass
+        self._pending_handles = []
+
+    async def _on_pending_changed(self, event: Any) -> None:
+        """A call was parked, or one was answered — redraw the row from the gate's queue.
+
+        Both events land here because the row asks the same question of both: what is waiting
+        now? The event carries the one call it is about; the gate is re-read rather than the
+        event counted, so a hotkey, a `/approve`, and a blocking prompt in another mode all
+        leave the row saying the same true thing.
+        """
+        self._refresh_pending_row()
+
+    def _refresh_pending_row(self) -> None:
+        """Push the gate's queue (oldest first) at the channel's input box, if it has one."""
+        setter = getattr(self._channel, "box_set_pending", None)
+        if setter is None:
+            return  # a channel with no input box: Discord, ACP, a test double
+        gate = self._session_gate()
+        setter(list(getattr(gate, "pending", {}).values()) if gate is not None else [])
 
     def _use_input_box(self) -> bool:
         """Box mode only for the real TerminalChannel on an interactive TTY, with the config
@@ -512,6 +574,9 @@ class OrchestratorREPL:
                 self._channel.box_notify_working(False)
                 await self._play_next_from_fifo()
                 return True
+            if kind in PENDING_HOTKEYS:
+                await self._answer_pending("", approve=PENDING_HOTKEYS[kind])
+                return True
             if kind == "tier2_result":
                 # #92c: a background tier-2 verdict landed — apply the late upgrade (or let the
                 # optimistic queue stand). Serialized here in the one coordinator loop → race-free.
@@ -536,6 +601,25 @@ class OrchestratorREPL:
         except EOFError:
             return False  # /quit (or a queued /quit) ends the REPL
         return True
+
+    async def _answer_pending(self, arg: str, *, approve: bool) -> None:
+        """ctrl+y / ctrl+n from the box (``arg`` empty: the OLDEST parked call) and a Discord
+        reaction (``arg`` = the notice's pending id): answer one parked call, right now.
+
+        The same two steps `/approve` takes — the gate records the answer, the model hears it as
+        words, nothing here ever dispatches a tool — reached from the control queue instead of
+        the slash queue (see :data:`PENDING_HOTKEYS`). An approval at an IDLE session becomes an
+        ordinary user turn here, adopted exactly as a typed line's turn is, because
+        `_dispatch_input` (which normally starts the one `/approve` leaves behind) is not on this
+        path.
+        """
+        await self._handle_pending_answer(arg, approve=approve)
+        follow, self._slash_followup = self._slash_followup, None
+        if follow is None:
+            return
+        task = await self._start_user_turn(follow)
+        if task is not None:
+            self._start_turn_task(task, follow)
 
     async def _route_during_turn(self, clean: str, forced: bool) -> None:
         """Decide nudge vs queue for a message typed while a turn runs, deliver it, and reflect

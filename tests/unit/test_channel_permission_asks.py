@@ -577,3 +577,132 @@ def test_the_three_commands_are_in_the_one_table():
     command nobody discovers."""
     names = [name for name, _ in SLASH_COMMANDS]
     assert {"/pending", "/approve", "/deny"} <= set(names)
+
+
+# ------------------------------------- ctrl+y / ctrl+n and the staged/resolved bus wiring
+
+class _BoxChannel(_RecordingChannel):
+    """`_RecordingChannel` plus the three box seams the staging surface touches."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list] = []       # every box_set_pending push, in order
+        self.staged: list = []           # PermissionStaged events handed to the channel
+        self.working: list[bool] = []
+
+    def box_set_pending(self, items) -> None:
+        self.rows.append(list(items))
+
+    def box_notify_working(self, working: bool) -> None:
+        self.working.append(working)
+
+    async def on_permission_staged(self, event) -> None:
+        self.staged.append(event)
+
+
+def _turn_agent(started: list[str]) -> types.SimpleNamespace:
+    """An AgentLoop stand-in that records the turns an idle-session approval starts."""
+
+    async def _run_turn(task, on_token=None):
+        started.append(task)
+        return "done"
+
+    return types.SimpleNamespace(
+        _config=types.SimpleNamespace(name="a"), current_session_id="s",
+        run_turn=_run_turn, push_user_nudge=lambda text: started.append(f"nudge:{text}"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_hotkey_approves_the_oldest_and_nudges_a_running_turn(tmp_path):
+    """ctrl+y goes through the CONTROL queue, so it lands while the turn is still running —
+    a `/approve` typed there would be queued and replayed only after it."""
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    agent = _RecordingAgent()
+    repl = _repl(channel, gate)
+    repl._agent = agent
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(5))
+    try:
+        await _stage_one(gate)
+
+        assert await repl._handle_box_event("approve_pending", None) is True
+        assert gate.pending == {}
+        assert len(agent.nudges) == 1 and "approved pending #1" in agent.nudges[0]
+        assert repl._slash_followup is None, "a running turn must not also start a new one"
+    finally:
+        repl._turn_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_hotkey_approve_on_an_idle_session_starts_the_turn_itself(tmp_path):
+    """`_dispatch_input` is not on this path, so the hotkey owns starting the follow-up turn."""
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    started: list[str] = []
+    repl._agent = _turn_agent(started)
+    repl._box_ctrl_q = asyncio.Queue()
+    await _stage_one(gate)
+
+    assert await repl._handle_box_event("approve_pending", None) is True
+    assert repl._turn_task is not None
+    await repl._turn_task
+    assert started and "approved pending #1" in started[0]
+    assert repl._slash_followup is None, "the follow-up was consumed, not left for the next line"
+
+
+@pytest.mark.asyncio
+async def test_hotkey_deny_drops_it_and_starts_nothing(tmp_path):
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    repl._agent = _RecordingAgent()
+    await _stage_one(gate)
+
+    assert await repl._handle_box_event("deny_pending", None) is True
+    assert gate.pending == {}
+    assert "denied" in channel.sent[-1]
+    assert repl._turn_task is None and repl._slash_followup is None
+
+
+@pytest.mark.asyncio
+async def test_staging_draws_the_row_and_answering_empties_it(tmp_path):
+    """End to end over the real bus: the gate publishes, the REPL's subscription redraws the row.
+
+    The REPL owns the ROW and nothing else — the transcript line is the channel's own
+    PermissionStaged subscription, so a channel that already says it never says it twice
+    because the REPL is hosting it.
+    """
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    gate.bus = repl._bus
+    repl._subscribe_pending()
+    try:
+        outcome = await _stage_one(gate)
+        assert channel.rows[-1] == [outcome.pending], "the row reads the gate's queue, oldest first"
+        assert channel.staged == [], "the REPL does not relay the notice for the channel"
+
+        await gate.approve()
+        assert channel.rows[-1] == [], "the row shows what is LEFT, not the event's one call"
+    finally:
+        repl._unsubscribe_pending()
+
+
+@pytest.mark.asyncio
+async def test_a_channel_resolver_takes_the_hotkey_path_for_a_named_id(tmp_path):
+    """A Discord reaction names the notice's id; the REPL installs itself as that channel's
+    `_pending_resolver` and answers through the same path ctrl+y takes."""
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    channel._pending_resolver = None  # the shape DiscordChannel ships with
+    agent = _RecordingAgent()
+    repl = _repl(channel, gate)
+    repl._agent = agent
+    repl._subscribe_pending()
+    assert channel._pending_resolver is not None
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(5))
+    try:
+        await _stage_one(gate)
+        await channel._pending_resolver("approve", 1)
+        assert gate.pending == {}
+        assert len(agent.nudges) == 1 and "approved pending #1" in agent.nudges[0]
+    finally:
+        repl._turn_task.cancel()
+        repl._unsubscribe_pending()

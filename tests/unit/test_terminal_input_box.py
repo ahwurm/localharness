@@ -13,16 +13,18 @@ is the first of its kind in this repo.
 from __future__ import annotations
 
 import asyncio
+import time
+import types
 from contextlib import contextmanager
 from io import StringIO
 
-import pytest
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from localharness.channels.terminal import (
+    PRESENCE_WINDOW_S,
     TERMINAL_THEME,
     TerminalChannel,
     _build_persistent_input_app,
@@ -519,3 +521,282 @@ class TestWorkingTallies:
         ch.tps_source = lambda: (28.4, False)
         text = self._text(ch._box_status_frags())
         assert "⋯ thinking 120" in text and "~28 tok/s" in text
+
+
+# --------------------------------------------------- the parked-call row + hotkeys + presence
+
+def _pending(pid: int, rendering: str = "bash_exec: rm -rf ~/old-notes"):
+    """One PendingCall, built the way the gate builds it (id + one-line rendering are all the
+    box ever reads)."""
+    from localharness.agent.gate_types import PendingCall, PermissionRequest
+
+    return PendingCall(
+        id=pid,
+        request=PermissionRequest(
+            tool_name="bash_exec", tool_params={"command": "rm -rf ~/old-notes"},
+            klass="shell-destructive", key=None, grantable=False,
+            reason="destructive", display=rendering,
+        ),
+        rendering=rendering,
+        agent_label="",
+        session_id="s",
+        created_at=0.0,
+    )
+
+
+def _staged_event(pending, total: int = 1):
+    from localharness.core.events import PermissionStaged
+
+    return PermissionStaged(
+        agent_id="main", session_id="s", pending=pending, total=total, channel="terminal",
+    )
+
+
+class _BellOutput:
+    """Stands in for the box app's Output: the bell is the only call under test."""
+
+    def __init__(self) -> None:
+        self.bells = 0
+
+    def bell(self) -> None:
+        self.bells += 1
+
+
+class TestPendingRow:
+    """The row UNDER the bottom bar: one muted line per queue, naming the oldest parked call."""
+
+    def _text(self, frags) -> str:
+        return "".join(t for _style, t in frags)
+
+    def test_row_is_hidden_while_nothing_is_parked(self):
+        ch = _channel()
+        ch._box_active = True
+        assert ch._box_pending_frags() == [], "an empty queue costs no line at all"
+
+    def test_row_names_the_oldest_and_counts_the_rest(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(3), _pending(4, "bash_exec: sudo apt install x")])
+        text = self._text(ch._box_pending_frags())
+        assert "2 decisions pending" in text
+        assert "#3" in text and "rm -rf ~/old-notes" in text, "the OLDEST is the one shown"
+        assert "sudo apt" not in text, "the rest are a count, not a list"
+        assert "ctrl+y run · ctrl+n skip · /pending" in text
+
+    def test_one_parked_call_reads_as_one_decision(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(1)])
+        text = self._text(ch._box_pending_frags())
+        assert "1 decision pending" in text and "decisions" not in text
+
+    def test_row_is_muted_not_an_error(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(1)])
+        assert all(style == "class:hint" for style, _ in ch._box_pending_frags())
+
+    async def _render(self, pending_frags):
+        """Draw the real app once and return what the screen got — the row has to be IN the
+        layout, not merely rendered by a function nobody mounted."""
+        from prompt_toolkit.output.plain_text import PlainTextOutput
+
+        sink, holder = StringIO(), {}
+        with create_pipe_input() as inp, create_app_session(
+            input=inp, output=PlainTextOutput(sink)
+        ):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=lambda _t: None, on_interrupt=lambda: None,
+                on_eof=lambda: holder["app"].exit(),
+                hint_fn=lambda: [("class:hint", "  tab commands")], right_fn=lambda: [],
+                status_fn=lambda: [], pending_fn=lambda: pending_frags,
+            )
+            holder["app"] = app
+            inp.send_text("\x04")
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+        return sink.getvalue()
+
+    async def test_the_row_is_drawn_under_the_footer(self):
+        screen = await self._render([("class:hint", "  ⏸ 1 decision pending")])
+        assert "⏸ 1 decision pending" in screen
+        assert screen.index("tab commands") < screen.index("⏸"), "under the bottom bar, not over"
+
+    async def test_an_empty_queue_draws_no_row_at_all(self):
+        assert "⏸" not in await self._render([])
+
+    def test_answering_empties_the_row(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(1)])
+        ch.box_set_pending([])
+        assert ch._box_pending_frags() == []
+
+
+class TestStagedNotice:
+    """PermissionStaged → one inline transcript line, and a bell only for somebody who is there."""
+
+    async def test_staged_prints_the_inline_notice(self):
+        ch = _channel()
+        await ch.on_permission_staged(_staged_event(_pending(2), total=3))
+        out = ch._console.file.getvalue()
+        assert "needs you" in out and "#2" in out and "rm -rf ~/old-notes" in out
+        assert "/approve 2" in out, "the line carries the way to answer it"
+
+    async def test_the_channel_picks_the_event_up_itself(self, tmp_path):
+        """`start()` is where a channel takes its events off the bus. Without the subscription
+        `send_pending_notice` is a method nobody calls — and the notice is the only thing that
+        tells a person a step was skipped, since the model was told to carry on without it."""
+        ch = _channel()
+        ch._history_file = str(tmp_path / "history")
+        await ch.start()
+        try:
+            await ch.bus.publish(_staged_event(_pending(7), total=2))
+            assert "#7" in ch._console.file.getvalue()
+        finally:
+            await ch.stop()
+
+    async def test_staged_while_present_rings_the_bell_once(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_app = types.SimpleNamespace(output=_BellOutput())
+        ch._note_keystroke()  # somebody just typed
+        await ch.on_permission_staged(_staged_event(_pending(1)))
+        assert ch._box_app.output.bells == 1
+
+    async def test_staged_while_away_is_silent(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._box_app = types.SimpleNamespace(output=_BellOutput())
+        ch._last_keystroke_at = time.monotonic() - PRESENCE_WINDOW_S - 1.0
+        await ch.on_permission_staged(_staged_event(_pending(1)))
+        assert ch._box_app.output.bells == 0, "no beeping into an empty room"
+        assert "needs you" in ch._console.file.getvalue(), "the transcript line still lands"
+
+
+class TestPresence:
+    async def test_a_keystroke_stamps_the_clock(self):
+        ch = _channel()
+        assert ch._present() is False, "nobody has typed yet"
+        ch._note_keystroke()
+        assert ch._present() is True
+
+    async def test_coming_back_says_what_is_waiting_once(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(1), _pending(2)])
+        ch._last_keystroke_at = time.monotonic() - PRESENCE_WINDOW_S - 1.0
+        ch._note_keystroke()
+        ch._note_keystroke()  # the very next key is not a second return
+        await asyncio.sleep(0)  # the line is printed from a task (the hook is synchronous)
+        out = ch._console.file.getvalue()
+        assert out.count("while you were away") == 1
+        assert "2 decisions pending" in out
+
+    async def test_no_return_line_with_an_empty_queue(self):
+        ch = _channel()
+        ch._box_active = True
+        ch._last_keystroke_at = time.monotonic() - PRESENCE_WINDOW_S - 1.0
+        ch._note_keystroke()
+        await asyncio.sleep(0)
+        assert ch._console.file.getvalue() == ""
+
+    async def test_a_short_gap_is_not_a_return(self):
+        ch = _channel()
+        ch._box_active = True
+        ch.box_set_pending([_pending(1)])
+        ch._last_keystroke_at = time.monotonic() - 1.0
+        ch._note_keystroke()
+        await asyncio.sleep(0)
+        assert "while you were away" not in ch._console.file.getvalue()
+
+
+class TestPendingHotkeys:
+    """ctrl+y / ctrl+n on the live box: a control event NOW, never a queued slash command."""
+
+    async def _drive_app(self, feed: str):
+        answers: list[bool] = []
+        holder: dict = {}
+
+        def on_eof() -> None:
+            holder["app"].exit()
+
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=lambda _t: None, on_interrupt=lambda: None, on_eof=on_eof,
+                hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
+                status_fn=lambda: [],
+                on_pending_answer=answers.append,
+            )
+            holder["app"] = app
+            inp.send_text(feed)
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+        return answers
+
+    async def test_ctrl_y_approves_and_ctrl_n_denies(self):
+        assert await self._drive_app("\x19\x0e\x04") == [True, False]
+
+    async def test_the_hotkeys_never_reach_the_line(self):
+        subs: list[str] = []
+        holder: dict = {}
+
+        def on_eof() -> None:
+            holder["app"].exit()
+
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=subs.append, on_interrupt=lambda: None, on_eof=on_eof,
+                hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
+                status_fn=lambda: [],
+            )
+            holder["app"] = app
+            inp.send_text("\x19ok\r\x04")
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+        assert subs == ["ok"], "ctrl+y is a key, not a character"
+
+    async def test_live_box_posts_the_control_event_for_the_oldest(self):
+        ch = _channel()
+        ch._history = InMemoryHistory()
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                ch.box_set_pending([_pending(1)])
+                inp.send_text("\x19")
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("approve_pending", None)
+                inp.send_text("\x0e")
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("deny_pending", None)
+            finally:
+                await ch.stop_input_box()
+
+    async def test_with_nothing_parked_the_hotkeys_do_nothing(self):
+        ch = _channel()
+        ch._history = InMemoryHistory()
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                inp.send_text("\x19\x0ehello\r")
+                # The submit that FOLLOWS them is the first event on the queue: neither key
+                # produced one of its own.
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("submit", "hello")
+            finally:
+                await ch.stop_input_box()
+
+    async def test_typing_into_the_live_box_stamps_presence(self):
+        ch = _channel()
+        ch._history = InMemoryHistory()
+        ch._last_keystroke_at = time.monotonic() - PRESENCE_WINDOW_S - 1.0
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                ch._last_keystroke_at = time.monotonic() - PRESENCE_WINDOW_S - 1.0
+                assert ch._present() is False
+                inp.send_text("hi\r")
+                await asyncio.wait_for(q.get(), timeout=10.0)
+                assert ch._present() is True, "the key press reached the presence hook"
+            finally:
+                await ch.stop_input_box()
