@@ -20,7 +20,13 @@ from localharness.channels.discord import (
     PERMISSION_REACTIONS_UNGRANTABLE,
     DiscordChannel,
 )
-from localharness.cli.repl import MODE_EFFECTS, MODE_SETTABLE_NAMES
+from localharness.agent.gate_types import ToolMeta
+from localharness.cli.repl import (
+    MODE_EFFECTS,
+    MODE_SETTABLE_NAMES,
+    NOTHING_PENDING,
+)
+from localharness.cli.slash_commands import SLASH_COMMANDS
 from localharness.config.grants import GrantStore
 from localharness.core.bus import EventBus
 
@@ -460,3 +466,114 @@ async def test_discord_posts_one_line_when_a_call_is_denied():
     assert len(sent) == 1
     assert "permission denied" in sent[0]
     assert "never here" in sent[0]
+
+
+# ----------------------------------------------------- /pending, /approve, /deny
+
+class _RecordingAgent:
+    """Stands in for the AgentLoop: the only thing `/approve` asks of it is the nudge seam."""
+
+    def __init__(self) -> None:
+        self.nudges: list[str] = []
+
+    def push_user_nudge(self, text: str) -> None:
+        self.nudges.append(text)
+
+
+async def _stage_one(gate: PermissionGate, command: str = "rm -rf ~/old-notes"):
+    """Park one call the way a real turn does: through `check` in the default mode."""
+    gate.set_mode("auto")
+    gate.asker = _noop_asker
+    return await gate.check(
+        "bash_exec", {"command": command}, ToolMeta(group="shell"),
+        agent_id="main", session_id="s",
+    )
+
+
+async def _noop_asker(request):
+    raise AssertionError("the asker was called; `auto` must stage, never ask")
+
+
+@pytest.mark.asyncio
+async def test_slash_pending_lists_what_is_waiting(tmp_path):
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+
+    assert await repl._handle_slash("/pending") is True
+    assert channel.sent[-1] == NOTHING_PENDING
+
+    await _stage_one(gate)
+    assert await repl._handle_slash("/pending") is True
+    assert "#1" in channel.sent[-1] and "rm -rf" in channel.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_slash_approve_answers_the_gate_and_nudges_a_running_turn(tmp_path):
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    agent = _RecordingAgent()
+    repl = _repl(channel, gate)
+    repl._agent = agent
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(5))
+    try:
+        await _stage_one(gate)
+
+        assert await repl._handle_slash("/approve 1") is True
+        assert gate.pending == {}
+        assert "approved" in channel.sent[-1] and "#1" in channel.sent[-1]
+        # The approval reaches the MODEL as words at the next step boundary — never as a second
+        # path into tool dispatch.
+        assert len(agent.nudges) == 1
+        assert "approved pending #1" in agent.nudges[0]
+        assert repl._slash_followup is None, "a running turn must not also start a new one"
+    finally:
+        repl._turn_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_slash_approve_on_an_idle_session_leaves_a_turn_to_start(tmp_path):
+    """With no turn in flight there is nothing to nudge, so the approval becomes an ordinary
+    user turn — started by `_dispatch_input`, which owns "a line became a turn"."""
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    await _stage_one(gate)
+
+    assert await repl._handle_slash("/approve") is True
+    assert repl._slash_followup is not None
+    assert "approved pending #1" in repl._slash_followup
+
+
+@pytest.mark.asyncio
+async def test_slash_deny_drops_it_and_never_starts_a_turn(tmp_path):
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    await _stage_one(gate)
+
+    assert await repl._handle_slash("/deny 1") is True
+    assert gate.pending == {}
+    assert "denied" in channel.sent[-1]
+    # Nothing for an idle session to do about a refusal: there is no call to run.
+    assert repl._slash_followup is None
+
+
+@pytest.mark.asyncio
+async def test_slash_approve_reports_an_unknown_number(tmp_path):
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    assert await repl._handle_slash("/approve 9") is True
+    assert "No pending call #9" in channel.sent[-1]
+    assert repl._slash_followup is None
+
+
+@pytest.mark.asyncio
+async def test_slash_approve_rejects_a_non_number(tmp_path):
+    channel, gate = _RecordingChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    assert await repl._handle_slash("/approve latest") is True
+    assert "/approve takes a pending number" in channel.sent[-1]
+
+
+def test_the_three_commands_are_in_the_one_table():
+    """/help and the completion menu both read SLASH_COMMANDS: a command missing there is a
+    command nobody discovers."""
+    names = [name for name, _ in SLASH_COMMANDS]
+    assert {"/pending", "/approve", "/deny"} <= set(names)
