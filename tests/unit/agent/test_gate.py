@@ -812,3 +812,18 @@ async def test_an_approval_ticket_never_beats_a_refusal_recorded_since(tmp_path)
     outcome = await _check(gate, "bash_exec", HOME_DELETE)
     assert not outcome.allowed and "never here" in outcome.reason
     assert gate._approved_once == {}, "the ticket is spent on sight, never stockpiled"
+
+
+@pytest.mark.asyncio
+async def test_leaving_auto_drops_an_unspent_ticket(tmp_path):
+    """`/approve` answered auto's question; `guarded` asks its own about the same call and the
+    old yes must not answer it (critic, 2026-09-12)."""
+    asked: list[PermissionRequest] = []
+    gate = _auto_gate(tmp_path, asker=_answer("reject_once", asked))
+    await _check(gate, "bash_exec", HOME_DELETE)
+    await gate.approve(1)
+
+    gate.set_mode("guarded")
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not outcome.allowed
+    assert len(asked) == 1, "guarded's blocking ask ran; the stale ticket did not stand in"

@@ -706,3 +706,38 @@ async def test_a_channel_resolver_takes_the_hotkey_path_for_a_named_id(tmp_path)
     finally:
         repl._turn_task.cancel()
         repl._unsubscribe_pending()
+
+
+@pytest.mark.asyncio
+async def test_classic_loop_marks_its_turn_as_running(tmp_path):
+    """A Discord session runs the classic loop, which never went through `_start_turn_task`,
+    so `_turn_running()` read False mid-turn and a reaction's approval could start a second
+    concurrent turn (critic, 2026-09-12)."""
+    channel, gate = _BoxChannel(), _gate(tmp_path)
+    repl = _repl(channel, gate)
+    seen: list[bool] = []
+    lines = iter(["hello"])
+
+    async def read_input():
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError
+
+    async def turn():
+        await asyncio.sleep(0)
+        seen.append(repl._turn_running())
+
+    async def dispatch(_text):
+        return asyncio.ensure_future(turn())
+
+    channel.read_input = read_input
+    channel.start = channel.stop = _noop
+    repl._establish_workspace_trust = _noop
+    repl._dispatch_input = dispatch
+    await repl._run_classic()
+    assert seen == [True]
+
+
+async def _noop(*_a, **_k):
+    return None
