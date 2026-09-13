@@ -933,7 +933,7 @@ the next start reads `permissions.mode` from config again. `auto` is the default
 once, and after that everything runs except `AUTO_BLACKLIST` — deletes aimed outside the project,
 `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … | sh`,
 `dd`/`mkfs`/`shred`/`format`, writes to a secret store or a system directory, and writes to
-`.git/**` or `.localharness/**` — which asks every time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
+`.git/**` or `.localharness/**` — which is parked for a human every time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
 the workspace boundary or is unfamiliar, and remembers an
 "always" in `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for destructive
 operations aimed inside the project. `read-only` refuses writes,
@@ -943,6 +943,20 @@ any other mode; a scheduled job still writes `permissions.mode: unattended` in i
 nobody is there to type it. Discord takes the same five names as a plain `mode <name>` message, and
 Zed's picker lists them.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
+
+**`/pending`, `/approve [N]` and `/deny [N]` answer a parked call.** From v0.14.2 a blacklisted call
+in `auto` is not put to you as a blocking prompt: the gate parks it, the model is told to continue
+without that step and to name the pending number in its final answer, and the turn runs on.
+`/pending` lists the queue, one line per call with the number you type. `/approve [N]` runs one and
+`/deny [N]` drops one; with no number they take the oldest. An approval reaches the MODEL as words,
+a nudge into a running turn or an ordinary user turn when the session is idle, so the agent loop
+stays the only thing that dispatches a tool. It is a one-shot pass for that exact call, tool plus
+arguments, and nothing is written to `grants.yaml`. The input box carries the same queue under it as
+a single line, `⏸ 1 decision pending  #3  bash: rm -rf ~/old-notes   ctrl+y run · ctrl+n skip ·
+/pending`, and `ctrl+y` / `ctrl+n` answer the oldest immediately. Two limits stated plainly: the
+queue is in-session and a restart drops it, and a `/approve` typed into the box mid-turn is queued
+by the input router and lands after the turn ends, which is why the hotkeys exist. `guarded` and
+`trusted` do not stage; they ask, and block.
 
 **`--no-input` is not a permission switch.** It governs one question only — whether to load an
 untrusted workspace's config layer — and never loosens the gate. A `--no-input` run with no trust

@@ -535,8 +535,8 @@ class PermissionConfig(BaseModel):
         default=DEFAULT_MODE,  # "auto", from agent/gate_types.py
         description=(
             "Session permission mode. 'auto' (default): deny patterns win, then the blacklist "
-            "asks every time and remembers nothing, and everything else runs once the workspace "
-            "is trusted. 'guarded': the gate also asks once about each boundary-crossing or "
+            "is parked as a pending decision for a human rather than asked about, and "
+            "everything else runs once the workspace is trusted. 'guarded': the gate also asks once about each boundary-crossing or "
             "unfamiliar call and remembers the answer — the v0.14.0 default. 'trusted': 'auto' "
             "plus a prompt for destructive operations inside the project. 'read-only': writes, "
             "non-read-only shell and code execution are refused. 'unattended': every ask becomes "
@@ -1314,8 +1314,8 @@ project, protected, or unresolvable; `irreversible_signatures` wherever they poi
 the behaviour-changing files of `.localharness/` (`config.yaml`, `overrides.yaml`, `plugins/**`),
 with `protected_paths_home` and `protected_paths_system` applying in full; and `pipe_to_shell`, a
 download whose sink takes its **program** from stdin (`curl … | sh`; `curl … | python3 -c '…'` is
-not one). A call the gate cannot read at all — a non-string command or path — asks as well; a
-command *name* computed at runtime (`eval "$(direnv hook bash)"`, `$VAR …`) does not. Everything
+not one). A call the gate cannot read at all — a non-string command or path — is staged as well; a
+command *name* computed at runtime (`eval "$(direnv hook bash)"`, `$VAR …`) is not. Everything
 else runs without asking — docker, every other git subcommand, `.env` and key files inside the
 project, interpreters, subagents, MCP and plugin tools, network reads, and writes anywhere else. It
 remembers nothing beyond the trust answer. **There is no allow-list in `auto`** — nothing is
@@ -1323,7 +1323,14 @@ enumerated as safe, so `AUTO_BLACKLIST` is the one surface to curate, and it is 
 **not** reachable from `permissions.ask.*`: every field of it either loosens the mode when extended
 or is the list that decides whether the default is safe at all, and config travels with a
 repository. `localharness ask-rate --traces DIR --mode auto` reports which entries fired over your
-own traces (`--mode guarded` measures the v0.14.0 behaviour over the same corpus). `guarded`, the v0.14.0 default and now opt-in, also
+own traces (`--mode guarded` measures the v0.14.0 behaviour over the same corpus). From v0.14.2
+none of this blocks the loop: in `auto` a blacklisted call is not put to a human at all, it is
+PARKED (`PermissionGate._stage`, `STAGING_MODES`), the model is handed `PENDING_OBSERVATION` and
+told to continue without the step, and a human answers later with `gate.approve(n)` / `gate.deny(n)`
+behind `/pending`, `/approve [N]` and `/deny [N]`. The queue is keyed by the whole tool call
+(`call_identity`), not by the grant key, so an approval can never cover a command the human did not
+read, and it buys exactly one re-run. `guarded` and `trusted` keep the blocking ask, and a channel
+that cannot ask at all still fails closed rather than piling up a queue nobody will answer. `guarded`, the v0.14.0 default and now opt-in, also
 asks a human before a call crosses the workspace boundary or is unfamiliar, and remembers the
 answer; it is what a declined workspace, and a run that cannot ask and has no trust record, fall
 back to. `trusted` is `auto` plus a prompt for destructive operations aimed inside the project.
@@ -1373,8 +1380,9 @@ them is the harness being used. The two dict-shaped tables (`destructive_flag_ve
 signature, so a wrong entry would silently change what an existing grant means.
 
 **The grant store (`~/.localharness/grants.yaml`).** Remembered answers are not config. **The
-default mode neither reads this file nor writes it**: `auto` asks only about blacklist classes,
-which are never remembered, so grants are what `guarded` accumulates. Recorded refusals are the
+default mode neither reads this file nor writes it**: `auto` stages only blacklist classes, which
+are never remembered, so grants are what `guarded` accumulates. A `/approve` is not a grant either:
+it is a one-shot ticket consumed by the next matching call. Recorded refusals are the
 exception and apply in every mode, `auto` included — a "never" you have given still denies, without
 prompting. They live in
 one file in the global config directory, keyed by the workspace's resolved path, written only when a
