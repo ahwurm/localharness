@@ -71,6 +71,8 @@ from localharness.core.events import (
     Escalation,
     Observation,
     ParseFailed,
+    PermissionResolved,
+    PermissionStaged,
     TaskComplete,
     TurnFailed,
 )
@@ -260,6 +262,61 @@ It said "Load workspace configuration?" until v0.14.1, when the config-layer que
 session-permission question became one decision and one record (owner ruling 2026-09-11). A
 title naming only the config half would be describing half of what a yes now does."""
 
+PENDING_NOTICE = (
+    "⏸ needs you  #{id}  {rendering}   ({total} pending) — send /approve {id} to run it or "
+    "/deny {id} to skip"
+)
+"""The one line a Zed user gets when `auto` PARKS a call instead of asking (owner ruling
+2026-09-12).
+
+It rides as ordinary agent text, not as a `session/request_permission`: a dialog is exactly what
+staging exists to remove, and ACP has no notice primitive between the two. So the panel shows one
+inline line, the turn carries on underneath it, and nothing blocks.
+
+Worded differently from `channels/base.PENDING_NOTICE_LINE` for one reason: Zed gives this agent
+no command surface of its own, so the only way a person can answer is to TYPE into the same
+message box the turn came from. "send /approve 3" says that; a bare "/approve 3" in parentheses
+reads, in an editor panel, like a button somebody is meant to find."""
+
+PENDING_LIST_HEADER = "{total} waiting on you:"
+PENDING_LIST_LINE = "  #{id}  {label}{rendering}   (/approve {id} · /deny {id})"
+NOTHING_PENDING = "Nothing pending."
+"""`/pending`: the queue `auto` parked, one line each — the same one-line rendering every other
+surface shows, so the number a person types is the number they read."""
+
+PENDING_NEEDS_A_NUMBER = (
+    "{verb} takes a pending number, e.g. {verb} 1 — or {verb} on its own for the oldest."
+)
+PENDING_UNKNOWN = "No pending #{id}. Send /pending to see what is waiting."
+"""A number nobody parked. One line and no turn: a typo must not become a prompt the model then
+answers as if it were a request."""
+
+PENDING_RESOLVED_LINES: dict[bool, str] = {
+    True: "✅ approved #{id}  {rendering} — it runs when the model re-issues it",
+    False: "❌ skipped #{id}  {rendering}",
+}
+"""The outcome of one parked call, written into the transcript where the notice was.
+
+Keyed by "was it approved" so the two halves of the pair cannot drift apart. The approval line
+says "it runs when the model re-issues it" rather than "ran": `PermissionGate.approve` records an
+answer and dispatches nothing — the call is re-issued by the MODEL, which may have finished the
+task another way by the time a human gets round to the queue."""
+
+PENDING_APPROVED_NUDGE = (
+    "Human approved pending #{id} ({rendering}). Run it now if it is still useful, then continue."
+)
+PENDING_DENIED_NUDGE = "Human declined pending #{id} ({rendering}); do not retry it."
+"""The sentence the MODEL reads, word for word the pair `cli/repl` sends.
+
+An approval reaches the model as WORDS — a nudge into the running turn, or an ordinary user turn
+when the session is idle — so the agent loop stays the only thing that ever dispatches a tool.
+The wording is duplicated from the REPL rather than imported because `channels` must not depend
+on `cli`; the model has to read the same sentence whichever surface took the answer, so the two
+copies belong in one home the day a third surface needs them."""
+
+PENDING_COMMAND_VERBS: frozenset[str] = frozenset({"/pending", "/approve", "/deny"})
+"""The three commands a Zed prompt can be instead of a turn (:func:`_pending_command`)."""
+
 ONE_THREAD_PER_PROCESS = (
     "This localharness process is already serving a thread in {current}. Start a second "
     "LocalHarness agent server for {requested} — one agent process serves one project folder and "
@@ -373,6 +430,19 @@ def _tool_title(tool_name: str, params: dict[str, Any]) -> str:
     return f"{tool_name}: {flat}"
 
 
+def _pending_command(text: str) -> tuple[str, str]:
+    """A prompt that is a queue command → (verb, argument); anything else → ("", "").
+
+    WHOLE-message and nothing else: "can you /approve 1 while you're there" is a sentence for the
+    model, not a command, and reading a verb out of the middle of a prompt would silently swallow
+    a turn. Case-insensitive because the box a Zed user types into capitalizes nothing for them.
+    """
+    parts = (text or "").strip().split()
+    if not parts or len(parts) > 2 or parts[0].lower() not in PENDING_COMMAND_VERBS:
+        return "", ""
+    return parts[0].lower(), parts[1] if len(parts) > 1 else ""
+
+
 class AcpChannel(ChannelAdapter):
     """localharness as an ACP agent, and as the channel that renders its session (PRD §4).
 
@@ -425,6 +495,15 @@ class AcpChannel(ChannelAdapter):
         # A map rather than one slot: subagents run concurrently on this bus, so two identical
         # calls can be in flight at once (D4).
         self._pending_calls: dict[str, tuple[str, dict]] = {}
+        # Every call `auto` parked this session, by pending id. Kept here and not read off the
+        # gate because a resolution REMOVES it from `gate.pending` before the event is published,
+        # and the outcome line still has to name the command that was answered.
+        self._staged: dict[int, Any] = {}
+        self._announced: set[int] = set()
+        """Pending ids whose outcome line is already in the transcript. The bus handler and the
+        slash command both answer the same call — one from `PermissionResolved`, one from the
+        return value of `gate.approve` — so the line is written by whichever arrives first and
+        never twice."""
         self._pending_notice: Optional[str] = None
         self._handles: list[Any] = []
 
@@ -609,6 +688,13 @@ class AcpChannel(ChannelAdapter):
         A prompt for any id but the live one is refused (:data:`UNKNOWN_SESSION`). It used to
         overwrite the live id, so a second thread's prompt silently re-tagged the first thread's
         file reads, permission dialogs and updates with its own session id.
+
+        `/pending`, `/approve N` and `/deny N` are intercepted ahead of the boundary check and
+        the bring-up: Zed gives this agent no command surface, so the queue is answered by typing
+        into the same box, and those three answers must cost neither a model turn nor a session
+        bring-up (nothing can be parked before a session exists). The one exception
+        comes back as text — an approval on an idle session is a sentence the model has to run a
+        turn on, so it falls through the ordinary path below and Zed sees the retry stream.
         """
         self._require_live_session(session_id)
         text = _prompt_text(prompt)
@@ -617,6 +703,13 @@ class AcpChannel(ChannelAdapter):
         if self._pending_notice is not None:
             notice, self._pending_notice = self._pending_notice, None
             await self.send_message(notice)
+
+        verb, arg = _pending_command(text)
+        if verb:
+            followup = await self._run_pending_command(verb, arg)
+            if followup is None:
+                return PromptResponse(stop_reason="end_turn")
+            text = followup
 
         if self._boundary is None:
             from localharness.cli.start_cmd import NO_BOUNDARY_NOTICE
@@ -878,6 +971,113 @@ class AcpChannel(ChannelAdapter):
         )
         return getattr(response.outcome, "option_id", None) == "allow_once"
 
+    # ------------------------------------------------------------ the pending queue
+
+    async def on_permission_staged(self, event: Any) -> None:
+        """`PermissionStaged` → the one-line notice, and a local copy of the parked call.
+
+        The copy is what lets the outcome line name a command: `PermissionGate._answer` pops the
+        call out of `gate.pending` before publishing its resolution, so by the time this channel
+        hears the answer the gate no longer holds the rendering it has to print.
+        """
+        self._staged[event.pending.id] = event.pending
+        await self.send_pending_notice(event.pending, event.total)
+
+    async def send_pending_notice(self, pending: Any, total: int) -> None:
+        """One inline line (:data:`PENDING_NOTICE`), not a dialog — see that constant."""
+        await self.send_message(
+            PENDING_NOTICE.format(
+                id=pending.id, rendering=sanitize_for_display(pending.rendering), total=total
+            )
+        )
+
+    async def on_permission_resolved(self, event: Any) -> None:
+        """Write the outcome of a PARKED call into the transcript; ignore every other answer.
+
+        An ordinary ASK resolves through this event too, and Zed already drew that dialog and its
+        outcome — repeating it in the panel would report a decision the user just made by hand.
+        A staged call is the one whose answer carries `pending_id` (set by `gate.approve` /
+        `gate.deny`); a dialog answer carries none and is left alone.
+        """
+        pid = getattr(event, "pending_id", None)
+        answered = self._staged.get(pid) if pid is not None else None
+        if answered is None:
+            return
+        await self._announce_resolution(answered, str(event.decision).startswith("allow"))
+
+    async def _announce_resolution(self, pending: Any, approved: bool) -> None:
+        """The outcome line for one parked call, written once however the answer arrived."""
+        if pending.id in self._announced:
+            return
+        self._announced.add(pending.id)
+        await self.send_message(
+            PENDING_RESOLVED_LINES[approved].format(
+                id=pending.id, rendering=sanitize_for_display(pending.rendering)
+            )
+        )
+
+    async def _run_pending_command(self, verb: str, arg: str) -> Optional[str]:
+        """Answer the queue in place of a turn. Returns the sentence the MODEL still has to hear.
+
+        `None` means the command is finished — `/pending`, any error, a denial, and an approval
+        that reached a running turn as a nudge. A string means the approval had no turn to nudge,
+        so the caller runs it as an ordinary user turn; that is the only way an approval reaches
+        the model on an idle session, and it keeps the agent loop the one thing that dispatches a
+        tool.
+
+        Honest about the nudge path: a Zed client sends one `session/prompt` at a time, so
+        `/approve` typed while a turn runs is normally only possible for a client that issues
+        concurrent requests. The branch exists because JSON-RPC permits exactly that and a nudge
+        into the live turn is the right answer when it happens.
+        """
+        queue = list((getattr(self._gate, "pending", None) or {}).values())
+        if verb == "/pending":
+            lines = [PENDING_LIST_HEADER.format(total=len(queue))] + [
+                PENDING_LIST_LINE.format(
+                    id=p.id, label=p.agent_label, rendering=sanitize_for_display(p.rendering)
+                )
+                for p in queue
+            ]
+            await self.send_message("\n".join(lines) if queue else NOTHING_PENDING)
+            return None
+
+        approve = verb == "/approve"
+        if arg and not arg.isdigit():
+            await self.send_message(PENDING_NEEDS_A_NUMBER.format(verb=verb))
+            return None
+        # No gate yet means no session yet, and nothing can have been parked before one exists —
+        # so the empty queue is the true answer, not a reason to start a model server.
+        if self._gate is None:
+            await self.send_message(NOTHING_PENDING)
+            return None
+        answer = self._gate.approve if approve else self._gate.deny
+        try:
+            answered = await answer(int(arg) if arg else None)
+        except KeyError:
+            await self.send_message(
+                PENDING_UNKNOWN.format(id=arg) if arg else NOTHING_PENDING
+            )
+            return None
+
+        # Usually already written by `on_permission_resolved` (the gate publishes inside the
+        # await above); this is what keeps the confirmation from going missing on a gate wired
+        # without a bus.
+        await self._announce_resolution(answered, approve)
+        nudge = (PENDING_APPROVED_NUDGE if approve else PENDING_DENIED_NUDGE).format(
+            id=answered.id, rendering=answered.rendering
+        )
+        if self._turn_running():
+            self._agent_loop.push_user_nudge(nudge)
+            return None
+        # A denial needs no turn of its own: there is nothing for an idle session to do about it.
+        return nudge if approve else None
+
+    def _turn_running(self) -> bool:
+        """Is a turn in flight right now? `prompt` owns the task and clears it in its `finally`,
+        so this is the same slot `session/cancel` cancels."""
+        task = self._turn_task
+        return task is not None and not task.done()
+
     # ------------------------------------------------------------ bus → session/update
 
     async def start(self) -> None:
@@ -890,6 +1090,10 @@ class AcpChannel(ChannelAdapter):
             self.bus.subscribe(TurnFailed, self.on_turn_failed),
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Escalation, self.on_escalation),
+            # The queue: the only way this channel hears that `auto` parked a call, and the only
+            # way it hears the answer once somebody gives one.
+            self.bus.subscribe(PermissionStaged, self.on_permission_staged),
+            self.bus.subscribe(PermissionResolved, self.on_permission_resolved),
         ]
 
     async def stop(self) -> None:
