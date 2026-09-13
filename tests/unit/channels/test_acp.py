@@ -41,7 +41,7 @@ from localharness.agent.context import ContextManager
 from localharness.agent.gate import PermissionGate
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.channels.acp import AcpChannel
+from localharness.channels.acp import NOTHING_PENDING, PENDING_UNKNOWN, AcpChannel
 from localharness.config.grants import GrantStore
 from localharness.config.models import AgentConfig
 from localharness.core.bus import EventBus
@@ -1089,6 +1089,156 @@ async def test_two_identical_calls_in_flight_pair_with_the_right_row(
     await agent.ask_permission(_ask())
     tool_call, _options = session.client.permission_requests[before + 2]
     assert tool_call.tool_call_id == "tc-first"
+
+
+# ------------------------------------------------------------------ the pending queue
+
+STAGED_COMMAND = "git reset --hard HEAD~1"
+"""A command `auto` parks: blacklisted, but approvable. (`rm -rf` is a shipped DENY pattern —
+no `/approve` can lift that one, so it would never reach the queue.)"""
+
+
+async def _staged(tmp_path, monkeypatch) -> Session:
+    """An `auto` session whose first turn had one call parked and carried on without it."""
+    session = await _start(
+        tmp_path,
+        monkeypatch,
+        responses=_plan(("bash_exec", {"command": STAGED_COMMAND})),
+        tools=[Shell()],
+        mode="auto",
+    )
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("undo that")])
+    assert list(session.gate.pending) == [1], "the call was not parked"
+    return session
+
+
+async def _say(session: Session, text: str) -> int:
+    """Send one prompt; return how many model calls it cost (0 = no turn ran)."""
+    before = len(session.llm.seen_messages)
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block(text)])
+    return len(session.llm.seen_messages) - before
+
+
+def _lines_with(session: Session, needle: str) -> list[str]:
+    return [c for c in session.client.chunks() if needle in c]
+
+
+async def test_a_parked_call_is_one_inline_line_and_never_a_dialog(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """Owner ruling 2026-09-12: in `auto` nothing blocks. Zed gets the notice as agent text —
+    a dialog is the thing staging removed — and the turn finishes without the step."""
+    session = await _staged(tmp_path, monkeypatch)
+
+    notices = _lines_with(session, "⏸ needs you")
+    assert len(notices) == 1, session.client.chunks()
+    assert "#1" in notices[0] and "/approve 1" in notices[0] and "/deny 1" in notices[0]
+    assert STAGED_COMMAND in notices[0]
+    assert session.client.permission_requests == [], "a parked call put a dialog to the user"
+    assert session.tools["bash_exec"].ran == []
+    assert session.llm.model_saw("pending #1"), "the model was not told to route around it"
+
+
+async def test_pending_lists_the_queue_without_running_a_turn(tmp_path, monkeypatch, keep_cwd):
+    """`/pending` is answered by the adapter: no model call, no bring-up, just the queue."""
+    session = await _staged(tmp_path, monkeypatch)
+
+    assert await _say(session, "/pending") == 0, "listing the queue ran a turn"
+    listing = _lines_with(session, "#1")[-1]
+    assert STAGED_COMMAND in listing and "waiting on you" in listing
+
+
+async def test_pending_on_an_empty_queue_says_so(tmp_path, monkeypatch, keep_cwd):
+    """Before anything is parked — before the session is even built — the queue is empty, and
+    saying so must not start a model server."""
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")], mode="auto"
+    )
+    assert await _say(session, "/PENDING") == 0
+    assert session.client.chunks()[-1] == NOTHING_PENDING
+
+
+async def test_approve_on_an_idle_session_runs_a_turn_that_re_issues_the_call(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """The end-to-end shape: the human answers, the MODEL re-issues the command, the gate spends
+    the one-run ticket. The approval reaches the model as an ordinary user turn, so Zed sees the
+    retry stream — nothing here dispatches a tool."""
+    session = await _staged(tmp_path, monkeypatch)
+    # Queued AFTER the parking turn, so the command is re-issued by the turn the approval
+    # starts rather than by the one that parked it.
+    session.llm._responses.extend([
+        FakeLLMResponse(
+            content=None,
+            tool_calls=[
+                FakeToolCall(
+                    id="tc-retry", name="bash_exec", arguments={"command": STAGED_COMMAND}
+                )
+            ],
+        ),
+        FakeLLMResponse(content="Ran it."),
+    ])
+
+    assert await _say(session, "/approve 1") > 0, "an approval on an idle session ran no turn"
+    assert session.llm.model_saw("Human approved pending #1")
+    assert session.tools["bash_exec"].ran == [STAGED_COMMAND], "the approved call never ran"
+    assert session.gate.pending == {}
+    assert len(_lines_with(session, "✅ approved #1")) == 1, "the outcome line is missing or twice"
+
+
+async def test_approve_during_a_running_turn_nudges_it_instead_of_starting_another(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """A client that issues concurrent requests can answer mid-turn (Zed sends one prompt at a
+    time, so this is the programmatic path). The approval then goes into the turn that is
+    already running, as words at its next step boundary."""
+    session = await _staged(tmp_path, monkeypatch)
+    pushed: list[str] = []
+    monkeypatch.setattr(session.agent._agent_loop, "push_user_nudge", pushed.append)
+    running: asyncio.Future = asyncio.get_running_loop().create_future()
+    session.agent._turn_task = asyncio.ensure_future(running)
+
+    try:
+        assert await _say(session, "/approve 1") == 0, "a nudged approval also started a turn"
+    finally:
+        running.set_result(None)
+        session.agent._turn_task = None
+
+    assert len(pushed) == 1
+    assert pushed[0].startswith("Human approved pending #1 (bash_exec: git reset --hard HEAD~1")
+    assert pushed[0].endswith("Run it now if it is still useful, then continue.")
+    assert session.gate.pending == {}
+
+
+async def test_deny_answers_the_call_and_starts_nothing(tmp_path, monkeypatch, keep_cwd):
+    """A denial needs no turn of its own — there is nothing for an idle session to do about it —
+    and it writes no durable refusal, only one line saying the call was dropped."""
+    session = await _staged(tmp_path, monkeypatch)
+
+    assert await _say(session, "/deny 1") == 0
+    assert session.gate.pending == {}
+    assert len(_lines_with(session, "❌ skipped #1")) == 1
+    assert session.tools["bash_exec"].ran == []
+
+
+async def test_a_number_nobody_parked_is_one_line_and_no_turn(tmp_path, monkeypatch, keep_cwd):
+    """A typo must not become a prompt the model answers as though it were a request."""
+    session = await _staged(tmp_path, monkeypatch)
+
+    assert await _say(session, "/approve 7") == 0
+    assert session.client.chunks()[-1] == PENDING_UNKNOWN.format(id="7")
+    assert list(session.gate.pending) == [1], "the queue was touched by an unknown number"
+
+
+async def test_a_prompt_that_merely_mentions_approve_is_still_a_prompt(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """The intercept is whole-message: reading a verb out of the middle of a sentence would
+    silently swallow a turn the user asked for."""
+    session = await _staged(tmp_path, monkeypatch)
+
+    assert await _say(session, "can you /approve 1 and then tidy up") > 0
+    assert list(session.gate.pending) == [1]
 
 
 # ------------------------------------------------------------------ the real command
