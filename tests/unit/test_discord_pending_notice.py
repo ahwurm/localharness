@@ -102,7 +102,7 @@ def _pending(pending_id: int = 3, rendering: str = "bash_exec: rm -rf ~/old-note
 
 
 def _resolved(pending: PendingCall, decision: str) -> PermissionResolved:
-    """The event the gate publishes when a human answers — no pending id on it, by design."""
+    """The event `gate.approve`/`gate.deny` publish: it names the parked call by `pending_id`."""
     return PermissionResolved(
         agent_id="",
         session_id=pending.session_id,
@@ -110,6 +110,7 @@ def _resolved(pending: PendingCall, decision: str) -> PermissionResolved:
         klass=pending.request.klass,
         key=None,
         decision=decision,
+        pending_id=pending.id,
     )
 
 
@@ -323,3 +324,17 @@ def test_a_long_command_is_truncated_into_one_message():
     body = pending_notice_body(_pending(rendering="bash_exec: " + "x" * (_DISCORD_LIMIT * 2)), 1)
     assert len(body) <= _DISCORD_LIMIT
     assert body.endswith(PENDING_TRUNCATION_SUFFIX) or PENDING_TRUNCATION_SUFFIX in body
+
+
+@pytest.mark.asyncio
+async def test_a_dialog_answer_without_a_pending_id_never_closes_a_notice():
+    """A guarded-mode dialog resolves through the same event with the same pairing fields; only
+    a resolution that names the parked call may close its notice (critic finding, 2026-09-12)."""
+    ch = _discord_channel()
+    ch._pending_resolver = _Resolver()
+    pending = _pending(1)
+    await ch.send_pending_notice(pending, 1)
+    event = _resolved(pending, "allow_once")
+    event = event.model_copy(update={"pending_id": None})
+    await ch.on_permission_resolved(event)
+    assert any(n.pending.id == 1 for n in ch._pending_notices.values()), "nobody answered #1"

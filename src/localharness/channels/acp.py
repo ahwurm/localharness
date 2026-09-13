@@ -490,7 +490,6 @@ class AcpChannel(ChannelAdapter):
         # gate because a resolution REMOVES it from `gate.pending` before the event is published,
         # and the outcome line still has to name the command that was answered.
         self._staged: dict[int, Any] = {}
-        self._announced: set[int] = set()
         """Pending ids whose outcome line is already in the transcript. The bus handler and the
         slash command both answer the same call — one from `PermissionResolved`, one from the
         return value of `gate.approve` — so the line is written by whichever arrives first and
@@ -998,9 +997,8 @@ class AcpChannel(ChannelAdapter):
 
     async def _announce_resolution(self, pending: Any, approved: bool) -> None:
         """The outcome line for one parked call, written once however the answer arrived."""
-        if pending.id in self._announced:
-            return
-        self._announced.add(pending.id)
+        if self._staged.pop(pending.id, None) is None:
+            return  # already announced, or never staged on this channel
         await self.send_message(
             PENDING_RESOLVED_LINES[approved].format(
                 id=pending.id, rendering=sanitize_for_display(pending.rendering)

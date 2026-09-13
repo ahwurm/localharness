@@ -542,23 +542,18 @@ class DiscordChannel(ChannelAdapter):
             notice.task.cancel()
 
     def _notice_for(self, event: PermissionResolved) -> _PendingNotice | None:
-        """The notice this resolution closes: by `pending_id` when the event carries one, else
-        the oldest still-open notice with the same pairing fields (see the caller's note)."""
-        if event.pending_id is not None:
-            for notice in self._pending_notices.values():
-                if notice.pending.id == event.pending_id:
-                    return notice
+        """The notice this resolution closes, by `pending_id` — and only by that.
+
+        A blocking ask (guarded/trusted) resolves through the same event with no pending id,
+        and its pairing fields (session, tool, class, key) are the SAME ones a parked call of
+        that class carries, so matching on them would let a dialog answer close a notice whose
+        call is still queued — a message reading "ran" over an item nobody ran.
+        """
+        if event.pending_id is None:
             return None
-        for notice in self._pending_notices.values():  # insertion order: oldest first
-            request = notice.pending.request
-            if (
-                notice.pending.session_id == event.session_id
-                and request.tool_name == event.tool_name
-                and request.klass == event.klass
-                and (request.key if request.grantable else None) == event.key
-            ):
-                return notice
-        return None
+        return next(
+            (n for n in self._pending_notices.values() if n.pending.id == event.pending_id), None
+        )
 
     async def _close_pending(self, notice: _PendingNotice, action: str) -> None:
         """Stamp the verdict onto the notice message (:data:`PENDING_RESOLVED_LINES`).

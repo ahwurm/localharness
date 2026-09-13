@@ -795,3 +795,20 @@ async def test_a_subagents_pending_says_whose_it_is(tmp_path):
     assert gate.pending[1].agent_label == "[worker] "
     assert gate.pending[1].rendering.startswith("bash_exec")
     assert gate.pending[1].session_id == "s"
+
+
+@pytest.mark.asyncio
+async def test_an_approval_ticket_never_beats_a_refusal_recorded_since(tmp_path):
+    """The ticket turns an ASK into an ALLOW and nothing else: a "never here" written between
+    staging and the re-run is a DENY from the verdict, and it still wins (critic, 2026-09-12)."""
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"))
+    staged = await _check(gate, "bash_exec", HOME_DELETE)
+    request = staged.pending.request
+    await gate.approve(1)
+
+    gate.grants.add_refusal(
+        new_refusal(key=request.key, klass=request.klass, workspace=gate.workspace,
+                    channel="test", session_id="s"))
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not outcome.allowed and "never here" in outcome.reason
+    assert gate._approved_once == {}, "the ticket is spent on sight, never stockpiled"
