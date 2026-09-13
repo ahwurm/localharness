@@ -43,6 +43,38 @@ table rather than typed out, so a mode added there can never go missing here."""
 MODE_STATUS_TEMPLATE = "Permission mode: {mode}. Switch with /mode <name> — {settable}."
 MODE_CHANGED_TEMPLATE = "Permission mode: {mode} — {effect}."
 
+NOTHING_PENDING = "Nothing pending."
+PENDING_HEADER = "{total} waiting on you — /approve N or /deny N:"
+PENDING_LINE = "  #{id}  {label}{rendering}"
+"""`/pending`: the queue of calls `auto` parked instead of asking about (owner ruling
+2026-09-12). One line per call, the same one-line rendering every other surface shows, so the
+number a person types is the number they read."""
+
+PENDING_COMMANDS: dict[bool, tuple[str, str]] = {
+    True: ("approve", "approved"),
+    False: ("deny", "denied"),
+}
+"""(command word, past tense) for the two answers, keyed by "is this an approval". One table so
+the word in the error line ("/approve takes a number") and the word in the confirmation
+("Pending #1 approved") cannot drift from each other or from the command that was typed."""
+
+PENDING_NO_SUCH = "No pending call {id}. /pending lists what is waiting."
+PENDING_NEEDS_A_NUMBER = "/{verb} takes a pending number, e.g. /{verb} 1 (or /{verb} for the oldest)."
+PENDING_ANSWERED_LINE = "Pending #{id} {verb}: {rendering}"
+"""What the person who typed `/approve` or `/deny` sees back. The command is echoed with the
+command it answered, because a bare "done" after a number typed from memory is how the wrong
+call gets approved quietly."""
+
+PENDING_APPROVED_NUDGE = (
+    "Human approved pending #{id} ({rendering}). Run it now if it is still useful, then continue."
+)
+PENDING_DENIED_NUDGE = "Human declined pending #{id} ({rendering}); do not retry it."
+"""The sentence the MODEL gets. It is a nudge (`AgentLoop.push_user_nudge`) when a turn is in
+flight and an ordinary user turn when the session is idle — either way it reaches the model as
+words, never as a second path into tool dispatch. "if it is still useful" is doing real work:
+the turn was told to carry on without the step and may well have finished the task another way
+by the time the answer lands."""
+
 BARE_MODE_COMMAND = "mode"
 BARE_MODE_COMMAND_CHANNELS: frozenset[str] = frozenset({"discord"})
 """Channels where `mode <name>` as the first word IS the command (PRD §3.4). Discord has no
@@ -199,6 +231,10 @@ class OrchestratorREPL:
         # / non-interactive paths that don't wire it.
         self._on_agent_deployed = on_agent_deployed
         # --- Type-anytime input box (box mode); inert on the classic path ---
+        # A sentence a slash command left for the MODEL, to be started as an ordinary user turn
+        # once the command has been handled (`/approve` on an idle session). Consumed and
+        # cleared by _dispatch_input; None the rest of the time.
+        self._slash_followup: Optional[str] = None
         self._turn_task: Optional[asyncio.Task] = None      # the in-flight turn, or None (idle)
         self._current_task: str = ""                          # its originating request (tier-2 context)
         self._fifo: deque[str] = deque()                      # queued messages → future turns (FIFO)
@@ -325,7 +361,13 @@ class OrchestratorREPL:
         # Slash commands — deterministic, no LLM
         if user_input.startswith("/"):
             if await self._handle_slash(user_input):
-                return None
+                # A command may leave a sentence the MODEL has to hear: `/approve` on an idle
+                # session has nothing to nudge, so its approval becomes an ordinary user turn.
+                # It is started here rather than inside the handler because this is the one
+                # place that owns "a line of input became a turn", and each caller adopts the
+                # returned task its own way (box coordinator, classic loop).
+                follow, self._slash_followup = self._slash_followup, None
+                return None if follow is None else await self._start_user_turn(follow)
 
         # PRD §3.4: Discord has no slash convention of its own, so `mode <name>` as the first
         # word is the same command there. Terminal users type `/mode`; a terminal line starting
@@ -357,6 +399,15 @@ class OrchestratorREPL:
             )
             return None
 
+        return await self._start_user_turn(user_input)
+
+    async def _start_user_turn(self, text: str) -> Optional[asyncio.Task]:
+        """Publish the UserMessage and start the turn task for one line of ordinary input.
+
+        The tail of `_dispatch_input`, named so `/approve` can reach it too: an approval typed at
+        an idle session is a sentence the model has to run a turn on, and it must enter the
+        session by exactly the path every other typed line does (memory pipeline included), not
+        by a private shortcut into `run_turn`."""
         # Publish user message for memory pipeline. channel_id is the adapter's class
         # attribute ("terminal", "discord", ...) — history rows carry the REAL channel.
         ch_id = getattr(self._channel, "channel_id", None)
@@ -364,11 +415,11 @@ class OrchestratorREPL:
             UserMessage(
                 agent_id=self._agent._config.name,
                 session_id=self._agent.current_session_id,
-                content=user_input,
+                content=text,
                 channel=ch_id if isinstance(ch_id, str) else "terminal",
             )
         )
-        return asyncio.ensure_future(self._agent.run_turn(task=user_input, on_token=None))
+        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=None))
 
     # ------------------------------------------------------------------ #
     # Persistent type-anytime input box coordinator (box mode)
@@ -839,6 +890,72 @@ class OrchestratorREPL:
             metadata={"style": "system.info"},
         )
 
+    def _turn_running(self) -> bool:
+        """Is a turn in flight right now? (The box coordinator's own test, in one place.)
+
+        Read by `/approve` and `/deny` to choose between nudging the running turn and starting a
+        fresh one. It is honestly usually False when those commands run: a slash command typed
+        mid-turn is QUEUED by `_route_during_turn` and played back after the turn ends, so the
+        nudge path is the one a programmatic caller or a classic-mode session takes, not the one
+        a person typing into the box normally hits.
+        """
+        return self._turn_task is not None and not self._turn_task.done()
+
+    async def _handle_pending_cmd(self) -> None:
+        """`/pending` — the calls `auto` parked for a human instead of asking about."""
+        gate = self._session_gate()
+        queue = list(getattr(gate, "pending", {}).values()) if gate is not None else []
+        if not queue:
+            await self._channel.send_message(NOTHING_PENDING, metadata={"style": "system.info"})
+            return
+        lines = [PENDING_HEADER.format(total=len(queue))]
+        lines += [
+            PENDING_LINE.format(id=p.id, label=p.agent_label, rendering=p.rendering)
+            for p in queue
+        ]
+        await self._channel.send_message("\n".join(lines), metadata={"style": "system.info"})
+
+    async def _handle_pending_answer(self, arg: str, *, approve: bool) -> None:
+        """`/approve [N]` and `/deny [N]` — answer one parked call; no argument takes the oldest.
+
+        The gate only records the answer; nothing is dispatched here. An approval reaches the
+        MODEL as words — a nudge into the running turn, or a fresh user turn when the session is
+        idle — so the agent loop stays the only thing that ever runs a tool. A denial needs no
+        turn of its own: there is nothing for an idle session to do about it.
+        """
+        command, verb = PENDING_COMMANDS[approve]
+        gate = self._session_gate()
+        if gate is None:
+            await self._channel.send_message(NOTHING_PENDING, metadata={"style": "system.info"})
+            return
+        arg = (arg or "").strip()
+        if arg and not arg.isdigit():
+            await self._channel.send_message(
+                PENDING_NEEDS_A_NUMBER.format(verb=command),
+                metadata={"style": "system.error"},
+            )
+            return
+        answer = gate.approve if approve else gate.deny
+        try:
+            answered = await answer(int(arg) if arg else None)
+        except KeyError:
+            await self._channel.send_message(
+                PENDING_NO_SUCH.format(id=f"#{arg}" if arg else "— nothing is waiting"),
+                metadata={"style": "system.error"},
+            )
+            return
+        await self._channel.send_message(
+            PENDING_ANSWERED_LINE.format(id=answered.id, verb=verb, rendering=answered.rendering),
+            metadata={"style": "system.info"},
+        )
+        template = PENDING_APPROVED_NUDGE if approve else PENDING_DENIED_NUDGE
+        nudge = template.format(id=answered.id, rendering=answered.rendering)
+        if self._turn_running():
+            if self._agent is not None:
+                self._agent.push_user_nudge(nudge)
+        elif approve:
+            self._slash_followup = nudge
+
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle slash commands. Returns True if handled, False to pass through."""
         cmd_lower = cmd.lower().strip()
@@ -879,6 +996,18 @@ class OrchestratorREPL:
 
         if cmd_lower == "/mode" or cmd_lower.startswith("/mode "):
             await self._handle_mode_cmd(cmd_lower[len("/mode"):].strip())
+            return True
+
+        if cmd_lower == "/pending":
+            await self._handle_pending_cmd()
+            return True
+
+        if cmd_lower == "/approve" or cmd_lower.startswith("/approve "):
+            await self._handle_pending_answer(cmd_lower[len("/approve"):], approve=True)
+            return True
+
+        if cmd_lower == "/deny" or cmd_lower.startswith("/deny "):
+            await self._handle_pending_answer(cmd_lower[len("/deny"):], approve=False)
             return True
 
         if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):

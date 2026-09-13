@@ -34,7 +34,7 @@ def test_table_matches_the_dispatcher_command_set():
     # Every command the REPL dispatcher claims appears in the table, and vice versa — no drift.
     src = inspect.getsource(repl.OrchestratorREPL._handle_slash)
     dispatched = {"/help", "/agents", "/model", "/reasoning", "/verbose", "/mode", "/memory",
-                  "/quit", "/exit"}
+                  "/pending", "/approve", "/deny", "/quit", "/exit"}
     table = {name for name, _ in SLASH_COMMANDS}
     assert table == dispatched
     for cmd in dispatched:
