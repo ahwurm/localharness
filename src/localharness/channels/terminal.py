@@ -103,7 +103,14 @@ _PHASE_LABELS = {"waiting": "waiting", "thinking": "thinking", "writing": "writi
 _SILENCE_NOTE_SECONDS = 10.0   # no delta for this long mid-stream → say so on the row
 
 # --- The parked-call row, under the bottom bar (`auto` staging, owner ruling 2026-09-12) ---
+PENDING_NOTICE_LINE_TERMINAL = "⏸ needs you  #{id}  {rendering}"
+"""The terminal's transcript copy of a parked call: no answering legend, because the row under
+the box (:data:`BOX_PENDING_ROW`) carries it for exactly as long as it applies, and the shared
+:data:`PENDING_NOTICE_LINE` wrapped its legend to column 0 on a real pane (dogfood 2026-09-12)."""
+
 BOX_PENDING_ROW = "⏸ {count} {noun} pending  #{id}  {rendering}   ctrl+y run · ctrl+n skip · /pending"
+BOX_PENDING_ROW_LEGEND_SEP = "   "
+"""The three spaces before the legend in :data:`BOX_PENDING_ROW` — where a too-wide row breaks."""
 """The one line a staged call gets at the input, in the owner's own words for it: "ignore or
 move to background (under the bottom bar, one decision pending)".
 
@@ -779,7 +786,8 @@ def _build_persistent_input_app(
     # furthest from the work, because a staged call is a note to answer whenever — not a prompt.
     # Same zero-height collapse as the status row, so an empty queue costs no line at all.
     pending_row = ConditionalContainer(
-        Window(FormattedTextControl(pending_fn), height=1, dont_extend_height=True),
+        # No fixed height: one line when it fits, two when the legend has to drop down.
+        Window(FormattedTextControl(pending_fn), dont_extend_height=True),
         filter=Condition(lambda: bool(pending_fn())),
     )
     body = HSplit([status_row, frame, footer, pending_row])
@@ -1305,7 +1313,7 @@ class TerminalChannel(ChannelAdapter):
         and why it could not take it.
         """
         await self._print_notice_line(
-            PENDING_NOTICE_LINE.format(id=pending.id, rendering=pending.rendering, total=total)
+            PENDING_NOTICE_LINE_TERMINAL.format(id=pending.id, rendering=pending.rendering)
         )
 
     async def on_permission_staged(self, event: Any) -> None:
@@ -1621,10 +1629,28 @@ class TerminalChannel(ChannelAdapter):
             return []
         oldest = self._pending[0]
         count = len(self._pending)
-        return [("class:hint", "  " + BOX_PENDING_ROW.format(
-            count=count, noun=BOX_PENDING_NOUNS[count != 1],
-            id=oldest.id, rendering=oldest.rendering,
-        ))]
+        line = "  " + BOX_PENDING_ROW.format(
+            count=count, noun=BOX_PENDING_NOUNS[count != 1], id=oldest.id,
+            rendering=oldest.rendering,
+        )
+        # The rendering carries the class and the reason and can outrun the pane, and the hotkey
+        # legend at the END of the row is the part a person must see (dogfood 2026-09-12: a
+        # 160-column pane lost `ctrl+n skip · /pending`). A row that does not fit becomes two
+        # lines, the legend on its own, rather than an ellipsis eating the command.
+        if len(line) > self._columns() > 0:
+            head, _, legend = line.rpartition(BOX_PENDING_ROW_LEGEND_SEP)
+            line = head + "\n     " + legend
+        return [("class:hint", line)]
+
+    @staticmethod
+    def _columns() -> int:
+        """The pane width the row must fit, from the running application's own output."""
+        try:
+            from prompt_toolkit.application import get_app
+
+            return get_app().output.get_size().columns
+        except Exception:  # noqa: BLE001 — no app (tests, teardown): let the row wrap
+            return 0
 
     def _box_placeholder(self) -> str:
         """Dim text inside the empty box: the #49 guidance hint until first use, then nothing."""
