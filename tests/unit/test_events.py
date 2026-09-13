@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 32 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 33 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -22,6 +22,7 @@ from localharness.core.events import (
     OutcomeObserved,
     PermissionAsked,
     PermissionResolved,
+    PermissionStaged,
     ParseFailed,
     ScenarioCompleted,
     SentinelAlert,
@@ -139,8 +140,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 32 event types."""
-    assert len(EVENT_TYPE_MAP) == 32
+    """EVENT_TYPE_MAP has entries for all 33 event types."""
+    assert len(EVENT_TYPE_MAP) == 33
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -149,7 +150,8 @@ def test_event_type_map_complete():
         "ComponentMutated", "MutationArchived", "SentinelAlert", "MemoryGateFired",
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
-        "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionResolved",
+        "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
+        "PermissionResolved",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -222,14 +224,14 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 30 event classes."""
+    """AnyEvent type contains all 33 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
         ConsolidationFinished, ConsolidationStarted, InputRouted, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 32
+    assert len(args) == 33
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -238,7 +240,7 @@ def test_any_event_union():
         ComponentMutated, MutationArchived, SentinelAlert, MemoryGateFired,
         ExpectationAttached, OutcomeObserved, SurpriseScored,
         ConsolidationStarted, ConsolidationFinished, InputRouted,
-        TurnEndMicroPassCompleted, PermissionAsked, PermissionResolved,
+        TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
     }
     assert set(args) == expected
 

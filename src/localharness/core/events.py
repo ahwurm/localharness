@@ -1,4 +1,4 @@
-"""All 32 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 33 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name — required for bubus routing
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from localharness.agent.gate_types import DecisionKind
+from localharness.agent.gate_types import DecisionKind, PendingCall
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 
 from .types import AgentID, DivisionID, EventSeq, OrgID, SessionID, ToolCallID  # noqa: F401
@@ -247,6 +247,36 @@ class PermissionAsked(BaseEvent):
     klass: str
     """The AskClass (PRD §3.1). Spelled `klass` because `class` is a keyword."""
     key: Optional[str] = None
+    channel: str
+
+
+class PermissionStaged(BaseEvent):
+    """Published when `auto` PARKS a blocked call for a human instead of asking (2026-09-12).
+
+    The staged twin of PermissionAsked, and the only way a channel learns that something is owed:
+    the agent loop holds no channel handle — it surfaces a denial by writing
+    `DENIED_OBSERVATION_PREFIX` onto the Observation and letting each channel match it — so a
+    notice that is ABOUT the queue rather than about one tool result has to travel on its own
+    event. A channel subscribes to this and renders `ChannelAdapter.send_pending_notice`.
+
+    Its resolution is an ordinary PermissionResolved carrying `allow_once` or `reject_once`,
+    published whenever the human answers — which may be turns later, or never. `total` is the
+    size of the queue at the moment of staging, so the notice can say "3 pending" without the
+    renderer holding a copy of the gate's state.
+
+    Deliberately NOT a PermissionAsked: nobody was asked. `localharness ask-rate` counts prompts
+    a human was actually stopped by, and folding a staged call into that number would report
+    interruptions that never happened.
+    """
+
+    event_type: str = "PermissionStaged"
+    agent_id: AgentID
+    session_id: SessionID
+    pending: PendingCall
+    """The parked call itself (`agent/gate_types.PendingCall`) — id, request, one-line rendering,
+    who asked, when."""
+    total: int
+    """How many calls are waiting on a human, this one included."""
     channel: str
 
 
@@ -577,6 +607,7 @@ AnyEvent = Union[
     DelegationResult,
     Escalation,
     PermissionAsked,
+    PermissionStaged,
     PermissionResolved,
     Heartbeat,
     CompactionTriggered,
@@ -612,6 +643,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "DelegationResult": DelegationResult,
     "Escalation": Escalation,
     "PermissionAsked": PermissionAsked,
+    "PermissionStaged": PermissionStaged,
     "PermissionResolved": PermissionResolved,
     "Heartbeat": Heartbeat,
     "CompactionTriggered": CompactionTriggered,
