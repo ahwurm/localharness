@@ -69,6 +69,7 @@ All notable changes to LocalHarness are documented here. The format follows
   that default should change is a separate ruling, still open.
 - Answering from Discord by reaction needs the REPL wiring that ships in this
   same release. It is not something an older session picks up.
+- An answer the model is already writing when you press ctrl+n may still mention the item, because the denial reaches it as words on its next step, not mid-sentence.
 
 ## [0.14.1] — 2026-09-11
 

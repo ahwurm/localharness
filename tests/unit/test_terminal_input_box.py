@@ -641,7 +641,7 @@ class TestStagedNotice:
         await ch.on_permission_staged(_staged_event(_pending(2), total=3))
         out = ch._console.file.getvalue()
         assert "needs you" in out and "#2" in out and "rm -rf ~/old-notes" in out
-        assert "/approve 2" in out, "the line carries the way to answer it"
+        assert "/approve" not in out, "the row under the box carries the legend, not the transcript"
 
     async def test_the_channel_picks_the_event_up_itself(self, tmp_path):
         """`start()` is where a channel takes its events off the bus. Without the subscription
