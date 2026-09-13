@@ -25,6 +25,18 @@ One line per denial, not a block: denials arrive mid-turn while the model re-pla
 person needs the reason, not a report."""
 
 
+PENDING_NOTICE_LINE = (
+    "⏸ needs you  #{id}  {rendering}   ({total} pending · /approve {id} · /deny {id})"
+)
+"""The one line a human gets when `auto` PARKS a call instead of asking (owner ruling
+2026-09-12).
+
+One line, for the same reason `PERMISSION_DENIED_LINE` is one line: it arrives mid-turn while
+the model carries on without the step, and the person needs the command and the two words that
+answer it, not a report. Everything a reply needs is in the line — the number, the command, how
+many are waiting, and both verbs spelled out — because the alternative is a notice that tells
+somebody something is wrong and makes them go looking for how to fix it."""
+
 KEPT_CONTROL_CHARS = "\t\n"
 """The two control characters a rendered question may keep: tab, and newline.
 
@@ -231,6 +243,25 @@ class ChannelAdapter(ABC):
             agent_id=agent_id,
         )
 
+    async def send_pending_notice(self, pending: Any, total: int) -> None:
+        """Tell the human a call was parked for them — one line (:data:`PENDING_NOTICE_LINE`).
+
+        `pending` is a `PendingCall` and `total` the size of the queue including it. Typed `Any`
+        for the reason `ask_permission`'s request is: `channels` must stay importable without
+        reaching into `agent`, and a renderer only ever touches `.id` and `.rendering`.
+
+        Default: through `send_message`, so a channel that overrides nothing still says it. The
+        terminal, Discord and ACP each have a better place to put it and override this; a channel
+        with genuinely nowhere to put it may override with a no-op, but silence is the failure
+        this exists to prevent — the model is told to carry on without the step, so if the notice
+        does not land the human never learns a step was skipped at all.
+        """
+        await self.send_message(
+            PENDING_NOTICE_LINE.format(
+                id=pending.id, rendering=pending.rendering, total=total
+            )
+        )
+
     async def send_renderable(
         self,
         renderable: Any,
@@ -294,6 +325,17 @@ class ChannelAdapter(ABC):
             await self.send_permission_denied(
                 tool_name=event.tool_name or "", reason=reason, agent_id=event.agent_id
             )
+
+    async def on_permission_staged(self, event: Any) -> None:
+        """Default handler for PermissionStaged: draw the one-line notice.
+
+        This event is the ONLY way a channel hears that a call was parked. The agent loop has no
+        channel handle — it surfaces an ordinary denial by writing `DENIED_OBSERVATION_PREFIX`
+        onto the Observation and letting `on_observation` match it — and a queue notice is not
+        about one tool result, so it travels on its own event instead. A channel subscribes to it
+        in its own `start()`, beside the Observation and Action subscriptions.
+        """
+        await self.send_pending_notice(event.pending, event.total)
 
     async def on_task_complete(self, event: TaskComplete) -> None:
         """Default handler for TaskComplete events. Sends the summary.

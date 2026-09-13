@@ -19,6 +19,7 @@ regression nobody notices, so the warning is not optional.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import suppress
@@ -29,11 +30,15 @@ from typing import Any, Optional
 from localharness.agent.gate_types import (
     DEFAULT_MODE,
     MODE_STRICTNESS,
+    PENDING_OBSERVATION,
+    PENDING_REPEAT_OBSERVATION,
+    UNGRANTABLE_OBSERVATION_SUFFIX,
     Asker,
     Decision,
     GateOutcome,
     GateSettings,
     Mode,
+    PendingCall,
     PermissionRequest,
     ToolMeta,
     Verdict,
@@ -79,6 +84,50 @@ those with no deadline at all — verification A defect D3, where an unanswered 
 auto-denied after the tool's own timeout while three separate docs promised it would not.
 Nothing is awaited under a deadline either when both the config value and the tool timeout are
 None."""
+
+STAGING_MODES: frozenset[str] = frozenset({"auto"})
+"""The modes in which an ASK is PARKED for a human instead of put to one (owner ruling
+2026-09-12: a blacklisted call must never block the agent loop in the default mode).
+
+``auto`` only. It is the mode a person gets without choosing it, it asks about a handful of
+irreversible things (:data:`~localharness.agent.gate_types.AUTO_BLACKLIST`), and its whole design
+goal is "the thinnest interaction off of no interaction" — a question that stops the loop until
+somebody walks back to the keyboard is the thickest interaction there is. ``guarded`` and
+``trusted`` keep the blocking ask because being asked is what those modes ARE; ``read-only``
+denies and ``unattended`` allows, so neither reaches an ask at all.
+
+A frozenset rather than ``self.mode == "auto"`` at the call site so the rule is one named thing
+to read, and widening it later is one diff."""
+
+PENDING_STAGED_LOG = "pending #%d staged for a human on the %s channel: %s"
+"""Logged at INFO when a call is parked. Same reason :data:`MODE_SET_FROM_CHANNEL_LOG` is
+logged: a session that skipped a step because nobody answered should say so in its own log, not
+only in a channel's scrollback that scrolls away."""
+
+PENDING_ANSWERED_LOG = "pending #%d %s by a human on the %s channel: %s"
+"""Logged at INFO on every :meth:`PermissionGate.approve` / :meth:`PermissionGate.deny`. The
+second field is the verb ("approved"/"denied") so one grep finds both halves of the audit trail
+the staging queue replaces the blocking prompt with."""
+
+PENDING_APPROVED_VERB = "approved"
+PENDING_DENIED_VERB = "denied"
+"""The two verbs :data:`PENDING_ANSWERED_LOG` takes, named so the log and any renderer that
+echoes them cannot drift."""
+
+APPROVED_ONCE_REASON = "approved by a human from the channel (pending #{id})"
+"""The allow reason for the ONE retry a :meth:`PermissionGate.approve` buys.
+
+An approval is deliberately not a grant and not a mode change: the human said yes to the call
+they read, so the key is consumed by the next matching call and the one after that stages
+again. Nothing durable is written — ``/approve`` is the ungrantable tier's answer, and the
+ungrantable tier asks every time by construction (:data:`~localharness.agent.gate_types.
+UNGRANTABLE_CLASSES`)."""
+
+NO_PENDING_ERROR = "nothing is pending"
+PENDING_UNKNOWN_ERROR = "no pending call #{id}"
+"""The two ``KeyError`` payloads of :meth:`PermissionGate.approve` / :meth:`PermissionGate.deny`.
+A channel catches the KeyError and renders its own one-liner; these exist so a caller that
+prints the exception still prints a sentence."""
 
 MODE_SET_FROM_CHANNEL_LOG = "permission mode %s -> %s, set by a human on the %s channel"
 """Logged at INFO every time :meth:`PermissionGate.set_mode` is driven from a channel.
@@ -144,10 +193,40 @@ It goes on ``display`` rather than being left to each renderer because ``display
 thing every channel is guaranteed to show; ``PermissionRequest.agent_id`` carries the same fact
 structurally for a channel that wants to render it its own way."""
 
+CALL_IDENTITY = "{tool_name}\x00{params}"
+"""How :func:`call_identity` spells "the same call again" for the staging queue.
+
+Deliberately NOT the grant key. A grant key is a CLASS of calls — the signature ``rm -rf`` is one
+key however many directories it is pointed at — which is exactly right for "never ask about this
+kind of command again" and exactly wrong here: a pending call is a specific command a human is
+being shown and asked to answer, and folding ``rm -rf ~/notes`` and ``rm -rf ~/photos`` into one
+queue entry would have them approve a command they never read. The whole tool call is the
+identity, so a retry of the same call finds its own pending number and nothing else does.
+
+It is also the only identity available where it is needed: the one-shot approval is consulted at
+the TOP of :meth:`PermissionGate.check`, before ``evaluate`` has run and therefore before any
+request, class or key exists."""
+
 MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` gives every MCP tool the group ``mcp/<server>``. That group IS how the
 registry knows the server name, so the ``ToolMeta`` builder reads it rather than taking a
 second, drift-prone path through the registry."""
+
+
+def call_identity(tool_name: str, params: dict) -> str:
+    """One tool call's identity for the staging queue (:data:`CALL_IDENTITY`).
+
+    ``sort_keys`` so two dicts that differ only in insertion order are one call; ``default=repr``
+    so a parameter the model smuggled past JSON (a path object from a plugin tool, say) degrades
+    to a stable string instead of raising inside the gate. A value that defeats even that falls
+    back to ``repr`` of the whole mapping, which is still stable within one process — the cost of
+    a wrong answer here is a duplicate queue entry, never a wrong permission.
+    """
+    try:
+        rendered = json.dumps(params or {}, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        rendered = repr(params)
+    return CALL_IDENTITY.format(tool_name=tool_name, params=rendered)
 
 
 def derive_session_boundary(
@@ -302,6 +381,31 @@ class PermissionGate:
         self._config_deny = deny
         self._warned_cannot_ask = False
 
+        self.pending: dict[int, PendingCall] = {}
+        """Calls parked for a human, oldest first (owner ruling 2026-09-12).
+
+        Insertion-ordered, which is what makes "the oldest" — the default target of
+        :meth:`approve` and :meth:`deny` — a plain ``next(iter(...))`` rather than a sort over a
+        timestamp. Public because every surface that shows the queue (``/pending``, a channel's
+        notice, a footer) reads it directly; nothing outside the gate WRITES it."""
+
+        self._pending_seq = 0
+        """The last number handed out. Never reset and never reused inside a session: a person
+        who typed ``/approve 2`` must not find that 2 is now a different command."""
+
+        self._pending_by_call: dict[str, int] = {}
+        """:func:`call_identity` → pending id, so a model re-trying a staged call gets told its
+        own number back instead of filling the queue with copies of one command."""
+
+        self._approved_once: dict[str, int] = {}
+        """:func:`call_identity` → the pending number it was approved as, for every call a human
+        approved that has not re-run yet.
+
+        One-shot tickets, not a grant store: see :data:`APPROVED_ONCE_REASON`. Consulted before
+        ``evaluate``, and the ticket is spent whether or not the call then survives the deny
+        tier, so an approval can never be stockpiled. It keeps the pending number because that
+        number is the only handle the human, the model and the log share for this one call."""
+
     def attach_channel(self, channel: Any) -> None:
         """Point the gate at the channel that will render its questions (PRD §3.5).
 
@@ -362,12 +466,21 @@ class PermissionGate:
         (``GrantStore.add_refusal``) consulted by ``verdict.evaluate``, not an fnmatch pattern
         over raw arguments — refusing the signature ``cp`` must not also ban ``scp``, ``cpio``
         and every command whose arguments merely contain "cp".
+
+        The refusal reason carries :data:`~localharness.agent.gate_types.
+        UNGRANTABLE_OBSERVATION_SUFFIX`, because this tier is the one nobody can lift from a
+        channel: no ``/approve`` reaches it and no mode switch does either. The model could not
+        tell that from the word "denied" and stopped to compose prose asking the human to run
+        the command by hand — the stall the staging queue exists to end — so the sentence that
+        ends it is attached here, at the un-approvable refusal itself.
         """
         deny = config_deny if config_deny is not None else self._config_deny
         if deny is not None:
             result = deny(tool_name, params)
             if result.denied:
-                return result
+                return PermissionResult(
+                    denied=True, reason=result.reason + UNGRANTABLE_OBSERVATION_SUFFIX
+                )
         return PermissionResult(denied=False)
 
     def context(self, deny: Optional[DenyFn] = None) -> GateContext:
@@ -414,6 +527,17 @@ class PermissionGate:
         """
         if self.owner_agent_id is None:
             self.owner_agent_id = agent_id  # see the attribute's docstring: first caller owns
+        identity = call_identity(tool_name, tool_params)
+        if identity in self._approved_once:
+            # A human answered `/approve` for exactly this call. The ticket is spent here, before
+            # the deny tier is consulted, so it can never be stockpiled — but the deny tier still
+            # wins, because `permissions.deny_patterns` is the owner's own never-run list and no
+            # channel answer is above it (it may also have CHANGED since the call was staged).
+            pending_id = self._approved_once.pop(identity)
+            if not self._deny(tool_name, tool_params, deny).denied:
+                return GateOutcome(
+                    allowed=True, reason=APPROVED_ONCE_REASON.format(id=pending_id)
+                )
         try:
             result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
         except Exception:  # noqa: BLE001 — a verdict that crashes must deny, never escape
@@ -427,12 +551,153 @@ class PermissionGate:
         request = result.request
         assert request is not None  # evaluate() always attaches one to an ASK
         if self.asker is None:
+            # Checked BEFORE staging on purpose: staging is a promise that a human can be
+            # reached, and a channel that cannot ask cannot keep it. A bench or cron run would
+            # otherwise pile up a queue nobody will ever answer, silently, in place of the one
+            # loud warning that names the fix.
             self._warn_cannot_ask(tool_name)
             return GateOutcome(allowed=False, reason=NO_ASKER_REASON)
+        if self.mode in STAGING_MODES:
+            return await self._stage(
+                request, agent_id=agent_id, session_id=session_id, call_id=call_id,
+                identity=identity,
+            )
         return await self._ask(
             request, agent_id=agent_id, session_id=session_id, call_id=call_id,
             tool_timeout_s=tool_timeout_s,
         )
+
+    # -------------------------------------------------------------- staging
+
+    async def _stage(
+        self,
+        request: PermissionRequest,
+        *,
+        agent_id: str,
+        session_id: str,
+        call_id: Optional[str],
+        identity: str,
+    ) -> GateOutcome:
+        """Park a blocked call for a human and let the turn carry on (owner ruling 2026-09-12).
+
+        The asker is NOT called: nobody is asked, so nothing is awaited and the loop never
+        stops. What the model gets back is a refusal it can route around
+        (:data:`~localharness.agent.gate_types.PENDING_OBSERVATION`); what the human gets is a
+        :class:`~localharness.core.events.PermissionStaged` on the bus, which is the only way a
+        channel hears about this — the loop holds no channel handle and surfaces ordinary
+        denials by writing a prefix onto the Observation, which is a fact about ONE tool result
+        and cannot carry a queue.
+
+        A repeat of a call already in the queue returns the SAME number and the shorter
+        :data:`~localharness.agent.gate_types.PENDING_REPEAT_OBSERVATION`, so a model that
+        retries fills the log rather than the queue.
+        """
+        from localharness.core.events import PermissionStaged
+
+        staged = self.pending.get(self._pending_by_call.get(identity, 0))
+        if staged is not None:
+            return GateOutcome(
+                allowed=False,
+                reason=PENDING_REPEAT_OBSERVATION.format(id=staged.id),
+                pending=staged,
+            )
+        self._pending_seq += 1
+        staged = PendingCall(
+            id=self._pending_seq,
+            request=self._attributed(request, agent_id=agent_id, call_id=call_id),
+            rendering=request.display,
+            agent_label=self._agent_label(agent_id),
+            session_id=session_id,
+            created_at=time.time(),
+        )
+        self.pending[staged.id] = staged
+        self._pending_by_call[identity] = staged.id
+        log.info(PENDING_STAGED_LOG, staged.id, self.channel_name, staged.rendering)
+        await self._publish(
+            PermissionStaged(
+                agent_id=agent_id,
+                session_id=session_id,
+                pending=staged,
+                total=len(self.pending),
+                channel=self.channel_name,
+            )
+        )
+        return GateOutcome(
+            allowed=False,
+            reason=PENDING_OBSERVATION.format(id=staged.id, rendering=staged.rendering),
+            pending=staged,
+        )
+
+    async def approve(self, n: Optional[int] = None) -> PendingCall:
+        """A human says yes to a parked call. ``None`` answers the oldest one.
+
+        The approval buys exactly ONE run of that same call (:data:`APPROVED_ONCE_REASON`): the
+        human said yes to the command they read, not to its class, and the ungrantable tier this
+        queue is made of asks every time by construction. Nothing durable is written, so a
+        second identical call stages again as a new number.
+
+        It does not run anything by itself. The call is re-issued by the MODEL, nudged by
+        whatever surface took the approval (``cli/repl`` pushes a user nudge into the running
+        turn, or submits one as a fresh turn when the session is idle) — which keeps the agent
+        loop the only thing that ever dispatches a tool.
+
+        Raises ``KeyError`` when ``n`` names no parked call, or when nothing is parked at all.
+        """
+        return await self._answer(n, approved=True)
+
+    async def deny(self, n: Optional[int] = None) -> PendingCall:
+        """A human says no to a parked call. ``None`` answers the oldest one.
+
+        Nothing durable is written here either: this is a ``reject_once``, not the
+        ``reject_always`` that a blocking prompt can turn into a stored refusal. A queue entry
+        is a single command somebody looked at and declined; turning that into a permanent
+        "never here" is a bigger answer than the one they gave, and ``grants.yaml`` is where a
+        permanent one belongs.
+
+        Raises ``KeyError`` on an unknown id, exactly as :meth:`approve` does.
+        """
+        return await self._answer(n, approved=False)
+
+    async def _answer(self, n: Optional[int], *, approved: bool) -> PendingCall:
+        """The shared half of :meth:`approve` and :meth:`deny`: pop, log, publish."""
+        from localharness.core.events import PermissionResolved
+
+        if n is None:
+            if not self.pending:
+                raise KeyError(NO_PENDING_ERROR)
+            n = next(iter(self.pending))  # insertion order: the oldest still waiting
+        if n not in self.pending:
+            raise KeyError(PENDING_UNKNOWN_ERROR.format(id=n))
+        staged = self.pending.pop(n)
+        # The identity index is scanned rather than mirrored in a second dict: the queue is
+        # human-scale (a handful of entries a person is expected to read), and one index that
+        # cannot fall out of step with `pending` is worth more here than the lookup.
+        for identity, pending_id in list(self._pending_by_call.items()):
+            if pending_id == n:
+                del self._pending_by_call[identity]
+                if approved:
+                    self._approved_once[identity] = n
+        log.info(
+            PENDING_ANSWERED_LOG,
+            staged.id,
+            PENDING_APPROVED_VERB if approved else PENDING_DENIED_VERB,
+            self.channel_name,
+            staged.rendering,
+        )
+        request = staged.request
+        await self._publish(
+            PermissionResolved(
+                agent_id=request.agent_id or "",
+                session_id=staged.session_id,
+                tool_name=request.tool_name,
+                klass=request.klass,
+                key=request.key if request.grantable else None,
+                decision="allow_once" if approved else "reject_once",
+                latency_ms=int((time.time() - staged.created_at) * MS_PER_SECOND),
+                wrote_grant=False,
+            )
+        )
+        return staged
 
     def _warn_cannot_ask(self, tool_name: str) -> None:
         if self._warned_cannot_ask:
@@ -535,10 +800,23 @@ class PermissionGate:
         orchestrator and every child it dispatches (PRD §3.4) and the person answering sees them
         all on one surface.
         """
-        display = request.display
+        return replace(
+            request,
+            agent_id=agent_id,
+            call_id=call_id,
+            display=self._agent_label(agent_id) + request.display,
+        )
+
+    def _agent_label(self, agent_id: str) -> str:
+        """:data:`SUBAGENT_DISPLAY_PREFIX` for a subagent's call, ``""`` for the session's own.
+
+        Read by :meth:`_attributed`, which glues it onto ``display``, and carried separately on
+        :class:`~localharness.agent.gate_types.PendingCall` so a queue renderer can lay the two
+        out its own way instead of splitting a string back apart.
+        """
         if agent_id and agent_id != self.owner_agent_id:
-            display = SUBAGENT_DISPLAY_PREFIX.format(agent_id=agent_id) + display
-        return replace(request, agent_id=agent_id, call_id=call_id, display=display)
+            return SUBAGENT_DISPLAY_PREFIX.format(agent_id=agent_id)
+        return ""
 
     async def _resolved(
         self,

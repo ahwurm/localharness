@@ -21,7 +21,12 @@ from localharness.agent.gate import (
     deny_fn_from,
     tool_meta_from_schema,
 )
-from localharness.agent.gate_types import Decision, PermissionRequest, ToolMeta
+from localharness.agent.gate_types import (
+    UNGRANTABLE_OBSERVATION_SUFFIX,
+    Decision,
+    PermissionRequest,
+    ToolMeta,
+)
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.grants import GrantStore, new_refusal
 from localharness.config.models import PermissionConfig
@@ -30,6 +35,7 @@ from localharness.core.events import (
     CANCELLED_RESOLUTION,
     PermissionAsked,
     PermissionResolved,
+    PermissionStaged,
 )
 from localharness.tools import ToolSchema
 
@@ -599,3 +605,193 @@ async def test_a_request_built_by_hand_needs_neither_field(tmp_path):
         grantable=True, reason="r", display="d",
     )
     assert request.agent_id is None and request.call_id is None
+
+
+# ------------------------------------------------------------------- staging (auto)
+
+def _auto_gate(tmp_path, **kw) -> PermissionGate:
+    """A gate in the DEFAULT mode, where a blocked call is parked rather than asked about.
+
+    Kept apart from `_gate` above, which pins `guarded` to exercise the blocking ask: these
+    tests are about the mode a person gets without choosing one, and the whole behaviour under
+    test is that the asker is never reached.
+    """
+    return _gate(tmp_path, mode="auto", **kw)
+
+
+HOME_DELETE = {"command": "rm -rf ~/old-notes"}
+"""A call `auto` still stops: a target-scoped destructive verb pointed OUTSIDE the workspace
+(`AUTO_BLACKLIST.target_scoped_verbs`). `rm -rf build` inside the project is allowed silently,
+which is the point of the mode — so the fixture has to leave the boundary to stage anything."""
+
+
+@pytest.mark.asyncio
+async def test_auto_stages_instead_of_asking(tmp_path):
+    """The owner ruling of 2026-09-12: a blacklisted call must never hold the agent loop.
+
+    Everything in one test because they are one behaviour: nobody is awaited, the model is told
+    to carry on, the call is parked under a number, and the human hears about it on the bus.
+    """
+    seen: list[PermissionRequest] = []
+    bus = EventBus()
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once", seen), bus=bus, channel_name="terminal")
+
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+
+    assert outcome.allowed is False
+    assert seen == [], "the asker was called; a prompt held the loop"
+    assert "pending #1" in outcome.reason
+    assert outcome.pending is not None and outcome.pending.id == 1
+    assert list(gate.pending) == [1]
+    assert gate.pending[1].rendering == outcome.pending.rendering
+    assert "rm -rf" in gate.pending[1].rendering
+
+    staged = bus.history(event_types=[PermissionStaged])
+    assert len(staged) == 1
+    assert staged[0].pending.id == 1 and staged[0].total == 1
+    assert staged[0].channel == "terminal"
+    assert bus.history(event_types=[PermissionAsked]) == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_call_again_is_the_same_pending_number(tmp_path):
+    """A model that retries must fill the log, not the queue."""
+    bus = EventBus()
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"), bus=bus)
+
+    first = await _check(gate, "bash_exec", HOME_DELETE)
+    second = await _check(gate, "bash_exec", HOME_DELETE)
+
+    assert second.pending is not None and second.pending.id == first.pending.id == 1
+    assert "already pending" in second.reason
+    assert list(gate.pending) == [1]
+    assert len(bus.history(event_types=[PermissionStaged])) == 1, "a retry re-announced itself"
+
+
+@pytest.mark.asyncio
+async def test_a_different_target_is_a_different_pending(tmp_path):
+    """The queue is keyed by the CALL, not by the grant key: `rm -rf` is one key and two very
+    different commands, and a human must never approve one by reading the other."""
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"))
+    await _check(gate, "bash_exec", {"command": "rm -rf ~/notes"})
+    await _check(gate, "bash_exec", {"command": "rm -rf ~/photos"})
+    assert sorted(gate.pending) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_approve_allows_exactly_one_re_run(tmp_path):
+    """`/approve` answers the command the human read, not its class — so the ticket is spent by
+    the next matching call and the one after that stages afresh."""
+    bus = EventBus()
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"), bus=bus)
+    await _check(gate, "bash_exec", HOME_DELETE)
+
+    answered = await gate.approve(1)
+    assert answered.id == 1 and gate.pending == {}
+    resolved = bus.history(event_types=[PermissionResolved])
+    assert [e.decision for e in resolved] == ["allow_once"]
+    assert resolved[0].wrote_grant is False
+
+    allowed = await _check(gate, "bash_exec", HOME_DELETE)
+    assert allowed.allowed and "pending #1" in allowed.reason
+
+    again = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not again.allowed and again.pending is not None and again.pending.id == 2
+
+
+@pytest.mark.asyncio
+async def test_approve_with_no_number_takes_the_oldest(tmp_path):
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"))
+    await _check(gate, "bash_exec", {"command": "rm -rf ~/notes"})
+    await _check(gate, "bash_exec", {"command": "rm -rf ~/photos"})
+    assert (await gate.approve()).id == 1
+    assert list(gate.pending) == [2]
+
+
+@pytest.mark.asyncio
+async def test_deny_clears_the_pending_and_grants_nothing(tmp_path):
+    bus = EventBus()
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"), bus=bus)
+    await _check(gate, "bash_exec", HOME_DELETE)
+
+    assert (await gate.deny(1)).id == 1
+    assert gate.pending == {}
+    assert [e.decision for e in bus.history(event_types=[PermissionResolved])] == ["reject_once"]
+
+    # A denial is a reject_ONCE: it clears the queue entry, it does not become a stored refusal,
+    # so the next identical call is parked again rather than silently denied forever.
+    again = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not again.allowed and again.pending is not None and again.pending.id == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["approve", "deny"])
+async def test_an_unknown_pending_number_raises(tmp_path, verb):
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"))
+    with pytest.raises(KeyError):
+        await getattr(gate, verb)(7)
+    with pytest.raises(KeyError):
+        await getattr(gate, verb)()  # nothing is pending at all
+
+
+@pytest.mark.asyncio
+async def test_guarded_still_blocks_on_the_asker(tmp_path):
+    """The mode a person CHOSE to be asked in is untouched: being asked is what it is for."""
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, asker=_answer("allow_once", seen))  # _gate pins `guarded`
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+    assert outcome.allowed and len(seen) == 1
+    assert gate.pending == {} and outcome.pending is None
+
+
+@pytest.mark.asyncio
+async def test_auto_without_an_asker_still_fails_closed(tmp_path):
+    """Staging is a promise that a human can be reached. A bench or cron run cannot keep it, so
+    it keeps the loud denial instead of piling up a queue nobody will ever answer."""
+    gate = _auto_gate(tmp_path, asker=None)
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not outcome.allowed and outcome.pending is None
+    assert outcome.reason == NO_ASKER_REASON
+    assert gate.pending == {}
+
+
+@pytest.mark.asyncio
+async def test_the_deny_tier_says_nobody_can_approve_it_and_is_not_stageable(tmp_path):
+    """The owner watched the model stall in prose after a hard refusal of `rm -rf`, asking the
+    human to run it. A DENY is the owner's own never-run list — no /approve reaches it."""
+    gate = _auto_gate(
+        tmp_path,
+        asker=_answer("allow_once"),
+        deny=deny_fn_from(PermissionEvaluator(), PermissionConfig()),
+    )
+    outcome = await _check(gate, "bash_exec", {"command": "sudo rm -rf /"})
+    assert not outcome.allowed
+    assert outcome.reason.endswith(UNGRANTABLE_OBSERVATION_SUFFIX)
+    assert outcome.pending is None and gate.pending == {}
+
+
+@pytest.mark.asyncio
+async def test_an_approval_never_beats_the_deny_tier(tmp_path):
+    """A ticket is spent on sight, and the never-run list still wins — the patterns may even
+    have changed between the staging and the answer."""
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"))
+    await _check(gate, "bash_exec", HOME_DELETE)
+    await gate.approve(1)
+
+    gate._config_deny = deny_fn_from(PermissionEvaluator(), PermissionConfig(
+        deny_patterns=["bash_exec(*old-notes*)"]))
+    outcome = await _check(gate, "bash_exec", HOME_DELETE)
+    assert not outcome.allowed
+    assert outcome.reason.endswith(UNGRANTABLE_OBSERVATION_SUFFIX)
+    assert gate._approved_once == {}, "the one-shot ticket survived a hard deny"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_pending_says_whose_it_is(tmp_path):
+    """One gate serves the orchestrator and every subagent it dispatches (PRD §3.4), and
+    "approve `rm -rf`" is a different question depending on which agent asked it."""
+    gate = _auto_gate(tmp_path, asker=_answer("allow_once"), owner_agent_id="main")
+    await gate.check("bash_exec", HOME_DELETE, SHELL, agent_id="worker", session_id="s")
+    assert gate.pending[1].agent_label == "[worker] "
+    assert gate.pending[1].rendering.startswith("bash_exec")
+    assert gate.pending[1].session_id == "s"

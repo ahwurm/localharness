@@ -191,12 +191,97 @@ Asker = Callable[[PermissionRequest], Awaitable[Decision]]
 """A channel's rendering of an ASK: awaitable so the loop pauses until a human answers."""
 
 
+# ------------------------------------------------------------------- staging
+
+@dataclass(frozen=True)
+class PendingCall:
+    """One blocked call parked for a human instead of held open in front of the loop.
+
+    Owner ruling 2026-09-12: in ``auto`` — the default mode — a prompt must NEVER hold the agent
+    loop. The asker is the wrong shape for that: a terminal or a Zed dialog holds the question
+    open with no deadline (PRD §3.5's "Timeout: none"), which is exactly right when a person is
+    looking at it and exactly wrong when they stepped away, because the turn stops dead until
+    they come back. So in ``auto`` the gate does not ask at all — it STAGES: it records the call
+    here, hands the model a refusal it can route around
+    (:data:`PENDING_OBSERVATION`), and lets the human answer later from the channel
+    (``/pending``, ``/approve N``, ``/deny N``). The queue waits for the human; the loop does
+    not.
+
+    ``guarded`` and ``trusted`` are unchanged: a person who chose to be asked about everything
+    chose the blocking ask, and ``unattended`` never asks at all.
+    """
+
+    id: int
+    """Small per-session counter, 1-based. It is what a human types (``/approve 2``) and what the
+    model is told to mention, so it is a running number rather than a uuid."""
+
+    request: PermissionRequest
+    """The request the asker would have been handed, already attributed (agent id, call id), so
+    nothing about the call has to be re-derived to render or re-run it."""
+
+    rendering: str
+    """The one-line human rendering — ``request.display`` BEFORE the subagent prefix, e.g.
+    ``bash_exec: rm -rf ~/old-notes``. Kept as its own field because every surface that shows a
+    pending call shows this string and only this string."""
+
+    agent_label: str
+    """Who asked, as :data:`~localharness.agent.gate.SUBAGENT_DISPLAY_PREFIX` renders it, or ``""``
+    for the session's own agent. Separate from ``rendering`` so a channel can lay the two out its
+    own way; one gate serves the orchestrator and every subagent it dispatches (PRD §3.4)."""
+
+    session_id: str
+    """The session the call belongs to, carried because the resolution event needs it and the
+    request does not have it. A pending call outlives the turn that raised it, so the session
+    cannot simply be read off "the turn running now"."""
+
+    created_at: float
+    """Wall clock (``time.time()``), not the monotonic clock the ask latency uses: this number is
+    read by a human deciding whether a queued call is still worth running, and "queued at 14:02"
+    only means something on a clock they share."""
+
+
+PENDING_OBSERVATION = (
+    "needs a human (pending #{id}: {rendering}). The human is not required to answer now. "
+    "Continue the task without this step, work around it if you can, and mention pending #{id} "
+    "in your final answer."
+)
+"""What the model is told the moment a call is staged (owner ruling 2026-09-12).
+
+Three things it has to say, in this order, or the loop stalls anyway. That the call did not run.
+That waiting is NOT the plan — a model told only "a human was asked" will politely wait, which is
+the very stall staging exists to remove. And that the pending number belongs in the final answer,
+so the human who never looked at the channel still learns what was skipped."""
+
+PENDING_REPEAT_OBSERVATION = "already pending as #{id}; do not retry it, continue without it."
+"""The same call, staged again. Shorter on purpose: the long instruction above was already given
+once, and a model that is re-trying is a model that is looping, so the only new information is
+"this is the one you already queued"."""
+
+UNGRANTABLE_OBSERVATION_SUFFIX = (
+    " This is on the never-run list and cannot be approved by anyone. Do not ask the human to "
+    "run it; continue the task without it or use a safer alternative."
+)
+"""Appended to the refusal reason of the config DENY tier (``PermissionGate._deny``).
+
+A DENY is not an ASK that failed: no human can lift it from a prompt, because it is the owner's
+own ``permissions.deny_patterns``, a tier above asking. The model could not tell the two apart —
+it read "Permission denied" and stopped to compose prose asking the human to run ``rm -rf``
+itself, which the owner watched it do. Saying "nobody can approve this" is what turns a hard
+refusal into a fact the model can plan around instead of a request it waits on."""
+
+
 @dataclass(frozen=True)
 class GateOutcome:
     """Result of the effectful ``PermissionGate.check`` (A4): the loop only needs allow/deny."""
 
     allowed: bool
     reason: str = ""
+    pending: PendingCall | None = None
+    """Set when this outcome is a STAGED refusal (``auto`` mode) rather than a plain one.
+
+    The reason string already carries the pending number for the MODEL; this carries the call
+    itself for the loop and the channels, so a surface that wants to render "⏸ needs you #2" does
+    not have to parse an English sentence to find out that one is owed."""
 
 
 @dataclass(frozen=True)

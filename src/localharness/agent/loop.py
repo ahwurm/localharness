@@ -1095,7 +1095,11 @@ class AgentLoop:
         """Queue a user-typed nudge for delivery to the running turn at its next step
         boundary (type-anytime input box). Session-persisted via the same seam as the #82
         stuck-recovery nudge, but a DISTINCT source: it never touches the stuck detector or
-        its max_nudges_per_turn accounting. Multiple nudges stack (FIFO). No-op on blank."""
+        its max_nudges_per_turn accounting. Multiple nudges stack (FIFO). No-op on blank.
+
+        `/approve` reuses it: a human answering a call the gate parked (owner ruling 2026-09-12)
+        reaches the running turn the same way any typed steer does, so the approval is a sentence
+        the model reads at the next step boundary rather than a second path into tool dispatch."""
         text = (text or "").strip()
         if text:
             self._user_nudge_inbox.append(text)
@@ -1983,6 +1987,10 @@ class AgentLoop:
                 # The reason reaches the model as the tool observation, so a soft deny
                 # ("not permitted in read-only mode") or an unaskable one ("needs human
                 # approval; this channel cannot ask") is something it can re-plan against.
+                # In `auto` the gate STAGES instead of asking (owner ruling 2026-09-12): the
+                # outcome carries `pending`, the reason tells the model to carry on without the
+                # step, and the HUMAN is told by the gate's own PermissionStaged bus event —
+                # this loop holds no channel handle, so it cannot tell anyone anything.
                 perm_result = await self._gate_check(session, tool_call)
                 if not perm_result.allowed:
                     session.push({
