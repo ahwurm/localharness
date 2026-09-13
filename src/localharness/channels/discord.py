@@ -16,8 +16,9 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import structlog
 
@@ -30,6 +31,8 @@ from localharness.core.events import (
     Heartbeat,
     Observation,
     ParseFailed,
+    PermissionResolved,
+    PermissionStaged,
     TaskComplete,
     TurnFailed,
 )
@@ -141,11 +144,101 @@ PERMISSION_LEGEND_UNGRANTABLE = (
 sentence someone reads on a phone, and the wording is the design."""
 
 
+PENDING_REACTIONS: dict[str, str] = {"✅": "approve", "❌": "deny"}
+"""The two answers a PARKED call takes (owner ruling 2026-09-12, the staging queue).
+
+The same ✅/❌ pair a blocking ask offers, and deliberately NOT :data:`PERMISSION_REACTIONS`'
+♾️: ``auto`` stages only the ungrantable tier, an approval there buys exactly one re-run of the
+one command a human read (``gate.APPROVED_ONCE_REASON``) and nothing durable is ever written, so
+an "always here" reaction would promise something this queue cannot keep.
+
+The values are the verbs :attr:`DiscordChannel._pending_resolver` is called with, so the emoji
+map and the resolver contract cannot drift apart.
+"""
+
+PENDING_NOTICE_MESSAGE = (
+    "⏸ **needs you**  #{id}  `{rendering}`   ({total} pending) — "
+    "react ✅ to run it, ❌ to skip, or reply `/approve {id}` · `/deny {id}`"
+)
+"""One line, the Discord shape of :data:`~localharness.channels.base.PENDING_NOTICE_LINE`.
+
+Both ways to answer are spelled out in the line itself. A reaction is the fast one on a phone,
+but a reaction is lost the moment the bot cannot see the message (a reconnect that misses the
+raw event, a channel the bot loses reaction permission in), and the text commands go through the
+REPL's own slash router — so the notice never rests on the reaction path having worked.
+"""
+
+PENDING_RESOLVED_LINES: dict[str, str] = {
+    "approve": "✅ ran #{id} — approved; the model re-issues the call.",
+    "deny": "❌ skipped #{id} — denied.",
+}
+"""What the notice becomes once it has been answered, whichever surface answered it.
+
+Same reasoning as :data:`PERMISSION_TIMEOUT_LINE`: a notice still showing two live reactions
+after the call was answered is a lie somebody will tap, and the tap is a silent no-op because
+the waiter behind it is gone. "ran" is the approval's honest word only because the approval is
+spent on a re-run the MODEL issues — the gate dispatches nothing itself.
+"""
+
+PENDING_NO_RESOLVER_LINE = (
+    "⚠️ nothing in this session is wired to reactions — answer with `/approve {id}` or `/deny {id}`"
+)
+"""Posted when a reaction arrives and :attr:`DiscordChannel._pending_resolver` was never
+installed (the REPL owns that wiring). The alternative is exactly the D7 failure: the person
+taps, nothing happens anywhere, and the message still says a reaction is how you answer."""
+
+PENDING_RAN_DECISIONS: frozenset[str] = frozenset({"allow_once", "allow_always"})
+"""The ``PermissionResolved.decision`` values that mean the call may run.
+
+Everything else the event can carry — ``reject_once``, ``reject_always``,
+``CANCELLED_RESOLUTION`` — reads as "skipped": from this message's point of view they are one
+outcome, the command did not run.
+"""
+
+PENDING_TRUNCATION_SUFFIX = "…"
+"""Marks a rendering cut down to fit :data:`_DISCORD_LIMIT`; see :func:`pending_notice_body`."""
+
+
+def pending_notice_body(pending: Any, total: int) -> str:
+    """Render the notice, with the command truncated so the whole line fits ONE message.
+
+    The budget is derived, not chosen: whatever :data:`_DISCORD_LIMIT` allows, minus what the
+    template costs at these numbers. Chunking is the wrong answer here even though
+    :func:`_chunk` exists — a split notice leaves the reactions on a message whose text no longer
+    shows the command they answer, and the whole point of the line is that the number a person
+    taps is the number they read.
+    """
+    frame = PENDING_NOTICE_MESSAGE.format(id=pending.id, rendering="", total=total)
+    room = _DISCORD_LIMIT - len(frame)
+    rendering = sanitize_for_display(pending.rendering)
+    if len(rendering) > room:
+        rendering = rendering[: room - len(PENDING_TRUNCATION_SUFFIX)] + PENDING_TRUNCATION_SUFFIX
+    return PENDING_NOTICE_MESSAGE.format(id=pending.id, rendering=rendering, total=total)
+
+
+@dataclass
+class _PendingNotice:
+    """One posted notice, and the reaction waiter watching it."""
+
+    pending: Any
+    message: Any
+    body: str
+    waiter: asyncio.Queue
+    task: asyncio.Task | None = None
+
+
 class DiscordChannel(ChannelAdapter):
     """Discord gateway channel: messages in, agent replies out.
 
     Push (discord on_message) is bridged to the REPL's pull (read_input) via an asyncio.Queue.
     Turns are processed serially — messages that arrive mid-turn queue up and run in order.
+
+    Parked calls (``auto``'s staging queue) are answered here by reaction. This channel holds no
+    gate handle — it never has — so the tap has to be handed back to whoever owns the gate:
+    :attr:`_pending_resolver` is that handle, and the REPL installs it
+    (``channel._pending_resolver = ...``, calling ``gate.approve``/``gate.deny`` and nudging the
+    model). Until it is installed a reaction is logged and the message says so
+    (:data:`PENDING_NO_RESOLVER_LINE`) rather than silently doing nothing.
     """
 
     channel_id = "discord"
@@ -178,6 +271,13 @@ class DiscordChannel(ChannelAdapter):
         # message id -> queue of emoji, for ask_permission. Push (a gateway reaction event) is
         # bridged to pull (an awaiting gate) the same way on_message is bridged to read_input.
         self._reaction_waiters: dict[int, asyncio.Queue] = {}
+        # pending id -> the notice posted for it, insertion-ordered (oldest first), for as long
+        # as nobody has answered it. Its message is edited in place when the answer arrives.
+        self._pending_notices: dict[int, _PendingNotice] = {}
+        self._pending_resolver: Callable[[str, int], Awaitable[None]] | None = None
+        """How a reaction reaches the gate: ``await resolver(action, pending_id)`` where action is
+        one of :data:`PENDING_REACTIONS`' values ("approve"/"deny"). Installed by the REPL, which
+        owns the gate and the nudge; None here means reactions cannot be answered yet."""
 
     async def start(self) -> None:
         try:
@@ -240,6 +340,10 @@ class DiscordChannel(ChannelAdapter):
             self.bus.subscribe(Escalation, self.on_escalation),
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Heartbeat, self.on_heartbeat),
+            # The only way this channel hears about the staging queue: the loop holds no channel
+            # handle, so a parked call and its answer both travel as their own events.
+            self.bus.subscribe(PermissionStaged, self.on_permission_staged),
+            self.bus.subscribe(PermissionResolved, self.on_permission_resolved),
         ]
         self._client_task = asyncio.create_task(self._client.start(self._token))
         await self._ready.wait()
@@ -249,6 +353,10 @@ class DiscordChannel(ChannelAdapter):
             if h is not None:
                 self.bus.unsubscribe(h)
         self._handles = []
+        # Reaction waiters outlive the turn that staged them, so shutdown is the only thing that
+        # ends them. Left running they would keep a closed session's tasks alive.
+        for notice in list(self._pending_notices.values()):
+            self._drop_notice(notice)
         if self._client is not None:
             await self._client.close()
         if self._client_task is not None:
@@ -339,6 +447,132 @@ class DiscordChannel(ChannelAdapter):
             )
         except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — never mask the cancel
             log.warning("discord_permission_timeout_note_failed", message_id=getattr(sent, "id", None))
+
+    async def send_pending_notice(self, pending: Any, total: int) -> None:
+        """Post the parked call as its own message, with the two answers pre-reacted.
+
+        The one rule this method exists to keep: it must NOT wait for the human. ``auto`` stages
+        a call precisely so the agent loop can carry on without it, and this runs on the bus
+        handler for that staging — awaiting a reaction here would put the stall back one layer
+        down. So the wait lives in a detached task and this returns as soon as the message and
+        its reactions are up.
+
+        The reactions ARE added before returning, unlike the wait: they are two bounded REST
+        calls, and a notice that tells someone to tap ✅ before ✅ is there is a notice they will
+        try to answer by hand.
+        """
+        target = self._current_msg
+        if target is None or self._client is None:
+            log.warning("discord_pending_no_target", pending_id=getattr(pending, "id", None))
+            return
+        body = pending_notice_body(pending, total)
+        sent = await target.channel.send(body)
+        waiter: asyncio.Queue = asyncio.Queue()
+        self._reaction_waiters[int(sent.id)] = waiter
+        for emoji in PENDING_REACTIONS:
+            try:
+                await sent.add_reaction(emoji)
+            except Exception:  # noqa: BLE001 — a failed reaction must not drop the notice
+                log.warning("discord_pending_reaction_failed", emoji=emoji)
+        notice = _PendingNotice(pending=pending, message=sent, body=body, waiter=waiter)
+        self._pending_notices[int(pending.id)] = notice
+        notice.task = asyncio.create_task(self._await_pending_reaction(notice))
+
+    async def _await_pending_reaction(self, notice: _PendingNotice) -> None:
+        """Wait — for as long as it takes — for the first mapped reaction, then resolve it.
+
+        Detached from the turn that staged the call, so it has no deadline: a parked call is
+        exactly the one a person is expected to answer later, and the timeout that guards a
+        blocking ask (:data:`PERMISSION_TIMEOUT_LINE`) would here delete an answer the queue is
+        still holding open. Cancellation is the only other way out, and it comes from
+        :meth:`on_permission_resolved` when the same call was answered in text.
+        """
+        try:
+            while True:
+                action = PENDING_REACTIONS.get(await notice.waiter.get())
+                if action is not None:
+                    break
+        finally:
+            self._reaction_waiters.pop(int(notice.message.id), None)
+        resolver = self._pending_resolver
+        if resolver is None:
+            log.warning("discord_pending_no_resolver", pending_id=notice.pending.id, action=action)
+            # The notice stays registered: the human still has the text commands, and when they
+            # use them the resolution event edits this same message.
+            await self._edit_or_reply(
+                notice.message, notice.body, PENDING_NO_RESOLVER_LINE.format(id=notice.pending.id)
+            )
+            return
+        self._pending_notices.pop(int(notice.pending.id), None)
+        await resolver(action, int(notice.pending.id))
+        await self._close_pending(notice, action)
+
+    async def on_permission_resolved(self, event: PermissionResolved) -> None:
+        """Close the notice for a call that was answered somewhere else (``/approve 3`` in chat).
+
+        The reaction waiter is cancelled here, and that cancel is the point: without it the ✅
+        still sitting on an answered message stays live, and a tap on it minutes later would
+        resolve the call a second time — approving something the person already denied by text.
+
+        `PermissionResolved` carries no pending id (it is the same event a blocking ask
+        publishes), so the notice is matched on the pairing key that event does carry — session,
+        tool, class, grant key — oldest first. HONEST LIMIT: two calls of the same tool and class
+        parked at once (two different `rm -rf` paths) are indistinguishable at this event, and the
+        older notice takes the verdict. The gate's own queue is unaffected; what can be wrong is
+        which of two messages gets annotated.
+        """
+        notice = self._notice_for(event)
+        if notice is None:
+            return
+        self._drop_notice(notice)
+        action = "approve" if event.decision in PENDING_RAN_DECISIONS else "deny"
+        await self._close_pending(notice, action)
+
+    def _drop_notice(self, notice: _PendingNotice) -> None:
+        """Forget a notice and stop listening for its reactions.
+
+        The waiter is popped HERE rather than left to the task's own ``finally``: a task
+        cancelled before it has run once never reaches that ``finally``, and a staged call
+        answered in the same breath it was posted is exactly that case. A live waiter for a
+        closed notice is a reaction that resolves nothing and pins the queue entry forever.
+        """
+        self._pending_notices.pop(int(notice.pending.id), None)
+        self._reaction_waiters.pop(int(notice.message.id), None)
+        if notice.task is not None:
+            notice.task.cancel()
+
+    def _notice_for(self, event: PermissionResolved) -> _PendingNotice | None:
+        """The notice this resolution closes: by `pending_id` when the event carries one, else
+        the oldest still-open notice with the same pairing fields (see the caller's note)."""
+        if event.pending_id is not None:
+            for notice in self._pending_notices.values():
+                if notice.pending.id == event.pending_id:
+                    return notice
+            return None
+        for notice in self._pending_notices.values():  # insertion order: oldest first
+            request = notice.pending.request
+            if (
+                notice.pending.session_id == event.session_id
+                and request.tool_name == event.tool_name
+                and request.klass == event.klass
+                and (request.key if request.grantable else None) == event.key
+            ):
+                return notice
+        return None
+
+    async def _close_pending(self, notice: _PendingNotice, action: str) -> None:
+        """Stamp the verdict onto the notice message (:data:`PENDING_RESOLVED_LINES`).
+
+        An edit, not a new message, for the reason :meth:`_annotate_expired` gives: the answer
+        belongs to the question, not thirty lines below it. A failure to say it at all is logged
+        and dropped — the call is already resolved in the gate, and no channel write may undo
+        that or raise into whatever answered it.
+        """
+        line = PENDING_RESOLVED_LINES[action].format(id=notice.pending.id)
+        try:
+            await self._edit_or_reply(notice.message, notice.body, line)
+        except Exception:  # noqa: BLE001 — the answer is recorded; the annotation is cosmetic
+            log.warning("discord_pending_note_failed", message_id=getattr(notice.message, "id", None))
 
     async def _edit_or_reply(self, sent: Any, body: str, line: str) -> None:
         try:
