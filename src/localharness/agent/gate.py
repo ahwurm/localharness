@@ -449,6 +449,10 @@ class PermissionGate:
         if from_channel and name != self.mode:
             log.info(MODE_SET_FROM_CHANNEL_LOG, self.mode, name, self.channel_name)
         self.mode = name  # type: ignore[assignment]
+        if name not in STAGING_MODES:
+            # A ticket is an answer to auto's question. A stricter mode asks its own, wider
+            # question about the same call, and an old yes must not answer it silently.
+            self._approved_once.clear()
         return self.mode
 
     # ----------------------------------------------------------------- deny
