@@ -331,7 +331,7 @@ const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
-  webNoted: false, bring: null,
+  webNoted: false, bring: null, echoes: [],
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -399,6 +399,10 @@ function onEvent(name, data) {
   const child = !!data.parent_id;
   switch (name) {
     case "UserMessage": {
+      // The bus's echo of a message THIS page sent claims the local-echo bubble instead of
+      // drawing a second one — the provisional pattern (rule 2), applied to the user's own text.
+      const e = S.echoes.length && S.echoes[0].text === data.content ? S.echoes.shift() : null;
+      if (e) { e.meta.textContent = "you · via " + data.channel; break; }
       const r = add(el("div", "row user"));
       r.appendChild(el("div", null, data.content));
       r.appendChild(el("div", "meta", "you · via " + data.channel));
@@ -901,10 +905,19 @@ async function send(intent) {
   if (!text) return;
   S.lastSent = text;
   $("text").value = "";
+  // LOCAL ECHO (owner, 2026-09-14, "I don't even see my message after I send it"): the bubble
+  // appears the moment the thumb hits send, and its meta line carries the delivery truth. The
+  // bus's own UserMessage echo later claims this row (see the reducer) rather than duplicating.
+  const row = add(el("div", "row user"));
+  row.appendChild(el("div", null, text));
+  const meta = el("div", "meta", "you · sending…");
+  row.appendChild(meta);
+  S.echoes.push({ text, meta });
   const r = await post(`/api/sessions/${S.session || "current"}/message`,
                        intent ? { text, intent } : { text });
-  if (r.status === "no_resolver") add(el("div", "row err", r.detail));
-  else if (r.bringing_up) add(el("div", "row sys", "starting the session for this message…"));
+  if (r.status === "no_resolver") { meta.textContent = "you · NOT delivered"; add(el("div", "row err", r.detail)); }
+  else if (r.bringing_up) meta.textContent = "you · sent — the session is starting for this message";
+  else meta.textContent = "you · sent";
   paint();   // `retry` becomes offerable the moment there is a last message to re-send
 }
 $("send").onclick = () => send(null);
