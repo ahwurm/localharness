@@ -54,8 +54,10 @@ BANNER = """LocalHarness web channel
 Put a TLS-terminating proxy in front of it before reaching it from a phone:
   tailscale serve --bg {port}            (recommended: auto-renewing certs, and the only
                                           topology that also offers tailnet identity)
-Plain HTTP on a non-localhost origin works as a browser TAB only — no service worker, no
-home-screen install, no Web Push. That is a browser rule, not a harness limitation.
+Plain HTTP on a non-localhost origin does not work at all: no service worker (so no
+home-screen install and no Web Push), and the event stream cannot authenticate, because a
+browser refuses to keep the Secure session cookie there. Both are browser rules. localhost
+is exempt, which is why the development loop needs none of this.
 
 Enrol a client with this token (it is required on every request, including the stream):
   {token}
