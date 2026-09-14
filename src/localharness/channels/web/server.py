@@ -41,7 +41,7 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, R
 from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
-from . import auth
+from . import auth, push
 from .channel import WebChannel
 from .protocol import (
     COLLAPSIBLE_GROUPS,
@@ -104,6 +104,45 @@ not silently reintroduce the stall.
 """
 
 
+TOKEN_FRAGMENT_KEY = "t"
+"""The URL-FRAGMENT key the enrolment QR carries the app token in: `https://host/#t=<token>`.
+
+§7.3 says the token is never placed in a URL, and this honours the reason that rule exists
+rather than its letter. What the rule is about is the query string, which lands in server logs,
+in proxy logs and in `Referer` headers. A fragment is sent to no server at all — it never leaves
+the browser — and the page below strips it from the address bar the moment it has been read, so
+it does not survive into history or a screenshot either. The alternative is hand-typing a
+256-bit secret on a phone keyboard, which is the setup step people abandon.
+"""
+
+MANIFEST_CONTENT_TYPE = "application/manifest+json"
+
+MANIFEST: dict[str, Any] = {
+    "name": "localharness",
+    "short_name": "harness",
+    "description": "The agent harness on your box, from your phone.",
+    "id": "/",
+    "scope": "/",
+    "start_url": "/",
+    # `standalone`, not `browser`: WIN-A is "beats opening ChatGPT", and a thing you reach by
+    # unlocking the phone, opening Safari and typing a .ts.net URL has lost that contest before
+    # the model is consulted. The competitor is a home-screen icon.
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#ffffff",
+    "theme_color": "#111111",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"},
+    ],
+}
+"""The install identity. Deliberately plain, and the icon is a placeholder meant to be replaced —
+drop a new `icon-192.png` / `icon-512.png` into the UI directory and it is done, no build step,
+which is the same promise the reference page itself makes (WEBCH-20)."""
+
+
 SECURITY_HEADERS: dict[str, str] = {
     # THE one that matters here. The shell is served without a credential and is inert without
     # one — but `localStorage` is scoped to the ORIGIN, not to the frame embedding it, so an
@@ -155,12 +194,14 @@ class WebServer:
         ui_dir: Optional[Path] = None,
         on_first_message: Optional[Any] = None,
         replay: Any = None,
+        config_dir: Optional[str | Path] = None,
     ) -> None:
         self.channel = channel
         self.token = token
         self.ui_dir = (ui_dir or PACKAGED_UI_DIR).resolve()
         self.on_first_message = on_first_message
         self.replay = replay
+        self.config_dir = config_dir
         self._bringup_started = False
         self.app = self._build()
 
@@ -231,6 +272,11 @@ class WebServer:
             Route("/api/permissions/{request_id}/answer", self.answer, methods=["POST"]),
             Route("/api/pending/{pending_id}/{verb}", self.pending, methods=["POST"]),
             Route("/api/bringup/abort", self.abort_bringup, methods=["POST"]),
+            Route("/api/push/key", self.push_key, methods=["GET"]),
+            Route("/api/push/subscribe", self.push_subscribe, methods=["POST"]),
+            # Before the catch-all, and a ROUTE rather than a file, because an authenticated
+            # caller gets a `start_url` that pairs the installed app (see `manifest`).
+            Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
             Route("/api/sessions/{session_id}/message", self.message, methods=["POST"]),
@@ -792,6 +838,68 @@ class WebServer:
             return refusal
         return _json({"status": "aborting" if self.channel.abort_bringup() else "not_building"})
 
+    # ------------------------------------------------------------------ the app (A2)
+
+    async def push_key(self, request: Request) -> Response:
+        """The VAPID public key, so the page can call `pushManager.subscribe()`.
+
+        Authenticated even though a public key is not a secret: an unauthenticated caller has no
+        business learning that this box exists, let alone enough to start an enrolment.
+        """
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        keys = push.load_or_create_vapid(self.config_dir)
+        return _json({"application_server_key": keys.application_server_key})
+
+    async def push_subscribe(self, request: Request) -> Response:
+        """Register a device for Web Push.
+
+        **This is a credential-gated verb and the gate is the point.** A push subscription is a
+        standing channel into the owner's lock screen, carrying deep links to the very things the
+        harness wants approved; letting an unauthenticated caller register one would hand a
+        stranger both the notifications and a map of what to tap. It takes the same two-part POST
+        check as every other verb — bearer token AND a JSON content type — so a cross-origin
+        form, which is the shape that would otherwise skip a preflight, cannot reach it.
+        """
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        try:
+            body = await self._body(request)
+        except ValueError as exc:
+            return _json({"error": str(exc)}, status=400)
+        subscription = push.valid_subscription(body)
+        if subscription is None:
+            return _json({"error": push.SUBSCRIPTION_ERROR}, status=400)
+        store = push.SubscriptionStore(self.config_dir)
+        store.add(subscription)
+        return _json({"status": "subscribed", "devices": len(store.all())})
+
+    async def manifest(self, request: Request) -> Response:
+        """The PWA manifest — and the one place the install story gets honest.
+
+        iOS keeps a home-screen web app's storage in a DIFFERENT jar from Safari's. So a phone
+        that paired in Safari by scanning the QR installs an app that knows nothing: same origin,
+        empty `localStorage`, no cookie. The obvious fix — put the token in `start_url` — would
+        publish it to every unauthenticated caller of this route, so instead the token-bearing
+        `start_url` is served ONLY to a caller that already has the credential, which the page
+        arranges by asking for the manifest with `crossorigin="use-credentials"`.
+
+        Belt and braces, because that credentialed manifest fetch is browser behavior we cannot
+        force: when it does not happen the generic manifest is served, the app installs anyway,
+        and the shell shows its pairing field. The install is never blocked — only pre-paired.
+        """
+        authed = self._authed(request, post=False) is None
+        body = dict(MANIFEST)
+        if authed:
+            body["start_url"] = f"/#{TOKEN_FRAGMENT_KEY}={self.token}"
+        response = _json(body)
+        response.headers["Content-Type"] = MANIFEST_CONTENT_TYPE
+        # Never let a proxy or a shared cache keep the token-bearing variant.
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     def _ensure_session(self) -> bool:
         """Start session bring-up if it has not begun. Returns True if this call started it."""
         if self._bringup_started or self.on_first_message is None or self.replay is not None:
@@ -813,6 +921,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/pending/{pending_id}/{approve|deny}", "answer a parked call"),
     ("POST", "/api/bringup/abort", "abandon a wedged session bring-up"),
     ("POST", "/api/auth/enroll", "trade the bearer token for the stream cookie"),
+    ("POST", "/api/push/subscribe", "register this device for Web Push; body is a PushSubscription"),
+    ("GET", "/api/push/key", "the VAPID application server key for pushManager.subscribe()"),
     ("GET", "/api/stream", "the SSE event stream; ?from={seq} resumes"),
     ("GET", "/api/sessions/{id}/events", "replay off disk as NDJSON; ?from={seq}"),
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),

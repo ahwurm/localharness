@@ -203,7 +203,8 @@ async def _serve(
                 console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
                 raise typer.Exit(2) from exc
         driver = ReplayDriver(channel, log_path, speed=speed, fixtures=loaded)
-        server = WebServer(channel, token=token, ui_dir=resolved_ui, replay=driver)
+        server = WebServer(channel, token=token, ui_dir=resolved_ui, replay=driver,
+                           config_dir=config_dir)
         console.print(escape(REPLAY_BANNER.format(
             host=host, port=port, log=log_path, speed=speed,
             fixtures=f"   fixtures  {fixtures}" if fixtures else "",
@@ -229,6 +230,7 @@ async def _serve(
 
         server = WebServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
+            config_dir=config_dir,
         )
         console.print(escape(BANNER.format(
             host=host, port=port, ui_dir=resolved_ui, cwd=Path.cwd(), token=token,
