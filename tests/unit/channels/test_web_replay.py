@@ -234,13 +234,13 @@ async def test_playback_starts_when_a_client_connects_not_when_the_server_boots(
     server = WebServer(channel, token="t", replay=driver)
 
     assert driver._task is None, "constructing the server must not start playback"
-    server._maybe_prewarm()                       # what a connect does
+    await server._maybe_prewarm()                 # what a connect does
     assert driver._task is not None
     await driver._task
 
     # A refresh replays from the top rather than joining a finished playback.
     first = driver._task
-    server._maybe_prewarm()
+    await server._maybe_prewarm()
     assert driver._task is not first
     await driver.stop()
 
