@@ -19,8 +19,10 @@ class ToolResultGetTool(Tool):
             group="fs.read",
             description=(
                 "Restore the full body of a previously evicted tool result. When you see a "
-                "stub like \"[tool result evicted — ~N tokens — call tool_result_get('<id>') "
-                "to restore]\", pass that exact <id> here to get the original content back."
+                "stub like \"[tool result evicted — <tool> <argument> — ~N tokens — call "
+                "tool_result_get('<id>') to restore the full body]\", or the tail note "
+                "\"[out of view: ...]\" listing such stubs, pass that exact <id> here to get "
+                "the original content back. Do it BEFORE a step that depends on that content."
             ),
             parameters={
                 "type": "object",

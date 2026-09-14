@@ -109,6 +109,23 @@ TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
 _TOOL_STUB_PREFIX = "[tool result evicted"
+_TOOL_STUB_SUFFIX = " to restore the full body]"
+# A stub names the call it replaced — tool + first string argument (a path, a url, a query, a
+# command) — so a model re-reading its history can tell WHICH result is gone without pairing
+# the stub back to the assistant turn that made the call. Measured live (2026-09-14): a model
+# composed from "notes it read earlier" that had been evicted, because the anonymous stub gave
+# it nothing to recognize. The hint cap keeps a stub near 40 tokens (one path or command line
+# fits; a page of shell output does not), which is also the ledger's per-entry budget below.
+_STUB_HINT_CHARS: int = 80
+# The out-of-view note: every stub still in the prompt, listed ONCE at the tail — where the
+# model's attention is (the Manus recitation rule: re-append the state you need attended,
+# don't leave it buried mid-history). It answers the question the model must ask before a
+# load-bearing step — "is my grounding actually in front of me?" — without a history scan.
+# Bounded by the window, not a bare count: an entry is one stub (~_LEDGER_TOKENS_PER_ENTRY
+# tokens) and the note may spend at most _LEDGER_WINDOW_FRACTION of the context.
+_OUT_OF_VIEW_PREFIX = "[out of view:"
+_LEDGER_WINDOW_FRACTION: float = 0.01
+_LEDGER_TOKENS_PER_ENTRY: int = 40
 # #140: recall output enters the store with UNTRUSTED origin. Memory can hold material that
 # originally arrived from untrusted channels (remembered web content), and facts carry no
 # per-item provenance — so the floor assumes the worst: an evicted recall body is data the
@@ -269,21 +286,57 @@ class ContentStore:
         self._fetch_seq = 0
 
 
-def _tool_call_ids_named(messages: list[Message], names: frozenset[str]) -> set[str]:
-    """tool_call ids whose function name is in `names`. tool_calls arrive as dicts (replayed
-    history) or objects (fresh provider parse), so both shapes are read."""
-    ids: set[str] = set()
+def _call_meta(messages: list[Message]) -> dict[str, tuple[str, str]]:
+    """tool_call id -> (function name, hint). The hint is the call's first string argument —
+    whitespace-collapsed, capped at _STUB_HINT_CHARS — and is what makes a stub self-describing.
+    tool_calls arrive as dicts (replayed history) or objects (fresh provider parse), so both
+    shapes are read."""
+    meta: dict[str, tuple[str, str]] = {}
     for m in messages:
         if m.get("role") != "assistant":
             continue
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
             name = (fn.get("name", "") if isinstance(fn, dict) else getattr(fn, "name", "")) or ""
-            if name in names:
-                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                if tc_id:
-                    ids.add(tc_id)
-    return ids
+            raw = (fn.get("arguments") if isinstance(fn, dict)
+                   else getattr(fn, "arguments", None)) or "{}"
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                args = {}
+            first = next((v for v in args.values() if isinstance(v, str) and v.strip()), "") \
+                if isinstance(args, dict) else ""
+            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+            if tc_id:
+                meta[tc_id] = (name, " ".join(first.split())[:_STUB_HINT_CHARS])
+    return meta
+
+
+def _tool_call_ids_named(messages: list[Message], names: frozenset[str]) -> set[str]:
+    """tool_call ids whose function name is in `names`."""
+    return {i for i, (n, _) in _call_meta(messages).items() if n in names}
+
+
+def _out_of_view_note(messages: list[Message], max_context_tokens: int) -> str:
+    """One tail line naming every evicted tool result still stubbed in `messages` — tool, first
+    argument, size, restore handle — oldest first, the oldest dropped past the window-derived
+    cap. Empty when nothing is evicted, so a session under the eviction gate pays nothing."""
+    entries = [
+        (m.get("content") or "")[len(_TOOL_STUB_PREFIX) + 3 : -len(_TOOL_STUB_SUFFIX)]
+        for m in messages
+        if m.get("role") == "tool"
+        and (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)
+        and (m.get("content") or "").endswith(_TOOL_STUB_SUFFIX)
+    ]
+    if not entries:
+        return ""
+    cap = max(1, int(max_context_tokens * _LEDGER_WINDOW_FRACTION) // _LEDGER_TOKENS_PER_ENTRY)
+    older = max(0, len(entries) - cap)
+    shown = "; ".join(entries[older:]) + (f"; +{older} older" if older else "")
+    return (
+        f"{_OUT_OF_VIEW_PREFIX} {len(entries)} evicted tool result(s) are not in this prompt — "
+        f"{shown}. Restore one before relying on it.]"
+    )
 
 
 def _evict_large_tool_results(
@@ -305,8 +358,9 @@ def _evict_large_tool_results(
     Memory-recall results (#140) evict like any other bulky body but enter the store with
     untrusted origin — restorable and verb-readable, never exec-bindable."""
     # tool_call_ids that resolve to web tools — those go through the web path, skip here.
-    web_ids = _tool_call_ids_named(messages, _WEB_TOOLS)
-    memory_ids = _tool_call_ids_named(messages, _MEMORY_TOOLS)
+    meta = _call_meta(messages)
+    web_ids = {i for i, (n, _) in meta.items() if n in _WEB_TOOLS}
+    memory_ids = {i for i, (n, _) in meta.items() if n in _MEMORY_TOOLS}
     evictable = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
@@ -326,9 +380,11 @@ def _evict_large_tool_results(
         origin: Origin = "untrusted" if m.get("tool_call_id") in memory_ids else "trusted"
         rid = store.put(body, origin=origin)
         approx_tokens = len(body) // 4
+        name, hint = meta.get(m.get("tool_call_id") or "", ("", ""))
+        what = " ".join(s for s in (name, hint) if s)
         out[i] = {**m, "content": (
-            f"{_TOOL_STUB_PREFIX} — ~{approx_tokens} tokens — "
-            f"call tool_result_get('{rid}') to restore the full body]"
+            f"{_TOOL_STUB_PREFIX} — {what + ' — ' if what else ''}~{approx_tokens} tokens — "
+            f"call tool_result_get('{rid}'){_TOOL_STUB_SUFFIX}"
         )}
     return out, len(stale)
 
@@ -1646,6 +1702,16 @@ class ContextManager:
         # 0.80/0.95 triggers use, so the floor can never fire before the stage designed to prevent it.
         reserve = response_reserve(self.max_context_tokens, self.max_response_tokens)
         effective_limit = self.max_context_tokens - reserve
+        # The out-of-view note rides on the LAST message — the one spot that changes every turn
+        # anyway, so the prefix cache is untouched — never on an assistant message (it would
+        # read as the model's own words) and never into session history: this is the request
+        # list, the session keeps the full bodies. Appended BEFORE the emergency floor so the
+        # floor's arithmetic counts it.
+        note = _out_of_view_note(repaired, self.max_context_tokens)
+        if note and repaired and repaired[-1].get("role") in ("user", "tool"):
+            last = repaired[-1]
+            repaired = [*repaired[:-1],
+                        {**last, "content": f"{last.get('content') or ''}\n\n{note}"}]
         floor_usage = self._token_counter.estimate_messages(repaired)
         # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
         # user turn, no history) gives SummaryCompactionStage no safe "middle" to summarize — the

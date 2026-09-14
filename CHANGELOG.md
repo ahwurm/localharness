@@ -7,6 +7,23 @@ All notable changes to LocalHarness are documented here. The format follows
 ## [0.14.2] — unreleased
 
 ### Changed
+- **An eviction stub now says what it replaced, and the prompt's last message lists
+  everything that is out of view.** A stub used to read `[tool result evicted — ~N
+  tokens — call tool_result_get('id')]`: a token count and a handle, no tool, no
+  path. A model re-reading its history could not tell which stub was the notes it
+  had read three turns ago, and one composed a draft from grounding it no longer
+  held. The stub now carries the tool and its first argument (`read_file
+  /notes/y120.md`), and when any stub is in the prompt the last message ends with
+  one `[out of view: …]` line naming them all, newest last, capped at 1 % of the
+  window. Nothing is written to session history and the prefix cache is untouched:
+  the note rides on the one message that changes every turn anyway.
+- **Calling a tool that does not exist now says so, and names the nearest one.**
+  `Tool 'delegate' not found or not permitted for agent 'x'` folded two cases into
+  one sentence, and a model retried it three times while a human reading the same
+  line concluded the tool "needs to be trusted". A name nothing answers to is now
+  `Unknown tool 'delegate'. Did you mean: agent?` — nearest by spelling, or by
+  group, which is how `delegate` finds `agent`. A tool that exists but is not this
+  agent's is a separate `permission_denied` error that says so.
 - **In `auto`, a call on the blacklist no longer stops the agent. It is parked
   for a human, and the turn carries on.** Until now the gate asked, and a
   terminal or Zed question waits with no deadline, so a turn stopped dead the

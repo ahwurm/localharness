@@ -1,4 +1,5 @@
 """ToolRegistry: scope resolution, Pydantic dispatch, and hook integration."""
+import difflib
 import time
 from collections.abc import Callable
 from typing import Any
@@ -238,6 +239,37 @@ class ToolRegistry:
             return self._tools["mcp"][name]
         return None
 
+    # difflib's own default ratio; below it "did you mean" turns into noise.
+    SUGGEST_CUTOFF: float = 0.6
+
+    def _unknown_tool(
+        self, name: str, agent_id: str, division_id: str, tool_config: Any
+    ) -> ToolResult:
+        """The two cases dispatch used to fold into one string, told apart: a tool that exists
+        but is not this agent's is `permission_denied` (retrying will not help; a config change
+        will); a name nothing answers to is `not_found` with the nearest callable names — by
+        spelling (difflib) or by GROUP, since a model that wants to delegate asks for `delegate`,
+        which is the group of the tool named `agent`. Measured live (2026-09-14): three
+        identical retries of `delegate`, and a human reading the old message concluded the tool
+        "needs to be trusted"."""
+        if self._find_tool_by_name(name) is not None:
+            return ToolResult(
+                output="", success=False, error_type="permission_denied",
+                error=f"Tool '{name}' exists but is not permitted for agent '{agent_id}'",
+            )
+        visible = self.get_tools_for_agent(agent_id, division_id, tool_config)
+        wanted = name.lower()
+        by_group = [n for n, s in visible.items()
+                    if wanted in (s.group.lower(), s.group.lower().rsplit(".", 1)[-1])]
+        close = difflib.get_close_matches(name, list(visible), n=3, cutoff=self.SUGGEST_CUTOFF)
+        near = list(dict.fromkeys([*by_group, *close]))
+        tail = (f" Did you mean: {', '.join(near)}?" if near
+                else f" Callable tools: {', '.join(sorted(visible)) or 'none'}.")
+        return ToolResult(
+            output="", success=False, error_type="not_found",
+            error=f"Unknown tool '{name}'.{tail}",
+        )
+
     def lookup_tool(
         self,
         name: str,
@@ -265,12 +297,7 @@ class ToolRegistry:
 
         tool = self._get_tool_for_agent(name, agent_id, division_id, tool_config)
         if tool is None:
-            return ToolResult(
-                output="",
-                success=False,
-                error=f"Tool '{name}' not found or not permitted for agent '{agent_id}'",
-                error_type="not_found",
-            )
+            return self._unknown_tool(name, agent_id, division_id, tool_config)
 
         validated = self._validate_arguments(name, arguments, tool.info())
         if isinstance(validated, ToolResult):
