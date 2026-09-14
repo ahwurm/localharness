@@ -10,6 +10,7 @@ unauthenticated caller.
 from __future__ import annotations
 
 import json
+import shutil
 
 import httpx
 import pytest
@@ -255,3 +256,23 @@ async def test_plain_http_says_the_stream_cannot_authenticate(page):
     window = boot[max(0, where - 700):where + 700]
     # It has to name the CAUSE, not just the symptom, or the owner debugs their wifi.
     assert "cookie" in window.lower()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+async def test_the_page_and_worker_actually_parse(page, worker, tmp_path):
+    """Every other assertion in this file matches STRINGS. A stray brace would leave them all
+    green and the app dead on the first line, because the whole page is one inline module and a
+    module that does not parse runs none of itself.
+
+    Skipped where node is absent, and honest about it: this is insurance, not the guarantee.
+    """
+    import re
+    import subprocess
+
+    module = re.search(r'<script type="module">(.*?)</script>', page, re.S)
+    assert module, "the reference page is one inline module; that shape changed"
+    for name, source in (("page.mjs", module.group(1)), ("sw.js", worker)):
+        path = tmp_path / name
+        path.write_text(source, encoding="utf-8")
+        result = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{name} does not parse:\n{result.stderr}"
