@@ -505,3 +505,21 @@ def _request():
         klass="shell-destructive", key=None, grantable=False, reason="destructive",
         display="bash_exec: rm -rf ~/old-notes",
     )
+
+
+async def test_health_carries_what_a_late_client_could_not_have_been_told(tmp_path):
+    """Two facts a one-shot line on the wire cannot deliver to a phone that connects afterwards:
+    how many devices are enrolled for push, and who else is driving this agent (WEBCH-29)."""
+    from localharness.config.session_presence import LiveSession
+
+    _, channel, _, client = await _stack(tmp_path)
+    channel.set_co_tenants([LiveSession(
+        pid=4242, agent="orchestrator", channel="terminal", workspace="/home/x/proj",
+        session_id="s0", started_at=0.0,
+    )])
+    push.SubscriptionStore(tmp_path).add(_subscription())
+
+    body = (await client.get("/api/health", headers=BEARER)).json()
+    assert body["push_enrolled"] == 1
+    assert body["other_sessions"][0]["channel"] == "terminal"
+    assert body["other_sessions"][0]["pid"] == 4242
