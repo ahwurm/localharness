@@ -1,13 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- localharness app mark: the capped agent.
-       Coordinates are the appicon-512.png geometry verbatim (k=1.36 character
-       scale, brim length 52, bbox-centred so the whole mark including its
-       outline clears every edge, every edge snapped to a whole 512-unit pixel).
-       Ink bbox is 53,72 -> 458,440: margins 53px left/right (10.35%) and
-       72/71px top/bottom (14%), so no mask can reach it. Plain shapes only.
+       Coordinates are the appicon-512.png geometry verbatim (k=1.26 character
+       scale, brim length 52 pointing RIGHT, character centred on the canvas so
+       the brim hangs as the off-centre accent, every edge snapped to a whole
+       512-unit pixel). Ink bbox is 100,85 -> 476,427: margins 100px left,
+       35px right (6.8%), 85/84px top/bottom - the brim tip clears the edge.
+       Plain shapes only.
        The cap mark uses the two-block degradation form, not letter paths: a
        favicon renders at 16-32px, well under the 9px letter-height floor where
-       "LH" turns to mud. Green block = the L, white block = the H. -->
+       "LH" turns to mud. Green block = the L, white block = the H, left to
+       right as normal regardless of which way the brim points. -->
 
   <!-- full-bleed ground; no rounding, the browser/OS masks it -->
   <rect width="512" height="512" fill="#0D0F15"/>
@@ -15,22 +17,22 @@
   <!-- the agent's head: outline first, then fill. Both share one corner radius
        (0.246 x head width), so the stroke reads slightly tighter at the corners
        exactly as the raster does. -->
-  <rect x="129" y="115" width="325" height="325" rx="71.9" fill="#074A24"/>
-  <rect x="145" y="132" width="293" height="292" rx="71.9" fill="#56DC85"/>
+  <rect x="105" y="126" width="302" height="301" rx="66.6" fill="#074A24"/>
+  <rect x="121" y="141" width="270" height="271" rx="66.6" fill="#56DC85"/>
 
   <!-- cap outline: crown (top corners only) + brim -->
-  <path d="M180.1,72 H401.9 A57.1,57.1 0 0 1 459,129.1 V200 H123 V129.1 A57.1,57.1 0 0 1 180.1,72 Z" fill="#181B20"/>
-  <rect x="53" y="142" width="282" height="79" rx="11.4" fill="#181B20"/>
+  <path d="M152.9,85 H359.1 A52.9,52.9 0 0 1 412,137.9 V204 H100 V137.9 A52.9,52.9 0 0 1 152.9,85 Z" fill="#181B20"/>
+  <rect x="216" y="151" width="261" height="73" rx="10.5" fill="#181B20"/>
 
   <!-- cap: crown flat-topped with rounded corners (a 5-panel), then the brim -->
-  <path d="M180.8,88 H402.2 A40.8,40.8 0 0 1 443,128.8 V183 H140 V128.8 A40.8,40.8 0 0 1 180.8,88 Z" fill="#494D55"/>
-  <rect x="69" y="159" width="250" height="46" rx="11.4" fill="#494D55"/>
+  <path d="M153.8,100 H358.2 A37.8,37.8 0 0 1 396,137.8 V189 H116 V137.8 A37.8,37.8 0 0 1 153.8,100 Z" fill="#494D55"/>
+  <rect x="231" y="166" width="231" height="43" rx="10.5" fill="#494D55"/>
 
   <!-- the brand4 mark on the front panel, in block form -->
-  <rect x="266" y="113" width="21" height="36" fill="#56DC85"/>
-  <rect x="296" y="113" width="21" height="36" fill="#FFFFFF"/>
+  <rect x="233" y="124" width="19" height="32" fill="#56DC85"/>
+  <rect x="260" y="124" width="19" height="32" fill="#FFFFFF"/>
 
   <!-- eyes -->
-  <circle cx="223.4" cy="303.6" r="28.6" fill="#0D0F15"/>
-  <circle cx="359.4" cy="303.6" r="28.6" fill="#0D0F15"/>
+  <circle cx="193" cy="300.1" r="26.5" fill="#0D0F15"/>
+  <circle cx="319" cy="300.1" r="26.5" fill="#0D0F15"/>
 </svg>
