@@ -585,3 +585,43 @@ async def test_an_event_published_during_the_backfill_is_neither_dropped_nor_dup
     expected = {e.seq for e in pub if e.seq >= pub[2].seq}
     assert seen == sorted(set(seen)), f"duplicated or out of order: {seen}"
     assert set(seen) == expected, f"missing {expected - set(seen)}, extra {set(seen) - expected}"
+
+
+async def test_connecting_does_not_start_a_cold_model_server(tmp_path):
+    """§6.1's guardrail: a phone in a pocket must not be able to spin the GPU.
+
+    A connect is a much weaker signal of intent than a message — a backgrounded page reconnects on
+    its own — and bring-up starts a harness-managed model server when one is configured. So the
+    connect path pre-warms only when the provider already answers, which is the normal case on a
+    warm box and free there. On this machine that is not a style preference: concurrent prefills
+    caused a hard system freeze.
+    """
+    _, channel, server, _ = await _stack(tmp_path)
+    channel.session_id = None
+    started: list[str] = []
+    server.on_first_message = lambda: started.append("bring-up")
+
+    channel._model_reachable = False
+    server.channel.probe_model = _fixed(False)        # type: ignore[method-assign]
+    await server._maybe_prewarm()
+    assert started == [], "a connect started bring-up against a cold model server"
+
+    # ...but an actual message always does, because a human asked for something.
+    assert server._ensure_session() is True
+    assert started == ["bring-up"]
+
+
+async def test_connecting_does_prewarm_a_warm_box(tmp_path):
+    _, channel, server, _ = await _stack(tmp_path)
+    channel.session_id = None
+    started: list[str] = []
+    server.on_first_message = lambda: started.append("bring-up")
+    server.channel.probe_model = _fixed(True)         # type: ignore[method-assign]
+    await server._maybe_prewarm()
+    assert started == ["bring-up"]
+
+
+def _fixed(value):
+    async def _probe():
+        return value
+    return _probe

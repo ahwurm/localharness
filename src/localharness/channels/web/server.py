@@ -258,7 +258,7 @@ class WebServer:
         if refusal is not None:
             return refusal
         cursor = self._cursor(request)
-        self._maybe_prewarm()
+        await self._maybe_prewarm()
         client = self.channel.attach_client()
         return StreamingResponse(
             self._sse(client, cursor),
@@ -362,13 +362,21 @@ class WebServer:
         base = self.channel._session_dir
         return None if base is None else base / f"{session_id}.jsonl"
 
-    def _maybe_prewarm(self) -> None:
+    async def _maybe_prewarm(self) -> None:
         """Opening the app IS the signal — for a live session, and for a replay (LOCKED, §6.1).
 
         ACP cannot know a user is coming until they submit a prompt; this channel can, because it
         has a connect event the others lack. So a client connecting begins bring-up in the
         background immediately and by the time a thumb has finished typing the session is usually
         already up. The single cheapest thing that serves WIN-A.
+
+        **But a phone in a pocket must not be able to spin the GPU.** A connect is a much weaker
+        signal of intent than a message — a backgrounded page reconnects on its own — and bring-up
+        will start a harness-managed model server if one is configured. So the connect path
+        pre-warms ONLY when the provider already answers its probe, which is the normal case on a
+        warm box and costs nothing there. A cold server waits for an actual message, where a human
+        has demonstrably asked for something. `POST .../message` goes through `_ensure_session`,
+        which has no such condition.
 
         The replay case uses the same signal for a different reason, found by driving the real
         command: starting the playback when the SERVER starts means a browser opened a few
@@ -381,6 +389,9 @@ class WebServer:
         if self._bringup_started or self.on_first_message is None:
             return
         if self.channel.session_id is not None:
+            return
+        if await self.channel.probe_model() is not True:
+            log.info("web_prewarm_skipped", reason="provider not answering; waiting for a message")
             return
         self._bringup_started = True
         self.on_first_message()
