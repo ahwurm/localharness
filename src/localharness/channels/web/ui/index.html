@@ -747,6 +747,21 @@ $("recheck").onclick = async () => {
   } catch (e) {
     add(el("div", "row err", "could not reach the API — is the token right? " + e));
   }
+  // Plain HTTP on a LAN address is not merely "no install and no push" — the stream does not
+  // work AT ALL, and it fails in the most misleading way available. `/api/auth/enroll` sets a
+  // `Secure` cookie, browsers REJECT a Secure cookie on a non-secure origin, and EventSource
+  // cannot send the bearer header instead — so every connect 401s and the page sits on
+  // "offline — retrying" as though the wifi were bad. Say the cause, once, loudly.
+  // (localhost is exempt: browsers treat it as a secure context and keep the cookie.)
+  if (!secure) {
+    add(el("div", "row err",
+      "NOT ON HTTPS. The event stream cannot authenticate here: the browser refuses to keep " +
+      "the session cookie on a plain-http origin, and EventSource cannot send a header " +
+      "instead — so this page will retry forever and never connect. There is no home-screen " +
+      "install and no notifications either. Put TLS in front of the port (tailscale serve " +
+      "--bg, or any proxy) and open the https URL."));
+  }
+
   connect();
   await registerWorker();
   paintPush();

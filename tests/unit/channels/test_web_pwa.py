@@ -238,3 +238,20 @@ async def test_the_page_shows_a_co_tenant_session(page):
     assert "other_sessions" in page
     where = page.index("other_sessions")
     assert "another session is live" in page[where:where + 500]
+
+
+async def test_plain_http_says_the_stream_cannot_authenticate(page):
+    """Found by self-critique, not by a failing test. On a plain-HTTP LAN origin the browser
+    REJECTS the `Secure` enrolment cookie, so `EventSource` authenticates with nothing and the
+    stream 401s — which surfaces as "offline — retrying" forever. That is a spinner that never
+    ends, dressed as a network blip, and it is the exact failure WEBCH-26 forbids.
+
+    localhost is not affected: browsers treat it as a secure context and accept the cookie.
+    """
+    assert "window.isSecureContext" in page
+    boot = page[page.index("---- boot"):]
+    assert "not on https" in boot.lower() or "needs https" in boot.lower()
+    where = boot.lower().index("https")
+    window = boot[max(0, where - 700):where + 700]
+    # It has to name the CAUSE, not just the symptom, or the owner debugs their wifi.
+    assert "cookie" in window.lower()

@@ -523,3 +523,28 @@ async def test_health_carries_what_a_late_client_could_not_have_been_told(tmp_pa
     assert body["push_enrolled"] == 1
     assert body["other_sessions"][0]["channel"] == "terminal"
     assert body["other_sessions"][0]["pid"] == 4242
+
+
+def test_escalations_do_not_inflate_the_badge_forever():
+    """Found by self-critique. A parked call and a blocking ask both get a `resolved()` — an
+    Escalation gets none, because nothing publishes "the stuck turn is unstuck". Keyed by the
+    clock, every escalation would add a badge unit that could never come off, so a box that
+    escalates occasionally ends up permanently showing "7 things need you" with nothing behind
+    them. A new turn starting is the signal that the stuck one is over."""
+    p = push.PushPolicy()
+    p.needs_you("s1", kind="escalation", now=0.0)
+    p.needs_you("s1", kind="escalation", now=1.0)
+    assert p.outstanding("s1") == 2
+
+    p.turn_started("s1", now=10.0)
+    assert p.outstanding("s1") == 0
+
+
+def test_a_new_turn_does_not_clear_a_parked_call():
+    """The other half: parked calls OUTLIVE the turn that raised them — that is the whole point
+    of parking — so the same sweep must not take them with it."""
+    p = push.PushPolicy()
+    p.needs_you("s1", kind="parked", now=0.0, pending_id=1)
+    p.needs_you("s1", kind="escalation", now=1.0)
+    p.turn_started("s1", now=10.0)
+    assert p.outstanding("s1") == 1
