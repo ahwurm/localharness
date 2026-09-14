@@ -48,8 +48,10 @@
      dialog into whatever the injected page wants it to say.
   4. THE CURSOR IS PERSISTED. Last-seen seq goes to localStorage on EVERY event, because iOS
      reclaims the page and the app relaunches into a fresh JS context where EventSource's own
-     resume state is gone. Without this the reopened app skips silently to the tail and misses
-     the answer.
+     resume state is gone. A COLD open still starts CLEAN by design (owner, 2026-09-14: opening
+     the app is "just type" — the past lives behind the menu): the persisted cursor's job is the
+     in-context resume after backgrounding, and the "earlier activity" pointer on a fresh open —
+     not a full replay into the new view. Nothing is silently missed; it is one tap away.
 -->
 <style>
   /* THE PALETTE. These are localharness.dev's own `@theme` design tokens (src/styles/global.css)
@@ -329,7 +331,7 @@ const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
-  webNoted: false,
+  webNoted: false, bring: null,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -411,14 +413,14 @@ function onEvent(name, data) {
       // parent_id means a SUBAGENT's turn ended, not yours. 45% of real sessions delegate, so
       // treating a child's completion as the turn's end clears the running state while the root
       // is still generating.
-      if (!child) { S.turn = false; paint(); }
+      if (!child) { S.turn = false; restDials(); paint(); }
       add(el("div", "row sys" + (child ? " child" : ""),
         (child ? "subagent turn done · " : "turn done · ") +
         `${data.iterations} iterations · ${(data.duration_seconds || 0).toFixed(1)}s · ` +
         `${data.input_tokens}+${data.output_tokens} tokens${data.tokens_estimated ? " (estimated)" : ""}`));
       break;
     case "TurnFailed":
-      if (!child) S.turn = false;
+      if (!child) { S.turn = false; restDials(); }
       paint();
       add(el("div", "row " + (child ? "sys child" : "err"),
         (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "")));
@@ -670,7 +672,12 @@ function onFrame(name, d) {
       if (d.protocol_version !== 1) add(el("div", "row err",
         "protocol_version " + d.protocol_version + " — this page was written against 1. Something " +
         "will render as a blank cell; go read /api/protocol."));
-      paint(d.model_state);
+      // A cold open starts clean, so point at the past instead of replaying it (rule 4, amended):
+      // a stored cursor for this session means this phone has watched it before.
+      if (!d.synthetic && !log.children.length && LS.getItem(cursorKey()) != null)
+        add(el("div", "row sys", "earlier activity in this session is in the menu — ☰, top entry."));
+      // REPLAY keeps its label: paint() maps a healthy state to the quiet wordmark otherwise.
+      paint(d.synthetic ? null : d.model_state);
       break;
     case "TokenDelta": { const p = provisional(); p.text += d.text; p.body.textContent = p.text; break; }
     case "StreamClosed": clearProvisional(d.superseded_by_seq); break;
@@ -700,26 +707,41 @@ function onFrame(name, d) {
         `Nothing ran.`));
       break;
     case "TurnCancelled":
-      S.turn = false; clearProvisional(null); paint();
+      S.turn = false; clearProvisional(null); restDials(); paint();
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
       break;
     case "BringUpStage": {
+      // ONE self-replacing status row, not a stack (owner, 2026-09-14: opening the app showed
+      // build plumbing instead of a chat). Stages update the same line; "ready" removes it;
+      // only a FAILURE stays in the transcript, red and readable.
       $("state").textContent = d.failed ? "bring-up failed: " + d.stage : "starting: " + d.stage;
-      const row = add(el("div", "row " + (d.failed ? "err" : "sys")));
-      row.appendChild(el("div", null, d.stage + (d.detail ? " — " + d.detail : "")));
-      // A rising number reports elapsed time, not health — a wedged memory lock, a failing MCP
-      // server and a sibling process holding the inference lock all look like a slow start. So
-      // the build window gets its OWN way out: cancelling a TURN is a different state machine,
-      // and without this there is no escape from a bring-up that stuck.
-      if (d.abortable && !d.failed) {
-        const b = el("button", "small", "give up on this build");
-        b.onclick = async () => {
-          const r = await post("/api/bringup/abort");
-          add(el("div", "row sys", r.status === "aborting"
-            ? "abandoning the build." : "there is no build to abandon."));
-        };
-        row.appendChild(b);
+      if (d.failed) {
+        if (S.bring) { S.bring.remove(); S.bring = null; }
+        add(el("div", "row err", d.stage + (d.detail ? " — " + d.detail : "")));
+        break;
       }
+      if (d.stage === "ready") {
+        if (S.bring) { S.bring.remove(); S.bring = null; }
+        $("state").textContent = "harness";
+        break;
+      }
+      if (!S.bring) {
+        S.bring = add(el("div", "row sys"));
+        S.bring.appendChild(el("div"));
+        // A rising number reports elapsed time, not health (WEBCH-43): the build window keeps
+        // its OWN way out, because cancelling a TURN is a different state machine.
+        if (d.abortable) {
+          const b = el("button", "small", "give up on this build");
+          b.onclick = async () => {
+            const r = await post("/api/bringup/abort");
+            add(el("div", "row sys", r.status === "aborting"
+              ? "abandoning the build." : "there is no build to abandon."));
+          };
+          S.bring.appendChild(b);
+        }
+      }
+      S.bring.children[0].textContent =
+        "starting the session — " + d.stage + (d.detail ? " · " + d.detail : "");
       break;
     }
     case "Notice": {
@@ -745,10 +767,10 @@ function onFrame(name, d) {
 let es = null;
 function connect(from) {
   if (es) es.close();
-  const stored = LS.getItem(cursorKey());
-  const cursor = from != null ? from : (S.seq != null ? S.seq + 1 : (stored ? Number(stored) + 1 : null));
-  // `?from=` explicitly, not just Last-Event-ID: the case this exists for is a COLD RELAUNCH,
-  // where iOS reclaimed the page and EventSource's own resume state went with it.
+  // In-context resume only (rule 4, amended): S.seq carries across a backgrounding, so the gap
+  // backfills and nothing repeats. A COLD open deliberately ignores the stored cursor — the
+  // fresh view starts clean and Hello points at the drawer for the past.
+  const cursor = from != null ? from : (S.seq != null ? S.seq + 1 : null);
   es = new EventSource("/api/stream" + (cursor != null ? "?from=" + cursor : ""));
   const known = new Set([
     "Hello", "TokenDelta", "StreamClosed", "ReasoningDelta", "StatusTick", "BlockingAsk",
@@ -769,11 +791,23 @@ function connect(from) {
                    "InputRouted"]) es.addEventListener(n, handle(n));
 }
 
+function restDials() {
+  // Between turns the ribbon goes quiet: the phase and token counters are live-turn readings.
+  // tok/s and ctx stay — one is the box's honest speed, the other is how full the context is.
+  $("phase").textContent = "";
+  $("tok").textContent = "";
+}
+
 function paint(modelState) {
   closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
+  // The ribbon is QUIET when everything is fine (owner, 2026-09-14: "just type"): a healthy
+  // state renders as the wordmark, and the center only speaks when something needs you.
   if (S.offline) { s.textContent = "offline — retrying"; s.className = "offline"; }
-  else { s.className = ""; if (modelState) s.textContent = modelState; }
+  else if (modelState) {
+    s.className = "";
+    s.textContent = ["ready", "connected", "unknown"].includes(modelState) ? "harness" : modelState;
+  } else s.className = "";
   if (modelState === "unreachable") s.textContent = "model server unreachable — start it, then retry";
   else if (modelState === "cold") s.textContent = "cold — send to start the session";
   if (s.dataset.dream) s.textContent += " · dreaming";
@@ -938,7 +972,7 @@ async function loadSessions() {
       b.appendChild(el("div", "meta", (s.live ? "live now · " : "") +
         new Date(s.modified_unix * 1000).toLocaleString() +
         " · " + (s.size_bytes / 1024).toFixed(0) + " KB"));
-      b.onclick = () => { $("drawer").close(); s.live ? closeHistory() : openHistory(s.session_id); };
+      b.onclick = () => { $("drawer").close(); openHistory(s.session_id, s.live); };
       box.appendChild(b);
     }
     if (!(r.sessions || []).length && !r.note)
@@ -949,14 +983,15 @@ async function loadSessions() {
 // THE DIGEST, deliberately: only rule 1's blessed sources are drawn — UserMessage in,
 // TaskComplete out, TurnFailed as the miss — so history can never contradict what live
 // rendering said. Full fidelity stays a server feature: `localharness web --replay`.
-async function openHistory(id) {
+async function openHistory(id, live) {
   const hist = $("hist");
   hist.replaceChildren();
   const bar = el("div", "row sys");
   const back = el("button", "small", "back to live");
   back.onclick = closeHistory;
   bar.appendChild(back);
-  bar.appendChild(el("div", "meta", "history · " + id + " · read-only"));
+  bar.appendChild(el("div", "meta",
+    (live ? "current session — up to now" : "history · " + id) + " · read-only"));
   hist.appendChild(bar);
   let text = "";
   try {
