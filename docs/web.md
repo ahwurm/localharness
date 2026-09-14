@@ -6,8 +6,9 @@ it — so a phone on your own private network can drive a real session: streamin
 tool calls and their results, the permission gate, the pending queue, and the instruments the
 terminal footer shows.
 
-**Read this before you install it.** What ships today is a **bare, intentionally unstyled
-reference page**. It is a worked example whose job is to exercise every part of the wire so the
+**Read this before you install it.** What ships today is a **single-file reference page** — one
+HTML file with one inline module, no framework and no build step. It wears the project's palette
+and is meant to be usable one-handed, but its job is to exercise every part of the wire so the
 contract is demonstrable and copyable. It is **not a finished chat app**, and it is not trying to
 be one. The intended use is that you fork the page and build the interface you want on top of an
 API that is already complete.

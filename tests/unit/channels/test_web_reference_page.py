@@ -1,6 +1,6 @@
 """The reference page's checklist (WEBCH-18) and its two non-negotiable client rules.
 
-The page is deliberately ugly and that is the specification. What it is NOT allowed to be is
+How the page LOOKS is the owner's half and is not specified here. What it is not allowed to be is
 incomplete or unsafe, so this file walks §4.2's whole event vocabulary and asserts the page
 handles every frame, then checks the two rules whose violation is silent:
 
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from localharness.channels.web.protocol import FRAME_TYPES
-from localharness.channels.web.server import PACKAGED_UI_DIR
+from localharness.channels.web.server import MANIFEST, PACKAGED_UI_DIR
 
 PAGE = PACKAGED_UI_DIR / "index.html"
 
@@ -136,6 +136,30 @@ def test_it_is_mobile_usable_even_though_it_is_unstyled(page):
     assert "font-size:16px" in page, "iOS zooms an input below 16px, which breaks one-thumb use"
     assert "overflow-wrap:anywhere" in page, "nothing may scroll sideways"
     assert "position:fixed" in page, "the composer must be reachable without scrolling"
+
+
+def test_the_page_pays_the_safe_area_inset_at_both_ends(page):
+    """Owner bug, from the live install: the top of the app clipped under the Dynamic Island.
+
+    `viewport-fit=cover` plus a translucent status bar hands the page the WHOLE screen, including
+    the strips with hardware in them, so the page has to inset itself — the island at the top, the
+    home indicator at the bottom. The two metas and the two insets only work as a set: translucent
+    without the top inset is the clipped header, and an opaque bar whose colour does not match the
+    ground is a grey stripe across a dark app.
+
+    The colours are asserted as a RELATIONSHIP rather than a literal, so re-painting the palette
+    cannot leave the status bar or the launch screen behind: whatever `--bg` is, the `theme-color`
+    meta and the manifest must both already be it."""
+    assert "viewport-fit=cover" in page
+    assert 'content="black-translucent"' in page
+    assert "env(safe-area-inset-top)" in page, "the header clips under the Dynamic Island"
+    assert "env(safe-area-inset-bottom)" in page, "the composer sits under the home indicator"
+
+    ground = re.search(r"--bg:(#[0-9A-Fa-f]{6})", page).group(1)
+    assert f'name="theme-color" content="{ground}"' in page, "the status bar must be the ground"
+    # The manifest's two colours are what iOS paints BEFORE any of this page runs.
+    assert MANIFEST["theme_color"] == ground, "the installed app's chrome is not the page's ground"
+    assert MANIFEST["background_color"] == ground, "a cold launch flashes a different colour"
 
 
 def test_the_page_treats_a_subagents_turn_boundary_as_a_child_event(page):
