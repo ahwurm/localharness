@@ -475,8 +475,11 @@ function withCode(container, raw, copyable) {
 
 // ---------------------------------------------------------------- the reducer
 function onEvent(name, data) {
-  remember(data.seq);
   const child = !!data.parent_id;
+  // A ROOT event names the session it belongs to — after a new chat, this is how the page
+  // learns the fresh id (a delegated child's events carry the child's own id; never adopt those).
+  if (!child && data.session_id && data.session_id !== S.session) S.session = data.session_id;
+  remember(data.seq);
   switch (name) {
     case "UserMessage": {
       // The bus's echo of a message THIS page sent claims the local-echo bubble instead of
@@ -795,18 +798,17 @@ function onFrame(name, d) {
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
       break;
     case "BringUpStage": {
-      // ONE self-replacing status row, not a stack (owner, 2026-09-14: opening the app showed
-      // build plumbing instead of a chat). Stages update the same line; "ready" removes it;
-      // only a FAILURE stays in the transcript, red and readable.
+      // ONE self-replacing row (owner, 2026-09-14): stages update in place, ready/ended
+      // remove it, only a failure stays in the transcript.
       $("state").textContent = d.failed ? "bring-up failed: " + d.stage : "starting: " + d.stage;
       if (d.failed) {
         if (S.bring) { S.bring.remove(); S.bring = null; }
         add(el("div", "row err", d.stage + (d.detail ? " — " + d.detail : "")));
         break;
       }
-      if (d.stage === "ready") {
+      if (d.stage === "ready" || d.stage === "ended") {
         if (S.bring) { S.bring.remove(); S.bring = null; }
-        $("state").textContent = "harness";
+        $("state").textContent = d.stage === "ready" ? "harness" : "chat ended";
         break;
       }
       if (!S.bring) {
@@ -1120,15 +1122,27 @@ function closeHistory() {
 $("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions(); };
 $("drawerClose").onclick = () => $("drawer").close();
 
-// ---------------------------------------------------------------- new chat (the honest button)
-$("newBtn").onclick = () => {
-  // One process serves one LIVE session and no wire verb restarts it yet, so this button cannot
-  // fake a throwaway thread. Cold box: the composer already IS the new chat — go there. Live
-  // session: say the true thing instead of pretending.
-  if (S.session == null && !S.turn) { closeHistory(); $("text").focus(); return; }
-  showSheet("new chat", "this agent runs ONE continuous session — its memory carries across " +
-    "turns, so there is no throwaway thread to open.\n\na fresh-session verb is not on the " +
-    "wire yet; when it lands, this button starts using it.");
+// ---------------------------------------------------------------- new chat
+$("newBtn").onclick = async () => {
+  // POST /api/sessions/new ends the live session and builds a fresh one; the old chat stays in
+  // the drawer. Cold box: the composer already IS the new chat — go there. Mid-turn the server
+  // refuses (409) and the refusal is shown: stop the turn first, that verb exists.
+  closeHistory();
+  if (S.session == null && !S.turn) { $("text").focus(); return; }
+  const r = await post("/api/sessions/new");
+  if (r.status !== "starting") {
+    add(el("div", "row err", "no new chat: " + (r.error || JSON.stringify(r))));
+    return;
+  }
+  // The fresh view is the point. Local per-session state dies with the old chat; the stream
+  // stays attached and the fresh session's events land below. S.seq is dropped because the new
+  // session's seqs restart — resuming from the old cursor would skip everything.
+  log.replaceChildren();
+  S.calls.clear(); S.echoes = []; S.burst = null; S.prov = null; S.lastSent = "";
+  S.session = null; S.seq = null;
+  paint();
+  $("greet").hidden = false;
+  $("text").focus();
 };
 
 // ---------------------------------------------------------------- the settings pill

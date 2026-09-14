@@ -364,9 +364,25 @@ async def _serve(
             )
             channel.set_bringup_abort(session_task.cancel)
 
+        async def _new_session() -> None:
+            """The + button's other half: end the live session, then begin a fresh one.
+
+            Cancellation is the mechanism — the session lives inside `session_task` — and
+            `_bring_up` tells the two cancellations apart: a live session ending on purpose
+            publishes "ended", only a genuinely abandoned BUILD publishes the red "cancelled".
+            The old session's log stays on disk, which is what keeps it in the drawer.
+            """
+            nonlocal session_task
+            if session_task is not None and not session_task.done():
+                session_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await session_task
+            channel.reset_session()
+            _begin_session()
+
         server = WebServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
-            config_dir=config_dir,
+            on_new_session=_new_session, config_dir=config_dir,
         )
         # Web Push, on the live path only. A `--replay` run must never buzz a phone about a
         # session that finished last week.
@@ -433,8 +449,15 @@ async def _bring_up(
             channel_mode="web", web_channel=channel,
         )
     except asyncio.CancelledError:
-        channel.set_bringup("cancelled", detail="the build was abandoned from the client.",
-                            failed=True, elapsed=time.monotonic() - started)
+        # Two very different cancels share this except: a bound session means the NEW-CHAT verb
+        # ended a live session on purpose (quiet, not red); no session yet means the build
+        # itself was abandoned (the give-up button's job, and worth the red row).
+        if channel.session_id is not None:
+            channel.set_bringup("ended", detail="this chat was closed for a new one.",
+                                elapsed=time.monotonic() - started)
+        else:
+            channel.set_bringup("cancelled", detail="the build was abandoned from the client.",
+                                failed=True, elapsed=time.monotonic() - started)
         raise
     except Exception as exc:  # noqa: BLE001 — a failed build reports itself; it never kills the server
         log.warning("web session bring-up failed", exc_info=True)
@@ -442,4 +465,6 @@ async def _bring_up(
             "failed", detail=str(exc), failed=True, elapsed=time.monotonic() - started,
         )
     else:
-        channel.set_bringup("ready", elapsed=time.monotonic() - started)
+        # A clean return means the session is OVER (the task runs its whole life). "ready" is
+        # published where readiness actually begins — bind_runtime — not here.
+        channel.set_bringup("ended", elapsed=time.monotonic() - started)

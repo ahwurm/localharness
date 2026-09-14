@@ -177,15 +177,19 @@ async def test_the_stream_opens_with_hello_and_stamps_the_bus_seq_as_the_sse_id(
                                  tool_call_id="c1"))
 
     task = asyncio.ensure_future(_publish_soon())
-    frames = await _read_frames(server, 2)
+    frames = await _read_frames(server, 3)
     await task
 
     assert frames[0][0] == "Hello" and frames[0][1] is None
     assert frames[0][2]["protocol_version"] == 1
     assert frames[0][2]["session_id"] == "s1"
-    assert frames[1][0] == "Action"
-    assert frames[1][1] is not None and frames[1][1] == frames[1][2]["seq"]
-    assert frames[1][2]["tool_call_id"] == "c1"
+    # bind_runtime publishes "ready", and a fresh client gets that state on arrival — as an
+    # SSE-only frame it must carry NO id, so it never disturbs the resume cursor.
+    state = [f for f in frames[1:] if f[0] == "BringUpStage"]
+    assert all(f[1] is None for f in state)
+    action = next(f for f in frames[1:] if f[0] == "Action")
+    assert action[1] is not None and action[1] == action[2]["seq"]
+    assert action[2]["tool_call_id"] == "c1"
 
 
 async def test_reconnect_backfills_from_the_cursor_then_tails_with_no_gaps_or_duplicates(tmp_path):
@@ -249,6 +253,53 @@ async def test_the_history_list_is_newest_first_titled_by_the_first_user_message
     assert rows[0]["title"] == "hello phone"
     assert rows[1]["title"] == "yesterday's ask"       # stripped, and the torn line skipped
     assert rows[1]["size_bytes"] == old.stat().st_size
+
+
+async def test_new_chat_ends_the_session_and_begins_a_fresh_one(tmp_path):
+    """POST /api/sessions/new — the + button. The runner's restart handle is called once and
+    the response says the old chat survives on disk."""
+    restarts = []
+
+    async def _restart():
+        restarts.append(1)
+
+    _, channel, _, client = await _stack(tmp_path, on_new_session=_restart)
+    got = await client.post("/api/sessions/new", json={}, headers=JSON)
+    assert got.status_code == 200
+    body = got.json()
+    assert body["status"] == "starting" and "history" in body["note"]
+    assert restarts == [1]
+
+
+async def test_new_chat_is_refused_mid_turn_and_without_a_restart_handle(tmp_path):
+    """Mid-turn, a new chat would discard real GPU work — the stop verb exists, use it. And a
+    server with no restart handle (replay) must say so instead of pretending."""
+    async def _restart():
+        raise AssertionError("the mid-turn refusal must come before the handle is called")
+
+    _, channel, _, client = await _stack(tmp_path, on_new_session=_restart)
+    channel._turn_running = True
+    got = await client.post("/api/sessions/new", json={}, headers=JSON)
+    assert got.status_code == 409
+    assert "stop it first" in got.json()["error"]
+
+    _, _, _, bare = await _stack(tmp_path)   # no handle installed at all
+    got = await bare.post("/api/sessions/new", json={}, headers=JSON)
+    assert got.status_code == 409
+    assert "cannot restart" in got.json()["error"]
+
+
+async def test_reset_session_forgets_the_corpse_but_keeps_the_history_dir(tmp_path):
+    """The channel half of new-chat: health answers cold, open asks die with their session,
+    and the drawer's log directory survives into the gap between sessions."""
+    _, channel, _, client = await _stack(tmp_path)
+    assert channel.session_id == "s1"
+    channel._turn_running = True
+    channel.reset_session()
+    assert channel.session_id is None and channel._turn_running is False
+    assert channel._session_dir is not None
+    got = await client.get("/api/health", headers=BEARER)
+    assert got.json()["session_live"] is False
 
 
 async def test_the_history_list_says_why_a_cold_box_has_none(tmp_path):

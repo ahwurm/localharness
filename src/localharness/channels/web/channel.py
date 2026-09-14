@@ -348,6 +348,32 @@ class WebChannel(ChannelAdapter):
         self._llm = llm
         self._agent_loop = agent_loop
         self._session_dir = session_dir
+        # The session exists from this line on, with two client-visible consequences. First,
+        # "ready" is published HERE — the bring-up task only returns when the whole session
+        # ends, so publishing ready from its `else` branch meant the build row and the ribbon
+        # said "starting" for the session's entire life. Second, the give-up abort is disarmed:
+        # it is wired to the session TASK's cancel, and once the build is over that handle
+        # cancels a live session — which is exactly what a stray thumb did on 2026-09-14.
+        self.set_bringup_abort(None)
+        self.set_bringup("ready", elapsed=self._bringup.elapsed if self._bringup else 0.0)
+
+    def reset_session(self) -> None:
+        """Forget the bound session so the next bring-up binds fresh — the new-chat verb's half.
+
+        The runtime handles go stale the moment the session task is cancelled; dropping them
+        makes `/api/health` answer cold instead of describing a corpse. Open blocking asks die
+        with the session — their answers have nowhere to land and their `PermissionResolved`
+        is never coming. `_session_dir` deliberately survives: the drawer must keep listing
+        history between sessions, and the next bind rewrites it anyway.
+        """
+        self.session_id = None
+        self.agent_id = None
+        self._gate = None
+        self._llm = None
+        self._agent_loop = None
+        self._turn_running = False
+        self._open_asks.clear()
+        self.set_bringup_abort(None)
 
     async def start(self) -> None:
         """Subscribe to the bus. Idempotent — the REPL starts the channel that already exists.
