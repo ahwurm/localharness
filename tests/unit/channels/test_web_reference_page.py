@@ -170,3 +170,13 @@ def test_the_page_reaches_every_read_endpoint_it_can_use(page):
     # The parked queue's two verbs are built from one template, so look for the shape.
     assert "/api/pending/${p.id}/${verb}" in page
     assert '["approve", "deny"]' in page
+
+
+def test_a_repeated_tool_call_id_cannot_orphan_a_row(page):
+    """The client's own belt against a duplicate the server should never send.
+
+    The cost of being wrong is silent and permanent: a second row for the same call overwrites
+    the map entry, and the Observation then reaches only the second, leaving the first at
+    "waiting…" for the rest of the session.
+    """
+    assert "if (S.calls.has(d.tool_call_id)) return;" in page
