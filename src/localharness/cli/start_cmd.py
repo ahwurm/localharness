@@ -418,6 +418,8 @@ async def _announce_presence(channel: Any, *, config_dir: str | None, agent: str
     is a hazard to be told about, not a reason to refuse somebody their own second session.
     """
     try:
+        import os
+
         from localharness.config import session_presence
 
         co_tenants = session_presence.register(
@@ -425,7 +427,8 @@ async def _announce_presence(channel: Any, *, config_dir: str | None, agent: str
             session_id=session_id, workspace=workspace,
         )
         if hasattr(channel, "set_co_tenants"):
-            channel.set_co_tenants(co_tenants)
+            channel.set_co_tenants(co_tenants, lambda: session_presence.live_sessions(
+                config_dir, agent=agent, workspace=workspace, exclude_pid=os.getpid()))
         if co_tenants:
             await channel.send_error(session_presence.warning(co_tenants, agent=agent))
     except Exception:  # noqa: BLE001 — a lost warning never costs a session its start-up

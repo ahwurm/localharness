@@ -313,11 +313,13 @@ class WebChannel(ChannelAdapter):
         self._push: Any = None
         self._push_tasks: set[asyncio.Task] = set()
 
-        # Other live sessions on this agent (WEBCH-29), as found at bring-up. Carried so a phone
-        # that connects LATER can still see a co-tenant it was never present to be warned about
-        # — the warning itself is a one-shot line on the wire, and a one-shot line is invisible
-        # to a client that arrives after it.
+        # Other live sessions on this agent (WEBCH-29): the bring-up list, refreshed by
+        # `live_co_tenants()` whenever health is read. Carried so a phone that connects LATER can
+        # still see a co-tenant it was never present to be warned about — the warning itself is a
+        # one-shot line on the wire, and a one-shot line is invisible to a client that arrives
+        # after it.
         self._co_tenants: list[Any] = []
+        self._co_tenant_rescan: Optional[Callable[[], list[Any]]] = None
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -474,12 +476,36 @@ class WebChannel(ChannelAdapter):
 
     # ---------------------------------------------------------------- push (A2)
 
-    def set_co_tenants(self, others: list[Any]) -> None:
-        """Record the other live sessions on this agent, for `GET /api/health` (WEBCH-29)."""
+    def set_co_tenants(
+        self, others: list[Any], rescan: Optional[Callable[[], list[Any]]] = None
+    ) -> None:
+        """Record the other live sessions on this agent, for `GET /api/health` (WEBCH-29).
+
+        `rescan` re-reads the registry at request time. Without it the answer is frozen at
+        bring-up, and the session that started FIRST is exactly the one that can never learn of
+        the second — which is backwards, because it is the first session's history the second
+        one interleaves with.
+        """
         self._co_tenants = list(others or [])
+        self._co_tenant_rescan = rescan
 
     @property
     def co_tenants(self) -> list[Any]:
+        """The last known list. `live_co_tenants()` is what a reader should ask for."""
+        return self._co_tenants
+
+    def live_co_tenants(self) -> list[Any]:
+        """The co-tenants right NOW — blocking, so call it off the event loop.
+
+        Falls back to the snapshot when nothing wired a rescan (a test channel, a driver that
+        never announced), which is the pre-WEBCH-29 behaviour and never worse than it.
+        """
+        if self._co_tenant_rescan is None:
+            return self._co_tenants
+        try:
+            self._co_tenants = list(self._co_tenant_rescan())
+        except Exception:  # noqa: BLE001 — health answers even when the registry is unreadable
+            log.warning("co_tenant_rescan_failed", exc_info=True)
         return self._co_tenants
 
     def set_push(self, service: Any) -> None:

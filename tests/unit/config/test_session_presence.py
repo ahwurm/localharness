@@ -135,10 +135,12 @@ class _FakeChannel:
 
     def __init__(self) -> None:
         self.co_tenants = None
+        self.rescan = None
         self.errors: list[str] = []
 
-    def set_co_tenants(self, others):
+    def set_co_tenants(self, others, rescan=None):
         self.co_tenants = others
+        self.rescan = rescan
 
     async def send_error(self, error, detail=None, agent_id=None):
         self.errors.append(error)
@@ -164,6 +166,27 @@ async def test_the_startup_hook_warns_and_hands_the_channel_the_co_tenants(tmp_p
     assert len(channel.errors) == 1
     assert "ANOTHER SESSION IS LIVE" in channel.errors[0]
     assert "not a refusal" in channel.errors[0]
+
+
+async def test_the_hook_hands_over_a_rescan_that_sees_a_session_that_joined_later(tmp_path):
+    """WEBCH-29. The snapshot is taken before the second session exists — which means the FIRST
+    session is precisely the one that can never be told about it, and that is backwards: it is
+    the first session's `history.jsonl` the second one interleaves with.
+    """
+    from localharness.cli.start_cmd import _announce_presence
+
+    channel = _FakeChannel()
+    await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
+                             channel_mode="web", session_id="s1", workspace=tmp_path)
+    assert channel.co_tenants == []
+
+    # Somebody opens a terminal on the same agent afterwards.
+    session_presence.register(tmp_path, agent="orchestrator", channel="terminal",
+                              session_id="s2", workspace=tmp_path, pid=1)
+
+    assert channel.rescan is not None, "no rescan was handed over; health stays frozen forever"
+    later = channel.rescan()
+    assert [s.channel for s in later] == ["terminal"]
 
 
 async def test_the_startup_hook_is_silent_when_nobody_else_is_there(tmp_path):
