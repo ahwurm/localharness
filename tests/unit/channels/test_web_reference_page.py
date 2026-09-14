@@ -144,3 +144,29 @@ def test_the_page_treats_a_subagents_turn_boundary_as_a_child_event(page):
     for case in ('case "TurnStarted"', 'case "TurnCompleted"'):
         block = page.split(case)[1].split("break;")[0]
         assert "!child" in block, f"{case} does not distinguish a subagent's turn from yours"
+
+
+def test_a_stuck_build_can_be_abandoned_from_the_page(page):
+    """WEBCH-43's second half. The server has had `POST /api/bringup/abort` since the surface
+    landed; the page did not call it, so `docs/web.md`'s "offers a way out" was an overclaim.
+    Cancelling a TURN is a different state machine and does not apply to a build."""
+    assert "/api/bringup/abort" in page
+    assert "give up on this build" in page
+
+
+def test_the_page_reaches_every_read_endpoint_it_can_use(page):
+    """WEBCH-18: every wire feature demonstrable from this page alone.
+
+    `/api/tool-results/{eviction_id}` is the documented exception and is NOT here: the
+    ContentStore is keyed by an eviction id that no `Observation` carries, so a transcript has no
+    id to link. That is a limit of the event schema, not of the page, and faking a link would be
+    worse than leaving it out.
+    """
+    for endpoint in ("/api/stream", "/api/health", "/api/protocol", "/api/tools",
+                     "/api/grants", "/api/permissions", "/api/auth/enroll"):
+        assert endpoint in page, f"the page never calls {endpoint}"
+    for verb in ("/message", "/cancel", "/command", "/answer"):
+        assert verb in page, f"the page never exercises {verb}"
+    # The parked queue's two verbs are built from one template, so look for the shape.
+    assert "/api/pending/${p.id}/${verb}" in page
+    assert '["approve", "deny"]' in page
