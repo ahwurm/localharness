@@ -329,6 +329,16 @@ async def _serve(
                 console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
                 raise typer.Exit(2) from exc
         driver = ReplayDriver(channel, log_path, speed=speed, fixtures=loaded)
+        # The real builtin registry, no session required: without it `/api/tools` is empty in
+        # replay, every group renders as "unknown", and the condensed view a client is being
+        # DEVELOPED against never groups a thing — the one rendering the replay loop exists to
+        # exercise. Built-ins only; a live session may add more, and that difference is honest.
+        from localharness.tools.builtin import register_builtin_tools
+        from localharness.tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        await register_builtin_tools(registry)
+        channel._tool_registry = registry
         server = WebServer(channel, token=token, ui_dir=resolved_ui, replay=driver,
                            config_dir=config_dir)
         console.print(escape(REPLAY_BANNER.format(

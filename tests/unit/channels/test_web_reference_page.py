@@ -342,3 +342,32 @@ report();
     assert joined.count("half an answer") == 1, "the superseded draft was left on the page"
     assert [r for r in rendered if r["cls"].startswith("row answer")], "the answer never rendered"
     assert "streaming…" not in joined
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_safe_group_calls_consolidate_into_one_counter_row_by_default(page, tmp_path):
+    """The terminal's condensed view, carried over (owner, 2026-09-14): consecutive safe-group
+    calls are ONE counter row (`read · grep  2/2`), a side-effecting call stays its own row,
+    and an error both counts on the counter and opens the per-call truth."""
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: 1, synthetic: false, model_state: "ready"});
+S.tools = {read: {group: "fs.read"}, grep: {group: "fs.read"}, bash_exec: {group: "execute"}};
+S.collapsible = ["fs.read", "web", "memory"];
+onEvent("Action", {seq: 2, action_type: "tool_call", tool_name: "read",
+                   tool_call_id: "c1", tool_params: {path: "a.py"}});
+onEvent("Action", {seq: 3, action_type: "tool_call", tool_name: "grep",
+                   tool_call_id: "c2", tool_params: {pattern: "x"}});
+onEvent("Observation", {seq: 4, tool_call_id: "c1", output: "one"});
+onEvent("Observation", {seq: 5, tool_call_id: "c2", error: "denied"});
+onEvent("Action", {seq: 6, action_type: "tool_call", tool_name: "bash_exec",
+                   tool_call_id: "c3", tool_params: {command: "ls"}});
+report();
+""", tmp_path)
+    tool_rows = [r for r in rendered if "tool" in r["cls"]]
+    assert len(tool_rows) == 2, f"expected one counter + one itemized row, got {tool_rows}"
+    counter = tool_rows[0]["text"]
+    assert "read · grep" in counter and "2/2" in counter, counter
+    assert "✗1" in counter, "the error never reached the counter"
+    assert "a.py" in counter, "the per-call truth is not one tap away"
+    assert "bash_exec" in tool_rows[1]["text"], "the side-effecting call lost its own row"
