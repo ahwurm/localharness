@@ -653,3 +653,48 @@ async def test_the_collapse_rule_itemizes_the_measured_tool_mix_on_the_REAL_regi
     # Every destructive tool is itemized, whatever it is called.
     assert {r["name"] for r in rows if r["destructive"]} <= itemized
     assert {"read", "grep", "glob"} <= {r["name"] for r in rows}
+
+
+async def test_last_event_id_resumes_AFTER_the_event_it_names(tmp_path):
+    """The commonest reconnect there is, and it duplicated an event.
+
+    `?from=N` is the page's own cursor and already means "from N inclusive" — it computes it as
+    `last_seen + 1`. `Last-Event-ID: N` is the BROWSER's, attached automatically on
+    `EventSource`'s auto-reconnect after any wifi blip with no app code involved, and names the
+    last event RECEIVED. Treating both as inclusive re-delivered one event on every such
+    reconnect — and the client is not idempotent about it: a repeated `Action(tool_call)`
+    overwrites the call map, orphaning the first row at "waiting…" forever.
+
+    Invisible to the cold-relaunch test, which sets `?from=`. Found by adversarial review.
+    """
+    bus, channel, server, _ = await _stack(tmp_path)
+    pub = [await bus.publish(Observation(
+        agent_id="a", session_id="s1", observation_type="tool_result",
+        tool_name="read", tool_call_id=f"c{i}", output=f"o{i}",
+    )) for i in range(4)]
+
+    frames = await _read_frames(server, 2, headers={
+        "Authorization": f"Bearer {TOKEN}", "Last-Event-ID": str(pub[1].seq),
+    })
+    seqs = [f[1] for f in frames if f[1] is not None]
+    assert pub[1].seq not in seqs, "re-served the event the browser said it already had"
+    assert seqs[0] == pub[2].seq
+
+    # ...and an explicit ?from= is still INCLUSIVE, because the page already added the one.
+    frames = await _read_frames(server, 2, path=f"/api/stream?from={pub[1].seq}")
+    assert [f[1] for f in frames if f[1] is not None][0] == pub[1].seq
+
+
+async def test_every_response_refuses_to_be_framed(tmp_path):
+    """The shell is unauthenticated by design and inert without a token — but `localStorage` is
+    scoped to the ORIGIN, not to the frame embedding it. Without a framing rule a malicious page
+    can iframe this origin, inherit an enrolled session, and UI-redress BOTH taps of the
+    `_always` confirm: defeating by clicks the one control built so a single request cannot write
+    a permanent, global, unrevokable grant."""
+    _, _, _, client = await _stack(tmp_path)
+    for path, headers in (("/", {}), ("/api/health", BEARER), ("/api/nope", BEARER)):
+        got = await client.get(path, headers=headers)
+        assert got.headers["x-frame-options"] == "DENY", path
+        assert "frame-ancestors 'none'" in got.headers["content-security-policy"], path
+        assert got.headers["x-content-type-options"] == "nosniff", path
+        assert got.headers["referrer-policy"] == "no-referrer", path
