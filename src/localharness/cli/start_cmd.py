@@ -31,6 +31,11 @@ stored, and read by nothing at all.) One frozenset so the CLI's help text, the r
 and the branch cannot drift apart."""
 
 UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
+
+WEB_NEEDS_ITS_OWN_COMMAND = (
+    "the web channel is served by its own command, because the HTTP server has to be reachable "
+    "before a session exists. Run `localharness web` instead of `localharness start --channel web`."
+)
 """Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
 second and a typo costing a session."""
 
@@ -438,6 +443,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             ),
             param_hint="--channel",
         )
+    if channel_mode == "web" and web_channel is None:
+        # `web` names a channel this function cannot BUILD: the HTTP server has to be up and
+        # serving before a session exists, so the channel is constructed by `localharness web` and
+        # handed in. Without that, the branch below would fall through to the terminal — which is
+        # precisely the silent fallback the check above exists to end, reintroduced by the same
+        # commit that ended it.
+        raise typer.BadParameter(WEB_NEEDS_ITS_OWN_COMMAND, param_hint="--channel")
 
     import time as _time
     import uuid

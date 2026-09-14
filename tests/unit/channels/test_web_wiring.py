@@ -279,3 +279,19 @@ async def test_doctor_reports_the_effective_bind_and_flags_a_loose_token(tmp_pat
     os.chmod(token_path(tmp_path), 0o644)
     _print_web_listener(tmp_path)
     assert "expected 600" in capsys.readouterr().out
+
+
+async def test_start_channel_web_without_a_server_is_refused_not_silently_a_terminal(tmp_path):
+    """The regression the unknown-channel fix could have re-introduced by its own hand.
+
+    `web` names a channel `_start_async` cannot BUILD — the HTTP server must be reachable before a
+    session exists, so `localharness web` constructs it and hands it in. Adding `web` to the known
+    set without this check made `--channel web` pass validation and then fall through to the
+    TERMINAL branch: exactly the silent fallback the same commit existed to end.
+    """
+    from localharness.cli.start_cmd import WEB_NEEDS_ITS_OWN_COMMAND, _start_async
+
+    with pytest.raises(typer.BadParameter) as exc:
+        await _start_async(None, False, False, str(tmp_path), channel_mode="web")
+    assert "localharness web" in str(exc.value)
+    assert WEB_NEEDS_ITS_OWN_COMMAND in str(exc.value)
