@@ -357,20 +357,31 @@ function renderObservation(d, child) {
 function provisional() {
   if (!S.prov) {
     const row = add(el("div", "row prov"));
-    S.prov = { row, text: "", body: el("div"), reason: el("pre") };
+    const meta = el("div", "meta", "streaming… (this bubble is provisional; the Action that " +
+      "lands supersedes it)");
+    S.prov = { row, text: "", body: el("div"), reason: el("pre"), meta };
     S.prov.reason.style.display = "none";
     row.appendChild(S.prov.reason);
     row.appendChild(S.prov.body);
-    row.appendChild(el("div", "meta", "streaming… (this bubble is provisional; the Action that " +
-      "lands supersedes it)"));
+    row.appendChild(meta);
   }
   return S.prov;
 }
 function clearProvisional(bySeq) {
   if (!S.prov) return;
-  S.prov.row.remove();
+  const p = S.prov;
   S.prov = null;
-  if (bySeq != null) { /* superseded — the authoritative event is on its way in */ }
+  // SUPERSEDED. The authoritative event is already on its way in, so the draft must go: leaving
+  // it is how the same answer ends up printed twice (rule 1).
+  if (bySeq != null) { p.row.remove(); return; }
+  // NO SUCCESSOR — a cancelled or failed turn (WEBCH-37). The bubble on screen is then the only
+  // copy of that text ANYWHERE: neither path publishes the `llm_response` Action, so nothing is
+  // persisted and the replay log has nothing to show later either. Removing it deletes work the
+  // user watched being written, which is also the opposite of what the row drawn a moment later
+  // promises ("the partial text above stays"). Keep it, and strip the one line on it that has
+  // just stopped being true.
+  if (!p.text && !p.reason.textContent) { p.row.remove(); return; }   // nothing to keep
+  p.meta.remove();
 }
 
 // ---------------------------------------------------------------- SSE-only frames
