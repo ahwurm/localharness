@@ -161,8 +161,15 @@
   .user::before { content:none; }
   .user .meta { text-align:right; }
 
+  /* max-height (owner, 2026-09-14 "too long vertically"): a wall of output scrolls INSIDE its
+     own box instead of paging the whole transcript. */
   pre { margin:8px 0; padding:10px 12px; background:var(--surface); border:1px solid var(--line);
-        border-radius:12px; overflow-x:auto; white-space:pre; font-size:12.5px; line-height:1.5; }
+        border-radius:12px; overflow:auto; white-space:pre; font-size:12.5px; line-height:1.5;
+        max-height:38vh; }
+  .hint { color:var(--dim); font-size:12.5px; white-space:nowrap; overflow:hidden;
+          text-overflow:ellipsis;
+          font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .row.tool, .row.sys, .row.narr { margin:8px 0; }   /* machine rows sit tighter than prose */
   .meta { color:var(--dim); font-size:11.5px; margin-top:5px; letter-spacing:.02em; }
   .untrusted { display:inline-block; margin-left:7px; padding:1px 8px; border-radius:999px;
                font-size:11px; color:var(--warn); border:1px solid var(--warn);
@@ -322,6 +329,7 @@ const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
+  webNoted: false,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -364,9 +372,11 @@ function copyButton(getText, label) {
   };
   return b;
 }
-function withCode(container, raw) {
+function withCode(container, raw, copyable) {
   // Fenced blocks become <pre> with their own copy button; everything else is plain text. Both
-  // copy from `raw`, not from the DOM.
+  // copy from `raw`, not from the DOM. `copyable=false` drops the whole-message button —
+  // narration between tool calls is glanced at, not copied, and the button was a row of height
+  // under every explain (owner, 2026-09-14).
   const parts = String(raw).split(/```/);
   parts.forEach((part, i) => {
     if (i % 2 === 1) {
@@ -378,7 +388,7 @@ function withCode(container, raw) {
       container.appendChild(el("div", null, part));
     }
   });
-  container.appendChild(copyButton(() => String(raw), "copy message"));
+  if (copyable !== false) container.appendChild(copyButton(() => String(raw), "copy message"));
 }
 
 // ---------------------------------------------------------------- the reducer
@@ -393,7 +403,7 @@ function onEvent(name, data) {
       break;
     }
     case "TurnStarted":
-      if (!child) { S.turn = true; paint(); }
+      if (!child) { S.turn = true; S.webNoted = false; paint(); }
       add(el("div", "row sys" + (child ? " child" : ""),
         (child ? "subagent turn started — " : "turn started — ") + (data.task_summary || "")));
       break;
@@ -491,9 +501,10 @@ function closeBurst() {
   const b = S.burst;
   if (!b) return;
   S.burst = null;
-  // the disclosure the terminal prints when a web burst closes, kept word for word
-  if (b.group === "web" && !b.noted) {
-    b.noted = true;
+  // the disclosure the terminal prints when a web burst closes — word for word, and like the
+  // terminal, ONCE PER USER TURN, not under every burst
+  if (b.group === "web" && !S.webNoted) {
+    S.webNoted = true;
     b.row.appendChild(el("div", "meta", "web results — UNTRUSTED, treated as data only"));
   }
 }
@@ -524,6 +535,15 @@ function burstAdd(group, child, d) {
   burstHead(b);
 }
 
+function paramHint(params) {
+  // The ONE most telling argument, one line: the command, the path, the query — whichever
+  // string comes first. The full arguments stay in the breakout; this is the audit glance.
+  for (const v of Object.values(params || {})) {
+    if (typeof v === "string" && v.trim()) return v.replace(/\s+/g, " ").slice(0, 90);
+  }
+  return "";
+}
+
 function renderAction(d, child) {
   if (d.action_type === "tool_call") {
     // Be idempotent about a repeated call id. The SERVER is what guarantees no duplicate — the
@@ -551,19 +571,27 @@ function renderAction(d, child) {
     if ((S.tools[d.tool_name] || {}).destructive) head.appendChild(el("span", "untrusted", " destructive"));
     if (["web_search", "web_fetch", "web_page_query"].includes(d.tool_name))
       head.appendChild(el("span", "untrusted", " untrusted ingest"));
-    const args = el("pre", null, JSON.stringify(d.tool_params || {}, null, 1));
-    if (collapse) {
-      const det = el("details"); det.appendChild(el("summary", null, "arguments"));
-      det.appendChild(args); row.appendChild(det);
-    } else { row.appendChild(args); }
-    row.appendChild(el("div", "meta", "id " + (d.tool_call_id || "?") + " · waiting…"));
+    // Vertically condensed (owner, 2026-09-14): the visible row is head + a one-line hint of the
+    // telling argument + status. Full arguments and the output land behind one tap; an error
+    // opens the fold itself, and verbose starts it open. The command IS still on screen — the
+    // hint is the audit line, exactly the terminal's one-line-per-call shape.
+    const hint = paramHint(d.tool_params);
+    if (hint) row.appendChild(el("div", "hint", hint));
+    const det = el("details");
+    det.appendChild(el("summary", null, "arguments & output"));
+    det.appendChild(el("pre", null, JSON.stringify(d.tool_params || {}, null, 1)));
+    det.open = S.verbose;
+    row.appendChild(det);
+    row._det = det;               // the Observation folds the output into the same breakout
+    row._meta = row.appendChild(el("div", "meta", "waiting…"));
     S.calls.set(d.tool_call_id, row);
     return;
   }
   if (d.action_type !== "llm_response") return;
   if (d.has_tool_calls) {
-    // Interstitial narration: the model talking while it calls tools.
-    if (d.content) { const r = add(el("div", "row narr" + (child ? " child" : ""))); withCode(r, d.content); }
+    // Interstitial narration: the model talking while it calls tools. Not copyable — the
+    // button was a full row of height under every explain, for text nobody copies.
+    if (d.content) { const r = add(el("div", "row narr" + (child ? " child" : ""))); withCode(r, d.content, false); }
   } else {
     // THE FINAL ANSWER — and it must NOT be drawn. TaskComplete renders it. Drawing it here is
     // the single most likely way a client ships with every answer printed twice.
@@ -575,15 +603,21 @@ function renderObservation(d, child) {
   const row = S.calls.get(d.tool_call_id);
   const target = row || add(el("div", "row tool" + (child ? " child" : "")));
   const out = d.output || d.error || "";
-  target.appendChild(el("pre", null, out));
+  // The body goes into the row's breakout when it has one (itemized rows), or straight into the
+  // element when it IS the breakout (a burst's per-call item) or an orphan.
+  const home = target._det || target;
+  home.appendChild(el("pre", null, out));
+  if (d.truncated) home.appendChild(el("div", "meta",
+    "truncated from " + (d.original_length ?? "?") + " chars — the full body is not on the bus at all"));
+  home.appendChild(copyButton(() => out, "copy output"));
   const bits = [];
   if (d.exit_code != null) bits.push("exit " + d.exit_code);
-  if (d.truncated) bits.push("truncated from " + (d.original_length ?? "?") + " chars — the full " +
-    "body is not on the bus at all");
+  if (d.truncated) bits.push("truncated");
   if (d.error) bits.push("error");
-  target.appendChild(el("div", "meta", bits.join(" · ") || "done"));
-  if (d.error) target.classList.add("err");
-  target.appendChild(copyButton(() => out, "copy output"));
+  const status = bits.join(" · ") || "done";
+  if (target._meta) target._meta.textContent = status;   // the waiting… line becomes the verdict
+  else target.appendChild(el("div", "meta", status));
+  if (d.error) { target.classList.add("err"); if (target._det) target._det.open = true; }
   const b = target._burst;
   if (b) {
     b.done++;
