@@ -83,25 +83,42 @@
   pre, .meta, #bar, summary, button.small
        { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
 
+  /* THE RIBBON (owner, 2026-09-14, from the phone screenshot): hamburger left, new-chat right,
+     the connection state and the turn instruments between them. Everything that used to crowd
+     this bar now lives behind those two ends — history and housekeeping in the drawer, model
+     and session config on the composer's settings pill. */
   /* THE INSET IS NOT OPTIONAL (owner, live iPhone): `viewport-fit=cover` plus a translucent
      status bar puts the top of this element under the Dynamic Island unless it pays for it. */
   header { position:sticky; top:0; z-index:5; background:var(--bg);
            background:color-mix(in srgb,var(--bg) 88%,transparent);
            -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
            border-bottom:1px solid var(--line);
-           padding:8px max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));
-           padding-top:calc(8px + env(safe-area-inset-top)); }
-  #bar { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; font-size:12.5px;
+           padding:6px max(10px,env(safe-area-inset-right)) 6px max(10px,env(safe-area-inset-left));
+           padding-top:calc(6px + env(safe-area-inset-top)); }
+  #bar { display:flex; gap:8px; align-items:center; font-size:12.5px;
          max-width:var(--col); margin:0 auto; }
   #bar b { font-weight:600; }
   #bar .meta { margin:0; }
-  #bar .meta:empty { display:none; }   /* an instrument with no reading adds no phantom gap */
+  .meta:empty { display:none; }        /* an instrument with no reading adds no phantom gap */
+  button.icon { flex:none; width:44px; height:44px; min-height:44px; padding:0;
+                border-radius:999px; font-size:19px; line-height:1; }
+  #mid { flex:1; min-width:0; text-align:center; overflow:hidden; }
+  #dials { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
+  #queueBtn { flex:none; color:var(--warn);
+              border-color:color-mix(in srgb,var(--warn) 45%,transparent); }
   .offline { color:var(--bad); }
 
   main { max-width:var(--col); margin:0 auto; padding-top:18px;
          padding-left:max(14px,env(safe-area-inset-left));
          padding-right:max(14px,env(safe-area-inset-right));
          padding-bottom:calc(11rem + env(safe-area-inset-bottom)); }
+
+  /* THE GREETING — the screenshot's empty state: the mark, a serif hello, nothing else.
+     It never captures a tap and the first real transcript row retires it (see add()). */
+  #greet { position:fixed; inset:0; z-index:0; display:grid; place-content:center;
+           justify-items:center; gap:12px; text-align:center; pointer-events:none; }
+  #greet[hidden] { display:none; }     /* display:grid would otherwise defeat the attribute */
+  #hello { font-family:Georgia,"Times New Roman",serif; font-size:27px; }
 
   /* ONE ROW SYSTEM: a fixed glyph column carrying the entity's colour, then the content. Same
      hue as the terminal gives that entity, so scrollback and phone agree about what a thing is. */
@@ -181,8 +198,12 @@
   #acts { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:4px; }
   #acts button { flex:0 1 auto; font-size:13px; padding:6px 14px; border-radius:999px;
                  background:transparent; color:var(--dim); }
+  /* the model/config pill lives IN the prompt box (owner, from the screenshot) */
+  #acts #modelBtn { border-color:var(--line); max-width:46vw; overflow:hidden;
+                    text-overflow:ellipsis; white-space:nowrap; }
   #acts #send { order:9; margin-left:auto; padding:6px 20px; font-weight:600;
                 color:var(--agent-ink); background:var(--agent); border-color:var(--agent); }
+  #acts #cancel { order:8; margin-left:auto; }  /* mid-turn, stop takes send's right edge */
 
   dialog { width:min(94vw,34rem); max-width:min(94vw,34rem); color:var(--ink);
            background:var(--surface); border:1px solid var(--line); border-radius:18px;
@@ -195,38 +216,77 @@
   #ask h3 { color:var(--warn); }
   summary { cursor:pointer; min-height:32px; color:var(--dim); font-size:12.5px; padding:4px 0; }
   summary::marker { color:var(--dim); }
+
+  /* THE DRAWER — a left sheet, the hamburger's other half: history first, housekeeping under it. */
+  #drawer { position:fixed; inset:0 auto 0 0; margin:0; height:100%; max-height:none;
+            width:min(84vw,20rem); border-radius:0 18px 18px 0; overflow-y:auto;
+            padding:calc(14px + env(safe-area-inset-top)) 14px
+                    calc(14px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); }
+  #drawer h3:not(:first-child) { margin-top:22px; }
+  .sess > div:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #modes { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  #modes button { display:inline-block; width:auto; margin-top:0; }
+  #modes .meta { flex-basis:100%; margin:0 0 2px; }
+  .modeOn { color:var(--agent); border-color:var(--agent); }
 </style>
 </head>
 <body>
 <header>
   <div id="bar">
-    <b id="state">connecting…</b>
-    <span id="phase" class="meta"></span>
-    <span id="tok" class="meta"></span>
-    <span id="tps" class="meta"></span>
-    <span id="ctx" class="meta"></span>
-    <span id="model" class="meta"></span>
-    <button class="small" id="recheck" title="re-run the model-server probe">re-check</button>
-    <button class="small" id="pushBtn" hidden>notifications</button>
-    <button class="small" id="queueBtn">needs you <span class="badge" id="pcount">0</span></button>
-    <button class="small" id="reasonBtn">reasoning: off</button>
-    <button class="small" id="grantsBtn">grants</button>
-    <button class="small" id="protoBtn">protocol</button>
+    <button class="icon" id="menuBtn" aria-label="history and housekeeping">☰</button>
+    <div id="mid">
+      <b id="state">connecting…</b>
+      <div id="dials">
+        <span id="phase" class="meta"></span>
+        <span id="tok" class="meta"></span>
+        <span id="tps" class="meta"></span>
+        <span id="ctx" class="meta"></span>
+      </div>
+    </div>
+    <button class="small" id="queueBtn" hidden>needs you <span class="badge" id="pcount">0</span></button>
+    <button class="icon" id="newBtn" aria-label="new chat">+</button>
   </div>
 </header>
 
+<div id="greet" hidden>
+  <img src="/icon.svg" alt="" width="64" height="64">
+  <div id="hello">Good day</div>
+  <div id="agentline" class="meta"></div>
+</div>
+
 <main id="log"></main>
+<main id="hist" hidden></main>
 
 <div id="composer">
   <textarea id="text" placeholder="ask…" autocomplete="off" autocapitalize="sentences"></textarea>
   <div id="acts">
+    <button class="small" id="modelBtn" title="model and session settings"><span id="model">settings</span></button>
+    <button id="retry" hidden title="re-send the last message as a NEW turn; the old answer stays">retry</button>
+    <button id="nudge" hidden title="steer the running turn now — no classifier, no model call">nudge</button>
+    <button id="queue" hidden title="run after the current turn">queue</button>
+    <button id="cancel" hidden>stop</button>
     <button id="send">send</button>
-    <button id="nudge" title="steer the running turn now — no classifier, no model call">nudge</button>
-    <button id="queue" title="run after the current turn">queue</button>
-    <button id="cancel">stop</button>
-    <button id="retry" title="re-send the last message as a NEW turn; the old answer stays">retry</button>
   </div>
 </div>
+
+<dialog id="drawer">
+  <h3>history</h3>
+  <div id="sessions"><div class="meta">open the drawer to read the list…</div></div>
+  <h3>housekeeping</h3>
+  <button class="small" id="pushBtn" hidden>notifications</button>
+  <button class="small" id="recheck" title="re-run the model-server probe">re-check the model server</button>
+  <button class="small" id="grantsBtn">grants</button>
+  <button class="small" id="protoBtn">protocol</button>
+  <button class="small" id="drawerClose">close</button>
+</dialog>
+
+<dialog id="cfg">
+  <h3>session</h3>
+  <div id="cfgModel" class="meta"></div>
+  <button class="small" id="reasonBtn">reasoning: off</button>
+  <div id="modes"></div>
+  <button class="small" id="cfgClose">close</button>
+</dialog>
 
 <dialog id="ask"></dialog>
 <dialog id="sheet"></dialog>
@@ -260,7 +320,7 @@ const get = (path) => fetch(path, { headers: { "Authorization": "Bearer " + toke
 const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
-  reasoning: false, offline: false,
+  reasoning: false, offline: false, modes: [],
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -284,6 +344,7 @@ function el(tag, cls, text) {
 function atBottom() { return window.innerHeight + window.scrollY >= document.body.offsetHeight - 120; }
 function add(node) {
   const stick = atBottom();
+  $("greet").hidden = true;   // the first real transcript row retires the greeting
   log.appendChild(node);
   if (stick) window.scrollTo(0, document.body.scrollHeight);
   return node;
@@ -621,7 +682,17 @@ function paint(modelState) {
   else if (modelState === "cold") s.textContent = "cold — send to start the session";
   if (s.dataset.dream) s.textContent += " · dreaming";
   $("pcount").textContent = String(S.parked.size + S.asks.size);
+  // the amber pill is an ACTION MOMENT: on the ribbon only while something actually waits
+  $("queueBtn").hidden = S.parked.size + S.asks.size === 0;
+  // the composer is CONTEXTUAL (owner: "efficient"): between turns you can send, or re-send the
+  // last message; during one you can steer it, queue behind it, or stop it. Same verbs as the
+  // wire offers at that moment — never a button that can only fail.
+  $("send").hidden = S.turn;
+  $("nudge").hidden = !S.turn;
+  $("queue").hidden = !S.turn;
+  $("cancel").hidden = !S.turn;
   $("cancel").disabled = !S.turn;
+  $("retry").hidden = S.turn || !S.lastSent;
 }
 
 // ---------------------------------------------------------------- permission UI
@@ -704,6 +775,7 @@ async function send(intent) {
                        intent ? { text, intent } : { text });
   if (r.status === "no_resolver") add(el("div", "row err", r.detail));
   else if (r.bringing_up) add(el("div", "row sys", "starting the session for this message…"));
+  paint();   // `retry` becomes offerable the moment there is a last message to re-send
 }
 $("send").onclick = () => send(null);
 $("nudge").onclick = () => send("nudge");
@@ -753,6 +825,118 @@ $("protoBtn").onclick = async () => {
   const p = await get("/api/protocol");
   showSheet("protocol v" + p.protocol_version, JSON.stringify(p, null, 1));
 };
+
+// ---------------------------------------------------------------- the drawer (hamburger)
+// History straight off the wire: GET /api/sessions lists the logs on disk, a tap renders one
+// through the digest below. No client-side session store — the disk is the store.
+async function loadSessions() {
+  const box = $("sessions");
+  box.replaceChildren(el("div", "meta", "reading the log directory…"));
+  try {
+    const r = await get("/api/sessions");
+    box.replaceChildren();
+    if (r.note) box.appendChild(el("div", "meta", r.note));
+    for (const s of r.sessions || []) {
+      const b = el("button", "sess");
+      b.appendChild(el("div", null, s.title || s.session_id));
+      b.appendChild(el("div", "meta", (s.live ? "live now · " : "") +
+        new Date(s.modified_unix * 1000).toLocaleString() +
+        " · " + (s.size_bytes / 1024).toFixed(0) + " KB"));
+      b.onclick = () => { $("drawer").close(); s.live ? closeHistory() : openHistory(s.session_id); };
+      box.appendChild(b);
+    }
+    if (!(r.sessions || []).length && !r.note)
+      box.appendChild(el("div", "meta", "no session logs on disk yet."));
+  } catch (e) { box.replaceChildren(el("div", "meta", "could not read /api/sessions: " + e)); }
+}
+
+// THE DIGEST, deliberately: only rule 1's blessed sources are drawn — UserMessage in,
+// TaskComplete out, TurnFailed as the miss — so history can never contradict what live
+// rendering said. Full fidelity stays a server feature: `localharness web --replay`.
+async function openHistory(id) {
+  const hist = $("hist");
+  hist.replaceChildren();
+  const bar = el("div", "row sys");
+  const back = el("button", "small", "back to live");
+  back.onclick = closeHistory;
+  bar.appendChild(back);
+  bar.appendChild(el("div", "meta", "history · " + id + " · read-only"));
+  hist.appendChild(bar);
+  let text = "";
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/events`,
+                          { headers: { "Authorization": "Bearer " + token } });
+    text = await r.text();
+  } catch (e) { hist.appendChild(el("div", "row err", "could not read that session: " + e)); }
+  for (const line of text.split("\n")) {
+    let d; try { d = JSON.parse(line); } catch (e) { continue; }
+    if (d.parent_id) continue;               // a subagent's traffic collapses to nothing here
+    if (d.event_type === "UserMessage") {
+      const r2 = el("div", "row user");
+      r2.appendChild(el("div", null, d.content));
+      hist.appendChild(r2);
+    } else if (d.event_type === "TaskComplete") {
+      const r2 = el("div", "row answer");
+      withCode(r2, d.summary || "");
+      hist.appendChild(r2);
+    } else if (d.event_type === "TurnFailed") {
+      hist.appendChild(el("div", "row err",
+        "turn failed — " + d.reason + ": " + (d.detail || "")));
+    }
+  }
+  log.hidden = true; $("composer").hidden = true; $("greet").hidden = true;
+  hist.hidden = false;
+  window.scrollTo(0, 0);
+}
+function closeHistory() {
+  $("hist").hidden = true; $("hist").replaceChildren();
+  log.hidden = false; $("composer").hidden = false;
+  window.scrollTo(0, document.body.scrollHeight);
+}
+$("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions(); };
+$("drawerClose").onclick = () => $("drawer").close();
+
+// ---------------------------------------------------------------- new chat (the honest button)
+$("newBtn").onclick = () => {
+  // One process serves one LIVE session and no wire verb restarts it yet, so this button cannot
+  // fake a throwaway thread. Cold box: the composer already IS the new chat — go there. Live
+  // session: say the true thing instead of pretending.
+  if (S.session == null && !S.turn) { closeHistory(); $("text").focus(); return; }
+  showSheet("new chat", "this agent runs ONE continuous session — its memory carries across " +
+    "turns, so there is no throwaway thread to open.\n\na fresh-session verb is not on the " +
+    "wire yet; when it lands, this button starts using it.");
+};
+
+// ---------------------------------------------------------------- the settings pill
+// The model/config home the owner asked for: IN the prompt box. The pill's label is the model
+// name the instruments report; tapping it opens the session sheet — reasoning, permission mode
+// (the one wire verb this page never exercised before), and the current readings.
+function paintModes() {
+  const box = $("modes");
+  box.replaceChildren();
+  if (S.modes.length) box.appendChild(el("div", "meta", "permission mode, via POST …/mode"));
+  for (const m of S.modes) {
+    const b = el("button", "small" + (m === S.mode ? " modeOn" : ""), m);
+    b.onclick = async () => {
+      const r = await post(`/api/sessions/${S.session || "current"}/mode`, { mode: m });
+      if (r.mode) { S.mode = r.mode; paintModes(); add(el("div", "row sys", "permission mode set: " + r.mode)); }
+      else add(el("div", "row err", "mode not set — " + (r.error || JSON.stringify(r))));
+    };
+    box.appendChild(b);
+  }
+}
+$("modelBtn").onclick = () => {
+  $("cfgModel").textContent = [$("model").textContent, $("ctx").textContent, $("tps").textContent]
+    .filter(t => t && t !== "settings").join(" · ")
+    || "no model reading yet — the instruments arrive with the first turn";
+  paintModes();
+  $("cfg").showModal();
+};
+$("cfgClose").onclick = () => $("cfg").close();
+// a tap on the dim backdrop closes a sheet, exactly as a thumb expects
+for (const dlgId of ["drawer", "cfg"]) {
+  $(dlgId).onclick = (ev) => { if (ev.target === $(dlgId)) $(dlgId).close(); };
+}
 
 // ---------------------------------------------------------------- the app shell (A2)
 // Installed = running from the home screen. iOS reports it on `navigator.standalone`, everyone
@@ -877,8 +1061,11 @@ $("recheck").onclick = async () => {
       get("/api/protocol"), get("/api/tools"), get("/api/health"),
     ]);
     S.collapsible = proto.collapsible_groups || S.collapsible;
+    S.modes = proto.modes || [];        // the settings pill's mode buttons, from the gate's own list
     for (const t of tools.tools) S.tools[t.name] = t;
     S.session = health.session_id || S.session;
+    if (health.mode) S.mode = health.mode;
+    if (health.agent_id) $("agentline").textContent = "agent · " + health.agent_id;
     paint(health.model_state);
     // WEBCH-29. The bring-up warning is one line on the wire, so a phone that connected after
     // it was sent would never know. This is the same fact, read as state on arrival.
@@ -904,6 +1091,13 @@ $("recheck").onclick = async () => {
       "install and no notifications either. Put TLS in front of the port (tailscale serve " +
       "--bg, or any proxy) and open the https URL."));
   }
+
+  // the screenshot's greeting, shown only while the transcript is empty — the first row that
+  // arrives (backfill included) retires it via add()
+  const hr = new Date().getHours();
+  $("hello").textContent = hr < 5 ? "Up late" : hr < 12 ? "Good morning"
+    : hr < 18 ? "Good afternoon" : "Good evening";
+  if (!log.children.length) $("greet").hidden = false;
 
   connect();
   await registerWorker();
