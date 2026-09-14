@@ -172,6 +172,22 @@
           text-overflow:ellipsis;
           font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .row.tool, .row.sys, .row.narr { margin:8px 0; }   /* machine rows sit tighter than prose */
+
+  /* the markdown subset (answers + narration): quiet structure, phone-first */
+  .mdh { font-weight:650; margin:12px 0 4px; line-height:1.35; }
+  .mdh1 { font-size:19px; }  .mdh2 { font-size:17.5px; }  .mdh3, .mdh4 { font-size:16px; }
+  .mdp { margin:6px 0; }
+  .row ul, .row ol { margin:6px 0; padding-left:1.3rem; }
+  .row li { margin:3px 0; }
+  .mdcode { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.9em;
+            background:var(--surface); border:1px solid var(--line); border-radius:6px;
+            padding:0 5px; }
+  .tablewrap { overflow-x:auto; margin:10px 0; border:1px solid var(--line); border-radius:12px; }
+  .tablewrap table { border-collapse:collapse; font-size:13.5px; min-width:100%; }
+  .tablewrap th, .tablewrap td { padding:7px 12px; text-align:left;
+                                 border-bottom:1px solid var(--line); white-space:nowrap; }
+  .tablewrap th { color:var(--dim); font-weight:600; font-size:12px; letter-spacing:.03em; }
+  .tablewrap tr:last-child td { border-bottom:0; }
   .meta { color:var(--dim); font-size:11.5px; margin-top:5px; letter-spacing:.02em; }
   .untrusted { display:inline-block; margin-left:7px; padding:1px 8px; border-radius:999px;
                font-size:11px; color:var(--warn); border:1px solid var(--warn);
@@ -374,11 +390,75 @@ function copyButton(getText, label) {
   };
   return b;
 }
+// ---------------------------------------------------------------- markdown, safely
+// The phone is a READING surface (owner, 2026-09-14: "output isn't formatted at all"), so
+// prose renders a small markdown subset — headings, lists, tables, bold, inline code. It is
+// built ENTIRELY with createElement + textContent: these are structure tokens interpreted
+// over plain text, never HTML parsed from the model, so rule 3 stands and an injected
+// <script> stays eight characters of text.
+function inline(node, text) {
+  const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) node.appendChild(el("span", null, text.slice(last, m.index)));
+    const tok = m[0];
+    node.appendChild(tok.charAt(0) === "`" ? el("code", "mdcode", tok.slice(1, -1))
+                                           : el("b", null, tok.slice(2, -2)));
+    last = m.index + tok.length;
+  }
+  if (last < text.length) node.appendChild(el("span", null, text.slice(last)));
+}
+function mdBlock(container, text) {
+  const lines = String(text).split("\n");
+  let i = 0, list = null, listTag = null;
+  while (i < lines.length) {
+    const line = lines[i];
+    // A table is a header row over a |---| separator; it scrolls in its own wrapper so a wide
+    // one never drags the page sideways (same rule as <pre>).
+    if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || "")) {
+      list = null;
+      const wrap = el("div", "tablewrap");
+      const table = el("table");
+      wrap.appendChild(table);
+      const cells = (s) => s.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+      const addRow = (s, tag) => {
+        const tr = el("tr");
+        for (const c of cells(s)) { const cell = el(tag); inline(cell, c.trim()); tr.appendChild(cell); }
+        table.appendChild(tr);
+      };
+      addRow(lines[i], "th");
+      i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { addRow(lines[i], "td"); i++; }
+      container.appendChild(wrap);
+      continue;
+    }
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    const num = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (h) {
+      list = null;
+      const d = el("div", "mdh mdh" + h[1].length);
+      inline(d, h[2]);
+      container.appendChild(d);
+    } else if (bullet || num) {
+      const tag = bullet ? "ul" : "ol";
+      if (!list || listTag !== tag) { list = el(tag); listTag = tag; container.appendChild(list); }
+      const li = el("li");
+      inline(li, (bullet || num)[1]);
+      list.appendChild(li);
+    } else {
+      list = null;
+      if (line.trim()) { const p = el("div", "mdp"); inline(p, line); container.appendChild(p); }
+    }
+    i++;
+  }
+}
+
 function withCode(container, raw, copyable) {
-  // Fenced blocks become <pre> with their own copy button; everything else is plain text. Both
-  // copy from `raw`, not from the DOM. `copyable=false` drops the whole-message button —
-  // narration between tool calls is glanced at, not copied, and the button was a row of height
-  // under every explain (owner, 2026-09-14).
+  // Fenced blocks become <pre> with their own copy button; everything else renders through the
+  // markdown subset above. Both copy from `raw`, not from the DOM. `copyable=false` drops the
+  // whole-message button — narration between tool calls is glanced at, not copied, and the
+  // button was a row of height under every explain (owner, 2026-09-14).
   const parts = String(raw).split(/```/);
   parts.forEach((part, i) => {
     if (i % 2 === 1) {
@@ -387,7 +467,7 @@ function withCode(container, raw, copyable) {
       container.appendChild(pre);
       container.appendChild(copyButton(() => body, "copy code"));
     } else if (part.trim()) {
-      container.appendChild(el("div", null, part));
+      mdBlock(container, part);
     }
   });
   if (copyable !== false) container.appendChild(copyButton(() => String(raw), "copy message"));
