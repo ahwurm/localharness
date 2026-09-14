@@ -1,12 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
-     role="img" aria-label="localharness">
-  <!--
-    PLACEHOLDER. Three stacked bars on a dark square, and it is meant to be replaced.
-    The same picture as icon-192/512/180.png, which scripts/make_web_icons.py generates —
-    edit both or neither, or a launcher will show one and a browser tab the other.
-  -->
-  <rect width="512" height="512" fill="#111111"/>
-  <rect x="113" y="143" width="286" height="51" fill="#aa6600"/>
-  <rect x="148" y="230" width="215" height="51" fill="#ffffff"/>
-  <rect x="184" y="317" width="143" height="51" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- localharness app mark: the capped agent.
+       Coordinates are the appicon-512.png geometry verbatim (k=1.36 character
+       scale, +8px optical shift answering the brim's leftward mass pull, every
+       edge snapped to a whole 512-unit pixel). Plain shapes only.
+       The cap mark uses the two-block degradation form, not letter paths: a
+       favicon renders at 16-32px, well under the 9px letter-height floor where
+       "LH" turns to mud. Green block = the L, white block = the H. -->
+
+  <!-- full-bleed ground; no rounding, the browser/OS masks it -->
+  <rect width="512" height="512" fill="#0D0F15"/>
+
+  <!-- the agent's head: outline first, then fill. Both share one corner radius
+       (0.246 x head width), so the stroke reads slightly tighter at the corners
+       exactly as the raster does. -->
+  <rect x="101" y="115" width="326" height="325" rx="71.9" fill="#074A24"/>
+  <rect x="118" y="132" width="292" height="292" rx="71.9" fill="#56DC85"/>
+
+  <!-- cap outline: crown (top corners only) + brim.
+       The brim outline starts at x=-7 and is clipped by the viewport - this is
+       faithful to the approved raster, whose ink reaches x=0. -->
+  <path d="M153.1,72 H374.9 A57.1,57.1 0 0 1 432,129.1 V200 H96 V129.1 A57.1,57.1 0 0 1 153.1,72 Z" fill="#181B20"/>
+  <rect x="-7" y="142" width="315" height="79" rx="11.4" fill="#181B20"/>
+
+  <!-- cap: crown flat-topped with rounded corners (a 5-panel), then the brim -->
+  <path d="M152.8,88 H375.2 A40.8,40.8 0 0 1 416,128.8 V183 H112 V128.8 A40.8,40.8 0 0 1 152.8,88 Z" fill="#494D55"/>
+  <rect x="9" y="159" width="282" height="46" rx="11.4" fill="#494D55"/>
+
+  <!-- the brand4 mark on the front panel, in block form -->
+  <rect x="239" y="113" width="20" height="36" fill="#56DC85"/>
+  <rect x="269" y="113" width="20" height="36" fill="#FFFFFF"/>
+
+  <!-- eyes -->
+  <circle cx="196" cy="303.6" r="28.6" fill="#0D0F15"/>
+  <circle cx="332" cy="303.6" r="28.6" fill="#0D0F15"/>
 </svg>
