@@ -54,7 +54,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
-- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`)
+- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`), or `localharness web` to drive one from a phone on your own private network (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
 
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
@@ -203,6 +203,7 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 | `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
 | `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit; `--show-reasoning` streams the model's thinking as dim lines while it generates, `/reasoning` toggles it live — needs the server's reasoning parser) |
 | `acp` | Run as an [Agent Client Protocol](https://agentclientprotocol.com) server so LocalHarness appears in Zed's agent panel — see [docs/zed.md](docs/zed.md) |
+| `web` | Serve the session to a phone: a JSON event API plus a bare reference page (`--replay`/`--fixtures` build the UI with the model server down) — see [docs/web.md](docs/web.md) |
 | `doctor` | Check Python, config, endpoint, model, context budget, token counting and directories; inside a project, name both config layers and the keys the project overrides |
 | `config show` | Print the effective merged config and the file that set each key |
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
@@ -242,6 +243,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 ## Documentation
 
 - [docs/zed.md](docs/zed.md) — **Use in Zed**: register `localharness acp` as an agent server, what the panel shows, and what it does not do yet
+- [docs/web.md](docs/web.md) — **Use from a phone**: `localharness web`, what the bare reference page is and is not, how to build your own UI against the event API with the GPU cold, and a table of which channel to use for what
 - [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and setup notes
 - [docs/specs/](docs/specs/) — component specs
 

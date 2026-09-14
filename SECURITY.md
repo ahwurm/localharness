@@ -465,3 +465,42 @@ start the server with an API key and set `provider.api_key` to match; for access
 beyond your LAN use a private overlay network (Tailscale/WireGuard). Never port-forward
 a bare, unauthenticated endpoint to the internet. See "Running the harness on a
 different machine than the model" in the README.
+
+### `localharness web`
+
+The web channel adds a second listener, and it is a more serious one than the model
+server: **it can run arbitrary shell with your privileges**, because that is what the
+agent behind it does. Three things hold it, and each is there for a reason:
+
+- **It binds loopback only.** Startup refuses any other address unless
+  `--allow-unsafe-bind` is passed explicitly. A fronting proxy publishes it — this is
+  also what keeps a proxy's identity headers meaningful, since they are only
+  trustworthy if nothing but the proxy can reach the backend.
+- **An app token is required on every request**, the event stream included. It is
+  generated on first run and stored `0600` under the global config directory.
+  Binding loopback makes the boundary tighter in one sense and looser in another:
+  every local process on the machine can now reach that port, including one an agent
+  itself started. `localharness web --rotate-token` invalidates every enrolled client.
+  **Named gap:** there is no per-device revoke — rotation is all or nothing.
+- **The POST surface is CSRF-safe by construction.** Every write verb requires both a
+  bearer header and `application/json`, and the three simple content types a
+  cross-origin form can send without a preflight are refused outright. The event
+  stream uses a `Secure`/`HttpOnly`/`SameSite=Strict` cookie, because `EventSource`
+  cannot carry a header and a token in a URL lands in logs and referrers.
+
+Two further properties worth knowing about, both deliberate:
+
+- **A permanent grant cannot be written in one request.** `allow_always` and
+  `reject_always` take a second POST carrying a server-minted, short-lived,
+  single-use token. The grant store is global, keyed by workspace real path, never
+  expires, and has no revoke command, so one mis-tap — or one buggy script holding the
+  token — must not be able to produce one.
+- **`--ui-dir` and `--replay` are real-path confined.** Both take a user path; neither
+  will serve a file outside the resolved root, follow a symlink out of it, or open
+  anything that is not a session log. Same discipline the trust and grant stores
+  already use.
+
+The static page is served without a credential and is inert without one: every `/api`
+route refuses an unauthenticated caller, so reaching the port is still not a shell.
+The alternative — putting the token in the URL of the page that bootstraps enrolment —
+is the thing the cookie design exists to avoid.
