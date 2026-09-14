@@ -13,7 +13,9 @@ adding a frame and forgetting the page. Rendering fidelity is the owner's half.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -180,3 +182,139 @@ def test_a_repeated_tool_call_id_cannot_orphan_a_row(page):
     "waiting…" for the rest of the session.
     """
     assert "if (S.calls.has(d.tool_call_id)) return;" in page
+
+
+# --------------------------------------------------------------------------------------------
+# Executed-page tests. Everything above matches STRINGS; these RUN the shipped reducer against a
+# DOM the size of what the page actually touches. The bug that motivated them (WEBCH-37) was
+# invisible to string matching: the page SAYS "the partial text above stays" in one branch and
+# deletes it in another, and only driving the real frame order shows which one wins.
+DOM_SHIM = """
+const mk = (tag) => ({
+  tagName: tag, className: "", textContent: "", style: {}, dataset: {}, children: [], parent: null,
+  disabled: false, open: false, onclick: null,
+  appendChild(n) { n.parent = this; this.children.push(n); return n; },
+  remove() {
+    const p = this.parent;
+    if (p) p.children.splice(p.children.indexOf(this), 1);
+    this.parent = null;
+  },
+  classList: { add() {}, remove() {}, contains: () => false },
+  close() {}, showModal() {},
+});
+const byId = new Map();
+globalThis.document = {
+  createElement: mk,
+  getElementById: (id) => { if (!byId.has(id)) byId.set(id, mk("div")); return byId.get(id); },
+  body: { offsetHeight: 0, scrollHeight: 0 },
+  addEventListener() {},
+};
+const store = new Map();
+globalThis.window = {
+  localStorage: {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  },
+  innerHeight: 0, scrollY: 0, scrollTo() {}, isSecureContext: true, addEventListener() {},
+};
+globalThis.location = { hash: "", search: "", pathname: "/" };
+globalThis.history = { replaceState() {} };
+globalThis.rows = () => {
+  const text = (n) => (n.textContent || "") + n.children.map(text).join("");
+  return document.getElementById("log").children.map((r) => ({ cls: r.className, text: text(r) }));
+};
+globalThis.report = () => console.log(JSON.stringify(rows()));
+"""
+
+BOOT = "\n(async () => {"
+
+
+def _drive(page: str, script: str, tmp_path) -> list[dict]:
+    """Run the page's reducer under `DOM_SHIM`, feed it `script`, return the rendered rows.
+
+    The boot block is sliced off — it opens an EventSource and talks to an API, neither of which
+    exists here. What is under test is everything above it: the reducer, and it runs VERBATIM, so
+    a change to the shipped page changes what these assert against.
+    """
+    import subprocess
+
+    module = re.search(r'<script type="module">(.*?)</script>', page, re.S)
+    assert module, "the reference page is one inline module; that shape changed"
+    body, sep, _boot = module.group(1).partition(BOOT)
+    assert sep, "the page's boot block moved; this harness slices it off by that marker"
+
+    path = tmp_path / "driven.mjs"
+    path.write_text(DOM_SHIM + body + script, encoding="utf-8")
+    result = subprocess.run(["node", str(path)], capture_output=True, text=True)
+    assert result.returncode == 0, f"the page threw:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+HELLO = """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+                  protocol_version: 1, synthetic: false, model_state: "ready"});
+onEvent("TurnStarted", {seq: 1, task_summary: "a question"});
+onFrame("TokenDelta", {stream_id: "x", text: "half an ", phase: "writing"});
+onFrame("TokenDelta", {stream_id: "x", text: "answer"});
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_cancelling_a_turn_keeps_the_text_the_model_already_wrote(page, tmp_path):
+    """WEBCH-37. The row the user is watching is the ONLY copy of a cancelled turn's output.
+
+    A cancelled turn publishes no `TurnCompleted`, so the loop persists no `llm_response` Action
+    for it and the replay log has nothing either: deleting the bubble deletes the text for good.
+    The page even says so in the very next row it draws — "the partial text above stays" — and
+    that line was, until this test, false.
+    """
+    rendered = _drive(page, HELLO + """
+onFrame("StreamClosed", {stream_id: "x", superseded_by_seq: null});
+onFrame("TurnCancelled", {session_id: "s"});
+report();
+""", tmp_path)
+    joined = " ".join(r["text"] for r in rendered)
+    assert "half an answer" in joined, "the cancelled turn's text was deleted from the page"
+    assert "turn cancelled" in joined
+    assert "streaming…" not in joined, "a stopped stream still claims to be streaming"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_turn_that_fails_mid_stream_keeps_its_text_too(page, tmp_path):
+    """The same hand, dealt by the other path: `TurnFailed` closes the stream with no successor.
+
+    Here the partial text is diagnostic — it is what the model had produced when the provider
+    died, and the error row alone does not say it.
+    """
+    rendered = _drive(page, HELLO + """
+onFrame("StreamClosed", {stream_id: "x", superseded_by_seq: null});
+onEvent("TurnFailed", {seq: 2, reason: "provider_error", detail: "connection reset"});
+report();
+""", tmp_path)
+    joined = " ".join(r["text"] for r in rendered)
+    assert "half an answer" in joined, "the failed turn's partial text was deleted from the page"
+    assert "turn failed — provider_error" in joined
+    assert "streaming…" not in joined
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_healthy_turn_still_replaces_the_draft_exactly_once(page, tmp_path):
+    """The other half of the fix, and the one with teeth: keeping the bubble MUST NOT become
+    keeping it when an authoritative Action supersedes it. That prints the answer twice, which
+    §4.2.1 calls the single most likely way a client ships broken.
+    """
+    rendered = _drive(page, HELLO + """
+onFrame("StreamClosed", {stream_id: "x", superseded_by_seq: 7});
+onEvent("Action", {seq: 7, action_type: "llm_response", has_tool_calls: false,
+                   content: "half an answer, finished"});
+onEvent("TaskComplete", {seq: 8, summary: "half an answer, finished", success: true,
+                         duration_seconds: 1.0});
+report();
+""", tmp_path)
+    joined = " ".join(r["text"] for r in rendered)
+    # The draft is a PREFIX of the final answer, so one occurrence means the draft went and the
+    # answer came; two means the same text is on the page twice.
+    assert joined.count("half an answer") == 1, "the superseded draft was left on the page"
+    assert [r for r in rendered if r["cls"].startswith("row answer")], "the answer never rendered"
+    assert "streaming…" not in joined
