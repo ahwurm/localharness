@@ -1469,6 +1469,28 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # the fix (`permissions.mode: unattended`) once.
         gate.attach_channel(channel)
 
+        # --- WEBCH-29: is anybody else driving this agent right now? ---
+        # One hook for every channel, because this function is the funnel all four come through.
+        # It WARNS and never refuses (owner ruling): `history.jsonl` and `compact.md` take
+        # unlocked appends, so two live sessions on one agent can interleave and a long append
+        # can tear — a hazard that is latent today and reachable by habit, since running the
+        # terminal while a phone is attached is a normal thing to do, not an exotic one.
+        try:
+            from localharness.config import session_presence
+
+            co_tenants = session_presence.register(
+                config_dir, agent=agent_config.name, channel=channel_mode,
+                session_id=sitting_id, workspace=state_dir,
+            )
+            if hasattr(channel, "set_co_tenants"):
+                channel.set_co_tenants(co_tenants)
+            if co_tenants:
+                await channel.send_error(
+                    session_presence.warning(co_tenants, agent=agent_config.name)
+                )
+        except Exception:  # noqa: BLE001 — a lost warning never costs a session its start-up
+            log.warning("session_presence_failed", exc_info=True)
+
         # --- Determine returning user ---
         is_returning = events_path.exists() and events_path.stat().st_size > 0
 

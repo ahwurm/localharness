@@ -312,6 +312,12 @@ class WebChannel(ChannelAdapter):
         self._push: Any = None
         self._push_tasks: set[asyncio.Task] = set()
 
+        # Other live sessions on this agent (WEBCH-29), as found at bring-up. Carried so a phone
+        # that connects LATER can still see a co-tenant it was never present to be warned about
+        # — the warning itself is a one-shot line on the wire, and a one-shot line is invisible
+        # to a client that arrives after it.
+        self._co_tenants: list[Any] = []
+
     # ---------------------------------------------------------------- lifecycle
 
     def bind_runtime(
@@ -465,6 +471,14 @@ class WebChannel(ChannelAdapter):
         await self._react(event)
 
     # ---------------------------------------------------------------- push (A2)
+
+    def set_co_tenants(self, others: list[Any]) -> None:
+        """Record the other live sessions on this agent, for `GET /api/health` (WEBCH-29)."""
+        self._co_tenants = list(others or [])
+
+    @property
+    def co_tenants(self) -> list[Any]:
+        return self._co_tenants
 
     def set_push(self, service: Any) -> None:
         """Attach the Web Push service. Absent, every trigger site below is inert."""

@@ -41,6 +41,8 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, R
 from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
+from localharness.config import session_presence
+
 from . import auth, push
 from .channel import WebChannel
 from .protocol import (
@@ -520,7 +522,20 @@ class WebServer:
             "mode": getattr(self.channel._gate, "mode", None),
             "clients": self.channel.client_count,
             "replay": self.replay is not None,
+            "push_enrolled": self._push_enrolled(),
+            # WEBCH-29. The bring-up warning is one line on the wire and therefore invisible to a
+            # phone that connected afterwards; this is the same fact as state, which a client
+            # arriving at any time can read.
+            "other_sessions": session_presence.summary(self.channel.co_tenants),
         })
+
+    def _push_enrolled(self) -> int:
+        """How many devices would buzz. The page uses it to tell "notifications are on" from
+        "notifications are on, on some other phone"."""
+        try:
+            return len(push.SubscriptionStore(self.config_dir).all())
+        except Exception:  # noqa: BLE001 — health must answer even when push is broken
+            return 0
 
     async def protocol(self, request: Request) -> Response:
         """The contract, served from the same places the code reads it from.
