@@ -341,6 +341,43 @@ class OrchestratorREPL:
         # path the hotkeys take, so the gate records it and the model hears it as words.
         if getattr(self._channel, "_pending_resolver", "absent") is None:
             self._channel._pending_resolver = self._resolve_pending_from_channel
+        # The same handshake for the two things a channel with its own out-of-band surface (the
+        # web channel's POST verbs) needs and cannot reach on its own: steering the RUNNING turn,
+        # and cancelling it. Both live on the REPL because the REPL owns the loop handle and the
+        # turn task; a channel that started holding either would be a second owner of the one
+        # thing that must have exactly one. Installed only when the channel DECLARES the
+        # attribute as None — a channel that does not is skipped with no error, which is why
+        # `WebChannel` declares both as class attributes.
+        if getattr(self._channel, "_nudge_resolver", "absent") is None:
+            self._channel._nudge_resolver = self._nudge_from_channel
+        if getattr(self._channel, "_cancel_resolver", "absent") is None:
+            self._channel._cancel_resolver = self._cancel_from_channel
+
+    async def _nudge_from_channel(self, text: str, intent: str = "nudge") -> bool:
+        """Steer the running turn with a line a channel already classified.
+
+        No classifier is spent: the human pressed the nudge button, so tier-2's up-to-35-second
+        permit-wait + timeout budget (bug #92) buys nothing here but the delay it was measured
+        causing. Returns False when there is no turn to steer, so the caller can say so.
+        """
+        clean = (text or "").strip()
+        if not clean or not self._turn_running():
+            return False
+        self._agent.push_user_nudge(clean)
+        return True
+
+    async def _cancel_from_channel(self) -> bool:
+        """Cancel the in-flight turn from a channel's own surface.
+
+        The same cancel `_await_turn_with_sigint` performs for Ctrl+C: cancelling the TURN, not
+        the session. Returns False when nothing is running, so a mis-tap on an idle session is a
+        no-op with an honest answer rather than a silent one.
+        """
+        task = self._turn_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
 
     async def _resolve_pending_from_channel(self, action: str, pending_id: int) -> None:
         await self._answer_pending(str(pending_id), approve=(action == "approve"))
@@ -487,7 +524,13 @@ class OrchestratorREPL:
                 channel=ch_id if isinstance(ch_id, str) else "terminal",
             )
         )
-        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=None))
+        # Streaming is opt-in BY THE CHANNEL, through a declared flag rather than the presence of
+        # a method: a channel that says `streams_tokens` gets the model's answer as it generates,
+        # and one that says nothing is driven exactly as before. The terminal says nothing and
+        # keeps passing None — it has never streamed answer text — so this adds live text to the
+        # web channel without touching what any existing surface does.
+        on_token = self._channel.on_token if getattr(self._channel, "streams_tokens", False) else None
+        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token))
 
     # ------------------------------------------------------------------ #
     # Persistent type-anytime input box coordinator (box mode)
@@ -858,12 +901,16 @@ class OrchestratorREPL:
                     pass
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
-        """/reasoning [on|off] — toggle the live reasoning stream on the terminal channel."""
-        from localharness.channels.terminal import TerminalChannel
+        """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.
 
-        if not isinstance(self._channel, TerminalChannel):
+        Gated on the capability, not on the class: this refused on every non-terminal channel
+        until the web channel could stream reasoning too, at which point an `isinstance` check
+        was refusing a command the surface could perfectly well honour (WEBCH-19).
+        """
+        if not getattr(self._channel, "has_display_toggles", False):
             await self._channel.send_message(
-                "/reasoning is a terminal-channel setting.", metadata={"style": "system.info"},
+                "/reasoning needs a channel that renders a reasoning stream; this one does not.",
+                metadata={"style": "system.info"},
             )
             return
         if arg in ("on", "off"):
@@ -887,12 +934,13 @@ class OrchestratorREPL:
     async def _handle_verbose_cmd(self, arg: str) -> None:
         """/verbose [on|off] — the detailed view: every tool call itemized with its arguments
         and its own result line (the default groups read/memory/web families into one counter
-        line each), plus the reasoning stream. Same as `localharness start --verbose`."""
-        from localharness.channels.terminal import TerminalChannel
+        line each), plus the reasoning stream. Same as `localharness start --verbose`.
 
-        if not isinstance(self._channel, TerminalChannel):
+        Capability-gated for the same reason `/reasoning` is (WEBCH-19)."""
+        if not getattr(self._channel, "has_display_toggles", False):
             await self._channel.send_message(
-                "/verbose is a terminal-channel setting.", metadata={"style": "system.info"},
+                "/verbose needs a channel with a detailed view; this one does not have one.",
+                metadata={"style": "system.info"},
             )
             return
         if arg in ("on", "off"):

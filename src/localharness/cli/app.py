@@ -22,6 +22,7 @@ from localharness.cli import report_cmd as _report_cmd  # noqa: F401
 from localharness.cli.start_cmd import start_app
 from localharness.cli.update_cmd import update
 from localharness.cli.validate_cmd import validate
+from localharness.cli.web_cmd import web_cmd
 
 app = typer.Typer(
     name="localharness",
@@ -42,6 +43,9 @@ app.command("update")(update)
 # The Zed / Agent Client Protocol server (PRD §4). Visible: it is the verb a Zed
 # `agent_servers` entry runs, and a hidden command cannot be discovered from `--help`.
 app.command("acp")(acp_cmd)
+# The phone UI and its event API (docs/web.md). Visible for the same reason `acp` is: a channel
+# that exists only in the docs is a channel nobody finds.
+app.command("web")(web_cmd)
 # Internal instrument for the permission classifier, not a marketed verb (PRD §10).
 app.command("ask-rate", hidden=True)(ask_rate)
 app.add_typer(agent_app, name="agent")

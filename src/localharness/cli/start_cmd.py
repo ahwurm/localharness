@@ -21,6 +21,19 @@ console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
 
+KNOWN_CHANNEL_MODES: frozenset[str] = frozenset({"terminal", "discord", "web"})
+"""Every value `--channel` / `channel_mode` accepts.
+
+It exists because the selection below was a bare if/elif with no validation, so an unknown
+channel silently became the terminal — `--channel discrod` started an ordinary session and
+nothing said the flag had been ignored. (`AgentConfig.channel` is a separate decoy: it is parsed,
+stored, and read by nothing at all.) One frozenset so the CLI's help text, the refusal message
+and the branch cannot drift apart."""
+
+UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
+"""Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
+second and a typo costing a session."""
+
 NO_BOUNDARY_NOTICE = (
     "No project folder here, so there is no workspace boundary: every write, edit and "
     "non-read-only shell command will ask, every time. Run localharness from inside a project "
@@ -389,8 +402,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
                        no_input: bool = False, show_reasoning: bool = False,
-                       acp_channel: Any = None) -> None:
+                       acp_channel: Any = None, web_channel: Any = None) -> None:
     """Async entry point: discover agent, wire dependencies, run REPL.
+
+    `web_channel` is the PWA adapter (`channels/web.WebChannel`) when this session is being
+    driven from a phone. Passed in for the same reason `acp_channel` is — the HTTP server is up
+    and serving before any session exists, so the channel outlives and precedes this call — but
+    it takes the opposite exit: the web branch does NOT replace the REPL. That is the hybrid of
+    the web PRD §6.0, and picking either pure shape would have cost something real. ACP's shape
+    buys reachability-before-a-session and costs the REPL's slash commands, the input router, the
+    pending resolver and `UserMessage` publishing — which is why an ACP session's log contains no
+    user turns at all. Discord's shape buys all of those and cannot be reached before a session.
+    The web channel is built early like ACP and driven by `OrchestratorREPL` like Discord.
 
     `acp_channel` is the Zed/ACP adapter (`channels/acp.AcpChannel`) when this session is being
     driven over the Agent Client Protocol. It is passed IN rather than built here because the
@@ -402,6 +425,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     fleet — is the same path a terminal or Discord session takes, which is the point of passing
     the channel in rather than forking a third session builder.
     """
+    # FIRST, before anything is read or built. An unknown `--channel` used to fall through to the
+    # terminal SILENTLY — `--channel discrod` started an ordinary terminal session and nothing
+    # anywhere said the flag had been ignored. It is refused here rather than at the CLI boundary
+    # so every caller of this function gets the same answer, and before the config lookup so the
+    # refusal does not depend on what happens to be on disk: a typo in the channel is a typo
+    # whether or not the box has been `init`ed yet.
+    if channel_mode not in KNOWN_CHANNEL_MODES:
+        raise typer.BadParameter(
+            UNKNOWN_CHANNEL_ERROR.format(
+                given=channel_mode, known=", ".join(sorted(KNOWN_CHANNEL_MODES))
+            ),
+            param_hint="--channel",
+        )
+
     import time as _time
     import uuid
 
@@ -448,7 +485,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # The RAW flag value, not cfg_path: "was this explicit" does not survive resolution.
     from localharness.cli.workspace import resolve_workspace_layer, settle_startup_trust
     interactive = False if no_input else None
-    workspace = resolve_workspace_layer(config_dir, interactive=interactive)
+    if web_channel is not None:
+        # The web channel is already live and a client is already attached (its SSE connection is
+        # what triggered this bring-up), so the one question a phone CAN answer at this point is
+        # the one about an outside `.localharness/`. `resolve_workspace_layer`'s asker is
+        # synchronous and runs on a worker thread, so the channel bridges the answer back with
+        # `run_coroutine_threadsafe` — the same bridge ACP documents. Skipping it does not fail
+        # loudly: it silently makes an outside workspace invisible forever, which is exactly the
+        # phase-39 failure the trust dialog was added to prevent.
+        workspace = await asyncio.to_thread(
+            resolve_workspace_layer, config_dir, asker=web_channel.trust_asker()
+        )
+    else:
+        workspace = resolve_workspace_layer(config_dir, interactive=interactive)
     # The ONE startup question (owner bar 2026-09-11). It settles trust for this workspace root
     # and, when the project has no state store at all, creates one — the moment a person is
     # demonstrably in a project and about to work in it (owner ruling 2026-09-04). Every guard
@@ -1386,6 +1435,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # Built at the ACP handshake (it had to answer `initialize` before any of this
             # existed); the gate attaches to it below exactly like any other channel.
             channel = acp_channel
+        elif web_channel is not None:
+            # Built by `localharness web` before this call, for the same reason: the HTTP server
+            # answers, serves history and holds the pending queue with the model server cold.
+            # Unlike ACP it does NOT take a `serve()` branch below — the REPL drives it.
+            channel = web_channel
         elif channel_mode == "discord":
             from localharness.channels.discord import DiscordChannel, discord_config_from_env
             channel = DiscordChannel(bus=bus, config=discord_config_from_env())
@@ -1418,10 +1472,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         ))
         if interactive and isinstance(channel, TerminalChannel):
             channel.first_prompt_hint = _first_prompt_hint(is_returning)
-        if isinstance(channel, TerminalChannel):
-            # Colored tok/s readout (status row / thinking label): poll the client's live
-            # decode-speed snapshot. The client object survives /model rebinds, so this
-            # stays valid across swaps.
+        if hasattr(channel, "tps_source"):
+            # The instrument cluster. Colored tok/s readout (status row / thinking label): poll
+            # the client's live decode-speed snapshot. The client object survives /model rebinds,
+            # so this stays valid across swaps.
+            #
+            # NONE of this is on the bus — `stream_snapshot` and friends are direct callables —
+            # so a channel that wants a status row gets it by being wired here, exactly as the
+            # terminal is. Keyed on the attribute rather than on `isinstance(TerminalChannel)`
+            # because the web channel needs the identical three sources to build its `StatusTick`
+            # frame, and a widening isinstance chain here is a second list to keep in step.
             channel.tps_source = llm.gen_speed_snapshot
             channel.progress_source = llm.stream_snapshot  # phase + live token tallies
             channel.model_source = lambda: llm.config.model  # footer model chip, swap-safe
@@ -1491,10 +1551,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if name not in available_agent_names:
                 available_agent_names.append(name)
 
-        if isinstance(channel, TerminalChannel):
+        if getattr(channel, "has_display_toggles", False):
             # Reasoning stream: the sink is always wired (it no-ops while the flag is off) so
             # /reasoning can toggle it mid-session; the flag comes from --show-reasoning or
             # terminal.show_reasoning in config.yaml.
+            #
+            # `llm.on_reasoning` was gated to `TerminalChannel` here, and widening THIS ONE LINE
+            # is the whole of what live reasoning on the phone required — the callback already
+            # carried the raw text, and no provider change was needed. Keyed on the capability
+            # flag so the next channel that can render reasoning declares itself rather than
+            # being added to a list in `cli`.
             term_cfg = getattr(harness, "terminal", None)
             channel.show_reasoning = show_reasoning or bool(
                 getattr(term_cfg, "show_reasoning", False)
@@ -1505,6 +1571,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel.verbose = verbose
             if llm is not None:
                 llm.on_reasoning = channel.on_reasoning
+
+        if web_channel is not None:
+            # Everything the HTTP surface has to answer a STATE question about — `/api/tools`,
+            # `/api/permissions`, `/api/health`, and the session log `?from={seq}` replays from.
+            # One explicit handoff rather than the channel reconstructing state from the event
+            # stream it also forwards, which would give it two sources of truth for the same fact.
+            web_channel.bind_runtime(
+                session_id=sitting_id,
+                agent_id=agent_config.name,
+                gate=gate,
+                tool_registry=tool_registry,
+                llm=llm,
+                agent_loop=agent_loop,
+                session_dir=events_path.parent / "sessions",
+            )
 
         if acp_channel is not None:
             # The workspace-trust question, on the path that has no REPL to host it (owner
@@ -1657,7 +1738,12 @@ def start_app(
             help="Config directory. Default: $LOCALHARNESS_DIR, else $LOCALHARNESS_HOME, else ~/.localharness.",
         ),
     ] = None,
-    channel: Annotated[str, typer.Option("--channel", "-c", help="Input channel: terminal (default) or discord")] = "terminal",
+    channel: Annotated[str, typer.Option(
+        "--channel", "-c",
+        help="Input channel: terminal (default), discord, or web. An unknown name is refused, "
+             "not silently treated as terminal. `localharness web` is the friendlier way in to "
+             "the last of those — it starts the HTTP server first.",
+    )] = "terminal",
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,
     list_models: Annotated[bool, typer.Option("--list-models", help="List models available at the configured provider, then exit")] = False,
