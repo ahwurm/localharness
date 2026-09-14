@@ -397,13 +397,19 @@ async def _serve(
 async def _bring_up(
     channel: Any, *, config_dir: Optional[str], verbose: bool, agent: Optional[str]
 ) -> None:
-    """Build the session and hand the channel to the REPL, naming each stage as it goes.
+    """Build the session and hand the channel to the REPL, reporting the build to the client.
 
-    The stage names are WEBCH-43's whole point: a rising number reports elapsed time, not health,
-    and a wedged memory lock, a failing MCP server and a sibling process holding the inference
-    `flock` all look identical to a healthy slow start. So the screen says which stage it is in,
-    and the build has its own abort — cancelling a TURN is a different state machine and there
-    is otherwise no way out of a build that stuck.
+    What WEBCH-43 actually delivers here is the ABORT: cancelling a TURN is a different state
+    machine, so without this there is no way out of a build that stuck, and the phone's only
+    option is to kill the app. That half is real — `set_bringup` publishes an abortable stage and
+    the client's button reaches it.
+
+    The stage NAMES are not yet. There is exactly one non-terminal name, "starting the session",
+    covering the whole of `_start_async`; the other three are its terminals. So a wedged memory
+    lock, a failing MCP server and a sibling process holding the inference `flock` still look
+    identical from the client — the screen says the build is running and can be abandoned, not
+    which part of it is slow. Naming the wedges means instrumenting `_start_async` itself, and
+    that is the fast-follow this docstring is not allowed to pretend already happened.
     """
     import time
 
