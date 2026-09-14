@@ -336,3 +336,172 @@ async def test_delivery_with_no_subscriptions_is_a_no_op_not_a_crash(tmp_path):
                                policy=push.PushPolicy())
     await service.deliver(push.Push(title="x", body="y", tag="t", badge=0, data={}, alert=True))
     assert calls == []
+
+
+# ---------------------------------------------------------------- the wiring
+# "Done" is a push that a real bus event actually produces. Everything above this line could
+# pass with the trigger sites unwritten, which is the failure mode these exist to close.
+
+class _Recorder:
+    """Stands in for the sender: records what would have gone out, sends nothing."""
+
+    def __init__(self) -> None:
+        self.sent: list[push.Push] = []
+
+    async def send(self, subscription, message):
+        self.sent.append(message)
+        return True
+
+
+async def _pushable(tmp_path):
+    bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
+    channel = WebChannel(bus=bus, config={})
+    await channel.start()
+    channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
+    store = push.SubscriptionStore(tmp_path)
+    store.add(_subscription())
+    recorder = _Recorder()
+    channel.set_push(push.PushService(store=store, sender=recorder, policy=push.PushPolicy()))
+    return bus, channel, recorder
+
+
+async def test_a_parked_call_on_the_bus_reaches_the_push_sender(tmp_path):
+    """The whole point, end to end: the gate stages a call, and a phone in a pocket hears
+    about it. A test that stopped at the policy would prove nothing about whether anything
+    calls it."""
+    from localharness.agent.gate_types import PendingCall
+    from localharness.core.events import PermissionStaged
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    pending = PendingCall(
+        id=2, request=_request(), rendering="bash_exec: rm -rf ~/old-notes",
+        agent_label="", session_id="s1", created_at=0.0,
+    )
+    await bus.publish(PermissionStaged(session_id="s1", agent_id="orchestrator", pending=pending, total=1,
+                                    channel="web"))
+    await channel.flush_push()
+
+    assert len(recorder.sent) == 1
+    sent = recorder.sent[0]
+    assert sent.data["class"] == push.CLASS_NEEDS_YOU
+    assert sent.data["pending_id"] == 2
+    assert "pending=2" in sent.data["url"]
+    assert "rm -rf" in sent.body
+
+
+async def test_an_escalation_on_the_bus_reaches_the_push_sender(tmp_path):
+    from localharness.core.events import Escalation
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    await bus.publish(Escalation(session_id="s1", agent_id="orchestrator", reason="no progress for 6 iterations",
+                              detail="same tool, same args, six times", iteration_at_escalation=6))
+    await channel.flush_push()
+
+    assert len(recorder.sent) == 1
+    assert recorder.sent[0].data["class"] == push.CLASS_NEEDS_YOU
+
+
+async def test_a_long_turn_finishing_with_nobody_attached_pushes(tmp_path):
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(
+        session_id="s1", agent_id="orchestrator", iterations=3, elapsed_tokens=100,
+        duration_seconds=push.TURN_PUSH_MIN_S + 30, summary="fixed the parser",
+    ))
+    await channel.flush_push()
+
+    assert len(recorder.sent) == 1
+    assert recorder.sent[0].data["class"] == push.CLASS_TURN_FINISHED
+    assert "fixed the parser" in recorder.sent[0].body
+
+
+async def test_a_turn_finishing_while_the_phone_is_watching_pushes_nothing(tmp_path):
+    """The presence gate, through the real attach path — not a hand-set integer."""
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    channel.attach_client()
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
+                                 duration_seconds=9999.0, summary="done"))
+    await channel.flush_push()
+
+    assert recorder.sent == []
+
+
+async def test_a_subagents_turn_finishing_does_not_push(tmp_path):
+    """45% of real sessions delegate. A child turn completing mid-task is not "your task is
+    done" — the same root-only rule the instrument cluster already learned the hard way."""
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(session_id="s1", parent_id="root-1", agent_id="researcher", iterations=1,
+                                 elapsed_tokens=9, duration_seconds=9999.0, summary="child"))
+    await channel.flush_push()
+
+    assert recorder.sent == []
+
+
+async def test_answering_in_another_surface_clears_the_badge_here(tmp_path):
+    """WEBCH-08's cross-surface rule, seen from the push side: answering in Discord publishes
+    `PermissionResolved`, and the phone's badge has to come down with it."""
+    from localharness.agent.gate_types import PendingCall
+    from localharness.core.events import PermissionResolved, PermissionStaged
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    pending = PendingCall(id=3, request=_request(), rendering="bash_exec: ls", agent_label="",
+                          session_id="s1", created_at=0.0)
+    await bus.publish(PermissionStaged(session_id="s1", agent_id="orchestrator", pending=pending, total=1,
+                                    channel="web"))
+    await bus.publish(PermissionResolved(
+        session_id="s1", agent_id="orchestrator", pending_id=3, decision="allow_once",
+        klass="shell", key="k", tool_name="bash_exec",
+    ))
+    await channel.flush_push()
+
+    assert channel._push.policy.outstanding("s1") == 0
+
+
+async def test_a_channel_with_no_push_service_still_runs_a_turn(tmp_path):
+    """Push is optional — `--replay`, a box with no phone enrolled, a plain terminal user. The
+    trigger sites must be inert without it rather than raising into the bus."""
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
+    channel = WebChannel(bus=bus, config={})
+    await channel.start()
+    channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
+                                 duration_seconds=9999.0, summary="done"))
+    await channel.flush_push()   # a no-op, and must not raise
+
+
+async def test_a_failing_push_never_takes_the_turn_down(tmp_path):
+    """A push service having a bad day is a convenience failing, not a turn failing."""
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus, channel, recorder = await _pushable(tmp_path)
+
+    class _Broken:
+        async def send(self, subscription, message):
+            raise RuntimeError("push service on fire")
+
+    channel._push.sender = _Broken()
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
+                                 duration_seconds=9999.0, summary="done"))
+    await channel.flush_push()   # must not raise
+
+
+def _request():
+    from localharness.agent.gate_types import PermissionRequest
+
+    return PermissionRequest(
+        tool_name="bash_exec", tool_params={"command": "rm -rf ~/old-notes"},
+        klass="shell-destructive", key=None, grantable=False, reason="destructive",
+        display="bash_exec: rm -rf ~/old-notes",
+    )

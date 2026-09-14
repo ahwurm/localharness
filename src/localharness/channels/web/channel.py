@@ -38,7 +38,16 @@ from localharness.core.bus import EventBus
 # Only the four types this channel REACTS to beyond forwarding. Everything else reaches the
 # client through `EVENT_TYPE_MAP` in `start()`, which is the point: nothing here is a list of
 # what the wire carries.
-from localharness.core.events import Action, Heartbeat, TurnCompleted, TurnFailed, TurnStarted
+from localharness.core.events import (
+    Action,
+    Escalation,
+    Heartbeat,
+    PermissionResolved,
+    PermissionStaged,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 
 from .protocol import (
     AskExpired,
@@ -72,6 +81,14 @@ silent stream and the cost at rest is zero.
 
 STATUS_TICK_INTERVAL_S = 1.0 / STATUS_TICK_HZ
 """Derived from the rate above rather than written twice."""
+
+PUSH_SUMMARY_CHARS = 120
+"""How much of a turn summary or a parked call's rendering a notification body may carry.
+
+A lock screen truncates around here anyway, and the encrypted push record has a fixed size — so
+a 40 KB tool error is cut where the notification is composed rather than failing at the
+transport, where the only symptom would be a push that silently never arrived.
+"""
 
 SSE_KEEPALIVE_S = 15.0
 """Comment-only `: ping` interval.
@@ -290,6 +307,11 @@ class WebChannel(ChannelAdapter):
         self._forwarded_max: dict[str, int] = {}
         self._session_dir: Optional[Path] = None
 
+        # Web Push, when a phone has enrolled. Optional on purpose: `--replay` sets none, and a
+        # box nobody has paired a phone with must behave exactly as it did before A2.
+        self._push: Any = None
+        self._push_tasks: set[asyncio.Task] = set()
+
     # ---------------------------------------------------------------- lifecycle
 
     def bind_runtime(
@@ -359,6 +381,9 @@ class WebChannel(ChannelAdapter):
         for ask in list(self._open_asks.values()):
             self._settle(ask, ASK_FALLBACK_DECISION)
         self._open_asks.clear()
+        # A turn-finished push fired moments before shutdown is the one most worth not dropping:
+        # it is the notification saying the thing you walked away from is done.
+        await self.flush_push()
 
     # ---------------------------------------------------------------- fan-out
 
@@ -439,6 +464,42 @@ class WebChannel(ChannelAdapter):
         self._emit(type(event).__name__, seq, payload)
         await self._react(event)
 
+    # ---------------------------------------------------------------- push (A2)
+
+    def set_push(self, service: Any) -> None:
+        """Attach the Web Push service. Absent, every trigger site below is inert."""
+        self._push = service
+
+    def _push_fire(self, message: Any) -> None:
+        """Deliver one push WITHOUT waiting for it.
+
+        Scheduled rather than awaited because this runs inside bus-event handling, on the event
+        loop that is also generating tokens: a push service that takes ten seconds to answer
+        would otherwise pause the turn it is announcing. The task is held in a set because a
+        bare `ensure_future` can be garbage-collected mid-flight — the same footgun the harness
+        hit once already elsewhere.
+        """
+        if self._push is None or message is None:
+            return
+        task = asyncio.ensure_future(self._deliver(message))
+        self._push_tasks.add(task)
+        task.add_done_callback(self._push_tasks.discard)
+
+    async def _deliver(self, message: Any) -> None:
+        try:
+            await self._push.deliver(message)
+        except Exception:  # noqa: BLE001 — a convenience never takes the turn down with it
+            log.warning("web_push_failed", exc_info=True)
+
+    async def flush_push(self) -> None:
+        """Wait for in-flight pushes. Used by `stop()` so a turn-finished push is not dropped on
+        the way out, and by tests, which would otherwise race the loop."""
+        while self._push_tasks:
+            await asyncio.gather(*list(self._push_tasks), return_exceptions=True)
+
+    def _push_policy(self) -> Any:
+        return None if self._push is None else self._push.policy
+
     async def _react(self, event: Any) -> None:
         """The few events this channel does something about beyond forwarding them.
 
@@ -450,16 +511,49 @@ class WebChannel(ChannelAdapter):
         carried on generating. Found by test, not by reading.
         """
         root = getattr(event, "parent_id", None) is None
+        policy = self._push_policy()
         if isinstance(event, TurnStarted):
             if root:
                 self._turn_running = True
                 self._stream_id = None
                 await self._start_status_ticker()
+                if policy is not None:
+                    policy.turn_started(self.session_id)
         elif isinstance(event, (TurnCompleted, TurnFailed)):
             if root:
                 self._turn_running = False
                 await self._stop_status_ticker()
                 self._close_stream(None)
+                if policy is not None:
+                    # `duration_seconds` is the harness's OWN measurement of the turn; preferred
+                    # over this channel's wall-clock bookkeeping, which cannot see a turn that
+                    # began before the page connected.
+                    self._push_fire(policy.turn_finished(
+                        self.session_id,
+                        clients_attached=self.client_count,
+                        duration=getattr(event, "duration_seconds", None),
+                        summary=(getattr(event, "summary", "") or "")[:PUSH_SUMMARY_CHARS],
+                    ))
+        elif isinstance(event, PermissionStaged):
+            # NOT gated on `root`: a subagent's parked call needs a human exactly as much as the
+            # orchestrator's does, and 45% of real sessions delegate.
+            if policy is not None:
+                pending = getattr(event, "pending", None)
+                self._push_fire(policy.needs_you(
+                    self.session_id, kind="parked",
+                    pending_id=getattr(pending, "id", None),
+                    detail=(getattr(pending, "rendering", "") or "")[:PUSH_SUMMARY_CHARS],
+                ))
+        elif isinstance(event, PermissionResolved):
+            # From ANY surface — answering in Discord has to bring this phone's badge down too.
+            if policy is not None:
+                policy.resolved(self.session_id, pending_id=getattr(event, "pending_id", None))
+        elif isinstance(event, Escalation):
+            if policy is not None:
+                self._push_fire(policy.needs_you(
+                    self.session_id, kind="escalation",
+                    detail=(getattr(event, "reason", "") or "")[:PUSH_SUMMARY_CHARS],
+                ))
         elif isinstance(event, Heartbeat):
             self._context_pct = event.context_utilization_pct
         elif isinstance(event, Action):
@@ -695,6 +789,16 @@ class WebChannel(ChannelAdapter):
         ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request))
         self._open_asks[request_id] = ask
         self.push(ask.frame)
+        policy = self._push_policy()
+        if policy is not None:
+            # A blocking ask is the one that stops the turn dead, so it is the one most worth a
+            # buzz — and it is the class most likely to be sitting on a screen nobody is looking
+            # at, since the gate holds the loop until somebody answers.
+            self._push_fire(policy.needs_you(
+                self.session_id, kind="blocking", request_id=request_id,
+                detail=(getattr(ask.frame, "text", "") or getattr(request, "display", "")
+                        or "")[:PUSH_SUMMARY_CHARS],
+            ))
         try:
             kind = await ask.future
             return Decision(kind=kind)
@@ -824,6 +928,11 @@ class WebChannel(ChannelAdapter):
         ask.outcome = kind
         if not ask.future.done():
             ask.future.set_result(kind)
+        policy = self._push_policy()
+        if policy is not None:
+            # An answered question is no longer outstanding, however it was answered — including
+            # by the shutdown path below, which settles every open ask as a denial.
+            policy.resolved(self.session_id, request_id=ask.request_id)
 
     def register_fixture_ask(self, frame: BlockingAsk) -> None:
         """Make a `--fixtures` blocking ask genuinely answerable (§8).

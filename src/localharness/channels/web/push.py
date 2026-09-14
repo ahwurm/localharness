@@ -348,7 +348,7 @@ class PushPolicy:
 
     def turn_finished(
         self, session_id: Optional[str], *, clients_attached: int, now: Optional[float] = None,
-        summary: str = "",
+        summary: str = "", duration: Optional[float] = None,
     ) -> Optional[Push]:
         """A push, or None — and None is the common answer.
 
@@ -358,16 +358,19 @@ class PushPolicy:
            its own stream when it goes to the background precisely so that this signal means
            "watching" rather than "has the tab open somewhere".
         2. **Duration.** A turn shorter than the measured median is one you could have waited for.
-        3. **A start we actually saw.** No start timestamp means no duration, and a push whose
-           "while you were away" is unmeasured is a push that fires on a process restart.
+        3. **A duration we actually have.** `TurnCompleted` carries the harness's own
+           `duration_seconds` and that is preferred, because this object cannot see a turn that
+           began before the page connected. Failing that, the start we timed ourselves. Failing
+           both, no push: an unmeasured "while you were away" is a push that fires on restart.
         """
         state = self._state(session_id)
         started, state.turn_started_at = state.turn_started_at, None
-        if clients_attached > 0 or started is None:
+        if clients_attached > 0:
             return None
         moment = time.monotonic() if now is None else now
-        elapsed = moment - started
-        if elapsed < TURN_PUSH_MIN_S:
+        elapsed = duration if duration is not None else (
+            None if started is None else moment - started)
+        if elapsed is None or elapsed < TURN_PUSH_MIN_S:
             return None
         return Push(
             title="turn finished",
