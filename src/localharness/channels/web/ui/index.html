@@ -284,6 +284,7 @@
   <h3>session</h3>
   <div id="cfgModel" class="meta"></div>
   <button class="small" id="reasonBtn">reasoning: off</button>
+  <button class="small" id="verboseBtn">verbose: off</button>
   <div id="modes"></div>
   <button class="small" id="cfgClose">close</button>
 </dialog>
@@ -320,7 +321,7 @@ const get = (path) => fetch(path, { headers: { "Authorization": "Bearer " + toke
 const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
-  reasoning: false, offline: false, modes: [],
+  reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -346,6 +347,7 @@ function add(node) {
   const stick = atBottom();
   $("greet").hidden = true;   // the first real transcript row retires the greeting
   log.appendChild(node);
+  S.lastRow = node;           // burst recency: a row landing after a counter ends its run
   if (stick) window.scrollTo(0, document.body.scrollHeight);
   return node;
 }
@@ -475,6 +477,53 @@ function onEvent(name, data) {
   }
 }
 
+// THE BURST COUNTER — the terminal's condensed view, carried over (channels/terminal.py:
+// consecutive calls from one family collapse into `read · grep · 5/5`; side-effecting tools
+// stay itemized because each one is the audit trail; /verbose is the opt-out). Family
+// membership here is the server-declared SAFE group, not a name list — the same opt-in rule
+// the argument-collapse uses, so a new dangerous tool cannot start grouping by omission.
+// Display-only: per-call truth (args, output, errors) accumulates under the row's <details>.
+function burstHead(b) {
+  b.label.textContent = (b.child ? "↳ " : "") + b.tools.join(" · ") +
+    "  " + b.done + "/" + b.calls + (b.errors ? "  ✗" + b.errors : "");
+}
+function closeBurst() {
+  const b = S.burst;
+  if (!b) return;
+  S.burst = null;
+  // the disclosure the terminal prints when a web burst closes, kept word for word
+  if (b.group === "web" && !b.noted) {
+    b.noted = true;
+    b.row.appendChild(el("div", "meta", "web results — UNTRUSTED, treated as data only"));
+  }
+}
+function burstAdd(group, child, d) {
+  const key = group + (child ? "#child" : "");
+  if (S.burst && (S.burst.key !== key || S.lastRow !== S.burst.row)) closeBurst();
+  if (!S.burst) {
+    const row = add(el("div", "row tool" + (child ? " child" : "")));
+    row.dataset.group = group;
+    const head = el("div");
+    const label = el("span");
+    head.appendChild(label);
+    if (group === "web") head.appendChild(el("span", "untrusted", " untrusted ingest"));
+    row.appendChild(head);
+    const det = el("details");
+    det.appendChild(el("summary", null, "per-call detail"));
+    row.appendChild(det);
+    S.burst = { key, group, child, row, label, det, tools: [], calls: 0, done: 0, errors: 0 };
+  }
+  const b = S.burst;
+  if (!b.tools.includes(d.tool_name)) b.tools.push(d.tool_name);
+  b.calls++;
+  const item = el("div", null, d.tool_name);
+  item.appendChild(el("pre", null, JSON.stringify(d.tool_params || {}, null, 1)));
+  item._burst = b;               // the Observation finds its counter through the item
+  b.det.appendChild(item);
+  S.calls.set(d.tool_call_id, item);
+  burstHead(b);
+}
+
 function renderAction(d, child) {
   if (d.action_type === "tool_call") {
     // Be idempotent about a repeated call id. The SERVER is what guarantees no duplicate — the
@@ -487,6 +536,12 @@ function renderAction(d, child) {
     // never heard of is itemized. A newly-added dangerous tool therefore cannot silently start
     // collapsing because nobody remembered to add it to a deny list.
     const collapse = S.collapsible.includes(group);
+    // The condensed default (owner, 2026-09-14): safe-group calls consolidate into one counter
+    // row; verbose itemizes every call, and a destructive flag itemizes whatever the group says.
+    if (!S.verbose && collapse && !(S.tools[d.tool_name] || {}).destructive) {
+      burstAdd(group, child, d);
+      return;
+    }
     const row = add(el("div", "row tool" + (child ? " child" : "")));
     // The GROUP the server reported, handed to the stylesheet so a row can be coloured by what it
     // is — memory cyan, a delegated subagent green — the way the terminal colours the same call.
@@ -529,6 +584,12 @@ function renderObservation(d, child) {
   target.appendChild(el("div", "meta", bits.join(" · ") || "done"));
   if (d.error) target.classList.add("err");
   target.appendChild(copyButton(() => out, "copy output"));
+  const b = target._burst;
+  if (b) {
+    b.done++;
+    if (d.error) { b.errors++; b.det.open = true; }   // an error opens the per-call truth
+    burstHead(b);
+  }
   S.calls.delete(d.tool_call_id);
 }
 
@@ -675,6 +736,7 @@ function connect(from) {
 }
 
 function paint(modelState) {
+  closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
   if (S.offline) { s.textContent = "offline — retrying"; s.className = "offline"; }
   else { s.className = ""; if (modelState) s.textContent = modelState; }
@@ -931,6 +993,14 @@ $("modelBtn").onclick = () => {
     || "no model reading yet — the instruments arrive with the first turn";
   paintModes();
   $("cfg").showModal();
+};
+$("verboseBtn").onclick = () => {
+  // Client-side only, unlike the reasoning toggle: reasoning DELTAS are gated server-side, but
+  // every event already reaches this page — density is this client's half. Posting /verbose
+  // would flip the terminal's scrollback from a phone, which is nobody's expectation.
+  S.verbose = !S.verbose;
+  $("verboseBtn").textContent = "verbose: " + (S.verbose ? "on" : "off");
+  closeBurst();   // applies from the next call on; rows already drawn stay as drawn
 };
 $("cfgClose").onclick = () => $("cfg").close();
 // a tap on the dim backdrop closes a sheet, exactly as a thumb expects
