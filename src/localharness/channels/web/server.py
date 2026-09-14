@@ -107,6 +107,25 @@ not silently reintroduce the stall.
 """
 
 
+SESSION_LIST_CAP = 50
+"""How many logs `GET /api/sessions` returns, newest first.
+
+The drawer it feeds is a recency surface on a phone, not an archive browser: fifty rows is
+already several screens of thumb-scroll, and each row costs a title scan (below). A box that
+outgrows this wants `ls sessions/`, not a longer drawer.
+"""
+
+TITLE_SCAN_LINES = 200
+"""How deep into a log the title scan reads before giving up on finding a `UserMessage`.
+
+The first user message is normally within the first handful of lines; the cap is there so one
+bring-up-heavy or malformed log cannot cost a full-file read per listing row.
+"""
+
+TITLE_MAX_CHARS = 100
+"""A history row's title is a recognition cue, not the message: one drawer line's worth."""
+
+
 TOKEN_FRAGMENT_KEY = "t"
 """The URL-FRAGMENT key the enrolment QR carries the app token in: `https://host/#t=<token>`.
 
@@ -285,6 +304,7 @@ class WebServer:
             # caller gets a `start_url` that pairs the installed app (see `manifest`).
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
+            Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
             Route("/api/sessions/{session_id}/message", self.message, methods=["POST"]),
             Route("/api/sessions/{session_id}/cancel", self.cancel, methods=["POST"]),
@@ -691,6 +711,61 @@ class WebServer:
             }, status=404)
         return _json({"eviction_id": eviction_id, "body": body})
 
+    async def sessions(self, request: Request) -> Response:
+        """The history list: every session log on disk, newest first (the drawer behind ☰).
+
+        Reading is free, exactly as `events` below — no session, no GPU, no bring-up. `title`
+        is the first `UserMessage` in the log, because "what did I ask" is how a human
+        recognises a conversation; a log whose scan finds none gets null and the client
+        falls back to the id.
+        """
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+
+        def scan() -> tuple[list[dict], Optional[str]]:
+            if self.replay is not None:
+                files = [self.replay.path] if self.replay.path.exists() else []
+            else:
+                base = self.channel._session_dir
+                if base is None:
+                    return [], ("no log directory yet — it binds when the first session "
+                                "comes up, so a cold box has no history to list")
+                if not base.is_dir():
+                    return [], None
+                files = sorted(base.glob("*.jsonl"),
+                               key=lambda p: p.stat().st_mtime, reverse=True)
+            rows: list[dict] = []
+            for path in files[:SESSION_LIST_CAP]:
+                title: Optional[str] = None
+                try:
+                    with path.open(encoding="utf-8", errors="replace") as fh:
+                        for lineno, raw in enumerate(fh):
+                            if lineno >= TITLE_SCAN_LINES:
+                                break
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue  # a torn line is skipped, exactly as _backfill does
+                            if data.get("event_type") == "UserMessage":
+                                text = (data.get("content") or "").strip()
+                                title = text[:TITLE_MAX_CHARS] or None
+                                break
+                    stat = path.stat()
+                except OSError:
+                    continue  # deleted between glob and read: a listing must not 500 over it
+                rows.append({
+                    "session_id": path.stem,
+                    "title": title,
+                    "modified_unix": stat.st_mtime,
+                    "size_bytes": stat.st_size,
+                    "live": path.stem == self.channel.session_id,
+                })
+            return rows, None
+
+        listed, note = await asyncio.to_thread(scan)
+        return _json({"sessions": listed, "note": note})
+
     async def events(self, request: Request) -> Response:
         """Replay/backfill off disk. Reading is always free — it needs nothing live.
 
@@ -949,6 +1024,7 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/push/subscribe", "register this device for Web Push; body is a PushSubscription"),
     ("GET", "/api/push/key", "the VAPID application server key for pushManager.subscribe()"),
     ("GET", "/api/stream", "the SSE event stream; ?from={seq} resumes"),
+    ("GET", "/api/sessions", "the session logs on disk, newest first: [{session_id, title, live, …}]"),
     ("GET", "/api/sessions/{id}/events", "replay off disk as NDJSON; ?from={seq}"),
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),
     ("GET", "/api/tools", "the live registry: name -> group, destructive"),

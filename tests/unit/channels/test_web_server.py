@@ -16,7 +16,7 @@ from localharness.channels.web import auth
 from localharness.channels.web.channel import WebChannel
 from localharness.channels.web.server import WebServer
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Observation, TaskComplete
+from localharness.core.events import Action, Observation, TaskComplete, UserMessage
 
 pytestmark = pytest.mark.asyncio
 
@@ -116,7 +116,8 @@ async def _read_frames(server, n, *, path="/api/stream", headers=None):
 async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
     _, _, _, client = await _stack(tmp_path)
     for path in ("/api/stream", "/api/health", "/api/protocol", "/api/schema", "/api/tools",
-                 "/api/grants", "/api/permissions", "/api/sessions/s1/events"):
+                 "/api/grants", "/api/permissions", "/api/sessions",
+                 "/api/sessions/s1/events"):
         assert (await client.get(path)).status_code == 401, path
     for path in ("/api/sessions/s1/message", "/api/sessions/s1/cancel",
                  "/api/sessions/s1/mode", "/api/sessions/s1/command",
@@ -221,6 +222,45 @@ async def test_the_backfill_matches_the_session_log_byte_for_byte(tmp_path):
                (tmp_path / "sessions" / "s1.jsonl").read_text().splitlines()]
     assert served == on_disk
     assert [row["summary"] for row in served] == [e.summary for e in events]
+
+
+async def test_the_history_list_is_newest_first_titled_by_the_first_user_message(tmp_path):
+    """`GET /api/sessions` feeds the drawer behind the page's hamburger: every log on disk,
+    newest first, the live one flagged, titled by what the human asked."""
+    import os
+
+    bus, channel, server, client = await _stack(tmp_path)
+    await bus.publish(UserMessage(agent_id="a", session_id="s1",
+                                  content="hello phone", channel="web"))
+    old = tmp_path / "sessions" / "s0.jsonl"
+    old.write_text(
+        "not json — a torn line is skipped\n"
+        + json.dumps({"seq": 1, "event_type": "UserMessage", "content": "  yesterday's ask  "})
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(old, (1_000_000_000, 1_000_000_000))  # firmly older than the live log
+
+    got = await client.get("/api/sessions", headers=BEARER)
+    assert got.status_code == 200
+    rows = got.json()["sessions"]
+    assert [r["session_id"] for r in rows] == ["s1", "s0"]
+    assert rows[0]["live"] is True and rows[1]["live"] is False
+    assert rows[0]["title"] == "hello phone"
+    assert rows[1]["title"] == "yesterday's ask"       # stripped, and the torn line skipped
+    assert rows[1]["size_bytes"] == old.stat().st_size
+
+
+async def test_the_history_list_says_why_a_cold_box_has_none(tmp_path):
+    """Before the first session binds there is no log directory to read — the endpoint says so
+    instead of serving an empty list that looks like an empty history."""
+    _, channel, _, client = await _stack(tmp_path)
+    channel._session_dir = None
+    got = await client.get("/api/sessions", headers=BEARER)
+    assert got.status_code == 200
+    body = got.json()
+    assert body["sessions"] == []
+    assert "no log directory yet" in body["note"]
 
 
 async def test_a_persist_hole_surfaces_as_a_visible_gap(tmp_path):
