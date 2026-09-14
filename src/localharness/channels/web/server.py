@@ -69,8 +69,9 @@ preflight. Refused outright on every POST — for a verb that can approve a perm
 UI_INDEX = "index.html"
 
 PACKAGED_UI_DIR = Path(__file__).parent / "ui"
-"""Where the deliberately-ugly reference page ships. Served from a DIRECTORY, live: the owner
-edits the file and pulls to refresh — no server restart, no build step, no bundler (WIN-B)."""
+"""Where the reference page ships. Served from a DIRECTORY, live: the owner edits the file and
+pulls to refresh — no server restart, no build step, no bundler (WIN-B). The worker beside it
+caches nothing for the same reason, so a restyle reaches an installed phone on the next reload."""
 
 MAX_BODY_BYTES = 1 << 20
 """1 MiB. Sourced from the measured message corpus: the longest real user message is 10,900
@@ -131,8 +132,12 @@ MANIFEST: dict[str, Any] = {
     # the model is consulted. The competitor is a home-screen icon.
     "display": "standalone",
     "orientation": "portrait",
-    "background_color": "#ffffff",
-    "theme_color": "#111111",
+    # Both are the reference page's ground (`--color-bg` from localharness.dev's theme, the same
+    # value its `theme-color` meta carries). They are what iOS paints the splash screen and the
+    # surround with BEFORE a line of the page has run, so a mismatch here is a white flash on
+    # every cold launch of a dark app.
+    "background_color": "#0D0F15",
+    "theme_color": "#0D0F15",
     "icons": [
         {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
         {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
