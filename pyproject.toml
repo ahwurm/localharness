@@ -76,6 +76,20 @@ exact-tokenizer = [
 json-repair = [
     "json-repair>=0.30,<1",
 ]
+# The web channel (`localharness web`): the ASGI app and the server behind it. OPTIONAL, on the
+# `dispatch` precedent — a terminal-only install should not carry an HTTP server.
+#
+# DECLARED EXPLICITLY even though `mcp` (a main dependency) already pulls both in today. That is
+# the whole lesson of the numpy/anyio/packaging entry above: a transitive dependency is not a
+# promise, and `mcp` could drop or re-pin either of these and break an install that looks fine
+# here. Starlette rather than FastAPI (no routing sugar is needed, and SSE is written by hand so
+# the bus `seq` IS the SSE id); uvicorn rather than a hand-rolled h11 loop; ASGI rather than
+# aiohttp so the whole surface is drivable in-process by `httpx.ASGITransport` with no socket and
+# no model, which is how every web test runs.
+web = [
+    "starlette>=0.40,<1",
+    "uvicorn>=0.30,<1",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

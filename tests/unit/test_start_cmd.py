@@ -236,6 +236,10 @@ def test_repl_slash_help():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -299,6 +303,10 @@ def test_repl_slash_agents_empty():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -330,6 +338,10 @@ def test_repl_slash_agents_with_cards():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -362,6 +374,10 @@ def test_repl_unknown_slash_rejected_deterministically():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
@@ -402,6 +418,10 @@ def test_repl_normal_input_routes_to_agent():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
@@ -439,6 +459,10 @@ def test_repl_does_not_double_fire_output():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
@@ -472,6 +496,10 @@ def test_repl_skips_empty_input():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -517,6 +545,10 @@ def test_repl_creation_intent_starts_workflow():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -557,6 +589,10 @@ def test_repl_active_workflow_routes_to_creation_handler():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -643,6 +679,10 @@ def test_repl_creation_cancel_clears_workflow():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -862,6 +902,10 @@ def test_repl_publishes_user_message_before_run_turn():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_loop._config = mock_agent_config
     mock_loop.current_session_id = None
@@ -901,6 +945,10 @@ def test_repl_slash_commands_no_user_message():
 
     mock_channel = AsyncMock()
     mock_channel.read_input = fake_read_input
+    # A test double has to declare what it is: streaming is opt-in by the channel
+    # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
+    # AsyncMock answers truthy to every attribute it has never heard of.
+    mock_channel.streams_tokens = False
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
