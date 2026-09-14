@@ -391,10 +391,25 @@ function onFrame(name, d) {
       S.turn = false; clearProvisional(null); paint();
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
       break;
-    case "BringUpStage":
+    case "BringUpStage": {
       $("state").textContent = d.failed ? "bring-up failed: " + d.stage : "starting: " + d.stage;
-      if (d.detail) add(el("div", "row " + (d.failed ? "err" : "sys"), d.stage + " — " + d.detail));
+      const row = add(el("div", "row " + (d.failed ? "err" : "sys")));
+      row.appendChild(el("div", null, d.stage + (d.detail ? " — " + d.detail : "")));
+      // A rising number reports elapsed time, not health — a wedged memory lock, a failing MCP
+      // server and a sibling process holding the inference lock all look like a slow start. So
+      // the build window gets its OWN way out: cancelling a TURN is a different state machine,
+      // and without this there is no escape from a bring-up that stuck.
+      if (d.abortable && !d.failed) {
+        const b = el("button", "small", "give up on this build");
+        b.onclick = async () => {
+          const r = await post("/api/bringup/abort");
+          add(el("div", "row sys", r.status === "aborting"
+            ? "abandoning the build." : "there is no build to abandon."));
+        };
+        row.appendChild(b);
+      }
       break;
+    }
     case "Notice": {
       const r = add(el("div", "row " + (d.style === "system.error" ? "err" : "sys")));
       if (d.preformatted) r.appendChild(el("pre", null, d.text)); else r.appendChild(el("div", null, d.text));
