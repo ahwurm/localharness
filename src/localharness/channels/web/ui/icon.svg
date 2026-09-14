@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-label="localharness">
+  <!--
+    PLACEHOLDER. Three stacked bars on a dark square, and it is meant to be replaced.
+    The same picture as icon-192/512/180.png, which scripts/make_web_icons.py generates —
+    edit both or neither, or a launcher will show one and a browser tab the other.
+  -->
+  <rect width="512" height="512" fill="#111111"/>
+  <rect x="113" y="143" width="286" height="51" fill="#aa6600"/>
+  <rect x="148" y="230" width="215" height="51" fill="#ffffff"/>
+  <rect x="184" y="317" width="143" height="51" fill="#ffffff"/>
+</svg>

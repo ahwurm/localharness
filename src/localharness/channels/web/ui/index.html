@@ -4,6 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>localharness</title>
+<!-- The install (A2). `crossorigin="use-credentials"` is load-bearing, not boilerplate: without
+     it the browser fetches the manifest anonymously, and the server can only hand a pairing
+     `start_url` to a caller that presents the credential. iOS keeps a home-screen app's storage
+     in a different jar from Safari's, so this is what stops the installed app starting blank. -->
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<!-- iOS uses THIS for the home-screen icon, not the manifest's, and it does not take an SVG. -->
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="harness">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <!--
   THE REFERENCE PAGE. It is deliberately ugly and that is the specification, not an apology.
 
@@ -79,6 +91,8 @@
     <span id="tps" class="meta"></span>
     <span id="ctx" class="meta"></span>
     <span id="model" class="meta"></span>
+    <button class="small" id="recheck" title="re-run the model-server probe">re-check</button>
+    <button class="small" id="pushBtn" hidden>notifications</button>
     <button class="small" id="queueBtn">needs you <span class="badge" id="pcount">0</span></button>
     <button class="small" id="reasonBtn">reasoning: off</button>
     <button class="small" id="grantsBtn">grants</button>
@@ -108,10 +122,18 @@
 // string lands in logs and referrers. POSTs carry it as a bearer header; the stream uses the
 // SameSite=Strict cookie that /api/auth/enroll sets in exchange for it.
 const LS = window.localStorage;
-let token = LS.getItem("lh.token") || new URLSearchParams(location.search).get("token") || "";
-if (new URLSearchParams(location.search).get("token")) {
+// PAIRING (A2). The enrolment QR encodes `https://host/#t=<token>`, and the FRAGMENT is the
+// reason that is allowed: a fragment is never sent to a server, so it lands in no access log,
+// no proxy log and no Referer — which is what the "never put the token in a URL" rule is
+// actually about. It is still read once and erased from the address bar immediately, so it
+// survives into neither history nor a screenshot. (`?token=` is also accepted, for a link
+// someone already bookmarked; it is the worse of the two and the QR never produces it.)
+const fragmentToken = new URLSearchParams(location.hash.slice(1)).get("t");
+const queryToken = new URLSearchParams(location.search).get("token");
+let token = LS.getItem("lh.token") || fragmentToken || queryToken || "";
+if (fragmentToken || queryToken) {
   LS.setItem("lh.token", token);
-  history.replaceState(null, "", location.pathname);   // don't leave a secret in the address bar
+  history.replaceState(null, "", location.pathname + location.search.replace(/[?&]token=[^&]*/, ""));
 }
 const H = () => ({ "Content-Type": "application/json", "Authorization": "Bearer " + token });
 const post = (path, body) =>
@@ -603,10 +625,107 @@ $("protoBtn").onclick = async () => {
   showSheet("protocol v" + p.protocol_version, JSON.stringify(p, null, 1));
 };
 
+// ---------------------------------------------------------------- the app shell (A2)
+// Installed = running from the home screen. iOS reports it on `navigator.standalone`, everyone
+// else through the display-mode media query.
+const installed = () =>
+  (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+  window.navigator.standalone === true;
+
+// HTTPS gating, said out loud instead of failing silently. A service worker — and therefore
+// install and push — needs a secure context: https, or localhost. Over plain http on a LAN
+// address the browser refuses, so the page degrades to a browser tab and SAYS SO rather than
+// showing a button that throws. `tailscale serve` is the supported way to get the certificate.
+const secure = window.isSecureContext === true;
+let swReg = null;
+
+async function registerWorker() {
+  if (!secure || !("serviceWorker" in navigator)) return null;
+  try {
+    swReg = await navigator.serviceWorker.register("/sw.js");
+    return swReg;
+  } catch (e) {
+    add(el("div", "row err", "service worker refused: " + e));
+    return null;
+  }
+}
+
+function pushReason() {
+  if (!secure) return "no notifications: this page is not on https — put `tailscale serve` " +
+                     "(or any TLS proxy) in front of it, then reopen this URL.";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return "no notifications: this browser has no Web Push.";
+  }
+  // ORDER IS LOAD-BEARING (§5.5). iOS grants push ONLY to a PWA already on the Home Screen; a
+  // bare tab that asks first burns the one prompt the owner ever sees and produces a
+  // subscription that can never deliver. So the request is not merely discouraged before
+  // install — it is unreachable, because this returns before `requestPermission` is called.
+  if (!installed()) return "add to Home Screen first (Share → Add to Home Screen), then " +
+                           "reopen from the icon to turn notifications on.";
+  if (Notification.permission === "denied") {
+    return "notifications are blocked for this app in system settings.";
+  }
+  return null;
+}
+
+async function enablePush() {
+  const blocked = pushReason();
+  if (blocked) { add(el("div", "row sys", blocked)); return; }
+  const reg = swReg || await registerWorker();
+  if (!reg) return;
+  const granted = await Notification.requestPermission();
+  if (granted !== "granted") { add(el("div", "row sys", "notifications not granted.")); return; }
+  const { application_server_key } = await get("/api/push/key");
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,   // iOS permits nothing else; every push below shows something
+    applicationServerKey: application_server_key,
+  });
+  const r = await post("/api/push/subscribe", sub.toJSON());
+  add(el("div", "row sys", r.status === "subscribed"
+    ? "notifications on for this device (" + r.devices + " enrolled)."
+    : "the server refused the subscription: " + JSON.stringify(r)));
+  paintPush();
+}
+
+function paintPush() {
+  const b = $("pushBtn");
+  b.hidden = false;
+  const blocked = pushReason();
+  b.textContent = blocked ? "notifications: unavailable"
+    : (Notification.permission === "granted" ? "notifications: on" : "turn on notifications");
+  b.title = blocked || "buzz this phone when a turn finishes or the gate needs you";
+}
+
+// A push carries where to land; opening from one, or tapping one while the app is open, has to
+// actually go there (WEBCH-44).
+async function followDeepLink(params) {
+  const pending = params.get("pending");
+  const ask = params.get("ask");
+  if (ask && S.asks.has(ask)) { showAsk(S.asks.get(ask)); return; }
+  if (pending || ask) await showQueue();
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (ev) => {
+    const d = ev.data || {};
+    if (d.type === "notificationclick" && d.url) {
+      followDeepLink(new URLSearchParams(d.url.split("?")[1] || ""));
+    }
+  });
+}
+
+$("pushBtn").onclick = enablePush;
+$("recheck").onclick = async () => {
+  // "unreachable" must not be a dead end: the probe only re-runs when something asks it to.
+  $("state").textContent = "re-checking…";
+  try { const h = await get("/api/health"); paint(h.model_state); }
+  catch (e) { S.offline = true; paint(); }
+};
+
 // ---------------------------------------------------------------- boot
 (async () => {
   if (!token) {
-    const t = prompt("app token (printed by `localharness web`)");
+    const t = prompt("app token (printed by `localharness web`, or scan its QR)");
     if (t) { token = t.trim(); LS.setItem("lh.token", token); }
   }
   try { await post("/api/auth/enroll", {}); } catch (e) { /* the bearer header still works */ }
@@ -622,10 +741,23 @@ $("protoBtn").onclick = async () => {
     add(el("div", "row err", "could not reach the API — is the token right? " + e));
   }
   connect();
+  await registerWorker();
+  paintPush();
+  // Arrived from a notification: `/?session=…&pending=…`. Done after the first paint so the
+  // parked queue it opens is populated.
+  await followDeepLink(new URLSearchParams(location.search));
+
   // Coming back from the background is the commonest arrival, so re-check rather than trust the
   // stream to still be alive: iOS can leave an EventSource that believes it is connected.
+  //
+  // Going AWAY closes it on purpose, and that is what makes push honest: `client_count` on the
+  // server is the presence signal that suppresses the turn-finished push (WEBCH-16), so an
+  // abandoned stream left open would mean "somebody is watching" while the phone is in a
+  // pocket. Closing it here makes the signal mean what it says.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && (S.offline || !es || es.readyState === 2)) connect();
+    if (document.hidden) { if (es) { es.close(); es = null; } return; }
+    if (S.offline || !es || es.readyState === 2) connect();
+    paintPush();
   });
 })();
 </script>
