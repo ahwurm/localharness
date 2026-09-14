@@ -134,3 +134,13 @@ def test_it_is_mobile_usable_even_though_it_is_unstyled(page):
     assert "font-size:16px" in page, "iOS zooms an input below 16px, which breaks one-thumb use"
     assert "overflow-wrap:anywhere" in page, "nothing may scroll sideways"
     assert "position:fixed" in page, "the composer must be reachable without scrolling"
+
+
+def test_the_page_treats_a_subagents_turn_boundary_as_a_child_event(page):
+    """45% of real sessions delegate, and a subagent publishes its OWN TurnStarted/TurnCompleted
+    (stamped with the parent's session id). Treating a child's completion as the turn's end
+    clears the running state — the stop button, the streaming bubble — while the root is still
+    generating. The channel has the same guard; the page needs its own."""
+    for case in ('case "TurnStarted"', 'case "TurnCompleted"'):
+        block = page.split(case)[1].split("break;")[0]
+        assert "!child" in block, f"{case} does not distinguish a subagent's turn from yours"

@@ -193,13 +193,18 @@ function onEvent(name, data) {
       break;
     }
     case "TurnStarted":
-      S.turn = true; paint();
-      add(el("div", "row sys", "turn started — " + (data.task_summary || "")));
+      if (!child) { S.turn = true; paint(); }
+      add(el("div", "row sys" + (child ? " child" : ""),
+        (child ? "subagent turn started — " : "turn started — ") + (data.task_summary || "")));
       break;
     case "TurnCompleted":
-      S.turn = false; paint();
-      add(el("div", "row sys",
-        `turn done · ${data.iterations} iterations · ${(data.duration_seconds || 0).toFixed(1)}s · ` +
+      // parent_id means a SUBAGENT's turn ended, not yours. 45% of real sessions delegate, so
+      // treating a child's completion as the turn's end clears the running state while the root
+      // is still generating.
+      if (!child) { S.turn = false; paint(); }
+      add(el("div", "row sys" + (child ? " child" : ""),
+        (child ? "subagent turn done · " : "turn done · ") +
+        `${data.iterations} iterations · ${(data.duration_seconds || 0).toFixed(1)}s · ` +
         `${data.input_tokens}+${data.output_tokens} tokens${data.tokens_estimated ? " (estimated)" : ""}`));
       break;
     case "TurnFailed":

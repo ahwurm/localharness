@@ -440,15 +440,26 @@ class WebChannel(ChannelAdapter):
         await self._react(event)
 
     async def _react(self, event: Any) -> None:
-        """The few events this channel does something about beyond forwarding them."""
+        """The few events this channel does something about beyond forwarding them.
+
+        Every turn-boundary reaction is gated on `parent_id is None` — i.e. the ROOT turn. A
+        subagent's turn publishes its own `TurnStarted`/`TurnCompleted` (stamped with the parent's
+        session id by `_ParentIdBus`), and 45% of real sessions delegate, so without the guard a
+        child finishing mid-task set `_turn_running = False`: the instrument cluster went dead for
+        the rest of the root turn and the provisional streaming bubble was dropped, while the root
+        carried on generating. Found by test, not by reading.
+        """
+        root = getattr(event, "parent_id", None) is None
         if isinstance(event, TurnStarted):
-            self._turn_running = True
-            self._stream_id = None
-            await self._start_status_ticker()
+            if root:
+                self._turn_running = True
+                self._stream_id = None
+                await self._start_status_ticker()
         elif isinstance(event, (TurnCompleted, TurnFailed)):
-            self._turn_running = False
-            await self._stop_status_ticker()
-            self._close_stream(None)
+            if root:
+                self._turn_running = False
+                await self._stop_status_ticker()
+                self._close_stream(None)
         elif isinstance(event, Heartbeat):
             self._context_pct = event.context_utilization_pct
         elif isinstance(event, Action):
