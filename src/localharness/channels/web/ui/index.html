@@ -1213,6 +1213,34 @@ $("recheck").onclick = async () => {
                                " (pid " + other.pid + ") in " + other.workspace +
                                ". Both keep working, but they share this agent's history."));
     }
+    // THE PERSISTENT LAST EXCHANGE (owner, 2026-09-14, "typed a question got nothing"): an
+    // answer that lands while no phone is watching must be ON the screen at the next open —
+    // not filed behind the menu. A cold open therefore renders the live session's last
+    // question and its answer off the persisted log (rule 1: the answer drawn is
+    // TaskComplete's summary and nothing else); the greeting stays only for a session with
+    // no exchanges yet. The live tail then continues below, so an in-flight turn's completion
+    // still arrives as the next row.
+    if (S.session && !log.children.length) {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(S.session)}/events`,
+                                { headers: { "Authorization": "Bearer " + token } });
+        let lastUser = null, lastAnswer = null;
+        for (const line of (await res.text()).split("\n")) {
+          let d; try { d = JSON.parse(line); } catch (e) { continue; }
+          if (d.parent_id) continue;
+          if (d.event_type === "UserMessage") { lastUser = d; lastAnswer = null; }
+          else if (d.event_type === "TaskComplete") lastAnswer = d;
+        }
+        if (lastUser) {
+          const r = add(el("div", "row user"));
+          r.appendChild(el("div", null, lastUser.content));
+          r.appendChild(el("div", "meta", "you · earlier"));
+          if (lastAnswer) { const a = add(el("div", "row answer")); withCode(a, lastAnswer.summary || ""); }
+        }
+      } catch (e) { /* the clean open stays clean */ }
+    }
+    if (health.turn_in_progress)
+      add(el("div", "row sys", "a turn is running — its answer lands right here when it finishes."));
   } catch (e) {
     add(el("div", "row err", "could not reach the API — is the token right? " + e));
   }
