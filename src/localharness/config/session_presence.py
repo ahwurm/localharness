@@ -159,8 +159,15 @@ def register(
 
 
 def release(config_dir: Optional[str | Path] = None, *, pid: Optional[int] = None) -> None:
-    """Remove this session's entry on a graceful exit. Optional by design — `live_sessions`
-    prunes by pid liveness, so forgetting this (or being killed before it runs) costs nothing."""
+    """Remove this session's entry on a graceful exit.
+
+    **Deliberately has no production caller**, which is worth stating rather than leaving to look
+    like an oversight: liveness is decided by asking the OS about the pid, so an entry left
+    behind by a crash, a SIGKILL or a pulled plug is pruned by the next reader anyway. Wiring
+    this into a shutdown path would clean up exactly the cases that never needed cleaning and
+    none of the cases that do. It exists for a caller that wants to un-register early, and for
+    the tests that prove pruning works both ways.
+    """
     _discard(presence_dir(config_dir) / f"{os.getpid() if pid is None else pid}.json")
 
 

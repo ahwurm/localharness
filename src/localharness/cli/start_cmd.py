@@ -403,6 +403,35 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     )
 
 
+
+async def _announce_presence(channel: Any, *, config_dir: str | None, agent: str,
+                             channel_mode: str, session_id: str, workspace: Any) -> None:
+    """Register this session and warn — loudly, by name — if another already drives this agent.
+
+    Its own function rather than a block inside `_start_async` so it can be TESTED. It was a
+    block, and deleting the `set_co_tenants` line left the whole suite green while
+    `GET /api/health` silently reported no co-tenants forever — a checkmark on a lie, caught in
+    review rather than by a test, which is the argument for the seam.
+
+    WARNS and never refuses (owner ruling 8): `history.jsonl` and `compact.md` take unlocked
+    appends, so two live sessions on one agent can interleave and a long append can tear. That
+    is a hazard to be told about, not a reason to refuse somebody their own second session.
+    """
+    try:
+        from localharness.config import session_presence
+
+        co_tenants = session_presence.register(
+            config_dir, agent=agent, channel=channel_mode,
+            session_id=session_id, workspace=workspace,
+        )
+        if hasattr(channel, "set_co_tenants"):
+            channel.set_co_tenants(co_tenants)
+        if co_tenants:
+            await channel.send_error(session_presence.warning(co_tenants, agent=agent))
+    except Exception:  # noqa: BLE001 — a lost warning never costs a session its start-up
+        log.warning("session_presence_failed", exc_info=True)
+
+
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
@@ -1477,21 +1506,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # unlocked appends, so two live sessions on one agent can interleave and a long append
         # can tear — a hazard that is latent today and reachable by habit, since running the
         # terminal while a phone is attached is a normal thing to do, not an exotic one.
-        try:
-            from localharness.config import session_presence
-
-            co_tenants = session_presence.register(
-                config_dir, agent=agent_config.name, channel=channel_mode,
-                session_id=sitting_id, workspace=state_dir,
-            )
-            if hasattr(channel, "set_co_tenants"):
-                channel.set_co_tenants(co_tenants)
-            if co_tenants:
-                await channel.send_error(
-                    session_presence.warning(co_tenants, agent=agent_config.name)
-                )
-        except Exception:  # noqa: BLE001 — a lost warning never costs a session its start-up
-            log.warning("session_presence_failed", exc_info=True)
+        await _announce_presence(
+            channel, config_dir=config_dir, agent=agent_config.name,
+            channel_mode=channel_mode, session_id=sitting_id, workspace=state_dir,
+        )
 
         # --- Determine returning user ---
         is_returning = events_path.exists() and events_path.stat().st_size > 0

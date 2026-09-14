@@ -130,13 +130,71 @@ def test_the_summary_is_serialisable_for_the_health_endpoint(tmp_path):
     assert json.loads(json.dumps(rows))[0]["channel"] == "web"
 
 
-def test_start_up_registers_presence_for_every_channel():
-    """One hook, in the function all four channels funnel through — not a web-only feature. The
-    terminal-vs-web collision is the one the owner will actually hit."""
+class _FakeChannel:
+    """Records what the start-up hook actually did to a channel."""
+
+    def __init__(self) -> None:
+        self.co_tenants = None
+        self.errors: list[str] = []
+
+    def set_co_tenants(self, others):
+        self.co_tenants = others
+
+    async def send_error(self, error, detail=None, agent_id=None):
+        self.errors.append(error)
+
+
+async def test_the_startup_hook_warns_and_hands_the_channel_the_co_tenants(tmp_path):
+    """Driven through the REAL hook, not by matching strings in its source.
+
+    The string-matching version of this test passed while `set_co_tenants` was deleted — the
+    line had no test at all, and `GET /api/health` would have reported no co-tenants forever.
+    """
+    from localharness.cli.start_cmd import _announce_presence
+
+    # pid 1 is alive and is not us — `register` excludes only the CALLING process, which is
+    # what makes "another session" mean another process rather than this one twice.
+    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+                              workspace=tmp_path, pid=1)
+    channel = _FakeChannel()
+    await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
+                             channel_mode="terminal", session_id="s2", workspace=tmp_path)
+
+    assert channel.co_tenants and channel.co_tenants[0].channel == "web"
+    assert len(channel.errors) == 1
+    assert "ANOTHER SESSION IS LIVE" in channel.errors[0]
+    assert "not a refusal" in channel.errors[0]
+
+
+async def test_the_startup_hook_is_silent_when_nobody_else_is_there(tmp_path):
+    """The commonest case by far. A warning that fires every time is a warning nobody reads."""
+    from localharness.cli.start_cmd import _announce_presence
+
+    channel = _FakeChannel()
+    await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
+                             channel_mode="web", session_id="s1", workspace=tmp_path)
+
+    assert channel.errors == []
+    assert channel.co_tenants == []
+
+
+async def test_the_startup_hook_survives_a_channel_that_cannot_warn(tmp_path):
+    """ACP and a fixture channel are not obliged to implement every optional hook."""
+    from localharness.cli.start_cmd import _announce_presence
+
+    class _Minimal:
+        pass
+
+    await _announce_presence(_Minimal(), config_dir=str(tmp_path), agent="a",
+                             channel_mode="acp", session_id="s", workspace=tmp_path)
+    # Registered anyway — the NEXT session's warning depends on this one having written.
+    assert len(session_presence.live_sessions(tmp_path)) == 1
+
+
+def test_start_up_calls_the_presence_hook():
+    """The seam is only worth testing if production actually reaches it."""
     import inspect
 
     from localharness.cli import start_cmd
 
-    source = inspect.getsource(start_cmd._start_async)
-    assert "session_presence.register" in source
-    assert "send_error" in source[source.index("session_presence.register"):][:900]
+    assert "_announce_presence(" in inspect.getsource(start_cmd._start_async)

@@ -34,8 +34,10 @@ self.addEventListener("push", (event) => {
 
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
-    // A page that IS open should move to the item too, rather than making the owner tap a
-    // notification about a screen they are already looking at.
+    // Tell an open page, so it can re-sync its badge — its event stream is closed while
+    // backgrounded, so its counts are stale by definition. It deliberately does NOT navigate:
+    // moving the view under a thumb that is mid-sentence is worse than a stale badge, and the
+    // notification is still sitting there to be tapped.
     const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     for (const client of open) client.postMessage({ type: "push", payload });
     if (typeof navigator !== "undefined" && navigator.setAppBadge && payload.badge) {

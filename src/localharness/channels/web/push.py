@@ -21,6 +21,7 @@ look" and carries WHERE to look; the approving happens in the app.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -77,6 +78,16 @@ PUSH_URGENCY = "high"
 """RFC 8030 urgency. Both classes are things a person is waiting on — a finished turn or a
 blocked one — and `high` is what asks the push service not to batch it behind a power-saving
 window. Not `very-low`: nothing here is a background sync."""
+
+SHUTDOWN_FLUSH_S = 2.0
+"""How long `stop()` waits for in-flight pushes before abandoning them.
+
+Derived from the server's own graceful-shutdown budget (`uvicorn.Config(
+timeout_graceful_shutdown=2)`) rather than chosen independently: two numbers describing the same
+moment that disagree is how a "2 second" shutdown turns into a minute. Each send carries
+`PUSH_TIMEOUT_S`, so without this bound a few devices on a dead network path hold Ctrl-C for
+that long multiplied by the number enrolled.
+"""
 
 PUSH_TIMEOUT_S = 10.0
 """Socket budget for one push. It runs on the event loop during a turn, so it gets a bound; a
@@ -476,11 +487,10 @@ class PushSender:
         self.subject = subject
         self._transport = transport
 
-    async def send(self, subscription: dict, message: Push) -> Optional[bool]:
+    async def send(self, subscription: dict, message: Push,
+                   client: Any = None) -> Optional[bool]:
         """True on delivery, False if the endpoint is GONE and should be pruned, None if the
         attempt failed in a way that says nothing about the subscription."""
-        import httpx
-
         endpoint = subscription["endpoint"]
         try:
             body = self._encrypt(subscription, message.to_json())
@@ -489,9 +499,11 @@ class PushSender:
             log.warning("web_push_encode_failed", endpoint=endpoint[:60], exc_info=True)
             return False
         try:
-            async with httpx.AsyncClient(transport=self._transport,
-                                         timeout=PUSH_TIMEOUT_S) as client:
+            if client is not None:
                 response = await client.post(endpoint, content=body, headers=headers)
+            else:
+                async with self.session() as own:
+                    response = await own.post(endpoint, content=body, headers=headers)
         except Exception:  # noqa: BLE001 — no network is not evidence the phone is gone
             log.info("web_push_send_failed", endpoint=endpoint[:60], exc_info=True)
             return None
@@ -501,6 +513,18 @@ class PushSender:
             log.info("web_push_rejected", status=response.status_code, endpoint=endpoint[:60])
             return None
         return True
+
+    def session(self) -> Any:
+        """One client for one fan-out.
+
+        NOT one long-lived client held on this object: an httpx pool with no owner responsible
+        for closing it is exactly the leak this project already had to fix once (#154). Scoping
+        it to the fan-out amortizes the handshake across every enrolled device while keeping the
+        close unconditional.
+        """
+        import httpx
+
+        return httpx.AsyncClient(transport=self._transport, timeout=PUSH_TIMEOUT_S)
 
     def _encrypt(self, subscription: dict, payload: bytes) -> bytes:
         """RFC 8291 aes128gcm. A FRESH ephemeral key per message, which the standard requires and
@@ -559,16 +583,30 @@ class PushService:
         """Fan one decided push out to every enrolled device. Returns how many were delivered."""
         if message is None:
             return 0
+        # to_thread: `deliver` is scheduled from bus-event handling, so this read sits on the
+        # loop that is also generating tokens.
+        subscriptions = await asyncio.to_thread(self.store.all)
+        if not subscriptions:
+            return 0
         sent = 0
-        for subscription in self.store.all():
-            outcome = await self.sender.send(subscription, message)
-            if outcome is True:
-                sent += 1
-            elif outcome is False:
-                # The push service said this subscription is gone — an uninstalled app, a reset
-                # phone. Keeping it means signing and encrypting for a corpse on every turn.
-                self.store.remove(subscription["endpoint"])
-                log.info("web_push_pruned", endpoint=subscription["endpoint"][:60])
+        # An httpx client opens no socket until its first request, so this needs no `__aenter__`
+        # — only an unconditional close, which the `finally` gives it.
+        session = getattr(self.sender, "session", None)
+        client = session() if callable(session) else None
+        try:
+            for subscription in subscriptions:
+                outcome = await self.sender.send(subscription, message, client=client)
+                if outcome is True:
+                    sent += 1
+                elif outcome is False:
+                    # The push service said this subscription is gone — an uninstalled app, a
+                    # reset phone. Keeping it means signing and encrypting for a corpse every
+                    # time anything happens.
+                    await asyncio.to_thread(self.store.remove, subscription["endpoint"])
+                    log.info("web_push_pruned", endpoint=subscription["endpoint"][:60])
+        finally:
+            if client is not None:
+                await client.aclose()
         return sent
 
     @classmethod
