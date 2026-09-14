@@ -93,9 +93,16 @@ happened.
 
 **The server is up before the session is.** Open the page with the model server cold and you can
 still read the pending queue and the protocol. Connecting is itself the signal to start bringing
-the session up in the background, so by the time you have finished typing it is usually ready. If
-you send before it is, the page names the stage it is waiting on and offers a way out — a rising
-number tells you how long you have waited, not whether anything is wrong.
+the session up in the background, so on a warm box the session is usually ready by the time you
+have finished typing.
+
+**With the model server actually cold, connecting does nothing** — deliberately. A backgrounded
+page reconnects on its own, and bringing a session up can start a harness-managed model server,
+so a phone in a pocket would otherwise be able to spin your GPU with nobody asking for anything.
+Sending a message always brings the session up; opening the app only does so when the provider is
+already answering. If you send before the session is ready, the page names the stage it is waiting
+on and gives you a way out of a build that has stuck — a rising number tells you how long you have
+waited, not whether anything is wrong.
 
 **Permission questions are a queue, not a modal.** In `auto` — the default — a blacklisted call is
 *parked*: the model is told to carry on without that step, the turn keeps running, and the page
