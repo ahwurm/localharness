@@ -764,10 +764,6 @@ function onFrame(name, d) {
       if (d.protocol_version !== 1) add(el("div", "row err",
         "protocol_version " + d.protocol_version + " — this page was written against 1. Something " +
         "will render as a blank cell; go read /api/protocol."));
-      // A cold open starts clean, so point at the past instead of replaying it (rule 4, amended):
-      // a stored cursor for this session means this phone has watched it before.
-      if (!d.synthetic && !log.children.length && LS.getItem(cursorKey()) != null)
-        add(el("div", "row sys", "earlier activity in this session is in the menu — ☰, top entry."));
       // REPLAY keeps its label: paint() maps a healthy state to the quiet wordmark otherwise.
       paint(d.synthetic ? null : d.model_state);
       break;
@@ -1104,7 +1100,8 @@ async function loadSessions() {
       b.appendChild(el("div", "meta", (s.live ? "live now · " : "") +
         new Date(s.modified_unix * 1000).toLocaleString() +
         " · " + (s.size_bytes / 1024).toFixed(0) + " KB"));
-      b.onclick = () => { $("drawer").close(); openHistory(s.session_id, s.live); };
+      // the live chat needs no second view of itself: the transcript on screen IS that chat
+      b.onclick = () => { $("drawer").close(); s.live ? closeHistory() : openHistory(s.session_id); };
       box.appendChild(b);
     }
     if (!(r.sessions || []).length && !r.note)
@@ -1112,41 +1109,68 @@ async function loadSessions() {
   } catch (e) { box.replaceChildren(el("div", "meta", "could not read /api/sessions: " + e)); }
 }
 
-// THE DIGEST, deliberately: only rule 1's blessed sources are drawn — UserMessage in,
-// TaskComplete out, TurnFailed as the miss — so history can never contradict what live
-// rendering said. Full fidelity stays a server feature: `localharness web --replay`.
-async function openHistory(id, live) {
+// THE SPINE RENDERER — one conversation, one look, wherever you arrive from (owner,
+// 2026-09-14: "I don't know why there's a difference"). Finished turns render as the spine —
+// rule 1's sources only: what was asked, what was answered, what failed. An IN-FLIGHT turn
+// (only when rendering into the live log) replays through the REAL reducer instead, so its
+// tool rows, counters and narration look exactly like live — because they are: the reducer
+// remembers each seq, and the stream then resumes from there with no gap and no double.
+function renderSpine(lines, container) {
+  const parsed = [];
+  let maxSeq = null;
+  for (const line of lines) {
+    let d; try { d = JSON.parse(line); } catch (e) { continue; }
+    parsed.push(d);
+    if (d.seq != null) maxSeq = d.seq;       // the log is seq-ordered
+  }
+  let liveFrom = parsed.length;
+  if (container === log) {
+    for (let i = parsed.length - 1; i >= 0; i--) {
+      const d = parsed[i];
+      if (d.parent_id) continue;
+      if (["TurnCompleted", "TurnFailed", "TaskComplete"].includes(d.event_type)) break;
+      if (d.event_type === "TurnStarted") { liveFrom = i; break; }
+    }
+  }
+  for (let i = 0; i < parsed.length; i++) {
+    const d = parsed[i];
+    if (i >= liveFrom) { onEvent(d.event_type || "Event", d); continue; }
+    if (d.parent_id) continue;               // a subagent's traffic collapses to nothing here
+    let r = null;
+    if (d.event_type === "UserMessage") {
+      r = el("div", "row user");
+      r.appendChild(el("div", null, d.content));
+    } else if (d.event_type === "TaskComplete") {
+      r = el("div", "row answer");
+      withCode(r, d.summary || "");
+    } else if (d.event_type === "TurnFailed") {
+      r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || ""));
+    }
+    if (r) {
+      container.appendChild(r);
+      if (container === log) { S.lastRow = r; $("greet").hidden = true; }
+    }
+  }
+  return maxSeq;
+}
+
+async function openHistory(id) {
   const hist = $("hist");
   hist.replaceChildren();
   const bar = el("div", "row sys");
   const back = el("button", "small", "back to live");
   back.onclick = closeHistory;
   bar.appendChild(back);
-  bar.appendChild(el("div", "meta",
-    (live ? "current session — up to now" : "history · " + id) + " · read-only"));
+  bar.appendChild(el("div", "meta", "history · " + id + " · this chat has ended"));
   hist.appendChild(bar);
-  let text = "";
   try {
     const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/events`,
                           { headers: { "Authorization": "Bearer " + token } });
-    text = await r.text();
+    renderSpine((await r.text()).split("\n"), hist);
   } catch (e) { hist.appendChild(el("div", "row err", "could not read that session: " + e)); }
-  for (const line of text.split("\n")) {
-    let d; try { d = JSON.parse(line); } catch (e) { continue; }
-    if (d.parent_id) continue;               // a subagent's traffic collapses to nothing here
-    if (d.event_type === "UserMessage") {
-      const r2 = el("div", "row user");
-      r2.appendChild(el("div", null, d.content));
-      hist.appendChild(r2);
-    } else if (d.event_type === "TaskComplete") {
-      const r2 = el("div", "row answer");
-      withCode(r2, d.summary || "");
-      hist.appendChild(r2);
-    } else if (d.event_type === "TurnFailed") {
-      hist.appendChild(el("div", "row err",
-        "turn failed — " + d.reason + ": " + (d.detail || "")));
-    }
-  }
+  hist.appendChild(el("div", "row sys",
+    "an ended chat is read-only, but nothing is lost: the agent's memory carries it, so a new " +
+    "chat can be asked about anything here. Tap-to-continue is the next build."));
   log.hidden = true; $("composer").hidden = true; $("greet").hidden = true;
   hist.hidden = false;
   window.scrollTo(0, 0);
@@ -1357,30 +1381,19 @@ $("recheck").onclick = async () => {
                                " (pid " + other.pid + ") in " + other.workspace +
                                ". Both keep working, but they share this agent's history."));
     }
-    // THE PERSISTENT LAST EXCHANGE (owner, 2026-09-14, "typed a question got nothing"): an
-    // answer that lands while no phone is watching must be ON the screen at the next open —
-    // not filed behind the menu. A cold open therefore renders the live session's last
-    // question and its answer off the persisted log (rule 1: the answer drawn is
-    // TaskComplete's summary and nothing else); the greeting stays only for a session with
-    // no exchanges yet. The live tail then continues below, so an in-flight turn's completion
-    // still arrives as the next row.
-    if (S.session && !log.children.length) {
+    // THE CHAT IS THE VIEW (owner, 2026-09-14, "I don't know why there's a difference"): a
+    // cold open renders the live session's whole conversation spine off the persisted log —
+    // the same rows the menu's read-only view draws (rule 1 sources only) — and the live tail
+    // continues below it. One chat, one look, wherever you arrive from. The greeting stays
+    // only for a session with no exchanges yet; an answer that landed while no phone was
+    // watching is therefore simply THERE at the next open.
+    // (not in replay: there the playback itself is the render, and a spine would double it)
+    if (S.session && !log.children.length && !health.replay) {
       try {
         const res = await fetch(`/api/sessions/${encodeURIComponent(S.session)}/events`,
                                 { headers: { "Authorization": "Bearer " + token } });
-        let lastUser = null, lastAnswer = null;
-        for (const line of (await res.text()).split("\n")) {
-          let d; try { d = JSON.parse(line); } catch (e) { continue; }
-          if (d.parent_id) continue;
-          if (d.event_type === "UserMessage") { lastUser = d; lastAnswer = null; }
-          else if (d.event_type === "TaskComplete") lastAnswer = d;
-        }
-        if (lastUser) {
-          const r = add(el("div", "row user"));
-          r.appendChild(el("div", null, lastUser.content));
-          r.appendChild(el("div", "meta", "you · earlier"));
-          if (lastAnswer) { const a = add(el("div", "row answer")); withCode(a, lastAnswer.summary || ""); }
-        }
+        const upto = renderSpine((await res.text()).split("\n"), log);
+        if (upto != null) remember(upto);   // the stream below resumes right after the spine
       } catch (e) { /* the clean open stays clean */ }
     }
     if (health.turn_in_progress)
