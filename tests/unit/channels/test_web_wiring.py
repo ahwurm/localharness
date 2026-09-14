@@ -254,3 +254,28 @@ async def test_bringup_stages_are_named_and_abortable():
 
     channel.set_bringup("failed", detail="no model server", failed=True)
     assert channel.model_state() == "unreachable"
+
+
+# ------------------------------------------------------------------ doctor (WEBCH-13)
+
+async def test_doctor_reports_the_effective_bind_and_flags_a_loose_token(tmp_path, capsys):
+    """A security posture nobody can check is a security posture nobody trusts."""
+    import os
+
+    from localharness.channels.web.auth import rotate_token, token_path
+    from localharness.cli.doctor_cmd import _print_web_listener
+
+    _print_web_listener(tmp_path)
+    assert "not enrolled yet" in capsys.readouterr().out
+
+    rotate_token(tmp_path)
+    _print_web_listener(tmp_path)
+    out = capsys.readouterr().out
+    assert "loopback only" in out and "--allow-unsafe-bind" in out
+    assert "A token is required on every request" in out
+    # ...and it never prints the secret itself: doctor output ends up in bug reports.
+    assert token_path(tmp_path).read_text().strip() not in out
+
+    os.chmod(token_path(tmp_path), 0o644)
+    _print_web_listener(tmp_path)
+    assert "expected 600" in capsys.readouterr().out

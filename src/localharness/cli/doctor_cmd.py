@@ -187,6 +187,40 @@ def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
     console.print(escape(f"       Last migrated {when}; backup at {latest}"), soft_wrap=True)
 
 
+def _print_web_listener(config_dir: Path) -> None:
+    """Say whether the phone listener has been enrolled, and where it binds (WEBCH-13).
+
+    The bind is the thing worth reporting: `localharness web` runs arbitrary shell with the
+    owner's privileges, so it binds loopback only and refuses anything else without an explicit
+    override — and a security posture nobody can check is a security posture nobody trusts. The
+    address is reported from the constant the server actually enforces, not from a string here,
+    so the two cannot disagree.
+
+    Silent about the token's VALUE, deliberately: `doctor` output ends up in bug reports.
+    """
+    from localharness.channels.web.auth import LOOPBACK_HOSTS, token_path
+    from localharness.cli.web_cmd import DEFAULT_PORT
+
+    path = token_path(config_dir)
+    if not path.exists():
+        console.print(
+            f"{_INFO} Web channel: not enrolled yet — `localharness web` generates its app token "
+            f"on first run."
+        )
+        return
+    console.print(
+        f"{_INFO} Web channel: enrolled; binds {sorted(LOOPBACK_HOSTS)[0]}:{DEFAULT_PORT} "
+        f"(loopback only unless --allow-unsafe-bind). A token is required on every request."
+    )
+    mode = path.stat().st_mode & 0o777
+    if mode != 0o600:
+        console.print(
+            f"{_FAIL} Web app token is mode {mode:o}, expected 600 — anyone who can read it can "
+            f"drive your agent."
+        )
+    console.print(escape(f"       Token file: {path}"), soft_wrap=True)
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -295,6 +329,8 @@ def doctor(
     # docstring). ONE call site on purpose: an owner veto before release is a two-line revert.
     if harness is not None:
         _print_migration_state(cfg_path, harness)
+
+    _print_web_listener(cfg_path)
 
     # 4. LLM endpoint reachable
     if harness is not None:
