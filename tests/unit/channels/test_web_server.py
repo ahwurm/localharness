@@ -545,3 +545,43 @@ async def test_the_token_is_generated_once_stored_0600_and_rotatable(tmp_path, m
     assert (path.stat().st_mode & 0o777) == 0o600
     assert auth.rotate_token() not in (first, "")
     assert auth.load_or_create_token()[0] != first
+
+
+async def test_an_event_published_during_the_backfill_is_neither_dropped_nor_duplicated(tmp_path):
+    """The off-by-one race that sits next to the reconnect seam (§4.2.3), driven deliberately.
+
+    The composition is subscribe-FIRST, then backfill, then drain with a `seq` de-dup — an order
+    that can duplicate but can never drop, which is the safe side. This publishes a new event
+    halfway through consuming the backfill, which is precisely the window, and asserts the seam
+    serves it exactly once.
+    """
+    bus, channel, server, _ = await _stack(tmp_path)
+    pub = [await bus.publish(Observation(
+        agent_id="a", session_id="s1", observation_type="tool_result",
+        tool_name="read", tool_call_id=f"c{i}", output=f"o{i}",
+    )) for i in range(6)]
+
+    client = channel.attach_client()
+    seen: list[int] = []
+    served: int | None = None
+    injected = False
+    async for _, seq, _line in server._backfill("s1", pub[2].seq):
+        seen.append(seq)
+        served = seq
+        if not injected:
+            injected = True
+            pub.append(await bus.publish(Observation(
+                agent_id="a", session_id="s1", observation_type="tool_result",
+                tool_name="read", tool_call_id="mid", output="mid",
+            )))
+
+    while not client.queue.empty():                    # the SSE loop's own de-dup, applied here
+        _, seq, _payload = client.queue.get_nowait()
+        if seq is not None and served is not None and seq <= served:
+            continue
+        seen.append(seq)
+        served = seq
+
+    expected = {e.seq for e in pub if e.seq >= pub[2].seq}
+    assert seen == sorted(set(seen)), f"duplicated or out of order: {seen}"
+    assert set(seen) == expected, f"missing {expected - set(seen)}, extra {set(seen) - expected}"
