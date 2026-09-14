@@ -15,7 +15,13 @@ import pytest
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.channels.web.channel import ALWAYS_KINDS, ASK_FALLBACK_DECISION, WebChannel
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Observation, TaskComplete, TurnStarted
+from localharness.core.events import (
+    Action,
+    Observation,
+    TaskComplete,
+    TurnCompleted,
+    TurnStarted,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -500,3 +506,26 @@ async def test_stop_releases_every_subscription(tmp_path):
     before = bus.subscriber_count
     await channel.stop()
     assert bus.subscriber_count == 0 and before > 0
+
+async def test_a_subagents_turn_end_must_not_stop_the_root_ticker(tmp_path):
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = WebChannel(bus=bus, config={})
+    await channel.start()
+    channel.progress_source = lambda: {"phase": "writing"}
+    channel.attach_client()
+
+    await bus.publish(TurnStarted(agent_id="root", session_id="s", task_summary="go",
+                                  budget={"max_actions": 5}))
+    await asyncio.sleep(0.02)
+    assert channel._turn_running is True
+
+    # A delegated child turn starts and finishes while the ROOT turn carries on.
+    await bus.publish(TurnStarted(agent_id="child", session_id="s2", parent_id="s",
+                                  task_summary="sub", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(agent_id="child", session_id="s2", parent_id="s",
+                                    iterations=1, duration_seconds=1.0, elapsed_tokens=10,
+                                    summary="child done"))
+    await asyncio.sleep(0.02)
+    assert channel._turn_running is True, "a child's completion stopped the root's instruments"
+    assert channel._status_task is not None and not channel._status_task.done()
+    await channel.stop()
