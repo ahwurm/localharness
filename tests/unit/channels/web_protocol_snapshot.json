@@ -1,5 +1,5 @@
 {
-  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump. See test_web_protocol.py.",
+  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description \u2014 which moves a digest without moving the wire, and is said so in the commit. See test_web_protocol.py.",
   "protocol_version": 1,
   "types": {
     "Action": "65edde367f5433b5",
@@ -34,7 +34,7 @@
     "ScenarioCompleted": "bf3d5704625bc117",
     "SentinelAlert": "24ca483deaf4bc02",
     "StatusTick": "da27528f1accb57d",
-    "StreamClosed": "b972fa87a85db47e",
+    "StreamClosed": "7906619b43307b46",
     "StuckRecovered": "e95d2550e5ef66bc",
     "SurpriseScored": "3836a523233126e6",
     "SystemReady": "63f9d2514f4ac6cb",

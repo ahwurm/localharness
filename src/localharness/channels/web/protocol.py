@@ -33,13 +33,22 @@ from pydantic import BaseModel, ConfigDict, Field
 PROTOCOL_VERSION = 1
 """Bumped on any breaking change to the wire.
 
-Enforced rather than remembered: `tests/unit/channels/test_web_contract.py` snapshots every
+Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
 integer moving in the same diff. A project that auto-generates its schema specifically because
 it distrusts humans to keep two things in sync should not then trust a human to remember the
 version — and a forgotten bump degrades a stale client SILENTLY (`undefined` renders as a blank
 cell, not a crash), which is the worst failure for somebody returning to their own UI a few
 evenings later.
+
+It tracks FRAME semantics, not the route list: ADDING an endpoint does not bump it. A client
+written against version 1 keeps rendering every frame correctly when a new route appears
+beside the ones it already calls, so a bump there would only teach clients to distrust a
+number that had not changed meaning. Changing or removing a frame field is what moves it.
+
+The snapshot digests a field's DESCRIPTION along with its type, so correcting wrong prose also
+moves it. That is a re-record without a bump, called out in the commit message: the frame is
+byte-for-byte what it was, and a client written against version 1 renders it identically.
 """
 
 NEVER_FIRED_EVENTS: frozenset[str] = frozenset({
@@ -184,8 +193,11 @@ class StreamClosed(WireFrame):
     stream_id: str
     superseded_by_seq: Optional[int] = Field(
         default=None,
-        description="The seq of the Action that now owns this text. None when the stream ended "
-                    "without one (a cancelled or failed turn) — drop the provisional bubble.",
+        description="The seq of the Action that now owns this text — drop the provisional bubble, "
+                    "that Action renders it. None when the stream ended without one (a cancelled "
+                    "or failed turn): KEEP the text and drop only its 'streaming' label. No "
+                    "Action is coming and none was persisted, so the bubble is the only copy of "
+                    "what the model wrote (WEBCH-37).",
     )
 
 
