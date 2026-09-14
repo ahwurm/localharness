@@ -189,9 +189,9 @@ def test_the_page_reaches_every_read_endpoint_it_can_use(page):
     worse than leaving it out.
     """
     for endpoint in ("/api/stream", "/api/health", "/api/protocol", "/api/tools",
-                     "/api/grants", "/api/permissions", "/api/auth/enroll"):
+                     "/api/grants", "/api/permissions", "/api/auth/enroll", "/api/sessions"):
         assert endpoint in page, f"the page never calls {endpoint}"
-    for verb in ("/message", "/cancel", "/command", "/answer"):
+    for verb in ("/message", "/cancel", "/command", "/answer", "/mode"):
         assert verb in page, f"the page never exercises {verb}"
     # The parked queue's two verbs are built from one template, so look for the shape.
     assert "/api/pending/${p.id}/${verb}" in page
