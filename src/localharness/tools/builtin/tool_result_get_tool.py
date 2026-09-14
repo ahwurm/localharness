@@ -7,8 +7,10 @@ class ToolResultGetTool(Tool):
     """Re-pull the full body of a tool result that was evicted to a restorable stub.
 
     Bulky tool results are replaced in-context with a stub like
-    `[tool result evicted — ~N tokens — call tool_result_get('<id>') to restore]`.
-    This tool returns the exact original body for that id from the ContentStore."""
+    `[tool result evicted — read_file /notes/y120.md — ~N tokens — call tool_result_get('<id>')
+    to restore the full body]`, and the request's last message ends with an `[out of view: …]`
+    line listing every such stub. This tool returns the exact original body for that id from
+    the ContentStore."""
 
     def __init__(self, store: ContentStore) -> None:
         self._store = store

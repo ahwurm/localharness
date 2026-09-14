@@ -544,15 +544,18 @@ class ToolRegistry:
         """
         start_ms = int(time.monotonic() * 1000)
 
-        # Step 1: Resolve tool
+        # Step 1: Resolve tool. Two cases, told apart (they used to share one sentence,
+        # and a model retried the "not found" reading three times while a human read
+        # "not permitted" and went looking for a trust setting):
+        #   - the name exists somewhere but is not this agent's -> permission_denied,
+        #     "Tool 'x' exists but is not permitted for agent 'a'"
+        #   - nothing answers to the name -> not_found, "Unknown tool 'x'. Did you
+        #     mean: agent?" — nearest by GROUP first (a model asking for `delegate`
+        #     wants the tool whose group is delegate), then by spelling (difflib),
+        #     else the agent's callable list.
         tool = self._get_tool_for_agent(name, agent_id, division_id, tool_config)
         if tool is None:
-            return ToolResult(
-                output="",
-                success=False,
-                error=f"Tool '{name}' not found or not permitted for agent '{agent_id}'",
-                error_type="not_found",
-            )
+            return self._unknown_tool(name, agent_id, division_id, tool_config)
 
         # Step 2: Validate arguments
         validated = self._validate_arguments(name, arguments, tool.info())
