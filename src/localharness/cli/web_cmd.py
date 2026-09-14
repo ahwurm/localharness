@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -68,6 +69,45 @@ TOKEN_ROTATED = (
     "Named gap: rotation is all-or-nothing — there is no per-device revoke."
 )
 
+PUSH_UNAVAILABLE = (
+    "Web Push is unavailable (its `web` extra packages are missing or the VAPID key could not "
+    "be written). Everything else works; the phone just will not buzz."
+)
+
+QR_ERROR_LEVEL = "l"
+"""Error correction for the enrolment QR: the lowest, on purpose.
+
+The higher levels exist for a code printed on a box that will be scratched, photographed at an
+angle or faded by sunlight. This one is on a screen, forty centimetres from a phone, for about
+four seconds — so the redundancy buys nothing and costs modules, and modules are terminal rows.
+"""
+
+TAILSCALE_PROBE_TIMEOUT_S = 2.0
+"""Budget for the `tailscale status` call that guesses the phone-reachable URL. Bounded because
+this runs before the server starts serving: a wedged CLI must not hold up start-up, and the
+answer is a convenience — `--public-url` is the authoritative one."""
+
+ENROLMENT_HEADER = """Pair a phone: scan this with the camera (it carries the URL and the token).
+  {url}
+"""
+
+ENROLMENT_LOOPBACK_NOTE = (
+    "That is a LOOPBACK url, which no phone can reach. Publish the port, then re-run with the "
+    "address the phone will use:\n"
+    "    tailscale serve --bg {port}\n"
+    "    localharness web --public-url https://<your-machine>.<your-tailnet>.ts.net"
+)
+
+ENROLMENT_GUESSED_NOTE = (
+    "Address guessed from `tailscale status`. It is right only if something is publishing this "
+    "port on 443 (`tailscale serve --bg {port}`). Pass --public-url to say it exactly."
+)
+
+ENROLMENT_NO_QR = (
+    "No QR: the `segno` package is missing (it ships with the `web` extra). Open the URL above "
+    "on the phone by hand — the part after the # is the token, and it never reaches the server."
+)
+
 REPLAY_BANNER = """LocalHarness web channel — REPLAY (no model server, no GPU, deterministic)
   serving   http://{host}:{port}
   log       {log}
@@ -112,6 +152,11 @@ def web_cmd(
              "so the permission UI and instrument cluster can be built offline too.",
     )] = None,
     speed: Annotated[float, typer.Option("--speed", help="Replay speed multiplier.")] = 1.0,
+    public_url: Annotated[Optional[str], typer.Option(
+        "--public-url",
+        help="The URL a PHONE reaches this box at (e.g. https://spark.tail1234.ts.net). Used for "
+             "the enrolment QR. Auto-detected from `tailscale status` when omitted.",
+    )] = None,
     rotate_token: Annotated[bool, typer.Option(
         "--rotate-token",
         help="Mint a new app token, invalidating every enrolled client, and exit.",
@@ -127,6 +172,7 @@ def web_cmd(
         console.print(escape(TOKEN_ROTATED.format(
             token=token, path=web_auth.token_path(config_dir),
         )), soft_wrap=True)
+        print_enrolment(token, public_url=public_url, host=host, port=port)
         raise typer.Exit(0)
 
     try:
@@ -151,9 +197,86 @@ def web_cmd(
         asyncio.run(_serve(
             config_dir=config_dir, host=host, port=port, token=token, ui_dir=ui_dir,
             replay=replay, fixtures=fixtures, speed=speed, verbose=verbose, agent=agent,
+            public_url=public_url,
         ))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
+
+
+def detect_public_url(port: int, *, runner: Any = None) -> Optional[str]:
+    """Best-effort guess at the URL a phone reaches this box at, from `tailscale status --json`.
+
+    A guess, and labelled as one wherever it is printed. Tailscale is the SUPPORTED topology,
+    not a requirement (§7.1) — plain LAN and any reverse proxy are legitimate — so this never
+    fails a start-up and never overrides `--public-url`. It exists because the alternative for a
+    first-time user is looking up their own MagicDNS name before they can pair a phone.
+    """
+    import json as _json
+    import subprocess
+
+    run = runner or (lambda cmd: subprocess.run(
+        cmd, capture_output=True, text=True, timeout=TAILSCALE_PROBE_TIMEOUT_S, check=False))
+    try:
+        result = run(["tailscale", "status", "--json"])
+        if getattr(result, "returncode", 1) != 0:
+            return None
+        name = (_json.loads(result.stdout).get("Self") or {}).get("DNSName") or ""
+    except Exception:  # noqa: BLE001 — no tailscale, no network, bad JSON: all just "no guess"
+        return None
+    name = name.rstrip(".")
+    return f"https://{name}" if name else None
+
+
+def enrolment_url(token: str, *, public_url: Optional[str], host: str, port: int) -> tuple[str, str]:
+    """The URL the QR encodes, and which KIND of address it turned out to be.
+
+    The token rides in the FRAGMENT. A fragment is never sent to a server, so it lands in no
+    access log, no proxy log and no `Referer` — which is what §7.3's "never put the token in a
+    URL" is actually protecting. The page reads it once and erases it from the address bar.
+    """
+    kind = "given"
+    base = public_url
+    if not base:
+        base = detect_public_url(port)
+        kind = "guessed" if base else "loopback"
+    if not base:
+        base = f"http://{host}:{port}"
+    return f"{base.rstrip('/')}/#t={token}", kind
+
+
+def render_qr(url: str) -> Optional[str]:
+    """The QR as terminal art, or None when `segno` is not installed.
+
+    Half-block compaction keeps it to about 21 rows for an enrolment URL, which fits a terminal
+    nobody has resized. Degrading to None rather than raising is the point: a missing optional
+    package must cost you a convenience, not the command.
+    """
+    try:
+        import segno
+    except ImportError:
+        return None
+    buffer = io.StringIO()
+    segno.make(url, error=QR_ERROR_LEVEL).terminal(buffer, compact=True)
+    return buffer.getvalue().rstrip("\n")
+
+
+def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: int) -> None:
+    """Print the pairing QR and its URL. Nobody hand-types a 256-bit secret into a phone."""
+    url, kind = enrolment_url(token, public_url=public_url, host=host, port=port)
+    console.print(escape(ENROLMENT_HEADER.format(url=url)), soft_wrap=True)
+    art = render_qr(url)
+    if art is None:
+        console.print(escape(ENROLMENT_NO_QR), style="dim", soft_wrap=True)
+    else:
+        # No markup, no highlighting and no wrapping: this is a picture made of block
+        # characters, and Rich reflowing it would turn it into a QR that does not scan.
+        console.print(art, markup=False, highlight=False, soft_wrap=True)
+    if kind == "loopback":
+        console.print(escape(ENROLMENT_LOOPBACK_NOTE.format(port=port)), style="dim",
+                      soft_wrap=True)
+    elif kind == "guessed":
+        console.print(escape(ENROLMENT_GUESSED_NOTE.format(port=port)), style="dim",
+                      soft_wrap=True)
 
 
 async def _serve(
@@ -168,6 +291,7 @@ async def _serve(
     speed: float,
     verbose: bool,
     agent: Optional[str],
+    public_url: Optional[str] = None,
 ) -> None:
     import uvicorn
 
@@ -232,9 +356,19 @@ async def _serve(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
             config_dir=config_dir,
         )
+        # Web Push, on the live path only. A `--replay` run must never buzz a phone about a
+        # session that finished last week.
+        try:
+            from localharness.channels.web.push import PushService
+
+            channel.set_push(PushService.build(config_dir))
+        except Exception:  # noqa: BLE001 — no push is a missing convenience, not a failed start
+            console.print(escape(PUSH_UNAVAILABLE), style="dim", soft_wrap=True)
+
         console.print(escape(BANNER.format(
             host=host, port=port, ui_dir=resolved_ui, cwd=Path.cwd(), token=token,
         )), soft_wrap=True)
+        print_enrolment(token, public_url=public_url, host=host, port=port)
 
     config = uvicorn.Config(
         server.app, host=host, port=port, log_level="warning", access_log=False,
