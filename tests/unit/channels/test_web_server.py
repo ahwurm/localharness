@@ -625,3 +625,31 @@ def _fixed(value):
     async def _probe():
         return value
     return _probe
+
+
+async def test_the_collapse_rule_itemizes_the_measured_tool_mix_on_the_REAL_registry(tmp_path):
+    """WEBCH-31/04 against the real thing, not a fake.
+
+    Every other test here builds a stub registry, which proves the plumbing and nothing about the
+    rule. The measured corpus says 60.8% of real tool calls MUTATE and `bash_exec` alone is 45.5%
+    — so what has to hold is that the actual built-in tools land outside the collapsible
+    allowlist. A fake registry cannot tell you that; a real one that grew a new dangerous tool in
+    a collapsible group would fail here the day it landed.
+    """
+    from localharness.channels.web.protocol import COLLAPSIBLE_GROUPS
+    from localharness.channels.web.server import _tool_rows
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    await register_builtin_tools(registry)
+    rows = _tool_rows(registry)
+    assert rows, "the real registry produced no tools — the walk is reading the wrong buckets"
+
+    itemized = {r["name"] for r in rows if r["group"] not in COLLAPSIBLE_GROUPS}
+    assert {"bash_exec", "edit", "write"} <= itemized, (
+        f"a mutating built-in fell into a collapsible group; itemized = {sorted(itemized)}"
+    )
+    # Every destructive tool is itemized, whatever it is called.
+    assert {r["name"] for r in rows if r["destructive"]} <= itemized
+    assert {"read", "grep", "glob"} <= {r["name"] for r in rows}
