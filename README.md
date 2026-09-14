@@ -54,7 +54,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
-- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`), or `localharness web` to drive one from a phone on your own private network (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
+- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`), or `localharness web` to drive one from a phone on your own private network — home-screen install, a pairing QR so you never type the token, and a lock-screen notification when a long turn finishes or the permission gate needs you (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
 
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
