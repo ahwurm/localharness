@@ -345,6 +345,26 @@ report();
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_running_turn_pulses_a_working_row_and_its_end_removes_it(page, tmp_path):
+    """'No thinking or dots or anything after I send' (owner): while a turn runs and nothing
+    streams, exactly one pulsing working row pins the transcript tail; the turn's end takes
+    it down."""
+    running = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: 1, synthetic: false, model_state: "ready"});
+report();
+""", tmp_path)
+    assert sum(1 for r in running if "working" in r["cls"]) == 1, running
+    ended = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: 1, synthetic: false, model_state: "ready"});
+onFrame("TurnCancelled", {session_id: "s"});
+report();
+""", tmp_path)
+    assert not any("working" in r["cls"] for r in ended), ended
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
 def test_answers_render_the_markdown_subset_without_leaking_markup(page, tmp_path):
     """The phone is a reading surface: headings, tables and bold render as STRUCTURE — built
     with createElement/textContent only, never parsed as HTML — and the marker characters

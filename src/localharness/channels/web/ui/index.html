@@ -135,8 +135,11 @@
   .answer { font-size:16.5px; line-height:1.62; }
   .answer::before { content:"▌"; color:var(--agent); }
   .prov::before   { content:"▌"; color:var(--agent); animation:blink 1.2s steps(1,end) infinite; }
+  /* the working pulse: alive, quietly, until output takes over */
+  .working::before { content:"▌"; color:var(--agent); animation:blink 1.2s steps(1,end) infinite; }
+  .working > div { color:var(--dim); font-size:13.5px; }
   @keyframes blink { 50% { opacity:.2; } }
-  @media (prefers-reduced-motion:reduce) { .prov::before { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { .prov::before, .working::before { animation:none; } }
   .narr { color:var(--dim); }
   .tool::before { content:"▸"; color:var(--tool); }
   .tool > div:first-of-type { color:var(--tool); font-size:13.5px;
@@ -347,7 +350,7 @@ const S = {
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
-  webNoted: false, bring: null, echoes: [],
+  webNoted: false, bring: null, echoes: [], working: null, sent: false,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -492,7 +495,7 @@ function onEvent(name, data) {
       break;
     }
     case "TurnStarted":
-      if (!child) { S.turn = true; S.webNoted = false; paint(); }
+      if (!child) { S.turn = true; S.sent = false; S.webNoted = false; paint(); }
       add(el("div", "row sys" + (child ? " child" : ""),
         (child ? "subagent turn started — " : "turn started — ") + (data.task_summary || "")));
       break;
@@ -500,14 +503,14 @@ function onEvent(name, data) {
       // parent_id means a SUBAGENT's turn ended, not yours. 45% of real sessions delegate, so
       // treating a child's completion as the turn's end clears the running state while the root
       // is still generating.
-      if (!child) { S.turn = false; restDials(); paint(); }
+      if (!child) { S.turn = false; S.sent = false; restDials(); paint(); }
       add(el("div", "row sys" + (child ? " child" : ""),
         (child ? "subagent turn done · " : "turn done · ") +
         `${data.iterations} iterations · ${(data.duration_seconds || 0).toFixed(1)}s · ` +
         `${data.input_tokens}+${data.output_tokens} tokens${data.tokens_estimated ? " (estimated)" : ""}`));
       break;
     case "TurnFailed":
-      if (!child) { S.turn = false; restDials(); }
+      if (!child) { S.turn = false; S.sent = false; restDials(); }
       paint();
       add(el("div", "row " + (child ? "sys child" : "err"),
         (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "")));
@@ -727,6 +730,7 @@ function provisional() {
     row.appendChild(S.prov.reason);
     row.appendChild(S.prov.body);
     row.appendChild(meta);
+    ensureWorking();   // the streaming bubble supersedes the pulse
   }
   return S.prov;
 }
@@ -736,15 +740,16 @@ function clearProvisional(bySeq) {
   S.prov = null;
   // SUPERSEDED. The authoritative event is already on its way in, so the draft must go: leaving
   // it is how the same answer ends up printed twice (rule 1).
-  if (bySeq != null) { p.row.remove(); return; }
+  if (bySeq != null) { p.row.remove(); ensureWorking(); return; }
   // NO SUCCESSOR — a cancelled or failed turn (WEBCH-37). The bubble on screen is then the only
   // copy of that text ANYWHERE: neither path publishes the `llm_response` Action, so nothing is
   // persisted and the replay log has nothing to show later either. Removing it deletes work the
   // user watched being written, which is also the opposite of what the row drawn a moment later
   // promises ("the partial text above stays"). Keep it, and strip the one line on it that has
   // just stopped being true.
-  if (!p.text && !p.reason.textContent) { p.row.remove(); return; }   // nothing to keep
+  if (!p.text && !p.reason.textContent) { p.row.remove(); ensureWorking(); return; }   // nothing to keep
   p.meta.remove();
+  ensureWorking();   // the turn may still be running (a tool break): the pulse comes back
 }
 
 // ---------------------------------------------------------------- SSE-only frames
@@ -784,6 +789,14 @@ function onFrame(name, d) {
       $("tps").style.color = d.tps == null ? "" : d.tps >= 30 ? "var(--ok)" : d.tps >= 20 ? "var(--warn)" : "var(--bad)";
       if (d.model) $("model").textContent = d.model;
       if (d.context_pct != null) $("ctx").textContent = "ctx " + d.context_pct.toFixed(0) + "%";
+      // live words on the working pulse: what kind of work, and for how long
+      if (S.working) {
+        S.working.label.textContent =
+          ({ thinking: "thinking…", writing: "writing…", tool_call: "calling a tool…",
+             waiting: "waiting for the model…" }[d.phase] || d.phase + "…") +
+          "  " + d.elapsed.toFixed(0) + "s";
+        ensureWorking();
+      }
       break;
     case "BlockingAsk": S.asks.set(d.request_id, d); paint(); showAsk(d); break;
     case "AskExpired":
@@ -794,7 +807,7 @@ function onFrame(name, d) {
         `Nothing ran.`));
       break;
     case "TurnCancelled":
-      S.turn = false; clearProvisional(null); restDials(); paint();
+      S.turn = false; S.sent = false; clearProvisional(null); restDials(); paint();
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
       break;
     case "BringUpStage": {
@@ -884,6 +897,28 @@ function restDials() {
   $("tok").textContent = "";
 }
 
+// ---------------------------------------------------------------- the working indicator
+// "No thinking or dots or anything after I send" (owner, 2026-09-14): between a send and the
+// first visible output there can be a MINUTE of real work — bring-up, routing, a long think —
+// and a silent transcript reads as a dead app. One display-only row pins to the transcript
+// tail whenever a turn is running (or a send is in flight) and nothing is streaming yet;
+// StatusTick puts live words and a clock on it, and the streaming bubble supersedes it.
+function ensureWorking() {
+  if (S.prov || (!S.turn && !S.sent)) {
+    if (S.working) { S.working.row.remove(); S.working = null; }
+    return;
+  }
+  if (!S.working) {
+    const row = el("div", "row working");
+    const label = el("div", null, "working…");
+    row.appendChild(label);
+    S.working = { row, label };
+    add(row);
+  } else if (S.lastRow !== S.working.row) {
+    log.appendChild(S.working.row);   // real rows land above; the pulse stays the last thing
+  }
+}
+
 function paint(modelState) {
   closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
@@ -909,6 +944,7 @@ function paint(modelState) {
   $("cancel").hidden = !S.turn;
   $("cancel").disabled = !S.turn;
   $("retry").hidden = S.turn || !S.lastSent;
+  ensureWorking();
 }
 
 // ---------------------------------------------------------------- permission UI
@@ -1000,7 +1036,8 @@ async function send(intent) {
   if (r.status === "no_resolver") { meta.textContent = "you · NOT delivered"; add(el("div", "row err", r.detail)); }
   else if (r.bringing_up) meta.textContent = "you · sent — the session is starting for this message";
   else meta.textContent = "you · sent";
-  paint();   // `retry` becomes offerable the moment there is a last message to re-send
+  if (r.status !== "no_resolver") S.sent = true;   // the pulse starts NOW, not at TurnStarted
+  paint();   // `retry` becomes offerable, and the working pulse appears under the echo
 }
 $("send").onclick = () => send(null);
 $("nudge").onclick = () => send("nudge");
