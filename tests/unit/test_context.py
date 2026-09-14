@@ -2075,3 +2075,108 @@ async def test_context_manager_threads_the_cap_into_the_budget_it_returns():
     _, budget = await cm.build_messages([{"role": "user", "content": "hi"}], None)
     assert budget.max_response_tokens == 16_384
     assert budget.effective_limit == 131_072 - 16_384
+
+
+# ---- persisted compaction (2026-09-14, the #145 architecture item) ---------------------------
+# A fired summary used to live in one request and be thrown away; the session's list only grew,
+# and every later build re-summarized a bigger middle. Now the summary is committed into the
+# caller's history in place, so the session itself shrinks.
+
+@pytest.mark.asyncio
+async def test_fired_summary_is_committed_into_the_history_and_a_later_build_does_not_refire():
+    from localharness.agent.context import COMPACTION_SUMMARY_MARKER
+    calls = {"n": 0}
+
+    async def summarize(middle):
+        calls["n"] += 1
+        return "the gist"
+
+    cm, msgs = _guard_cm(summarize)
+    before = len(msgs)
+    out, _ = await cm.build_messages(msgs)
+    assert calls["n"] == 1
+    assert cm.last_fire_summary == "the gist"
+    idx, removed = cm.last_commit
+    # The caller's list shrank IN PLACE: head kept, one summary, tail kept.
+    assert len(msgs) == before - removed and removed >= 2
+    assert msgs[0]["content"] == "sys" and msgs[-1]["content"] == "recent short tail"
+    assert msgs[idx] == {"role": "assistant", "content": f"{COMPACTION_SUMMARY_MARKER}the gist"}
+    assert sum((m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER) for m in msgs) == 1
+    # A later build starts from the shorter history: nothing to summarize, no model call.
+    again, budget = await cm.build_messages(msgs)
+    assert calls["n"] == 1 and cm.last_commit is None and cm.last_fire_summary is None
+    assert budget.usage_fraction < cm._compaction_trigger_fraction
+
+
+@pytest.mark.asyncio
+async def test_a_later_fire_rolls_the_previous_summary_into_the_new_one():
+    from localharness.agent.context import COMPACTION_SUMMARY_MARKER
+    seen: list[list] = []
+
+    async def summarize(middle):
+        seen.append(list(middle))
+        return f"gist #{len(seen)}"
+
+    cm, msgs = _guard_cm(summarize)
+    await cm.build_messages(msgs)
+    assert len(seen) == 1
+    # The session grows past the trigger again: the middle now holds the committed summary.
+    tail = msgs.pop()
+    msgs.extend(_compactible_msgs()[1:-1])
+    msgs.append(tail)
+    await cm.build_messages(msgs)
+    assert len(seen) == 2
+    assert any((m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER) for m in seen[1]), \
+        "the second fire must summarize the first summary, not sit beside it"
+    summaries = [m for m in msgs if (m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER)]
+    assert len(summaries) == 1 and summaries[0]["content"].endswith("gist #2")
+    assert msgs[0]["content"] == "sys"  # the head is the session's own first message, always
+
+
+@pytest.mark.asyncio
+async def test_a_bloating_summary_is_used_for_the_request_but_never_committed():
+    from localharness.agent.context import COMPACTION_SUMMARY_MARKER
+
+    async def bloating(middle):
+        return "X " * 3000
+
+    cm, msgs = _guard_cm(bloating)
+    before = list(msgs)
+    out, budget = await cm.build_messages(msgs)
+    # The request is the emergency floor's problem (test_long_turn_with_bloating_... above);
+    # the history is this test's: a summary bigger than what it replaces is never written back.
+    assert cm.last_fire_summary is not None and cm.last_commit is None
+    assert msgs == before, "history must never get bigger by a commit"
+    assert not any((m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER) for m in msgs)
+
+
+def test_summarizer_input_is_capped_by_the_window_and_carries_a_previous_summary_whole():
+    from localharness.agent.context import (
+        COMPACTION_SUMMARY_MARKER, SUMMARIZER_MESSAGE_CHARS, SUMMARIZER_MIN_MESSAGE_CHARS,
+        render_summarizer_input, summarizer_input_chars,
+    )
+    assert summarizer_input_chars(65_536) == 65_536  # a quarter of the window, four chars a token
+    prev = {"role": "assistant", "content": COMPACTION_SUMMARY_MARKER + "S" * 3000}
+    bulk = [{"role": "user", "content": f"m{i} " + "w" * 2000} for i in range(20)]
+    def user_lines(text):
+        return [line for line in text.split("\n") if line.startswith("[user]: ")]
+    free = render_summarizer_input([prev, *bulk])
+    assert prev["content"] in free
+    assert len(user_lines(free)) == 20
+    assert all(len(line) <= SUMMARIZER_MESSAGE_CHARS + len("[user]: ") for line in user_lines(free))
+    capped = render_summarizer_input([prev, *bulk], max_input_chars=6_000)
+    assert len(capped) <= 6_000
+    assert prev["content"] in capped, "the rolled-up past is carried whole"
+    body_lines = user_lines(capped)
+    assert len(body_lines) == 20, "every message still has its line — shorter, never dropped"
+    assert all(len(line) >= SUMMARIZER_MIN_MESSAGE_CHARS for line in body_lines[:-1])
+
+
+def test_window_overflow_learns_the_served_window_and_never_grows_it_back():
+    from localharness.agent.context import ContextManager, TokenCounter
+    cm = ContextManager(max_context_tokens=10_000, token_counter=TokenCounter())
+    assert cm.window_overflow(8_000, 9_000) == 8_000        # the server named its window
+    assert cm.window_overflow(None, 7_000) == 7_000         # unnamed: the refused request bounds it
+    assert cm.window_overflow(None, 0) == 7_000             # a count the counter could not make
+    assert cm.window_overflow(9_000, 9_500) == 7_000        # a served window does not grow back
+    assert cm.window_overflow(4_096, 6_000) == 4_096        # llama.cpp's default n_ctx is a window

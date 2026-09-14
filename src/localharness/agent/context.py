@@ -143,6 +143,23 @@ _MEMORY_TOOLS = frozenset({"memory_search", "memory_get"})
 # idempotent (deterministic off canonical messages — no spiral), but it is a silent partial
 # view, not merely graceful degradation.
 _RESTORE_TOOLS = frozenset({"tool_result_get"})
+APPROX_CHARS_PER_TOKEN: int = 4  # the chars//4 planning approximation used wherever no counter is at hand
+COMPACTION_SUMMARY_MARKER = "[Context Summary]\n"
+# The summarizer's own request must fit the window it is clearing (a middle span that has
+# accumulated for many turns 400s the summarizer itself, and that failure is swallowed as a
+# warning — measured on the owner's Windows sessions, 2026-09-14). Its input is capped at a
+# quarter of the window (three quarters left for the system line, the summary and the counting
+# slack of approximate runtimes); each message is cut to SUMMARIZER_MESSAGE_CHARS, never below
+# SUMMARIZER_MIN_MESSAGE_CHARS (role + the opening of the line: enough to know it happened) —
+# except a previous summary, which IS the rolled-up past and is carried whole.
+SUMMARIZER_INPUT_FRACTION: float = 0.25
+SUMMARIZER_MESSAGE_CHARS: int = 500
+SUMMARIZER_MIN_MESSAGE_CHARS: int = 80
+
+
+def summarizer_input_chars(max_context_tokens: int) -> int:
+    """The summarizer's input budget in chars, derived from the window it serves."""
+    return int(max_context_tokens * SUMMARIZER_INPUT_FRACTION) * APPROX_CHARS_PER_TOKEN
 # MOVE 0c (coordinator ruling 2026-07-06, REPLACING the earlier must-shrink latch): bound the
 # summary-compaction storm with hysteresis + a hard floor — never by switching compaction off.
 # The latch inherited the root problem: shrink-per-fire near the trigger is often tiny (SEMA-05
@@ -379,7 +396,7 @@ def _evict_large_tool_results(
         body = m.get("content") or ""
         origin: Origin = "untrusted" if m.get("tool_call_id") in memory_ids else "trusted"
         rid = store.put(body, origin=origin)
-        approx_tokens = len(body) // 4
+        approx_tokens = len(body) // APPROX_CHARS_PER_TOKEN
         name, hint = meta.get(m.get("tool_call_id") or "", ("", ""))
         what = " ".join(s for s in (name, hint) if s)
         out[i] = {**m, "content": (
@@ -1112,6 +1129,10 @@ class SummaryCompactionStage:
         self.compact_md_path = compact_md_path
         self.target_usage_fraction = target_usage_fraction
         self.trigger_usage_fraction = trigger_usage_fraction
+        # (preserve_first_n, preserve_last_n) the LAST fire landed at — the widening loop below
+        # may have halved them. ContextManager re-applies this span to the session's own history
+        # to commit the summary there (see _commit_summary).
+        self.last_span: tuple[int, int] | None = None
 
     async def apply(
         self,
@@ -1119,6 +1140,7 @@ class SummaryCompactionStage:
         budget: TokenBudget,
         token_counter: TokenCounter,
     ) -> tuple[list[Message], bool]:
+        self.last_span = None
         if budget.usage_fraction < self.trigger_usage_fraction:
             return messages, False
         if self.llm_summarize_fn is None:
@@ -1139,9 +1161,10 @@ class SummaryCompactionStage:
                 except Exception as exc:
                     log.warning("Summarization failed: %s. Stopping compaction at current state.", exc)
                     return working, modified
-                summary_message = {"role": "assistant", "content": f"[Context Summary]\n{summary_text}"}
+                summary_message = {"role": "assistant", "content": f"{COMPACTION_SUMMARY_MARKER}{summary_text}"}
                 working = working[:first_boundary] + [summary_message] + working[last_boundary:]
                 modified = True
+                self.last_span = (first_n, last_n)
                 if _writes_compact_md(self.compact_md_path):
                     _write_compact_md(self.compact_md_path, summary_text)
                 log.info(
@@ -1157,24 +1180,59 @@ class SummaryCompactionStage:
             first_n, last_n = min(first_n, next_f), min(last_n, next_l)
 
     def _safe_cut_boundary(self, messages: list[Message], start_idx: int, direction: str) -> int:
-        """Find a safe cut boundary that does not split tool_use/tool_result pairs."""
-        n = len(messages)
-        start_idx = max(0, min(start_idx, n))
+        return _safe_cut_boundary(messages, start_idx, direction)
 
-        if direction == "forward":
-            i = start_idx
-            while i < n:
-                if _is_safe_cut_after(messages, i - 1):
-                    return i
-                i += 1
-            return start_idx
-        else:  # backward
-            i = start_idx
-            while i > 0:
-                if _is_safe_cut_after(messages, i - 1):
-                    return i
-                i -= 1
-            return start_idx
+
+def _safe_cut_boundary(messages: list[Message], start_idx: int, direction: str) -> int:
+    """Find a safe cut boundary that does not split tool_use/tool_result pairs."""
+    n = len(messages)
+    start_idx = max(0, min(start_idx, n))
+
+    if direction == "forward":
+        i = start_idx
+        while i < n:
+            if _is_safe_cut_after(messages, i - 1):
+                return i
+            i += 1
+        return start_idx
+    else:  # backward
+        i = start_idx
+        while i > 0:
+            if _is_safe_cut_after(messages, i - 1):
+                return i
+            i -= 1
+        return start_idx
+
+
+def _commit_summary(
+    messages: list[Message], summary_message: Message, first_n: int, last_n: int,
+) -> tuple[int, int] | None:
+    """Write a fired summary back into the caller's history IN PLACE — the one mutation
+    build_messages makes to its input, and the reason a long session stops re-summarizing.
+
+    Until now a summary lived in one request and was thrown away: the session's own list only
+    ever grew, every later build re-summarized a bigger middle with a fresh model call (three
+    per turn, then the emergency floor cut history mechanically — #145, the owner's own
+    diagnosis). The stage's contract is "keep the first `first_n` and last `last_n`, summarize
+    the rest"; re-applying that span to the raw list — the same safe-cut rule, so no tool
+    pair is split — collapses exactly the region the summary covered, without mapping through
+    the evicted/capped view the stage saw. Rolling: a previous summary sitting in the middle
+    is summarized into the new one, so the prompt carries ONE summary and the head stays the
+    first messages of the session (the task statement). Committed only when the summary is
+    shorter than what it replaces — a bloating summarizer never makes history bigger.
+    Returns (index of the summary in `messages`, messages removed), or None if nothing was
+    committed."""
+    if not isinstance(messages, list):
+        return None
+    fb = _safe_cut_boundary(messages, first_n, "forward")
+    lb = _safe_cut_boundary(messages, len(messages) - last_n, "backward")
+    if lb - fb < 2:
+        return None
+    replaced = sum(len(m.get("content") or "") for m in messages[fb:lb])
+    if len(summary_message.get("content") or "") >= replaced:
+        return None
+    messages[fb:lb] = [dict(summary_message)]
+    return fb, lb - fb - 1
 
 
 class FullAutoCompactStage:
@@ -1234,7 +1292,9 @@ class FullAutoCompactStage:
             tool_schema_tokens=0,
             max_response_tokens=budget.max_response_tokens,
         )
-        return await self._summary_stage.apply(messages, forced_budget, token_counter)
+        out = await self._summary_stage.apply(messages, forced_budget, token_counter)
+        self.last_span = self._summary_stage.last_span
+        return out
 
 
 class CompactionPipeline:
@@ -1277,6 +1337,7 @@ class CompactionPipeline:
             ),
         ]
         self._stages: list = self._deterministic_stages + self._llm_stages
+        self.last_span: tuple[int, int] | None = None  # span of the last LLM stage that fired
 
     async def _run_stages(
         self, stages: list, messages: list[Message], budget: TokenBudget,
@@ -1293,6 +1354,7 @@ class CompactionPipeline:
             if modified:
                 working = result
                 any_modified = True
+                self.last_span = getattr(stage, "last_span", None) or self.last_span
                 # Recompute budget after modification
                 new_usage = self._token_counter.estimate_messages(working)
                 budget = TokenBudget(
@@ -1319,6 +1381,7 @@ class CompactionPipeline:
         self, messages: list[Message], budget: TokenBudget,
     ) -> tuple[list[Message], bool]:
         """LLM-calling stages (summary + full-auto) — these consume the per-turn fire budget."""
+        self.last_span = None
         return await self._run_stages(self._llm_stages, messages, budget)
 
 
@@ -1450,9 +1513,36 @@ def load_compact_md(compact_md_path: Path) -> Message | None:
     return None
 
 
-def make_compaction_summarize_fn(llm: Any) -> Any:
+def render_summarizer_input(messages: list, max_input_chars: int | None = None) -> str:
+    """The middle span as the summarizer sees it: one line per message, each cut to
+    SUMMARIZER_MESSAGE_CHARS — a previous summary carried whole — and the total held under
+    `max_input_chars` by cutting every ordinary line down (floor SUMMARIZER_MIN_MESSAGE_CHARS)
+    before, as a last resort, cutting the tail of the rendering itself."""
+    def prefix(m: Any) -> str:
+        return f"[{m.get('role', '?')}]: "
+
+    def carried(m: Any) -> bool:
+        return (m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER)
+
+    def line(m: Any, cap: int) -> str:
+        content = m.get("content") or ""
+        return prefix(m) + (content if carried(m) else content[:cap])
+    text = "\n".join(line(m, SUMMARIZER_MESSAGE_CHARS) for m in messages)
+    if max_input_chars is None or len(text) <= max_input_chars:
+        return text
+    # What the cap cannot touch: every prefix and newline, and the carried summaries whole.
+    fixed = sum(len(prefix(m)) + 1 + (len(m.get("content") or "") if carried(m) else 0)
+                for m in messages)
+    ordinary = sum(1 for m in messages if not carried(m))
+    cap = max(SUMMARIZER_MIN_MESSAGE_CHARS, (max_input_chars - fixed) // max(1, ordinary))
+    text = "\n".join(line(m, cap) for m in messages)
+    return text[:max_input_chars]  # only the 80-char floor can still push it over
+
+
+def make_compaction_summarize_fn(llm: Any, max_input_chars: int | None = None) -> Any:
     """Build the `llm_summarize_fn` for SummaryCompactionStage: render the middle messages and ask
-    the model for a dense summary.
+    the model for a dense summary. `max_input_chars` (see summarizer_input_chars) keeps the
+    summarizer's own request inside the window it is clearing.
 
     The (message, usage) unpack is LOAD-BEARING and shared by start_cmd + the bench runner so it
     lives in ONE tested place: `complete()` returns a (message, usage) TUPLE, and a bare
@@ -1465,9 +1555,7 @@ def make_compaction_summarize_fn(llm: Any) -> Any:
                 "Summarize the following conversation history concisely. Preserve key facts, "
                 "decisions, and tool results. Output a dense summary paragraph."
             )},
-            {"role": "user", "content": "\n".join(
-                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:500]}" for m in messages
-            )},
+            {"role": "user", "content": render_summarizer_input(messages, max_input_chars)},
         ]
         # Internal summarizer call — thinking off per-request (scoped #11 exception):
         # its bounded completion must yield the summary, not hidden CoT.
@@ -1528,6 +1616,11 @@ class ContextManager:
         self._token_counter = token_counter or TokenCounter()
         self._bus = bus
         self._agent_id = agent_id
+        # Set by build_messages: the summary a fire produced this build (None: no fire), and
+        # where it was committed into the caller's history as (index, messages removed) — the
+        # loop moves its turn-start index by it (None: nothing committed).
+        self.last_fire_summary: str | None = None
+        self.last_commit: tuple[int, int] | None = None
         self._session_id = session_id
         self._iteration = 0
         # MOVE 0c: `_compaction_fires` counts summary compactions in the current turn (backstop
@@ -1546,6 +1639,24 @@ class ContextManager:
     def set_iteration(self, iteration: int) -> None:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
         self._iteration = int(iteration)
+
+    def window_overflow(self, served_limit: int | None, request_tokens: int) -> int:
+        """The server refused a request as larger than its window: learn the window and keep
+        it for the rest of the session (a served window does not grow back). `served_limit` is
+        the number the server named, if it named one; otherwise the refused request's own size
+        is the best upper bound there is — the next build then sits at or over 100 % of it and
+        compaction lands it at target (response_reserve scales down for small windows, so even
+        llama.cpp's default 4096 is a window the harness can plan against). Returns the window
+        now in force."""
+        candidate = served_limit or request_tokens
+        if 0 < candidate < self.max_context_tokens:
+            log.warning(
+                "context window overflow: the server refused a ~%d-token request; window %d -> %d "
+                "for the rest of this session (served limit %s)",
+                request_tokens, self.max_context_tokens, candidate, served_limit or "not named",
+            )
+            self.max_context_tokens = candidate
+        return self.max_context_tokens
 
     def reset_compaction_guard(self) -> None:
         """The agent loop's per-turn reset (the only turn-boundary signal the manager gets).
@@ -1597,6 +1708,8 @@ class ContextManager:
         copied = [
             {**m, "content": ""} if m.get("content") is None else m for m in messages
         ]
+        self.last_fire_summary = None
+        self.last_commit = None
         repaired = self.repair_tool_pairing(copied)
         restore_pins = self._restore_pins(repaired)
         tool_tokens = self._token_counter.estimate_messages(
@@ -1675,6 +1788,19 @@ class ContextManager:
                     repaired, any_modified = await self._pipeline.run_llm(repaired, pre_budget)
                     if any_modified:
                         self._compaction_fires += 1
+                        summary = next((m for m in repaired if m.get("role") == "assistant"
+                                        and (m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER)), None)
+                        span = getattr(self._pipeline, "last_span", None)
+                        if summary is not None:
+                            self.last_fire_summary = summary["content"][len(COMPACTION_SUMMARY_MARKER):]
+                        if summary is not None and span is not None:
+                            self.last_commit = _commit_summary(messages, summary, *span)
+                            if self.last_commit is not None:
+                                log.info(
+                                    "compaction committed: %d history messages -> 1 summary at index %d "
+                                    "(the session shrinks; later builds start from it)",
+                                    self.last_commit[1], self.last_commit[0],
+                                )
                         if self._bus is not None:
                             post_budget = TokenBudget(
                                 total_limit=self.max_context_tokens,

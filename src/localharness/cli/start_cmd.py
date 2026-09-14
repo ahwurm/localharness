@@ -1265,13 +1265,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         try:
             compact_md_path = agent_dir / "compact.md"
 
-            from localharness.agent.context import make_compaction_summarize_fn
+            from localharness.agent.context import make_compaction_summarize_fn, summarizer_input_chars
             pipeline = CompactionPipeline(
                 token_counter=token_counter,
                 tool_result_cap=agent_config.context.max_tool_output_chars,
                 preserve_first_n=agent_config.context.preserve_first_n_messages,
                 preserve_last_n=agent_config.context.preserve_last_n_messages,
-                llm_summarize_fn=make_compaction_summarize_fn(llm),  # shared, tuple-unpack tested
+                llm_summarize_fn=make_compaction_summarize_fn(  # shared, tuple-unpack tested
+                    llm, summarizer_input_chars(agent_config.context.max_context_tokens),
+                ),
                 compact_md_path=compact_md_path,
                 trigger_usage_fraction=_compaction_trigger_fraction,
             )

@@ -876,6 +876,33 @@ Precondition: budget.usage_fraction >= 0.80
 9. Return StageResult(messages=compacted, modified=True, summary_text=summary_text)
 ```
 
+### Committed to the session (2026-09-14)
+
+A fired summary used to live in one request and be thrown away. `build_messages()` returns a
+request list; the session's own `messages` never shrank, so once past the trigger every later
+build re-summarized a bigger middle with a fresh model call — three per turn (`MAX_COMPACTION_FIRES_PER_TURN`), and after that the emergency floor cut history mechanically on
+every iteration. That is the re-fire mechanism named on #145.
+
+Now the summary is **written back into the caller's list in place** (`_commit_summary`). The
+stage records the `(preserve_first_n, preserve_last_n)` it landed at (`last_span`, after any
+widening); the manager re-applies that span to the raw history with the same safe-cut rule, so no
+tool pair is split, and replaces the region with the one `[Context Summary]` message. It does not
+map indices through the evicted/capped view the stage saw — "keep the first N and last M,
+summarize the rest" is the contract, and it is re-applied to the list that persists.
+
+Consequences:
+- **Rolling.** A previous summary sitting in the middle is summarized into the new one, so the
+  prompt carries one summary and the head stays the session's own first messages (the task).
+- **One fire per span, not per request.** A later build starts from the shorter history and
+  usually needs no model call at all. The per-turn fire cap remains as the storm guard.
+- **Never bigger.** A summary longer than what it replaces (a bloating summarizer) is used for
+  the request as before but never committed; history cannot grow by a commit.
+- **The loop follows.** `ContextManager.last_commit = (index, removed)`; the agent loop moves
+  `session.turn_start_idx` by it (`_absorb_commit`) so the turn-scoped reply scan never reads
+  the summary as this turn's answer. `last_fire_summary` is what the memory gist persists.
+- **Prefix cache.** The rewrite happens once per fire, not per request; between fires the head
+  plus summary is a stable prefix.
+
 ### `_safe_cut_boundary()`
 
 ```python
@@ -1143,6 +1170,15 @@ Stage 4 (full auto-compact):
     Both steps log at ERROR and publish CompactionTriggered. Nothing is raised.
 ```
 
+**The summarizer's own request is bounded (2026-09-14).** A middle span that accumulated for
+many turns could overflow the window inside the summarizer itself, and that failure was
+swallowed as the warning above — the turn then 400'd downstream. `render_summarizer_input()` caps
+the input at `summarizer_input_chars(window)` (a quarter of the window at four chars a token):
+each message is cut to 500 chars, a previous `[Context Summary]` is carried whole, and when the
+total still exceeds the cap every ordinary line is cut down (floor 80 chars) before, as a last
+resort, the rendering's tail. Both production call sites (`start_cmd`, the bench runner) thread
+their configured window in.
+
 ### Token Count Estimation Errors
 
 Token counting uses `try/except` around every `tiktoken` call. If tiktoken raises (encoding not found, internal error), fall back to `_CharHeuristic` transparently. Log at WARNING on first fallback in a session.
@@ -1194,6 +1230,17 @@ utilization with compaction latched off. The rule now is that **overflow is impo
 — a loudly-logged lossy history beats a dead session.
 
 ---
+
+**Overflow learning (2026-09-14).** The harness plans against `max_context_tokens`; the server
+serves whatever it serves (a model swap, a server restarted smaller, llama.cpp's default 4096).
+When the server refuses a request as larger than its window — recognized by phrase
+(`provider.client.is_context_overflow`: vLLM's "maximum context length is N", llama.cpp's
+"exceeds the available context size", LM Studio's "greater than the context length"; 400 or 413)
+— the loop does not fail the turn. `ContextManager.window_overflow(served_limit, request_tokens)`
+adopts the window the server named, or the refused request's own size when it named none, for
+the rest of the session; the request is rebuilt against it (compaction and the floor do the
+shrinking) and sent once more. A second refusal in the same turn ends it with a message that
+names the window and the remedy. Before this, any such 400 was `turn failed — llm_error`.
 
 ## Configuration Reference
 

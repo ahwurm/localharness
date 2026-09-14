@@ -1006,3 +1006,27 @@ async def test_aclose_survives_a_failing_transport_close():
 
     await client.aclose()  # must not raise
     assert mock_openai.close.await_count == 1
+
+
+# ---- context-window overflow recognition (2026-09-14) ---------------------------------------
+
+def test_context_overflow_is_recognized_by_phrase_and_the_limit_parsed_when_named():
+    from localharness.provider.client import (
+        ProviderAPIError, context_overflow_limit, is_context_overflow,
+    )
+    vllm = ("Error code: 400 - This model's maximum context length is 32768 tokens. However, "
+            "you requested 34000 tokens (30000 in the messages, 4000 in the completion).")
+    llamacpp = ("Error code: 400 - the request exceeds the available context size. try increasing "
+                "the context size or enable context shift")
+    lmstudio = ("Error code: 400 - The number of tokens to keep from the initial prompt is greater "
+                "than the context length")
+    assert is_context_overflow(ProviderAPIError(vllm, status_code=400))
+    assert is_context_overflow(ProviderAPIError(llamacpp, status_code=400))
+    assert is_context_overflow(ProviderAPIError(lmstudio, status_code=413))
+    assert not is_context_overflow(ProviderAPIError("Error code: 400 - invalid JSON body", status_code=400))
+    assert not is_context_overflow(ProviderAPIError(vllm, status_code=500))  # a 500 is an outage, not a size
+    assert not is_context_overflow(RuntimeError(vllm))
+    assert context_overflow_limit(vllm) == 32768   # the served window, never the requested count
+    assert context_overflow_limit(llamacpp) is None
+    assert context_overflow_limit("n_ctx = 8192 exceeded") == 8192
+    assert context_overflow_limit("context size (4096)") == 4096

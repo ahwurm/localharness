@@ -417,13 +417,15 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         token_counter = TokenCounter()
     bench_store = ContentStore()
 
-    from localharness.agent.context import make_compaction_summarize_fn
+    from localharness.agent.context import make_compaction_summarize_fn, summarizer_input_chars
     bench_pipeline = CompactionPipeline(
         token_counter=token_counter,
         tool_result_cap=cctx.max_tool_output_chars,
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
-        llm_summarize_fn=make_compaction_summarize_fn(llm_client),  # shared, tuple-unpack tested
+        llm_summarize_fn=make_compaction_summarize_fn(  # shared, tuple-unpack tested
+            llm_client, summarizer_input_chars(cctx.max_context_tokens),
+        ),
         # A bench scenario has NO prior-session context and leaves none behind. Said with the
         # sentinel, not None: None means "nothing configured", which the reader turns into a
         # default path under the config dir — i.e. the operator's own agent state (F7).

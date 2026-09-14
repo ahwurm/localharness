@@ -84,6 +84,10 @@ class Session:
     # One bounded retry per turn after the provider aborted a generation that degenerated
     # into repetition mid-stream; the second such abort ends the turn as a failure.
     degenerate_reprompt_used: bool = False
+    # One rebuild-and-retry per turn after the server refuses a request as over its window —
+    # the ContextManager learns the window first, so the retry is a smaller request, not the
+    # same one again.
+    overflow_retry_used: bool = False
 
     @property
     def baton_nudge_used(self) -> bool:
@@ -609,10 +613,28 @@ def _format_stuck_summary(session: Session) -> str:
 
 
 def _format_error_summary(session: Session, exc: Exception) -> str:
-    return (
-        f"Agent encountered an error: {type(exc).__name__}: {exc}. "
-        f"Completed {session.actions_taken} tool calls across {session.iteration} iterations."
-    )
+    from localharness.provider.client import is_context_overflow
+    tail = f"Completed {session.actions_taken} tool calls across {session.iteration} iterations."
+    if is_context_overflow(exc):
+        return (
+            "Context window overflow: the server refused the request as larger than its window, "
+            "even after compaction and one rebuild. Raise the served window (--ctx-size, "
+            "num_ctx, LM Studio's context length) or start a new session. "
+            f"Server said: {str(exc)[:200]}. {tail}"
+        )
+    return f"Agent encountered an error: {type(exc).__name__}: {exc}. {tail}"
+
+
+def _absorb_commit(session: Session, ctx: Any) -> None:
+    """A fired summary was written into session.messages (ContextManager.last_commit): the
+    turn's own start index moves with it, so the turn-scoped reply scan never reads the summary
+    as this turn's answer and never points past the end of the list."""
+    commit = getattr(ctx, "last_commit", None)
+    if not commit:
+        return
+    start, removed = commit
+    if session.turn_start_idx > start:
+        session.turn_start_idx = max(start + 1, session.turn_start_idx - removed)
 
 
 def _budget_note(session: Session, budget: BudgetTracker) -> str:
@@ -1265,6 +1287,8 @@ class AgentLoop:
             ProviderDegenerateError,
             ProviderTimeoutError,
             ProviderAPIError,
+            context_overflow_limit,
+            is_context_overflow,
         )
         from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
@@ -1452,27 +1476,24 @@ class AgentLoop:
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
 
-            # 3. Build request messages first (runs compaction if needed)
+            # 3. Build request messages first (runs compaction if needed). A fired summary is
+            # committed into session.messages by the ContextManager; the turn index follows.
             request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
+            _absorb_commit(session, self._ctx)
 
             # SESS-03: a compaction summary must outlive the window. CompactionTriggered
             # cannot fire live (production ContextManager has no bus — start_cmd gap, noted
-            # for the owner, NOT fixed here); the summary is only observable in the returned
-            # request_messages. Rolling per-sitting node: supersede absorbs re-fires.
-            if self._memory is not None:
-                _marker = "[Context Summary]\n"
-                for _m in request_messages:
-                    _c = _m.get("content") or ""
-                    if _m.get("role") == "assistant" and _c.startswith(_marker):
-                        try:
-                            from localharness.memory.hierarchy import persist_compaction_gist
-                            await persist_compaction_gist(
-                                self._memory, summary=_c[len(_marker):],
-                                session_id=session.session_id,
-                            )
-                        except Exception:
-                            log.warning("compaction-gist persistence failed (non-fatal)", exc_info=True)
-                        break  # one summary message per build; stop at the first
+            # for the owner, NOT fixed here); the summary a fire produced this build is what
+            # the ContextManager reports. Rolling per-sitting node: supersede absorbs re-fires.
+            _fired = getattr(self._ctx, "last_fire_summary", None)
+            if self._memory is not None and _fired:
+                try:
+                    from localharness.memory.hierarchy import persist_compaction_gist
+                    await persist_compaction_gist(
+                        self._memory, summary=_fired, session_id=session.session_id,
+                    )
+                except Exception:
+                    log.warning("compaction-gist persistence failed (non-fatal)", exc_info=True)
 
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
             raw_pct = ctx_budget.usage_fraction * 100.0
@@ -1574,6 +1595,21 @@ class AgentLoop:
                 session.terminated_reason = "error"
                 return _format_error_summary(session, exc)
             except ProviderAPIError as exc:
+                if (
+                    is_context_overflow(exc)
+                    and not session.overflow_retry_used
+                    and hasattr(self._ctx, "window_overflow")
+                ):
+                    # The window the harness planned against is larger than the one the server
+                    # serves (a model swap, a server restarted smaller, a pinned budget). Learn
+                    # the real one, rebuild against it — compaction and the floor do the
+                    # shrinking — and send once more. A second refusal in the turn ends it.
+                    session.overflow_retry_used = True
+                    self._ctx.window_overflow(
+                        context_overflow_limit(str(exc)),
+                        ctx_budget.current_usage + ctx_budget.tool_schema_tokens,
+                    )
+                    continue
                 if exc.status_code == 400:
                     log.error(
                         "HTTP 400 from LLM in %s — server error: %s. Request messages: %s",
@@ -2145,6 +2181,7 @@ class AgentLoop:
             request_messages, _ = await self._ctx.build_messages(
                 session.messages + [{"role": "user", "content": instruction}], None
             )
+            _absorb_commit(session, self._ctx)
             response_message, usage = await self._llm.stream_complete(
                 request_messages, tools=None, on_token=on_token,
             )
@@ -2186,6 +2223,7 @@ class AgentLoop:
             request_messages, _ = await self._ctx.build_messages(
                 session.messages + [{"role": "user", "content": instruction}], None
             )
+            _absorb_commit(session, self._ctx)
             response_message, usage = await self._llm.stream_complete(
                 request_messages, tools=None, on_token=on_token,
             )
@@ -2343,6 +2381,7 @@ class AgentLoop:
                 pass
 
         request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
+        _absorb_commit(session, self._ctx)
 
         try:
             response_message, usage = await self._llm.stream_complete(
