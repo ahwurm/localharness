@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>localharness</title>
+<!--
+  THE REFERENCE PAGE. It is deliberately ugly and that is the specification, not an apology.
+
+  Its only job is to exercise every wire feature so the contract is demonstrable from one file
+  you can read in a sitting. There is no design system, no theming, no framework and no build
+  step: one HTML file with one inline module. Edit it, pull to refresh, done — no server restart.
+  It is meant to be copied and cannibalised, not extended.
+
+  Unstyled is allowed. UNUSABLE is not: tap targets are real, nothing needs pinch-zoom, nothing
+  scrolls sideways, and the composer is reachable without scrolling.
+
+  The four rules that keep a client correct, all implemented below and all worth stealing:
+
+  1. THE ANSWER IS RENDERED ONCE. It arrives three times — as TokenDelta frames, as an
+     `Action(llm_response, has_tool_calls=false)`, and as `TaskComplete.summary`. TaskComplete is
+     the one that renders. A tool-less llm_response is NEVER drawn (see renderAction).
+  2. ONE RENDERER. The client is a reducer over events. SSE-only frames populate PROVISIONAL
+     state; a persisted event always supersedes it. A replayed session simply never enters a
+     provisional state, so live and replay share one code path.
+  3. EVERYTHING IS TEXT. Every model- or tool-derived string goes in through textContent. A
+     rendered-HTML tool result is a prompt-injection foothold that can rewrite the permission
+     dialog into whatever the injected page wants it to say.
+  4. THE CURSOR IS PERSISTED. Last-seen seq goes to localStorage on EVERY event, because iOS
+     reclaims the page and the app relaunches into a fresh JS context where EventSource's own
+     resume state is gone. Without this the reopened app skips silently to the tail and misses
+     the answer.
+-->
+<style>
+  :root { --line:#999; --dim:#666; --bad:#a00; --ok:#060; --warn:#a60; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+         background:#fff; color:#111; -webkit-text-size-adjust:100%; }
+  header { position:sticky; top:0; background:#eee; border-bottom:2px solid var(--line);
+           padding:6px 8px; z-index:5; }
+  #bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:13px; }
+  #bar b { font-weight:700; }
+  main { padding:8px; padding-bottom:180px; }
+  .row { border:1px solid var(--line); margin:6px 0; padding:6px; overflow-wrap:anywhere; }
+  .user   { border-left:6px solid #06c; }
+  .narr   { border-left:6px solid #999; font-style:italic; }
+  .answer { border-left:6px solid #060; }
+  .prov   { border-left:6px dashed #060; opacity:.8; }
+  .tool   { border-left:6px solid #a60; }
+  .child  { margin-left:14px; border-style:dashed; }
+  .err    { border-left:6px solid var(--bad); color:var(--bad); }
+  .sys    { border-left:6px solid #999; color:var(--dim); font-size:13px; }
+  .gap    { border:2px dashed var(--bad); color:var(--bad); }
+  pre  { margin:4px 0; padding:6px; background:#f4f4f4; border:1px solid #ddd;
+         overflow-x:auto; white-space:pre; font-size:13px; }
+  .meta { color:var(--dim); font-size:12px; }
+  button { font:inherit; font-size:15px; min-height:44px; padding:6px 10px; cursor:pointer;
+           border:1px solid var(--line); background:#f7f7f7; }
+  button.small { min-height:32px; font-size:12px; padding:2px 8px; }
+  #composer { position:fixed; bottom:0; left:0; right:0; background:#eee; border-top:2px solid var(--line);
+              padding:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom)); }
+  #text { width:100%; font:inherit; font-size:16px; min-height:48px; padding:6px;
+          border:1px solid var(--line); }
+  #acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+  #acts button { flex:1 1 auto; }
+  dialog { max-width:min(96vw,42rem); border:2px solid #111; padding:10px; }
+  .untrusted { background:#fee; border:1px solid var(--bad); padding:2px 4px; font-size:12px; }
+  .badge { background:#a60; color:#fff; padding:1px 7px; border-radius:9px; font-size:12px; }
+  .offline { background:var(--bad); color:#fff; }
+  summary { cursor:pointer; min-height:32px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="bar">
+    <b id="state">connecting…</b>
+    <span id="phase" class="meta"></span>
+    <span id="tok" class="meta"></span>
+    <span id="tps" class="meta"></span>
+    <span id="ctx" class="meta"></span>
+    <span id="model" class="meta"></span>
+    <button class="small" id="queueBtn">needs you <span class="badge" id="pcount">0</span></button>
+    <button class="small" id="reasonBtn">reasoning: off</button>
+    <button class="small" id="grantsBtn">grants</button>
+    <button class="small" id="protoBtn">protocol</button>
+  </div>
+</header>
+
+<main id="log"></main>
+
+<div id="composer">
+  <textarea id="text" placeholder="ask…" autocomplete="off" autocapitalize="sentences"></textarea>
+  <div id="acts">
+    <button id="send">send</button>
+    <button id="nudge" title="steer the running turn now — no classifier, no model call">nudge</button>
+    <button id="queue" title="run after the current turn">queue</button>
+    <button id="cancel">stop</button>
+    <button id="retry" title="re-send the last message as a NEW turn; the old answer stays">retry</button>
+  </div>
+</div>
+
+<dialog id="ask"></dialog>
+<dialog id="sheet"></dialog>
+
+<script type="module">
+// ---------------------------------------------------------------- credentials
+// The token is required on every request, the stream included. It is never put in a URL: a query
+// string lands in logs and referrers. POSTs carry it as a bearer header; the stream uses the
+// SameSite=Strict cookie that /api/auth/enroll sets in exchange for it.
+const LS = window.localStorage;
+let token = LS.getItem("lh.token") || new URLSearchParams(location.search).get("token") || "";
+if (new URLSearchParams(location.search).get("token")) {
+  LS.setItem("lh.token", token);
+  history.replaceState(null, "", location.pathname);   // don't leave a secret in the address bar
+}
+const H = () => ({ "Content-Type": "application/json", "Authorization": "Bearer " + token });
+const post = (path, body) =>
+  fetch(path, { method: "POST", headers: H(), body: JSON.stringify(body || {}) })
+    .then(r => r.json().catch(() => ({ status: r.status })));
+const get = (path) => fetch(path, { headers: { "Authorization": "Bearer " + token } }).then(r => r.json());
+
+// ---------------------------------------------------------------- state
+const S = {
+  session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
+  tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
+  reasoning: false, offline: false,
+};
+const $ = id => document.getElementById(id);
+const log = $("log");
+
+const cursorKey = () => "lh.seq." + (S.session || "unknown");
+function remember(seq) {
+  // WEBCH-42. On EVERY event, not on unload: iOS does not reliably run unload handlers, and the
+  // case this exists for is precisely the one where the page is reclaimed without warning.
+  if (seq == null) return;
+  S.seq = seq;
+  try { LS.setItem(cursorKey(), String(seq)); } catch (e) { /* private mode: degrade, don't die */ }
+}
+
+// ---------------------------------------------------------------- rendering helpers
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;   // textContent, ALWAYS. Rule 3.
+  return n;
+}
+function atBottom() { return window.innerHeight + window.scrollY >= document.body.offsetHeight - 120; }
+function add(node) {
+  const stick = atBottom();
+  log.appendChild(node);
+  if (stick) window.scrollTo(0, document.body.scrollHeight);
+  return node;
+}
+function copyButton(getText, label) {
+  const b = el("button", "small", label || "copy");
+  b.onclick = () => {
+    // Copy from the STORED string, never from rendered DOM. Re-extracting text from markup is
+    // how leading whitespace dies in a code block — the exact defect shipped in a major vendor's
+    // Android app.
+    const text = getText();
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+      .then(() => { b.textContent = "copied"; setTimeout(() => (b.textContent = label || "copy"), 900); })
+      .catch(() => { b.textContent = "copy failed"; });
+  };
+  return b;
+}
+function withCode(container, raw) {
+  // Fenced blocks become <pre> with their own copy button; everything else is plain text. Both
+  // copy from `raw`, not from the DOM.
+  const parts = String(raw).split(/```/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      const body = part.replace(/^[^\n]*\n/, "");      // drop the language tag line
+      const pre = el("pre", null, body);
+      container.appendChild(pre);
+      container.appendChild(copyButton(() => body, "copy code"));
+    } else if (part.trim()) {
+      container.appendChild(el("div", null, part));
+    }
+  });
+  container.appendChild(copyButton(() => String(raw), "copy message"));
+}
+
+// ---------------------------------------------------------------- the reducer
+function onEvent(name, data) {
+  remember(data.seq);
+  const child = !!data.parent_id;
+  switch (name) {
+    case "UserMessage": {
+      const r = add(el("div", "row user"));
+      r.appendChild(el("div", null, data.content));
+      r.appendChild(el("div", "meta", "you · via " + data.channel));
+      break;
+    }
+    case "TurnStarted":
+      S.turn = true; paint();
+      add(el("div", "row sys", "turn started — " + (data.task_summary || "")));
+      break;
+    case "TurnCompleted":
+      S.turn = false; paint();
+      add(el("div", "row sys",
+        `turn done · ${data.iterations} iterations · ${(data.duration_seconds || 0).toFixed(1)}s · ` +
+        `${data.input_tokens}+${data.output_tokens} tokens${data.tokens_estimated ? " (estimated)" : ""}`));
+      break;
+    case "TurnFailed":
+      if (!child) S.turn = false;
+      paint();
+      add(el("div", "row " + (child ? "sys child" : "err"),
+        (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "")));
+      break;
+    case "Action": renderAction(data, child); break;
+    case "Observation": renderObservation(data, child); break;
+    case "TaskComplete": {
+      // THE ANSWER. Rendered from here and nowhere else (rule 1). A CHILD's TaskComplete is
+      // forwarded by the wire on purpose and collapsed here: a subagent's summary drawn as a
+      // top-level answer reads as a premature, often contradictory final answer.
+      const r = add(el("div", "row " + (child ? "sys child" : "answer")));
+      if (child) {
+        const d = el("details"); d.appendChild(el("summary", null, "subagent finished"));
+        d.appendChild(el("div", null, data.summary)); r.appendChild(d);
+      } else {
+        withCode(r, data.summary || "");
+        r.appendChild(el("div", "meta",
+          `${data.success ? "ok" : "unsuccessful"} · ${(data.duration_seconds || 0).toFixed(1)}s`));
+      }
+      break;
+    }
+    case "Heartbeat":
+      if (data.context_utilization_pct != null) {
+        $("ctx").textContent = "ctx " + data.context_utilization_pct.toFixed(0) + "%";
+        // 80% is where compaction FIRES, so red means "compacting now", not "nearly full".
+        $("ctx").style.color = data.context_utilization_pct >= 80 ? "var(--bad)"
+          : data.context_utilization_pct >= 65 ? "var(--warn)" : "";
+      }
+      break;
+    case "ParseFailed":
+      add(el("div", "row err",
+        `tool call not parsed (retry ${data.parse_retry_count}) — the model emitted tool-shaped ` +
+        `text nothing read, so nothing ran: ${data.raw_content_preview}`));
+      break;
+    case "CompactionTriggered":
+      add(el("div", "row sys",
+        `context compacted ${(data.pre_usage_fraction * 100).toFixed(0)}% → ` +
+        `${(data.post_usage_fraction * 100).toFixed(0)}% — older detail summarized`));
+      break;
+    case "Escalation":
+      add(el("div", "row err", "escalated — " + data.reason + ": " + (data.detail || "")));
+      break;
+    case "InputRouted":
+      add(el("div", "row sys", `input routed: ${data.decision} (${data.tier} — ${data.rule_or_reason})`));
+      break;
+    case "ConsolidationStarted": $("state").dataset.dream = "1"; paint(); break;
+    case "ConsolidationFinished": delete $("state").dataset.dream; paint(); break;
+    case "PermissionStaged":
+      S.parked.set(data.pending.id, data.pending);
+      paint();
+      add(el("div", "row tool",
+        `parked #${data.pending.id} — ${data.pending.rendering} (${data.total} waiting; the turn ` +
+        `carried on without it)`));
+      break;
+    case "PermissionResolved":
+      // Closes the item on EVERY surface. Answer it in Discord and this badge clears; the bus
+      // gives that away free.
+      if (data.pending_id != null) S.parked.delete(data.pending_id);
+      paint();
+      add(el("div", "row sys",
+        `permission ${data.decision}${data.pending_id != null ? " (#" + data.pending_id + ")" : ""}` +
+        (data.wrote_grant ? " — a permanent grant was written" : "")));
+      break;
+    case "PermissionAsked": break;   // audit only; it carries no payload to draw
+    default: break;
+  }
+}
+
+function renderAction(d, child) {
+  if (d.action_type === "tool_call") {
+    const group = (S.tools[d.tool_name] || {}).group || "unknown";
+    // Opt-in by SAFE group, never opt-out by dangerous group: a tool in a group this client has
+    // never heard of is itemized. A newly-added dangerous tool therefore cannot silently start
+    // collapsing because nobody remembered to add it to a deny list.
+    const collapse = S.collapsible.includes(group);
+    const row = add(el("div", "row tool" + (child ? " child" : "")));
+    const head = el("div", null, (child ? "↳ " : "") + d.tool_name + "  [" + group + "]");
+    row.appendChild(head);
+    if ((S.tools[d.tool_name] || {}).destructive) head.appendChild(el("span", "untrusted", " destructive"));
+    if (["web_search", "web_fetch", "web_page_query"].includes(d.tool_name))
+      head.appendChild(el("span", "untrusted", " untrusted ingest"));
+    const args = el("pre", null, JSON.stringify(d.tool_params || {}, null, 1));
+    if (collapse) {
+      const det = el("details"); det.appendChild(el("summary", null, "arguments"));
+      det.appendChild(args); row.appendChild(det);
+    } else { row.appendChild(args); }
+    row.appendChild(el("div", "meta", "id " + (d.tool_call_id || "?") + " · waiting…"));
+    S.calls.set(d.tool_call_id, row);
+    return;
+  }
+  if (d.action_type !== "llm_response") return;
+  if (d.has_tool_calls) {
+    // Interstitial narration: the model talking while it calls tools.
+    if (d.content) { const r = add(el("div", "row narr" + (child ? " child" : ""))); withCode(r, d.content); }
+  } else {
+    // THE FINAL ANSWER — and it must NOT be drawn. TaskComplete renders it. Drawing it here is
+    // the single most likely way a client ships with every answer printed twice.
+    clearProvisional(d.seq);
+  }
+}
+
+function renderObservation(d, child) {
+  const row = S.calls.get(d.tool_call_id);
+  const target = row || add(el("div", "row tool" + (child ? " child" : "")));
+  const out = d.output || d.error || "";
+  target.appendChild(el("pre", null, out));
+  const bits = [];
+  if (d.exit_code != null) bits.push("exit " + d.exit_code);
+  if (d.truncated) bits.push("truncated from " + (d.original_length ?? "?") + " chars — the full " +
+    "body is not on the bus at all");
+  if (d.error) bits.push("error");
+  target.appendChild(el("div", "meta", bits.join(" · ") || "done"));
+  if (d.error) target.classList.add("err");
+  target.appendChild(copyButton(() => out, "copy output"));
+  S.calls.delete(d.tool_call_id);
+}
+
+// ---------------------------------------------------------------- provisional state (rule 2)
+function provisional() {
+  if (!S.prov) {
+    const row = add(el("div", "row prov"));
+    S.prov = { row, text: "", body: el("div"), reason: el("pre") };
+    S.prov.reason.style.display = "none";
+    row.appendChild(S.prov.reason);
+    row.appendChild(S.prov.body);
+    row.appendChild(el("div", "meta", "streaming… (this bubble is provisional; the Action that " +
+      "lands supersedes it)"));
+  }
+  return S.prov;
+}
+function clearProvisional(bySeq) {
+  if (!S.prov) return;
+  S.prov.row.remove();
+  S.prov = null;
+  if (bySeq != null) { /* superseded — the authoritative event is on its way in */ }
+}
+
+// ---------------------------------------------------------------- SSE-only frames
+function onFrame(name, d) {
+  switch (name) {
+    case "Hello":
+      S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress;
+      $("state").textContent = d.synthetic ? "REPLAY" : "connected";
+      if (d.synthetic) add(el("div", "row sys",
+        "REPLAY: the streaming and instrument frames on this connection are SYNTHESIZED from a " +
+        "persisted log — plausible, not measured. A blocking ask has no persisted analog at all."));
+      if (d.protocol_version !== 1) add(el("div", "row err",
+        "protocol_version " + d.protocol_version + " — this page was written against 1. Something " +
+        "will render as a blank cell; go read /api/protocol."));
+      paint(d.model_state);
+      break;
+    case "TokenDelta": { const p = provisional(); p.text += d.text; p.body.textContent = p.text; break; }
+    case "StreamClosed": clearProvisional(d.superseded_by_seq); break;
+    case "ReasoningDelta": {
+      const p = provisional();
+      p.reason.style.display = S.reasoning ? "" : "none";
+      p.reason.textContent += d.text;
+      break;
+    }
+    case "StatusTick":
+      $("phase").textContent = d.phase + (d.silent > 10 ? " (stalled " + d.silent.toFixed(0) + "s)" : "");
+      $("phase").style.color = d.silent > 10 ? "var(--bad)" : "";
+      $("tok").textContent = `${d.thinking_tokens}t/${d.answer_tokens}a/${d.tool_call_tokens}c ` +
+                             `${d.elapsed.toFixed(0)}s`;
+      $("tps").textContent = d.tps == null ? "" :
+        d.tps.toFixed(0) + " tok/s" + (d.tps_verified ? "" : "≈") + (d.synthetic ? " (synthetic)" : "");
+      $("tps").style.color = d.tps == null ? "" : d.tps >= 30 ? "var(--ok)" : d.tps >= 20 ? "var(--warn)" : "var(--bad)";
+      if (d.model) $("model").textContent = d.model;
+      if (d.context_pct != null) $("ctx").textContent = "ctx " + d.context_pct.toFixed(0) + "%";
+      break;
+    case "BlockingAsk": S.asks.set(d.request_id, d); paint(); showAsk(d); break;
+    case "AskExpired":
+      S.asks.delete(d.request_id); paint();
+      if ($("ask").open && $("ask").dataset.rid === d.request_id) $("ask").close();
+      add(el("div", "row err",
+        `that question expired after ${d.waited_s.toFixed(0)}s and was recorded as ${d.decision}. ` +
+        `Nothing ran.`));
+      break;
+    case "TurnCancelled":
+      S.turn = false; clearProvisional(null); paint();
+      add(el("div", "row sys", "turn cancelled — the partial text above stays."));
+      break;
+    case "BringUpStage":
+      $("state").textContent = d.failed ? "bring-up failed: " + d.stage : "starting: " + d.stage;
+      if (d.detail) add(el("div", "row " + (d.failed ? "err" : "sys"), d.stage + " — " + d.detail));
+      break;
+    case "Notice": {
+      const r = add(el("div", "row " + (d.style === "system.error" ? "err" : "sys")));
+      if (d.preformatted) r.appendChild(el("pre", null, d.text)); else r.appendChild(el("div", null, d.text));
+      if (d.detail) r.appendChild(el("div", "meta", d.detail));
+      break;
+    }
+    case "GapDetected":
+      add(el("div", "row gap",
+        `GAP: events ${d.from_seq}–${d.to_seq} were delivered live but are missing from the log. ` +
+        d.detail));
+      break;
+    case "Lagged":
+      add(el("div", "row gap", "this client fell behind and its buffer was dropped — resyncing."));
+      connect(d.from_seq);
+      break;
+    default: break;
+  }
+}
+
+// ---------------------------------------------------------------- the connection
+let es = null;
+function connect(from) {
+  if (es) es.close();
+  const stored = LS.getItem(cursorKey());
+  const cursor = from != null ? from : (S.seq != null ? S.seq + 1 : (stored ? Number(stored) + 1 : null));
+  // `?from=` explicitly, not just Last-Event-ID: the case this exists for is a COLD RELAUNCH,
+  // where iOS reclaimed the page and EventSource's own resume state went with it.
+  es = new EventSource("/api/stream" + (cursor != null ? "?from=" + cursor : ""));
+  const known = new Set([
+    "Hello", "TokenDelta", "StreamClosed", "ReasoningDelta", "StatusTick", "BlockingAsk",
+    "AskExpired", "TurnCancelled", "BringUpStage", "Notice", "GapDetected", "Lagged",
+  ]);
+  es.onopen = () => { S.offline = false; paint(); };
+  es.onerror = () => { S.offline = true; paint(); };   // EventSource retries on its own
+  const handle = (name) => (ev) => {
+    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (known.has(name)) onFrame(name, d); else onEvent(name, d);
+    if (ev.lastEventId) remember(Number(ev.lastEventId));
+  };
+  for (const n of known) es.addEventListener(n, handle(n));
+  for (const n of ["UserMessage", "TurnStarted", "TurnCompleted", "TurnFailed", "Action",
+                   "Observation", "TaskComplete", "Heartbeat", "ParseFailed", "StuckRecovered",
+                   "CompactionTriggered", "Escalation", "PermissionAsked", "PermissionStaged",
+                   "PermissionResolved", "ConsolidationStarted", "ConsolidationFinished",
+                   "InputRouted"]) es.addEventListener(n, handle(n));
+}
+
+function paint(modelState) {
+  const s = $("state");
+  if (S.offline) { s.textContent = "offline — retrying"; s.className = "offline"; }
+  else { s.className = ""; if (modelState) s.textContent = modelState; }
+  if (modelState === "unreachable") s.textContent = "model server unreachable — start it, then retry";
+  else if (modelState === "cold") s.textContent = "cold — send to start the session";
+  if (s.dataset.dream) s.textContent += " · dreaming";
+  $("pcount").textContent = String(S.parked.size + S.asks.size);
+  $("cancel").disabled = !S.turn;
+}
+
+// ---------------------------------------------------------------- permission UI
+function showAsk(d) {
+  const dlg = $("ask");
+  dlg.dataset.rid = d.request_id;
+  dlg.replaceChildren();
+  dlg.appendChild(el("h3", null, d.klass === "workspace-trust" ? "Trust this workspace?" : "Permission"));
+  dlg.appendChild(el("div", null, d.display || d.reason));
+  if (d.untrusted_ingest) dlg.appendChild(el("div", "untrusted",
+    "this tool ingests attacker-controllable content"));
+  dlg.appendChild(el("pre", null, JSON.stringify(d.tool_params, null, 1)));
+  if (d.deadline_s) dlg.appendChild(el("div", "meta",
+    `the gate stops waiting after about ${d.deadline_s}s and records a denial`));
+  for (const o of d.options) {
+    const b = el("button", null, o.name + (o.confirm_required ? " (2 taps)" : ""));
+    b.onclick = async () => {
+      let r = await post(`/api/permissions/${d.request_id}/answer`, { kind: o.kind });
+      if (r.status === "confirm_required") {
+        // The second tap is enforced by the SERVER, not here. This page is the owner's disposable
+        // half — anything else holding the token (curl, a Shortcut, a future UI) hits the same
+        // wall, which is the whole point of putting it there rather than in a page.
+        if (!confirm(r.detail)) return;
+        r = await post(`/api/permissions/${d.request_id}/answer`,
+                       { kind: o.kind, confirm_token: r.confirm_token });
+      }
+      S.asks.delete(d.request_id); paint(); dlg.close();
+      add(el("div", "row sys", "answered: " + (r.decision || r.status)));
+    };
+    dlg.appendChild(b);
+  }
+  dlg.showModal();
+}
+
+async function showQueue() {
+  const dlg = $("sheet");
+  const state = await get("/api/permissions");
+  dlg.replaceChildren(el("h3", null, "needs you"));
+  for (const a of state.blocking) {
+    const b = el("button", null, "answer: " + (a.display || a.tool_name));
+    b.onclick = () => { dlg.close(); showAsk(a); };
+    dlg.appendChild(b);
+  }
+  if (!state.parked.length && !state.blocking.length)
+    dlg.appendChild(el("div", null, "nothing waiting."));
+  for (const p of state.parked) {
+    const row = el("div", "row tool");
+    row.appendChild(el("div", null, `#${p.id} ${p.rendering}`));
+    row.appendChild(el("div", "meta", p.agent_label || "this agent"));
+    for (const verb of ["approve", "deny"]) {
+      const b = el("button", null, verb);
+      b.onclick = async () => {
+        const r = await post(`/api/pending/${p.id}/${verb}`);
+        add(el("div", "row sys", r.note || r.detail || r.status));
+        dlg.close(); paint();
+      };
+      row.appendChild(b);
+    }
+    dlg.appendChild(row);
+  }
+  const close = el("button", null, "close"); close.onclick = () => dlg.close();
+  dlg.appendChild(close);
+  dlg.showModal();
+}
+
+async function showSheet(title, body) {
+  const dlg = $("sheet");
+  dlg.replaceChildren(el("h3", null, title), el("pre", null, body));
+  const close = el("button", null, "close"); close.onclick = () => dlg.close();
+  dlg.appendChild(close); dlg.showModal();
+}
+
+// ---------------------------------------------------------------- composer
+async function send(intent) {
+  const text = $("text").value.trim();
+  if (!text) return;
+  S.lastSent = text;
+  $("text").value = "";
+  const r = await post(`/api/sessions/${S.session || "current"}/message`,
+                       intent ? { text, intent } : { text });
+  if (r.status === "no_resolver") add(el("div", "row err", r.detail));
+  else if (r.bringing_up) add(el("div", "row sys", "starting the session for this message…"));
+}
+$("send").onclick = () => send(null);
+$("nudge").onclick = () => send("nudge");
+$("queue").onclick = () => send("queue");
+$("retry").onclick = () => {
+  // Re-sends as an ordinary NEW turn on the same linear session. Not a branch: the log is
+  // append-only JSONL and a mis-built branch is worse than none. The old answer stays readable.
+  if (!S.lastSent) return;
+  $("text").value = S.lastSent;
+  add(el("div", "row sys", "retrying — the previous answer stays above"));
+  send(null);
+};
+
+let undo = null;
+$("cancel").onclick = () => {
+  // A brief undo window before the POST fires. Cancel sits next to the composer where a
+  // distracted thumb lands, and on this box the GPU is the scarce resource — a mis-tap discards
+  // real generation.
+  if (undo) return;
+  const row = add(el("div", "row sys"));
+  row.appendChild(el("span", null, "cancelling in 3s… "));
+  const b = el("button", "small", "undo");
+  b.onclick = () => { clearTimeout(undo); undo = null; row.remove(); };
+  row.appendChild(b);
+  undo = setTimeout(async () => {
+    undo = null; row.remove();
+    const r = await post(`/api/sessions/${S.session || "current"}/cancel`);
+    if (r.status === "nothing_to_cancel") add(el("div", "row sys", "nothing was running."));
+  }, 3000);
+};
+
+$("reasonBtn").onclick = async () => {
+  S.reasoning = !S.reasoning;
+  $("reasonBtn").textContent = "reasoning: " + (S.reasoning ? "on" : "off");
+  if (S.prov) S.prov.reason.style.display = S.reasoning ? "" : "none";
+  // The server-side toggle too, through the REPL's own dispatcher — so the two surfaces cannot
+  // drift and `/reasoning` means the same thing wherever it is typed.
+  await post(`/api/sessions/${S.session || "current"}/command`,
+             { text: "/reasoning " + (S.reasoning ? "on" : "off") });
+};
+$("queueBtn").onclick = showQueue;
+$("grantsBtn").onclick = async () => {
+  const g = await get("/api/grants");
+  showSheet("permanent grants (" + g.grants.length + ")", g.note + "\n\n" + JSON.stringify(g.grants, null, 1));
+};
+$("protoBtn").onclick = async () => {
+  const p = await get("/api/protocol");
+  showSheet("protocol v" + p.protocol_version, JSON.stringify(p, null, 1));
+};
+
+// ---------------------------------------------------------------- boot
+(async () => {
+  if (!token) {
+    const t = prompt("app token (printed by `localharness web`)");
+    if (t) { token = t.trim(); LS.setItem("lh.token", token); }
+  }
+  try { await post("/api/auth/enroll", {}); } catch (e) { /* the bearer header still works */ }
+  try {
+    const [proto, tools, health] = await Promise.all([
+      get("/api/protocol"), get("/api/tools"), get("/api/health"),
+    ]);
+    S.collapsible = proto.collapsible_groups || S.collapsible;
+    for (const t of tools.tools) S.tools[t.name] = t;
+    S.session = health.session_id || S.session;
+    paint(health.model_state);
+  } catch (e) {
+    add(el("div", "row err", "could not reach the API — is the token right? " + e));
+  }
+  connect();
+  // Coming back from the background is the commonest arrival, so re-check rather than trust the
+  // stream to still be alive: iOS can leave an EventSource that believes it is connected.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && (S.offline || !es || es.readyState === 2)) connect();
+  });
+})();
+</script>
+</body>
+</html>
