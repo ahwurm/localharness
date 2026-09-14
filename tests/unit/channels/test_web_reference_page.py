@@ -345,6 +345,27 @@ report();
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_answers_render_the_markdown_subset_without_leaking_markup(page, tmp_path):
+    """The phone is a reading surface: headings, tables and bold render as STRUCTURE — built
+    with createElement/textContent only, never parsed as HTML — and the marker characters
+    (##, **, |---|) must not survive into the rendered text."""
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+                  protocol_version: 1, synthetic: false, model_state: "ready"});
+onEvent("TaskComplete", {seq: 2, success: true, duration_seconds: 1.0, summary:
+  "## Indexes\\n| Index | Move |\\n|---|---|\\n| S&P 500 | -0.48% |\\n- **AI worries** hit chips\\n<script>x</script>"});
+report();
+""", tmp_path)
+    answer = [r for r in rendered if r["cls"].startswith("row answer")][0]["text"]
+    for kept in ("Indexes", "S&P 500", "-0.48%", "AI worries", "hit chips"):
+        assert kept in answer, f"{kept!r} was lost in rendering"
+    for marker in ("##", "**", "|---"):
+        assert marker not in answer, f"markdown marker {marker!r} leaked into the rendered text"
+    # Rule 3 survives the renderer: the tag arrives as eight characters of text, not an element.
+    assert "<script>x</script>" in answer
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
 def test_safe_group_calls_consolidate_into_one_counter_row_by_default(page, tmp_path):
     """The terminal's condensed view, carried over (owner, 2026-09-14): consecutive safe-group
     calls are ONE counter row (`read · grep  2/2`), a side-effecting call stays its own row,
