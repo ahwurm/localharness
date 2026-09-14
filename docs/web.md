@@ -108,11 +108,20 @@ mean it. A proxy publishes it.
 tailscale serve --bg 8765
 ```
 
-**The plain-HTTP path is a browser tab, not an app.** Over plain HTTP on a non-localhost origin
-the browser will not register a service worker, so there is no home-screen install and no push
-notification. That is a browser rule, not a LocalHarness limitation, and it is said here rather
-than left to be discovered. The app token is required in all three topologies, precisely because
-the network boundary differs between them.
+**Plain HTTP on a LAN address does not work at all — it is not a reduced version of this.**
+Two browser rules, not LocalHarness limitations, and the second is the fatal one:
+
+- No service worker on a non-secure origin, so no home-screen install and no notifications.
+- **The event stream cannot authenticate.** Enrolment sets a `Secure` cookie, browsers refuse to
+  keep a `Secure` cookie on a plain-http origin, and `EventSource` cannot send the bearer header
+  instead — so every connection attempt is rejected and the page retries forever. It looks
+  exactly like bad wifi. The page now says so on load rather than letting you debug your router.
+
+`http://localhost` is exempt from both: browsers treat it as a secure context, which is why the
+development loop works without any of this. For a phone, put TLS in front of the port.
+
+The app token is required in all three topologies, precisely because the network boundary differs
+between them.
 
 ## Which channel should I use?
 

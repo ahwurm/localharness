@@ -344,7 +344,14 @@ class PushPolicy:
     # -- class 1: a turn finished while you were away ----------------------
 
     def turn_started(self, session_id: Optional[str], *, now: Optional[float] = None) -> None:
-        self._state(session_id).turn_started_at = time.monotonic() if now is None else now
+        state = self._state(session_id)
+        state.turn_started_at = time.monotonic() if now is None else now
+        # An escalation is the only needs-you class with NO resolution event — nothing ever
+        # publishes "the stuck turn is unstuck" — so its badge unit could never come off, and a
+        # box that escalates occasionally would end up permanently claiming that seven things
+        # need a human. A new turn starting IS that signal. Parked calls are deliberately not
+        # swept: outliving the turn that raised them is the entire point of parking one.
+        state.outstanding = {key for key in state.outstanding if key[0] != "escalation"}
 
     def turn_finished(
         self, session_id: Optional[str], *, clients_attached: int, now: Optional[float] = None,
