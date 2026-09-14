@@ -34,6 +34,8 @@ from typing import Any, AsyncIterator, Optional
 
 import structlog
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from starlette.responses import StreamingResponse
@@ -100,6 +102,38 @@ exactly this. Paying a model call and half a minute to reach the answer we would
 free is the worst available trade. Written down so a later "simplification" back to `auto` does
 not silently reintroduce the stall.
 """
+
+
+SECURITY_HEADERS: dict[str, str] = {
+    # THE one that matters here. The shell is served without a credential and is inert without
+    # one — but `localStorage` is scoped to the ORIGIN, not to the frame embedding it, so an
+    # iframe of this origin inherits an enrolled session wholesale. Both headers, because
+    # `frame-ancestors` is the modern rule and `X-Frame-Options` is what an older WebView obeys.
+    "X-Frame-Options": "DENY",
+    # `frame-ancestors` alone, NOT a `default-src`: the reference page is deliberately one file
+    # with inline `<style>` and an inline module, and a `default-src 'self'` would break the very
+    # page this serves. `base-uri` and `form-action` are free alongside it and close a `<base>`
+    # rewrite and a cross-origin form post.
+    "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Content-Type-Options": "nosniff",
+    # The token is never put in a URL, and this keeps any future one out of a referrer anyway.
+    "Referrer-Policy": "no-referrer",
+}
+"""Stamped on EVERY response by :class:`_SecurityHeaders`, the static shell included.
+
+Not on the API alone: the shell is the thing an attacker wants to frame, precisely because it is
+the one route that answers without a credential.
+"""
+
+
+class _SecurityHeaders(BaseHTTPMiddleware):
+    """Add :data:`SECURITY_HEADERS` to every response, including the streaming one."""
+
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
 
 
 def _json(payload: Any, status: int = 200) -> JSONResponse:
@@ -174,6 +208,17 @@ class WebServer:
     # ------------------------------------------------------------------ routes
 
     def _build(self) -> Starlette:
+        """Routes, plus the headers that keep the unauthenticated shell from being weaponised.
+
+        `SECURITY_HEADERS` is not decoration. The static page is served without a credential and
+        argued inert — every `/api` route refuses an unauthenticated caller — but the enrolled
+        token lives in `localStorage`, which is scoped to the ORIGIN, not to whatever frames it.
+        Without a framing rule, a malicious page the owner's browser happens to visit can iframe
+        this origin, inherit an enrolled session, and UI-redress BOTH taps of the `_always`
+        confirm — defeating by clicks the one control built specifically so a single request
+        cannot write a permanent, global, unrevokable grant. Found by an adversarial review, not
+        by the tests.
+        """
         routes = [
             Route("/api/auth/enroll", self.enroll, methods=["POST"]),
             Route("/api/stream", self.stream, methods=["GET"]),
@@ -194,7 +239,7 @@ class WebServer:
             Route("/api/sessions/{session_id}/command", self.command, methods=["POST"]),
             Route("/{path:path}", self.static, methods=["GET"]),
         ]
-        return Starlette(routes=routes)
+        return Starlette(routes=routes, middleware=[Middleware(_SecurityHeaders)])
 
     # ------------------------------------------------------------------ static
 
@@ -274,21 +319,37 @@ class WebServer:
 
     @staticmethod
     def _cursor(request: Request) -> Optional[int]:
-        """The client's resume point: its own `?from=` wins, else the browser's `Last-Event-ID`.
+        """The client's resume point, normalised to "the first seq I still want".
 
-        `?from=` wins because a COLD RELAUNCH is the real case — iOS reclaims the page, the app
-        comes back in a fresh JS context and `EventSource`'s own resume state is gone with it. So
-        the cursor that matters is the one the client persisted to `localStorage` on every event
-        and hands back explicitly (WEBCH-42); `Last-Event-ID` only covers a socket drop with the
-        page still alive.
+        Two sources, and **they do not mean the same thing** — which is the whole reason this is
+        a function rather than one `int()` call:
+
+        * `?from=N` is the client's own explicit request and already means "from N inclusive":
+          the page computes it as `last_seen + 1`.
+        * `Last-Event-ID: N` is the BROWSER's, attached automatically on `EventSource`'s own
+          auto-reconnect, and names the last event it RECEIVED. Serving from N would re-deliver
+          it — one duplicated event on every ordinary wifi blip, with no app code involved.
+
+        So the header is advanced by one and the query parameter is not. Getting this wrong is
+        invisible in the cold-relaunch test everyone writes (which sets `?from=`) and shows up
+        only on the commonest reconnect there is.
+
+        `?from=` wins when both are present: a cold relaunch is the case that matters — iOS
+        reclaims the page and `EventSource`'s own resume state goes with it — so the cursor the
+        client persisted to `localStorage` is the authoritative one (WEBCH-42).
         """
-        for raw in (request.query_params.get("from"), request.headers.get("last-event-id")):
-            if raw is None:
-                continue
+        raw = request.query_params.get("from")
+        if raw is not None:
             try:
                 return int(raw)
             except (TypeError, ValueError):
-                continue
+                pass
+        header = request.headers.get("last-event-id")
+        if header is not None:
+            try:
+                return int(header) + 1
+            except (TypeError, ValueError):
+                pass
         return None
 
     async def _sse(self, client: Any, cursor: Optional[int]) -> AsyncIterator[bytes]:
