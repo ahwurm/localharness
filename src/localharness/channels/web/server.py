@@ -219,6 +219,7 @@ class WebServer:
         token: str,
         ui_dir: Optional[Path] = None,
         on_first_message: Optional[Any] = None,
+        on_new_session: Optional[Any] = None,
         replay: Any = None,
         config_dir: Optional[str | Path] = None,
     ) -> None:
@@ -226,6 +227,7 @@ class WebServer:
         self.token = token
         self.ui_dir = (ui_dir or PACKAGED_UI_DIR).resolve()
         self.on_first_message = on_first_message
+        self.on_new_session = on_new_session
         self.replay = replay
         self.config_dir = config_dir
         self._bringup_started = False
@@ -305,6 +307,7 @@ class WebServer:
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
+            Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
             Route("/api/sessions/{session_id}/message", self.message, methods=["POST"]),
             Route("/api/sessions/{session_id}/cancel", self.cancel, methods=["POST"]),
@@ -841,6 +844,30 @@ class WebServer:
             return _json({"status": "nothing_to_cancel"})
         return _json({"status": "cancelled"})
 
+    async def new_session(self, request: Request) -> Response:
+        """The + button: end the current session and build a fresh one (owner, 2026-09-14).
+
+        Refused mid-turn on purpose — the stop verb exists, and killing a generating session
+        under a thumb that wanted a clean topic break discards real GPU work. Refused in replay
+        and wherever the runner installed no restart handle: this endpoint must never pretend.
+        The old session's log stays on disk, so the drawer keeps the chat that just ended.
+        """
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        if self.on_new_session is None:
+            return _json({"error": "this server cannot restart the session — a replay serves "
+                                   "a finished log, and only the live runner installs the "
+                                   "restart handle"}, status=409)
+        if self.channel._turn_running:
+            return _json({"error": "a turn is running — stop it first, then start the new "
+                                   "chat"}, status=409)
+        await self.on_new_session()
+        return _json({
+            "status": "starting",
+            "note": "the fresh session is building; the old chat stays in the history list",
+        })
+
     async def answer(self, request: Request) -> Response:
         """Answer a blocking ask. Idempotent; the `_always` kinds take a second, server-checked tap."""
         refusal = self._authed(request, post=True)
@@ -1012,6 +1039,7 @@ class WebServer:
 
 
 _VERBS: tuple[tuple[str, str, str], ...] = (
+    ("POST", "/api/sessions/new", "end the current session, build a fresh one; the old log stays"),
     ("POST", "/api/sessions/{id}/message", "a user turn; body {text, intent?}"),
     ("POST", "/api/sessions/{id}/cancel", "cancel the in-flight turn, then emit TurnCancelled"),
     ("POST", "/api/sessions/{id}/mode", "set the permission mode; body {mode}"),
