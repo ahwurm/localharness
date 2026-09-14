@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from localharness.cli import web_cmd
 
 
@@ -105,11 +107,30 @@ def test_the_command_offers_a_public_url_flag():
     assert "public_url" in inspect.signature(web_cmd.web_cmd).parameters
 
 
-def test_rotating_the_token_reprints_a_qr():
-    """§7.2: rotation is the answer to 'my phone was stolen while the app was still enrolled',
-    and it is useless if re-pairing means hand-typing the new secret."""
-    import inspect
+def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
+    """§7.2: rotation is the answer to "my phone was stolen while the app was still enrolled",
+    and it is useless if re-pairing means hand-typing the new secret.
 
-    source = inspect.getsource(web_cmd.web_cmd)
-    rotate = source[source.index("if rotate_token:"):]
-    assert "print_enrolment" in rotate[:600]
+    Driven through the real command. The earlier version of this test sliced the function's
+    SOURCE and would have stayed green if `raise typer.Exit(0)` moved above the print, making
+    the QR dead code — a mutation a reviewer found, not the suite.
+    """
+    import typer
+
+    from localharness.channels.web import auth as web_auth
+
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path))
+    before = web_auth.load_or_create_token(tmp_path)[0]
+    capsys.readouterr()
+
+    with pytest.raises(typer.Exit) as exit_info:
+        web_cmd.web_cmd(config_dir=str(tmp_path), rotate_token=True,
+                        public_url="https://spark.example.ts.net")
+    assert exit_info.value.exit_code == 0
+
+    out = capsys.readouterr().out
+    after = web_auth.load_or_create_token(tmp_path)[0]
+    assert after != before, "the token was not actually rotated"
+    assert "█" in out, "no QR was printed for the new token"
+    assert after in out, "the QR and its URL must carry the NEW token"
+    assert before not in out

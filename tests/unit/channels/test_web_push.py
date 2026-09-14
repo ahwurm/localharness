@@ -8,7 +8,9 @@ endpoint are all asserted against what actually went out.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import json
 
 import httpx
@@ -348,7 +350,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.sent: list[push.Push] = []
 
-    async def send(self, subscription, message):
+    async def send(self, subscription, message, client=None):
         self.sent.append(message)
         return True
 
@@ -487,7 +489,7 @@ async def test_a_failing_push_never_takes_the_turn_down(tmp_path):
     bus, channel, recorder = await _pushable(tmp_path)
 
     class _Broken:
-        async def send(self, subscription, message):
+        async def send(self, subscription, message, client=None):
             raise RuntimeError("push service on fire")
 
     channel._push.sender = _Broken()
@@ -548,3 +550,91 @@ def test_a_new_turn_does_not_clear_a_parked_call():
     p.needs_you("s1", kind="escalation", now=1.0)
     p.turn_started("s1", now=10.0)
     assert p.outstanding("s1") == 1
+
+
+async def test_an_expired_ask_clears_the_badge(tmp_path):
+    """The sibling of the escalation leak, and worse because expiry is the DESIGNED path on a
+    phone: the gate's deadline arrives as a cancel, and a pocket does not answer questions.
+
+    `PermissionResolved` carries no `request_id`, so no bus-side wiring could ever clear this —
+    only `ask_permission` itself can. Without it the "needs you" badge is permanently wrong for
+    the rest of the session and every later push carries the inflated count.
+    """
+    from localharness.agent.gate_types import PermissionRequest
+
+    _, channel, _ = await _pushable(tmp_path)
+    request = PermissionRequest(tool_name="bash_exec", tool_params={}, klass="shell",
+                                key=None, grantable=False, reason="r", display="d")
+    task = asyncio.ensure_future(channel.ask_permission(request))
+    await asyncio.sleep(0.05)
+    assert channel._push.policy.outstanding("s1") == 1
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert channel.open_asks() == []
+    assert channel._push.policy.outstanding("s1") == 0
+
+
+async def test_an_ask_that_fails_to_render_also_clears_the_badge(tmp_path):
+    """Every exit from the question, not an enumerated list of the ones somebody remembered."""
+    from localharness.agent.gate_types import PermissionRequest
+
+    _, channel, _ = await _pushable(tmp_path)
+    request = PermissionRequest(tool_name="bash_exec", tool_params={}, klass="shell",
+                                key=None, grantable=False, reason="r", display="d")
+
+    async def explode(self):
+        raise RuntimeError("render fault")
+
+    task = asyncio.ensure_future(channel.ask_permission(request))
+    await asyncio.sleep(0.05)
+    request_id = next(iter(channel._open_asks))
+    channel._open_asks[request_id].future.set_exception(RuntimeError("render fault"))
+    await task
+
+    assert channel._push.policy.outstanding("s1") == 0
+
+
+async def test_shutdown_does_not_wait_out_every_push_timeout(tmp_path):
+    """Ctrl-C must not hang. `flush_push` awaits in-flight deliveries and each send has a
+    ten-second socket budget, so a handful of enrolled devices behind a dead network path could
+    otherwise hold the process for minutes — while uvicorn's own graceful budget claims two
+    seconds."""
+    _, channel, _ = await _pushable(tmp_path)
+
+    class _Hangs:
+        async def send(self, subscription, message, client=None):
+            await asyncio.sleep(3600)
+
+    channel._push.sender = _Hangs()
+    channel._push_fire(push.Push(title="x", body="y", tag="t", badge=1, data={}, alert=True))
+
+    # wait_for, not a bare await: a regression here HANGS, and a hanging test is one whose
+    # result nobody ever reads.
+    await asyncio.wait_for(channel.stop(), timeout=push.SHUTDOWN_FLUSH_S + 2.0)
+
+
+async def test_one_fan_out_opens_one_client_not_one_per_device(tmp_path):
+    """Sixteen devices used to mean sixteen connection pools and sixteen TLS handshakes for one
+    notification. Scoped to the fan-out rather than held on the sender, because an httpx pool
+    with no owner responsible for closing it is the leak this project already fixed once."""
+    store = push.SubscriptionStore(tmp_path)
+    for n in range(3):
+        store.add(_subscription(f"https://push.example/{n}"))
+    keys = push.load_or_create_vapid(tmp_path)
+
+    requests: list[str] = []
+    sender = push.PushSender(keys, transport=httpx.MockTransport(
+        lambda r: requests.append(str(r.url)) or httpx.Response(201)))
+    opened = []
+    real_session = sender.session
+    sender.session = lambda: opened.append(1) or real_session()  # type: ignore[method-assign]
+
+    service = push.PushService(store=store, sender=sender, policy=push.PushPolicy())
+    assert await service.deliver(
+        push.Push(title="x", body="y", tag="t", badge=1, data={}, alert=True)) == 3
+
+    assert len(requests) == 3, "every enrolled device must still be reached"
+    assert len(opened) == 1, "one client for the fan-out, not one per device"

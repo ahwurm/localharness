@@ -522,7 +522,7 @@ class WebServer:
             "mode": getattr(self.channel._gate, "mode", None),
             "clients": self.channel.client_count,
             "replay": self.replay is not None,
-            "push_enrolled": self._push_enrolled(),
+            "push_enrolled": await asyncio.to_thread(self._push_enrolled),
             # WEBCH-29. The bring-up warning is one line on the wire and therefore invisible to a
             # phone that connected afterwards; this is the same fact as state, which a client
             # arriving at any time can read.
@@ -864,7 +864,9 @@ class WebServer:
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
-        keys = push.load_or_create_vapid(self.config_dir)
+        # to_thread: this reads (and on first use writes) a key file, and it runs on the
+        # same loop that is streaming tokens to every other attached client.
+        keys = await asyncio.to_thread(push.load_or_create_vapid, self.config_dir)
         return _json({"application_server_key": keys.application_server_key})
 
     async def push_subscribe(self, request: Request) -> Response:
@@ -888,8 +890,8 @@ class WebServer:
         if subscription is None:
             return _json({"error": push.SUBSCRIPTION_ERROR}, status=400)
         store = push.SubscriptionStore(self.config_dir)
-        store.add(subscription)
-        return _json({"status": "subscribed", "devices": len(store.all())})
+        devices = await asyncio.to_thread(_store_add, store, subscription)
+        return _json({"status": "subscribed", "devices": devices})
 
     async def manifest(self, request: Request) -> Response:
         """The PWA manifest — and the one place the install story gets honest.
@@ -948,6 +950,12 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/schema", "JSON Schema for every event and frame"),
     ("GET", "/api/protocol", "this document, as data"),
 )
+
+
+def _store_add(store: Any, subscription: dict) -> int:
+    """Add and count in ONE worker-thread hop, rather than two round trips to the loop."""
+    store.add(subscription)
+    return len(store.all())
 
 
 def _tool_rows(registry: Any) -> list[dict]:

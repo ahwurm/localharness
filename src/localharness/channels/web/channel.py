@@ -49,6 +49,7 @@ from localharness.core.events import (
     TurnStarted,
 )
 
+from . import push as push_mod
 from .protocol import (
     AskExpired,
     AskOption,
@@ -388,8 +389,9 @@ class WebChannel(ChannelAdapter):
             self._settle(ask, ASK_FALLBACK_DECISION)
         self._open_asks.clear()
         # A turn-finished push fired moments before shutdown is the one most worth not dropping:
-        # it is the notification saying the thing you walked away from is done.
-        await self.flush_push()
+        # it is the notification saying the thing you walked away from is done. Bounded, because
+        # a push service that never answers must not be able to hold Ctrl-C.
+        await self.flush_push(timeout=push_mod.SHUTDOWN_FLUSH_S)
 
     # ---------------------------------------------------------------- fan-out
 
@@ -505,11 +507,25 @@ class WebChannel(ChannelAdapter):
         except Exception:  # noqa: BLE001 — a convenience never takes the turn down with it
             log.warning("web_push_failed", exc_info=True)
 
-    async def flush_push(self) -> None:
+    async def flush_push(self, timeout: Optional[float] = None) -> None:
         """Wait for in-flight pushes. Used by `stop()` so a turn-finished push is not dropped on
-        the way out, and by tests, which would otherwise race the loop."""
+        the way out, and by tests, which would otherwise race the loop.
+
+        `stop()` passes a bound and that bound is load-bearing: each send carries a ten-second
+        socket budget, so a few devices behind a dead network path would hold Ctrl-C for minutes
+        — while uvicorn's own graceful-shutdown budget claims two seconds. An undelivered
+        notification is worth waiting a moment for and is not worth a hung process.
+        """
         while self._push_tasks:
-            await asyncio.gather(*list(self._push_tasks), return_exceptions=True)
+            pending = list(self._push_tasks)
+            if timeout is None:
+                await asyncio.gather(*pending, return_exceptions=True)
+                continue
+            done, still_running = await asyncio.wait(pending, timeout=timeout)
+            for task in still_running:
+                task.cancel()
+            self._push_tasks.difference_update(still_running)
+            return
 
     def _push_policy(self) -> Any:
         return None if self._push is None else self._push.policy
@@ -830,6 +846,14 @@ class WebChannel(ChannelAdapter):
             return Decision(kind=ASK_FALLBACK_DECISION)
         finally:
             self._open_asks.pop(request_id, None)
+            # HERE, not in the two success paths, and that placement is the whole point. The
+            # badge counts what is outstanding, and this question stops being outstanding on
+            # EVERY exit — answered, expired by the gate's deadline, or failed while rendering.
+            # Expiry is not the rare path either: it is the designed one, because a pocket does
+            # not answer questions. And no bus-side wiring could cover it — `PermissionResolved`
+            # carries no `request_id` — so if this line is not exhaustive, nothing else is.
+            if policy is not None:
+                policy.resolved(self.session_id, request_id=request_id)
 
     @staticmethod
     def ask_options(klass: str, grantable: bool) -> list[AskOption]:

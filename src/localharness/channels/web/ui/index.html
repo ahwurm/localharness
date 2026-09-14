@@ -706,10 +706,24 @@ async function followDeepLink(params) {
 }
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.addEventListener("message", (ev) => {
+  navigator.serviceWorker.addEventListener("message", async (ev) => {
     const d = ev.data || {};
     if (d.type === "notificationclick" && d.url) {
       followDeepLink(new URLSearchParams(d.url.split("?")[1] || ""));
+    } else if (d.type === "push") {
+      // A push arrived while the app is open. Re-sync the badge from the server rather than
+      // navigating: the stream is closed while backgrounded, so this page's counts may be
+      // stale — but yanking the view out from under a thumb that is mid-sentence would be a
+      // worse bug than a stale badge. The notification is still there to tap.
+      try {
+        const state = await get("/api/permissions");
+        // Number keys, matching `S.parked.set(data.pending.id, ...)` on the event path —
+        // a string key here would shadow rather than replace, and `PermissionResolved`
+        // (which deletes by the event's numeric id) would then never clear the row.
+        S.parked = new Map((state.parked || []).map(p => [p.id, p]));
+        S.asks = new Map((state.blocking || []).map(a => [a.request_id, a]));
+        paint();
+      } catch (e) { /* offline: the badge stays as it was */ }
     }
   });
 }
