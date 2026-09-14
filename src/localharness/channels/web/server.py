@@ -526,7 +526,10 @@ class WebServer:
             # WEBCH-29. The bring-up warning is one line on the wire and therefore invisible to a
             # phone that connected afterwards; this is the same fact as state, which a client
             # arriving at any time can read.
-            "other_sessions": session_presence.summary(self.channel.co_tenants),
+            # Re-scanned per request, not snapshotted at bring-up: the first session would
+            # otherwise report an empty list forever, however many joined it afterwards.
+            "other_sessions": session_presence.summary(
+                await asyncio.to_thread(self.channel.live_co_tenants)),
         })
 
     def _push_enrolled(self) -> int:

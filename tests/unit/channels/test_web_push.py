@@ -527,6 +527,23 @@ async def test_health_carries_what_a_late_client_could_not_have_been_told(tmp_pa
     assert body["other_sessions"][0]["pid"] == 4242
 
 
+async def test_health_re_reads_the_co_tenants_rather_than_answering_from_bring_up(tmp_path):
+    """The snapshot is empty for the session that started FIRST, forever — it was taken before
+    anybody else was there. Health re-scans, so the first session learns about the second."""
+    from localharness.config.session_presence import LiveSession
+
+    _, channel, _, client = await _stack(tmp_path)
+    joined_later = [LiveSession(pid=4242, agent="orchestrator", channel="terminal",
+                                workspace="/home/x/proj", session_id="s2", started_at=0.0)]
+    channel.set_co_tenants([], lambda: joined_later)
+
+    body = (await client.get("/api/health", headers=BEARER)).json()
+    assert body["other_sessions"][0]["pid"] == 4242, "health answered from the stale snapshot"
+
+    joined_later.clear()   # and it goes away again when that session exits
+    assert (await client.get("/api/health", headers=BEARER)).json()["other_sessions"] == []
+
+
 def test_escalations_do_not_inflate_the_badge_forever():
     """Found by self-critique. A parked call and a blocking ask both get a `resolved()` — an
     Escalation gets none, because nothing publishes "the stuck turn is unstuck". Keyed by the
