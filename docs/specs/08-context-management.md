@@ -490,12 +490,29 @@ stub a body it would have no way to re-pull. The whole layer is switchable via
 An evicted body is replaced in-place with:
 
 ```
-[tool result evicted — ~N tokens — call tool_result_get('<id>') to restore the full body]
+[tool result evicted — read_file /notes/y120.md — ~3100 tokens — call tool_result_get('<id>') to restore the full body]
 ```
 
-`N` is a `chars // 4` approximation, present so the model can judge whether the body is worth
-redeeming. `tool_result_get(id)` returns the exact original body from the store. Nothing is lost —
-the content moved out of the prompt, not out of the session.
+The stub names the call it replaced — tool plus its first string argument, capped at 80 chars —
+so a model re-reading history can tell *which* result is gone without pairing the stub back to
+the assistant turn that made the call. `N` is a `chars // 4` approximation, present so the model
+can judge whether the body is worth redeeming. `tool_result_get(id)` returns the exact original
+body from the store. Nothing is lost — the content moved out of the prompt, not out of the
+session.
+
+**The out-of-view note.** A stub buried mid-history is only found by re-reading history, and a
+model composing a load-bearing answer does not re-read. So `build_messages()` appends one line to
+the *last* message of the request (user or tool role only — never an assistant message, never
+session history):
+
+```
+[out of view: 3 evicted tool result(s) are not in this prompt — read_file /notes/y120.md — ~3100 tokens — call tool_result_get('a1b2c3'); …; +1 older. Restore one before relying on it.]
+```
+
+Cache-neutral (the last message changes every turn anyway), free when nothing is evicted, and
+bounded by the window: an entry is one stub (~40 tokens) and the note spends at most 1 % of the
+context, oldest entries dropped first. This is the Manus recitation rule applied to eviction —
+re-append the state you need attended instead of leaving it where attention is not.
 
 ### The restore pin
 

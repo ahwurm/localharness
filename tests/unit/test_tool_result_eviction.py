@@ -13,9 +13,12 @@ from localharness.agent.context import (
     ContentStore,
     ContextManager,
     TokenCounter,
+    _OUT_OF_VIEW_PREFIX,
+    _STUB_HINT_CHARS,
     _TOOL_STUB_PREFIX,
     _content_handle,
     _evict_large_tool_results,
+    _out_of_view_note,
 )
 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
 
@@ -374,3 +377,99 @@ def test_pin_costs_exactly_one_eviction_not_the_keep_last_window():
     assert pinned[1]["content"] == _big_body(0)                       # pinned survives
     assert pinned[3]["content"].startswith(_TOOL_STUB_PREFIX)         # c1 still evicted
     assert pinned[5]["content"] == _big_body(2)                       # c2 stays in keep-last
+
+
+# ---- self-describing stubs + the out-of-view note (2026-09-14) ----------------------------
+# Live failure: a model composed from "notes it read earlier" that had been evicted. The stub
+# gave it nothing to recognize, and nothing at the tail said what was out of view.
+
+
+def test_stub_names_the_tool_and_its_first_argument():
+    store = ContentStore()
+    msgs = _exchange("c0", _big_body(0)) + _exchange("c1", _big_body(1))
+    out, n = _evict_large_tool_results(msgs, store, keep_last=1)
+    assert n == 1
+    stub = out[1]["content"]
+    assert stub.startswith(f"{_TOOL_STUB_PREFIX} — read_file /f/c0 — ~")
+    assert stub.endswith(" to restore the full body]")
+    assert store.get(_stub_handle(out)) == _big_body(0)  # the handle still redeems
+
+
+def test_stub_hint_is_whitespace_collapsed_and_capped():
+    store = ContentStore()
+    cmd = "find . -name '*.py'\n  | xargs   wc -l " + "x" * 200
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "b0", "type": "function",
+            "function": {"name": "bash_exec", "arguments": json.dumps({"command": cmd})}}]},
+        {"role": "tool", "tool_call_id": "b0", "content": "y" * 20_000},
+    ] + _exchange("c1", _big_body(1))
+    out, _ = _evict_large_tool_results(msgs, store, keep_last=1)
+    head = out[1]["content"].split(" — ~")[0]
+    hint = head[len(f"{_TOOL_STUB_PREFIX} — bash_exec "):]
+    assert "\n" not in hint and "  " not in hint
+    assert len(hint) == _STUB_HINT_CHARS
+    assert hint.startswith("find . -name '*.py' | xargs wc -l")
+
+
+def test_stub_without_call_meta_still_restorable():
+    # A tool result whose assistant call was compacted away: no name, no hint, same handle shape.
+    store = ContentStore()
+    msgs = [{"role": "tool", "tool_call_id": "orphan", "content": "z" * 20_000}]
+    msgs += _exchange("c1", _big_body(1))
+    out, n = _evict_large_tool_results(msgs, store, keep_last=1)
+    assert n == 1
+    assert out[0]["content"].startswith(f"{_TOOL_STUB_PREFIX} — ~")
+    assert store.get(_stub_handle(out)) == "z" * 20_000
+
+
+def test_out_of_view_note_lists_every_stub_and_caps_by_window():
+    store = ContentStore()
+    msgs = _base_convo()  # five bulky results
+    out, n = _evict_large_tool_results(msgs, store, keep_last=1)
+    assert n == 4
+    # A 100k window affords 1 % / 40 tokens = 25 entries: all four listed, none dropped.
+    note = _out_of_view_note(out, 100_000)
+    assert note.startswith(f"{_OUT_OF_VIEW_PREFIX} 4 evicted tool result(s)")
+    for i in range(4):
+        assert f"read_file /f/c{i} — ~" in note
+    assert "older" not in note and note.endswith("Restore one before relying on it.]")
+    # A 4k window affords exactly one entry: the NEWEST is kept, the rest are counted.
+    small = _out_of_view_note(out, 4_000)
+    assert "read_file /f/c3 — ~" in small and "read_file /f/c0" not in small
+    assert small.count("tool_result_get(") == 1 and "+3 older" in small
+    # Nothing evicted -> nothing said, and the entries are the stub bodies minus the frame.
+    assert _out_of_view_note(msgs, 100_000) == ""
+    assert "to restore the full body" not in note
+
+
+@pytest.mark.asyncio
+async def test_note_rides_on_the_last_request_message_and_never_on_history():
+    store = ContentStore()
+    msgs = _base_convo()
+    cm = _evicting_cm(store, msgs)
+    built, _ = await cm.build_messages(msgs)
+    assert _n_stubs(built) > 0
+    last = built[-1]
+    assert last["role"] == "tool"
+    body, _, note = last["content"].rpartition("\n\n")
+    assert body == _big_body(4) and note.startswith(_OUT_OF_VIEW_PREFIX)
+    assert sum(_OUT_OF_VIEW_PREFIX in (m.get("content") or "") for m in built) == 1
+    # The caller's history is untouched: the session keeps the full bodies, no note.
+    assert msgs[-1]["content"] == _big_body(4)
+    assert all(_OUT_OF_VIEW_PREFIX not in (m.get("content") or "") for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_no_note_under_the_eviction_gate_or_on_an_assistant_tail():
+    store = ContentStore()
+    msgs = _base_convo()
+    quiet, _ = await _evicting_cm(store, msgs, frac=0.30).build_messages(msgs)
+    assert _n_stubs(quiet) == 0
+    assert all(_OUT_OF_VIEW_PREFIX not in (m.get("content") or "") for m in quiet)
+    # A trailing assistant message never gets the note — it would read as the model's words.
+    tail = msgs + [{"role": "assistant", "content": "thinking aloud"}]
+    built, _ = await _evicting_cm(store, tail).build_messages(tail)
+    assert _n_stubs(built) > 0
+    assert built[-1]["content"] == "thinking aloud"
+    assert all(_OUT_OF_VIEW_PREFIX not in (m.get("content") or "") for m in built)

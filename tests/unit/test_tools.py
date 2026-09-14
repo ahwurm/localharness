@@ -1407,3 +1407,48 @@ async def test_write_tool_overwrite_that_replaces_most_of_a_file_has_no_edit_hin
     assert result.success is True
     assert "\n" not in result.output          # the one-line message, unchanged
     assert result.output.startswith("Overwrote ")
+
+
+# ---- unknown vs. not-permitted, and "did you mean" (2026-09-14) ---------------------------
+# Live failure: `Tool 'delegate' not found or not permitted for agent 'x'` — retried 3x by the
+# model, read as "needs to be trusted" by the human. The tool is named `agent`; its GROUP is
+# `delegate`.
+
+class _DelegateTool(Tool):
+    def info(self) -> ToolSchema:
+        return ToolSchema(name="agent", group="delegate", description="Delegate a task.",
+                          parameters={"type": "object", "properties": {}})
+
+    async def _execute(self) -> ToolResult:
+        return self.ok("delegated")
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_suggests_by_group_then_spelling():
+    reg = ToolRegistry()
+    await reg.register(_EchoTool(), scope="global")
+    await reg.register(_DelegateTool(), scope="global")
+    config = ToolConfig(inherit=["global"])
+    by_group = await reg.dispatch("delegate", {}, "agent-1", "div-1", config)
+    assert by_group.error_type == "not_found"
+    assert by_group.error == "Unknown tool 'delegate'. Did you mean: agent?"
+    by_spelling = await reg.dispatch("ecoh", {}, "agent-1", "div-1", config)
+    assert by_spelling.error == "Unknown tool 'ecoh'. Did you mean: echo?"
+    nothing_near = await reg.dispatch("zzzz", {}, "agent-1", "div-1", config)
+    assert nothing_near.error_type == "not_found"
+    assert nothing_near.error == "Unknown tool 'zzzz'. Callable tools: agent, echo."
+
+
+@pytest.mark.asyncio
+async def test_existing_but_denied_tool_is_permission_denied_not_not_found():
+    reg = ToolRegistry()
+    await reg.register(_EchoTool(), scope="global")
+    denied = await reg.dispatch("echo", {"message": "x"}, "agent-1", "div-1",
+                                ToolConfig(inherit=["global"], deny=["echo"]))
+    assert denied.success is False
+    assert denied.error_type == "permission_denied"
+    assert denied.error == "Tool 'echo' exists but is not permitted for agent 'agent-1'"
+    # Scoped to another agent: exists, not yours — the same answer, not a spelling hint.
+    await reg.register(_DelegateTool(), scope="agent", agent_id="someone-else")
+    other = await reg.dispatch("agent", {}, "agent-1", "div-1", ToolConfig(inherit=["global"]))
+    assert other.error_type == "permission_denied"
