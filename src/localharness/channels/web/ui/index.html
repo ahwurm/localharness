@@ -737,6 +737,13 @@ $("recheck").onclick = async () => {
     for (const t of tools.tools) S.tools[t.name] = t;
     S.session = health.session_id || S.session;
     paint(health.model_state);
+    // WEBCH-29. The bring-up warning is one line on the wire, so a phone that connected after
+    // it was sent would never know. This is the same fact, read as state on arrival.
+    for (const other of (health.other_sessions || [])) {
+      add(el("div", "row err", "another session is live on this agent: " + other.channel +
+                               " (pid " + other.pid + ") in " + other.workspace +
+                               ". Both keep working, but they share this agent's history."));
+    }
   } catch (e) {
     add(el("div", "row err", "could not reach the API — is the token right? " + e));
   }

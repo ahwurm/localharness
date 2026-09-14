@@ -230,3 +230,11 @@ async def test_the_manifest_json_is_valid(tmp_path):
     body = json.loads((await client.get("/manifest.webmanifest")).text)
     assert body["name"] and body["short_name"]
     assert body["start_url"].startswith("/")
+
+
+async def test_the_page_shows_a_co_tenant_session(page):
+    """WEBCH-29's other half: a phone that connected after the warning was sent still has to
+    learn that a terminal is driving the same agent."""
+    assert "other_sessions" in page
+    where = page.index("other_sessions")
+    assert "another session is live" in page[where:where + 500]
