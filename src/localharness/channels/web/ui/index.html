@@ -279,6 +279,11 @@ function onEvent(name, data) {
 
 function renderAction(d, child) {
   if (d.action_type === "tool_call") {
+    // Be idempotent about a repeated call id. The SERVER is what guarantees no duplicate — the
+    // seq de-dup at the reconnect seam, and Last-Event-ID resuming AFTER the id it names — but
+    // the cost of being wrong here is silent and permanent: a second row would overwrite the map
+    // entry and orphan the first at "waiting…" forever, because the Observation only reaches one.
+    if (S.calls.has(d.tool_call_id)) return;
     const group = (S.tools[d.tool_name] || {}).group || "unknown";
     // Opt-in by SAFE group, never opt-out by dangerous group: a tool in a group this client has
     // never heard of is itemized. A newly-added dangerous tool therefore cannot silently start
