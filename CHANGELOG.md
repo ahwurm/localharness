@@ -7,6 +7,31 @@ All notable changes to LocalHarness are documented here. The format follows
 ## [0.14.2] — unreleased
 
 ### Changed
+- **A compaction summary now stays in the session. Long sessions stop re-summarizing
+  and stop hitting the emergency floor every iteration.** Until now a summary was
+  built for one request and thrown away: the session's own history never shrank,
+  so past 80 % every later request re-summarized a bigger middle with a fresh model
+  call, three times a turn, and then the floor cut history mechanically on every
+  iteration after that (the open half of #145). The summary is now written back
+  into the history in place, at the same safe cut the stage used, so a later
+  request starts from the shorter history and usually needs no model call at all.
+  A previous summary is rolled into the next one, so the prompt carries one
+  summary and the head stays the session's first messages. A summary bigger than
+  what it replaces is never written back.
+- **A context-window overflow from the server no longer ends the turn.** The
+  harness plans against the window in your config; the server serves whatever it
+  serves, and when the two disagreed (a model swap, a server restarted smaller,
+  llama.cpp's default 4096) the 400 came back as `turn failed — llm_error` with
+  no hint that size was the problem. The refusal is now recognized by its wording
+  on vLLM, llama.cpp and LM Studio; the harness adopts the window the server
+  named (or the refused request's own size when it named none) for the rest of
+  the session, rebuilds against it, and sends once more. A second refusal in the
+  same turn ends it with a message that names the window and the fix.
+- **The summarizer's own request is bounded by the window it is clearing.** A
+  middle span that accumulated for many turns could overflow the window inside
+  the summarizer itself, and that failure was swallowed as a warning before the
+  turn overflowed downstream. Its input is now capped at a quarter of the window,
+  a previous summary carried whole, every other message cut down to fit.
 - **An eviction stub now says what it replaced, and the prompt's last message lists
   everything that is out of view.** A stub used to read `[tool result evicted — ~N
   tokens — call tool_result_get('id')]`: a token count and a handle, no tool, no

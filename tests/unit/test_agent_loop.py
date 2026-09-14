@@ -2791,3 +2791,65 @@ async def test_degenerate_stream_twice_fails_the_turn_honestly(bus, mock_llm_cli
     assert "degenerated into repetition" in summary
     assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
     assert len(llm.calls) == 2
+
+
+# ---- context-window overflow: learn the window, rebuild, retry once (2026-09-14) ------------
+
+class _OverflowLLM:
+    """Refuses the first `refusals` requests the way vLLM does, then answers."""
+
+    def __init__(self, refusals: int = 1, served: int = 1_500):
+        self.calls = 0; self.refusals = refusals; self.served = served
+        class _Cfg: pass
+        self.config = _Cfg(); self.config.tool_call_mode = "native"; self.config.context_window = 128_000
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
+        from types import SimpleNamespace as NS
+        from localharness.provider.client import ProviderAPIError
+        self.calls += 1
+        if self.calls <= self.refusals:
+            raise ProviderAPIError(
+                f"Error code: 400 - This model's maximum context length is {self.served} tokens. "
+                f"However, you requested 2100 tokens (1900 in the messages, 200 in the completion).",
+                status_code=400,
+            )
+        return NS(content="Done after the rebuild.", tool_calls=None), None
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_learns_the_served_window_and_retries_once(bus):
+    from localharness.agent.context import ContextManager, TokenCounter
+    ctx = ContextManager(max_context_tokens=50_000, token_counter=TokenCounter())
+    llm = _OverflowLLM(refusals=1, served=1_500)
+    loop = _make_agent_loop(lambda _responses: llm, [], bus, context_manager=ctx)
+    summary = await loop.run_turn("hi")
+    assert llm.calls == 2, "one rebuild-and-retry, not a fatal turn"
+    assert ctx.max_context_tokens == 1_500, "the window the server named is the window now"
+    assert "Done after the rebuild." in summary
+    assert not bus.history(event_types=[TurnFailed])
+
+
+@pytest.mark.asyncio
+async def test_a_second_overflow_in_the_turn_ends_it_naming_the_window(bus):
+    from localharness.agent.context import ContextManager, TokenCounter
+    ctx = ContextManager(max_context_tokens=50_000, token_counter=TokenCounter())
+    llm = _OverflowLLM(refusals=5)
+    loop = _make_agent_loop(lambda _responses: llm, [], bus, context_manager=ctx)
+    summary = await loop.run_turn("hi")
+    assert llm.calls == 2
+    assert summary.startswith("Context window overflow:")
+    assert "maximum context length is 1500" in summary
+
+
+def test_absorb_commit_moves_the_turn_start_index_with_the_collapsed_span():
+    from types import SimpleNamespace as NS
+    from localharness.agent.loop import Session, _absorb_commit
+    def moved(idx, commit):
+        s = Session(agent_id="a", session_id="s", messages=[])
+        s.turn_start_idx = idx
+        _absorb_commit(s, NS(last_commit=commit))
+        return s.turn_start_idx
+    assert moved(10, (3, 5)) == 5   # after the span: shifts by what was removed
+    assert moved(4, (3, 5)) == 4    # inside the span: lands just past the summary
+    assert moved(2, (3, 5)) == 2    # before the span: untouched
+    assert moved(9, None) == 9      # nothing committed

@@ -137,6 +137,36 @@ class ProviderRateLimitError(ProviderError):
         self.retry_after_seconds = retry_after_seconds
 
 
+# What an inference server says when a request is larger than its window. vLLM: "This model's
+# maximum context length is 32768 tokens. However, you requested ..."; llama.cpp: "the request
+# exceeds the available context size. try increasing the context size or enable context shift";
+# LM Studio: "... is greater than the context length". Matched on the phrase — vLLM and
+# llama.cpp both answer 400 (some proxies 413), the same status as any malformed request.
+CONTEXT_OVERFLOW_MARKERS: tuple[str, ...] = (
+    "context length", "context size", "context window", "maximum context",
+    "exceeds the available context", "too many tokens", "prompt is too long",
+    "input is too long", "n_ctx", "max_model_len",
+)
+_OVERFLOW_LIMIT_RE = re.compile(
+    r"(?:context length|context size|context window|n_ctx|max_model_len)[^\d\n]{0,8}(\d{3,})",
+    re.IGNORECASE,
+)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """True when `exc` is the server refusing a request as larger than its context window."""
+    if getattr(exc, "status_code", None) not in (400, 413):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in CONTEXT_OVERFLOW_MARKERS)
+
+
+def context_overflow_limit(message: str) -> int | None:
+    """The window the server named in an overflow message, or None when it named none."""
+    m = _OVERFLOW_LIMIT_RE.search(message)
+    return int(m.group(1)) if m else None
+
+
 class ProviderAPIError(ProviderError):
     """HTTP 4xx/5xx other than 429."""
 
