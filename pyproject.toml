@@ -89,6 +89,21 @@ json-repair = [
 web = [
     "starlette>=0.40,<1",
     "uvicorn>=0.30,<1",
+    # Web Push (RFC 8291/8292), for the phone to buzz when a turn finishes or the gate needs a
+    # human. These two ARE the crypto core of `pywebpush` — it imports both — and the obvious
+    # "just use pywebpush" is measured, not assumed: pywebpush installs 21 packages here against
+    # these 6, because it drags in BOTH `requests` and `aiohttp` to ship a transport we do not
+    # call. The harness already standardized on httpx (a main dependency, async, and mockable
+    # with `httpx.MockTransport` — which is how the push tests run without sending anything), so
+    # we take the encoder and keep our own transport. py-vapid also generates the VAPID keypair,
+    # so a new user is never sent to an external site to mint push keys (WEBCH-27).
+    "py-vapid>=1.9,<2",
+    "http-ece>=1.2,<2",
+    # The enrolment QR (WEBCH-27): nobody should hand-type a bearer token into a phone keyboard.
+    # Pure Python, zero dependencies of its own, and it renders to a terminal directly — no
+    # Pillow, no image file. Absent, `localharness web` prints the URL and says so (it degrades,
+    # it does not crash).
+    "segno>=1.6,<2",
 ]
 dev = [
     "pytest>=8",
