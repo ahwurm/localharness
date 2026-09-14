@@ -944,6 +944,12 @@ class TerminalChannel(ChannelAdapter):
     where an unanswered prompt auto-denied after the tool's own timeout while three docs
     promised it would not. A walk-away must cost a wait, never a silent denial."""
 
+    has_display_toggles = True
+    """`/reasoning` and `/verbose` act here: this channel owns `show_reasoning` and `verbose` and
+    prints the reasoning stream as dim ⋯ lines. Declared rather than inferred, so the REPL's two
+    handlers stopped being `isinstance(TerminalChannel)` checks that refused on every other
+    surface (web-channel PRD, WEBCH-19)."""
+
     @property
     def can_ask(self) -> bool:
         """Can a person answer a question here? (PRD §3.5's "non-tty" row.)
