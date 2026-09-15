@@ -244,6 +244,9 @@
   #ask h3 { color:var(--warn); }
   summary { cursor:pointer; min-height:32px; color:var(--dim); font-size:12.5px; padding:4px 0; }
   summary::marker { color:var(--dim); }
+  /* commentary folds read as prose one-liners, not machine text */
+  .narr summary, .prov summary { display:block; white-space:nowrap; overflow:hidden;
+                                 text-overflow:ellipsis; font-family:inherit; font-size:14px; }
 
   /* THE DRAWER — a left sheet, the hamburger's other half: history first, housekeeping under it. */
   #drawer { position:fixed; inset:0 auto 0 0; margin:0; height:100%; max-height:none;
@@ -681,9 +684,20 @@ function renderAction(d, child) {
   }
   if (d.action_type !== "llm_response") return;
   if (d.has_tool_calls) {
-    // Interstitial narration: the model talking while it calls tools. Not copyable — the
-    // button was a full row of height under every explain, for text nobody copies.
-    if (d.content) { const r = add(el("div", "row narr" + (child ? " child" : ""))); withCode(r, d.content, false); }
+    // Interstitial narration: the model talking while it calls tools. ONE LINE, expandable
+    // (owner, 2026-09-14: streamed commentary read as "the answer starting" and confused the
+    // wait) — the first line stays visible as the explain, the full text is a tap away.
+    if (d.content) {
+      const r = add(el("div", "row narr" + (child ? " child" : "")));
+      const text = String(d.content);
+      const first = text.split("\n")[0].slice(0, 90);
+      const det = el("details");
+      det.appendChild(el("summary", null, first + (text.length > first.length ? " …" : "")));
+      const body = el("div");
+      withCode(body, text, false);
+      det.appendChild(body);
+      r.appendChild(det);
+    }
   } else {
     // THE FINAL ANSWER — and it must NOT be drawn. TaskComplete renders it. Drawing it here is
     // the single most likely way a client ships with every answer printed twice.
@@ -722,13 +736,20 @@ function renderObservation(d, child) {
 // ---------------------------------------------------------------- provisional state (rule 2)
 function provisional() {
   if (!S.prov) {
+    // The live stream is FOLDED (owner: "collapse the streamed text into an expandable single
+    // line") because what streams here is often the model's working commentary, and a growing
+    // wall of it reads as "the answer starting". Tap to watch it write; the real answer, when
+    // it lands, renders open and formatted — and a cancelled turn's kept text opens itself.
     const row = add(el("div", "row prov"));
+    const det = el("details");
+    det.appendChild(el("summary", null, "the model is writing — tap to watch"));
     const meta = el("div", "meta", "streaming… (this bubble is provisional; the Action that " +
       "lands supersedes it)");
-    S.prov = { row, text: "", body: el("div"), reason: el("pre"), meta };
+    S.prov = { row, det, text: "", body: el("div"), reason: el("pre"), meta };
     S.prov.reason.style.display = "none";
-    row.appendChild(S.prov.reason);
-    row.appendChild(S.prov.body);
+    det.appendChild(S.prov.reason);
+    det.appendChild(S.prov.body);
+    row.appendChild(det);
     row.appendChild(meta);
     ensureWorking();   // the streaming bubble supersedes the pulse
   }
@@ -749,6 +770,7 @@ function clearProvisional(bySeq) {
   // just stopped being true.
   if (!p.text && !p.reason.textContent) { p.row.remove(); ensureWorking(); return; }   // nothing to keep
   p.meta.remove();
+  p.det.open = true;   // the kept text is the ONLY copy of a stopped turn's work: unfold it
   ensureWorking();   // the turn may still be running (a tool break): the pulse comes back
 }
 
