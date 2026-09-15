@@ -345,6 +345,11 @@ class WebChannel(ChannelAdapter):
 
         raw = self._forward_event
         self._handles = [self.bus.subscribe(t, raw) for t in EVENT_TYPE_MAP.values()]
+        # Subscription-wise this IS the start. Production binds BEFORE the session builder
+        # calls start(); without this line that later start() subscribed everything a second
+        # time and every event rendered twice (found by the after-fix repro, not by a test —
+        # the doubling was latent for as long as the bus was dead).
+        self._started = True
 
     def bind_runtime(
         self,
