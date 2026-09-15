@@ -254,7 +254,14 @@
             padding:calc(14px + env(safe-area-inset-top)) 14px
                     calc(14px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); }
   #drawer h3:not(:first-child) { margin-top:22px; }
+  #sessq { width:100%; margin:0 0 2px; padding:8px 10px; background:var(--surface);
+           color:var(--ink); border:1px solid var(--line); border-radius:10px; font:inherit; }
+  .sessrow { display:flex; gap:6px; align-items:stretch; }
+  .sessrow .sess { flex:1; min-width:0; width:auto; }
+  .sessrow .x { width:auto; display:inline-block; flex:none; color:var(--dim); }
+  .sessrow .x.arm { color:var(--warn); border-color:var(--warn); }
   .sess > div:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .hit { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #modes { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
   #modes button { display:inline-block; width:auto; margin-top:0; }
   #modes .meta { flex-basis:100%; margin:0 0 2px; }
@@ -302,6 +309,7 @@
 
 <dialog id="drawer">
   <h3>history</h3>
+  <input id="sessq" type="search" placeholder="search chats" autocomplete="off">
   <div id="sessions"><div class="meta">open the drawer to read the list…</div></div>
   <h3>housekeeping</h3>
   <button class="small" id="pushBtn" hidden>notifications</button>
@@ -1120,26 +1128,58 @@ $("protoBtn").onclick = async () => {
 // ---------------------------------------------------------------- the drawer (hamburger)
 // History straight off the wire: GET /api/sessions lists the logs on disk, a tap renders one
 // through the digest below. No client-side session store — the disk is the store.
-async function loadSessions() {
+async function loadSessions(q) {
   const box = $("sessions");
-  box.replaceChildren(el("div", "meta", "reading the log directory…"));
+  box.replaceChildren(el("div", "meta", q ? "searching…" : "reading the log directory…"));
   try {
-    const r = await get("/api/sessions");
+    const r = await get("/api/sessions" + (q ? "?q=" + encodeURIComponent(q) : ""));
+    // a newer keystroke owns the box — a slow older response must not paint over it
+    if (($("sessq").value || "").trim() !== (q || "")) return;
     box.replaceChildren();
     if (r.note) box.appendChild(el("div", "meta", r.note));
     for (const s of r.sessions || []) {
+      const row = el("div", "sessrow");
       const b = el("button", "sess");
       b.appendChild(el("div", null, s.title || s.session_id));
+      if (s.match) b.appendChild(el("div", "meta hit", "» " + s.match));
       b.appendChild(el("div", "meta", (s.live ? "live now · " : "") +
         new Date(s.modified_unix * 1000).toLocaleString() +
         " · " + (s.size_bytes / 1024).toFixed(0) + " KB"));
       // the live chat needs no second view of itself: the transcript on screen IS that chat
       b.onclick = () => { $("drawer").close(); s.live ? closeHistory() : openHistory(s.session_id); };
-      box.appendChild(b);
+      row.appendChild(b);
+      if (!s.live) row.appendChild(deleteButton(s.session_id, row));
+      box.appendChild(row);
     }
     if (!(r.sessions || []).length && !r.note)
-      box.appendChild(el("div", "meta", "no session logs on disk yet."));
+      box.appendChild(el("div", "meta",
+        q ? 'nothing said in any chat matches "' + q + '".' : "no session logs on disk yet."));
   } catch (e) { box.replaceChildren(el("div", "meta", "could not read /api/sessions: " + e)); }
+}
+
+// The ✕ is a two-tap: the first arms it ("sure?"), the second within the window deletes.
+// One-tap destruction under a scrolling thumb is how the bring-up-abort incident happened.
+// The server MOVES the log to sessions-trash/ (restorable at a shell), never unlinks.
+function deleteButton(id, row) {
+  const x = el("button", "small x", "✕");
+  x.title = "delete this chat (the log moves to trash on the box)";
+  let armed = null;
+  x.onclick = async () => {
+    if (armed === null) {
+      x.textContent = "sure?"; x.classList.add("arm");
+      armed = setTimeout(() => {
+        armed = null; x.textContent = "✕"; x.classList.remove("arm");
+      }, 3000);
+      return;
+    }
+    clearTimeout(armed); armed = null;
+    x.textContent = "…"; x.disabled = true;
+    const r = await post(`/api/sessions/${encodeURIComponent(id)}/delete`);
+    if (r.status === "deleted") { row.remove(); return; }
+    x.disabled = false; x.textContent = "✕"; x.classList.remove("arm");
+    row.appendChild(el("div", "meta", "delete failed: " + (r.error || "unknown")));
+  };
+  return x;
 }
 
 // THE SPINE RENDERER — one conversation, one look, wherever you arrive from (owner,
@@ -1213,8 +1253,13 @@ function closeHistory() {
   log.hidden = false; $("composer").hidden = false;
   window.scrollTo(0, document.body.scrollHeight);
 }
-$("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions(); };
+$("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions($("sessq").value.trim()); };
 $("drawerClose").onclick = () => $("drawer").close();
+let sessqTimer = null;
+$("sessq").oninput = () => {          // debounced so a fast thumb costs one request, not eight
+  clearTimeout(sessqTimer);
+  sessqTimer = setTimeout(() => loadSessions($("sessq").value.trim()), 250);
+};
 
 // ---------------------------------------------------------------- new chat
 $("newBtn").onclick = async () => {

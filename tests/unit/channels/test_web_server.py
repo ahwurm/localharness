@@ -121,6 +121,7 @@ async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
         assert (await client.get(path)).status_code == 401, path
     for path in ("/api/sessions/s1/message", "/api/sessions/s1/cancel",
                  "/api/sessions/s1/mode", "/api/sessions/s1/command",
+                 "/api/sessions/s1/delete",
                  "/api/permissions/x/answer", "/api/pending/1/approve", "/api/bringup/abort"):
         got = await client.post(path, json={})
         assert got.status_code == 401, path
@@ -448,6 +449,71 @@ async def test_a_real_hole_still_gaps_honestly_when_the_cursor_is_past_the_log(t
     frames = await _read_frames(server, 3, path="/api/stream?from=100")
     gap = next(f[2] for f in frames if f[0] == "GapDetected")
     assert (gap["from_seq"], gap["to_seq"]) == (3, 99)
+
+
+async def test_search_filters_sessions_by_what_was_said(tmp_path):
+    """`?q=` matches the digest's own sources — what was asked and what was answered — and
+    each hit row carries a snippet centred on the hit."""
+    bus, _, _, client = await _stack(tmp_path)
+    await bus.publish(UserMessage(agent_id="a", session_id="s1",
+                                  content="the alpha question", channel="web"))
+    await bus.publish(TaskComplete(agent_id="a", session_id="s1", success=True,
+                                   summary="a beta styled answer", duration_seconds=1.0,
+                                   iterations=1))
+    old = tmp_path / "sessions" / "s0.jsonl"
+    old.write_text(json.dumps({"seq": 0, "event_type": "UserMessage",
+                               "content": "gamma things"}) + "\n", encoding="utf-8")
+
+    hits = (await client.get("/api/sessions?q=BETA", headers=BEARER)).json()["sessions"]
+    assert [r["session_id"] for r in hits] == ["s1"] and "beta" in hits[0]["match"]
+    hits = (await client.get("/api/sessions?q=gamma", headers=BEARER)).json()["sessions"]
+    assert [r["session_id"] for r in hits] == ["s0"]
+    assert (await client.get("/api/sessions?q=zeta", headers=BEARER)).json()["sessions"] == []
+    # and no q keeps the plain listing, match-free
+    plain = (await client.get("/api/sessions", headers=BEARER)).json()["sessions"]
+    assert len(plain) == 2 and all("match" not in r for r in plain)
+
+
+async def test_delete_moves_an_ended_chat_to_trash_and_refuses_the_live_one(tmp_path):
+    """The ✕ behind the drawer row: an ended chat's log MOVES to sessions-trash/ (restorable),
+    the live chat is a 409, a missing id a 404."""
+    bus, _, _, client = await _stack(tmp_path)
+    await bus.publish(UserMessage(agent_id="a", session_id="s1",
+                                  content="live chat", channel="web"))
+    old = tmp_path / "sessions" / "s0.jsonl"
+    old.write_text(json.dumps({"seq": 0, "event_type": "UserMessage",
+                               "content": "old chat"}) + "\n", encoding="utf-8")
+
+    got = await client.post("/api/sessions/s0/delete", json={}, headers=JSON)
+    assert got.status_code == 200 and got.json()["status"] == "deleted"
+    assert not old.exists()
+    trashed = list((tmp_path / "sessions-trash").glob("s0*.jsonl"))
+    assert len(trashed) == 1 and "old chat" in trashed[0].read_text()
+    ids = [r["session_id"] for r in
+           (await client.get("/api/sessions", headers=BEARER)).json()["sessions"]]
+    assert "s0" not in ids
+
+    assert (await client.post("/api/sessions/s1/delete", json={},
+                              headers=JSON)).status_code == 409   # the live chat
+    assert (await client.post("/api/sessions/nope/delete", json={},
+                              headers=JSON)).status_code == 404
+
+
+async def test_delete_confines_the_id_to_the_sessions_dir(tmp_path):
+    """A wire-supplied id may only ever name `sessions/{id}.jsonl` — a traversal shape must
+    not be able to move the agent's bus ledger into the trash."""
+    bus, _, server, client = await _stack(tmp_path)
+    await bus.publish(UserMessage(agent_id="a", session_id="s1",
+                                  content="anything", channel="web"))   # materialises both files
+    outside = tmp_path / "bus-events.jsonl"
+    assert outside.exists()
+    # At the wire the router already refuses the slash shape (405 once %2F decodes) — and the
+    # resolver itself must refuse too, so a symlink or a future routing change cannot reopen it.
+    got = await client.post("/api/sessions/..%2Fbus-events/delete", json={}, headers=JSON)
+    assert got.status_code in (404, 405)
+    assert outside.exists()
+    assert server._session_log("../bus-events") is None
+    assert server._session_log("s1") == (tmp_path / "sessions" / "s1.jsonl").resolve()
 
 
 # ------------------------------------------------------------------ the verbs
