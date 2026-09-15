@@ -323,6 +323,29 @@ class WebChannel(ChannelAdapter):
 
     # ---------------------------------------------------------------- lifecycle
 
+    def rebind_bus(self, bus: Any) -> None:
+        """Point the event subscriptions at THE session's bus.
+
+        THE 2026-09-15 BUG, foundational: this channel is constructed before any session
+        exists, so the bus it subscribed to at start() was a placeholder nothing ever
+        publishes on. Live bus events therefore NEVER reached a phone — frames (direct
+        callbacks: the pulse, token streaming, asks) flowed, and every EVENT a client ever
+        saw came from a connect-time backfill, which is why the app only looked right after
+        a refresh. The unit tests never caught it because they build the channel and the
+        publisher on ONE bus; production built them on two. Every bring-up hands the real
+        bus over here — a new chat's fresh bus follows the same path.
+        """
+        if bus is None or bus is self.bus:
+            return
+        for handle in self._handles:
+            with contextlib.suppress(Exception):
+                self.bus.unsubscribe(handle)
+        self.bus = bus
+        from localharness.core.events import EVENT_TYPE_MAP
+
+        raw = self._forward_event
+        self._handles = [self.bus.subscribe(t, raw) for t in EVENT_TYPE_MAP.values()]
+
     def bind_runtime(
         self,
         *,
@@ -333,6 +356,7 @@ class WebChannel(ChannelAdapter):
         llm: Any = None,
         agent_loop: Any = None,
         session_dir: Optional[Path] = None,
+        bus: Any = None,
     ) -> None:
         """Hand the channel the session objects the HTTP surface has to answer questions about.
 
@@ -341,6 +365,7 @@ class WebChannel(ChannelAdapter):
         `/api/health` are *state* questions, and a channel that has to reconstruct state from an
         event stream it also forwards is a channel with two sources of truth.
         """
+        self.rebind_bus(bus)
         self.session_id = session_id
         self.agent_id = agent_id
         self._gate = gate

@@ -1642,6 +1642,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 llm=llm,
                 agent_loop=agent_loop,
                 session_dir=events_path.parent / "sessions",
+                # THE bus this session publishes on. The channel was constructed on a
+                # placeholder bus before any session existed; without this hand-over its
+                # event subscriptions point at a bus nothing writes to, and live events
+                # never reach a phone (2026-09-15 — the foundational webchat bug).
+                bus=bus,
             )
 
         if acp_channel is not None:

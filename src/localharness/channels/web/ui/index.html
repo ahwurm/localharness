@@ -309,6 +309,7 @@
   <button class="small" id="grantsBtn">grants</button>
   <button class="small" id="protoBtn">protocol</button>
   <button class="small" id="drawerClose">close</button>
+  <div class="meta" id="buildline"></div>
 </dialog>
 
 <dialog id="cfg">
@@ -1447,6 +1448,11 @@ $("recheck").onclick = async () => {
       "install and no notifications either. Put TLS in front of the port (tailscale serve " +
       "--bg, or any proxy) and open the https URL."));
   }
+
+  // THE BUILD STAMP: document.lastModified is the browser's own record of the page file's
+  // Last-Modified header — which build this phone is ACTUALLY running, not which one the
+  // server would serve on the next fetch. Ends the "did the refresh take?" debate for good.
+  $("buildline").textContent = "page build: " + document.lastModified;
 
   // the screenshot's greeting, shown only while the transcript is empty — the first row that
   // arrives (backfill included) retires it via add()
