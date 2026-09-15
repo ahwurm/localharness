@@ -446,7 +446,16 @@ class WebServer:
                 async for name, seq, payload in self._backfill(self.channel.session_id, cursor):
                     served_upto = seq if seq is not None else served_upto
                     yield _frame(name, seq, payload)
-                gap = self.channel.gap_against_log(self.channel.session_id, served_upto)
+                # The gap check gets the LOG's ceiling, never `served_upto`: a caught-up client
+                # reconnects with a cursor past the log's last row (the NORMAL case — cursors
+                # are bus-wide, the log is per-session, and any subagent interleave advances
+                # the bus past the session's newest row), the backfill serves nothing, and a
+                # None `served_upto` read as "log empty" — a full-session GAP banner over
+                # events all safely on disk (2026-09-15, live: from_seq=0 three times, every
+                # one false).
+                gap = self.channel.gap_against_log(
+                    self.channel.session_id, self._log_max_seq(self.channel.session_id)
+                )
                 if gap is not None:
                     log.error("web_replay_gap", from_seq=gap.from_seq, to_seq=gap.to_seq)
                     yield _frame(gap.frame_type, None, gap.model_dump_json())
@@ -516,6 +525,24 @@ class WebServer:
             return self.replay.path
         base = self.channel._session_dir
         return None if base is None else base / f"{session_id}.jsonl"
+
+    def _log_max_seq(self, session_id: str) -> Optional[int]:
+        """The highest seq the session log actually holds, cursor-independent."""
+        path = self._session_log(session_id)
+        if path is None or not path.exists():
+            return None
+        best: Optional[int] = None
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                seq = json.loads(line).get("seq")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(seq, int) and (best is None or seq > best):
+                best = seq
+        return best
 
     async def _maybe_prewarm(self) -> None:
         """Opening the app IS the signal — for a live session, and for a replay (LOCKED, §6.1).
