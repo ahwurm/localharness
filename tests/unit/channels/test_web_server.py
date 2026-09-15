@@ -255,6 +255,37 @@ async def test_the_history_list_is_newest_first_titled_by_the_first_user_message
     assert rows[1]["size_bytes"] == old.stat().st_size
 
 
+async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_construction_bus(tmp_path):
+    """THE 2026-09-15 FOUNDATIONAL BUG, wired the way PRODUCTION wires it: `localharness web`
+    constructs the channel on a placeholder bus before any session exists, and the session
+    later publishes on its OWN bus. Without bind_runtime carrying the subscriptions over,
+    live events never reach a phone — while frames still do, which is exactly what made the
+    app look alive while every transcript stayed frozen until a refresh. Every other test in
+    this file builds channel and publisher on ONE bus, which is why none of them could see it."""
+    placeholder = EventBus(persist_path=tmp_path / "placeholder.jsonl")
+    channel = WebChannel(bus=placeholder, config={})
+    await channel.start()
+    session_bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
+    channel.bind_runtime(
+        session_id="s1", agent_id="orchestrator",
+        session_dir=tmp_path / "sessions", bus=session_bus,
+    )
+    server = WebServer(channel, token=TOKEN)
+
+    async def _publish_soon():
+        await asyncio.sleep(0.05)
+        await session_bus.publish(Action(
+            agent_id="a", session_id="s1", action_type="tool_call",
+            tool_name="read", tool_params={"path": "x"}, tool_call_id="c1"))
+
+    task = asyncio.ensure_future(_publish_soon())
+    frames = await _read_frames(server, 3)
+    await task
+    assert any(f[0] == "Action" and f[2].get("tool_call_id") == "c1" for f in frames), (
+        f"a live event published on the SESSION bus never reached the stream: {[f[0] for f in frames]}"
+    )
+
+
 async def test_new_chat_ends_the_session_and_begins_a_fresh_one(tmp_path):
     """POST /api/sessions/new — the + button. The runner's restart handle is called once and
     the response says the old chat survives on disk."""
