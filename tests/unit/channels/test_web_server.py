@@ -407,6 +407,49 @@ async def test_a_persist_hole_surfaces_as_a_visible_gap(tmp_path):
     assert gap["to_seq"] == 99 and "missing from the session log" in gap["detail"]
 
 
+async def test_a_caught_up_reconnect_is_not_a_gap(tmp_path):
+    """THE 2026-09-15 FALSE ALARM, wired the way production produced it: cursors are bus-wide
+    and the log is per-session, so a subagent interleave leaves the client's cursor past the
+    session's newest row. The backfill rightly serves nothing — and served-nothing must not be
+    read as log-empty, which painted 'GAP: events 0–12' over a log that held every one of them."""
+    bus, channel, server, client = await _stack(tmp_path)
+    for i in range(3):                                  # s1 owns seqs 0..2, all on disk
+        await bus.publish(Observation(agent_id="a", session_id="s1",
+                                      observation_type="tool_result", tool_name="read",
+                                      tool_call_id=f"c{i}", output=f"out-{i}"))
+    for i in range(2):                                  # a subagent advances the bus to 4
+        await bus.publish(Observation(agent_id="sub", session_id="s-sub",
+                                      observation_type="tool_result", tool_name="fetch",
+                                      tool_call_id=f"x{i}", output="sub"))
+
+    async def _publish_soon():                          # unblocks the bounded frame read
+        await asyncio.sleep(0.05)
+        await bus.publish(TaskComplete(agent_id="a", session_id="s1", success=True,
+                                       summary="late", duration_seconds=1.0, iterations=1))
+
+    task = asyncio.ensure_future(_publish_soon())
+    frames = await _read_frames(server, 3, path="/api/stream?from=5")
+    await task
+    kinds = [f[0] for f in frames]
+    assert "GapDetected" not in kinds, frames
+    assert "TaskComplete" in kinds                      # the read went past the gap slot
+
+
+async def test_a_real_hole_still_gaps_honestly_when_the_cursor_is_past_the_log(tmp_path):
+    """The check the false-alarm fix must not blunt: forwarded past what the log holds is still
+    a gap — and it now names the missing rows, not the whole session back to zero."""
+    bus, channel, server, client = await _stack(tmp_path)
+    for i in range(3):
+        await bus.publish(Observation(agent_id="a", session_id="s1",
+                                      observation_type="tool_result", tool_name="read",
+                                      tool_call_id=f"c{i}", output=f"out-{i}"))
+    channel._forwarded_max["s1"] = 99                   # the swallowed-write shape
+
+    frames = await _read_frames(server, 3, path="/api/stream?from=100")
+    gap = next(f[2] for f in frames if f[0] == "GapDetected")
+    assert (gap["from_seq"], gap["to_seq"]) == (3, 99)
+
+
 # ------------------------------------------------------------------ the verbs
 
 async def test_a_message_between_turns_queues_for_the_repl(tmp_path):
