@@ -264,12 +264,15 @@ async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_cons
     this file builds channel and publisher on ONE bus, which is why none of them could see it."""
     placeholder = EventBus(persist_path=tmp_path / "placeholder.jsonl")
     channel = WebChannel(bus=placeholder, config={})
-    await channel.start()
     session_bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
+    # PRODUCTION ORDER: bind first (start_cmd:1637), the session builder's start() after.
+    # Both must collapse to ONE subscription set — the first after-fix repro rendered every
+    # event twice because the later start() subscribed everything again.
     channel.bind_runtime(
         session_id="s1", agent_id="orchestrator",
         session_dir=tmp_path / "sessions", bus=session_bus,
     )
+    await channel.start()
     server = WebServer(channel, token=TOKEN)
 
     async def _publish_soon():
@@ -281,8 +284,10 @@ async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_cons
     task = asyncio.ensure_future(_publish_soon())
     frames = await _read_frames(server, 3)
     await task
-    assert any(f[0] == "Action" and f[2].get("tool_call_id") == "c1" for f in frames), (
-        f"a live event published on the SESSION bus never reached the stream: {[f[0] for f in frames]}"
+    hits = [f for f in frames if f[0] == "Action" and f[2].get("tool_call_id") == "c1"]
+    assert len(hits) == 1, (
+        f"a live event on the SESSION bus must reach the stream EXACTLY once, got "
+        f"{len(hits)}: {[f[0] for f in frames]}"
     )
 
 
