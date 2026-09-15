@@ -125,6 +125,19 @@ bring-up-heavy or malformed log cannot cost a full-file read per listing row.
 TITLE_MAX_CHARS = 100
 """A history row's title is a recognition cue, not the message: one drawer line's worth."""
 
+MATCH_SNIPPET_CHARS = TITLE_MAX_CHARS
+"""How much of a matching line `?q=` search returns as the row's snippet.
+
+The snippet serves the same job as the title — recognise the chat, don't read it here — so it
+gets the same budget, centred on the hit rather than cut from the front."""
+
+TRASH_DIRNAME = "sessions-trash"
+"""Where a deleted chat's log MOVES (never unlinks) — beside `sessions/` in the agent dir.
+
+A one-tap phone gesture must not be able to destroy the only transcript of a conversation;
+restoring is `mv` back, emptying the trash is a human's call at a shell. Sibling of the dated
+`sessions-archive-*` dirs the clear-all flow used (2026-09-14) — same philosophy, rolling name."""
+
 
 TOKEN_FRAGMENT_KEY = "t"
 """The URL-FRAGMENT key the enrolment QR carries the app token in: `https://host/#t=<token>`.
@@ -309,6 +322,7 @@ class WebServer:
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
+            Route("/api/sessions/{session_id}/delete", self.delete_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/message", self.message, methods=["POST"]),
             Route("/api/sessions/{session_id}/cancel", self.cancel, methods=["POST"]),
             Route("/api/sessions/{session_id}/mode", self.mode, methods=["POST"]),
@@ -524,7 +538,11 @@ class WebServer:
         if self.replay is not None:
             return self.replay.path
         base = self.channel._session_dir
-        return None if base is None else base / f"{session_id}.jsonl"
+        if base is None:
+            return None
+        # The id comes off the wire, and `{id}.jsonl` under sessions/ is the only shape it may
+        # ever name — confined exactly as the static route confines its paths (WEBCH-40).
+        return auth.confine(base, f"{session_id}.jsonl")
 
     def _log_max_seq(self, session_id: str) -> Optional[int]:
         """The highest seq the session log actually holds, cursor-independent."""
@@ -766,10 +784,17 @@ class WebServer:
         is the first `UserMessage` in the log, because "what did I ask" is how a human
         recognises a conversation; a log whose scan finds none gets null and the client
         falls back to the id.
+
+        `?q=` filters to chats where the text matches what was SAID — `UserMessage.content`
+        and `TaskComplete.summary`, the same two sources the digest renders — case-insensitive
+        substring, and each hit row carries a `match` snippet centred on the hit. A search
+        reads every log in full (the title scan's line cap would make it a search that lies
+        about older or longer chats), still newest-first and capped at the same row count.
         """
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
+        q = (request.query_params.get("q") or "").strip().lower()
 
         def scan() -> tuple[list[dict], Optional[str]]:
             if self.replay is not None:
@@ -784,31 +809,51 @@ class WebServer:
                 files = sorted(base.glob("*.jsonl"),
                                key=lambda p: p.stat().st_mtime, reverse=True)
             rows: list[dict] = []
-            for path in files[:SESSION_LIST_CAP]:
+            for path in files if q else files[:SESSION_LIST_CAP]:
+                if len(rows) >= SESSION_LIST_CAP:
+                    break
                 title: Optional[str] = None
+                match: Optional[str] = None
                 try:
                     with path.open(encoding="utf-8", errors="replace") as fh:
                         for lineno, raw in enumerate(fh):
-                            if lineno >= TITLE_SCAN_LINES:
+                            if not q and lineno >= TITLE_SCAN_LINES:
+                                break
+                            if title is not None and (match is not None or not q):
                                 break
                             try:
                                 data = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue  # a torn line is skipped, exactly as _backfill does
-                            if data.get("event_type") == "UserMessage":
+                            kind = data.get("event_type")
+                            text = ""
+                            if kind == "UserMessage":
                                 text = (data.get("content") or "").strip()
-                                title = text[:TITLE_MAX_CHARS] or None
-                                break
+                                if title is None:
+                                    title = text[:TITLE_MAX_CHARS] or None
+                            elif q and kind == "TaskComplete":
+                                text = (data.get("summary") or "").strip()
+                            if q and match is None and text:
+                                hit = text.lower().find(q)
+                                if hit >= 0:
+                                    start = max(0, hit - MATCH_SNIPPET_CHARS // 4)
+                                    match = (("…" if start else "")
+                                             + text[start:start + MATCH_SNIPPET_CHARS])
                     stat = path.stat()
                 except OSError:
                     continue  # deleted between glob and read: a listing must not 500 over it
-                rows.append({
+                if q and match is None:
+                    continue
+                row = {
                     "session_id": path.stem,
                     "title": title,
                     "modified_unix": stat.st_mtime,
                     "size_bytes": stat.st_size,
                     "live": path.stem == self.channel.session_id,
-                })
+                }
+                if match is not None:
+                    row["match"] = match
+                rows.append(row)
             return rows, None
 
         listed, note = await asyncio.to_thread(scan)
@@ -833,6 +878,42 @@ class WebServer:
             "\n".join(rows), media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store"},
         )
+
+    async def delete_session(self, request: Request) -> Response:
+        """The drawer row's ✕. "Delete" MOVES the log to `sessions-trash/`, never unlinks.
+
+        The LIVE chat is refused: ending it is the + button's job, and a row able to end the
+        conversation it belongs to is a stray-thumb hazard (the bring-up-abort incident,
+        2026-09-14, was exactly one). Refused in replay — that server serves one finished log
+        read-only.
+        """
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        session_id = request.path_params["session_id"]
+        if self.replay is not None:
+            return _json({"error": "a replay serves one finished log, read-only"}, status=409)
+        if session_id == self.channel.session_id:
+            return _json({"error": "this chat is live — end it with the + button first, "
+                                   "then delete it"}, status=409)
+        path = self._session_log(session_id)
+        if path is None or not path.exists():
+            return _json({"error": "no log with that id"}, status=404)
+
+        def _move() -> None:
+            trash = path.parent.parent / TRASH_DIRNAME
+            trash.mkdir(parents=True, exist_ok=True)
+            target = trash / path.name
+            if target.exists():  # the same id deleted twice (restored between): keep both
+                target = trash / f"{path.stem}-{int(time.time())}{path.suffix}"
+            path.rename(target)
+
+        try:
+            await asyncio.to_thread(_move)
+        except OSError as exc:
+            return _json({"error": f"could not move the log to trash: {exc}"}, status=500)
+        return _json({"status": "deleted",
+                      "note": f"the log moved to {TRASH_DIRNAME}/ — restorable at a shell"})
 
     # ------------------------------------------------------------------ write verbs
 
@@ -1089,6 +1170,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/sessions/{id}/cancel", "cancel the in-flight turn, then emit TurnCancelled"),
     ("POST", "/api/sessions/{id}/mode", "set the permission mode; body {mode}"),
     ("POST", "/api/sessions/{id}/command", "a slash command through the REPL's dispatcher"),
+    ("POST", "/api/sessions/{id}/delete",
+     "move an ENDED chat's log to sessions-trash/ (the live chat is refused)"),
     ("POST", "/api/permissions/{request_id}/answer",
      "answer a blocking ask; idempotent; the _always kinds need a second POST with confirm_token"),
     ("POST", "/api/pending/{pending_id}/{approve|deny}", "answer a parked call"),
@@ -1097,7 +1180,9 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/push/subscribe", "register this device for Web Push; body is a PushSubscription"),
     ("GET", "/api/push/key", "the VAPID application server key for pushManager.subscribe()"),
     ("GET", "/api/stream", "the SSE event stream; ?from={seq} resumes"),
-    ("GET", "/api/sessions", "the session logs on disk, newest first: [{session_id, title, live, …}]"),
+    ("GET", "/api/sessions",
+     "the session logs on disk, newest first: [{session_id, title, live, …}]; "
+     "?q= full-text filters on what was said, rows gain a `match` snippet"),
     ("GET", "/api/sessions/{id}/events", "replay off disk as NDJSON; ?from={seq}"),
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),
     ("GET", "/api/tools", "the live registry: name -> group, destructive"),
