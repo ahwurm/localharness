@@ -483,8 +483,13 @@ function withCode(container, raw, copyable) {
 function onEvent(name, data) {
   const child = !!data.parent_id;
   // A ROOT event names the session it belongs to — after a new chat, this is how the page
-  // learns the fresh id (a delegated child's events carry the child's own id; never adopt those).
-  if (!child && data.session_id && data.session_id !== S.session) S.session = data.session_id;
+  // learns the fresh id (a delegated child's events carry the child's own id; never adopt
+  // those). Adopting also DROPS the old cursor: seq lines restart per chat, and resuming a
+  // new line from an old line's position skips everything.
+  if (!child && data.session_id && data.session_id !== S.session) {
+    S.session = data.session_id;
+    S.seq = null;
+  }
   remember(data.seq);
   switch (name) {
     case "UserMessage": {
@@ -778,6 +783,11 @@ function clearProvisional(bySeq) {
 function onFrame(name, d) {
   switch (name) {
     case "Hello":
+      // A different session id than this page knows = a NEW CHAT happened while this context
+      // was away: seq lines restart per chat, so every cursor and view held here is poison on
+      // the new line. Reboot onto the fresh session's spine rather than half-adopt it.
+      if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session
+          && location.reload) { location.reload(); return; }
       S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress;
       $("state").textContent = d.synthetic ? "REPLAY" : "connected";
       if (d.synthetic) add(el("div", "row sys",
