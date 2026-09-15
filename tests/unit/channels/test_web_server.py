@@ -314,6 +314,47 @@ async def test_the_history_list_says_why_a_cold_box_has_none(tmp_path):
     assert "no log directory yet" in body["note"]
 
 
+async def test_a_fresh_sessions_events_pass_the_seam_even_with_a_stale_cursor(tmp_path):
+    """Seq lines RESTART when a new chat swaps the bus. A client resuming with the OLD line's
+    cursor must still receive the fresh session's events — only the backfilled session's own
+    seqs are duplicates of the backfill. (2026-09-15, live: the pulse frames arrived while
+    every event of the fresh session was eaten at this seam.)"""
+    bus, channel, server, client = await _stack(tmp_path)
+    published = []
+    for i in range(3):
+        published.append(await bus.publish(Observation(
+            agent_id="a", session_id="s1", observation_type="tool_result",
+            tool_name="read", tool_call_id=f"c{i}", output=f"out-{i}")))
+
+    async def _emit_soon():
+        await asyncio.sleep(0.05)
+        # A true duplicate of the backfilled session: same line, seq already served — dropped.
+        channel._emit("Observation", published[2].seq, json.dumps(
+            {"seq": published[2].seq, "session_id": "s1", "event_type": "Observation"}))
+        # A fresh session's first events reuse low seq numbers on a NEW bus — they must pass.
+        channel._emit("UserMessage", 1, json.dumps(
+            {"seq": 1, "session_id": "s2", "event_type": "UserMessage",
+             "content": "fresh chat", "channel": "web"}))
+
+    task = asyncio.ensure_future(_emit_soon())
+    frames = await _read_frames(server, 5, path=f"/api/stream?from={published[1].seq}")
+    await task
+    names = [f[0] for f in frames]
+    assert names[0] == "Hello"
+    assert names.count("Observation") == 2, f"the stale-line duplicate must be dropped: {names}"
+    fresh = next(f for f in frames if f[0] == "UserMessage")
+    assert fresh[2]["session_id"] == "s2" and fresh[2]["content"] == "fresh chat"
+
+
+async def test_the_shell_is_served_no_cache_so_a_phone_always_revalidates(tmp_path):
+    """No Cache-Control at all invites HEURISTIC caching — iOS served a stale shell through a
+    whole night of fixes. `no-cache` plus the ETag makes every open a cheap 304 instead."""
+    _, _, _, client = await _stack(tmp_path)
+    got = await client.get("/")
+    assert got.status_code == 200
+    assert got.headers.get("cache-control") == "no-cache"
+
+
 async def test_a_persist_hole_surfaces_as_a_visible_gap(tmp_path):
     """WEBCH-33. The bus logs a persist failure and delivers anyway, so an event can be
     live-visible and permanently absent from the file a reconnecting client replays from."""

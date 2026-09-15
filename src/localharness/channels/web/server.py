@@ -337,7 +337,12 @@ class WebServer:
         target = auth.confine(self.ui_dir, rel)
         if target is None or not target.is_file():
             return PlainTextResponse("not found", status_code=404)
-        return FileResponse(target)
+        # `no-cache` means REVALIDATE, not "don't store": with the ETag FileResponse already
+        # sends, an unchanged page is a 304 and costs nothing. Without this header there is NO
+        # policy at all, and iOS applies heuristic caching to the installed app's shell — which
+        # is how the owner spent a night hard-refreshing to see fixes that were already live
+        # (2026-09-15, "very weird spot where i have to hard refresh to see the intended ui").
+        return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
     async def enroll(self, request: Request) -> Response:
         """Trade the app token for the `SameSite=Strict` cookie `EventSource` can carry.
@@ -436,6 +441,7 @@ class WebServer:
                 hello = hello.model_copy(update={"synthetic": True})
             yield _frame(hello.frame_type, None, hello.model_dump_json())
 
+            backfill_sid = self.channel.session_id
             if cursor is not None and self.channel.session_id:
                 async for name, seq, payload in self._backfill(self.channel.session_id, cursor):
                     served_upto = seq if seq is not None else served_upto
@@ -466,7 +472,19 @@ class WebServer:
                     continue
                 if seq is not None:
                     if served_upto is not None and seq <= served_upto:
-                        continue  # the backfill already served it — the seam's de-dup
+                        # The de-dup guards the backfill/live seam of ONE session's seq line —
+                        # and seq lines RESTART when a new chat swaps the bus (2026-09-15,
+                        # live: a phone holding yesterday's cursor watched frames arrive while
+                        # every event of the fresh session was eaten right here). A row from a
+                        # different session than the one backfilled is not a duplicate of that
+                        # backfill, whatever its seq number says. Parsing only on the drop
+                        # path keeps the common case free.
+                        try:
+                            row_sid = json.loads(payload).get("session_id")
+                        except (ValueError, TypeError):
+                            row_sid = None
+                        if row_sid == backfill_sid:
+                            continue  # the backfill already served it — the seam's de-dup
                     served_upto = seq
                     client.last_seq = seq
                 yield _frame(name, seq, payload)
