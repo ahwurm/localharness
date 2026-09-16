@@ -176,7 +176,9 @@ async def test_web_dispatch_uses_config_override_not_builder(monkeypatch, bus):
         async def run_turn(self, task):
             return "child summary"
     monkeypatch.setattr("localharness.agent.loop.AgentLoop", _FakeLoop)
-    monkeypatch.setattr(subagent, "_count_session_tool_calls", lambda bus, sid: 0)
+    # 1, not 0: a zero-call run now fails honestly by design (the zero-call fabrication
+    # guard) — this test is about the OVERRIDE driving the loop, so count one real call.
+    monkeypatch.setattr(subagent, "_count_session_tool_calls", lambda bus, sid: 1)
 
     out = await subagent.dispatch_web_subagent(
         "research X", llm=object(), bus=bus, base_registry=base,
