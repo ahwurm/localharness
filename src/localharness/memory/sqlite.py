@@ -176,6 +176,12 @@ AMBIENT_INJECTION_FLOOR = 0.7
 # the original provenance after the ';' for audit.
 USER_FORGET_PROVENANCE_PREFIX = "user_forget@"
 
+# Provenance marker for a HUMAN edit of a fact's content (web memory page / `localharness
+# memory edit`): `<prefix><epoch>;<surface>`. Sibling of user_forget@ / promoted_from_workspace@
+# — the three human-initiated verbs the store can attribute; an owner edit is ground truth, so
+# it rides the normal store_fact supersede path with this stamp instead of a session id.
+USER_EDIT_PROVENANCE_PREFIX = "user_edit@"
+
 
 def _schema_depth(tags: list[str]) -> int:
     """Read the depth:N tag (SEMA-03 depth cap). 0 = a plain lesson (no tag)."""

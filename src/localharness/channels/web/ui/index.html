@@ -262,6 +262,16 @@
   .sessrow .x.arm { color:var(--warn); border-color:var(--warn); }
   .sess > div:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sess .hit { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* THE MEMORY PAGE (owner, 2026-09-16): browse, edit in place, retire — the store keeps history. */
+  #mem { width:min(92vw,30rem); }
+  #memq { width:100%; margin:0 0 2px; padding:8px 10px; background:var(--surface);
+          color:var(--ink); border:1px solid var(--line); border-radius:10px; font:inherit; }
+  #memlist .sess > .meta { white-space:normal; }
+  #membody { width:100%; min-height:34vh; margin-top:8px; padding:8px 10px; resize:vertical;
+             background:var(--surface); color:var(--ink); border:1px solid var(--line);
+             border-radius:10px; font:inherit; font-size:13.5px; line-height:1.45; }
+  #memname { margin-top:8px; word-break:break-all; }
   #modes { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
   #modes button { display:inline-block; width:auto; margin-top:0; }
   #modes .meta { flex-basis:100%; margin:0 0 2px; }
@@ -312,12 +322,28 @@
   <input id="sessq" type="search" placeholder="search chats" autocomplete="off">
   <div id="sessions"><div class="meta">open the drawer to read the list…</div></div>
   <h3>housekeeping</h3>
+  <button class="small" id="memBtn">memory</button>
   <button class="small" id="pushBtn" hidden>notifications</button>
   <button class="small" id="recheck" title="re-run the model-server probe">re-check the model server</button>
   <button class="small" id="grantsBtn">grants</button>
   <button class="small" id="protoBtn">protocol</button>
   <button class="small" id="drawerClose">close</button>
   <div class="meta" id="buildline"></div>
+</dialog>
+
+<dialog id="mem">
+  <h3>memory</h3>
+  <input id="memq" type="search" placeholder="search memory" autocomplete="off">
+  <div id="memlist"><div class="meta">reading memory…</div></div>
+  <div id="memdetail" hidden>
+    <div id="memname" class="meta"></div>
+    <textarea id="membody" autocomplete="off"></textarea>
+    <div id="memmeta" class="meta"></div>
+    <button class="small" id="memsave">save edit</button>
+    <button class="small" id="memforget">delete (recoverable)</button>
+    <button class="small" id="memback">back to list</button>
+  </div>
+  <button class="small" id="memclose">close</button>
 </dialog>
 
 <dialog id="cfg">
@@ -1261,6 +1287,86 @@ $("sessq").oninput = () => {          // debounced so a fast thumb costs one req
   sessqTimer = setTimeout(() => loadSessions($("sessq").value.trim()), 250);
 };
 
+// ---------------------------------------------------------------- the memory page (owner,
+// 2026-09-16). Straight off /api/memory — the session's own store, edits supersede with
+// history kept, delete = retire (recoverable). Rule 3 everywhere: textContent, never HTML.
+async function loadMemory(q) {
+  const box = $("memlist");
+  $("memdetail").hidden = true; box.hidden = false; $("memq").hidden = false;
+  box.replaceChildren(el("div", "meta", q ? "searching…" : "reading memory…"));
+  try {
+    const r = await get("/api/memory" + (q ? "?q=" + encodeURIComponent(q) : ""));
+    if (r.error) { box.replaceChildren(el("div", "meta", r.error)); return; }
+    if (($("memq").value || "").trim() !== (q || "")) return;   // newest keystroke owns the box
+    box.replaceChildren();
+    for (const f of r.facts || []) {
+      const b = el("button", "sess");
+      b.appendChild(el("div", null, f.name));
+      b.appendChild(el("div", "meta", f.value));
+      b.onclick = () => openFact(f.name);
+      box.appendChild(b);
+    }
+    if (!(r.facts || []).length)
+      box.appendChild(el("div", "meta",
+        q ? 'nothing in memory matches "' + q + '".' : "memory is empty."));
+  } catch (e) { box.replaceChildren(el("div", "meta", "could not read memory: " + e)); }
+}
+
+async function openFact(name) {
+  let r;
+  try { r = await get("/api/memory/fact?name=" + encodeURIComponent(name)); }
+  catch (e) { return; }
+  if (r.error) return;
+  $("memlist").hidden = true; $("memq").hidden = true; $("memdetail").hidden = false;
+  $("memname").textContent = name;
+  $("membody").value = (r.fact && r.fact.value) || "";
+  const f = r.fact || {};
+  const bits = [];
+  if (f.source) bits.push("source: " + f.source);
+  bits.push((r.history || []).length + " version(s) kept");
+  if ((f.tags || []).length) bits.push("tags: " + f.tags.join(", "));
+  $("memmeta").textContent = r.fact ? bits.join(" · ") : "retired — history view only";
+  $("memsave").disabled = !r.fact;
+  $("memforget").disabled = !r.fact;
+  S.memOpen = name;
+}
+
+$("memsave").onclick = async () => {
+  const r = await post("/api/memory/edit",
+                       { name: S.memOpen, content: $("membody").value.trim() });
+  $("memmeta").textContent =
+    r.status === "edited" ? "saved — the old version stays in history" :
+    r.status === "unchanged" ? "no change to save" :
+    "save failed: " + (r.error || "unknown");
+};
+
+// delete is a two-tap, same reason as the drawer ✕: no destruction under a stray thumb —
+// and the server retires rather than destroys, so even a confirmed tap is recoverable.
+let memArm = null;
+$("memforget").onclick = async () => {
+  if (memArm === null) {
+    $("memforget").textContent = "sure? tap again";
+    memArm = setTimeout(() => {
+      memArm = null; $("memforget").textContent = "delete (recoverable)";
+    }, 3000);
+    return;
+  }
+  clearTimeout(memArm); memArm = null;
+  const r = await post("/api/memory/forget", { name: S.memOpen });
+  $("memforget").textContent = "delete (recoverable)";
+  if (r.status === "forgotten") loadMemory($("memq").value.trim());
+  else $("memmeta").textContent = "delete failed: " + (r.error || "unknown");
+};
+
+$("memback").onclick = () => loadMemory($("memq").value.trim());
+$("memBtn").onclick = () => { $("drawer").close(); $("mem").showModal(); loadMemory($("memq").value.trim()); };
+$("memclose").onclick = () => $("mem").close();
+let memqTimer = null;
+$("memq").oninput = () => {
+  clearTimeout(memqTimer);
+  memqTimer = setTimeout(() => loadMemory($("memq").value.trim()), 250);
+};
+
 // ---------------------------------------------------------------- new chat
 $("newBtn").onclick = async () => {
   // POST /api/sessions/new ends the live session and builds a fresh one; the old chat stays in
@@ -1319,7 +1425,7 @@ $("verboseBtn").onclick = () => {
 };
 $("cfgClose").onclick = () => $("cfg").close();
 // a tap on the dim backdrop closes a sheet, exactly as a thumb expects
-for (const dlgId of ["drawer", "cfg"]) {
+for (const dlgId of ["drawer", "cfg", "mem"]) {
   $(dlgId).onclick = (ev) => { if (ev.target === $(dlgId)) $(dlgId).close(); };
 }
 

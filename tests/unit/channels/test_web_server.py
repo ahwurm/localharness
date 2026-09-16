@@ -117,11 +117,11 @@ async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
     _, _, _, client = await _stack(tmp_path)
     for path in ("/api/stream", "/api/health", "/api/protocol", "/api/schema", "/api/tools",
                  "/api/grants", "/api/permissions", "/api/sessions",
-                 "/api/sessions/s1/events"):
+                 "/api/sessions/s1/events", "/api/memory", "/api/memory/fact"):
         assert (await client.get(path)).status_code == 401, path
     for path in ("/api/sessions/s1/message", "/api/sessions/s1/cancel",
                  "/api/sessions/s1/mode", "/api/sessions/s1/command",
-                 "/api/sessions/s1/delete",
+                 "/api/sessions/s1/delete", "/api/memory/edit", "/api/memory/forget",
                  "/api/permissions/x/answer", "/api/pending/1/approve", "/api/bringup/abort"):
         got = await client.post(path, json={})
         assert got.status_code == 401, path
@@ -514,6 +514,69 @@ async def test_delete_confines_the_id_to_the_sessions_dir(tmp_path):
     assert outside.exists()
     assert server._session_log("../bus-events") is None
     assert server._session_log("s1") == (tmp_path / "sessions" / "s1.jsonl").resolve()
+
+
+async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
+    """The memory page's whole contract against a REAL store: list shows the fact, an edit
+    supersedes (history kept, user_edit@…;web stamped, tags carried), forget retires without
+    destroying — and the history endpoint still serves the retired row."""
+    from localharness.memory.sqlite import MemoryStore, USER_EDIT_PROVENANCE_PREFIX
+
+    store = MemoryStore(agent_id="orchestrator", division_id="default", org_id="default",
+                        base_dir=str(tmp_path / "mem"))
+    await store.open()
+    try:
+        await store.store_fact(key="notes/searxng", value="original content",
+                               tags=["workaround"], source="remember")
+        bus, channel, server, client = await _stack(
+            tmp_path, runtime={"memory_store": store})
+
+        rows = (await client.get("/api/memory", headers=BEARER)).json()["facts"]
+        assert any(r["name"] == "notes/searxng" for r in rows)
+
+        got = await client.post("/api/memory/edit",
+                                json={"name": "notes/searxng", "content": "edited content"},
+                                headers=JSON)
+        assert got.status_code == 200 and got.json()["status"] == "edited"
+
+        detail = (await client.get("/api/memory/fact?name=notes/searxng",
+                                   headers=BEARER)).json()
+        assert detail["fact"]["value"] == "edited content"
+        assert detail["fact"]["provenance"].startswith(USER_EDIT_PROVENANCE_PREFIX)
+        assert "workaround" in detail["fact"]["tags"]          # tags carried, not dropped
+        assert len(detail["history"]) == 2                     # original kept, superseded
+        assert any(f["value"] == "original content" and f["status"] == "superseded"
+                   for f in detail["history"])
+
+        # Same content again: no phantom supersede row.
+        again = await client.post("/api/memory/edit",
+                                  json={"name": "notes/searxng", "content": "edited content"},
+                                  headers=JSON)
+        assert again.json()["status"] == "unchanged"
+
+        got = await client.post("/api/memory/forget", json={"name": "notes/searxng"},
+                                headers=JSON)
+        assert got.status_code == 200 and got.json()["status"] == "forgotten"
+        rows = (await client.get("/api/memory", headers=BEARER)).json()["facts"]
+        assert not any(r["name"] == "notes/searxng" for r in rows)   # off the hot path…
+        detail = (await client.get("/api/memory/fact?name=notes/searxng",
+                                   headers=BEARER)).json()
+        assert detail["history"]                                     # …but never destroyed
+
+        # Edit-only by design: a name with no active fact is a 404, not a create.
+        missing = await client.post("/api/memory/edit",
+                                    json={"name": "notes/nope", "content": "x"}, headers=JSON)
+        assert missing.status_code == 404
+    finally:
+        await store.close()
+
+
+async def test_memory_endpoints_answer_409_before_a_session_binds(tmp_path):
+    _, _, _, client = await _stack(tmp_path)   # no memory_store in the runtime
+    assert (await client.get("/api/memory", headers=BEARER)).status_code == 409
+    got = await client.post("/api/memory/edit", json={"name": "a", "content": "b"},
+                            headers=JSON)
+    assert got.status_code == 409
 
 
 # ------------------------------------------------------------------ the verbs

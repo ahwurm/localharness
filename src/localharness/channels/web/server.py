@@ -131,6 +131,20 @@ MATCH_SNIPPET_CHARS = TITLE_MAX_CHARS
 The snippet serves the same job as the title — recognise the chat, don't read it here — so it
 gets the same budget, centred on the hit rather than cut from the front."""
 
+MEMORY_LIST_CAP = 200
+"""How many facts `GET /api/memory` returns.
+
+Same philosophy as SESSION_LIST_CAP: the page is a browse-and-edit surface, not an archive
+dump — 200 rows is already deep thumb-scroll, and the search box narrows via FTS long before
+the cap matters. Ranked by the store's own recency+activation order."""
+
+MEMORY_SNIPPET_CHARS = 140
+"""A list row's value preview — recognise the fact, read it on the detail view."""
+
+MEMORY_HISTORY_CAP = 10
+"""Versions the detail view returns. Superseded rows are never deleted, but a fact edited
+hundreds of times is an audit question for the CLI, not a phone screen."""
+
 TRASH_DIRNAME = "sessions-trash"
 """Where a deleted chat's log MOVES (never unlinks) — beside `sessions/` in the agent dir.
 
@@ -323,6 +337,12 @@ class WebServer:
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
             Route("/api/sessions/{session_id}/delete", self.delete_session, methods=["POST"]),
+            # Memory is query/body-addressed, never path-addressed: fact names carry '/'
+            # ("schema/cluster/9aef296b"), which a path param cannot survive.
+            Route("/api/memory", self.memory_list, methods=["GET"]),
+            Route("/api/memory/fact", self.memory_fact, methods=["GET"]),
+            Route("/api/memory/edit", self.memory_edit, methods=["POST"]),
+            Route("/api/memory/forget", self.memory_forget, methods=["POST"]),
             Route("/api/sessions/{session_id}/message", self.message, methods=["POST"]),
             Route("/api/sessions/{session_id}/cancel", self.cancel, methods=["POST"]),
             Route("/api/sessions/{session_id}/mode", self.mode, methods=["POST"]),
@@ -915,6 +935,134 @@ class WebServer:
         return _json({"status": "deleted",
                       "note": f"the log moved to {TRASH_DIRNAME}/ — restorable at a shell"})
 
+    # ------------------------------------------------------------------ memory (owner ask
+    # 2026-09-16: "make our memory easier to edit within the app"). Everything goes through
+    # the SESSION's MemoryStore — the same object the memory tools write through — so edits
+    # supersede with history and read-back verification, and nothing touches sqlite directly.
+
+    def _memory(self) -> Any:
+        return getattr(self.channel, "_memory_store", None)
+
+    @staticmethod
+    def _fact_row(f: Any, *, snippet: bool = True) -> dict:
+        value = f.value or ""
+        return {
+            "name": f.key,
+            "value": value[:MEMORY_SNIPPET_CHARS] if snippet else value,
+            "status": f.status,
+            "confidence": f.confidence,
+            "source": f.source,
+            "node_kind": getattr(f, "node_kind", None),
+            "tags": list(f.tags or []),
+            "updated_at": f.updated_at,
+            "provenance": f.provenance,
+        }
+
+    async def memory_list(self, request: Request) -> Response:
+        """The memory page's list: active facts, store-ranked; `?q=` narrows via the store's FTS."""
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        store = self._memory()
+        if store is None:
+            return _json({"error": "memory binds when the session comes up — send a first "
+                                   "message, then browse"}, status=409)
+        from localharness.memory.sqlite import FactQuery
+
+        q = (request.query_params.get("q") or "").strip() or None
+        try:
+            facts = await store.query_facts(
+                FactQuery(text=q, min_confidence=0.0, limit=MEMORY_LIST_CAP)
+            )
+        except Exception as exc:
+            return _json({"error": f"memory query failed: {exc}"}, status=500)
+        return _json({"facts": [self._fact_row(f) for f in facts]})
+
+    async def memory_fact(self, request: Request) -> Response:
+        """One fact in full, with its version history (`?name=` — names carry slashes)."""
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        store = self._memory()
+        if store is None:
+            return _json({"error": "no live session — memory binds at bring-up"}, status=409)
+        name = (request.query_params.get("name") or "").strip()
+        if not name:
+            return _json({"error": "pass ?name="}, status=400)
+        fact = await store.get_fact(name)
+        history = await store.get_fact_history(name)
+        if fact is None and not history:
+            return _json({"error": "no fact with that name"}, status=404)
+        return _json({
+            "name": name,
+            "fact": self._fact_row(fact, snippet=False) if fact is not None else None,
+            "history": [self._fact_row(f, snippet=False) for f in history[:MEMORY_HISTORY_CAP]],
+        })
+
+    async def memory_edit(self, request: Request) -> Response:
+        """Owner edit: supersede the fact's content — history kept, `user_edit@…;web` stamped.
+
+        Edit-only by design: the row must already exist (the agent's `remember` and the memory
+        subsystems create facts). Tags and node_kind carry forward — an edit that silently
+        dropped them would be data loss wearing a save button.
+        """
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        store = self._memory()
+        if store is None:
+            return _json({"error": "no live session — memory binds at bring-up"}, status=409)
+        try:
+            body = await self._body(request)
+        except (ValueError, json.JSONDecodeError) as exc:
+            return _json({"error": str(exc)}, status=400)
+        name = str(body.get("name") or "").strip()
+        content = str(body.get("content") or "").strip()
+        if not name or not content:
+            return _json({"error": "body needs {name, content}"}, status=400)
+        current = await store.get_fact(name)
+        if current is None:
+            return _json({"error": "no active fact with that name — edits change an existing "
+                                   "fact"}, status=404)
+        if content == (current.value or "").strip():
+            return _json({"status": "unchanged", "name": name})
+        from localharness.memory.sqlite import USER_EDIT_PROVENANCE_PREFIX
+
+        await store.store_fact(
+            key=name, value=content,
+            tags=list(current.tags or []),
+            confidence=current.confidence,
+            source="user_edit",
+            provenance=f"{USER_EDIT_PROVENANCE_PREFIX}{int(time.time())};web",
+            node_kind=getattr(current, "node_kind", None) or "fact",
+        )
+        return _json({"status": "edited", "name": name,
+                      "note": "the previous version stays in history"})
+
+    async def memory_forget(self, request: Request) -> Response:
+        """Retire a fact off every hot path (`forget_fact` — recoverable, never a hard delete)."""
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        store = self._memory()
+        if store is None:
+            return _json({"error": "no live session — memory binds at bring-up"}, status=409)
+        try:
+            body = await self._body(request)
+        except (ValueError, json.JSONDecodeError) as exc:
+            return _json({"error": str(exc)}, status=400)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return _json({"error": "body needs {name}"}, status=400)
+        current = await store.get_fact(name)
+        if current is None:
+            return _json({"error": "no active fact with that name"}, status=404)
+        ok = await store.forget_fact(current.id)
+        if not ok:
+            return _json({"error": "a live turn superseded that fact first — reload"}, status=409)
+        return _json({"status": "forgotten", "name": name,
+                      "note": "retired, not destroyed — the row stays in history"})
+
     # ------------------------------------------------------------------ write verbs
 
     async def message(self, request: Request) -> Response:
@@ -1172,6 +1320,11 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/sessions/{id}/command", "a slash command through the REPL's dispatcher"),
     ("POST", "/api/sessions/{id}/delete",
      "move an ENDED chat's log to sessions-trash/ (the live chat is refused)"),
+    ("GET", "/api/memory", "the agent's saved facts, store-ranked; ?q= FTS filter"),
+    ("GET", "/api/memory/fact", "one fact in full + version history; ?name= (names carry slashes)"),
+    ("POST", "/api/memory/edit",
+     "supersede a fact's content — history kept, owner-attributed; body {name, content}"),
+    ("POST", "/api/memory/forget", "retire a fact (recoverable, never deleted); body {name}"),
     ("POST", "/api/permissions/{request_id}/answer",
      "answer a blocking ask; idempotent; the _always kinds need a second POST with confirm_token"),
     ("POST", "/api/pending/{pending_id}/{approve|deny}", "answer a parked call"),

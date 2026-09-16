@@ -1021,6 +1021,37 @@ async def test_bash_exec_ordinary_nonzero_exit_is_a_normal_result(command, rc):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command, tool", [
+    ('memory_get(name="schema/cluster/x")', "memory_get"),        # observed live 2026-09-16
+    ('web_search("Rohan Kumar Salesforce")', "web_search"),
+    ('  remember(name="a", content="b")', "remember"),
+])
+async def test_bash_exec_typed_harness_tool_gets_a_remediation_not_a_syntax_error(command, tool):
+    """A harness tool typed INTO bash is answered with a redirect to the real tool — not
+    bash's `syntax error near unexpected token`, which sent the model rummaging by hand."""
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command=command)
+    assert result.success is False
+    assert result.error_type == "execution_error"
+    assert f"`{tool}` is a harness TOOL" in result.error
+    assert "real tool call" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "echo 'memory_get(name=\"x\")'",           # quoted mention, not a call at command start
+    "awk 'function grep(s) { return s }' </dev/null",   # parens mid-command are shell-legal
+    "python3 -c 'print(1)'",
+])
+async def test_bash_exec_legit_commands_with_parens_are_not_intercepted(command):
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    result = await BashExecTool().run(command=command)
+    assert result.error_type != "execution_error" or "harness TOOL" not in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_bash_exec_exit_zero_output_carries_no_exit_line():
     """The ordinary success is untouched: no exit-code line on top of every result in the
     session — the code is only worth its tokens when it is not 0."""

@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import os
+import re
 import shutil
 import signal
 from pathlib import Path
@@ -34,6 +35,29 @@ _WINDOWS_ABNORMAL_EXIT_FLOOR = 0x8000_0000
 def _could_not_run(rc: int) -> bool:
     """Whether an exit code means the command never ran, rather than ran and said no."""
     return rc in _COULD_NOT_RUN_EXIT_CODES or rc < 0 or rc >= _WINDOWS_ABNORMAL_EXIT_FLOOR
+
+
+# Harness tool names a model types INTO bash as pseudo-Python — `memory_get(name="x")` — which
+# bash answers with a cryptic `syntax error near unexpected token`, after which the model goes
+# rummaging (observed live 2026-09-16: two sessions bash-sqlite3'ing their own memory.db after
+# exactly this). Names mirror register_builtin_tools (tools/builtin/__init__.py) — a rename
+# there should update this set, and a stale entry costs nothing (the pattern just never fires).
+_HARNESS_TOOL_NAMES = frozenset({
+    "read", "write", "edit", "glob", "grep", "bash_exec", "agent", "remember",
+    "memory_get", "memory_search", "web_search", "web_fetch", "web_page_query",
+    "load_document", "chunk", "tool_result_get",
+})
+_TOOL_CALL_IN_BASH = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*\(")
+
+
+def _typed_tool_call(command: str) -> str | None:
+    """The harness tool name when `command` STARTS with `tool_name(...)` — else None.
+
+    Anchored at the command start on purpose: `awk 'function foo(...)'` and friends carry
+    parens mid-command legitimately; the observed failure shape is the bare first token.
+    """
+    m = _TOOL_CALL_IN_BASH.match(command or "")
+    return m.group(1) if m and m.group(1) in _HARNESS_TOOL_NAMES else None
 
 
 def _find_bash() -> str | None:
@@ -245,6 +269,15 @@ class BashExecTool(Tool):
     async def _execute(
         self, command: str, timeout_s: float = 60.0, working_dir: str = "."
     ) -> ToolResult:
+        # A harness tool typed as a shell command gets a remediation, not bash's cryptic
+        # `syntax error near unexpected token` (which sends the model rummaging by hand).
+        if (typed := _typed_tool_call(command)) is not None:
+            return self.err(
+                f"`{typed}` is a harness TOOL, not a shell command — nothing was executed. "
+                f"Invoke {typed} as a real tool call (a real tool invocation, not text inside "
+                "bash), with its arguments as tool parameters.",
+                error_type="execution_error",
+            )
         # Confined (workspace_root set): relative working_dir — including the untouched default
         # "." — anchors at the workspace root, so the resting behavior is "your cwd IS the
         # workspace", not "your default call errors". Escapes after resolve() ("../x") are still

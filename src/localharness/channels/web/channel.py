@@ -307,6 +307,7 @@ class WebChannel(ChannelAdapter):
         # session log can serve, so a swallowed persist failure surfaces as a gap (§4.2.3).
         self._forwarded_max: dict[str, int] = {}
         self._session_dir: Optional[Path] = None
+        self._memory_store: Any = None
 
         # Web Push, when a phone has enrolled. Optional on purpose: `--replay` sets none, and a
         # box nobody has paired a phone with must behave exactly as it did before A2.
@@ -362,6 +363,7 @@ class WebChannel(ChannelAdapter):
         agent_loop: Any = None,
         session_dir: Optional[Path] = None,
         bus: Any = None,
+        memory_store: Any = None,
     ) -> None:
         """Hand the channel the session objects the HTTP surface has to answer questions about.
 
@@ -378,6 +380,7 @@ class WebChannel(ChannelAdapter):
         self._llm = llm
         self._agent_loop = agent_loop
         self._session_dir = session_dir
+        self._memory_store = memory_store
         # The session exists from this line on, with two client-visible consequences. First,
         # "ready" is published HERE — the bring-up task only returns when the whole session
         # ends, so publishing ready from its `else` branch meant the build row and the ribbon
@@ -401,6 +404,7 @@ class WebChannel(ChannelAdapter):
         self._gate = None
         self._llm = None
         self._agent_loop = None
+        self._memory_store = None  # closes with the session — a dead store must not answer
         self._turn_running = False
         self._open_asks.clear()
         self.set_bringup_abort(None)

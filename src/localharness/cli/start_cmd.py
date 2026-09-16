@@ -1647,6 +1647,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # event subscriptions point at a bus nothing writes to, and live events
                 # never reach a phone (2026-09-15 — the foundational webchat bug).
                 bus=bus,
+                # The memory page (GET/POST /api/memory*) speaks to the SESSION's store —
+                # same object the memory tools write through, never a second connection.
+                memory_store=memory_store,
             )
 
         if acp_channel is not None:
