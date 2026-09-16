@@ -64,6 +64,22 @@ WEB_MAX_ACTIONS = 56
 WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 57 — kept above the budget so max_actions binds
 WEB_MAX_DURATION_MINUTES = 20.0
 
+WEB_ZERO_CALL_RETRIES = 1
+"""Fresh attempts granted a web-researcher whose run made ZERO tool calls.
+
+The observed fault mode (2026-09-16, live): the subject model answers the research brief in
+prose — `web_search("...")` typed as TEXT — then rationalizes that its tools "are not exposed";
+the IDENTICAL dispatch succeeded minutes later, so one fresh attempt catches what is a sampling
+fluke, while more would spend the parent's latency on a model refusing the format. After the
+last attempt the dispatch fails HONESTLY instead of shipping a fabricated transcript as
+findings — which is what taught the orchestrator to bypass delegation with bash+curl."""
+
+ZERO_CALL_RETRY_PREFIX = (
+    "PREVIOUS ATTEMPT INVALID: you produced text without executing a single tool. "
+    "web_search / web_fetch ARE available to you — begin by actually CALLING web_search "
+    "(a real tool invocation, not text that looks like one).\n\n"
+)
+
 # Shared research discipline (ported from the localshift forked runner, tuned for ~56 calls so the
 # model's self-pacing tracks the raised budget instead of stopping early at the old 28-cap targets).
 WEB_RESEARCHER_ROLE_BASE = (
@@ -629,24 +645,35 @@ async def dispatch_web_subagent(
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     _kill, _compact = _child_runtime_paths(child_config, config_dir, state_dir=state_dir)
-    child_loop = AgentLoop(
-        config=child_config,
-        llm=llm,
-        bus=child_bus,
-        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
-        tool_registry=child_registry,
-        permission_evaluator=permission_evaluator,
-        gate=gate,
-        kill_file_path=_kill,
-        compact_md_path=_compact,
+
+    # A research run that called no tool produced no research. Fresh loop per attempt — the
+    # retry must not inherit a context already anchored on the refusal it is correcting.
+    for attempt in range(1 + WEB_ZERO_CALL_RETRIES):
+        child_loop = AgentLoop(
+            config=child_config,
+            llm=llm,
+            bus=child_bus,
+            context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
+            tool_registry=child_registry,
+            permission_evaluator=permission_evaluator,
+            gate=gate,
+            kill_file_path=_kill,
+            compact_md_path=_compact,
+        )
+        brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
+        summary = await child_loop.run_turn(brief)
+        tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+        if tool_calls_used > 0:
+            return format_web_findings(task, summary, tool_calls_used)
+
+    # Zero calls on every attempt: the text is fabrication-shaped, and a fabricated transcript
+    # labeled "failed" still reads like findings to a weak parent — so it is DISCARDED.
+    return (
+        f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
+        f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
+        "executing any web tool, so it produced no evidence; its text was discarded. Treat "
+        "this delegation as FAILED — do not present an answer to this task as researched."
     )
-
-    summary = await child_loop.run_turn(task)
-
-    child_session_id = child_loop.current_session_id
-    tool_calls_used = _count_session_tool_calls(bus, child_session_id)
-
-    return format_web_findings(task, summary, tool_calls_used)
 
 
 # --- search-verifier (P3): blind claim verification + keep-flag ledger --------------------------
@@ -797,6 +824,11 @@ async def dispatch_search_verifier_subagent(
 
     claim, entity, source_url = _parse_verifier_task(task)
     verdict = _parse_verifier_verdict(summary)
+    if tool_calls_used == 0 and isinstance(verdict, dict):
+        # A verifier that opened no source verified nothing, whatever its prose claims —
+        # the same zero-call fabrication shape the web-researcher guards against.
+        verdict = {**verdict, "verdict": "UNVERIFIABLE",
+                   "evidence": "verifier made zero tool calls; verdict coerced"}
     write_verification_ledger(
         run_id=parent_session_id, claim=claim, entity=entity, source_url=source_url, verdict=verdict
     )

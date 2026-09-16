@@ -562,3 +562,101 @@ async def test_config_child_write_implies_edit():
 
     reader = AgentConfig.model_validate({"name": "reader", "role": "Reads."})
     assert "edit" not in _config_child_allowed(reader)
+
+
+# ---------------------------------------------------------------------------
+# Zero-call fabrication guard (2026-09-16, live): a researcher that called no tool
+# produced no research — one fresh retry, then an HONEST failure, never prose-as-findings.
+# ---------------------------------------------------------------------------
+
+def _fake_httpx_page(monkeypatch, text: str) -> None:
+    """Minimal web_tool httpx stub (same shape as test_search_verifier's)."""
+    from localharness.tools.builtin import web_tool
+
+    class _Resp:
+        def __init__(self):
+            self.text = text
+            self.headers = {"content-type": "text/html"}
+            self.url = "https://page.test/"
+            self.encoding = "utf-8"
+        def raise_for_status(self): pass
+        def json(self): return None
+        async def aiter_bytes(self):
+            yield text.encode("utf-8")
+
+    class _Stream:
+        async def __aenter__(self): return _Resp()
+        async def __aexit__(self, *a): return False
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, **k): return _Resp()
+        def stream(self, method, url, **k): return _Stream()
+
+    monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.asyncio
+async def test_web_dispatch_retries_a_zero_call_run_then_returns_findings(
+    mock_llm_client, bus, monkeypatch
+):
+    """Attempt 1 answers in prose (the live fault shape); the retry — recognisable by its
+    sharpened brief — does real work. Robust to intra-turn nudges: the fake answers on what
+    the REQUEST contains, not on a fixed script position."""
+    from localharness.agent.subagent import ZERO_CALL_RETRY_PREFIX, dispatch_web_subagent
+
+    _fake_httpx_page(monkeypatch, "<html><body>Python 3.14.7 is current.</body></html>")
+    base = await _builtin_registry()
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+
+    class _RetryAwareLLM:
+        def __init__(self):
+            self.config = type("C", (), {"tool_call_mode": "native",
+                                         "context_window": 128_000})()
+            self._fetched = False
+        async def stream_complete(self, messages=None, tools=None, on_token=None, **kw):
+            joined = str(messages)
+            if ZERO_CALL_RETRY_PREFIX.splitlines()[0] in joined:
+                if not self._fetched:
+                    self._fetched = True
+                    resp = Response(content=None, tool_calls=[ToolCall(
+                        id="w1", name="web_fetch", arguments={"url": "https://page.test/"})])
+                else:
+                    resp = Response(content="ANSWER: Python 3.14.7. Source: page.test")
+                return resp, resp.usage
+            resp = Response(content='web_search("x") — my tools are not exposed')
+            return resp, resp.usage
+
+    result = await dispatch_web_subagent(
+        "find the current python version",
+        llm=_RetryAwareLLM(), bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+    )
+    assert "SUBAGENT RUN COMPLETE" in result
+    assert "ANSWER: Python 3.14.7" in result
+    assert "not exposed" not in result          # attempt 1's refusal prose never leaks
+
+
+@pytest.mark.asyncio
+async def test_web_dispatch_zero_calls_twice_fails_honestly_and_discards_the_prose(
+    mock_llm_client, bus
+):
+    from localharness.agent.subagent import dispatch_web_subagent
+
+    base = await _builtin_registry()
+    Response = mock_llm_client.Response
+    llm = mock_llm_client([
+        Response(content='web_search("a")\nweb_fetch("b")'),   # attempt 1: prose "calls"
+        Response(content="I still cannot call any tools."),    # retry: prose again
+    ])
+
+    result = await dispatch_web_subagent(
+        "who is X at Y corp",
+        llm=llm, bus=bus, base_registry=base,
+        parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
+    )
+    assert "SUBAGENT RUN FAILED" in result and "tool calls: 0" in result
+    assert "delegation as FAILED" in result
+    assert 'web_search("a")' not in result      # the fabricated transcript is discarded
