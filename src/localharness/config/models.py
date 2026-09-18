@@ -932,6 +932,36 @@ class MemoryConsolidationConfig(BaseModel):
     )
 
 
+class MemoryArchivalConfig(BaseModel):
+    """Dormancy archival — the forgetting half of consolidation (memory rung 1).
+
+    A fact that scores below the store's own proven-useful floor moves out of the hot
+    `facts` table into the cold `facts_archive` mirror: off every recall path, out of the
+    FTS haystack and the memory page, restorable byte-identical at any time. Nothing is
+    ever deleted.
+
+    ONE axis only, and it is a ROLLOUT GATE rather than a tuning knob — the line the step
+    archives against is COMPUTED from the store every pass (the minimum salience over the
+    facts that were actually recalled or touched by the owner), never configured."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "OFF by default, deliberately: archival is the first mechanism in this project "
+            "that REMOVES rows from the hot store, and the owner watches its first real run "
+            "before it is ever allowed to fire on its own. Leave it False and the "
+            "consolidation step no-ops with zero side effects — `localharness memory "
+            "archive --dry-run` still reports exactly what it WOULD move (it moves nothing), "
+            "and `localharness memory archive` still performs an explicit, owner-triggered "
+            "run. Set True only once a dry-run has been read on the store in question; then "
+            "every idle consolidation pass archives dormant facts automatically and reports "
+            "the count and the line it used. Mutable via `localharness components set "
+            "agent.memory.archival.enabled <true|false>`."
+        ),
+    )
+
+
 class TriggerLexiconConfig(BaseModel):
     """COLL-02 zero-NLU trigger word lists (owner steer 2026-07-04: TRIGGERS, NOT
     CLASSIFIERS — a tripwire for a later model look, recall-first by design; a false
@@ -1169,6 +1199,14 @@ class MemoryConfig(BaseModel):
     consolidation: MemoryConsolidationConfig = Field(
         default_factory=MemoryConsolidationConfig,
         description="Idle-time consolidation pass (v2.0 CONS) — see MemoryConsolidationConfig.",
+    )
+
+    archival: MemoryArchivalConfig = Field(
+        default_factory=MemoryArchivalConfig,
+        description=(
+            "Dormancy archival, the forgetting half of consolidation (rung 1) — OFF by "
+            "default, see MemoryArchivalConfig."
+        ),
     )
 
     predictive_gate: PredictiveGateConfig = Field(
