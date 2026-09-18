@@ -158,10 +158,9 @@ async def archive_dormant_facts(
     touched (that is rung 2); nothing is deleted, ever.
     """
     from localharness.memory.salience import (
-        ARCHIVE_RUNG_DORMANCY, archive_line, score_facts, select_archivable,
-        vacuum_warranted,
+        archive_line, score_facts, select_archivable, vacuum_warranted,
     )
-    from localharness.memory.sqlite import _row_to_fact
+    from localharness.memory.sqlite import ARCHIVE_SURFACE_FLOOR_LINE, _row_to_fact
 
     assert store._db is not None
     now = int(time.time()) if now is None else now
@@ -197,7 +196,7 @@ async def archive_dormant_facts(
         if cancel is not None and cancel.is_set():
             break   # a user turn is waiting; moves already committed stand
         moved = await store.archive_fact(
-            cand.fact_id, rung=ARCHIVE_RUNG_DORMANCY,
+            cand.fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE,
             s_at_archive=cand.s, line_at_archive=line,
         )
         if moved:
@@ -205,6 +204,164 @@ async def archive_dormant_facts(
         else:
             run.refused += 1
     if vacuum_warranted(run.moved, run.active_before):
+        await store.vacuum()
+        run.vacuumed = True
+    return run
+
+
+# ---------------------------------------------------------------------------
+# List-driven archival — scorer-AGNOSTIC plumbing.
+#
+# The scorer that decides WHO is dormant is going to keep changing (S v1 is an ordinal
+# ranking, not a calibrated probability, and rung 4 replaces its line outright). The first
+# watched live run is driven by an externally computed CONSENSUS of several measured
+# scorers, which no in-harness formula can reproduce. So the harness takes a LIST of fact
+# ids and stays out of the judging — and every safety rail is re-checked HERE, at execution
+# time, because a list is an opinion from outside and outside opinions do not get to move
+# the owner's own facts.
+# ---------------------------------------------------------------------------
+
+# Why a row was not moved. Named, because these strings are the report the owner reads.
+SKIP_UNKNOWN = "no such fact in this store"
+SKIP_NOT_ACTIVE = "not active (already superseded or archived)"
+SKIP_OWNER_TOUCHED = "your own hand (pinned)"
+SKIP_RECALLED = "recalled before (anchor)"
+SKIP_UNFOLDED_READS = "read since the last fold"
+SKIP_REFUSED_AT_MOVE = "changed underfoot during the run"
+SKIP_UNPARSEABLE = "unparseable row"
+
+# The list's field separator and comment marker. Trailing fields are IGNORED by design:
+# the list is produced by an external scorer whose columns WILL change, and a consumer that
+# broke on an extra column would turn every scorer change into a harness change.
+_LIST_SEPARATOR = "|"
+_LIST_COMMENT = "#"
+
+
+@dataclass(frozen=True)
+class SkippedFact:
+    """One row the run declined, with the reason in the owner's words. `fact_id` is None
+    for a row that never parsed into an id (then `line_no` and `raw` locate it in the file)."""
+    reason: str
+    fact_id: int | None = None
+    key: str = ""
+    line_no: int | None = None
+    raw: str = ""
+
+
+def parse_archive_list(text: str) -> tuple[list[int], list[SkippedFact]]:
+    """Parse an external condemned-id list: one row per fact, `|`-separated, FIRST field is
+    the fact id. Blank lines and `#` comments are skipped silently; trailing fields are
+    ignored; ids repeat harmlessly (first occurrence wins, file order preserved).
+
+    Returns (ids, unparseable rows). A garbage row is REPORTED, never fatal — one bad line
+    in a 10k-row list must not cost the other 9,999 their run, and it must not pass in
+    silence either.
+    """
+    ids: list[int] = []
+    seen: set[int] = set()
+    bad: list[SkippedFact] = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        row = raw.strip()
+        if not row or row.startswith(_LIST_COMMENT):
+            continue
+        head = row.split(_LIST_SEPARATOR, 1)[0].strip()
+        try:
+            fact_id = int(head)
+        except ValueError:
+            bad.append(SkippedFact(reason=SKIP_UNPARSEABLE, line_no=line_no, raw=row))
+            continue
+        if fact_id not in seen:
+            seen.add(fact_id)
+            ids.append(fact_id)
+    return ids, bad
+
+
+@dataclass
+class ArchiveListRun:
+    """One list-driven run's outcome — same reporting shape as ArchiveRun, minus the line
+    (there is none: the list is the authority, not a threshold this harness computed)."""
+    listed: int = 0
+    active_before: int = 0
+    candidates: list["Salience"] = field(default_factory=list)
+    skipped: list[SkippedFact] = field(default_factory=list)
+    moved: int = 0
+    vacuumed: bool = False
+    dry_run: bool = False
+
+
+async def archive_listed_facts(
+    store: "MemoryStore",
+    ids: list[int],
+    *,
+    dry_run: bool = False,
+    now: int | None = None,
+    unparseable: list[SkippedFact] | None = None,
+) -> ArchiveListRun:
+    """Archive exactly the listed ids — through every rail, re-checked at execution time.
+
+    The rails do not care what the list says. A listed id is skipped (and REPORTED, never
+    raised) when it names no row here, names a row that is not active, names a fact the
+    owner touched, names a fact that was ever recalled, or names a fact read since the last
+    fold. The store's own move verb then re-checks the last two on its own, so a fact that
+    becomes live between the scan and the move is still refused.
+
+    S v1 is recorded on each moved row as the LOCAL scorer's opinion at the moment of the
+    move — not as the reason. `line_at_archive` stays NULL: no line was consulted.
+    """
+    from localharness.memory.salience import is_pinned, score_fact, vacuum_warranted
+    from localharness.memory.sqlite import ARCHIVE_SURFACE_CONSENSUS_LIST, _row_to_fact
+
+    assert store._db is not None
+    now = int(time.time()) if now is None else now
+    run = ArchiveListRun(listed=len(ids), dry_run=dry_run,
+                         skipped=list(unparseable or []))
+    async with store._db.execute(
+        "SELECT COUNT(*) FROM facts WHERE agent_id = ? AND status = 'active'",
+        (store._agent_id,),
+    ) as cur:
+        (run.active_before,) = await cur.fetchone()
+
+    for fact_id in ids:
+        async with store._db.execute(
+            f"SELECT {store._FACT_COLS}, access_count_staged FROM facts "
+            "WHERE agent_id = ? AND id = ?",
+            (store._agent_id, fact_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            run.skipped.append(SkippedFact(reason=SKIP_UNKNOWN, fact_id=fact_id))
+            continue
+        cells = tuple(row)
+        fact, staged = _row_to_fact(cells[:-1]), cells[-1]
+        if fact.status != "active":
+            run.skipped.append(
+                SkippedFact(reason=SKIP_NOT_ACTIVE, fact_id=fact_id, key=fact.key))
+            continue
+        if is_pinned(fact):
+            run.skipped.append(
+                SkippedFact(reason=SKIP_OWNER_TOUCHED, fact_id=fact_id, key=fact.key))
+            continue
+        if (fact.access_count or 0) > 0:
+            run.skipped.append(
+                SkippedFact(reason=SKIP_RECALLED, fact_id=fact_id, key=fact.key))
+            continue
+        if (staged or 0) > 0:
+            run.skipped.append(
+                SkippedFact(reason=SKIP_UNFOLDED_READS, fact_id=fact_id, key=fact.key))
+            continue
+
+        scored = score_fact(fact, now)
+        run.candidates.append(scored)
+        if dry_run:
+            continue
+        if await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_CONSENSUS_LIST,
+                                    s_at_archive=scored.s, line_at_archive=None):
+            run.moved += 1
+        else:
+            run.candidates.pop()
+            run.skipped.append(
+                SkippedFact(reason=SKIP_REFUSED_AT_MOVE, fact_id=fact_id, key=fact.key))
+    if not dry_run and vacuum_warranted(run.moved, run.active_before):
         await store.vacuum()
         run.vacuumed = True
     return run

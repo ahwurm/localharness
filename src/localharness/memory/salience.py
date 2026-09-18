@@ -49,11 +49,6 @@ from localharness.memory.sqlite import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from localharness.memory.sqlite import Fact
 
-# The rung this module archives for — stamped into facts_archive.archive_rung so a later
-# rung's moves stay distinguishable from this one's (rung 2 archives superseded versions,
-# rung 3 unconfirmed mints; each must be separately restorable and separately auditable).
-ARCHIVE_RUNG_DORMANCY = "rung1_dormancy"
-
 # Logit DOMAIN GUARD — not a tuning knob. ln(c/(1−c)) diverges at c ∈ {0, 1}, so the
 # argument must be held off the poles. The offset is the store's own confidence
 # RESOLUTION: every confidence this codebase writes is a 2-decimal quantity (0.9
