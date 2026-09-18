@@ -116,11 +116,54 @@ def memory_list(
     _run(go())
 
 
+def _echo_candidates(candidates) -> None:
+    """The per-source table + worst-scoring names — identical for both archive modes, so
+    the two reports never drift apart in wording or in what they show."""
+    by_source: dict[str, int] = {}
+    for c in candidates:
+        by_source[c.source or "(none)"] = by_source.get(c.source or "(none)", 0) + 1
+    if not by_source:
+        return
+    typer.echo("by source:")
+    for src, n in sorted(by_source.items(), key=lambda kv: (-kv[1], kv[0])):
+        typer.echo(f"  {n:>5}  {src}")
+    typer.echo(f"first {min(_PREVIEW_KEYS, len(candidates))}:")
+    for c in sorted(candidates, key=lambda c: c.s)[:_PREVIEW_KEYS]:
+        typer.echo(f"  S={c.s:+.4f}  {c.key}")
+    if len(candidates) > _PREVIEW_KEYS:
+        typer.echo(f"  … and {len(candidates) - _PREVIEW_KEYS} more")
+
+
+def _echo_skipped(skipped) -> None:
+    """Every row the rails declined, counted by reason then listed. A list-driven run that
+    quietly dropped ids would be indistinguishable from one that worked."""
+    if not skipped:
+        return
+    by_reason: dict[str, int] = {}
+    for s in skipped:
+        by_reason[s.reason] = by_reason.get(s.reason, 0) + 1
+    typer.echo(f"SKIPPED ({len(skipped)}):")
+    for reason, n in sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0])):
+        typer.echo(f"  {n:>5}  {reason}")
+    for s in skipped[:_PREVIEW_KEYS]:
+        where = (f"line {s.line_no}: {s.raw!r}" if s.fact_id is None
+                 else f"[{s.fact_id}] {s.key}".rstrip())
+        typer.echo(f"  {where} — {s.reason}")
+    if len(skipped) > _PREVIEW_KEYS:
+        typer.echo(f"  … and {len(skipped) - _PREVIEW_KEYS} more")
+
+
 @memory_app.command("archive")
 def memory_archive(
     dry_run: bool = typer.Option(
         False, "--dry-run",
         help="Report what WOULD be archived and move nothing.",
+    ),
+    from_list: Optional[str] = typer.Option(
+        None, "--from-list", metavar="PATH",
+        help="Archive exactly the fact ids in this file instead of scoring the store. "
+             "One row per fact, '|'-separated, first field is the id; '#' lines are "
+             "comments and trailing fields are ignored. Every safety rail still applies.",
     ),
     agent: str = _AGENT_OPT,
     config_dir: Optional[str] = _CONFIG_OPT,
@@ -132,9 +175,48 @@ def memory_archive(
     by you. That line is READ OUT OF THE STORE on every run, never configured, and a store
     with nothing recalled yet has no line and archives nothing.
 
+    With --from-list, the judging happens OUTSIDE the harness: the file names the fact ids
+    to archive (e.g. the consensus of several measured scorers) and this verb moves exactly
+    those — still refusing, and reporting, any id that names a fact you touched, a fact that
+    was ever recalled, a fact read since the last fold, or no fact at all.
+
     This verb is the explicit, owner-triggered run — it works whether or not the automatic
     step (`agent.memory.archival.enabled`) is on. Read a --dry-run first.
     """
+    async def go_list():
+        from localharness.memory.consolidation import archive_listed_facts, parse_archive_list
+
+        path = Path(from_list).expanduser()
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            typer.echo(f"cannot read {path}: {exc}", err=True)
+            raise typer.Exit(1)
+        ids, unparseable = parse_archive_list(text)
+        store, db = await _open_store(agent, config_dir)
+        try:
+            _header(db)
+            typer.echo(f"list: {path} — {len(ids)} id(s), {len(unparseable)} unparseable row(s)")
+            if not ids and not unparseable:
+                typer.echo("the list is empty. Nothing archived.")
+                return
+            run = await archive_listed_facts(store, ids, dry_run=dry_run,
+                                             unparseable=unparseable)
+            verb = "would archive" if dry_run else "archived"
+            typer.echo(f"active facts: {run.active_before}")
+            typer.echo(f"{verb}: {len(run.candidates) if dry_run else run.moved} fact(s)")
+            if not dry_run and run.vacuumed:
+                typer.echo("vacuumed: more rows left than stayed, so the file was rewritten")
+            _echo_candidates(run.candidates)
+            _echo_skipped(run.skipped)
+            if dry_run:
+                typer.echo("dry run — nothing moved.")
+            else:
+                typer.echo("restore any of them with `localharness memory restore <id>` "
+                           "(`localharness memory list --archived` lists ids).")
+        finally:
+            await store.close()
+
     async def go():
         from localharness.memory.consolidation import archive_dormant_facts
 
@@ -163,18 +245,7 @@ def memory_archive(
                            f"{run.refused}")
             if not dry_run and run.vacuumed:
                 typer.echo("vacuumed: more rows left than stayed, so the file was rewritten")
-            by_source: dict[str, int] = {}
-            for c in run.candidates:
-                by_source[c.source or "(none)"] = by_source.get(c.source or "(none)", 0) + 1
-            if by_source:
-                typer.echo("by source:")
-                for src, n in sorted(by_source.items(), key=lambda kv: (-kv[1], kv[0])):
-                    typer.echo(f"  {n:>5}  {src}")
-                typer.echo(f"first {min(_PREVIEW_KEYS, len(run.candidates))}:")
-                for c in sorted(run.candidates, key=lambda c: c.s)[:_PREVIEW_KEYS]:
-                    typer.echo(f"  S={c.s:+.4f}  {c.key}")
-                if len(run.candidates) > _PREVIEW_KEYS:
-                    typer.echo(f"  … and {len(run.candidates) - _PREVIEW_KEYS} more")
+            _echo_candidates(run.candidates)
             if dry_run:
                 typer.echo("dry run — nothing moved.")
             else:
@@ -182,7 +253,7 @@ def memory_archive(
                            "(`localharness memory list --archived` lists ids).")
         finally:
             await store.close()
-    _run(go())
+    _run(go_list() if from_list else go())
 
 
 @memory_app.command("restore")

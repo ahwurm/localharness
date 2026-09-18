@@ -182,6 +182,24 @@ USER_FORGET_PROVENANCE_PREFIX = "user_forget@"
 # it rides the normal store_fact supersede path with this stamp instead of a session id.
 USER_EDIT_PROVENANCE_PREFIX = "user_edit@"
 
+# Archival stamp, same shape as the two markers above: `<prefix><epoch>;<surface>`. It goes
+# in the ARCHIVE's own metadata column (facts_archive.archive_rung), never on the fact row —
+# a restored fact must come back byte-identical, so nothing about the archival may be
+# written into it. The epoch duplicates facts_archive.archived_at on purpose: the stamp is
+# meant to be readable on its own, the way user_edit@<epoch>;cli is.
+ARCHIVE_STAMP_PREFIX = "archived@"
+
+# WHICH decision procedure condemned the row — kept as data, not prose, so the two stay
+# separately queryable forever. The first watched live run is driven by an externally
+# computed consensus list, and its moves must remain distinguishable from every later
+# automatic one (and from whatever scorer replaces today's).
+ARCHIVE_SURFACE_FLOOR_LINE = "rung1-floor-line"     # the store's own computed proven-useful floor
+ARCHIVE_SURFACE_CONSENSUS_LIST = "consensus-list"   # an external list of condemned fact ids
+
+
+def archive_stamp(surface: str, epoch: int) -> str:
+    return f"{ARCHIVE_STAMP_PREFIX}{epoch};{surface}"
+
 
 def _schema_depth(tags: list[str]) -> int:
     """Read the depth:N tag (SEMA-03 depth cap). 0 = a plain lesson (no tag)."""
@@ -1301,16 +1319,22 @@ class MemoryStore:
         self,
         fact_id: int,
         *,
-        rung: str,
+        surface: str,
         s_at_archive: float,
         line_at_archive: float | None,
     ) -> bool:
         """Move one ACTIVE fact out of the hot store into the cold archive.
 
+        `surface` names WHAT condemned the row (ARCHIVE_SURFACE_*); it is stamped as
+        `archived@<epoch>;<surface>` using the same epoch written to archived_at, so the
+        two can never disagree. Both land in the archive's metadata columns — the fact row
+        itself is written back unchanged, which is what makes restore byte-identical.
+
         Returns False (and changes nothing) when the row is gone, already superseded, or
         carries UNFOLDED reads — `access_count_staged > 0` means the fact was recalled
         since the last fold, so it is by definition freshly used and not dormant, whatever
-        its (stale) folded counters say.
+        its (stale) folded counters say. THIS is the execution-time rail: it holds no
+        matter which surface asked, including an external list that names the row outright.
 
         Raises MemoryVerifyError if the archived copy does not match the source row
         field-for-field, or if the source row survives the delete — the move is rolled
@@ -1331,10 +1355,12 @@ class MemoryStore:
         key = source_row[self._ARCHIVE_ROW_COLS.index("key")]
         try:
             marks = ", ".join("?" * (len(self._ARCHIVE_ROW_COLS) + 4))
+            now = int(time.time())
             await self._db.execute(
                 f"INSERT INTO facts_archive ({cols}, archived_at, archive_rung, "
                 f"s_at_archive, line_at_archive) VALUES ({marks})",
-                (*source_row, int(time.time()), rung, float(s_at_archive), line_at_archive),
+                (*source_row, now, archive_stamp(surface, now),
+                 float(s_at_archive), line_at_archive),
             )
             async with self._db.execute(
                 f"SELECT {cols} FROM facts_archive WHERE id = ?", (fact_id,)

@@ -25,9 +25,19 @@ from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from localharness.config.models import MemoryArchivalConfig, MemoryConsolidationConfig
-from localharness.memory.consolidation import ConsolidationPass, archive_dormant_facts
+from localharness.memory.consolidation import (
+    SKIP_NOT_ACTIVE,
+    SKIP_OWNER_TOUCHED,
+    SKIP_RECALLED,
+    SKIP_UNFOLDED_READS,
+    SKIP_UNKNOWN,
+    SKIP_UNPARSEABLE,
+    ConsolidationPass,
+    archive_dormant_facts,
+    archive_listed_facts,
+    parse_archive_list,
+)
 from localharness.memory.salience import (
-    ARCHIVE_RUNG_DORMANCY,
     CONFIDENCE_LOGIT_MAX,
     CONFIDENCE_LOGIT_MIN,
     archive_line,
@@ -41,6 +51,9 @@ from localharness.memory.salience import (
     vacuum_warranted,
 )
 from localharness.memory.sqlite import (
+    ARCHIVE_STAMP_PREFIX,
+    ARCHIVE_SURFACE_CONSENSUS_LIST,
+    ARCHIVE_SURFACE_FLOOR_LINE,
     USER_EDIT_PROVENANCE_PREFIX,
     FactQuery,
     MemoryStore,
@@ -274,7 +287,7 @@ async def test_archive_then_restore_round_trips_every_column(tmp_path: Path):
         fact_id = await _age(store, "ops/vllm-port", days=30)
         before = await _full_row(store, fact_id)
 
-        assert await store.archive_fact(fact_id, rung=ARCHIVE_RUNG_DORMANCY,
+        assert await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE,
                                         s_at_archive=-1.4, line_at_archive=-0.56) is True
         assert await _full_row(store, fact_id) is None       # gone from the hot table
         assert await store.count_archived() == 1
@@ -301,7 +314,7 @@ async def test_archived_facts_leave_the_search_index_and_come_back_with_restore(
                 FactQuery(text="vllm", min_confidence=0.0, limit=50))]
 
         assert "ops/vllm-port" in await search()
-        await store.archive_fact(fact_id, rung=ARCHIVE_RUNG_DORMANCY, s_at_archive=-1.0,
+        await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE, s_at_archive=-1.0,
                                  line_at_archive=-0.5)
         assert await search() == []                            # out of the haystack
         assert await store.get_fact("ops/vllm-port") is None   # and off the direct path
@@ -325,7 +338,7 @@ async def test_archive_refuses_a_row_with_unfolded_reads(tmp_path: Path):
         await store._db.execute(
             "UPDATE facts SET access_count_staged = 2 WHERE id = ?", (fact_id,))
         await store._db.commit()
-        assert await store.archive_fact(fact_id, rung=ARCHIVE_RUNG_DORMANCY,
+        assert await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE,
                                         s_at_archive=-2.0, line_at_archive=-0.5) is False
         assert await store.get_fact("k/recent") is not None
         assert await store.count_archived() == 0
@@ -341,7 +354,7 @@ async def test_archive_never_touches_superseded_rows(tmp_path: Path):
         await store.store_fact("k/one", "first value", confidence=0.65)
         old_id = (await store.get_fact("k/one")).id
         await store.store_fact("k/one", "second value", confidence=0.65)
-        assert await store.archive_fact(old_id, rung=ARCHIVE_RUNG_DORMANCY,
+        assert await store.archive_fact(old_id, surface=ARCHIVE_SURFACE_FLOOR_LINE,
                                         s_at_archive=-9.0, line_at_archive=0.0) is False
         assert (await store.get_fact_by_id(old_id)).status == "superseded"
         assert await store.count_archived() == 0
@@ -357,7 +370,7 @@ async def test_restore_refuses_when_a_live_fact_holds_the_name(tmp_path: Path):
     try:
         await store.store_fact("k/dup", "archived value", confidence=0.65)
         fact_id = await _age(store, "k/dup", days=30)
-        await store.archive_fact(fact_id, rung=ARCHIVE_RUNG_DORMANCY, s_at_archive=-1.0,
+        await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE, s_at_archive=-1.0,
                                  line_at_archive=-0.5)
         await store.store_fact("k/dup", "a newer live value", confidence=0.65)
 
@@ -391,7 +404,7 @@ async def test_the_archive_mirror_is_checked_against_the_live_facts_columns(tmp_
         await store._db.commit()
         store._archive_cols_checked = False
         try:
-            await store.archive_fact(fact_id, rung=ARCHIVE_RUNG_DORMANCY, s_at_archive=-1.0,
+            await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_FLOOR_LINE, s_at_archive=-1.0,
                                      line_at_archive=0.0)
             raise AssertionError("archival must refuse a mirror that no longer matches")
         except MemoryCorruptionError as exc:
@@ -494,7 +507,7 @@ async def test_the_archived_row_records_the_score_and_the_line_it_was_judged_by(
         assert len(rows) == run.moved == 6
         for key, rung, s_at, line_at, when in rows:
             assert key.startswith("mined/dead-")
-            assert rung == ARCHIVE_RUNG_DORMANCY
+            assert rung == f"{ARCHIVE_STAMP_PREFIX}{when};{ARCHIVE_SURFACE_FLOOR_LINE}"
             assert s_at < line_at == run.line
             assert when > 0
     finally:
@@ -666,3 +679,222 @@ async def test_the_scheduler_forwards_the_archival_config_to_its_pass(tmp_path: 
         assert await store.count_archived() == 6
     finally:
         await store.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. List-driven archival — scorer-agnostic plumbing.
+#
+# The scorer keeps changing (S v1 ranks, it does not calibrate), and the first watched
+# live run is driven by an externally computed CONSENSUS of several measured scorers that
+# no in-harness formula reproduces. So the harness takes a list of ids and stays out of the
+# judging — while every safety rail is re-checked HERE, at execution time, because a list
+# is an opinion from outside and outside opinions do not get to move the owner's facts.
+# ---------------------------------------------------------------------------
+
+def test_the_list_parser_takes_pipes_comments_and_junk(tmp_path: Path):
+    ids, bad = parse_archive_list(
+        "# consensus run 2026-09-18, 3 scorers agreeing\n"
+        "\n"
+        "101|mined/obs-0001|-1.51|3of3\n"       # trailing fields IGNORED (forward-compatible)
+        "  202  \n"                              # bare id, whitespace
+        "303|\n"
+        "101|mined/obs-0001|-1.51|3of3\n"       # a repeat is harmless
+        "   # an indented comment\n"
+        "not-an-id|whatever\n"                   # garbage: reported, never fatal
+        "|404\n"                                 # empty first field: garbage too
+    )
+    assert ids == [101, 202, 303]                # file order, deduped
+    assert [b.line_no for b in bad] == [8, 9]
+    assert all(b.reason == SKIP_UNPARSEABLE and b.fact_id is None for b in bad)
+    assert bad[0].raw == "not-an-id|whatever"    # the row is quoted back, not just counted
+
+
+async def _seed_one_of_each(store: MemoryStore) -> dict[str, int]:
+    """One dead fact (archivable) plus one of every row the rails must refuse."""
+    ids: dict[str, int] = {}
+    await store.store_fact("mined/dead", "a mined observation nobody ever used",
+                           tags=["sem"], confidence=0.65, source="transcript_mining")
+    ids["dead"] = await _age(store, "mined/dead", days=45)
+
+    await store.store_fact("profile/home", "the owner is in Denver", confidence=0.9,
+                           source="remember")
+    ids["pinned"] = await _age(store, "profile/home", days=45)
+
+    await store.store_fact("learned/vllm/resolved_error", "restart vllm after a GPU lock",
+                           tags=["tier:resolved_error"], confidence=0.8, source="write_gate")
+    ids["recalled"] = await _age(store, "learned/vllm/resolved_error", days=45, access_count=4)
+
+    await store.store_fact("sem/just-read", "a fact the model recalled this session",
+                           confidence=0.65, source="transcript_mining")
+    ids["staged"] = await _age(store, "sem/just-read", days=45)
+    await store._db.execute("UPDATE facts SET access_count_staged = 1 WHERE id = ?",
+                            (ids["staged"],))
+
+    await store.store_fact("k/versioned", "first value", confidence=0.65,
+                           source="transcript_mining")
+    ids["superseded"] = (await store.get_fact("k/versioned")).id
+    await store.store_fact("k/versioned", "second value", confidence=0.65,
+                           source="transcript_mining")
+    await store._db.commit()
+    return ids
+
+
+async def test_every_rail_refuses_and_the_run_carries_on(tmp_path: Path):
+    """MUTATION TARGET: drop the `is_anchor`/access_count rail from archive_listed_facts and
+    the recalled-fact assertion reddens. A list that names a fact you actually used does not
+    get to move it — and one bad id must never cost the rest of a 10k-row list its run."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        ids = await _seed_one_of_each(store)
+        listed = [ids["dead"], ids["pinned"], ids["recalled"], ids["staged"],
+                  ids["superseded"], 999_999]
+        run = await archive_listed_facts(store, listed)
+
+        assert run.moved == 1                                  # the run carried on
+        assert [c.fact_id for c in run.candidates] == [ids["dead"]]
+        assert await store.get_fact("mined/dead") is None
+        by_id = {s.fact_id: s.reason for s in run.skipped}
+        assert by_id == {
+            ids["pinned"]: SKIP_OWNER_TOUCHED,
+            ids["recalled"]: SKIP_RECALLED,
+            ids["staged"]: SKIP_UNFOLDED_READS,
+            ids["superseded"]: SKIP_NOT_ACTIVE,
+            999_999: SKIP_UNKNOWN,
+        }
+        for key in ("profile/home", "learned/vllm/resolved_error", "sem/just-read"):
+            assert await store.get_fact(key) is not None       # every refused row still hot
+        assert (await store.get_fact_by_id(ids["superseded"])).status == "superseded"
+    finally:
+        await store.close()
+
+
+async def test_the_stores_own_verb_refuses_even_when_the_list_insists(tmp_path: Path):
+    """Defence in depth: the rails are re-checked by the MOVE itself, so a fact that goes
+    live between the scan and the move is still refused — the list cannot outrun it."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("sem/x", "v", confidence=0.65, source="transcript_mining")
+        fact_id = await _age(store, "sem/x", days=45)
+        await store._db.execute("UPDATE facts SET access_count_staged = 1 WHERE id = ?",
+                                (fact_id,))
+        await store._db.commit()
+        # Straight at the store verb, bypassing the runner's scan entirely.
+        assert await store.archive_fact(fact_id, surface=ARCHIVE_SURFACE_CONSENSUS_LIST,
+                                        s_at_archive=-9.0, line_at_archive=None) is False
+        assert await store.get_fact("sem/x") is not None
+    finally:
+        await store.close()
+
+
+async def test_list_archived_rows_carry_the_consensus_stamp_and_no_line(tmp_path: Path):
+    """The stamp says WHICH procedure condemned the row, in the archive's own metadata —
+    the fact row is untouched. line_at_archive stays NULL: no line was consulted."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        ids = await _seed_one_of_each(store)
+        before = await _full_row(store, ids["dead"])
+        await archive_listed_facts(store, [ids["dead"]])
+        async with store._db.execute(
+            "SELECT archive_rung, archived_at, s_at_archive, line_at_archive "
+            "FROM facts_archive WHERE id = ?", (ids["dead"],)
+        ) as cur:
+            stamp, when, s_at, line_at = tuple(await cur.fetchone())
+        assert stamp == f"{ARCHIVE_STAMP_PREFIX}{when};{ARCHIVE_SURFACE_CONSENSUS_LIST}"
+        assert line_at is None                       # the list was the authority, not a line
+        assert s_at < 0                              # S v1 recorded as the local opinion
+        # And the round trip is unchanged by any of it.
+        assert await store.restore_fact(ids["dead"]) is True
+        assert await _full_row(store, ids["dead"]) == before
+    finally:
+        await store.close()
+
+
+def _write_list(tmp_path: Path, rows: list[str]) -> Path:
+    path = tmp_path / "consensus.txt"
+    path.write_text("\n".join(rows) + "\n")
+    return path
+
+
+def _seed_one_of_each_sync(tmp_path: Path) -> dict[str, int]:
+    async def go():
+        store = make_store(tmp_path)
+        await store.open()
+        try:
+            return await _seed_one_of_each(store)
+        finally:
+            await store.close()
+    return asyncio.run(go())
+
+
+def test_cli_list_dry_run_reports_and_moves_nothing(tmp_path: Path):
+    """MUTATION TARGET: ignore the dry_run flag in archive_listed_facts and this reddens."""
+    ids = _seed_one_of_each_sync(tmp_path)
+    lst = _write_list(tmp_path, [
+        "# consensus of 3 measured scorers, 2026-09-18",
+        f"{ids['dead']}|mined/dead|-1.5052|3of3",
+        f"{ids['recalled']}|learned/vllm/resolved_error|-0.9|2of3",
+        "999999|gone/already|-2.0|3of3",
+    ])
+    before = _all_rows(tmp_path)
+    out = runner.invoke(app, ["memory", "archive", "--dry-run", "--from-list", str(lst),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert "3 id(s), 0 unparseable row(s)" in out.output
+    assert "would archive: 1 fact(s)" in out.output
+    assert "mined/dead" in out.output
+    assert "SKIPPED (2):" in out.output
+    assert SKIP_RECALLED in out.output and SKIP_UNKNOWN in out.output
+    assert "dry run — nothing moved." in out.output
+    assert _all_rows(tmp_path) == before          # every row, every column: inert
+
+
+def test_cli_list_run_archives_exactly_the_listed_fact(tmp_path: Path):
+    ids = _seed_one_of_each_sync(tmp_path)
+    lst = _write_list(tmp_path, [f"{ids['dead']}|mined/dead", f"{ids['pinned']}|profile/home"])
+    out = runner.invoke(app, ["memory", "archive", "--from-list", str(lst),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert "archived: 1 fact(s)" in out.output
+    assert SKIP_OWNER_TOUCHED in out.output
+
+    out = runner.invoke(app, ["memory", "list", "--config-dir", str(tmp_path)])
+    assert "mined/dead" not in out.output
+    assert "profile/home" in out.output            # the owner's fact never moved
+
+    out = runner.invoke(app, ["memory", "restore", str(ids["dead"]),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0 and "restored mined/dead" in out.output
+    out = runner.invoke(app, ["memory", "list", "--config-dir", str(tmp_path)])
+    assert "mined/dead" in out.output
+
+
+def test_cli_list_reports_junk_rows_instead_of_dying_on_them(tmp_path: Path):
+    ids = _seed_one_of_each_sync(tmp_path)
+    lst = _write_list(tmp_path, ["# header", f"{ids['dead']}|mined/dead", "not-an-id|junk"])
+    out = runner.invoke(app, ["memory", "archive", "--dry-run", "--from-list", str(lst),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert "1 id(s), 1 unparseable row(s)" in out.output
+    assert "line 3: 'not-an-id|junk'" in out.output and SKIP_UNPARSEABLE in out.output
+    assert "would archive: 1 fact(s)" in out.output
+
+
+def test_cli_list_works_while_the_automatic_gate_is_off(tmp_path: Path):
+    """The gate governs the AUTOMATIC step only. The first watched live run IS this command,
+    with the gate still off — if the gate blocked it, that run could not happen."""
+    ids = _seed_one_of_each_sync(tmp_path)
+    assert MemoryArchivalConfig().enabled is False
+    lst = _write_list(tmp_path, [str(ids["dead"])])
+    out = runner.invoke(app, ["memory", "archive", "--from-list", str(lst),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0 and "archived: 1 fact(s)" in out.output
+
+
+def test_cli_list_missing_file_fails_cleanly(tmp_path: Path):
+    _seed_one_of_each_sync(tmp_path)
+    out = runner.invoke(app, ["memory", "archive", "--from-list", str(tmp_path / "nope.txt"),
+                              "--config-dir", str(tmp_path)])
+    assert out.exit_code == 1 and "cannot read" in out.output
