@@ -17,10 +17,29 @@ MAX_RETURNED_CHARS = 100_000   # hard char cap, independent of offset/limit (lin
 # for ANY oversized single result, binary or not.
 
 
+# The memory store's own file names (owner order 2026-09-18). `memory.db` covers the whole
+# SQLite family — memory.db, -wal, -shm, .bak — because the check is a substring of the name.
+MEMORY_STORE_FILENAMES: tuple[str, ...] = ("memory.db", "memory-archive")
+MEMORY_STORE_READ_GUIDANCE = (
+    "This is a memory store, and it is not readable from a tool that opens files — not with "
+    "read, and not through a shell either. Use your memory tools instead: memory_search to "
+    "find facts, memory_get to read one, remember to store one. They read the LIVE store; an "
+    "archived or left-over store file is deliberately out of reach, so that stale facts cannot "
+    "come back wearing the authority of current ones."
+)
+
+
 def _looks_binary(head: bytes) -> bool:
     """NUL-byte sniff on the first BINARY_SNIFF_BYTES of the file — the same heuristic
     grep_tool._read_text_guarded uses to skip binary files (same constant, imported above)."""
     return b"\x00" in head
+
+
+def _is_memory_store_artifact(target) -> bool:
+    """Is this path one of the memory store's own files? Name-based (case-folded), so it holds
+    for any directory — a copy, a backup, another agent's store, a wiped-and-left-behind one."""
+    name = target.name.lower()
+    return any(stem in name for stem in MEMORY_STORE_FILENAMES)
 
 
 class ReadTool(Tool):
@@ -80,11 +99,17 @@ class ReadTool(Tool):
             else:
                 raw = await loop.run_in_executor(None, target.read_bytes)
                 if _looks_binary(raw[:BINARY_SNIFF_BYTES]):
+                    head = (f"{target} looks like a binary file (a NUL byte in the first "
+                            f"{BINARY_SNIFF_BYTES} bytes) — refusing to read it as text. ")
+                    # The generic hint pointed at `bash_exec` + `sqlite3` — which, for a MEMORY
+                    # STORE, is the one route the shipped deny patterns exist to close (owner
+                    # order 2026-09-18). Handing the model a recipe for the blocked path is how
+                    # a refusal turns into a retry loop, so the store gets its own sentence.
                     return self.err(
-                        f"{target} looks like a binary file (a NUL byte in the first "
-                        f"{BINARY_SNIFF_BYTES} bytes) — refusing to read it as text. For a "
-                        "SQLite database, use bash_exec with sqlite3 (e.g. "
-                        "`sqlite3 <path> '.schema'`) instead of read.",
+                        head + MEMORY_STORE_READ_GUIDANCE
+                        if _is_memory_store_artifact(target)
+                        else head + "For a SQLite database, use bash_exec with sqlite3 (e.g. "
+                             "`sqlite3 <path> '.schema'`) instead of read.",
                         error_type="validation_error",
                     )
                 text = raw.decode("utf-8", "replace")

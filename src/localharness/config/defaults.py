@@ -39,4 +39,9 @@ DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by defau
 #   1 -> v0.9.1's 24-pattern list (issue #15: destructive service/process + embedded sudo/rm)
 #   2 -> v0.14's embedded `chmod 777` form (issue #159: the prefix-anchored pattern missed
 #        `find . -exec chmod 777 {} \;` and `cd x && chmod 777 y`)
-CURRENT_DEFAULTS_REVISION: int = 2
+#   3 -> memory-store artifacts out of reach of bash_exec AND python_exec (owner order
+#        2026-09-18): memory.db + its -wal/-shm/backup siblings, the facts_archive table,
+#        memory-archive, and the owner-only `localharness memory` CLI. An existing config
+#        picks these up on the next `config migrate` / first `start` — the union is additive,
+#        so a user's own entries are kept and nothing they deleted is smuggled back.
+CURRENT_DEFAULTS_REVISION: int = 3
