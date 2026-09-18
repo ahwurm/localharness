@@ -275,7 +275,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -685,6 +685,62 @@ PRAGMA user_version = 8;
 COMMIT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v9 — the COLD ARCHIVE (memory-forgetting rung 1). The project's law is
+# demote-never-delete; the measured consequence is a store where 99% of "active" rows are
+# demoted-but-present and still in the FTS haystack. Archival is the missing go-away step:
+# a row LEAVES `facts` (and with it the FTS index, every recall path, and the memory page)
+# into a cold mirror table, and `mv` back is a full restore. Deletion still does not exist.
+#
+# The mirror is column-for-column identical to `facts` so a restore is byte-identical —
+# including id (facts.id is AUTOINCREMENT, so sqlite_sequence guarantees the vacated id is
+# never handed to a new row and the superseded_by chain stays valid across a round trip).
+# `id` here is a plain INTEGER PRIMARY KEY: the archive never mints ids, it only carries
+# them. Four columns are ADDED, never folded into the fact's own values — the fact row must
+# come back unchanged, so the archival metadata lives beside it, not inside it.
+#
+# ADDITIVE ONLY: one new table, `facts` and its triggers untouched (an archived row's FTS
+# entry is removed by the EXISTING facts_ad delete trigger — no new FTS machinery).
+# ONE BEGIN IMMEDIATE ... PRAGMA user_version = 9; COMMIT (crash -> rollback to v8).
+# ---------------------------------------------------------------------------
+
+MIGRATION_V8_TO_V9_SQL = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS facts_archive (
+    id                   INTEGER PRIMARY KEY,
+    agent_id             TEXT    NOT NULL,
+    division_id          TEXT    NOT NULL DEFAULT '',
+    org_id               TEXT    NOT NULL DEFAULT '',
+    key                  TEXT    NOT NULL,
+    value                TEXT    NOT NULL,
+    tags                 TEXT    NOT NULL DEFAULT '[]',
+    confidence           REAL    NOT NULL DEFAULT 1.0,
+    source               TEXT    NOT NULL DEFAULT '',
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    expires_at           INTEGER,
+    status               TEXT    NOT NULL DEFAULT 'active',
+    superseded_by        INTEGER,
+    provenance           TEXT    NOT NULL DEFAULT '',
+    retrieval_strength   REAL    NOT NULL DEFAULT 0.5,
+    importance           REAL    NOT NULL DEFAULT 0.0,
+    access_count         INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at     INTEGER,
+    access_count_staged  INTEGER NOT NULL DEFAULT 0,
+    last_accessed_staged INTEGER,
+    node_kind            TEXT    NOT NULL DEFAULT 'fact',
+    archived_at          INTEGER NOT NULL,
+    archive_rung         TEXT    NOT NULL DEFAULT '',
+    s_at_archive         REAL    NOT NULL DEFAULT 0.0,
+    line_at_archive      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_facts_archive_agent_when
+    ON facts_archive(agent_id, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_archive_agent_key ON facts_archive(agent_id, key);
+PRAGMA user_version = 9;
+COMMIT;
+"""
+
 # Seeded spine (Amendment 4): TWO buckets, THREE children each, filed by what a memory SERVES
 # (a functional decision rule with an inline example — NEVER a bare "useful"). Every seed has
 # both real run-5 atom evidence AND prior-art convergence (survey §2.3). Idempotent per agent.
@@ -777,6 +833,8 @@ class MemoryStore:
         self._subscription_handles: list["SubscriptionHandle"] = []
         # Live session id — the default provenance stamped on writes (WRITE-04).
         self._current_session_id: str | None = None
+        # One-shot guard: the archive mirror still matches `facts` column-for-column (v9).
+        self._archive_cols_checked = False
 
     # ------------------------------------------------------------------
     # Identity (read-only accessors — the two facts a caller outside this module
@@ -921,6 +979,9 @@ class MemoryStore:
         if v == 7:
             await self._db.executescript(MIGRATION_V7_TO_V8_SQL)
             v = await _version()
+        if v == 8:
+            await self._db.executescript(MIGRATION_V8_TO_V9_SQL)
+            v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
         # is NOT enough — every read filters WHERE agent_id = ?, so rows stamped 'default'
@@ -968,6 +1029,7 @@ class MemoryStore:
         expires_at: int | None = None,
         provenance: str | None = None,
         node_kind: str = "fact",
+        importance: float | None = None,
         _retried: bool = False,
     ) -> Fact:
         """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04).
@@ -983,6 +1045,13 @@ class MemoryStore:
         Every write is READ-BACK-VERIFIED: the active row is re-read and compared before
         the write is claimed; a mismatch raises MemoryVerifyError (the Cline
         "claims-to-write-but-didn't" class).
+
+        `importance` (INSERT path only, unset = today's behaviour) lets a caller CARRY a
+        row's stakes forward instead of having them recomputed from the tag priors. The
+        priors dict is closed and hand-maintained, so a re-insert under new tags silently
+        re-ranks the fact at the 0.0 fallback — which is how a user-CONFIRMED correction
+        lost its rank on reconciliation settle. Carrying is the narrow fix; reworking how
+        importance is SET in the first place is the write-side rung of the memory redesign.
         """
         if not (0.0 <= confidence <= 1.0):
             raise ValueError(f"confidence must be in [0.0, 1.0], got {confidence}")
@@ -1043,7 +1112,9 @@ class MemoryStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
                     (self._agent_id, self._division_id, self._org_id, key, value,
                      tags_json, confidence, source, now, now, expires_at, prov,
-                     _importance_prior(tags or [], source), node_kind),
+                     (_importance_prior(tags or [], source) if importance is None
+                      else float(importance)),
+                     node_kind),
                 )
             except sqlite3.IntegrityError:
                 # Critic m4: two concurrent writers raced past the existence check (the
@@ -1055,7 +1126,7 @@ class MemoryStore:
                 return await self.store_fact(
                     key, value, tags=tags, confidence=confidence, source=source,
                     expires_at=expires_at, provenance=provenance, node_kind=node_kind,
-                    _retried=True,
+                    importance=importance, _retried=True,
                 )
             new_id = cur.lastrowid
             if existing is not None:
@@ -1185,6 +1256,180 @@ class MemoryStore:
             retired = cur.rowcount > 0
         await self._db.commit()
         return retired
+
+    # ------------------------------------------------------------------
+    # Cold archive (schema v9 — memory-forgetting rung 1). A move, not a delete:
+    # the row leaves the hot table (and the FTS index with it, via the existing
+    # facts_ad trigger) into `facts_archive`, and restore moves it back
+    # byte-identical. Both directions are ONE transaction with a read-back parity
+    # check between the write and the removal — the same "never claim a write you
+    # didn't verify" discipline store_fact holds, applied to a two-table move.
+    # ------------------------------------------------------------------
+
+    # The FULL physical row, in table order — NOT the `_FACT_COLS` projection. A restore
+    # must return the row byte-identical, which means carrying the columns the Fact
+    # projection drops (the staged read counters) as well as the ones it exposes.
+    _ARCHIVE_ROW_COLS: tuple[str, ...] = (
+        "id", "agent_id", "division_id", "org_id", "key", "value", "tags", "confidence",
+        "source", "created_at", "updated_at", "expires_at", "status", "superseded_by",
+        "provenance", "retrieval_strength", "importance", "access_count",
+        "last_accessed_at", "access_count_staged", "last_accessed_staged", "node_kind",
+    )
+
+    async def _assert_archive_columns(self) -> None:
+        """Fail LOUDLY if `facts` has grown a column this move would silently drop.
+
+        A migration that adds a column to `facts` and forgets `facts_archive` would make
+        archival lossy and restore a liar — exactly the class the read-back verify exists
+        to catch, one level up. Checked once per store (cheap), never guessed around.
+        """
+        if self._archive_cols_checked:
+            return
+        assert self._db is not None
+        async with self._db.execute("PRAGMA table_info(facts)") as cur:
+            live = tuple(r[1] for r in await cur.fetchall())
+        if live != self._ARCHIVE_ROW_COLS:
+            raise MemoryCorruptionError(
+                str(self._db_path),
+                f"facts columns {live} do not match the archive mirror "
+                f"{self._ARCHIVE_ROW_COLS} — a migration added a column without "
+                f"extending facts_archive; archival would lose it",
+            )
+        self._archive_cols_checked = True
+
+    async def archive_fact(
+        self,
+        fact_id: int,
+        *,
+        rung: str,
+        s_at_archive: float,
+        line_at_archive: float | None,
+    ) -> bool:
+        """Move one ACTIVE fact out of the hot store into the cold archive.
+
+        Returns False (and changes nothing) when the row is gone, already superseded, or
+        carries UNFOLDED reads — `access_count_staged > 0` means the fact was recalled
+        since the last fold, so it is by definition freshly used and not dormant, whatever
+        its (stale) folded counters say.
+
+        Raises MemoryVerifyError if the archived copy does not match the source row
+        field-for-field, or if the source row survives the delete — the move is rolled
+        back first, so a verify failure leaves the fact hot and intact.
+        """
+        assert self._db is not None
+        await self._assert_archive_columns()
+        cols = ", ".join(self._ARCHIVE_ROW_COLS)
+        async with self._db.execute(
+            f"SELECT {cols} FROM facts WHERE id = ? AND agent_id = ? "
+            "AND status = 'active' AND access_count_staged = 0",
+            (fact_id, self._agent_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return False
+        source_row = tuple(row)
+        key = source_row[self._ARCHIVE_ROW_COLS.index("key")]
+        try:
+            marks = ", ".join("?" * (len(self._ARCHIVE_ROW_COLS) + 4))
+            await self._db.execute(
+                f"INSERT INTO facts_archive ({cols}, archived_at, archive_rung, "
+                f"s_at_archive, line_at_archive) VALUES ({marks})",
+                (*source_row, int(time.time()), rung, float(s_at_archive), line_at_archive),
+            )
+            async with self._db.execute(
+                f"SELECT {cols} FROM facts_archive WHERE id = ?", (fact_id,)
+            ) as cur:
+                written = await cur.fetchone()
+            if written is None or tuple(written) != source_row:
+                raise MemoryVerifyError(key)
+            await self._db.execute(
+                "DELETE FROM facts WHERE id = ? AND agent_id = ? AND status = 'active'",
+                (fact_id, self._agent_id),
+            )
+            async with self._db.execute(
+                "SELECT COUNT(*) FROM facts WHERE id = ?", (fact_id,)
+            ) as cur:
+                (still_hot,) = await cur.fetchone()
+            if still_hot:
+                raise MemoryVerifyError(key)
+        except BaseException:
+            await self._db.rollback()
+            raise
+        await self._db.commit()
+        return True
+
+    async def restore_fact(self, fact_id: int) -> bool:
+        """Move an archived fact back into the hot store, byte-identical.
+
+        Returns False when the id is not in the archive, or when a NEWER active fact now
+        holds that name (the active-key unique index refuses it — the live row wins, and
+        the archived copy stays safe in the archive rather than being forced over it).
+        """
+        assert self._db is not None
+        await self._assert_archive_columns()
+        cols = ", ".join(self._ARCHIVE_ROW_COLS)
+        async with self._db.execute(
+            f"SELECT {cols} FROM facts_archive WHERE id = ? AND agent_id = ?",
+            (fact_id, self._agent_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return False
+        archived_row = tuple(row)
+        key = archived_row[self._ARCHIVE_ROW_COLS.index("key")]
+        marks = ", ".join("?" * len(self._ARCHIVE_ROW_COLS))
+        try:
+            await self._db.execute(
+                f"INSERT INTO facts ({cols}) VALUES ({marks})", archived_row
+            )
+        except sqlite3.IntegrityError:
+            await self._db.rollback()
+            return False
+        try:
+            async with self._db.execute(
+                f"SELECT {cols} FROM facts WHERE id = ?", (fact_id,)
+            ) as cur:
+                written = await cur.fetchone()
+            if written is None or tuple(written) != archived_row:
+                raise MemoryVerifyError(key)
+            await self._db.execute("DELETE FROM facts_archive WHERE id = ?", (fact_id,))
+            async with self._db.execute(
+                "SELECT COUNT(*) FROM facts_archive WHERE id = ?", (fact_id,)
+            ) as cur:
+                (still_archived,) = await cur.fetchone()
+            if still_archived:
+                raise MemoryVerifyError(key)
+        except BaseException:
+            await self._db.rollback()
+            raise
+        await self._db.commit()
+        return True
+
+    async def list_archived(self, limit: int = 50, *, key: str | None = None) -> list[Fact]:
+        """Archived facts, most recently archived first (the `--archived` listing)."""
+        assert self._db is not None
+        sql = (f"SELECT {self._FACT_COLS} FROM facts_archive WHERE agent_id = ?"
+               + (" AND key = ?" if key else "")
+               + " ORDER BY archived_at DESC, id DESC LIMIT ?")
+        params = (self._agent_id, key, limit) if key else (self._agent_id, limit)
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    async def count_archived(self) -> int:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM facts_archive WHERE agent_id = ?", (self._agent_id,)
+        ) as cur:
+            (n,) = await cur.fetchone()
+        return n
+
+    async def vacuum(self) -> None:
+        """Return the pages a big archival move freed to the filesystem. Cannot run inside
+        a transaction, so it is called after the moves have committed."""
+        assert self._db is not None
+        await self._db.execute("VACUUM")
+        await self._db.commit()
 
     # ------------------------------------------------------------------
     # Tag graph (schema v6): seeded spine + mint-time filing edges + the
