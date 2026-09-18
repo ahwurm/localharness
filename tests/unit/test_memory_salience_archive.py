@@ -639,3 +639,30 @@ async def test_an_unfolded_read_anchors_the_line_too(tmp_path: Path):
         assert run.candidates == []        # so nothing newer than it is below the line
     finally:
         await store.close()
+
+
+async def test_the_scheduler_forwards_the_archival_config_to_its_pass(tmp_path: Path):
+    """"Wired" means reachable from the thing the harness actually runs. The scheduler is
+    what start_cmd constructs; if it drops the archival config on the floor, the step can
+    never fire in a real session no matter how green the pass-level tests are."""
+    from localharness.memory.consolidation import ConsolidationScheduler
+
+    class _Bus:
+        async def publish(self, event):   # the scheduler's status dot; irrelevant here
+            return None
+
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await _seed_measured_shape(store)
+        sched = ConsolidationScheduler(
+            store, _Bus(), "orchestrator", _cons_cfg(),
+            archival=MemoryArchivalConfig(enabled=True),
+        )
+        sched.launch()
+        await sched._run_task
+        assert sched.last_report is not None
+        assert sched.last_report.archived == 6
+        assert await store.count_archived() == 6
+    finally:
+        await store.close()
