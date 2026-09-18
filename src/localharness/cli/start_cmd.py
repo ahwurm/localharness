@@ -1135,7 +1135,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 from localharness.memory.consolidation import ConsolidationScheduler
                 from localharness.memory.idle_llm import LLMTextAdapter
                 consolidation_scheduler = ConsolidationScheduler(
-                    memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm)
+                    memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm),
+                    # Memory rung 1: the forgetting half rides the same idle pass, behind
+                    # its own default-OFF gate (agent.memory.archival.enabled).
+                    archival=getattr(agent_config.memory, "archival", None),
                 )
                 await consolidation_scheduler.start()
             except Exception as exc:

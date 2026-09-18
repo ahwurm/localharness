@@ -44,8 +44,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
-    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.config.models import MemoryArchivalConfig, MemoryConsolidationConfig
     from localharness.core.bus import EventBus, SubscriptionHandle
+    from localharness.memory.salience import Salience
     from localharness.memory.sqlite import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,92 @@ class ConsolidationReport:
     mining_residue_rescued: int = 0
     mining_residue_retired: int = 0
     mining_folded: int = 0  # novelty gate: paraphrase mints folded into corroboration
+    # Dormancy archival (memory rung 1 — the forgetting half). `archive_line` is the
+    # salience floor this pass read out of the store; None = cold start (no fact has ever
+    # been recalled or owner-touched, so there is no evidence to draw a line from).
+    archived: int = 0
+    archive_line: float | None = None
+
+    def archive_report_line(self) -> str:
+        """The owner-visible one-liner for this pass's forgetting half."""
+        from localharness.memory.salience import format_pass_line
+        return format_pass_line(self.archived, self.archive_line)
+
+
+@dataclass
+class ArchiveRun:
+    """One archival run's outcome — the shape both the consolidation step and
+    `localharness memory archive [--dry-run]` report from (one code path, two triggers)."""
+    line: float | None
+    active_before: int
+    anchors: int
+    candidates: list["Salience"] = field(default_factory=list)  # below the line, unpinned
+    pinned_below_line: int = 0   # the hard floor's catch (0 under the anchor-floor line)
+    moved: int = 0               # rows actually moved (0 on a dry run)
+    refused: int = 0             # rows the store declined (unfolded reads, or raced away)
+    vacuumed: bool = False
+    dry_run: bool = False
+
+    def report_line(self) -> str:
+        from localharness.memory.salience import format_pass_line
+        return format_pass_line(self.moved, self.line)
+
+
+async def archive_dormant_facts(
+    store: "MemoryStore",
+    *,
+    dry_run: bool = False,
+    now: int | None = None,
+    cancel: Optional[asyncio.Event] = None,
+) -> ArchiveRun:
+    """Score every ACTIVE fact, read the line out of the store, and move what sits below it.
+
+    THE one implementation — the idle consolidation step and the CLI verb both call this,
+    so a dry-run's preview and a real pass can never diverge. Superseded rows are not
+    touched (that is rung 2); nothing is deleted, ever.
+    """
+    from localharness.memory.salience import (
+        ARCHIVE_RUNG_DORMANCY, archive_line, score_facts, select_archivable,
+        vacuum_warranted,
+    )
+    from localharness.memory.sqlite import _row_to_fact
+
+    assert store._db is not None
+    now = int(time.time()) if now is None else now
+    async with store._db.execute(
+        f"SELECT {store._FACT_COLS} FROM facts WHERE agent_id = ? AND status = 'active'",
+        (store._agent_id,),
+    ) as cur:
+        facts = [_row_to_fact(r) for r in await cur.fetchall()]
+
+    scored = score_facts(facts, now)
+    line = archive_line(scored)
+    candidates = select_archivable(scored, line)
+    run = ArchiveRun(
+        line=line, active_before=len(scored),
+        anchors=sum(1 for s in scored if s.anchor),
+        candidates=candidates,
+        pinned_below_line=sum(1 for s in scored if line is not None and s.s < line and s.pinned),
+        dry_run=dry_run,
+    )
+    if dry_run or not candidates:
+        return run
+
+    for cand in candidates:
+        if cancel is not None and cancel.is_set():
+            break   # a user turn is waiting; moves already committed stand
+        moved = await store.archive_fact(
+            cand.fact_id, rung=ARCHIVE_RUNG_DORMANCY,
+            s_at_archive=cand.s, line_at_archive=line,
+        )
+        if moved:
+            run.moved += 1
+        else:
+            run.refused += 1
+    if vacuum_warranted(run.moved, run.active_before):
+        await store.vacuum()
+        run.vacuumed = True
+    return run
 
 
 class ConsolidationPass:
@@ -125,12 +212,16 @@ class ConsolidationPass:
         llm: Any = None,
         embedder: Any = None,
         on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
+        archival: Optional["MemoryArchivalConfig"] = None,
     ) -> None:
         self._store = store
         self._cfg = cfg
         self._llm = llm
         self._embedder = embedder
         self._on_promotion_sample = on_promotion_sample
+        # `agent.memory.archival` — None (no caller wired it) reads as OFF, the same as the
+        # field's own default. Archival never fires because a call site forgot to pass config.
+        self._archival = archival
         self._cancel = asyncio.Event()
         # Same-run promotion grace (critic BLOCKER 2): cap-trim must never demote what
         # this very pass just promoted (fresh records have zero access history — the
@@ -181,6 +272,10 @@ class ConsolidationPass:
             self._step_decay,
             self._step_cap_trim,
             self._step_proxies,
+            # LAST, after the quality proxies: archival removes rows from the population
+            # the proxy metrics are computed over, so running it behind them keeps every
+            # pre-existing report number measuring exactly what it measured before.
+            self._step_archive_dormant,
         )
         for step in steps:
             if self._cancel.is_set():
@@ -607,6 +702,28 @@ class ConsolidationPass:
             except Exception:
                 log.exception("promotion-sample hook failed (non-fatal)")
 
+    # -- 7. dormancy archival (memory rung 1 — the forgetting half) --------
+
+    async def _step_archive_dormant(self, report: ConsolidationReport) -> None:
+        """Move facts below the store's own proven-useful floor out of the hot store.
+
+        Every other retirement verb in this project DEMOTES (status/retrieval_strength) and
+        the row stays in `facts`, in the FTS haystack, on the memory page — which is how a
+        measured 99%-never-recalled store still costs recall quality on every search. This
+        step is the go-away half: below-the-line rows move to `facts_archive`, restorable
+        byte-identical, nothing deleted.
+
+        GATED OFF BY DEFAULT (`agent.memory.archival.enabled`). Disabled, it returns before
+        reading a single row — zero side effects, the pass byte-identical to before. The
+        gate exists so the owner watches the first real run on a real store (dry-run first,
+        via `localharness memory archive --dry-run`) before it is ever automatic.
+        """
+        if self._archival is None or not getattr(self._archival, "enabled", False):
+            return
+        run = await archive_dormant_facts(self._store, cancel=self._cancel)
+        report.archived = run.moved
+        report.archive_line = run.line
+
     # -- watermark ---------------------------------------------------------
 
     async def _set_watermark(self, ts: int) -> None:
@@ -759,6 +876,7 @@ class ConsolidationScheduler:
         llm: Any = None,
         embedder: Any = None,
         on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
+        archival: Optional["MemoryArchivalConfig"] = None,
     ) -> None:
         self._store = store
         self._bus = bus
@@ -767,6 +885,7 @@ class ConsolidationScheduler:
         self._llm = llm
         self._embedder = embedder
         self._on_promotion_sample = on_promotion_sample
+        self._archival = archival   # agent.memory.archival — None reads as OFF
         self._handles: list["SubscriptionHandle"] = []
         self._running: Optional[ConsolidationPass] = None
         self._run_task: Optional[asyncio.Task] = None
@@ -862,7 +981,7 @@ class ConsolidationScheduler:
             return  # #90: don't run the full pass on top of a micro-pass (one inference gate)
         self._running = ConsolidationPass(
             self._store, self._cfg, llm=self._llm, embedder=self._embedder,
-            on_promotion_sample=self._on_promotion_sample,
+            on_promotion_sample=self._on_promotion_sample, archival=self._archival,
         )
         self._run_task = asyncio.create_task(self._run_and_record())
 
@@ -902,10 +1021,14 @@ class ConsolidationScheduler:
                 log.info("consolidation pass cancelled by user activity")
             else:
                 log.info(
-                    "consolidation: folded=%d promoted=%d decayed=%d demoted=%d churn=%.2f",
+                    "consolidation: folded=%d promoted=%d decayed=%d demoted=%d churn=%.2f%s",
                     self.last_report.folded, self.last_report.promoted,
                     self.last_report.decayed, self.last_report.demoted,
                     self.last_report.churn_rate,
+                    # The forgetting half is owner-visible or it did not happen — the count
+                    # AND the line it was drawn at, so a surprising number is auditable.
+                    f" — {self.last_report.archive_report_line()}"
+                    if self.last_report.archived else "",
                 )
         except Exception:
             log.exception("consolidation pass crashed (non-fatal)")
