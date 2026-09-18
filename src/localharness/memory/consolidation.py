@@ -170,8 +170,17 @@ async def archive_dormant_facts(
         (store._agent_id,),
     ) as cur:
         facts = [_row_to_fact(r) for r in await cur.fetchall()]
+    # Rows read since the last fold carry evidence the Fact projection cannot show (the
+    # staged counters are not part of it). They anchor the line like any other recall —
+    # see score_facts(also_anchor=...). Empty inside a pass; not empty from the CLI.
+    async with store._db.execute(
+        "SELECT id FROM facts WHERE agent_id = ? AND status = 'active' "
+        "AND access_count_staged > 0",
+        (store._agent_id,),
+    ) as cur:
+        staged_reads = [r[0] for r in await cur.fetchall()]
 
-    scored = score_facts(facts, now)
+    scored = score_facts(facts, now, also_anchor=staged_reads)
     line = archive_line(scored)
     candidates = select_archivable(scored, line)
     run = ArchiveRun(

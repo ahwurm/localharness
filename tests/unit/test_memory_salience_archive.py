@@ -607,3 +607,35 @@ def test_cli_says_so_on_a_cold_store(tmp_path: Path):
     out = runner.invoke(app, ["memory", "archive", "--dry-run", "--config-dir", str(tmp_path)])
     assert out.exit_code == 0, out.output
     assert "no line yet" in out.output and "Nothing archived." in out.output
+
+
+async def test_an_unfolded_read_anchors_the_line_too(tmp_path: Path):
+    """MUTATION TARGET: drop `also_anchor=staged_reads` from archive_dormant_facts and this
+    reddens. A read is a read whether or not the consolidation fold has moved the counter
+    yet; ignoring one leaves the line HIGHER than the evidence warrants, i.e. archives
+    MORE — the one direction this design does not accept. (Inside a pass the set is always
+    empty: the fold step runs first. From the CLI, mid-session, it is not.)"""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        await store.store_fact("sem/just-read", "a fact the model recalled this session",
+                               confidence=0.65, source="transcript_mining")
+        read_id = await _age(store, "sem/just-read", days=50)   # old, folded counter still 0
+        await store._db.execute(
+            "UPDATE facts SET access_count_staged = 1, last_accessed_staged = ? WHERE id = ?",
+            (int(time.time()), read_id))
+        await store.store_fact("p/remember", "the owner said so", source="remember")
+        await _age(store, "p/remember", days=5)                  # a high-scoring anchor
+        for i in range(3):
+            await store.store_fact(f"mined/d-{i}", f"dead {i}", confidence=0.65,
+                                   source="transcript_mining")
+            await _age(store, f"mined/d-{i}", days=20 + i)       # NEWER than the read fact
+        await store._db.commit()
+
+        run = await archive_dormant_facts(store, dry_run=True)
+        read_s = next(s for s in score_facts(
+            [await store.get_fact("sem/just-read")], int(time.time())) if True).s
+        assert run.line == read_s          # the unfolded read set the floor
+        assert run.candidates == []        # so nothing newer than it is below the line
+    finally:
+        await store.close()

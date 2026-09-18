@@ -37,7 +37,7 @@ cannot be archived because it never enters the `facts` table at all.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from localharness.memory.sqlite import (
@@ -145,8 +145,20 @@ def score_fact(fact: "Fact", now: int) -> Salience:
     )
 
 
-def score_facts(facts: Iterable["Fact"], now: int) -> list[Salience]:
-    return [score_fact(f, now) for f in facts]
+def score_facts(
+    facts: Iterable["Fact"], now: int, *, also_anchor: Iterable[int] = (),
+) -> list[Salience]:
+    """`also_anchor`: fact ids the CALLER knows carry evidence this projection cannot see —
+    today, rows with UNFOLDED (staged) reads, which the Fact projection does not expose.
+
+    A read is a read whether or not the consolidation fold has moved the counter yet.
+    Missing one leaves the line HIGHER than the evidence warrants — i.e. archives MORE —
+    and 'archives more than the evidence supports' is the one direction this design does
+    not accept. (Inside a consolidation pass the set is empty: the fold step runs first.)
+    """
+    ids = set(also_anchor)
+    return [replace(s, anchor=True) if s.fact_id in ids else s
+            for s in (score_fact(f, now) for f in facts)]
 
 
 def archive_line(scored: Sequence[Salience]) -> float | None:
