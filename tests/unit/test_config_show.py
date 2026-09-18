@@ -29,6 +29,7 @@ satisfied by the table body instead of by the header it is meant to grade.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -145,6 +146,20 @@ def _key(payload: dict, path: str) -> dict:
 
 def _combined(result) -> str:
     return (result.output or "") + (result.stderr or "")
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(output: str) -> str:
+    """`result.output` with the escape codes removed (test_config_migrate.py's `_plain`).
+
+    Typer's OptionHighlighter can't match a `--flag` as one span (its regex is `-\\w+` run
+    after a dash, and "--" has no word char between the two dashes), so it styles "-all" and
+    leaves the leading "-" unstyled — under forced color (typer forces it whenever
+    `GITHUB_ACTIONS` is set, tty or not) that inserts an escape sequence INSIDE the literal
+    text "--all", present on screen and absent from the raw string."""
+    return _ANSI.sub("", output)
 
 
 # ------------------------------------------------------------------ #
@@ -445,9 +460,10 @@ def test_show_is_registered_beside_migrate(tmp_path, monkeypatch):
     group = runner.invoke(app, ["config", "--help"])
     own = runner.invoke(app, ["config", "show", "--help"])
 
-    assert "migrate" in group.output and "show" in group.output
+    assert "migrate" in _plain(group.output) and "show" in _plain(group.output)
+    own_output = _plain(own.output)
     for flag in ("--all", "--json", "--config-dir"):
-        assert flag in own.output, f"{flag} is not on `config show --help`"
+        assert flag in own_output, f"{flag} is not on `config show --help`"
 
 
 # ------------------------------------------------------------------ #
