@@ -21,7 +21,8 @@ import typer
 
 memory_app = typer.Typer(
     name="memory",
-    help="Browse and edit the agent's persistent memory (list / show / edit / rm).",
+    help="Browse and edit the agent's persistent memory "
+         "(list / show / edit / rm / archive / restore).",
     no_args_is_help=True,
 )
 
@@ -61,10 +62,22 @@ def _run(coro) -> None:
     asyncio.run(coro)
 
 
+# Display-only: how many candidate names `archive --dry-run` prints before summarising the
+# rest. NOT a behavioural bar — it changes nothing about what moves; sized to leave the
+# per-source table on the same screen.
+_PREVIEW_KEYS = 20
+
+
 @memory_app.command("list")
 def memory_list(
     query: Optional[str] = typer.Option(None, "--query", "-q", help="Full-text filter (FTS)."),
     limit: int = typer.Option(30, "--limit", "-n"),
+    archived: bool = typer.Option(
+        False, "--archived",
+        help="List ARCHIVED facts instead (most recently archived first). The archive is "
+             "deliberately outside the search index, so --query filters these by plain "
+             "substring, not FTS.",
+    ),
     agent: str = _AGENT_OPT,
     config_dir: Optional[str] = _CONFIG_OPT,
 ) -> None:
@@ -75,15 +88,127 @@ def memory_list(
         store, db = await _open_store(agent, config_dir)
         try:
             _header(db)
-            facts = await store.query_facts(
-                FactQuery(text=query or None, min_confidence=0.0, limit=limit)
-            )
-            if not facts:
-                typer.echo("no facts match." if query else "memory is empty.")
-                return
+            if archived:
+                facts = await store.list_archived(limit=limit)
+                if query:
+                    needle = query.lower()
+                    facts = [f for f in facts
+                             if needle in f.key.lower() or needle in (f.value or "").lower()]
+                if not facts:
+                    typer.echo("no archived facts match." if query else "the archive is empty.")
+                    return
+                total = await store.count_archived()
+                typer.echo(f"archived: {total} fact(s) — restore one with "
+                           f"`localharness memory restore <id>`")
+            else:
+                facts = await store.query_facts(
+                    FactQuery(text=query or None, min_confidence=0.0, limit=limit)
+                )
+                if not facts:
+                    typer.echo("no facts match." if query else "memory is empty.")
+                    return
             for f in facts:
                 first = (f.value or "").strip().splitlines()[0] if (f.value or "").strip() else ""
-                typer.echo(f"  {f.key}  —  {first[:90]}")
+                prefix = f"  [{f.id}] " if archived else "  "
+                typer.echo(f"{prefix}{f.key}  —  {first[:90]}")
+        finally:
+            await store.close()
+    _run(go())
+
+
+@memory_app.command("archive")
+def memory_archive(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Report what WOULD be archived and move nothing.",
+    ),
+    agent: str = _AGENT_OPT,
+    config_dir: Optional[str] = _CONFIG_OPT,
+) -> None:
+    """Archive dormant facts — off every hot path, restorable, never deleted.
+
+    A fact archives when its salience (need + truth + stakes) falls below the store's own
+    proven-useful floor: the lowest-scoring fact that was ever actually recalled or touched
+    by you. That line is READ OUT OF THE STORE on every run, never configured, and a store
+    with nothing recalled yet has no line and archives nothing.
+
+    This verb is the explicit, owner-triggered run — it works whether or not the automatic
+    step (`agent.memory.archival.enabled`) is on. Read a --dry-run first.
+    """
+    async def go():
+        from localharness.memory.consolidation import archive_dormant_facts
+
+        store, db = await _open_store(agent, config_dir)
+        try:
+            _header(db)
+            run = await archive_dormant_facts(store, dry_run=dry_run)
+            if run.line is None:
+                typer.echo(
+                    f"active facts: {run.active_before} — no line yet: nothing in this store "
+                    f"has ever been recalled or touched by you, so there is no evidence to "
+                    f"draw a floor from. Nothing archived."
+                )
+                return
+            verb = "would archive" if dry_run else "archived"
+            typer.echo(
+                f"active facts: {run.active_before}  "
+                f"(anchors: {run.anchors} recalled-or-yours)"
+            )
+            typer.echo(f"line S={run.line:.4f} — the lowest-scoring anchor")
+            typer.echo(f"{verb}: {len(run.candidates) if dry_run else run.moved} fact(s)")
+            if run.pinned_below_line:
+                typer.echo(f"pinned below the line and KEPT: {run.pinned_below_line}")
+            if not dry_run and run.refused:
+                typer.echo(f"skipped (read since the last fold, or changed underfoot): "
+                           f"{run.refused}")
+            if not dry_run and run.vacuumed:
+                typer.echo("vacuumed: more rows left than stayed, so the file was rewritten")
+            by_source: dict[str, int] = {}
+            for c in run.candidates:
+                by_source[c.source or "(none)"] = by_source.get(c.source or "(none)", 0) + 1
+            if by_source:
+                typer.echo("by source:")
+                for src, n in sorted(by_source.items(), key=lambda kv: (-kv[1], kv[0])):
+                    typer.echo(f"  {n:>5}  {src}")
+                typer.echo(f"first {min(_PREVIEW_KEYS, len(run.candidates))}:")
+                for c in sorted(run.candidates, key=lambda c: c.s)[:_PREVIEW_KEYS]:
+                    typer.echo(f"  S={c.s:+.4f}  {c.key}")
+                if len(run.candidates) > _PREVIEW_KEYS:
+                    typer.echo(f"  … and {len(run.candidates) - _PREVIEW_KEYS} more")
+            if dry_run:
+                typer.echo("dry run — nothing moved.")
+            else:
+                typer.echo("restore any of them with `localharness memory restore <id>` "
+                           "(`localharness memory list --archived` lists ids).")
+        finally:
+            await store.close()
+    _run(go())
+
+
+@memory_app.command("restore")
+def memory_restore(
+    fact_id: int = typer.Argument(..., help="Archived fact id (see `memory list --archived`)."),
+    agent: str = _AGENT_OPT,
+    config_dir: Optional[str] = _CONFIG_OPT,
+) -> None:
+    """Bring an archived fact back, byte-identical, onto every hot path."""
+    async def go():
+        store, db = await _open_store(agent, config_dir)
+        try:
+            _header(db)
+            ok = await store.restore_fact(fact_id)
+            if ok:
+                fact = await store.get_fact_by_id(fact_id)
+                name = fact.key if fact is not None else str(fact_id)
+                typer.echo(f"restored {name} — searchable again, exactly as it was archived.")
+                return
+            typer.echo(
+                f"nothing restored: id {fact_id} is not in the archive, or a newer active "
+                f"fact already holds that name (the live one wins; the archived copy stays "
+                f"safe). `localharness memory list --archived` lists what is there.",
+                err=True,
+            )
+            raise typer.Exit(1)
         finally:
             await store.close()
     _run(go())
