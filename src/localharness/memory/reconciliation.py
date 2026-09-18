@@ -102,7 +102,8 @@ async def _revert(store: "MemoryStore", disputed: "Fact") -> str:
         await store.store_fact(
             key=disputed.key, value=pre.value,  # value CHANGES -> no corroboration no-op
             tags=[t for t in pre.tags if not t.startswith("tier:")],
-            confidence=pre.confidence, source="consolidation_reconciliation",
+            confidence=pre.confidence, importance=pre.importance,  # both carried from the
+            source="consolidation_reconciliation",                 # restored antecedent
             provenance=f"revert-of:{disputed.provenance or disputed.key}",
         )
         return "restored"
@@ -213,6 +214,10 @@ async def reconcile_corrections(
                         key=fact.key, value=disputed,
                         tags=_settle_tags(fact, "tier:reconcile_confirmed"),
                         confidence=fact.confidence,  # UNCHANGED, still < 0.7 (never promotes here)
+                        # CARRIED, exactly like confidence: the settle tier has no entry in the
+                        # closed `_IMPORTANCE_PRIORS` dict, so recomputing would re-rank a
+                        # user-CONFIRMED correction at the 0.0 fallback.
+                        importance=fact.importance,
                         source="consolidation_reconciliation",
                         provenance=f"confirm:{fact.provenance or fact.key}",
                     )
@@ -226,6 +231,7 @@ async def reconcile_corrections(
                         key=fact.key, value=corrected,
                         tags=_settle_tags(fact, "tier:reconcile_confirmed"),
                         confidence=fact.confidence,
+                        importance=fact.importance,   # carried, same reason as above
                         source="consolidation_reconciliation",
                         provenance=f"confirm-corrected:{fact.provenance or fact.key}",
                     )

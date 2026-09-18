@@ -301,3 +301,80 @@ async def test_revert_shape_b_clears_queue_no_antecedent(tmp_path: Path):
         assert report.reverted_restored == 0
     finally:
         await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Settle carries IMPORTANCE (memory rung 1's bug-shaped fix).
+#
+# `_IMPORTANCE_PRIORS` is a closed, hand-maintained dict and `store_fact` recomputes
+# importance from it on every INSERT. Settle re-inserts under the disposition tier
+# (`tier:reconcile_confirmed`), which has no entry — so a user-CONFIRMED correction, the
+# most evidence-backed row the store can hold, silently re-ranked at the 0.0 fallback.
+# The narrow fix carries the disputed row's stakes forward, the way its confidence already
+# was; the wholesale importance rework is the write-side rung, not this one.
+# ---------------------------------------------------------------------------
+
+_CORRECTION_PENDING_PRIOR = 0.2   # _IMPORTANCE_PRIORS["tier:correction_pending"]
+
+
+async def test_settle_confirm_carries_importance_forward(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = await _seed_shape_b(store)
+        before = await store.get_fact(key)
+        assert before is not None and before.importance == _CORRECTION_PENDING_PRIOR
+        report = await reconcile_corrections(store, _FakeLLM("CONFIRM"), asyncio.Event())
+        assert report.confirmed == 1
+        settled = await store.get_fact(key)
+        assert settled is not None
+        assert "tier:reconcile_confirmed" in settled.tags
+        # The whole point: a confirmed correction does not lose its rank on settle.
+        assert settled.importance == before.importance
+
+
+    finally:
+        await store.close()
+
+
+async def test_settle_confirm_corrected_carries_importance_forward(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = await _seed_shape_a(
+            store, pre_value="the capital is Sydney", provenance="evt-imp",
+            ctx_msg="actually the capital is Canberra",
+        )
+        before = await store.get_fact(key)
+        assert before is not None and before.importance == _CORRECTION_PENDING_PRIOR
+        report = await reconcile_corrections(
+            store, _FakeLLM("CONFIRM: the capital is Canberra"), asyncio.Event()
+        )
+        assert report.confirmed_corrected == 1
+        settled = await store.get_fact(key)
+        assert settled is not None and settled.value == "the capital is Canberra"
+        assert settled.importance == before.importance
+    finally:
+        await store.close()
+
+
+async def test_revert_restore_carries_the_antecedents_importance(tmp_path: Path):
+    """REVERT restores a pre-dispute version — the same re-insert, the same hole. The
+    antecedent here is a `remember` row (prior 0.4), so a lost carry is visible as 0.0."""
+    store = make_store(tmp_path)
+    await store.open()
+    try:
+        key = "profile/city"
+        await store.store_fact(key=key, value="Berlin", confidence=0.9, source="remember")
+        pre = await store.get_fact(key)
+        assert pre is not None and pre.importance > 0.0
+        await store.store_fact(
+            key=key, value=f"{_DISPUTE_MARKER} Berlin", tags=list(_PENDING_TAGS),
+            confidence=0.6, source="predictive_write_gate", provenance="evt-rev-imp",
+        )
+        await reconcile_corrections(store, _FakeLLM("REVERT"), asyncio.Event())
+        restored = await store.get_fact(key)
+        assert restored is not None and restored.value == "Berlin"
+        assert restored.importance == pre.importance
+    finally:
+        await store.close()
