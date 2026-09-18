@@ -15,6 +15,7 @@ record" are two different promises, and the second is the one that outlives the 
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,20 @@ from localharness.config import trust
 from localharness.config.paths import WORKSPACE_DIR_NAME
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(output: str) -> str:
+    """`result.output` with the escape codes removed.
+
+    Typer's OptionHighlighter regex (`-\\w+`, matched per run of `\\w` after a dash) cannot
+    match "--" as one span for a flag with an embedded hyphen like `--no-input`: it styles
+    "-no" and leaves the leading "-" and the trailing "-input" in separate, unstyled runs, so
+    forced color (typer forces it under `GITHUB_ACTIONS`, regardless of any real tty) inserts
+    an escape sequence INSIDE the literal text "--no-input" — present on screen, absent from
+    the raw string. Same fix as test_config_migrate.py's `_plain`."""
+    return _ANSI.sub("", output)
 
 _MINIMAL_CONFIG = {
     "version": "1",
@@ -165,6 +180,7 @@ def test_agent_create_no_input_without_a_scope_refuses(tmp_path, monkeypatch, fa
 ])
 def test_the_help_says_what_the_flag_is_for(argv):
     result = runner.invoke(app, argv)
+    output = _plain(result.output)
 
-    assert "--no-input" in result.output
-    assert "CI" in result.output
+    assert "--no-input" in output
+    assert "CI" in output
