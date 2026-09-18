@@ -244,6 +244,11 @@ globalThis.window = {
 };
 globalThis.location = { hash: "", search: "", pathname: "/" };
 globalThis.history = { replaceState() {} };
+// The page checks `"serviceWorker" in navigator` at module top level (push/A2 setup), so the
+// shim needs a `navigator` even though none of these tests exercise push — without it the
+// module throws before the reducer under test ever runs. No serviceWorker/clipboard keys, so
+// those checks read as "unsupported" (false), matching a plain non-PWA browser tab.
+globalThis.navigator = {};
 globalThis.rows = () => {
   const text = (n) => (n.textContent || "") + n.children.map(text).join("");
   return document.getElementById("log").children.map((r) => ({ cls: r.className, text: text(r) }));
