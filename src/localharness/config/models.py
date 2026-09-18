@@ -446,6 +446,42 @@ class PermissionConfig(BaseModel):
             "bash_exec(*shutdown*)",
             "bash_exec(*reboot*)",
             "bash_exec(*poweroff*)",
+            # --- memory-store artifacts (owner order 2026-09-18: "MAKE SURE it is
+            # inaccessible even to exec so a agent cant search a shitty old memory store").
+            # An agent's memory surface is its TOOLS (memory_search / memory_get / remember),
+            # which read the live store and can never see the cold archive. The shell has no
+            # legitimate memory use, and a leftover or backed-up store file is stale facts
+            # wearing the authority of current ones.
+            #
+            # Anchored on the ARTIFACT NAMES, not on the word "memory", so ordinary code that
+            # merely mentions memory is untouched. `*memory.db*` covers every path form and the
+            # whole SQLite family in one pattern — memory.db, -wal, -shm, .bak, any directory.
+            # `facts_archive` is the cold-archive TABLE (it catches a query against a store
+            # someone copied to another filename); `memory-archive` is the attached-archive db
+            # naming; `localharness memory ` is the owner-only CLI whose `list --archived` and
+            # `restore` verbs would otherwise be an agent-reachable way back into the archive.
+            #
+            # BOTH exec surfaces, because python_exec's own docstring says it has "no
+            # sandbox/isolation — same trust posture as bash_exec": one `import sqlite3` would
+            # walk straight around a bash-only list.
+            #
+            # Case: fnmatch normcases both sides, so these lowercase patterns are
+            # case-SENSITIVE on POSIX (where the filesystem is too, and the file is only ever
+            # created lowercase) and case-INSENSITIVE on Windows (where the filesystem is).
+            # The mechanism's behaviour matches the filesystem's on each platform.
+            #
+            # HONEST SCOPE: this is a guardrail against stumbling and casual access, not a
+            # sandbox. It matches raw pre-expansion argument text, so it cannot see through a
+            # shell glob (`sqlite3 *.db`), a renamed copy, or a string built at runtime. Real
+            # containment is `permissions.workspace_root` or running the subject in a container.
+            "bash_exec(*memory.db*)",
+            "bash_exec(*facts_archive*)",
+            "bash_exec(*memory-archive*)",
+            "bash_exec(*localharness memory *)",
+            "python_exec(*memory.db*)",
+            "python_exec(*facts_archive*)",
+            "python_exec(*memory-archive*)",
+            "python_exec(*localharness memory *)",
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
@@ -456,7 +492,11 @@ class PermissionConfig(BaseModel):
             "privilege escalation (sudo), recursive delete, world-writable chmod, and "
             "destructive service/process ops (docker stop/kill/rm, systemctl "
             "stop/disable/kill/mask, pkill/killall/kill, shutdown/reboot/poweroff) — while "
-            "leaving read-only ops (docker ps, systemctl status, journalctl) allowed. "
+            "leaving read-only ops (docker ps, systemctl status, journalctl) allowed. They "
+            "also put the MEMORY STORE out of reach of both exec surfaces (memory.db and its "
+            "-wal/-shm/backup siblings, the facts_archive table, memory-archive, and the "
+            "owner-only `localharness memory` CLI): an agent reads memory through its memory "
+            "tools, never through a shell, and a stale store file must not re-enter as fact. "
             "The deny list is evaluated after inheritance resolution — "
             "an agent's deny list is the UNION of its own list and all inherited lists. "
             "Agents can add to the deny list but never remove inherited entries."

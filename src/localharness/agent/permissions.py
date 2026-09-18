@@ -8,6 +8,31 @@ from dataclasses import dataclass
 from localharness.core.types import ToolCall
 
 
+# A denial that has a legitimate ALTERNATIVE should say so. A bare "matches deny pattern"
+# tells the model it is blocked but not what to do instead, and a model that does not know
+# the supported route retries the blocked one (observed as the retry-the-refused-command
+# loop). These tokens appear inside the shipped memory-store patterns themselves, so a new
+# pattern naming the same artifacts inherits the guidance with no second list to maintain.
+MEMORY_STORE_PATTERN_TOKENS: tuple[str, ...] = (
+    "memory.db", "facts_archive", "memory-archive", "localharness memory",
+)
+MEMORY_STORE_DENY_GUIDANCE = (
+    "the memory store is not reachable from a shell. Read and write memory with your memory "
+    "tools instead — memory_search to find facts, memory_get to read one, remember to store "
+    "one. They are the only supported way in, they read the LIVE store, and archived or "
+    "left-over store files are deliberately invisible to them: stale facts must not come back "
+    "wearing the authority of current ones."
+)
+
+
+def deny_reason(pattern: str) -> str:
+    """The agent-facing sentence for a matched deny pattern — the redirect, where one exists."""
+    base = f"Matches deny pattern: {pattern}"
+    if any(token in pattern for token in MEMORY_STORE_PATTERN_TOKENS):
+        return f"{base} — {MEMORY_STORE_DENY_GUIDANCE}"
+    return base
+
+
 @dataclass
 class PermissionResult:
     denied: bool
@@ -34,12 +59,12 @@ class PermissionEvaluator:
                 continue
             if arg_glob is None:
                 # Bare tool name pattern — any call to this tool is denied
-                return PermissionResult(denied=True, reason=f"Matches deny pattern: {pattern}")
+                return PermissionResult(denied=True, reason=deny_reason(pattern))
             # Check arg_glob against all string values in arguments
             # Also try with "./" prefix so relative paths match patterns like "*/agents/*.yaml"
             for v in _iter_string_values(tool_call.arguments):
                 if fnmatch.fnmatch(v, arg_glob) or fnmatch.fnmatch("./" + v, arg_glob):
-                    return PermissionResult(denied=True, reason=f"Matches deny pattern: {pattern}")
+                    return PermissionResult(denied=True, reason=deny_reason(pattern))
         return PermissionResult(denied=False)
 
 

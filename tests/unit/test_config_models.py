@@ -63,8 +63,11 @@ def test_permission_config_deny_patterns_default_count():
     cfg = PermissionConfig()
     # issue #15 grew the list from 7 to 24: destructive service/process-op globs + the fixed
     # sudo pattern + the embedded rm -rf form. Issue #159 added the 25th, the embedded
-    # `chmod 777` form (defaults revision 2).
-    assert len(cfg.deny_patterns) == 25
+    # `chmod 777` form (defaults revision 2). The owner's 2026-09-18 order added 8 more
+    # (revision 3): the four memory-store artifacts — memory.db, facts_archive,
+    # memory-archive, `localharness memory ` — across BOTH exec surfaces, bash_exec and
+    # python_exec.
+    assert len(cfg.deny_patterns) == 33
 
 
 def test_permission_config_invalid_pattern_raises():
