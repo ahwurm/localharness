@@ -1,8 +1,8 @@
 """Cross-feature seam 3 — config auto-migration meets the post-v0.9.2 schema growth.
 
 The seam no unit test crosses: 17 commits after the v0.9.2 release (df09f50) GREW the
-config schema with new agent-scoped memory fields (chapter_containment_guard_enabled,
-chapter_staleness_recheck_enabled, chapter_staleness_recheck_cap) while `config migrate`
+config schema with new agent-scoped memory fields (iteration_cap,
+idle_minutes, staleness_hours) while `config migrate`
 still only manages `org.permissions.{deny_patterns,defaults_revision}`. This module proves a
 config.yaml written EXACTLY as v0.9.2 shipped it (deny list at CURRENT_DEFAULTS_REVISION=1,
 none of the new fields) still (a) loads today with the new fields taking their code defaults,
@@ -121,11 +121,12 @@ def test_v092_config_loads_today_and_new_memory_fields_default(components_home):
 
     # A memory-consolidation subtree serialized under v0.9.2 (the three new fields did not exist
     # yet) — today's model fills them from code defaults, no ValidationError.
-    v092_consolidation = {"enabled": True, "schema_writer_enabled": True, "idle_minutes": 10.0}
+    # The resonance rebuild DELETED the chapter/mining/gate knobs; a config still
+    # carrying one fails LOUDLY by design (extra="forbid" names the dead key).
+    v092_consolidation = {"enabled": True, "idle_minutes": 10.0}
     cons = MemoryConsolidationConfig.model_validate(v092_consolidation)
-    assert cons.chapter_containment_guard_enabled is True
-    assert cons.chapter_staleness_recheck_enabled is True
-    assert cons.chapter_staleness_recheck_cap == 10
+    assert cons.iteration_cap == 200
+    assert cons.idle_minutes == 10.0
 
 
 # --------------------------------------------------------------------------- #

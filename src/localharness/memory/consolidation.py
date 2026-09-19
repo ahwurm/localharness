@@ -1,44 +1,38 @@
-"""Idle-time consolidation (CONS-01..06) — the CLS slow-integrate half of the memory system.
+"""Dreaming — idle consolidation as the memory spec defines it (2026-09-18, owner-ruled).
 
-Cognitive frame: the hippocampus captures fast, sparse episodes during the day (here: the
-event bus writing sessions + the WriteGate's candidates); the cortex integrates them into
-durable knowledge preferentially during idle periods, by REPLAY. The reasons the brain
-does this split are this box's reasons: integration is expensive (9.5 tok/s) and must
-never block behavior.
+Dreaming is when the model reads its own streams deeply. The pass replays the NEW
+event-ledger windows since the last digest (the amount digested is the only clock —
+no wall-time term exists in the mechanism), and for each window distributes that
+moment's one unit of attention over the stored traces by resonance in the model's
+own representation space (memory/resonance.py). Traces that resonate gain standing;
+everything else loses ground only RELATIVELY — forgetting is the shadow cast by
+learning, and an empty pass forgets nothing.
 
-Owner rulings + critic fixes baked in structurally:
-- IN-HARNESS feature, default-on / config-off (`agent.memory.consolidation.*` registry
-  axes) — NOT an OS cron job; no daemon assumed. v1 triggers: a session-start staleness
-  check + an in-session idle timer (CONS-01; critic BLOCKER 4).
-- COOPERATIVELY CANCELLABLE (CONS-02; critic BLOCKER 2): the serial `_inference_gate`
-  (provider/client.py) is non-preemptive and held to the last token — built after a real
-  dual-process box freeze — so any user turn cancels the in-flight pass (including its
-  LLM generation task) instead of making the user wait behind it.
-- SOFT capacity cap (CONS-05; critic BLOCKER 3): admission NEVER blocks inline; this pass
-  trims the active tier back under the bound — merge/dedup/demote, silent deletion never.
-- Guardrails non-optional (CONS-04): hard iteration cap, dedup-before-generate,
-  verify-against-leaf. LLM-judged deletion does not exist here at all.
-- Quality proxies (CONS-06; critic MAJOR 2): promote-then-superseded churn rate + a
-  promotion-sample hook (the dispatch layer can pipe samples to Discord for passive
-  owner spot-check) — fire counters alone can't see silent corruption.
+The pass, in order:
+  1. embed-backfill — any active fact without a vector (owner edits, restores,
+     pre-v10 rows) gets one; a changed embedding model re-embeds everything
+     (vectors from different models are not comparable).
+  2. digest — new closed turn windows -> resonance shares -> standing, committed
+     atomically with the ledger offsets that cover them.
+  3. bind — a window whose attention concentrated on several traces (above-uniform
+     shares) is a binding observation: the co-fired set becomes / strengthens a
+     named group, and the model names it (labels are for human legibility only,
+     never mechanism). Skipped silently without an LLM.
+  4. fold + settle — staged read-counters fold into the base columns; writer
+     paid/lost tallies recompute from the store's own tables (bets settle).
+  5. forget — gated by agent.memory.archival.enabled (default OFF): score by the
+     one salience currency, read the proven-useful line out of the store, archive
+     below it. Nothing is deleted; restore is one verb.
 
-The deterministic core (fold, candidate promotion on cross-episode recurrence, decay,
-cap trim, proxies) runs with NO model at all. The LLM passes (`llm=` param) are the idle
-extractors — mining (the primary semantic feeder, MOVE 2), the chapter-writer, and
-reconciliation — each cancellable + guarded and config-gated. (The old session-replay seam
-that wrote unreachable `replay/*` keys was retired into mining in MOVE 2.)
-
-Deliberate (whole-milestone critic m4): decay / cap-trim / untag write score columns
-via raw UPDATEs, bypassing store_fact's read-back-verify — these mutate derived ranking
-state, never claimed content; untag includes `tags` in its SET list so the narrowed
-facts_au trigger keeps FTS consistent, and the others don't touch indexed columns.
+Machine-safety properties carried over unchanged from the previous consolidation:
+in-harness only (no daemon), cooperatively cancellable the instant a user turn
+arrives (the serial inference gate is never held against the user), every LLM look
+budget-capped, every step exception-isolated.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import random
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
@@ -46,78 +40,31 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 if TYPE_CHECKING:
     from localharness.config.models import MemoryArchivalConfig, MemoryConsolidationConfig
     from localharness.core.bus import EventBus, SubscriptionHandle
+    from localharness.memory.resonance import ResonanceEngine
     from localharness.memory.salience import Salience
     from localharness.memory.sqlite import MemoryStore
 
 log = logging.getLogger(__name__)
 
 _WATERMARK_KEY = "consolidation/last_run"
-_DEMOTED_RS = 0.15   # below the 0.2 index gate: out of the injected block, still searchable
-_PROMOTED_CONFIDENCE = 0.8  # above the 0.7 injection threshold: promoted facts surface
-_CLASSIFY_BACKFILL_CAP = 10  # tag-graph F4: max untagged pool atoms bucket-filed per idle cycle
-_MICRO_CLASSIFY_CAP = 5   # #90: untagged atoms backfill-classified per turn-end micro-pass firing
-_MICRO_NAME_CAP = 2       # #90: proposed discovery candidates NAMEd per turn-end micro-pass firing
+_EMBED_MODEL_KEY = "resonance/embed_model"
 
 
 @dataclass
 class ConsolidationReport:
-    folded: int = 0
-    promoted: int = 0
-    decayed: int = 0
-    demoted: int = 0
-    replayed_claims: int = 0
-    schemas_written: int = 0   # Phase 36 SEMA-02/03: chapters written this pass
-    # Chapter containment guard: candidate ⊆ existing folded (no twin) / existing ⊊ candidate
-    # superseded (append-only). Closes the multi-contained gap chapter_refresh_overlap left.
-    chapters_folded: int = 0
-    chapters_superseded_by_containment: int = 0
-    # Absorption guard (d1v2): lopsided thin-bridge folds/supersedes REFUSED — a much-smaller
-    # distinct-topic chapter kept independent of a dominant host instead of being welded away.
-    chapters_absorption_refused: int = 0
-    # Chapter staleness re-check (B5, ANALYSIS §7): active chapters re-validated against their current
-    # active members BEFORE the writer runs — grounded ones revalidated, eroded ones re-drafted on the
-    # survivors or retired. Closes the "chapter's evidentiary base shrank and nothing noticed" gap.
-    chapters_revalidated: int = 0
-    chapters_redrafted_stale: int = 0
-    chapters_retired_stale: int = 0
-    # #70: recheck items superseded MID-PASS (by an earlier item's containment supersede) are skipped —
-    # a stale one-time snapshot must not redraft a chapter that no longer exists.
-    chapters_skipped_stale: int = 0
-    reconciled: int = 0        # Phase 36 PGATE-03: correction_pending rows resolved this pass
-    mined: int = 0             # Phase 36 PGATE-03: transcript facts mined this pass
-    tags_proposed: int = 0     # Tag-graph discovery: new candidate child tags this pass
-    tags_incorporated: int = 0 # Tag-graph discovery: candidates promoted to active this pass
-    tags_pruned: int = 0       # Tag-graph discovery: stale candidates retired this pass
-    tags_backfilled: int = 0   # Tag-graph F4: pool atoms bucket-filed by the idle classify step
-    embedder_used: str = ""    # Tag-graph F7: the embedder class discovery ran with (forensics)
-    active_over_cap: int = 0
-    churn_rate: float = 0.0
-    cancelled: bool = False
-    duration_s: float = 0.0
-    promoted_keys: list[str] = field(default_factory=list)
-    # Run-2 ruling 4 (observability): EVERY chapter-writer attempt (written or rejected, with
-    # its reason + grounding fields) — 'no chapter written' must leave a forensic trail.
-    schema_attempts: list[dict] = field(default_factory=list)
-    # FIX 2c (run-3): the RAW miner completion per chunk (pre-parse) — run-3's were unrecoverable,
-    # making the shadow-duplicate root-cause inferential. A forensic trail for the supersede path.
-    mining_completions: list[dict] = field(default_factory=list)
-    # STAGE 1 (extraction science plan): coverage/residue — committed records the miner processed,
-    # how many sourced a written atom, and the uncited rest (recall observability; the eval
-    # persists the residue per run for the cross-run intersection that gates any repair build).
-    mined_records_seen: int = 0
-    mined_records_cited: int = 0
-    mining_residue: list[dict] = field(default_factory=list)
-    # RESIDUE LEDGER (repair loop): per-pass enqueue/drain/rescue/retire outcomes.
-    mining_residue_enqueued: int = 0
-    mining_residue_drained: int = 0
-    mining_residue_rescued: int = 0
-    mining_residue_retired: int = 0
-    mining_folded: int = 0  # novelty gate: paraphrase mints folded into corroboration
-    # Dormancy archival (memory rung 1 — the forgetting half). `archive_line` is the
-    # salience floor this pass read out of the store; None = cold start (no fact has ever
-    # been recalled or owner-touched, so there is no evidence to draw a line from).
+    """One dreaming pass's ledger."""
+    embedded_backfill: int = 0     # facts given a vector this pass
+    reembedded_all: bool = False   # embedding model changed -> full re-embed happened
+    windows_digested: int = 0      # new stream windows integrated
+    standing_touched: int = 0      # facts that received any share this pass
+    folded: int = 0                # staged read-counters folded
+    groups_observed: int = 0       # binding observations (new or strengthened)
+    groups_named: int = 0          # groups the model named this pass
+    writers_settled: int = 0       # writers whose paid/lost tallies were recomputed
     archived: int = 0
     archive_line: float | None = None
+    cancelled: bool = False
+    duration_s: float = 0.0
 
     def archive_report_line(self) -> str:
         """The owner-visible one-liner for this pass's forgetting half."""
@@ -125,9 +72,15 @@ class ConsolidationReport:
         return format_pass_line(self.archived, self.archive_line)
 
 
+# ---------------------------------------------------------------------------
+# Archival verbs — scorer-agnostic plumbing (kept from rung 1; the scorer behind
+# them is now the resonance salience in memory/salience.py).
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class ArchiveRun:
-    """One archival run's outcome — the shape both the consolidation step and
+    """One archival run's outcome — the shape both the dreaming step and
     `localharness memory archive [--dry-run]` report from (one code path, two triggers)."""
     line: float | None
     active_before: int
@@ -153,9 +106,9 @@ async def archive_dormant_facts(
 ) -> ArchiveRun:
     """Score every ACTIVE fact, read the line out of the store, and move what sits below it.
 
-    THE one implementation — the idle consolidation step and the CLI verb both call this,
+    THE one implementation — the idle dreaming step and the CLI verb both call this,
     so a dry-run's preview and a real pass can never diverge. Superseded rows are not
-    touched (that is rung 2); nothing is deleted, ever.
+    touched; nothing is deleted, ever.
     """
     from localharness.memory.salience import (
         archive_line, score_facts, select_archivable, vacuum_warranted,
@@ -163,7 +116,6 @@ async def archive_dormant_facts(
     from localharness.memory.sqlite import ARCHIVE_SURFACE_FLOOR_LINE, _row_to_fact
 
     assert store._db is not None
-    now = int(time.time()) if now is None else now
     async with store._db.execute(
         f"SELECT {store._FACT_COLS} FROM facts WHERE agent_id = ? AND status = 'active'",
         (store._agent_id,),
@@ -179,7 +131,7 @@ async def archive_dormant_facts(
     ) as cur:
         staged_reads = [r[0] for r in await cur.fetchall()]
 
-    scored = score_facts(facts, now, also_anchor=staged_reads)
+    scored = score_facts(facts, also_anchor=staged_reads)
     line = archive_line(scored)
     candidates = select_archivable(scored, line)
     run = ArchiveRun(
@@ -210,15 +162,8 @@ async def archive_dormant_facts(
 
 
 # ---------------------------------------------------------------------------
-# List-driven archival — scorer-AGNOSTIC plumbing.
-#
-# The scorer that decides WHO is dormant is going to keep changing (S v1 is an ordinal
-# ranking, not a calibrated probability, and rung 4 replaces its line outright). The first
-# watched live run is driven by an externally computed CONSENSUS of several measured
-# scorers, which no in-harness formula can reproduce. So the harness takes a LIST of fact
-# ids and stays out of the judging — and every safety rail is re-checked HERE, at execution
-# time, because a list is an opinion from outside and outside opinions do not get to move
-# the owner's own facts.
+# List-driven archival — the harness takes a LIST of fact ids and stays out of the
+# judging; every safety rail is re-checked HERE, at execution time.
 # ---------------------------------------------------------------------------
 
 # Why a row was not moved. Named, because these strings are the report the owner reads.
@@ -304,15 +249,11 @@ async def archive_listed_facts(
     owner touched, names a fact that was ever recalled, or names a fact read since the last
     fold. The store's own move verb then re-checks the last two on its own, so a fact that
     becomes live between the scan and the move is still refused.
-
-    S v1 is recorded on each moved row as the LOCAL scorer's opinion at the moment of the
-    move — not as the reason. `line_at_archive` stays NULL: no line was consulted.
     """
     from localharness.memory.salience import is_pinned, score_fact, vacuum_warranted
     from localharness.memory.sqlite import ARCHIVE_SURFACE_CONSENSUS_LIST, _row_to_fact
 
     assert store._db is not None
-    now = int(time.time()) if now is None else now
     run = ArchiveListRun(listed=len(ids), dry_run=dry_run,
                          skipped=list(unparseable or []))
     async with store._db.execute(
@@ -350,7 +291,7 @@ async def archive_listed_facts(
                 SkippedFact(reason=SKIP_UNFOLDED_READS, fact_id=fact_id, key=fact.key))
             continue
 
-        scored = score_fact(fact, now)
+        scored = score_fact(fact)
         run.candidates.append(scored)
         if dry_run:
             continue
@@ -367,35 +308,31 @@ async def archive_listed_facts(
     return run
 
 
+# ---------------------------------------------------------------------------
+# The dreaming pass
+# ---------------------------------------------------------------------------
+
+
 class ConsolidationPass:
-    """One consolidation run. Construct fresh per run; `cancel()` at any time."""
+    """One dreaming run. Construct fresh per run; `cancel()` at any time — the pass
+    exits at its next per-window / per-step check and everything already committed
+    stands."""
 
     def __init__(
         self,
         store: "MemoryStore",
         cfg: "MemoryConsolidationConfig",
         *,
+        engine: Optional["ResonanceEngine"] = None,
         llm: Any = None,
-        embedder: Any = None,
-        on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
         archival: Optional["MemoryArchivalConfig"] = None,
     ) -> None:
         self._store = store
         self._cfg = cfg
+        self._engine = engine
         self._llm = llm
-        self._embedder = embedder
-        self._on_promotion_sample = on_promotion_sample
-        # `agent.memory.archival` — None (no caller wired it) reads as OFF, the same as the
-        # field's own default. Archival never fires because a call site forgot to pass config.
         self._archival = archival
         self._cancel = asyncio.Event()
-        # Same-run promotion grace (critic BLOCKER 2): cap-trim must never demote what
-        # this very pass just promoted (fresh records have zero access history — the
-        # lowest slow-score in any mature store, i.e. first trim victims).
-        self._promoted_ids_this_run: set[int] = set()
-        # #69: ONE claimed-refresh-key set for the whole pass, shared by the recheck step AND the writer
-        # step — so a chapter key the recheck heals onto cannot be re-adopted (and clobbered) by the writer.
-        self._claimed_refresh_keys: set[str] = set()
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -404,633 +341,167 @@ class ConsolidationPass:
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
-    # ------------------------------------------------------------------
-    # The run
-    # ------------------------------------------------------------------
-
     async def run(self) -> ConsolidationReport:
-        t0 = time.monotonic()
         report = ConsolidationReport()
-        steps = (
-            self._step_fold,
-            self._step_promote_recurring,
-            # BUG #46: reconcile runs BEFORE the heavy idle-LLM steps (mine/discover/write_schemas)
-            # so it gets first crack at the idle window. Reconciliation is the ONLY consumer that
-            # clears tier:correction_pending; its queue is written by the LIVE gate in PRIOR sessions
-            # (no pass step below produces it — zero same-pass dependency), and a real pass is
-            # cancelled ~4s after REPL start. At its old step-8 slot the three heavy steps consumed
-            # the whole window and it NEVER ran, leaving disputed facts corrupted forever. It stays
-            # fully cancellable (per-fact + cancellable look — the box-hang machine-safety invariant),
-            # so the fix is ORDER, not run-to-completion; it drains the small queue over a session or
-            # two. Running before mine also feeds mine's B4 defense THIS pass's freshly-reconciled
-            # values (strictly fresher, never a regression). fold + promote stay first: promote
-            # already ran before reconcile and EXCLUDES correction_pending, so its input is unchanged.
-            self._step_reconcile,       # Phase 36: correction-queue reconciliation (BUG #46: moved early)
-            # MOVE 2: mining is the primary semantic feeder and runs BEFORE clustering so the
-            # sem/ atoms it writes are available to the SAME pass's chapter-writer (else a
-            # freshly-mined atom waits a whole pass to be grouped). The orphaned replay seam
-            # (unreachable replay/* writes) is retired — mining is now the one idle extractor.
-            self._step_mine,            # Phase 36 / MOVE 2: typed-atom transcript mining
-            self._step_classify_untagged,  # Tag-graph F4: file pool atoms lacking a bucket tag
-            self._step_discover_tags,   # Tag-graph: discover NEW child tags before clustering reads them
-            self._step_recheck_stale,   # B5 (§7): re-validate active chapters BEFORE the writer runs
-            self._step_write_schemas,   # Phase 36: chapter-writer clusters sem/ atoms (llm+config-gated)
-            self._step_decay,
-            self._step_cap_trim,
-            self._step_proxies,
-            # LAST, after the quality proxies: archival removes rows from the population
-            # the proxy metrics are computed over, so running it behind them keeps every
-            # pre-existing report number measuring exactly what it measured before.
-            self._step_archive_dormant,
-        )
+        started = time.monotonic()
+        steps: list[Callable[[ConsolidationReport], Awaitable[None]]] = [
+            self._step_embed_backfill,
+            self._step_digest,
+            self._step_fold_and_settle,
+            self._step_forget,
+        ]
         for step in steps:
-            if self._cancel.is_set():
-                report.cancelled = True
+            if self.cancelled:
                 break
             try:
                 await step(report)
-            except asyncio.CancelledError:
-                report.cancelled = True
-                break
             except Exception:
-                log.exception("consolidation step %s failed (non-fatal)", step.__name__)
-        if not report.cancelled:
-            await self._set_watermark(int(time.time()))
-        report.duration_s = time.monotonic() - t0
+                log.exception("dreaming step %s failed (isolated)", step.__name__)
+        await _set_meta(self._store, _WATERMARK_KEY, str(int(time.time())))
+        report.cancelled = self.cancelled
+        report.duration_s = time.monotonic() - started
         return report
 
-    # -- 1. fold staged read-counters (RANK-04 boundary) -----------------
+    async def _embed(self, texts: list[str]):
+        assert self._engine is not None
+        return await asyncio.to_thread(self._engine.embed_docs, texts)
 
-    async def _step_fold(self, report: ConsolidationReport) -> None:
+    async def _step_embed_backfill(self, report: ConsolidationReport) -> None:
+        """Every active fact gets a vector; a changed embedding model re-embeds ALL
+        (vectors from different models are not comparable — the store records which
+        model embedded it). No engine wired -> the step reports and returns; nothing
+        pretends to embed."""
+        from localharness.memory import resonance as _res
+
+        if self._engine is None:
+            log.warning("dreaming: no resonance engine wired — embed/digest skipped")
+            return
+        stored_model = await _get_meta(self._store, _EMBED_MODEL_KEY)
+        if stored_model is not None and stored_model != self._engine.model_name:
+            ids = await self._store.all_embedded_fact_ids()
+            for fid in ids:
+                await self._store.set_fact_embedding(fid, None)
+            report.reembedded_all = True
+            log.info("dreaming: embedding model changed (%s -> %s); re-embedding %d facts",
+                     stored_model, self._engine.model_name, len(ids))
+        while not self.cancelled:
+            batch = await self._store.facts_missing_embedding(limit=64)
+            if not batch:
+                break
+            vecs = await self._embed([f"{f.key}: {f.value}" for f in batch])
+            for f, v in zip(batch, vecs):
+                await self._store.set_fact_embedding(f.id, _res.pack(v))
+                report.embedded_backfill += 1
+        await _set_meta(self._store, _EMBED_MODEL_KEY, self._engine.model_name)
+
+    async def _step_digest(self, report: ConsolidationReport) -> None:
+        """Replay the new stream and let the present meet the past: each window's one
+        unit of attention distributes over the stored traces by resonance share.
+        Standing deltas and ledger marks commit atomically per pass. Windows whose
+        attention concentrated on >=2 traces become binding observations."""
+        from localharness.memory import resonance as _res
+        from localharness.memory.streams import read_new_windows
+
+        if self._engine is None:
+            return
+        sessions_dir = self._store._agent_dir / "sessions"
+        marks = await self._store.get_digest_marks()
+        windows, new_marks = read_new_windows(
+            sessions_dir, marks, max_windows=self._cfg.iteration_cap
+        )
+        if not windows:
+            return
+        id_blobs = await self._store.active_embedded()
+        deltas: dict[int, float] = {}
+        bindings: list[list[int]] = []
+        digested = 0
+        for w in windows:
+            if self.cancelled:
+                break
+            text = w.text()
+            if not text.strip():
+                digested += 1
+                continue
+            vec = (await self._embed([text]))[0]
+            shares = _res.shares(vec, id_blobs)
+            for fid, share in shares.items():
+                deltas[fid] = deltas.get(fid, 0.0) + share
+            if len(id_blobs) >= 2 and shares:
+                # Above-uniform share = this moment's attention CONCENTRATED here.
+                uniform = 1.0 / len(id_blobs)
+                cofired = sorted(fid for fid, sh in shares.items() if sh > uniform)
+                if len(cofired) >= 2:
+                    bindings.append(cofired)
+            digested += 1
+        if self.cancelled and digested < len(windows):
+            # Marks may only cover what was integrated: re-derive them for the digested
+            # prefix by re-reading with the smaller bound (cheap; file IO only).
+            _, new_marks = read_new_windows(sessions_dir, marks, max_windows=digested)
+        await self._store.apply_digest(deltas, new_marks)
+        report.windows_digested = digested
+        report.standing_touched = len(deltas)
+        await self._step_bind(report, bindings)
+
+    async def _step_bind(self, report: ConsolidationReport, bindings: list[list[int]]) -> None:
+        """Binding observations become named groups. The model names them (one
+        budget-capped, cancellable look per new group); an unnamed group waits for a
+        later pass — labels are legibility, never mechanism, so nothing blocks on them."""
+        from localharness.memory.idle_llm import complete_cancellable
+
+        for members in bindings:
+            if self.cancelled:
+                return
+            gid = await self._store.upsert_group(members)
+            report.groups_observed += 1
+            if self._llm is None:
+                continue
+            groups = {g["id"]: g for g in await self._store.list_groups()}
+            g = groups.get(gid)
+            if g is None or g["label"]:
+                continue
+            facts = await self._store.get_facts_by_ids(members)
+            listing = "\n".join(f"- {f.key}: {f.value}" for f in facts)
+            answer = await complete_cancellable(
+                self._llm,
+                "These memories fired together during one experience:\n"
+                f"{listing}\n"
+                "If they form one coherent topic, answer with a short name for it "
+                "(2-4 words). If they do not, answer exactly NONE.",
+                self._cancel,
+            )
+            label = (answer or "").strip().splitlines()[0].strip() if answer else ""
+            if label and label.upper() != "NONE":
+                await self._store.set_group_label(gid, label)
+                report.groups_named += 1
+
+    async def _step_fold_and_settle(self, report: ConsolidationReport) -> None:
+        """Fold staged read-counters (the one moment reads may reorder the injected
+        block), then settle the bet ledger: paid/lost recomputed from the store's own
+        tables — uniform statistics, no incremental drift."""
         report.folded = await self._store.fold_staged_access()
+        report.writers_settled = await self._store.settle_writer_outcomes()
 
-    # -- 2. promote gate candidates that RECUR across episodes (CONS-03) --
-
-    async def _step_promote_recurring(self, report: ConsolidationReport) -> None:
-        """Cross-episode recurrence is the promotion warrant (Tse 2007 schema-consistent
-        fast track, translated): the same lesson captured from ≥2 distinct sessions
-        graduates from candidate (below the injection threshold) to durable fact
-        (above it), linked `derived_from` its source candidates."""
-        # Direct candidate query (Phase-31 critic M3): the relevance-ranked query_facts
-        # crowded backlog candidates out of the iteration_cap window as the store
-        # accumulated well-used facts — the guardrail silently became a starvation
-        # bound. Oldest-first over the pending set is what "bounded work on candidates"
-        # actually means.
-        from localharness.memory.sqlite import _row_to_fact
-
-        # EXCLUDE disputed/correction facts (critic MAJOR 2): a correction_phrase supersede
-        # writes the disputed row back onto the ORIGINAL gate/ key with tier:correction_pending,
-        # which would otherwise group + promote to 0.8 (into the injected block) here — the
-        # exact "<0.7 until Phase 36" violation. The tier tag catches BOTH the gate/-keyed
-        # disputed supersede rows and the correction/quarantine/ facts in one predicate.
-        assert self._store._db is not None
-        async with self._store._db.execute(
-            f"SELECT {self._store._FACT_COLS} FROM facts "
-            "WHERE agent_id = ? AND status = 'active' "
-            "AND tags LIKE '%\"pending_consolidation\"%' "
-            "AND tags NOT LIKE '%\"tier:correction_pending\"%' "
-            "ORDER BY created_at ASC, id ASC LIMIT ?",
-            (self._store._agent_id, self._cfg.iteration_cap),
-        ) as cur:
-            candidates = [_row_to_fact(r) for r in await cur.fetchall()]
-        # Grouping (whole-milestone critic B1): recurrence = the SAME LESSON across
-        # episodes, keyed by the gate's content hash — grouping by (tier, tool) alone
-        # merged two unrelated one-off errors on one tool into a fabricated "recurring"
-        # record (false positive) while the genuinely-recurring case self-superseded to
-        # one provenance and never promoted (false negative).
-        groups: dict[tuple[str, str, str], list] = {}
-        for c in candidates:
-            parts = c.key.split("/")  # gate/<tier>/<tool>[/<lesson>[/<session>]]
-            if len(parts) < 3 or parts[0] != "gate":
-                continue
-            lesson = parts[3] if len(parts) > 3 else ""
-            groups.setdefault((parts[1], parts[2], lesson), []).append(c)
-
-        for (tier, tool, lesson), members in groups.items():
-            if self._cancel.is_set():
-                return
-            provenances = {m.provenance for m in members if m.provenance}
-            key = f"learned/{tool}/{tier}" + (f"/{lesson}" if lesson else "")
-            existing = await self._store.get_fact(key)
-            # Promotion warrant: recurrence (≥2 distinct episodes), OR an existing
-            # promoted record (a single fresh episode is schema-consistent evidence —
-            # Tse 2007 fast track), OR a SALIENT flag (Phase-31 critic M1: the APPROACH
-            # §C "or carries a salience flag" route — the gate marks stuck-recoveries
-            # salient; one occurrence is warrant enough). Novelty candidates carry
-            # neither and by design never promote (telemetry tier).
-            salient = any("salient" in m.tags for m in members)
-            if existing is None and len(provenances) < 2 and not salient:
-                continue
-            # verify-against-leaf (CONS-04): the merged record is composed ONLY of
-            # verbatim candidate bodies (and the prior record's own bullets).
-            new_bodies = sorted({m.value for m in members if m.value})
-            if not new_bodies:
-                continue
-            prev_n = 0
-            prior_bullets: list[str] = []
-            if existing is not None:
-                prior_bullets = [ln[2:] for ln in existing.value.splitlines() if ln.startswith("- ")]
-                if existing.provenance.startswith("consolidated:"):
-                    try:
-                        prev_n = int(existing.provenance.split(":")[1].split("-")[0])
-                    except (ValueError, IndexError):
-                        prev_n = 0
-            total_n = prev_n + len(provenances)
-            # Newest evidence first, cap 5, and say what was dropped (critic M2: the
-            # old alphabetical [:5] silently discarded episodes while the count climbed).
-            seen_b: set[str] = set()
-            bullets = [b for b in new_bodies + prior_bullets
-                       if not (b in seen_b or seen_b.add(b))]
-            shown = bullets[:5]
-            dropped = len(bullets) - len(shown)
-            # PAYLOAD-FIRST, nothing before it (live test 2026-07-03: the
-            # "Recurring (N episodes): tier — " prefix pushed the payload past the
-            # index-line truncation — chat #3 saw bookkeeping ending in "File not
-            # found: /home/…", no filename, no resolution, and fumbled with the
-            # lesson nominally in context). Recurrence bookkeeping rides as a
-            # SUFFIX; the same rule the dogfood forced on gate captures one layer
-            # down. Every layer that touches lesson text repeats this rule.
-            # 135 = the discriminating payload budget: an absolute path (~50) plus
-            # error head plus resolution head must ALL fit, and 135 + the ~41-char
-            # recurrence suffix stays inside the index render's 180-char line.
-            lesson_preview = " ".join(shown[0].split())[:135] if shown else ""
-            plural = "s" if total_n != 1 else ""
-            merged = (
-                f"{lesson_preview} [recurring: {total_n} episode{plural}, {tier}]\n"
-                + "\n".join(f"- {b}" for b in shown)
-                + (f"\n- … (+{dropped} earlier example(s) consolidated away)" if dropped else "")
-            )
-            promoted = await self._store.store_fact(
-                key=key,
-                value=merged,
-                tags=["consolidated", f"tier:{tier}"],
-                confidence=_PROMOTED_CONFIDENCE,
-                source="consolidation",
-                provenance=f"consolidated:{total_n}-episodes",
-            )
-            self._promoted_ids_this_run.add(promoted.id)
-            for m in members:
-                try:
-                    await self._store.add_edge(promoted.id, m.id, "derived_from")
-                except Exception:
-                    pass
-                await self._untag_candidate(m.id, m.tags)
-            report.promoted += 1
-            report.promoted_keys.append(promoted.key)
-
-    async def _untag_candidate(self, fact_id: int, tags: list[str]) -> None:
-        """Candidate consumed: leaves the pending set and the index-eligible set (its
-        content lives on in the promoted record + the derived_from edge)."""
-        new_tags = json.dumps([t for t in tags if t != "pending_consolidation"])
-        assert self._store._db is not None
-        await self._store._db.execute(
-            "UPDATE facts SET tags = ?, retrieval_strength = MIN(retrieval_strength, ?) WHERE id = ?",
-            (new_tags, _DEMOTED_RS, fact_id),
-        )
-        await self._store._db.commit()
-
-    # -- 3. Phase-36 idle LLM passes (mine / chapter-writer / reconcile) --
-    # The orphaned replay seam (MOVE 2) is RETIRED: it was a near-duplicate idle extractor that
-    # wrote unreachable `replay/*` keys (neither promotion nor clustering could consume them).
-    # Mining is now the ONE idle extractor. Each pass below mirrors the same gating (return
-    # immediately when self._llm is None) AND its own config axis, delegating to a Wave-2 sibling
-    # (all never-raise + cancellable via the shared idle_llm path) and threading self._cancel so a
-    # user turn stops them mid-look. Because they early-return with no LLM, every existing llm=None
-    # test sees identical behavior — the deterministic core is byte-unchanged.
-
-    async def _step_recheck_stale(self, report: ConsolidationReport) -> None:
-        """B5 (ANALYSIS §7): re-validate active chapters against their CURRENT active members before
-        the writer runs. Gated on the LLM (a re-draft needs a generation) and TWO config axes in a
-        HIERARCHY (#65): `schema_writer_enabled` is the MASTER chapter-writer kill lever — OFF stops
-        this re-check too (an operator flipping the documented kill lever must get a real 'off', not a
-        path that keeps minting/superseding chapters); `chapter_staleness_recheck_enabled` is the
-        SUB-switch, effective only while the master is on. llm=None or either gate off -> inert, so the
-        deterministic core is byte-unchanged and a chapter-less store finds nothing. Containment
-        activity during a re-draft ACCUMULATES onto the same report counters the writer step uses
-        (both += so neither clobbers the other)."""
-        if (self._llm is None
-                or not getattr(self._cfg, "schema_writer_enabled", False)          # master kill (#65)
-                or not getattr(self._cfg, "chapter_staleness_recheck_enabled", True)):  # sub-switch
-            return
-        from localharness.memory.chapter_writer import recheck_stale_chapters
-        counts = {"revalidated": 0, "redrafted": 0, "retired": 0, "skipped_superseded": 0}
-        containment_counts = {"folded": 0, "superseded": 0}
-        absorption_counts = {"refused": 0}
-        await recheck_stale_chapters(
-            self._store, self._llm, self._cancel,
-            cap=getattr(self._cfg, "chapter_staleness_recheck_cap", 10),
-            refresh_overlap=self._cfg.chapter_refresh_overlap,
-            containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
-            containment_counts=containment_counts,
-            absorption_guard=getattr(self._cfg, "absorption_guard_enabled", True),
-            absorption_size_ratio=getattr(self._cfg, "absorption_guard_size_ratio", 0.34),
-            absorption_min_overlap=getattr(self._cfg, "absorption_guard_min_overlap", 0.5),
-            absorption_counts=absorption_counts,
-            attempts_log=report.schema_attempts,  # §7: staleness re-drafts/retires observable
-            counts=counts,
-            claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the writer step
-        )
-        report.chapters_revalidated += counts["revalidated"]
-        report.chapters_redrafted_stale += counts["redrafted"]
-        report.chapters_retired_stale += counts["retired"]
-        report.chapters_skipped_stale += counts["skipped_superseded"]
-        report.chapters_folded += containment_counts["folded"]
-        report.chapters_superseded_by_containment += containment_counts["superseded"]
-        report.chapters_absorption_refused += absorption_counts["refused"]
-
-    async def _step_write_schemas(self, report: ConsolidationReport) -> None:
-        if self._llm is None or not getattr(self._cfg, "schema_writer_enabled", False):
-            return
-        from localharness.memory.chapter_writer import write_cluster_schemas
-        containment_counts = {"folded": 0, "superseded": 0}
-        absorption_counts = {"refused": 0}
-        written = await write_cluster_schemas(
-            self._store, self._llm, self._cancel,
-            min_sessions=self._cfg.cluster_min_sessions,
-            write_budget=self._cfg.schema_write_budget,
-            depth_cap=self._cfg.schema_depth_cap,
-            # tier-1 embedding leg: same embedder discovery uses; 2-factor, never welds alone
-            embedder=self._embedder,
-            embed_sim=self._cfg.clustering_embed_sim_threshold,
-            # chapter refresh: membership drift supersedes the old chapter, never a sibling
-            refresh_overlap=self._cfg.chapter_refresh_overlap,
-            # containment guard: fold set-contained duplicates / supersede EACH subsumed chapter
-            containment_guard=getattr(self._cfg, "chapter_containment_guard_enabled", True),
-            containment_counts=containment_counts,
-            # absorption guard (d1v2): refuse lopsided thin-bridge folds — keep distinct topics independent
-            absorption_guard=getattr(self._cfg, "absorption_guard_enabled", True),
-            absorption_size_ratio=getattr(self._cfg, "absorption_guard_size_ratio", 0.34),
-            absorption_min_overlap=getattr(self._cfg, "absorption_guard_min_overlap", 0.5),
-            absorption_counts=absorption_counts,
-            attempts_log=report.schema_attempts,  # ruling 4: every attempt observable
-            claimed_refresh_keys=self._claimed_refresh_keys,  # #69: shared with the recheck step
-        )
-        report.schemas_written = len(written)
-        # += (not =): the staleness re-check step may have folded/superseded during a re-draft; both
-        # steps contribute to these counters within one pass.
-        report.chapters_folded += containment_counts["folded"]
-        report.chapters_superseded_by_containment += containment_counts["superseded"]
-        report.chapters_absorption_refused += absorption_counts["refused"]
-
-    async def _step_classify_untagged(self, report: ConsolidationReport) -> None:
-        """Tag-graph F4: file pool-visible atoms that LACK a bucket tag through the SAME two-step
-        classifier mining uses at mint time. remember()-sourced facts are pool members but never
-        pass through mine_transcript, so without this step they could never co-tag-edge (Stage B)
-        or enter discovery (which requires a bucket tag); it also catches pre-existing untagged
-        atoms. Bounded per cycle (_CLASSIFY_BACKFILL_CAP); provenance='backfill' keeps mint vs
-        idle filing distinguishable in forensics. Same gating as mint filing."""
-        if self._llm is None or not getattr(self._cfg, "mint_tagging_enabled", False):
-            return
-        from localharness.memory.clustering import _load_pool
-        from localharness.memory.tag_classify import file_atom_tags
-        assert self._store._db is not None
-        async with self._store._db.execute(
-            "SELECT DISTINCT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            "WHERE t.agent_id = ? AND t.parent_id IS NULL", (self._store._agent_id,),
-        ) as cur:
-            bucketed = {r[0] for r in await cur.fetchall()}
-        todo = [f for f in await _load_pool(self._store)
-                if f.node_kind != "schema" and f.id not in bucketed][:_CLASSIFY_BACKFILL_CAP]
-        for f in todo:
-            if self._cancel.is_set():
-                return
-            topic = f.key.split("/")[1] if f.key.startswith("sem/") else f.key
-            bucket, _child = await file_atom_tags(
-                self._store, self._llm, self._cancel,
-                atom_id=f.id, topic=topic, claim=f.value, provenance="backfill")
-            if bucket is not None:
-                report.tags_backfilled += 1
-
-    async def _step_discover_tags(self, report: ConsolidationReport) -> None:
-        """Tag-graph discovery (Stage C): propose/incorporate/prune child tags over bucket-only
-        atoms BEFORE the chapter-writer runs, so a just-incorporated tag forms co-tag edges in the
-        SAME pass. Gated on the LLM (llm=None -> inert, deterministic core byte-unchanged) and its
-        config axis. The embedder falls back to the dep-free default when none was injected; the
-        class actually used is recorded on the report (F7 — run-9 forensics must tell MiniLM from
-        the HashingEmbedder fallback)."""
-        if self._llm is None or not getattr(self._cfg, "tag_discovery_enabled", False):
-            return
-        from localharness.memory.discovery import discover_tags
-        embedder = self._embedder
-        if embedder is None:
-            from localharness.memory.embeddings import default_embedder
-            # #76: cache on self — MiniLM was reloading its weights EVERY pass (and
-            # spilling loader output over the input box). One load per process; the
-            # promote step's embedding leg reads self._embedder and benefits too.
-            embedder = self._embedder = default_embedder()
-        report.embedder_used = type(embedder).__name__
-        r = await discover_tags(self._store, self._llm, self._cancel, embedder=embedder,
-                                injection_weight=self._cfg.trace_injection_weight)
-        report.tags_proposed = len(r.proposed)
-        report.tags_incorporated = len(r.incorporated)
-        report.tags_pruned = len(r.pruned)
-
-    async def _step_reconcile(self, report: ConsolidationReport) -> None:
-        if self._llm is None or not getattr(self._cfg, "reconcile_enabled", False):
-            return
-        from localharness.memory.reconciliation import reconcile_corrections
-        r = await reconcile_corrections(
-            self._store, self._llm, self._cancel, ttl_looks=self._cfg.reconcile_ttl_looks
-        )
-        # Every disposition is a resolved queue row (36-05's 7-field, shape-aware counters):
-        # confirm (shape b) + confirm-corrected/retire (shape a) + revert-restore/clear + undecided.
-        report.reconciled = (
-            r.confirmed + r.confirmed_corrected + r.retired
-            + r.reverted_restored + r.reverted_cleared + r.undecided
-        )
-
-    async def _step_mine(self, report: ConsolidationReport) -> None:
-        if self._llm is None or not getattr(self._cfg, "mining_enabled", False):
-            return
-        from localharness.memory.mining import mine_transcript
-        m = await mine_transcript(
-            self._store, self._llm, self._cancel, write_budget=self._cfg.mining_write_budget,
-            corpus_char_cap=self._cfg.mining_corpus_char_cap,  # FIX 3b chunk size
-            known_atoms_cap=self._cfg.mining_known_atoms_cap,  # FIX 3
-            # FIX 4: conversational surface only (no tool read-backs)
-            operative_message_types=self._cfg.mining_operative_message_types,
-            # RESIDUE repair loop: amortized isolated re-mine of uncited records + K-trim
-            residue_enabled=self._cfg.mining_residue_enabled,
-            residue_attempt_cap=self._cfg.mining_residue_attempt_cap,
-            residue_record_budget=self._cfg.mining_residue_record_budget,
-            residue_min_chars=self._cfg.mining_residue_min_chars,
-            # Novelty gate: paraphrase mints fold into corroboration at this similarity
-            novelty_fold_threshold=self._cfg.mining_novelty_fold_threshold,
-            completions_log=report.mining_completions,  # FIX 2c: persist raw completions
-            file_tags=getattr(self._cfg, "mint_tagging_enabled", True),  # M1 mint-time filing
-            # RULING-D: fold scope + replaces=/B4(i) validity key off the child tag (KILL lever)
-            tag_grouping=getattr(self._cfg, "tag_grouping_enabled", True),
-        )
-        report.mined = m.written
-        report.mined_records_seen = m.records_seen      # STAGE 1 coverage
-        report.mined_records_cited = m.records_cited
-        report.mining_residue = m.residue
-        report.mining_residue_enqueued = m.residue_enqueued  # repair-loop outcomes
-        report.mining_residue_drained = m.residue_drained
-        report.mining_residue_rescued = m.residue_rescued
-        report.mining_residue_retired = m.residue_retired
-        report.mining_folded = m.folded  # novelty-gate folds
-
-    # -- 4. retrieval-strength decay (RANK-03's time axis) ----------------
-
-    async def _step_decay(self, report: ConsolidationReport) -> None:
-        """Accessibility decays with disuse (per half-life); trust (confidence) never
-        does — you don't lose the childhood phone number, you lose the ability to
-        summon it. Floor at 0.05: facts fade from the index, never from the store."""
-        assert self._store._db is not None
-        now = int(time.time())
-        half_life_s = max(self._cfg.decay_half_life_days, 0.01) * 86400
-        async with self._store._db.execute(
-            "SELECT id, retrieval_strength, COALESCE(last_accessed_at, updated_at) "
-            "FROM facts WHERE agent_id = ? AND status = 'active' AND retrieval_strength > 0.05",
-            (self._store._agent_id,),
-        ) as cur:
-            rows = await cur.fetchall()
-        updates = []
-        for fact_id, rs, last in rows:
-            idle_s = max(0, now - (last or now))
-            if idle_s < 86400:  # under a day idle: no decay churn
-                continue
-            new_rs = max(0.05, rs * 0.5 ** (idle_s / half_life_s))
-            if abs(new_rs - rs) >= 0.01:
-                updates.append((new_rs, fact_id))
-        if updates:
-            await self._store._db.executemany(
-                "UPDATE facts SET retrieval_strength = ? WHERE id = ?", updates
-            )
-            await self._store._db.commit()
-        report.decayed = len(updates)
-
-    # -- 5. SOFT-cap trim (CONS-05) ---------------------------------------
-
-    async def _step_cap_trim(self, report: ConsolidationReport) -> None:
-        """The capacity bound is enforced HERE, at the consolidation boundary — never at
-        admission (critic BLOCKER 3: hard-cap + background-only was a contradiction).
-        Trim = demote lowest-scoring actives below the index gate. Nothing is deleted."""
-        assert self._store._db is not None
-        cap = self._cfg.max_active_facts
-        now = int(time.time())
-        async with self._store._db.execute(
-            "SELECT COUNT(*) FROM facts WHERE agent_id = ? AND status = 'active' "
-            "AND retrieval_strength >= 0.2",
-            (self._store._agent_id,),
-        ) as cur:
-            (active,) = await cur.fetchone()
-        report.active_over_cap = max(0, active - cap)
-        if active <= cap:
-            return
-        # Exclusion (critic BLOCKER 2): never demote a record promoted in THIS run —
-        # promote-then-self-demote under ordinary over-cap conditions pitted two
-        # success criteria against each other. Deterministic tiebreakers (critic minor)
-        # so victim selection is stable, not SQLite-implementation-defined.
-        grace = self._promoted_ids_this_run or {-1}
-        grace_marks = ",".join("?" * len(grace))
-        async with self._store._db.execute(
-            "SELECT id FROM facts WHERE agent_id = ? AND status = 'active' "
-            "AND retrieval_strength >= 0.2 "
-            f"AND id NOT IN ({grace_marks}) "
-            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) ASC, "
-            "updated_at ASC, id ASC "
-            "LIMIT ?",
-            (self._store._agent_id, *grace, now, active - cap),
-        ) as cur:
-            victims = [r[0] for r in await cur.fetchall()]
-        if victims:
-            await self._store._db.executemany(
-                "UPDATE facts SET retrieval_strength = ? WHERE id = ?",
-                [(_DEMOTED_RS, v) for v in victims],
-            )
-            await self._store._db.commit()
-        report.demoted = len(victims)
-
-    # -- 6. quality proxies (CONS-06) --------------------------------------
-
-    async def _step_proxies(self, report: ConsolidationReport) -> None:
-        assert self._store._db is not None
-        cutoff = int(time.time()) - 14 * 86400
-        async with self._store._db.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) "
-            "FROM facts WHERE agent_id = ? AND source = 'consolidation' AND created_at >= ?",
-            (self._store._agent_id, cutoff),
-        ) as cur:
-            total, churned = await cur.fetchone()
-        report.churn_rate = (churned or 0) / total if total else 0.0
-
-        if report.promoted_keys and self._on_promotion_sample is not None:
-            sample_keys = random.sample(
-                report.promoted_keys, min(3, len(report.promoted_keys))
-            )
-            sample = [await self._store.get_fact(k) for k in sample_keys]
-            try:
-                result = self._on_promotion_sample([f for f in sample if f is not None])
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                log.exception("promotion-sample hook failed (non-fatal)")
-
-    # -- 7. dormancy archival (memory rung 1 — the forgetting half) --------
-
-    async def _step_archive_dormant(self, report: ConsolidationReport) -> None:
-        """Move facts below the store's own proven-useful floor out of the hot store.
-
-        Every other retirement verb in this project DEMOTES (status/retrieval_strength) and
-        the row stays in `facts`, in the FTS haystack, on the memory page — which is how a
-        measured 99%-never-recalled store still costs recall quality on every search. This
-        step is the go-away half: below-the-line rows move to `facts_archive`, restorable
-        byte-identical, nothing deleted.
-
-        GATED OFF BY DEFAULT (`agent.memory.archival.enabled`). Disabled, it returns before
-        reading a single row — zero side effects, the pass byte-identical to before. The
-        gate exists so the owner watches the first real run on a real store (dry-run first,
-        via `localharness memory archive --dry-run`) before it is ever automatic.
-        """
+    async def _step_forget(self, report: ConsolidationReport) -> None:
+        """The forgetting half — gated OFF by default (agent.memory.archival.enabled);
+        the owner flips it after watching a dry run. One implementation shared with the
+        CLI verb."""
         if self._archival is None or not getattr(self._archival, "enabled", False):
             return
         run = await archive_dormant_facts(self._store, cancel=self._cancel)
         report.archived = run.moved
         report.archive_line = run.line
 
-    # -- watermark ---------------------------------------------------------
 
-    async def _set_watermark(self, ts: int) -> None:
-        await _set_meta(self._store, _WATERMARK_KEY, str(ts))
-
-
-@dataclass
-class MicroPassReport:
-    classified: int = 0              # untagged atoms bucket-filed (unit 1)
-    bucket_conflicts_healed: int = 0  # legacy #88 double-bucket atoms collapsed (unit 1)
-    named: int = 0                   # proposed discovery candidates named/folded (unit 2)
-    promoted: int = 0                # recurrence promotions (unit 3, pure SQL)
-    pruned: int = 0                  # stale candidates retired (unit 3, pure SQL)
-    units: int = 0                   # atomic units executed this firing
-    budget_spent_s: float = 0.0
-    cancelled: bool = False
-
-
-class TurnEndMicroPass:
-    """The bounded tail-work drain that fires after a turn's answer is delivered (#90).
-
-    The big idle pass runs everything (mining, chapters, discovery, promotion) but is cancelled
-    ~seconds after it starts, so its TAIL steps — naming discovery candidates, backfilling untagged
-    atoms (remember-legacy), promotion/prune — rarely run live (the audit: 35 candidates stuck at
-    'proposed', remember rows never filed). This micro-pass drains ONLY that tail, in ATOMIC UNITS
-    (at most one small model call + its writes each) oldest-first, under a hard wall-clock budget,
-    reusing the SAME primitives as the idle pass (file_atom_tags, _incorporate, _step_promote_
-    recurring) — never a fork. A new user turn cancels it between units via the same cancel-on-
-    activity machinery the idle pass uses, so nothing is ever left half-done and frequency (every
-    turn end) is what guarantees the drain. The big idle pass is UNCHANGED."""
-
-    def __init__(self, store: "MemoryStore", cfg: "MemoryConsolidationConfig", *,
-                 llm: Any = None, clock: Callable[[], float] | None = None) -> None:
-        self._store = store
-        self._cfg = cfg
-        self._llm = llm
-        self._clock = clock or time.monotonic   # injectable for budget tests
-        self._cancel = asyncio.Event()
-
-    def cancel(self) -> None:
-        self._cancel.set()
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancel.is_set()
-
-    async def run(self) -> MicroPassReport:
-        report = MicroPassReport()
-        if not getattr(self._cfg, "turn_end_micro_pass_enabled", True):
-            return report  # master switch off — inert, today's behavior
-        budget = float(getattr(self._cfg, "turn_end_micro_pass_budget_seconds", 8.0))
-        t0 = self._clock()
-
-        def stop() -> bool:
-            return self._cancel.is_set() or (self._clock() - t0) >= budget
-
-        try:
-            await self._unit_heal_and_classify(report, stop)   # unit group 1
-            await self._unit_name_candidates(report, stop)     # unit group 2
-            await self._unit_promote_and_prune(report, stop)   # unit group 3 (pure SQL)
-        except Exception:
-            log.exception("turn-end micro-pass failed (non-fatal)")
-        report.cancelled = self._cancel.is_set()
-        report.budget_spent_s = self._clock() - t0
-        return report
-
-    def _tag_capable(self) -> bool:
-        """The classify/name units reuse the mint-time tagging machinery, so they honor the same
-        master lever the idle backfill does (mint_tagging_enabled) AND require the model."""
-        return self._llm is not None and getattr(self._cfg, "mint_tagging_enabled", False)
-
-    async def _unit_heal_and_classify(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
-        # (a) heal legacy #88 bucket conflicts — deterministic, no model call.
-        if stop():
-            return
-        healed = await self._store.heal_bucket_conflicts(limit=_MICRO_CLASSIFY_CAP)
-        report.bucket_conflicts_healed += len(healed)
-        report.units += 1
-        # (b) backfill-classify untagged fileable atoms (the _step_classify_untagged target set:
-        # the semantic pool minus already-bucketed atoms — includes remember-sourced facts),
-        # oldest-first, cap 5. Reuses file_atom_tags — the SAME two-pick classifier, not a fork.
-        if not self._tag_capable():
-            return
-        from localharness.memory.clustering import _load_pool
-        from localharness.memory.tag_classify import file_atom_tags
-        bucketed = await self._bucketed_atom_ids()
-        todo = sorted((f for f in await _load_pool(self._store)
-                       if f.node_kind != "schema" and f.id not in bucketed),
-                      key=lambda f: f.id)[:_MICRO_CLASSIFY_CAP]
-        for f in todo:
-            if stop():
-                return
-            topic = f.key.split("/")[1] if f.key.startswith("sem/") else f.key
-            bucket, _child = await file_atom_tags(
-                self._store, self._llm, self._cancel,
-                atom_id=f.id, topic=topic, claim=f.value, provenance="backfill")
-            if bucket is not None:
-                report.classified += 1
-            report.units += 1
-
-    async def _bucketed_atom_ids(self) -> set[int]:
-        """Atom ids already carrying an L1 bucket tag (mirrors _step_classify_untagged's exclusion)."""
-        assert self._store._db is not None
-        async with self._store._db.execute(
-            "SELECT DISTINCT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            "WHERE t.agent_id = ? AND t.parent_id IS NULL", (self._store._agent_id,),
-        ) as cur:
-            return {r[0] for r in await cur.fetchall()}
-
-    async def _unit_name_candidates(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
-        if stop() or not self._tag_capable():
-            return
-        from localharness.memory.discovery import name_eligible_candidates
-        report.named += await name_eligible_candidates(
-            self._store, self._llm, self._cancel, limit=_MICRO_NAME_CAP, stop=stop)
-        report.units += 1
-
-    async def _unit_promote_and_prune(self, report: MicroPassReport, stop: Callable[[], bool]) -> None:
-        # Pure SQL, no model calls — runs even without an LLM.
-        if stop():
-            return
-        # Promotion: reuse the idle pass's recurrence promotion verbatim (share the cancel event so a
-        # user turn cuts it between groups). A throwaway ConsolidationPass carries the exact logic.
-        cp = ConsolidationPass(self._store, self._cfg, llm=None)
-        cp._cancel = self._cancel
-        cp_report = ConsolidationReport()
-        await cp._step_promote_recurring(cp_report)
-        report.promoted += cp_report.promoted
-        report.units += 1
-        if stop():
-            return
-        from localharness.memory.discovery import prune_stale_candidates
-        report.pruned += await prune_stale_candidates(self._store)
-        report.units += 1
+# ---------------------------------------------------------------------------
+# Scheduler — trigger + cancellation owner (unchanged machine-safety shape)
+# ---------------------------------------------------------------------------
 
 
 class ConsolidationScheduler:
-    """CONS-01/02: the trigger + cancellation owner. No daemon exists on this box —
-    the scheduler lives inside the harness process: a staleness check at session start
-    plus an in-session idle timer; any user activity cancels a running pass instantly
-    and resets the timer."""
+    """The trigger + cancellation owner. No daemon exists on this box — the scheduler
+    lives inside the harness process: a staleness check at session start plus an
+    in-session idle timer; any user activity cancels a running pass instantly and
+    resets the timer."""
 
     def __init__(
         self,
@@ -1039,18 +510,16 @@ class ConsolidationScheduler:
         agent_id: str,
         cfg: "MemoryConsolidationConfig",
         *,
+        engine: Optional["ResonanceEngine"] = None,
         llm: Any = None,
-        embedder: Any = None,
-        on_promotion_sample: Optional[Callable[[list[Any]], Awaitable[None] | None]] = None,
         archival: Optional["MemoryArchivalConfig"] = None,
     ) -> None:
         self._store = store
         self._bus = bus
         self._agent_id = agent_id
         self._cfg = cfg
+        self._engine = engine
         self._llm = llm
-        self._embedder = embedder
-        self._on_promotion_sample = on_promotion_sample
         self._archival = archival   # agent.memory.archival — None reads as OFF
         self._handles: list["SubscriptionHandle"] = []
         self._running: Optional[ConsolidationPass] = None
@@ -1059,10 +528,6 @@ class ConsolidationScheduler:
         self._last_activity = time.monotonic()
         self._turn_in_flight = False  # #78: an agent turn is mid-flight (defers/cancels passes)
         self.last_report: Optional[ConsolidationReport] = None
-        # #90: the turn-end micro-pass (bounded tail-work drain), tracked alongside the full pass so
-        # the two never double-run and a new user turn cancels whichever is live.
-        self._micro: Optional[TurnEndMicroPass] = None
-        self._micro_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         if not self._cfg.enabled:
@@ -1071,12 +536,9 @@ class ConsolidationScheduler:
         self._handles.append(
             self._bus.subscribe(UserMessage, self._on_user_activity)
         )
-        # #78: track the agent turn in flight. UserMessage alone was insufficient — it fires at
-        # turn START, so the idle clock ran from there and a long turn let idle_minutes elapse
-        # while the agent was still working, launching a pass onto the same serial inference
-        # gate. TurnStarted -> (TurnCompleted|TurnFailed) is a guaranteed 1:1 bracket per turn.
-        # Filter to THIS agent_id: nested subagent turns ride the same bus with their own
-        # agent_id and are already inside the root turn's bracket — they must not toggle it.
+        # #78: track the agent turn in flight. TurnStarted -> (TurnCompleted|TurnFailed) is a
+        # guaranteed 1:1 bracket per turn. Filter to THIS agent_id: nested subagent turns ride
+        # the same bus with their own agent_id inside the root turn's bracket.
         self._handles.append(
             self._bus.subscribe(TurnStarted, self._on_turn_started, agent_id=self._agent_id)
         )
@@ -1098,14 +560,13 @@ class ConsolidationScheduler:
             self._timer_task.cancel()
             self._timer_task = None
         self.cancel_running()
-        for task in (self._run_task, self._micro_task):
-            if task is not None:
-                try:
-                    # Bounded (critic minor 3): a pathologically slow step must not stall
-                    # process shutdown; the cancel above makes steps exit at their next check.
-                    await asyncio.wait_for(task, timeout=15.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    task.cancel()
+        if self._run_task is not None:
+            try:
+                # Bounded: a pathologically slow step must not stall process shutdown;
+                # the cancel above makes steps exit at their next check.
+                await asyncio.wait_for(self._run_task, timeout=15.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                self._run_task.cancel()
 
     async def _on_user_activity(self, event: Any) -> None:
         """A user turn arrived: the box is NOT idle. Cancel any in-flight pass (it will
@@ -1114,63 +575,39 @@ class ConsolidationScheduler:
         self.cancel_running()
 
     async def _on_turn_started(self, event: Any) -> None:
-        """An agent turn is mid-flight (#78): defer STARTING a pass (via the launch() guard)
-        and cancel any RUNNING one — the same cooperative yield as user activity, so the pass
-        releases the serial inference gate at its next per-step check. Does NOT reset the idle
-        clock: idle is measured from turn END so a long turn can't look idle mid-flight."""
+        """An agent turn is mid-flight (#78): defer STARTING a pass (via the launch()
+        guard) and cancel any RUNNING one. Does NOT reset the idle clock: idle is
+        measured from turn END so a long turn can't look idle mid-flight."""
         self._turn_in_flight = True
         self.cancel_running()
 
     async def _on_turn_ended(self, event: Any) -> None:
-        """Turn finished (TurnCompleted or TurnFailed): clear the in-flight gate, reset the idle
-        clock so idle_minutes is counted from turn END (#78), and — the answer now delivered —
-        fire the bounded turn-end micro-pass to drain the tagging/naming tail (#90)."""
+        """Turn finished: clear the in-flight gate and reset the idle clock so
+        idle_minutes counts from turn END (#78)."""
         self._turn_in_flight = False
         self._last_activity = time.monotonic()
-        self.launch_micro()
 
     def cancel_running(self) -> None:
         if self._running is not None:
             self._running.cancel()
-        if self._micro is not None:   # #90: a new turn/user message cuts the micro-pass short too
-            self._micro.cancel()
 
     def launch(self) -> None:
-        """Fire a pass as a background task (idempotent while one is running; deferred while an
-        agent turn is in flight — #78, or while the turn-end micro-pass is running — #90). Bench/
-        eval never call this (they run ConsolidationPass directly), so their path is unaffected."""
+        """Fire a pass as a background task (idempotent while one is running; deferred
+        while an agent turn is in flight — #78). Bench/eval never call this (they run
+        ConsolidationPass directly)."""
         if self._turn_in_flight:
             return
         if self._run_task is not None and not self._run_task.done():
             return
-        if self._micro_task is not None and not self._micro_task.done():
-            return  # #90: don't run the full pass on top of a micro-pass (one inference gate)
         self._running = ConsolidationPass(
-            self._store, self._cfg, llm=self._llm, embedder=self._embedder,
-            on_promotion_sample=self._on_promotion_sample, archival=self._archival,
+            self._store, self._cfg, engine=self._engine, llm=self._llm,
+            archival=self._archival,
         )
         self._run_task = asyncio.create_task(self._run_and_record())
 
-    def launch_micro(self) -> None:
-        """#90: fire the turn-end micro-pass as a background task. Skips when disabled, when a turn
-        is back in flight, or when EITHER pass is already running (no double-run on the one serial
-        inference gate). Idempotent while one is running."""
-        if not getattr(self._cfg, "turn_end_micro_pass_enabled", True):
-            return
-        if self._turn_in_flight:
-            return
-        if self._run_task is not None and not self._run_task.done():
-            return
-        if self._micro_task is not None and not self._micro_task.done():
-            return
-        self._micro = TurnEndMicroPass(self._store, self._cfg, llm=self._llm)
-        self._micro_task = asyncio.create_task(self._run_micro_and_record())
-
     async def _emit_status(self, *, started: bool) -> None:
-        """Fire-and-forget dreaming-dot signal for the interactive REPL (#20). The terminal
-        channel shows/clears a quiet '· dreaming…' status on these; non-interactive channels
-        ignore them. A bus fault is swallowed — the pass must never break, and the terminal
-        clears the dot on the next turn regardless."""
+        """Fire-and-forget dreaming-dot signal for the interactive REPL (#20). A bus
+        fault is swallowed — the pass must never break on a status dot."""
         from localharness.core.events import ConsolidationFinished, ConsolidationStarted
         event = (ConsolidationStarted if started else ConsolidationFinished)(agent_id=self._agent_id)
         try:
@@ -1184,56 +621,26 @@ class ConsolidationScheduler:
             assert self._running is not None
             self.last_report = await self._running.run()
             if self.last_report.cancelled:
-                log.info("consolidation pass cancelled by user activity")
+                log.info("dreaming pass cancelled by user activity")
             else:
                 log.info(
-                    "consolidation: folded=%d promoted=%d decayed=%d demoted=%d churn=%.2f%s",
-                    self.last_report.folded, self.last_report.promoted,
-                    self.last_report.decayed, self.last_report.demoted,
-                    self.last_report.churn_rate,
-                    # The forgetting half is owner-visible or it did not happen — the count
-                    # AND the line it was drawn at, so a surprising number is auditable.
+                    "dreaming: embedded=%d windows=%d touched=%d folded=%d groups=%d/%d settled=%d%s",
+                    self.last_report.embedded_backfill, self.last_report.windows_digested,
+                    self.last_report.standing_touched, self.last_report.folded,
+                    self.last_report.groups_named, self.last_report.groups_observed,
+                    self.last_report.writers_settled,
+                    # The forgetting half is owner-visible or it did not happen.
                     f" — {self.last_report.archive_report_line()}"
                     if self.last_report.archived else "",
                 )
         except Exception:
-            log.exception("consolidation pass crashed (non-fatal)")
+            log.exception("dreaming pass crashed (non-fatal)")
         finally:
             self._running = None
             await self._emit_status(started=False)
 
-    async def _run_micro_and_record(self) -> None:
-        """#90: run one turn-end micro-pass and publish a TurnEndMicroPassCompleted ledger record of
-        what it drained (classify/name/promote/prune/heal counts, budget spent, whether cancelled).
-        Never breaks the loop — a crash or emit fault is swallowed."""
-        try:
-            assert self._micro is not None
-            report = await self._micro.run()
-            from localharness.core.events import TurnEndMicroPassCompleted
-            try:
-                await self._bus.publish(TurnEndMicroPassCompleted(
-                    agent_id=self._agent_id, classified=report.classified, named=report.named,
-                    promoted=report.promoted, pruned=report.pruned,
-                    bucket_conflicts_healed=report.bucket_conflicts_healed,
-                    units=report.units, budget_spent_s=report.budget_spent_s,
-                    cancelled=report.cancelled))
-            except Exception:
-                log.debug("micro-pass event emit failed (non-fatal)", exc_info=True)
-            if (report.classified or report.named or report.promoted or report.pruned
-                    or report.bucket_conflicts_healed):
-                log.info("turn-end micro-pass: classified=%d named=%d promoted=%d pruned=%d "
-                         "healed=%d units=%d %.2fs%s", report.classified, report.named,
-                         report.promoted, report.pruned, report.bucket_conflicts_healed,
-                         report.units, report.budget_spent_s,
-                         " (cancelled)" if report.cancelled else "")
-        except Exception:
-            log.exception("turn-end micro-pass crashed (non-fatal)")
-        finally:
-            self._micro = None
-
     async def should_run(self) -> bool:
-        """Session-start staleness: run when the watermark is old AND there is work
-        (pending candidates, staged reads, or an over-cap active tier)."""
+        """Session-start staleness: run when the watermark is old AND there is work."""
         if not self._cfg.enabled:
             return False
         raw = await _get_meta(self._store, _WATERMARK_KEY)
@@ -1245,42 +652,33 @@ class ConsolidationScheduler:
         return await self._has_work()
 
     async def _has_work(self) -> bool:
+        """Work = undigested stream (ledger bytes past the marks), a fact without a
+        vector, or staged reads awaiting the fold. Cheap: two SELECTs and a stat walk."""
         assert self._store._db is not None
-        # Scope the pending probe to gate/-keyed candidates (critic minor 1): predgate/ +
-        # correction/quarantine/ telemetry carry pending_consolidation forever (they never
-        # match the gate/ promotion prefix, so _untag_candidate never clears them), which
-        # otherwise pins _has_work True every sitting and defeats the staleness optimization.
-        # gate/ is exactly the set _step_promote_recurring promotes — WriteGate's convention.
-        # Disputed rows are likewise excluded (critic re-verdict residual): a correction
-        # supersede on a staged gate/ candidate keeps the gate/ key but carries
-        # tier:correction_pending, which promotion skips — so it can never be untagged and
-        # must not count as work either. Mirrors _step_promote_recurring's exclusion.
-        # Phase-36 DELIBERATE premise change (the 4th clause): reconciliation is the ONLY
-        # consumer that CLEARS tier:correction_pending (promote-recurring excludes it), so when
-        # reconcile is enabled an active quarantined correction IS work — the idle scheduler
-        # must fire the consumer instead of optimizing the pass away. When reconcile is disabled
-        # the old behavior holds EXACTLY (Pitfall 3's staleness optimization intact for non-36
-        # configs). surprising_failure rows stay EXCLUDED here on purpose: the chapter-writer
-        # drains them piggybacking on real-work passes (36-04), never re-pinning this probe.
-        q = (
+        async with self._store._db.execute(
             "SELECT EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND access_count_staged > 0), "
             "EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND status = 'active' "
-            "       AND tags LIKE '%\"pending_consolidation\"%' AND key LIKE 'gate/%' "
-            "       AND tags NOT LIKE '%\"tier:correction_pending\"%'), "
-            "(SELECT COUNT(*) FROM facts WHERE agent_id = :a AND status = 'active' "
-            "       AND retrieval_strength >= 0.2), "
-            "EXISTS(SELECT 1 FROM facts WHERE agent_id = :a AND status = 'active' "
-            "       AND tags LIKE '%\"tier:correction_pending\"%')"
-        )
-        async with self._store._db.execute(q, {"a": self._agent_id}) as cur:
-            staged, pending, active, corrections = await cur.fetchone()
-        reconcile_work = corrections and getattr(self._cfg, "reconcile_enabled", False)
-        return bool(staged or pending or reconcile_work or active > self._cfg.max_active_facts)
+            "       AND embedding IS NULL)",
+            {"a": self._agent_id},
+        ) as cur:
+            staged, unembedded = await cur.fetchone()
+        if staged or unembedded:
+            return True
+        marks = await self._store.get_digest_marks()
+        sessions_dir = self._store._agent_dir / "sessions"
+        if sessions_dir.is_dir():
+            for path in sessions_dir.glob("*.jsonl"):
+                try:
+                    if path.stat().st_size > marks.get(path.name, 0):
+                        return True
+                except OSError:
+                    continue
+        return False
 
     async def _idle_timer_loop(self) -> None:
         """In-session idle trigger: no user activity for idle_minutes → launch a pass.
-        The body is exception-guarded (critic M5): one transient _has_work error must
-        not silently kill idle consolidation for the rest of the session."""
+        The body is exception-guarded: one transient _has_work error must not silently
+        kill idle dreaming for the rest of the session."""
         interval = max(5.0, self._cfg.idle_minutes * 60 / 4)
         fired_for_this_idle = False
         while True:
@@ -1301,7 +699,8 @@ class ConsolidationScheduler:
 
 
 # ---------------------------------------------------------------------------
-# Tiny agent-scoped KV (watermark) — idempotent DDL, no schema-version bump
+# Tiny agent-scoped KV (watermark + embed-model identity). The schema-v10 migration
+# creates the same table; the idempotent DDL here keeps pre-v10 callers working.
 # ---------------------------------------------------------------------------
 
 async def _ensure_meta(store: "MemoryStore") -> None:

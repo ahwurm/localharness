@@ -1063,17 +1063,24 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             scope=getattr(agent_config.memory, "recall_scope", "workspace"),
         )
 
+    # The model as the similarity engine (memory spec role 2): ONE lazy-loading engine
+    # shared by the memory tools and the dreaming pass. Construction is free (the model
+    # loads on first use); an unusable engine fails LOUDLY at the call site — there is
+    # deliberately no fallback ranking behind it.
+    resonance_engine = None
+    if memory_store is not None:
+        from localharness.memory.resonance import ResonanceEngine
+        resonance_engine = ResonanceEngine(
+            getattr(agent_config.memory, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
+        )
+
     # --- Resource-owning window (#43) ---
     # Everything constructed AFTER the store opens must be torn down by the finally below. A hard
     # failure in this window (e.g. the TokenCounter fail-loud) otherwise skips cleanup and leaks
     # aiosqlite's NON-DAEMON worker thread — hanging interpreter shutdown forever. Pre-bind every
     # component the finally inspects so an early failure can't UnboundLocalError past the close.
-    write_gate = None
     session_acc = None
     consolidation_scheduler = None
-    predictive_gate = None
-    user_signal_detector = None
-    predictive_write_gate = None
     mcp_manager = None
     _session_started = False
     _exit_reason = "complete"
@@ -1093,18 +1100,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             except Exception as exc:
                 warnings.append(f"session-start: {exc}")
 
-        # Prediction-error write gate (WRITE-03/06): harness-initiated memory writes from bus
-        # signals. Default-on, config-off (agent.memory.write_gate_enabled) — cruncher-style.
-        write_gate = None
-        if memory_store is not None and getattr(agent_config.memory, "write_gate_enabled", True):
-            try:
-                from localharness.memory.gate import WriteGate
-                write_gate = WriteGate(memory_store, bus, agent_name_str)
-                await write_gate.open()
-            except Exception as exc:
-                warnings.append(f"memory write-gate: {exc}")
-                write_gate = None
-
         # SESS-02/05: sitting-scoped counters feeding the payload-first close-out summary
         # (zero model calls — derived from bus signals the gate already composes payload-first).
         # Same agent_id-filtered bus seam as the write gate; closed before the summary reads.
@@ -1117,17 +1112,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             except Exception as exc:
                 warnings.append(f"session-accumulator: {exc}")
 
-        # Idle-time consolidation (CONS-01..06): session-start staleness check + in-session
-        # idle timer, cooperatively cancelled by any user turn. Phase 36: the LLM replay seam is
-        # now ON in production — the real LLMClient is bridged through LLMTextAdapter (36-03, the
-        # SINGLE cancellable + char-bounded idle path) and passed as llm=, so the pass can write
-        # chapters, reconcile the correction queue, and mine transcripts. Each of those is gated
-        # per-step by an agent.memory.consolidation.* axis (schema_writer/reconcile/mining_enabled)
-        # AND early-returns when llm is None, so the deterministic core stays byte-unchanged. The
-        # try/except soft-degrades a wiring fault back to the deterministic pass (warnings.append).
-        # on_promotion_sample=None DEFERRED (CONS-06): the SEMA-05 report already surfaces generated
-        # chapters to the owner; wiring the Discord sample hook needs channel-construction reordering
-        # (§10), out of scope here. Named seam, same contract as llm.
+        # Idle-time dreaming: session-start staleness check + in-session idle timer,
+        # cooperatively cancelled by any user turn. The pass digests the event streams
+        # through the resonance engine, binds/names groups via the bridged LLM (the
+        # SINGLE cancellable + char-bounded idle path), settles the bet ledger, and —
+        # behind its own default-OFF gate — archives what no longer resonates. The
+        # try/except soft-degrades a wiring fault to no background memory work.
         consolidation_scheduler = None
         _cons_cfg = getattr(agent_config.memory, "consolidation", None)
         if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
@@ -1135,53 +1125,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 from localharness.memory.consolidation import ConsolidationScheduler
                 from localharness.memory.idle_llm import LLMTextAdapter
                 consolidation_scheduler = ConsolidationScheduler(
-                    memory_store, bus, agent_name_str, _cons_cfg, llm=LLMTextAdapter(llm),
-                    # Memory rung 1: the forgetting half rides the same idle pass, behind
-                    # its own default-OFF gate (agent.memory.archival.enabled).
+                    memory_store, bus, agent_name_str, _cons_cfg,
+                    # The model as the similarity engine: dreaming digests the event
+                    # streams through the resonance engine's space; the bridged LLM
+                    # names the groups it binds (both budget-capped + cancellable).
+                    engine=resonance_engine, llm=LLMTextAdapter(llm),
+                    # The forgetting half rides the same idle pass, behind its own
+                    # default-OFF gate (agent.memory.archival.enabled).
                     archival=getattr(agent_config.memory, "archival", None),
                 )
                 await consolidation_scheduler.start()
             except Exception as exc:
                 warnings.append(f"memory consolidation: {exc}")
                 consolidation_scheduler = None
-
-        # Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
-        # score every outcome; user-signal triggers log labeled prediction errors. Score
-        # everything, gate nothing — pure measurement feeding Phase 35's thresholds. Additive
-        # bus subscribers only (WriteGate shape); zero loop changes, zero model calls.
-        predictive_gate = None
-        user_signal_detector = None
-        _pg_cfg = getattr(agent_config.memory, "predictive_gate", None)
-        if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled:
-            try:
-                from localharness.memory.predictive_gate import PredictiveGate
-                predictive_gate = PredictiveGate(memory_store, bus, agent_name_str, _pg_cfg)
-                await predictive_gate.open()
-            except Exception as exc:
-                warnings.append(f"predictive-gate: {exc}")
-                predictive_gate = None
-            try:
-                from localharness.memory.user_signals import UserSignalDetector
-                user_signal_detector = UserSignalDetector(memory_store, bus, agent_name_str, _pg_cfg)
-                await user_signal_detector.open()
-            except Exception as exc:
-                warnings.append(f"user-signals: {exc}")
-                user_signal_detector = None
-
-        # PredictiveWriteGate (Phase 35, PGATE-01/02/03): the LIVE write decision — turns 34's
-        # already-published SurpriseScored + correction-worded UserMessage into gated sub-0.7 fact
-        # writes. Sibling subscriber (WriteGate shape), reusing the same _pg_cfg; gated on write_live
-        # (the pre-committed KILL-revert lever) AND enabled. Its OWN try/except so a wiring fault
-        # soft-degrades to motif-only capture and never crashes start.
-        predictive_write_gate = None
-        if memory_store is not None and _pg_cfg is not None and _pg_cfg.enabled and getattr(_pg_cfg, "write_live", True):
-            try:
-                from localharness.memory.predictive_write_gate import PredictiveWriteGate
-                predictive_write_gate = PredictiveWriteGate(memory_store, bus, agent_name_str, _pg_cfg)
-                await predictive_write_gate.open()
-            except Exception as exc:
-                warnings.append(f"predictive-write-gate: {exc}")
-                predictive_write_gate = None
 
         # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
         # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
@@ -1203,13 +1159,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # Both READ tools take the router, so the scope knob applies to on-demand recall
                 # exactly as it applies to injection (criterion 4 — one object, not per-tool
                 # checks).
-                await tool_registry.register(MemorySearchTool(recall_router), scope="global")
+                await tool_registry.register(
+                    MemorySearchTool(recall_router, engine=resonance_engine), scope="global"
+                )
                 await tool_registry.register(MemoryGetTool(recall_router), scope="global")
                 # remember() WRITES — it keeps the session's own store whatever recall_scope says.
-                # #87: wire the bridged LLM so remember() files its atom (bucket + child) at save
-                # time through the same cancellable, char-bounded idle path as mint-time tagging.
+                # The engine embeds the fact at write time; the bridged LLM performs the
+                # same-claim re-sighting look (cancellable, budget-capped).
                 await tool_registry.register(
-                    MemoryRememberTool(memory_store, llm=LLMTextAdapter(llm) if llm is not None else None),
+                    MemoryRememberTool(
+                        memory_store,
+                        llm=LLMTextAdapter(llm) if llm is not None else None,
+                        engine=resonance_engine,
+                    ),
                     scope="global",
                 )
             if agent_config.context.tool_result_eviction:
@@ -1700,7 +1662,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Consolidation -> WriteGate -> PredictiveGate/UserSignals/PredictiveWriteGate -> end_session -> MemoryStore -> LLMClient ---
+        # --- Ordered shutdown: MCP -> Dreaming -> end_session -> MemoryStore -> LLMClient ---
         # (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
@@ -1714,37 +1676,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 await consolidation_scheduler.stop()
             except Exception:
                 pass
-        if write_gate:
-            try:
-                await write_gate.close()
-            except Exception:
-                pass
-        # PredictiveGate / UserSignalDetector (Phase 34): additive bus subscribers that call
-        # store methods on fire — close them AFTER write_gate, while the store is still open,
-        # and BEFORE the close-out summary reads (same discipline as session_acc below).
-        if predictive_gate:
-            try:
-                await predictive_gate.close()
-            except Exception:
-                pass
-        if user_signal_detector:
-            try:
-                await user_signal_detector.close()
-            except Exception:
-                pass
-        # PredictiveWriteGate (Phase 35): writes facts via store_fact on fire, so close it
-        # AFTER user_signal_detector (no racing capture) while the store is still OPEN and
-        # BEFORE end_session reads the close-out summary (research Pitfall 4 — same discipline
-        # as write_gate/predictive_gate above).
-        if predictive_write_gate:
-            try:
-                await predictive_write_gate.close()
-            except Exception:
-                pass
-        # end_session needs the store OPEN (it writes) but the gate CLOSED (no racing
-        # capture mid-summary) and consolidation STOPPED (no in-flight promotion mutating
-        # facts mid-read) — hence here, after write_gate.close(), before the store closes
-        # (research Pitfall 4).
+        # end_session needs the store OPEN (it writes) and dreaming STOPPED (no in-flight
+        # pass mutating facts mid-read) — hence here, before the store closes.
         if session_acc is not None:
             try:
                 await session_acc.close()  # stop counting before the summary reads

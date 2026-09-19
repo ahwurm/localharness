@@ -239,46 +239,23 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.context.tool_result_evict_threshold_chars" in entries
     assert "agent.max_subagent_depth" in entries  # P2: delegation-depth cap is addressable
     assert "agent.cruncher.exec_enabled" in entries  # P-CRUNCH B: cruncher exec is addressable
-    assert "agent.memory.predictive_gate.write_live" in entries  # Phase 35 PGATE: the KILL-revert lever is addressable
-    # Phase 36 (the chapter-writer): the eight agent.memory.consolidation.* idle-LLM axes.
-    assert "agent.memory.consolidation.schema_writer_enabled" in entries
-    assert "agent.memory.consolidation.reconcile_enabled" in entries
-    assert "agent.memory.consolidation.mining_enabled" in entries
-    assert "agent.memory.consolidation.cluster_min_sessions" in entries
-    assert "agent.memory.consolidation.schema_write_budget" in entries
-    assert "agent.memory.consolidation.schema_depth_cap" in entries
-    assert "agent.memory.consolidation.reconcile_ttl_looks" in entries
-    assert "agent.memory.consolidation.mining_write_budget" in entries
+    # Resonance rebuild (2026-09-19): the embedding-model axis is addressable; the
+    # gate/chapter/mining knobs are GONE with their mechanisms.
+    assert "agent.memory.embedding_model" in entries
+    assert "agent.memory.consolidation.iteration_cap" in entries
+    assert "agent.memory.archival.enabled" in entries
+
     # Tag-graph (Amendment 4): two more agent.memory.consolidation.* axes.
-    assert "agent.memory.consolidation.mint_tagging_enabled" in entries
-    assert "agent.memory.consolidation.tag_discovery_enabled" in entries
     # Phase 36.2 (RULING-D): tags-as-grouping-truth KILL-revert lever is registry-addressable.
-    assert "agent.memory.consolidation.tag_grouping_enabled" in entries
     # FIX 3: mining chunk size + known-atoms window are now config knobs (two more axes).
-    assert "agent.memory.consolidation.mining_corpus_char_cap" in entries
-    assert "agent.memory.consolidation.mining_known_atoms_cap" in entries
     # FIX 4: mining's operative conversational surface (echo-collapse guard) is a config knob.
-    assert "agent.memory.consolidation.mining_operative_message_types" in entries
     # Residue ledger (core repair loop): enabled + K + per-pass record budget + intake filter.
-    assert "agent.memory.consolidation.mining_residue_enabled" in entries
-    assert "agent.memory.consolidation.mining_residue_attempt_cap" in entries
-    assert "agent.memory.consolidation.mining_residue_record_budget" in entries
-    assert "agent.memory.consolidation.mining_residue_min_chars" in entries
     # Novelty gate (mining precision): paraphrase-fold threshold.
-    assert "agent.memory.consolidation.mining_novelty_fold_threshold" in entries
     # Embedding edge signal (clustering tier-1): cosine threshold for the 2-factor link.
-    assert "agent.memory.consolidation.clustering_embed_sim_threshold" in entries
     # Chapter refresh (run-14 fix): member-overlap threshold for identity adoption.
-    assert "agent.memory.consolidation.chapter_refresh_overlap" in entries
     # Chapter containment guard (validation-20260712 fix): the set-containment kill lever.
-    assert "agent.memory.consolidation.chapter_containment_guard_enabled" in entries
     # Absorption guard (d1v2 gpu_ops-into-subagents weld): the kill lever + its two overlap knobs.
-    assert "agent.memory.consolidation.absorption_guard_enabled" in entries
-    assert "agent.memory.consolidation.absorption_guard_size_ratio" in entries
-    assert "agent.memory.consolidation.absorption_guard_min_overlap" in entries
     # Chapter staleness re-check (B5 / ANALYSIS §7 fix): the kill lever + its per-pass work cap.
-    assert "agent.memory.consolidation.chapter_staleness_recheck_enabled" in entries
-    assert "agent.memory.consolidation.chapter_staleness_recheck_cap" in entries
     # issue #15: the opt-in confinement lever is registry-addressable.
     assert "agent.permissions.workspace_root" in entries
     # #62: the inference queue-wait ceiling is a provider-level tuning knob.
@@ -302,9 +279,14 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 223, (
-        f"catalogue should be 223 entries (93 after RLM removal + agent.cruncher.* x3 +"
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.trace_ambient_injection x1 [owner reversal 2026-07-17: ambient-injection trace kill-switch] + agent.memory.consolidation.* x36 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + absorption guard x3 [d1v2] + chapter staleness re-check x2 + turn-end micro-pass x2 [#90] + injection co-fire weight x1 [owner reversal 2026-07-17]] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x10 [managed vLLM — init guided setup + local_models full-swap registry + gpu GPU-lock flag (0.11 Phase A, additive)] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x3 [type-anytime input box x2 + show_reasoning x1 (live reasoning stream)] + agent.baton_gate.enabled x1 [#84 baton gate kill-switch] + permissions.budget.max_tool_calls x2 [FIX 3: tool-dispatch cap decoupled from max_actions, org+agent scopes] + agent.baton_gate.max_nudges x1 [bounded-nudge knob] + agent.baton_gate.max_nudges x1 [bounded-nudge knob] + extra_endpoints x1 [0.10.0 model tree: peer OpenAI-compatible endpoints, list leaf] + active_endpoint.* x5 [0.10.0 model tree: persisted cross-endpoint selection — name/base_url/provider_type/model/api_key] + context.model_context_overrides x2 [#132 per-model context pins, org+agent scopes] + agent.repetition_guard.* x3 [#152 degenerate-repetition guard: kill-switch + min_lines + max_unique_ratio] + agent.memory.recall_scope x1 [v0.13 MEMS-02: which physical STORE recall reads from — workspace|global|both] + permissions.ask.* x40 [v0.14 PRD §3.1/§3.5 — 3 gate knobs (network_hosts, timeout_s, mcp_trusted_servers) + 17 rule-set overrides (13 + source_commands + git_config_dangerous_keys, critic findings F3a/F3b + protected_paths_system + protected_config_dir_entries [v0.14.1 auto-mode default: the machine's own directories, and the few harness config files that decide what runs]), org+agent scopes] - permissions.allow_patterns x2 [removed: grants live in the global store, never config — PRD §3.3] + agent.tools_required x1 [2026-09-17: the caller discards a zero-tool-call run, so the act-guard must not offer the CONFIRMED escape hatch; agent scope only] + agent.memory.archival.enabled x1 [memory rung 1: the dormancy-archival rollout gate — OFF by default; the archive LINE is computed from the store's own proven-useful floor, never configured]), got {len(entries)}"
+    assert len(entries) == 178, (
+        "catalogue should be 178 entries: the 223-entry v0.14 ledger minus the resonance "
+        "rebuild's removals (agent.memory.write_gate_enabled x1, "
+        "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
+        "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
+        "mechanisms) plus agent.memory.embedding_model x1 "
+        "(the subject-family resonance space is owner-addressable). "
+        f"got {len(entries)}"
     )
 
 
@@ -385,9 +367,14 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 223, (
-        f"catalogue should be 223 entries (93 after RLM removal + agent.cruncher.* x3 +"
-        f"org.enforce_capability_floor x1 + agent.memory.write_gate_enabled x1 [v2.0 WRITE-03] + agent.memory.trace_ambient_injection x1 [owner reversal 2026-07-17: ambient-injection trace kill-switch] + agent.memory.consolidation.* x36 [v2.0 CONS-01 x6 + Phase 36 chapter-writer x8 + tag-graph x2 + FIX-3 mining chunk/known caps x2 + FIX-4 operative-surface x1 + residue ledger x4 + novelty fold x1 + clustering embed x1 + chapter refresh x1 + Phase 36.2 RULING-D tag-grouping x1 + chapter containment guard x1 + absorption guard x3 [d1v2] + chapter staleness re-check x2 + turn-end micro-pass x2 [#90] + injection co-fire weight x1 [owner reversal 2026-07-17]] + agent.memory.predictive_gate.* x13 [Phase 34 COLL + Phase 35 write_live] + server.* x10 [managed vLLM — init guided setup + local_models full-swap registry + gpu GPU-lock flag (0.11 Phase A, additive)] + permissions.workspace_root x2 [issue #15, org+agent scopes] + permissions.defaults_revision x2 [issue #15, org+agent scopes] + provider.inference_queue_wait_seconds x1 [#62 gate-wait ceiling] + agent.stuck_detector.max_nudges_per_turn x1 [#81 per-turn nudge cap] + terminal.* x3 [type-anytime input box x2 + show_reasoning x1 (live reasoning stream)] + agent.baton_gate.enabled x1 [#84 baton gate kill-switch] + permissions.budget.max_tool_calls x2 [FIX 3: tool-dispatch cap decoupled from max_actions, org+agent scopes] + agent.baton_gate.max_nudges x1 [bounded-nudge knob] + agent.baton_gate.max_nudges x1 [bounded-nudge knob] + extra_endpoints x1 [0.10.0 model tree: peer OpenAI-compatible endpoints, list leaf] + active_endpoint.* x5 [0.10.0 model tree: persisted cross-endpoint selection — name/base_url/provider_type/model/api_key] + context.model_context_overrides x2 [#132 per-model context pins, org+agent scopes] + agent.repetition_guard.* x3 [#152 degenerate-repetition guard: kill-switch + min_lines + max_unique_ratio] + agent.memory.recall_scope x1 [v0.13 MEMS-02: which physical STORE recall reads from — workspace|global|both] + permissions.ask.* x40 [v0.14 PRD §3.1/§3.5 — 3 gate knobs (network_hosts, timeout_s, mcp_trusted_servers) + 17 rule-set overrides (13 + source_commands + git_config_dangerous_keys, critic findings F3a/F3b + protected_paths_system + protected_config_dir_entries [v0.14.1 auto-mode default: the machine's own directories, and the few harness config files that decide what runs]), org+agent scopes] - permissions.allow_patterns x2 [removed: grants live in the global store, never config — PRD §3.3] + agent.tools_required x1 [2026-09-17: the caller discards a zero-tool-call run, so the act-guard must not offer the CONFIRMED escape hatch; agent scope only] + agent.memory.archival.enabled x1 [memory rung 1: the dormancy-archival rollout gate — OFF by default; the archive LINE is computed from the store's own proven-useful floor, never configured]), got {len(entries)}"
+    assert len(entries) == 178, (
+        "catalogue should be 178 entries: the 223-entry v0.14 ledger minus the resonance "
+        "rebuild's removals (agent.memory.write_gate_enabled x1, "
+        "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
+        "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
+        "mechanisms) plus agent.memory.embedding_model x1 "
+        "(the subject-family resonance space is owner-addressable). "
+        f"got {len(entries)}"
     )
 
 
@@ -402,17 +389,7 @@ def test_role_sections_defaults_empty():
     assert a.role_sections.output == ""
 
 
-def test_write_budgets_express_manifest_scale_via_ctor():
-    """REVIEW FIX (36.1 pass): the designed-month eval derives schema_write_budget from its
-    manifest (len(topics)+1) and passes it to the CTOR, where pydantic validates immediately —
-    the old le=50 ceiling made a 50+-topic manifest a construction-time crash (and pushed
-    mining_write_budget into a post-construction assignment that bypassed validation entirely).
-    Both budgets must accept manifest/production scale through the validated constructor."""
-    from localharness.config.models import MemoryConsolidationConfig
 
-    cfg = MemoryConsolidationConfig(schema_write_budget=500, mining_write_budget=500)
-    assert cfg.schema_write_budget == 500
-    assert cfg.mining_write_budget == 500
 
 
 # ------------------------------------------------------------------ #

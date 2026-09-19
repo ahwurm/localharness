@@ -34,12 +34,8 @@ async def _seeded_store(tmp_path: Path) -> MemoryStore:
     store = MemoryStore(agent_id="test-agent", division_id="d", org_id="default",
                         base_dir=str(tmp_path))
     await store.open()
-    f = await store.store_fact(key="port", value="vLLM serves on port 8081", confidence=0.9,
-                               source="remember")
-    proj = await store.get_tag("project")
-    ops = await store.get_tag("ops")
-    await store.add_bucket_tag(f.id, proj.id)
-    await store.add_atom_tag(f.id, ops.id)
+    await store.store_fact(key="port", value="vLLM serves on port 8081", confidence=0.9,
+                           source="remember")
     return store
 
 
@@ -66,7 +62,7 @@ async def test_bare_memory_is_claimed_not_rejected_as_unknown(tmp_path):
         handled = await repl._handle_slash("/memory")
         assert handled is True
         out = channel.messages[-1]
-        assert "project" in out and "ops" in out  # overview tree rendered (nested branches)
+        assert "8081" in out                  # recent-memory row rendered
         assert "Unknown command" not in out   # NOT the unknown-slash reject path
         agent.run_turn.assert_not_called()    # deterministic, no LLM turn
         bus.publish.assert_not_called()
@@ -92,7 +88,7 @@ async def test_memory_show_and_search_thread_through(tmp_path):
         f = await store.get_fact("port")
         await repl._handle_slash(f"/memory show {f.id}")
         assert "vLLM serves on port 8081" in channel.messages[-1]
-        assert "ambient-eligible: yes" in channel.messages[-1]
+        assert "salience" in channel.messages[-1]
         # Case is preserved from the ORIGINAL string (sliced case-sensitively, like /model).
         await repl._handle_slash("/memory search vLLM")
         assert "8081" in channel.messages[-1]
@@ -125,7 +121,7 @@ async def test_unknown_tag_path_not_confused_with_unknown_command(tmp_path):
         channel = FakeChannel()
         repl, _, _ = _repl(channel, store)
         await repl._handle_slash("/memory nope/zilch")
-        assert "Unknown tag path" in channel.messages[-1]
+        assert "/memory show" in channel.messages[-1]      # the usage line, claimed
         assert "Unknown command" not in channel.messages[-1]
     finally:
         await store.close()

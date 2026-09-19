@@ -193,7 +193,8 @@ class RecallRouter:
     # ------------------------------------------------------------------
 
     async def load_context(
-        self, index_mode: bool = True, max_session_history: int = 8
+        self, index_mode: bool = True, max_session_history: int = 8,
+        max_chars: int = 16_000,
     ) -> Any:
         """The ambient-injection read. Same signature as `MemoryStore.load_context`.
 
@@ -218,14 +219,17 @@ class RecallRouter:
                 try:
                     store = await self._read_store()
                     ctx = await store.load_context(
-                        index_mode=index_mode, max_session_history=max_session_history
+                        index_mode=index_mode, max_session_history=max_session_history,
+                        max_chars=max_chars,
                     )
                 except Exception as exc:
-                    return await self._degraded_global_only(exc, index_mode, max_session_history)
+                    return await self._degraded_global_only(
+                        exc, index_mode, max_session_history, max_chars
+                    )
             else:
                 store = await self._read_store()
                 ctx = await store.load_context(
-                    index_mode=index_mode, max_session_history=max_session_history
+                    index_mode=index_mode, max_session_history=max_session_history, max_chars=max_chars
                 )
             # `injected_fact_ids` may only ever carry ids the PRIMARY owns: the loop records
             # the ambient trace on its own store handle, and facts.id is per-database. A
@@ -234,7 +238,7 @@ class RecallRouter:
             return ctx if store is self._primary else replace(ctx, injected_fact_ids=[])
 
         ws_ctx = await self._primary.load_context(
-            index_mode=index_mode, max_session_history=max_session_history
+            index_mode=index_mode, max_session_history=max_session_history, max_chars=max_chars
         )
         if index_mode:
             # The primary's index is rendered twice here (once inside load_context above for the
@@ -242,7 +246,7 @@ class RecallRouter:
             # SQLite SELECTs; the alternative — reaching past load_context for guardrails,
             # division and the count — trades a measurable cost for an unmeasurable one.
             ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
-                max_session_history, origin_label=ORIGIN_WORKSPACE
+                max_session_history, max_chars=max_chars, origin_label=ORIGIN_WORKSPACE
             )
             # Key-level dedup, workspace-wins — the same answer `query_facts` and `get_fact`
             # already give (B5). Without it the every-turn block handed the model both sides of
@@ -261,7 +265,8 @@ class RecallRouter:
                 return ws_ctx
             if index_mode:
                 g_md, g_ids = await g._render_memory_index_with_ids(
-                    _MERGED_GLOBAL_SESSION_HISTORY, origin_label=ORIGIN_GLOBAL,
+                    _MERGED_GLOBAL_SESSION_HISTORY, max_chars=max_chars,
+                    origin_label=ORIGIN_GLOBAL,
                     include_preamble=False, exclude_keys=ws_keys,
                 )
             else:
@@ -294,7 +299,8 @@ class RecallRouter:
         )
 
     async def _degraded_global_only(
-        self, exc: Exception, index_mode: bool, max_session_history: int
+        self, exc: Exception, index_mode: bool, max_session_history: int,
+        max_chars: int = 16_000,
     ) -> Any:
         """`global` scope, minus the only store it may read. The primary's context supplies the
         SAFETY fields — both stores derive division/guardrails from the same global_base_dir,
@@ -302,7 +308,7 @@ class RecallRouter:
         substituting this project's facts would be the knob quietly reversing itself."""
         log.warning("machine-global memory unavailable under recall_scope: global: %r", exc)
         ws_ctx = await self._primary.load_context(
-            index_mode=index_mode, max_session_history=max_session_history
+            index_mode=index_mode, max_session_history=max_session_history, max_chars=max_chars
         )
         return replace(
             ws_ctx,
@@ -331,6 +337,26 @@ class RecallRouter:
             if f.key not in seen:   # a name in both stores resolves to THIS project's version
                 merged.append(f)
         limit = int(getattr(query, "limit", 0) or 0)
+        return merged[:limit] if limit > 0 else merged
+
+    async def resonance_search(self, query_vec: Any, **kwargs: Any) -> list[Any]:
+        """The memory_search read (resonance rebuild): (fact, score) pairs ranked in the
+        model's space. `both` is scoped-first with a key-level dedup, then the caller's
+        limit — the cut happens AFTER the merge, so this project's facts are never
+        crowded out by the machine-global store's."""
+        if self.scope != SCOPE_BOTH:
+            return await (await self._read_store()).resonance_search(query_vec, **kwargs)
+
+        primary_hits = await self._primary.resonance_search(query_vec, **kwargs)
+        g = await self.ensure_global()
+        if g is None:
+            return primary_hits
+        seen = {f.key for f, _s in primary_hits}
+        merged = list(primary_hits)
+        for f, s in await g.resonance_search(query_vec, **kwargs):
+            if f.key not in seen:   # a name in both stores resolves to THIS project's version
+                merged.append((f, s))
+        limit = int(kwargs.get("limit", 0) or 0)
         return merged[:limit] if limit > 0 else merged
 
     async def get_fact(self, key: str) -> Any | None:
@@ -402,13 +428,6 @@ class RecallRouter:
         store = await self._enrichment_target()
         if store is not None:
             await store.record_activation_trace(**kwargs)
-
-    async def neighborhood(self, *args: Any, **kwargs: Any) -> list:
-        # The tag graph is per-database; a merged hit list has no single graph to walk, so the
-        # enrichment is off in `both` mode rather than walking the wrong store's edges.
-        if self.scope == SCOPE_BOTH:
-            return []
-        return await (await self._read_store()).neighborhood(*args, **kwargs)
 
     async def get_facts_by_ids(self, ids: list[int]) -> list:
         if self.scope == SCOPE_BOTH:

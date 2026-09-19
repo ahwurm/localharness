@@ -15,6 +15,29 @@ from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION, MemoryStore
 from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
 
 
+import numpy as np
+
+from localharness.memory import resonance as _res
+from localharness.memory.embeddings import HashingEmbedder
+
+
+class _Eng:
+    model_name = "hash-fake"
+    _h = HashingEmbedder(dim=64)
+
+    def embed_docs(self, texts):
+        return np.asarray(self._h.embed(texts), dtype=np.float32)
+
+    def embed_query(self, text):
+        return np.asarray(self._h.embed([text])[0], dtype=np.float32)
+
+
+async def _seed(store, key, value):
+    return await store.store_fact(
+        key, value, embedding=_res.pack(_Eng().embed_docs([f"{key}: {value}"])[0])
+    )
+
+
 def make_store(tmp_path: Path) -> MemoryStore:
     return MemoryStore(
         agent_id="test-agent",
@@ -35,11 +58,11 @@ async def test_search_appends_trace_with_fired_ids_and_stimulus(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
-        await store.store_fact("car_key", "car maintenance schedule")
+        await _seed(store, "recipe_key", "banana smoothie recipe with honey")
+        await _seed(store, "car_key", "auto maintenance schedule")
         recipe_id = (await store.get_fact("recipe_key")).id
 
-        res = await MemorySearchTool(store).run(query="smoothie")
+        res = await MemorySearchTool(store, engine=_Eng()).run(query="smoothie")
         assert res.success and "recipe_key" in res.output
 
         traces = await store.recent_activation_traces()
@@ -56,16 +79,19 @@ async def test_search_appends_trace_with_fired_ids_and_stimulus(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_search_no_hits_records_no_trace(tmp_path: Path):
-    """A retrieval event with zero hits is not an activation — no row (the early 'No facts
-    matched' return path fires before the trace hook)."""
+async def test_search_no_hits_still_records_the_moment(tmp_path: Path):
+    """Counts role (memory spec): what was ASKED is as much a measurement as what
+    answered — a zero-hit retrieval records one trace row with empty fired ids."""
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
-        res = await MemorySearchTool(store).run(query="thismatchesnothingxyz")
+        await _seed(store, "recipe_key", "banana smoothie recipe with honey")
+        res = await MemorySearchTool(store, engine=_Eng()).run(query="thismatchesnothingxyz")
         assert res.success
-        assert await store.recent_activation_traces() == []
+        traces = await store.recent_activation_traces()
+        assert len(traces) == 1
+        assert traces[0].fired_ids == [] and traces[0].injected_ids == []
+        assert traces[0].stimulus_text == "thismatchesnothingxyz"
     finally:
         await store.close()
 
@@ -181,7 +207,7 @@ async def test_trace_write_failure_does_not_break_search(tmp_path: Path, monkeyp
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
+        await _seed(store, "recipe_key", "banana smoothie recipe with honey")
         called = {"n": 0}
 
         async def boom(**kwargs):
@@ -189,7 +215,7 @@ async def test_trace_write_failure_does_not_break_search(tmp_path: Path, monkeyp
             raise RuntimeError("trace store down")
 
         monkeypatch.setattr(store, "record_activation_trace", boom)
-        res = await MemorySearchTool(store).run(query="smoothie")
+        res = await MemorySearchTool(store, engine=_Eng()).run(query="smoothie")
         assert res.success                       # retrieval survived the trace failure
         assert "recipe_key" in res.output
         assert called["n"] == 1                  # the hook fired (best-effort wrapper caught it)

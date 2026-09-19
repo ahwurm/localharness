@@ -1023,7 +1023,7 @@ async def test_bash_exec_ordinary_nonzero_exit_is_a_normal_result(command, rc):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command, tool", [
     ('memory_get(name="schema/cluster/x")', "memory_get"),        # observed live 2026-09-16
-    ('web_search("Rohan Kumar Salesforce")', "web_search"),
+    ('web_search("example persona employer")', "web_search"),
     ('  remember(name="a", content="b")', "remember"),
 ])
 async def test_bash_exec_typed_harness_tool_gets_a_remediation_not_a_syntax_error(command, tool):
