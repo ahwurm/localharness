@@ -2062,6 +2062,47 @@ async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
     assert "restate" not in nudges[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_act_guard_omits_the_hatch_when_tools_required(bus, tmp_path):
+    """tools_required => state the consequence, never offer the escape hatch.
+
+    Live 2026-09-17: the standard nudge promised a tool-less reply would be "delivered to the
+    user unchanged"; the web-research dispatcher then DISCARDED that exact reply for having zero
+    tool calls, and the subagent was reported as having "answered in prose". The loop and the
+    dispatcher disagreed. For an agent whose caller discards such a run, the nudge must not
+    advertise a sentinel that cannot deliver.
+    """
+    from localharness.agent.context import ContextManager
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.config.models import AgentConfig
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "needs-tools", "role": "Test.", "tools_required": True,
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
+                                   "kill_file": str(tmp_path / "KILL")}},
+        "self_check": {"enabled": False},
+    })
+    loop = AgentLoop(config=cfg, llm=_ConfirmOnNudgeLLM(), bus=bus,
+                     context_manager=ContextManager(), tool_registry=reg,
+                     permission_evaluator=PermissionEvaluator(), memory_loader=None)
+    session = Session(agent_id="needs-tools", session_id="s-ag-required", messages=[])
+    await loop._execute_loop(session, "find the current python version", None)
+
+    nudges = [m for m in session.messages if m.get("role") == "user"
+              and "no tool call" in (m.get("content") or "")]
+    assert len(nudges) == 1, "the tools_required act-guard still fires exactly once"
+    text = nudges[0]["content"]
+    assert "CONFIRMED" not in text, "the escape hatch must be gone for a tools_required agent"
+    assert "DISCARDS" in text and "FAILED" in text, "it must state the real consequence"
+    # and the default (hatch-offering) nudge must NOT have been used
+    assert "delivered to the user unchanged" not in text
+
+
 # ---------------------------------------------------------------------------
 # SESS-03: the loop.py caller — compaction summaries persist as a per-sitting gist
 # ---------------------------------------------------------------------------

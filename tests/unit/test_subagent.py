@@ -660,3 +660,8 @@ async def test_web_dispatch_zero_calls_twice_fails_honestly_and_discards_the_pro
     assert "SUBAGENT RUN FAILED" in result and "tool calls: 0" in result
     assert "delegation as FAILED" in result
     assert 'web_search("a")' not in result      # the fabricated transcript is discarded
+    # The honesty payload (2026-09-17): the parent must see the child's tools WERE on the wire,
+    # so a zero-call run can never again be read as a missing/broken toolset and "repaired"
+    # with a bash+curl bypass.
+    assert "WERE advertised" in result and "web_search" in result
+    assert "do not 'repair'" in result

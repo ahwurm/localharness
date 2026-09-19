@@ -1742,6 +1742,18 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    tools_required: bool = Field(
+        default=False,
+        description=(
+            "This agent's caller DISCARDS a run that made zero tool calls (the research "
+            "subagents: their output is worthless without evidence). Set it and the loop's "
+            "act-guard stops offering the CONFIRMED escape hatch — which told the model a "
+            "tool-less reply would be 'delivered to the user unchanged' while the dispatcher "
+            "was about to throw that same reply away (live 2026-09-17). The nudge states the "
+            "real consequence instead."
+        ),
+    )
+
     # --- Model ---
     model: str = Field(
         default="inherit",

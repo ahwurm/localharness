@@ -367,6 +367,19 @@ _ACT_GUARD_NUDGE = (
     "word: CONFIRMED. Your previous reply will then be delivered to "
     "the user unchanged."
 )
+# For an agent whose caller DISCARDS a zero-tool-call run (AgentConfig.tools_required): the
+# standard act-guard above offers a CONFIRMED sentinel and promises the tool-less reply will be
+# "delivered to the user unchanged" — a promise the caller then breaks by throwing that reply away
+# (live 2026-09-17: the web-researcher took the hatch, replied CONFIRMED, and its whole run was
+# discarded as "answered in prose without executing any web tool"). No hatch here: state the real
+# consequence, and rebut the model's standard confabulation that its tools are not exposed.
+_ACT_GUARD_NUDGE_TOOLS_REQUIRED = (
+    "You produced no tool call. Your caller DISCARDS a run with zero tool calls and reports the "
+    "task as FAILED — this reply will reach no one, and there is no sentinel or confirmation that "
+    "changes that. Make the tool call NOW. The tools listed in this request ARE available and "
+    "they work; if you believe one is missing or broken, say which in a single line and then call "
+    "the closest tool you do have. Do not answer from memory."
+)
 _SELF_CHECK_NUDGE = (
     "Review your answer above for correctness and completeness. "
     "If it is correct, reply with only the single word: CONFIRMED. If not, reply with "
@@ -1910,8 +1923,12 @@ class AgentLoop:
                 if (session.actions_taken == 0 and not session.act_nudge_used
                         and tool_schemas):
                     session.act_nudge_used = True
-                    log.info("Act-guard: tool-less first completion — nudging once")
-                    session.push({"role": "user", "content": _ACT_GUARD_NUDGE})
+                    tools_required = getattr(self._config, "tools_required", False)
+                    log.info("Act-guard: tool-less first completion — nudging once "
+                             "(tools_required=%s)", tools_required)
+                    session.push({"role": "user", "content": (
+                        _ACT_GUARD_NUDGE_TOOLS_REQUIRED if tools_required else _ACT_GUARD_NUDGE
+                    )})
                     continue
 
                 # Natural completion — reset parse retries
