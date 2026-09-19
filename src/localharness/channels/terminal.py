@@ -1013,9 +1013,12 @@ class TerminalChannel(ChannelAdapter):
         # The calls `auto` parked for a human, oldest first — pushed in by the REPL
         # (box_set_pending), read by the row under the footer and by both hotkeys.
         self._pending: list[Any] = []
-        # When a key last reached the box (monotonic). 0.0 = nobody has typed yet, which reads as
-        # AWAY until start_input_box stamps it: opening the box is somebody being there.
-        self._last_keystroke_at: float = 0.0
+        # When a key last reached the box (monotonic). None = nobody has typed yet, which reads
+        # as AWAY until start_input_box stamps it: opening the box is somebody being there.
+        # NOT 0.0: time.monotonic()'s epoch is arbitrary (often boot time), so on a
+        # freshly-started host/container `time.monotonic() - 0.0` can itself be under
+        # PRESENCE_WINDOW_S, which read a channel that had NEVER seen a keystroke as present.
+        self._last_keystroke_at: float | None = None
         self._decision_flash: str = ""           # transient routing-decision line in the box frame
         self._decision_flash_task: asyncio.Task | None = None
         self._first_box_hint: str = ""           # #49 guidance hint, shown in the box until first use
@@ -1336,6 +1339,8 @@ class TerminalChannel(ChannelAdapter):
 
     def _present(self) -> bool:
         """Is somebody at this keyboard right now — a key within :data:`PRESENCE_WINDOW_S`?"""
+        if self._last_keystroke_at is None:
+            return False
         return (time.monotonic() - self._last_keystroke_at) < PRESENCE_WINDOW_S
 
     def _ring_bell(self) -> None:
@@ -1361,7 +1366,9 @@ class TerminalChannel(ChannelAdapter):
         once per key: the second key is a hundred milliseconds after the first, not five minutes.
         """
         now = time.monotonic()
-        away_for = now - self._last_keystroke_at
+        # No prior stamp reads as "away" regardless of how young the clock is (same call as
+        # _present() above), not as a fresh return from a five-minute gap.
+        away_for = float("inf") if self._last_keystroke_at is None else now - self._last_keystroke_at
         self._last_keystroke_at = now
         if away_for < PRESENCE_WINDOW_S or not self._pending:
             return

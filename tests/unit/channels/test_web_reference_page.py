@@ -244,6 +244,15 @@ globalThis.window = {
 };
 globalThis.location = { hash: "", search: "", pathname: "/" };
 globalThis.history = { replaceState() {} };
+// The page checks `"serviceWorker" in navigator` at module top level (push/A2 setup), so the
+// shim needs a `navigator` even though none of these tests exercise push — without it the
+// module throws before the reducer under test ever runs. No serviceWorker/clipboard keys, so
+// those checks read as "unsupported" (false), matching a plain non-PWA browser tab.
+// defineProperty, not `globalThis.navigator = {}`: Node >=21 already exposes a real, getter-only
+// `navigator` global, and a plain assignment throws "Cannot set property navigator ... which has
+// only a getter" on any such Node (this shim is exercised on whatever `node` the box/CI has).
+// Node defines it configurable specifically so it CAN be overridden, so redefining it is safe.
+Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true, writable: true });
 globalThis.rows = () => {
   const text = (n) => (n.textContent || "") + n.children.map(text).join("");
   return document.getElementById("log").children.map((r) => ({ cls: r.className, text: text(r) }));

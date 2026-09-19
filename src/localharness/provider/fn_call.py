@@ -413,8 +413,15 @@ class FnCallConverter:
         # never run whatever the user installed. One package, one spelling.
         try:
             from json_repair import repair_json  # type: ignore[import-untyped]
-            return json.loads(repair_json(raw))
+            fixed = json.loads(repair_json(raw))
         except (ImportError, Exception):
-            pass
-
-        return None
+            return None
+        # json-repair (observed on 0.63) resolves input with NO recognizable JSON structure to
+        # an empty object instead of raising — the same "I found nothing" outcome steps 1-4
+        # already signal by falling through to None, just wearing a valid-looking shape. Trust
+        # an empty result only when the raw text was actually attempting an object/array (an
+        # unclosed "{" truncated immediately, say); anything else reaching this final step
+        # without so much as an opening brace/bracket was never JSON to begin with.
+        if fixed == {} and not raw.strip().startswith(("{", "[")):
+            return None
+        return fixed
