@@ -254,9 +254,17 @@ def test_doctor_llamacpp_router_mode_names_the_model(mock_httpx, tmp_path):
     assert "message-level" in result.output  # /apply-template named the model too
 
 
+@patch("localharness.cli.init_cmd._identify_endpoint_provider", return_value="vllm")
 @patch("localharness.cli.doctor_cmd.httpx")
-def test_doctor_vllm_tokenize_absent_still_fails(mock_httpx, tmp_path):
-    """#9: vLLM SHOULD serve /tokenize — a 404 there stays a real FAILURE (exit 1)."""
+def test_doctor_vllm_tokenize_absent_still_fails(mock_httpx, mock_identify, tmp_path):
+    """#9: vLLM SHOULD serve /tokenize — a 404 there stays a real FAILURE (exit 1).
+
+    `_identify_endpoint_provider` is mocked because it makes its OWN real `httpx` call
+    (a module-level import inside init_cmd.py, distinct from the patched `doctor_cmd.httpx`)
+    to confirm the runtime really is one that should serve /tokenize — unmocked, that call hits
+    the network and returns "unknown" on any box with nothing listening on :8000, silently
+    downgrading this FAILURE to an INFO and exiting 0.
+    """
     _StubCounter.mode_override = "approximate"  # /tokenize 404 -> counter finds none
     _write_config(tmp_path, "vllm", "http://localhost:8000/v1", model="m")
     mock_httpx.get.return_value = _models_resp({"data": [{"id": "m"}]})
