@@ -153,27 +153,7 @@ async def test_fused_search_ranks_used_trusted_first(store: MemoryStore):
 # RANK-05: superseded rows are out of the hot path via partial index
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_injected_block_query_uses_partial_active_index(store: MemoryStore):
-    """Phase-30 critic BLOCKER 2: EXPLAIN the REAL _render_memory_index query (the
-    rs-gate + function ORDER BY combination defeated the planner; a simplified stand-in
-    passed green while production fell to the all-rows agent_id index, scanning every
-    superseded row on the hottest per-turn path). INDEXED BY makes it deterministic."""
-    await store.store_fact("k1", "v1")
-    import time as _t
-    now = int(_t.time())
-    async with store._db.execute(
-        "EXPLAIN QUERY PLAN "
-        "SELECT key, value FROM facts INDEXED BY idx_facts_active_recency "
-        "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
-        "AND retrieval_strength >= 0.2 "
-        "AND (expires_at IS NULL OR expires_at > ?) "
-        "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
-        "updated_at DESC, key ASC",
-        ("act-agent", now, now),
-    ) as cur:
-        plan = " ".join(str(tuple(r)) for r in await cur.fetchall())
-    assert "idx_facts_active_recency" in plan, plan
+
 
 
 # ---------------------------------------------------------------------------

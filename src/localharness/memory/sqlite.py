@@ -897,10 +897,11 @@ class MemoryStore:
         # Overlapping writers (agent loop vs idle consolidation) wait instead of throwing
         # "database is locked" (critic CONS-02 groundwork).
         await self._db.execute("PRAGMA busy_timeout = 5000")
-        # Activation scoring as registered scalar functions: zero-token ranking (RANK-02)
-        # without depending on SQLite being compiled with math functions.
-        await self._db.create_function("lh_slow_score", 5, _slow_score, deterministic=True)
-        await self._db.create_function("lh_fused_score", 7, _fused_score, deterministic=True)
+        # The one salience currency as a registered scalar (SQLite has no ln of its
+        # own): ln(1+standing) + truth log-odds + declared stakes. Every ranked
+        # surface — the injected block, resonance search's secondary axis, and the
+        # owner's keyword search — orders by this same function.
+        await self._db.create_function("lh_salience", 4, _salience_sql, deterministic=True)
         await self._apply_migrations(owner_init=owner_init)
 
         if self._bus is not None:
@@ -1532,9 +1533,9 @@ class MemoryStore:
             return []
         prefixed_cols = ", ".join(f"f.{c}" for c in self._FACT_COLS.split(", "))
 
-        # Tool-path ranking is the FULL fused score — fresh, staged counters included,
-        # BM25 relevance + ln(confidence) precision term (RANK-04: only the tool result,
-        # appended after the prefix cache, may re-rank freely on every call).
+        # Owner-surface keyword lookup: the FTS MATCH decides WHO is a hit (text
+        # matching at query time is search — allowed), and the one salience currency
+        # decides the ORDER. No clock, no BM25 blending, no second scorer.
         if fts_text:
             sql = f"""
                 SELECT {prefixed_cols}
@@ -1546,14 +1547,11 @@ class MemoryStore:
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
                   {temporal_filter}
-                ORDER BY lh_fused_score(
-                    f.importance,
-                    f.access_count + f.access_count_staged,
-                    COALESCE(f.last_accessed_staged, f.last_accessed_at),
-                    f.updated_at, ?, f.confidence, rank) DESC
+                ORDER BY lh_salience(f.standing, f.truth_logodds, f.confidence, f.importance) DESC,
+                    f.updated_at DESC, f.key ASC
                 LIMIT ?
             """
-            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, *temporal_params, now, query.limit]
+            params: list[Any] = [fts_text, self._agent_id, query.min_confidence, now, *temporal_params, query.limit]
         else:
             sql = f"""
                 SELECT {prefixed_cols}
@@ -1563,14 +1561,11 @@ class MemoryStore:
                   AND (f.expires_at IS NULL OR f.expires_at > ?)
                   {status_filter}
                   {temporal_filter}
-                ORDER BY lh_fused_score(
-                    f.importance,
-                    f.access_count + f.access_count_staged,
-                    COALESCE(f.last_accessed_staged, f.last_accessed_at),
-                    f.updated_at, ?, f.confidence, 0.0) DESC
+                ORDER BY lh_salience(f.standing, f.truth_logodds, f.confidence, f.importance) DESC,
+                    f.updated_at DESC, f.key ASC
                 LIMIT ?
             """
-            params = [self._agent_id, query.min_confidence, now, *temporal_params, now, query.limit]
+            params = [self._agent_id, query.min_confidence, now, *temporal_params, query.limit]
 
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
@@ -2417,15 +2412,20 @@ def _clock_label(sitting_local_dt: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Activation scoring (RANK-02/03) — registered as SQLite scalar functions so ranking
-# is closed-form and costs ZERO decode tokens. ACT-R–INSPIRED base-level activation
-# with the canonical decay d = 0.5: a single-trace simplification ln(1+n) − d·ln(age
-# since most recent use), NOT Anderson & Schooler 1991's full ln(Σ tⱼ⁻ᵈ) per-trace sum
-# (Phase-30 critic minor: the criterion is freq+recency beating pure recency, which
-# this satisfies — claiming exact ACT-R fidelity would overreach).
+# The one salience currency, as a SQL scalar (registered as lh_salience): SQLite
+# cannot compute ln, so the Python function rides along. Identical math to
+# memory/salience.py's score_fact — S = ln(1+standing) + truth + stakes — with
+# the same legacy-confidence derivation for pre-v10 rows.
 # ---------------------------------------------------------------------------
 
-_ACTR_DECAY = 0.5
+
+def _salience_sql(standing, truth_logodds, confidence, importance) -> float:
+    import math
+
+    need = math.log1p(max(0.0, standing or 0.0))
+    truth = truth_logodds if truth_logodds is not None else _logit(confidence)
+    return need + truth + (importance or 0.0)
+
 
 # Log-odds <-> probability (v10). ln(p/(1-p)) diverges at the poles; the guard is the
 # CONFIDENCE column's own resolution (every value the store writes is sigmoid(logodds),
@@ -2444,54 +2444,6 @@ def _sigmoid(x: float) -> float:
     import math
 
     return 1.0 / (1.0 + math.exp(-x))
-
-
-def _base_activation(
-    access_count: int | None,
-    last_accessed_at: int | None,
-    updated_at: int | None,
-    now: int,
-    *,
-    day_granularity: bool,
-) -> float:
-    """ln(1 + n) − d·ln(age): n = folded access count; age measured from the most recent
-    of last-read/last-write. Day-granular for the injected block (byte-stable within a
-    day), continuous (hours) for the tool path."""
-    import math
-
-    n = access_count or 0
-    stamps = [s for s in (last_accessed_at, updated_at) if s is not None]
-    last = max(stamps) if stamps else now
-    if day_granularity:
-        # SHARED CALENDAR-DAY difference (Phase-30 critic BLOCKER 1): `(now-last)//86400`
-        # was a rolling 24h window phased to each fact's own last-touch — measured 11-24
-        # block reorders/day at 30-300 facts (an arbitrary-hour cache bust per fact).
-        # Epoch-day difference changes for ALL facts atomically at the same boundary as
-        # the system prompt's date line (loop.py:592) — measured ≤0.55 reorders/day.
-        age_units = max(0, (now // 86400) - (last // 86400)) + 1
-    else:
-        age_units = max(0, now - last) / 3600.0 + 1.0
-    return math.log(1 + n) - _ACTR_DECAY * math.log(age_units)
-
-
-def _slow_score(importance, access_count, last_accessed_at, updated_at, now) -> float:
-    """Injected-block score: importance + base-level over FOLDED columns, day-quantized.
-    Every input moves only at consolidation folds, genuine writes, or a day boundary —
-    the byte-stability discipline (RANK-04)."""
-    return (importance or 0.0) + _base_activation(
-        access_count, last_accessed_at, updated_at, now, day_granularity=True
-    )
-
-
-def _fused_score(importance, access_total, last_access, updated_at, now, confidence, bm25_rank) -> float:
-    """Tool-path score (SYNTHESIS §2, additive in log-odds): importance + base-level
-    (fresh, staged included, hour-granular) + ln(precision) − BM25 (SQLite bm25 is
-    smaller-is-better, typically negative — negate into a goodness term)."""
-    import math
-
-    base = _base_activation(access_total, last_access, updated_at, now, day_granularity=False)
-    conf = min(max(confidence if confidence is not None else 0.5, 1e-3), 1.0)
-    return (importance or 0.0) + base + math.log(conf) - (bm25_rank or 0.0)
 
 
 def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
