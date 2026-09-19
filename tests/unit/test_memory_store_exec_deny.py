@@ -59,7 +59,7 @@ def _denied(name: str, arguments: dict):
     "strings /old/backup/memory.db-wal | head -50",
     "cat ./.localharness/agents/x/memory.db-shm",
     "cp ~/.localharness/agents/orchestrator/memory.db /tmp/x.db",
-    "grep -a Denver memory.db.bak",
+    "grep -a Riverdale memory.db.bak",
     "tar xzf old.tgz && sqlite3 restored/memory.db 'select value from facts'",
     # The cold archive by TABLE name — catches a store someone copied to another filename.
     "sqlite3 /tmp/copied.db 'select * from facts_archive'",
@@ -137,7 +137,7 @@ def test_read_no_longer_teaches_the_bypass_for_a_store(tmp_path: Path):
                             base_dir=str(tmp_path))
         await store.open()
         try:
-            await store.store_fact("profile/home", "the owner lives in Denver",
+            await store.store_fact("profile/home", "the owner lives in Riverdale",
                                    source="remember")
         finally:
             await store.close()
@@ -176,6 +176,10 @@ _ALLOWED_ARCHIVE_SQL_SITES = {
     ("memory/sqlite.py", "restore_fact"),   # owner verb: move back
     ("memory/sqlite.py", "list_archived"),  # owner verb: `memory list --archived`
     ("memory/sqlite.py", "count_archived"), # owner verb: the count
+    # Dreaming's bet settlement: aggregates archived rows into writer paid/lost TALLIES.
+    # Returns counts only — no archived content can reach an agent through it, and no
+    # agent-facing tool calls it (the dreaming pass and its tests are the only callers).
+    ("memory/sqlite.py", "settle_writer_outcomes"),
 }
 
 
@@ -232,9 +236,8 @@ def test_the_agent_facing_modules_never_name_the_archive_in_sql():
     """Said the other way round, against the modules the agent's own verbs run through."""
     agent_facing = {
         "tools/builtin/memory_tools.py",   # memory_search / memory_get / remember
-        "memory/hierarchy.py", "memory/clustering.py", "memory/router.py",
-        "memory/markdown.py", "memory/mining.py", "memory/discovery.py",
-        "memory/consolidation.py", "memory/reconciliation.py", "memory/salience.py",
+        "memory/router.py", "memory/markdown.py", "memory/salience.py",
+        "memory/resonance.py", "memory/streams.py",
     }
     named = {module for module, _ in _archive_sql_sites()}
     assert not (named & agent_facing), named & agent_facing
@@ -247,27 +250,42 @@ def test_the_agent_facing_modules_never_name_the_archive_in_sql():
 def test_every_agent_facing_read_path_goes_blind_when_a_fact_is_archived(tmp_path: Path):
     """The structural test says no path NAMES the archive; this one says the paths behave
     that way end to end — search, get, the ambient shelf, and the tag graph."""
+    class _FakeEngine:
+        """Deterministic test double — the INTERFACE is the point, not the model.
+        Every text lands on the same unit vector, so every stored fact resonates
+        with every query and visibility reduces to presence in the hot store."""
+        model_name = "fake"
+
+        def embed_docs(self, texts):
+            import numpy as np
+            return np.ones((len(texts), 4), dtype=np.float32) / 2.0
+
+        def embed_query(self, text):
+            import numpy as np
+            return np.ones(4, dtype=np.float32) / 2.0
+
     async def go():
+        from localharness.memory import resonance as _res
+
         store = MemoryStore(agent_id="orchestrator", division_id="default", org_id="default",
                             base_dir=str(tmp_path))
         await store.open()
         try:
+            engine = _FakeEngine()
             fact = await store.store_fact(
                 "ops/vllm-port", "the vllm server listens on port 8081",
                 tags=["ops"], confidence=0.9, source="remember",
+                embedding=_res.pack(engine.embed_docs(["x"])[0]),
             )
-            search, get = MemorySearchTool(store), MemoryGetTool(store)
+            search, get = MemorySearchTool(store, engine=engine), MemoryGetTool(store)
 
             async def visible() -> dict[str, bool]:
                 ctx = await store.load_context()
-                tag = await store._get_tag_row("ops")
-                atoms = await store.atoms_for_tag(tag.id) if tag else []
                 return {
                     "memory_search": "ops/vllm-port" in (
                         await search._execute(query="vllm")).output,
                     "memory_get": (await get._execute(name="ops/vllm-port")).success,
                     "ambient": "ops/vllm-port" in (ctx.agent_memory_md or ""),
-                    "tag_graph": any(a.key == "ops/vllm-port" for a in atoms),
                     "query_facts": bool(await store.query_facts(
                         FactQuery(text="vllm", min_confidence=0.0))),
                 }

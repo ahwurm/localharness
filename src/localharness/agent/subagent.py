@@ -1209,21 +1209,6 @@ async def dispatch_cruncher_subagent(
                         "(possible lossy-summary-node leak): %s", len(unverified), shown)
             answer = (f"{answer}\n\n⚠️ unverified figures (absent from every section extract — may "
                       f"originate from a lossy summary node): {shown}")
-    # HIER-02: persist the gist tree (schema node + per-level gists + final, with
-    # derived_from/member_of edges and the HIER-04 figure net). Exception-ISOLATED, not
-    # detached (critic m2): awaited inline — a few WAL-mode SQLite writes on the answer
-    # path — but a persistence failure never degrades the cruncher's result.
-    if memory_store is not None:
-        try:
-            from localharness.memory.hierarchy import persist_gist_tree
-            await persist_gist_tree(
-                memory_store, question=question, leaf_extracts=extracts,
-                trace=reduce_trace, final_answer=answer or "",
-                session_id=parent_session_id or "", source_handles=handles,
-            )
-        except Exception:
-            log.exception("gist-tree persistence failed (non-fatal)")
-
     note = truncated_note.strip()
     header = f"[cruncher] sections: {n_sections}{(' | ' + note) if note else ''}"
     return f"{header}\n\n{answer or '(no answer)'}"

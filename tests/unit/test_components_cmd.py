@@ -302,12 +302,12 @@ def test_proposer_paths_enumerated(components_home):
 # merged doc against HarnessConfig (extra="forbid", no `agent` key), so EVERY
 # `set agent.<path> ...` died with "Extra inputs are not permitted" before any
 # write — the documented safety lever (models.py: `components set
-# agent.memory.consolidation.tag_grouping_enabled <true|false>`) was structurally
+# agent.memory.consolidation.enabled <true|false>`) was structurally
 # dead. The fix routes agent.* validation through AgentConfig and writes the same
 # user-overlay `agent:` section that `get`/`load_agent` read back.
 # ------------------------------------------------------------------ #
 
-_AGENT_AXIS = "agent.memory.consolidation.tag_grouping_enabled"
+_AGENT_AXIS = "agent.memory.consolidation.enabled"
 
 
 def _write_agent_yaml(home: Path, name: str, body: dict) -> None:
@@ -339,7 +339,7 @@ def test_set_agent_axis_writes_agent_section_to_overlay(components_home):
     r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
     assert r.exit_code == 0, r.output
     overlay = yaml.safe_load((components_home / "overrides.yaml").read_text(encoding="utf-8"))
-    assert overlay["agent"]["memory"]["consolidation"]["tag_grouping_enabled"] is False
+    assert overlay["agent"]["memory"]["consolidation"]["enabled"] is False
 
 
 def test_loaded_agent_without_override_reflects_set_value(components_home):
@@ -351,7 +351,7 @@ def test_loaded_agent_without_override_reflects_set_value(components_home):
     from localharness.config.loader import ConfigLoader
 
     agent = ConfigLoader().load_agent("plain")
-    assert agent.memory.consolidation.tag_grouping_enabled is False
+    assert agent.memory.consolidation.enabled is False
 
 
 def test_per_agent_yaml_wins_over_set_value(components_home):
@@ -361,14 +361,14 @@ def test_per_agent_yaml_wins_over_set_value(components_home):
         components_home,
         "opinionated",
         {"name": "opinionated", "role": "sets its own axis",
-         "memory": {"consolidation": {"tag_grouping_enabled": True}}},
+         "memory": {"consolidation": {"enabled": True}}},
     )
     r = runner.invoke(app, ["components", "set", _AGENT_AXIS, "false"])
     assert r.exit_code == 0, r.output
     from localharness.config.loader import ConfigLoader
 
     agent = ConfigLoader().load_agent("opinionated")
-    assert agent.memory.consolidation.tag_grouping_enabled is True
+    assert agent.memory.consolidation.enabled is True
 
 
 def test_set_org_axis_unchanged_by_fix(components_home):
@@ -394,7 +394,7 @@ def test_set_org_axis_after_agent_axis_still_validates(components_home):
     r2 = runner.invoke(app, ["components", "set", "org.context.compaction_threshold_pct", "85.0"])
     assert r2.exit_code == 0, r2.output
     overlay = yaml.safe_load((components_home / "overrides.yaml").read_text(encoding="utf-8"))
-    assert overlay["agent"]["memory"]["consolidation"]["tag_grouping_enabled"] is False
+    assert overlay["agent"]["memory"]["consolidation"]["enabled"] is False
     assert overlay["org"]["context"]["compaction_threshold_pct"] == 85.0
     # both axes still read back at layer=user
     for dotpath, expected in ((_AGENT_AXIS, False), ("org.context.compaction_threshold_pct", 85.0)):

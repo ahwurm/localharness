@@ -2137,55 +2137,10 @@ def _big_msgs(rounds: int = 6):
     ]
 
 
-@pytest.mark.asyncio
-async def test_compaction_gist_persisted_once_per_sitting(mock_llm_client, bus, tmp_path):
-    """Composed: run_turn → _execute_loop → build_messages compaction → the marker scan →
-    persist_compaction_gist. Two compacting turns in one sitting leave EXACTLY ONE active
-    gist row at gist/compaction/sit-1 (supersede/corroborate — never duplicate keys)."""
-    from localharness.memory.sqlite import MemoryStore
-
-    store = MemoryStore(agent_id="test-agent", division_id="", org_id="", base_dir=str(tmp_path))
-    await store.open()
-    try:
-        Response = mock_llm_client.Response
-        loop = _make_agent_loop(
-            mock_llm_client, [Response(content="done 1"), Response(content="done 2")], bus,
-            session_id="sit-1", memory_loader=store, context_manager=_compacting_ctx(),
-        )
-        await loop.run_turn("first", initial_messages=_big_msgs())  # compaction #1
-        await loop.run_turn("second")                               # #2 (messages never shrink)
-
-        history = await store.get_fact_history("gist/compaction/sit-1")
-        active = [f for f in history if f.status == "active"]
-        assert len(active) == 1                       # exactly one active after >= 2 compactions
-        assert "compacted: A then B" in active[0].value
-        assert active[0].node_kind == "gist" and active[0].provenance == "sit-1"
-    finally:
-        await store.close()
 
 
-@pytest.mark.asyncio
-async def test_compaction_gist_staging_discipline(mock_llm_client, bus, tmp_path):
-    """The 0.6 gist write must NOT reorder the injected block: _render_memory_index is
-    byte-identical before and after a compacting turn (below the 0.7 injection gate). The
-    get_fact assert keeps it non-vacuous — proves a gist was actually written."""
-    from localharness.memory.sqlite import MemoryStore
 
-    store = MemoryStore(agent_id="test-agent", division_id="", org_id="", base_dir=str(tmp_path))
-    await store.open()
-    try:
-        Response = mock_llm_client.Response
-        loop = _make_agent_loop(
-            mock_llm_client, [Response(content="done")], bus,
-            session_id="sit-1", memory_loader=store, context_manager=_compacting_ctx(),
-        )
-        index_before = await store._render_memory_index(10)
-        await loop.run_turn("first", initial_messages=_big_msgs())
 
-        assert await store.get_fact("gist/compaction/sit-1") is not None  # the write happened
-        assert await store._render_memory_index(10) == index_before       # byte-identical
-    finally:
-        await store.close()
 
 
 @pytest.mark.asyncio

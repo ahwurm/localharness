@@ -21,7 +21,7 @@ from localharness.config.overlay import load_overlay
 
 runner = CliRunner()
 
-_AGENT_AXIS = "agent.memory.consolidation.chapter_containment_guard_enabled"
+_AGENT_AXIS = "agent.memory.consolidation.enabled"
 _HARNESS_AXIS = "org.context.compaction_threshold_pct"
 
 
@@ -57,7 +57,7 @@ def test_agent_set_then_model_persist_preserves_both(components_home):
 
     overlay = load_overlay(components_home / "overrides.yaml")
     # The #22 agent slice survived the persist untouched.
-    assert overlay["agent"]["memory"]["consolidation"]["chapter_containment_guard_enabled"] is False
+    assert overlay["agent"]["memory"]["consolidation"]["enabled"] is False
     # The persisted default is present.
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
@@ -71,7 +71,7 @@ def test_agent_set_then_model_persist_preserves_both(components_home):
         "name: plain\nrole: plain role\n", encoding="utf-8"
     )
     assert (
-        fresh.load_agent("plain").memory.consolidation.chapter_containment_guard_enabled is False
+        fresh.load_agent("plain").memory.consolidation.enabled is False
     )
 
 

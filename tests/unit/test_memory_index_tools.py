@@ -3,20 +3,46 @@
 - load_context(index_mode=True) renders an INDEX (fact names + one-line descriptions),
   NOT full bodies.
 - session-history cap inlines only the last N entries.
-- memory_get returns a fact's full body; memory_search finds a seeded fact (FTS5).
+- memory_get returns a fact's full body; memory_search ranks by RESONANCE in the
+  engine's space (tests inject a deterministic hashing double — the INTERFACE is the
+  point, not the model).
 """
 import time
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from localharness.memory import resonance as res
+from localharness.memory.embeddings import HashingEmbedder
 from localharness.memory.sqlite import MemoryStore
 from localharness.tools.builtin.memory_tools import (
     MemoryGetTool,
     MemorySearchTool,
     resolve_time_expr,
 )
+
+
+class FakeEngine:
+    """Deterministic bag-of-words test double implementing the engine interface."""
+    model_name = "hash-fake"
+
+    def __init__(self) -> None:
+        self._h = HashingEmbedder(dim=64)
+
+    def embed_docs(self, texts):
+        return np.asarray(self._h.embed(texts), dtype=np.float32)
+
+    def embed_query(self, text):
+        return np.asarray(self._h.embed([text])[0], dtype=np.float32)
+
+
+async def seed(store, key, value, **kw):
+    eng = FakeEngine()
+    return await store.store_fact(
+        key, value, embedding=res.pack(eng.embed_docs([f"{key}: {value}"])[0]), **kw
+    )
 
 
 def make_store(tmp_path: Path) -> MemoryStore:
@@ -145,9 +171,9 @@ async def test_memory_search_finds_seeded_fact(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
-        await store.store_fact("car_key", "car maintenance schedule")
-        tool = MemorySearchTool(store)
+        await seed(store, "recipe_key", "banana smoothie recipe with honey")
+        await seed(store, "car_key", "auto maintenance schedule")
+        tool = MemorySearchTool(store, engine=FakeEngine())
         res = await tool.run(query="smoothie")
         assert res.success
         assert "recipe_key" in res.output
@@ -213,13 +239,13 @@ async def test_search_temporal_since_filters(tmp_path: Path):
     await store.open()
     try:
         now = int(time.time())
-        await store.store_fact("fresh_note", "temporal search marker fresh")
-        await store.store_fact("stale_note", "temporal search marker stale")
+        await seed(store, "fresh_note", "temporal search marker fresh")
+        await seed(store, "stale_note", "temporal search marker stale")
         await store._db.execute(
             "UPDATE facts SET updated_at = ? WHERE key = ?", (now - 2 * 86400, "stale_note")
         )
         await store._db.commit()
-        tool = MemorySearchTool(store)
+        tool = MemorySearchTool(store, engine=FakeEngine())
         res = await tool.run(query="marker", since="today")
         assert res.success
         assert "fresh_note" in res.output
@@ -237,8 +263,8 @@ async def test_search_temporal_bad_expr_readable_error(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("k", "some searchable value")
-        tool = MemorySearchTool(store)
+        await seed(store, "k", "some searchable value")
+        tool = MemorySearchTool(store, engine=FakeEngine())
         res = await tool.run(query="value", since="banana")
         assert res.success is False
         blob = (res.error or "") + (res.output or "")
@@ -255,36 +281,12 @@ async def test_search_temporal_params_optional(tmp_path: Path):
     store = make_store(tmp_path)
     await store.open()
     try:
-        await store.store_fact("recipe_key", "banana smoothie recipe with honey")
-        await store.store_fact("car_key", "car maintenance schedule")
-        tool = MemorySearchTool(store)
+        await seed(store, "recipe_key", "banana smoothie recipe with honey")
+        await seed(store, "car_key", "auto maintenance schedule")
+        tool = MemorySearchTool(store, engine=FakeEngine())
         res = await tool.run(query="smoothie")
         assert res.success
         assert "recipe_key" in res.output
         assert "car_key" not in res.output
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_search_hides_operational_namespaces_unless_asked(tmp_path: Path):
-    """Live: a gate/resolved_error row quoting a file path was the TOP hit for four
-    unrelated queries in one session. Operational memory (gate/, predgate/, learned/) is
-    hidden from memory_search unless the query names it."""
-    store = make_store(tmp_path)
-    await store.open()
-    try:
-        await store.store_fact("sem/profile/abc", "User is drafting a customer profile note")
-        await store.store_fact(
-            "gate/resolved_error/read/x",
-            "`read` error resolved: Path is a directory: skills/draft-customer-profile",
-        )
-        tool = MemorySearchTool(store)
-        res = await tool.run(query="customer profile")
-        assert res.success
-        assert "sem/profile/abc" in res.output
-        assert "gate/resolved_error" not in res.output
-        asked = await tool.run(query="gate customer")
-        assert "gate/resolved_error" in asked.output
     finally:
         await store.close()

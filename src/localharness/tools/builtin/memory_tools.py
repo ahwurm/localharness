@@ -1,7 +1,15 @@
-"""Memory retrieval tools: memory_search (FTS5 over fact contents) and memory_get (full body).
+"""Memory retrieval tools — retrieval by RESONANCE in the model's own space.
 
-These serve the full persistent-fact bodies on demand so the system prompt can inline only a
-small INDEX (fact names + one-line descriptions) instead of the entire MEMORY.md every turn.
+memory_search embeds the query with the subject-family model and ranks stored facts
+by cosine in that learned space (memory/resonance.py) — the model IS the connection
+between the present and the past. There is NO lexical, statistical, or hashing
+fallback behind these tools: if the resonance engine cannot run, the tool says so
+loudly (owner order: model as the connection, nothing else).
+
+remember persists one fact as a BET: birth truth comes from the writer's measured
+track record, the content is embedded at write time, and a re-sighting of an
+existing claim (judged by the model, not by string rules) lands as EVIDENCE on the
+existing row instead of a duplicate.
 """
 import asyncio
 import logging
@@ -12,12 +20,10 @@ from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 log = logging.getLogger(__name__)
 
-# Bounded wall-clock for remember()'s save-time tag filing (#87). Save-time filing is best-effort:
-# it runs the same two-pick classifier as mining, but must NEVER hold up a live turn — at this
-# budget the in-flight generation is cancelled (releasing the inference gate) and the fact is left
-# untagged for the turn-end micro-pass (#90). Two tiny closed-set calls; the cap is the slow-path
-# safety, not the expected latency.
-_REMEMBER_FILE_BUDGET_S = 6.0
+# Bounded wall-clock for remember()'s same-claim model look. Machine safety, not memory
+# math: the in-flight generation is cancelled at the budget (releasing the serial
+# inference gate) and the write proceeds as a plain new row.
+_REMEMBER_FOLD_BUDGET_S = 6.0
 
 
 def resolve_time_expr(expr: str, *, end: bool = False) -> int:
@@ -55,40 +61,25 @@ def resolve_time_expr(expr: str, *, end: bool = False) -> int:
     return int(datetime.combine(day, boundary).astimezone().timestamp())
 
 
-# Operational memory — tool lessons and gate statistics — is not the user's world (the
-# clustering pass excludes the same namespaces, memory/clustering.py). Observed live: a
-# gate/resolved_error row whose value quoted a file path was the TOP hit for four unrelated
-# queries ("customer profile", "interview notes", "draft", "customer notes interview") in one
-# 50-call session, crowding out the handful of real facts the model was searching for.
-_OPERATIONAL_PREFIXES = ("gate/", "predgate/", "learned/")
-_OPERATIONAL_WORDS = frozenset({"gate", "predgate", "learned", "lesson", "lessons"})
-
-
-def _is_operational(key: str) -> bool:
-    return key.startswith(_OPERATIONAL_PREFIXES)
-
-
-def _wants_operational(query: str) -> bool:
-    """The model asked for tool lessons by name — show them."""
-    import re
-    return any(tok in _OPERATIONAL_WORDS for tok in re.split(r"[^a-z]+", query.lower()))
+def _engine_error(exc: Exception) -> str:
+    return f"Memory unavailable — the resonance engine failed: {exc}"
 
 
 class MemorySearchTool(Tool):
-    """Search persistent-fact contents. Uses the existing FTS5 table (facts_fts) via
-    MemoryStore.query_facts — lower risk than a fresh LIKE scan because the schema already
-    defines facts_fts with INSERT/UPDATE/DELETE triggers that keep it in sync."""
+    """Search persistent memory by meaning: the query is embedded in the subject-family
+    model's space and facts rank by resonance (cosine). No FTS, no fallback."""
 
-    def __init__(self, memory_store: Any) -> None:
+    def __init__(self, memory_store: Any, engine: Any = None) -> None:
         self._mem = memory_store
+        self._engine = engine
 
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="memory_search",
             group="memory",
             description=(
-                "Search your persistent memory (fact names, values, tags) for a query string. "
-                "Returns matching fact names with a short snippet. Use memory_get(name) for a "
+                "Search your persistent memory by meaning for a query string. Returns the "
+                "most resonant fact names with a short snippet. Use memory_get(name) for a "
                 "match's full body. The system prompt shows only an index, so search when you "
                 "need detail that isn't already inlined. Supports time filters — e.g. "
                 "since='yesterday' answers 'what did we learn yesterday?'."
@@ -98,7 +89,7 @@ class MemorySearchTool(Tool):
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search terms to match against fact contents.",
+                        "description": "What to look for — matched by meaning, not exact words.",
                     },
                     "limit": {
                         "type": "integer",
@@ -132,10 +123,14 @@ class MemorySearchTool(Tool):
     async def _execute(
         self, query: str, limit: int = 10, since: str | None = None, until: str | None = None
     ) -> ToolResult:
-        from localharness.memory.sqlite import FactQuery
-
         if self._mem is None:
             return self.err("No memory store available.", error_type="execution_error")
+        if self._engine is None:
+            return self.err(
+                "Memory search unavailable: no resonance engine is wired. Retrieval runs "
+                "in the model's representation space and has no fallback path.",
+                error_type="execution_error",
+            )
         since_epoch = until_epoch = None
         try:
             if since:
@@ -143,88 +138,59 @@ class MemorySearchTool(Tool):
             if until:
                 until_epoch = resolve_time_expr(until, end=True)
         except ValueError as exc:
-            # Readable teach-back, never an exception into the loop (must_have #4). Note:
-            # error_type must be a valid ToolResult Literal — 'invalid_params' is NOT one
-            # (it raises a pydantic ValidationError); 'validation_error' is the correct fit.
             return self.err(str(exc), error_type="validation_error")
-        hide_operational = not _wants_operational(query)
         try:
-            facts = await self._mem.query_facts(
-                FactQuery(
-                    text=query, min_confidence=0.0,
-                    # Over-fetch a little when filtering so a page of gate rows can't
-                    # starve the real hits below them.
-                    limit=min(limit + 10, 50) if hide_operational else limit,
-                    since=since_epoch, until=until_epoch,
-                )
+            qvec = await asyncio.to_thread(self._engine.embed_query, query)
+        except Exception as exc:
+            return self.err(_engine_error(exc), error_type="execution_error")
+        try:
+            hits = await self._mem.resonance_search(
+                qvec, limit=limit, since=since_epoch, until=until_epoch
             )
         except Exception as exc:
             return self.err(f"Memory search failed: {exc}")
-        if hide_operational:
-            facts = [f for f in facts if not _is_operational(f.key)][:limit]
-        if not facts:
-            return self.ok(f"No facts matched '{query}'.")
-        # Reads bump STAGED counters only (RANK-04): ranking learns from use without
-        # ever reordering the injected block mid-conversation.
-        touch = getattr(self._mem, "touch_staged", None)
-        if touch is not None:
-            try:
-                await touch([f.key for f in facts])
-            except Exception:
-                pass  # staging is best-effort; retrieval must never fail on it
-        # P0 activation trace (tag-graph substrate): log this retrieval event best-effort.
-        # stimulus=query; fired=injected=the hits (all are rendered below). The graph
-        # neighborhood appended further down is spreading activation (a LATER phase) —
-        # deliberately NOT in the P0 fired/injected set, which is the direct search hits.
-        # A trace-write failure must NEVER fail the search (wrap + warn).
+        # Counts role: every retrieval moment is recorded, hits or not — what was asked
+        # is as much a measurement as what answered. A trace-write failure never fails
+        # the search.
+        hit_ids = [f.id for f, _score in hits]
         rec = getattr(self._mem, "record_activation_trace", None)
         if rec is not None:
             try:
-                hit_ids = [f.id for f in facts]
                 await rec(stimulus=query, fired_ids=hit_ids, injected_ids=hit_ids,
                           source="memory_search")
             except Exception:
                 log.warning("activation-trace write failed (memory_search)", exc_info=True)
+        if not hits:
+            return self.ok(f"No memories resonated with '{query}'.")
+        # Reads bump STAGED counters only: ranking learns from use without ever
+        # reordering the injected block mid-conversation.
+        touch = getattr(self._mem, "touch_staged", None)
+        if touch is not None:
+            try:
+                await touch([f.key for f, _score in hits])
+            except Exception:
+                pass  # staging is best-effort; retrieval must never fail on it
         lines = []
-        for f in facts:
+        for f, score in hits:
             snippet = (f.value or "").strip().replace("\n", " ")
             if len(snippet) > 160:
                 snippet = snippet[:159] + "…"
-            # Critic M4: unvetted candidates must never read with the same authority as
-            # confirmed facts — mark them until consolidation promotes them.
-            marker = " [pending]" if "pending_consolidation" in getattr(f, "tags", []) else ""
-            lines.append(f"- {f.key}{marker}: {snippet}")
-        # Structure-aware retrieval (HIER-03): the FTS hit is the ENTRY POINT; the graph
-        # supplies the neighborhood — a leaf hit surfaces its gist/schema context, a
-        # schema hit surfaces its members. Gist routes; verbatim answers.
-        nbhd = getattr(self._mem, "neighborhood", None)
-        by_ids = getattr(self._mem, "get_facts_by_ids", None)
-        top_id = getattr(facts[0], "id", 0)
-        if nbhd is not None and by_ids is not None and top_id:
-            try:
-                walk = await nbhd(top_id, depth=1, limit=6)
-                rel = await by_ids([nid for nid, d in walk if d > 0])
-                if rel:
-                    lines.append(
-                        "Related (graph neighborhood of top hit): "
-                        + ", ".join(f"{f.key} [{f.node_kind}]" for f in rel)
-                    )
-            except Exception:
-                pass  # the neighborhood is enrichment; search must never fail on it
-        return self.ok("\n".join(lines), match_count=len(facts))
+            lines.append(f"- {f.key}: {snippet}")
+        return self.ok("\n".join(lines), match_count=len(hits))
 
 
 class MemoryRememberTool(Tool):
-    """Persist one durable fact (WRITE-01). Writes route through MemoryStore.store_fact —
-    supersede-not-overwrite + read-back-verified; a conflicting name supersedes the old
-    version (history kept, retrievable via get_fact_history)."""
+    """Persist one durable fact as a bet (memory spec, write side). Writes route through
+    MemoryStore.store_fact — supersede-not-overwrite + read-back-verified; birth truth is
+    the writer's measured track record; the content is embedded at write time so the fact
+    can resonate with future presents."""
 
-    def __init__(self, memory_store: Any, llm: Any = None) -> None:
+    def __init__(self, memory_store: Any, llm: Any = None, engine: Any = None) -> None:
         self._mem = memory_store
-        # #87: an optional text-completion LLM (LLMTextAdapter in prod) enables save-time tag
-        # filing. None (tests / no model) keeps the byte-identical untagged save — the micro-pass
-        # files it later.
+        # An optional text-completion LLM (LLMTextAdapter in prod) enables the same-claim
+        # model look. None (tests / no model) keeps the plain write.
         self._llm = llm
+        self._engine = engine
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -251,7 +217,7 @@ class MemoryRememberTool(Tool):
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional tags for grouping/decay classes.",
+                        "description": "Optional tags for grouping.",
                     },
                 },
                 "required": ["name", "content"],
@@ -264,50 +230,81 @@ class MemoryRememberTool(Tool):
         )
 
     async def _execute(self, name: str, content: str, tags: Any = None) -> ToolResult:
+        from localharness.memory import resonance as _res
+
         if self._mem is None:
             return self.err("No memory store available.", error_type="execution_error")
+        if self._engine is None:
+            return self.err(
+                "Remember unavailable: no resonance engine is wired. Every memory is "
+                "embedded at write time and there is no fallback path.",
+                error_type="execution_error",
+            )
         clean_name = (name or "").strip()
         clean_content = (content or "").strip()
         if not clean_name or not clean_content:
             return self.err("Both 'name' and 'content' must be non-empty.", error_type="validation_error")
+        try:
+            vec = await asyncio.to_thread(
+                self._engine.embed_docs, [f"{clean_name}: {clean_content}"]
+            )
+        except Exception as exc:
+            return self.err(_engine_error(exc), error_type="execution_error")
+        blob = _res.pack(vec[0])
+
+        # Re-sighting check (spec: "a re-sighting of an existing claim is EVIDENCE on
+        # that row, never a new row"). The MODEL judges same-claim — top resonant
+        # existing fact under a different name, one budget-capped yes/no look. Any
+        # failure or timeout falls through to a plain new-row write.
+        folded_into = None
+        if self._llm is not None:
+            try:
+                candidates = await self._mem.resonance_search(vec[0], limit=2)
+                cand = next(
+                    (f for f, _s in candidates if f.key != clean_name), None
+                )
+                if cand is not None:
+                    same = await asyncio.wait_for(
+                        self._llm.complete(
+                            "Do these two statements make the same claim?\n"
+                            f"A: {cand.key}: {cand.value}\n"
+                            f"B: {clean_name}: {clean_content}\n"
+                            "Answer with exactly one word, yes or no."
+                        ),
+                        timeout=_REMEMBER_FOLD_BUDGET_S,
+                    )
+                    if isinstance(same, str) and same.strip().lower().startswith("yes"):
+                        folded_into = cand
+            except Exception:
+                log.debug("remember same-claim look failed (non-fatal)", exc_info=True)
+
         tag_list = [str(t) for t in (tags or [])] + ["remember"]
         try:
+            if folded_into is not None:
+                fact = await self._mem.store_fact(
+                    key=folded_into.key,
+                    value=folded_into.value,
+                    tags=folded_into.tags,
+                    source="remember",
+                )
+                return self.ok(
+                    f"Reinforced existing memory '{fact.key}' — the model judged this the "
+                    "same claim (evidence added, no duplicate row).",
+                    fact_key=fact.key,
+                )
             fact = await self._mem.store_fact(
                 key=clean_name,
                 value=clean_content,
                 tags=tag_list,
-                confidence=0.9,
                 source="remember",
+                embedding=blob,
             )
         except Exception as exc:
             return self.err(f"Remember failed: {exc}")
-        # #87: file the atom (bucket + child) at save time via the SAME two-pick seam mining uses.
-        # The save above is already durable; this is strictly best-effort and NEVER blocks/fails it.
-        if self._llm is not None:
-            await self._file_tags_best_effort(fact.id, clean_name, clean_content)
         return self.ok(
             f"Remembered '{fact.key}' (read-back verified).",
             fact_key=fact.key,
         )
-
-    async def _file_tags_best_effort(self, atom_id: int, topic: str, claim: str) -> None:
-        """Run the mint-time two-pick classifier (file_atom_tags) on the just-saved atom, bounded by
-        a wall-clock budget. HARD RULE (#87): a classify failure or timeout leaves the fact saved-
-        but-untagged and returns cleanly — it can never raise into (or stall) the remember tool. On
-        budget expiry the cancel event fires, which cancels the in-flight generation (releasing the
-        serial inference gate) exactly as the idle path does."""
-        from localharness.memory.tag_classify import file_atom_tags
-
-        cancel = asyncio.Event()
-        loop = asyncio.get_event_loop()
-        timer = loop.call_later(_REMEMBER_FILE_BUDGET_S, cancel.set)
-        try:
-            await file_atom_tags(self._mem, self._llm, cancel,
-                                 atom_id=atom_id, topic=topic, claim=claim, provenance="remember")
-        except Exception:
-            log.debug("remember save-time tag filing failed (non-fatal) for %r", topic, exc_info=True)
-        finally:
-            timer.cancel()
 
 
 class MemoryGetTool(Tool):
@@ -372,7 +369,7 @@ class MemoryGetTool(Tool):
                 await touch([fact.key])
             except Exception:
                 pass
-        # P0 activation trace: a memory_get surfaces one atom — a recall event
+        # Counts role: a memory_get surfaces one atom — a recall event
         # (stimulus=name, fired=injected=[that atom]). Best-effort (wrap + warn).
         rec = getattr(self._mem, "record_activation_trace", None)
         if rec is not None:

@@ -1364,6 +1364,9 @@ class AgentLoop:
                 ctx = await _recall.load_context(
                     index_mode=getattr(_mem_cfg, "index_mode", True),
                     max_session_history=getattr(_mem_cfg, "max_session_history_entries", 8),
+                    # The loading budget IS the whole gate (memory spec): facts admit
+                    # by salience until this many chars are spent.
+                    max_chars=getattr(_mem_cfg, "max_notes_chars", 16_000),
                 )
                 parts = [system_prompt]
                 if ctx.guardrails_md:
@@ -1493,20 +1496,6 @@ class AgentLoop:
             # committed into session.messages by the ContextManager; the turn index follows.
             request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
             _absorb_commit(session, self._ctx)
-
-            # SESS-03: a compaction summary must outlive the window. CompactionTriggered
-            # cannot fire live (production ContextManager has no bus — start_cmd gap, noted
-            # for the owner, NOT fixed here); the summary a fire produced this build is what
-            # the ContextManager reports. Rolling per-sitting node: supersede absorbs re-fires.
-            _fired = getattr(self._ctx, "last_fire_summary", None)
-            if self._memory is not None and _fired:
-                try:
-                    from localharness.memory.hierarchy import persist_compaction_gist
-                    await persist_compaction_gist(
-                        self._memory, summary=_fired, session_id=session.session_id,
-                    )
-                except Exception:
-                    log.warning("compaction-gist persistence failed (non-fatal)", exc_info=True)
 
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
             raw_pct = ctx_budget.usage_fraction * 100.0

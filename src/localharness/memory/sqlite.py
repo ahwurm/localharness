@@ -58,6 +58,11 @@ class Fact:
     access_count: int = 0
     last_accessed_at: int | None = None
     node_kind: str = "fact"
+    # v10 (resonance rebuild): belief as log-odds moved only by evidence (None on
+    # pre-v10 rows — derived from `confidence` at read time), and the accumulated
+    # resonance-share mass from dreaming's stream replay (the need axis; no clock).
+    truth_logodds: float | None = None
+    standing: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -70,22 +75,6 @@ class FactQuery:
     include_superseded: bool = False
     since: int | None = None   # epoch seconds, inclusive lower bound on facts.updated_at
     until: int | None = None   # epoch seconds, inclusive upper bound on facts.updated_at
-
-
-@dataclass(frozen=True)
-class ToolPrior:
-    """A per-tool statistical prior from event history (COLL-01) — the context a
-    surprise score is graded against. Computed in ONE indexed SQL aggregate; the
-    None fields carry cold start honestly (no history -> no prediction)."""
-    tool_name: str
-    n: int                          # prior observation count (strictly earlier rows)
-    error_rate: float | None        # AVG(is_error); None when n == 0
-    lat_mean_ms: float | None
-    lat_var_ms: float | None        # population variance
-    lat_n: int
-    size_mean: float | None
-    size_var: float | None
-    size_n: int
 
 
 @dataclass(frozen=True)
@@ -125,52 +114,6 @@ class ActivationTrace:
     ts: int
 
 
-@dataclass(frozen=True)
-class Tag:
-    """A first-class tag row (schema v6 — the tag-graph spine). TWO layers only: a BUCKET has
-    parent_id IS NULL (the seeded superordinate — personal/project); a CHILD has parent_id set to
-    its bucket. v1 permits ONLY bucket->child (depth 2) and nothing deeper — a grandchild is
-    refused at creation (create_tag), so the classifier stays flat at <=2 picks forever.
-    `status`: seeded (fixed spine) | proposed (a discovery candidate accruing evidence) | active
-    (incorporated; edge-eligible) | merged (folded into `merged_into`) | retired (pruned).
-    `origin`: seeded | discovered. The evidence-ladder fields (distinct_sittings, reuse_count,
-    last_accrual_ts) accrue on proposed candidates with recency decay until they incorporate or
-    prune (Amendment 4's Bayesian synaptogenesis — v1 realises the weights as counts + decay)."""
-    id: int
-    agent_id: str
-    name: str
-    definition: str
-    status: str
-    parent_id: int | None
-    origin: str
-    merged_into: int | None = None
-    distinct_sittings: int = 0
-    reuse_count: int = 0
-    last_accrual_ts: int | None = None
-    created_at: int = 0
-    updated_at: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Phase 36 (SEMA-03/04): lesson-cluster "chapter" schema contract
-# ---------------------------------------------------------------------------
-# The store-side half of the chapter node: key prefix, tier tag, confidence tier, depth tag.
-# DISTINCT from hierarchy.py's doc-analysis schema/doc/* gists (those are _GIST_CONFIDENCE=0.6,
-# below the 0.7 line, a different feature that routes but never injects). A chapter is a
-# PROMOTION over its member lessons: it must clear the 0.7 injection gate to render.
-SCHEMA_KEY_PREFIX = "schema/cluster/"          # chapter nodes; never collides with schema/doc/*
-SCHEMA_TIER_TAG = "tier:schema"
-SCHEMA_CONFIDENCE = 0.8                          # == consolidation._PROMOTED_CONFIDENCE; >= 0.7 gate
-SCHEMA_DEPTH_TAG_PREFIX = "depth:"              # depth:1 chapter-of-lessons, depth:2 chapter-of-chapters
-
-# The ambient-injection confidence floor. A fact renders into the every-turn memory shelf
-# (_render_memory_index_with_ids) only at confidence >= this value. Named here so the /memory
-# window can TEACH the user why a memory does/doesn't inject, reading the SAME number the render
-# clauses hardcode (the render also requires retrieval_strength >= 0.2, but confidence is the
-# primary, user-facing lever). The render clauses keep their literal 0.7 by design — the ambient
-# block's bytes are stability-critical, so this constant deliberately does not refactor them.
-AMBIENT_INJECTION_FLOOR = 0.7
-
 # Provenance marker stamped by forget_fact on a user-initiated forget. `<prefix><epoch>[;<orig>]`
 # — lets the /memory window detect a retired-by-user row (vs a plain version supersede) and keeps
 # the original provenance after the ';' for audit.
@@ -199,17 +142,6 @@ ARCHIVE_SURFACE_CONSENSUS_LIST = "consensus-list"   # an external list of condem
 
 def archive_stamp(surface: str, epoch: int) -> str:
     return f"{ARCHIVE_STAMP_PREFIX}{epoch};{surface}"
-
-
-def _schema_depth(tags: list[str]) -> int:
-    """Read the depth:N tag (SEMA-03 depth cap). 0 = a plain lesson (no tag)."""
-    for t in tags:
-        if t.startswith(SCHEMA_DEPTH_TAG_PREFIX):
-            try:
-                return int(t[len(SCHEMA_DEPTH_TAG_PREFIX):])
-            except ValueError:
-                return 0
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +225,7 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
 # Schema
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 # v1 kept verbatim: the v1→v2 migration test builds a v1 DB from this exact script.
 SCHEMA_V1_SQL = """
@@ -759,40 +691,72 @@ PRAGMA user_version = 9;
 COMMIT;
 """
 
-# Seeded spine (Amendment 4): TWO buckets, THREE children each, filed by what a memory SERVES
-# (a functional decision rule with an inline example — NEVER a bare "useful"). Every seed has
-# both real run-5 atom evidence AND prior-art convergence (survey §2.3). Idempotent per agent.
-_SEED_BUCKETS: list[tuple[str, str]] = [
-    ("personal",
-     "File here if the memory SERVES the user's own life — their body, interests, plans, and "
-     "pursuits — independent of any software project. Example: a Kyoto trip, a race-training "
-     "plan, or which stocks they follow."),
-    ("project",
-     "File here if the memory SERVES building, running, or configuring THIS software project — "
-     "its code, infrastructure, conventions, or roadmap. Example: the vLLM server port, a "
-     "subagent build order, or a read-only-subagents rule."),
-]
-_SEED_CHILDREN: dict[str, list[tuple[str, str]]] = {
-    "personal": [
-        ("health", "Serves the user's body, fitness, or medical life. Example: training for a "
-                   "10k, knee pain after intervals, or adding a pre-race taper."),
-        ("travel", "Serves a trip the user is planning or taking. Example: a Kyoto autumn-colors "
-                   "trip, whether a JR pass is worth it, or a ryokan onsen night."),
-        ("preferences", "Serves a standing personal taste or interest the user holds across "
-                        "topics. Example: follows HBM/semiconductor stocks, or prefers earnings "
-                        "quality over momentum."),
-    ],
-    "project": [
-        ("ops", "Serves running or configuring THIS project's infrastructure — ports, GPUs, "
-                "servers, deploys, debugging. Example: the vLLM server listens on port 8081, or "
-                "the KV-cache-spill mitigation."),
-        ("conventions", "Serves a rule or standard to follow in THIS project. Example: subagents "
-                        "are read-only unless stated, or the summarizer is capped at 200 words."),
-        ("roadmap", "Serves what is planned or being built in THIS project. Example: the subagent "
-                    "build order, or the first subagent is the summarizer."),
-    ],
-}
+# ---------------------------------------------------------------------------
+# Schema v10 — the resonance rebuild (memory spec 2026-09-18, model-as-connection).
+# Three columns join `facts` (and its archive mirror, column-for-column — the
+# _assert_archive_columns contract):
+#   truth_logodds — belief in the claim, log-odds currency, moved only by evidence
+#                   (birth = the writer's measured track record; NULL on pre-v10 rows,
+#                   derived from `confidence` at read time).
+#   standing      — accumulated resonance-share mass from dreaming's replay of the
+#                   event streams. The need axis; no clock anywhere.
+#   embedding     — the trace's encoding vector in the subject-family model's space
+#                   (float32 bytes). NULL = not yet embedded; dreaming backfills.
+# Four small tables join alongside:
+#   writers       — per-writer bet ledger (bets/confirmed/contradicted/paid/lost);
+#                   measured precision prices every new row's birth truth.
+#   memory_groups — dreaming's named bindings (labels for human legibility ONLY,
+#                   never mechanism).
+#   digest_marks  — per-ledger-file byte offsets: how much stream the store has
+#                   digested. The amount digested is the only clock.
+#   meta          — the KV table consolidation always kept (absorbed into the schema
+#                   proper so every open guarantees it).
+# ADDITIVE ONLY; ONE transaction (crash -> rollback to v9).
+# ---------------------------------------------------------------------------
 
+MIGRATION_V9_TO_V10_SQL = """
+BEGIN IMMEDIATE;
+ALTER TABLE facts ADD COLUMN truth_logodds REAL;
+ALTER TABLE facts ADD COLUMN standing REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE facts ADD COLUMN embedding BLOB;
+ALTER TABLE facts_archive ADD COLUMN truth_logodds REAL;
+ALTER TABLE facts_archive ADD COLUMN standing REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE facts_archive ADD COLUMN embedding BLOB;
+CREATE TABLE IF NOT EXISTS writers (
+    agent_id     TEXT    NOT NULL,
+    writer       TEXT    NOT NULL,
+    bets         INTEGER NOT NULL DEFAULT 0,
+    confirmed    INTEGER NOT NULL DEFAULT 0,
+    contradicted INTEGER NOT NULL DEFAULT 0,
+    paid         INTEGER NOT NULL DEFAULT 0,
+    lost         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (agent_id, writer)
+);
+CREATE TABLE IF NOT EXISTS memory_groups (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id   TEXT    NOT NULL,
+    label      TEXT    NOT NULL DEFAULT '',
+    member_ids TEXT    NOT NULL DEFAULT '[]',
+    evidence   INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_groups_agent ON memory_groups(agent_id, evidence DESC);
+CREATE TABLE IF NOT EXISTS digest_marks (
+    agent_id    TEXT    NOT NULL,
+    path        TEXT    NOT NULL,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (agent_id, path)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    agent_id TEXT NOT NULL,
+    key      TEXT NOT NULL,
+    value    TEXT NOT NULL,
+    PRIMARY KEY (agent_id, key)
+) WITHOUT ROWID;
+PRAGMA user_version = 10;
+COMMIT;
+"""
 
 # ---------------------------------------------------------------------------
 # MemoryStore
@@ -938,8 +902,6 @@ class MemoryStore:
         await self._db.create_function("lh_slow_score", 5, _slow_score, deterministic=True)
         await self._db.create_function("lh_fused_score", 7, _fused_score, deterministic=True)
         await self._apply_migrations(owner_init=owner_init)
-        if owner_init:
-            await self._seed_tags()
 
         if self._bus is not None:
             from localharness.core.events import Action, Observation, UserMessage
@@ -1000,6 +962,9 @@ class MemoryStore:
         if v == 8:
             await self._db.executescript(MIGRATION_V8_TO_V9_SQL)
             v = await _version()
+        if v == 9:
+            await self._db.executescript(MIGRATION_V9_TO_V10_SQL)
+            v = await _version()
 
         # Phase 33.1 (ORCH-02): one-time root-rename row fixup. Directory adoption alone
         # is NOT enough — every read filters WHERE agent_id = ?, so rows stamped 'default'
@@ -1042,97 +1007,100 @@ class MemoryStore:
         key: str,
         value: str,
         tags: list[str] | None = None,
-        confidence: float = 1.0,
+        confidence: float | None = None,
         source: str = "",
         expires_at: int | None = None,
         provenance: str | None = None,
         node_kind: str = "fact",
         importance: float | None = None,
+        embedding: bytes | None = None,
+        truth_logodds: float | None = None,
         _retried: bool = False,
     ) -> Fact:
-        """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04).
+        """Write a fact with supersede-not-overwrite semantics (WRITE-01/02/04) —
+        every write a BET, every re-sighting EVIDENCE (memory spec, write side).
 
-        - No active row for `key` → insert a new active row.
-        - Active row with the IDENTICAL value → corroboration touch (updated_at bumped,
-          confidence = max(old, new)); no duplicate row.
-        - Active row with a DIFFERENT value → the old row is marked superseded
-          (status='superseded', superseded_by=<new id>) and a fresh active row is
-          inserted. Nothing is overwritten or deleted; history stays queryable via
-          get_fact_history / FactQuery(include_superseded=True).
+        - No active row for `key` → insert a new active row. Birth truth = the
+          writer's MEASURED track record (Laplace precision from the `writers`
+          ledger, in log-odds), unless the caller carries `truth_logodds` or a
+          legacy `confidence` forward. The write is tallied as a bet.
+        - Active row with the IDENTICAL value → a re-sighting: EVIDENCE on that
+          row, never a new row. From a DIFFERENT provenance (a different episode),
+          the sighting writer's measured log-odds weight is ADDED to the row's
+          truth and the row's original writer is tallied `confirmed` — a cold
+          writer's weight is 0, so weak sources mathematically cannot push belief
+          high. Same-episode re-assertion is a plain touch. No ladders, no caps.
+        - Active row with a DIFFERENT value → the old row is superseded
+          (status='superseded', superseded_by=<new id>) and its writer tallied
+          `contradicted`; a fresh active row is inserted as a new bet. Nothing is
+          overwritten or deleted; history stays queryable.
 
-        Every write is READ-BACK-VERIFIED: the active row is re-read and compared before
-        the write is claimed; a mismatch raises MemoryVerifyError (the Cline
-        "claims-to-write-but-didn't" class).
+        `importance` is DECLARED stakes carried with the fact (the one human
+        input); unset = 0.0 — nothing invents importance anymore.
+        `embedding` is the trace's encoding vector (resonance.pack); writers that
+        cannot embed leave it NULL and dreaming backfills.
 
-        `importance` (INSERT path only, unset = today's behaviour) lets a caller CARRY a
-        row's stakes forward instead of having them recomputed from the tag priors. The
-        priors dict is closed and hand-maintained, so a re-insert under new tags silently
-        re-ranks the fact at the 0.0 fallback — which is how a user-CONFIRMED correction
-        lost its rank on reconciliation settle. Carrying is the narrow fix; reworking how
-        importance is SET in the first place is the write-side rung of the memory redesign.
+        Every write is READ-BACK-VERIFIED: the active row is re-read and compared
+        before the write is claimed; a mismatch raises MemoryVerifyError.
         """
-        if not (0.0 <= confidence <= 1.0):
+        if confidence is not None and not (0.0 <= confidence <= 1.0):
             raise ValueError(f"confidence must be in [0.0, 1.0], got {confidence}")
         assert self._db is not None
         now = int(time.time())
         tags_json = json.dumps(tags or [])
         prov = provenance if provenance is not None else (self._current_session_id or "")
+        writer = source or ""
 
         existing = await self._get_fact_row(key)
         if existing is not None and existing.value == value:
-            # Corroboration: same claim re-asserted — strengthen, don't duplicate.
-            # expires_at/tags/node_kind follow the NEW call (critics 29-m2 + 32-m1:
-            # the branch must not silently ignore caller-supplied metadata — same
-            # contract as the supersede path, minus the new row).
-            #
-            # MOVE 3 — the Bayesian recurrence ladder (the missing update rule): a SEMANTIC atom
-            # (sem/, mined/, or a settled tier:reconcile_confirmed correction) re-asserted from a
-            # DIFFERENT provenance day steps confidence up a ladder (+0.07, cap 0.85) instead of
-            # plain MAX — distinct-day recurrence EARNS ambient status. Same-day re-assertion is a
-            # no-op touch (provenance is updated below so the NEXT day is measured against it).
-            # Operational rows (predgate/ day-buckets, plain gate/) keep MAX — a separate track.
-            new_tags = tags or []
-            ladder_eligible = (
-                key.startswith("sem/") or key.startswith("mined/")
-                or "tier:reconcile_confirmed" in existing.tags
-                or "tier:reconcile_confirmed" in new_tags
-            )
-            distinct_day = bool(prov) and bool(existing.provenance) and existing.provenance != prov
-            if ladder_eligible and distinct_day:
-                new_conf = min(0.85, existing.confidence + 0.07)
-            else:
-                new_conf = max(existing.confidence, confidence)
+            # Re-sighting: evidence on the existing row, never a new row.
+            old_truth = (existing.truth_logodds if existing.truth_logodds is not None
+                         else _logit(existing.confidence))
+            distinct_episode = bool(prov) and bool(existing.provenance) and existing.provenance != prov
+            new_truth = old_truth
+            if distinct_episode:
+                new_truth = old_truth + _logit(await self.writer_precision(writer))
+                if existing.source:
+                    await self._bump_writer(existing.source, "confirmed")
             await self._db.execute(
-                "UPDATE facts SET updated_at = ?, confidence = ?, "
+                "UPDATE facts SET updated_at = ?, confidence = ?, truth_logodds = ?, "
                 "expires_at = ?, tags = ?, node_kind = ?, "
                 "provenance = CASE WHEN ? = '' THEN provenance ELSE ? END, "
                 "source = CASE WHEN ? = '' THEN source ELSE ? END "
                 "WHERE agent_id = ? AND key = ? AND status = 'active'",
-                (now, new_conf, expires_at, tags_json, node_kind,
+                (now, _sigmoid(new_truth), new_truth, expires_at, tags_json, node_kind,
                  prov, prov, source, source, self._agent_id, key),
             )
             await self._db.commit()
         else:
+            if truth_logodds is not None:
+                birth_truth = float(truth_logodds)
+            elif confidence is not None:
+                # Legacy carry-forward (owner edits, restores): the caller holds an
+                # already-priced belief; log-odds round-trips it, invents nothing.
+                birth_truth = _logit(confidence)
+            else:
+                birth_truth = _logit(await self.writer_precision(writer))
             if existing is not None:
-                # Supersede: vacate the active-unique slot, insert successor, then link.
-                # The loser's retrieval_strength drops immediately — interference: the old
-                # memory loses the retrieval competition, it is not erased (RANK-03).
+                # Supersede: vacate the active-unique slot, insert successor, link —
+                # and the old claim's writer is tallied contradicted (an outcome).
                 await self._db.execute(
-                    "UPDATE facts SET status = 'superseded', updated_at = ?, "
-                    "retrieval_strength = MIN(retrieval_strength, 0.1) "
+                    "UPDATE facts SET status = 'superseded', updated_at = ? "
                     "WHERE agent_id = ? AND key = ? AND status = 'active'",
                     (now, self._agent_id, key),
                 )
+                if existing.source:
+                    await self._bump_writer(existing.source, "contradicted")
             try:
                 cur = await self._db.execute(
                     "INSERT INTO facts (agent_id, division_id, org_id, key, value, tags, confidence, "
-                    "source, created_at, updated_at, expires_at, status, provenance, importance, node_kind) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                    "source, created_at, updated_at, expires_at, status, provenance, importance, "
+                    "node_kind, truth_logodds, standing, embedding) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 0.0, ?)",
                     (self._agent_id, self._division_id, self._org_id, key, value,
-                     tags_json, confidence, source, now, now, expires_at, prov,
-                     (_importance_prior(tags or [], source) if importance is None
-                      else float(importance)),
-                     node_kind),
+                     tags_json, _sigmoid(birth_truth), source, now, now, expires_at, prov,
+                     0.0 if importance is None else float(importance),
+                     node_kind, birth_truth, embedding),
                 )
             except sqlite3.IntegrityError:
                 # Critic m4: two concurrent writers raced past the existence check (the
@@ -1144,7 +1112,8 @@ class MemoryStore:
                 return await self.store_fact(
                     key, value, tags=tags, confidence=confidence, source=source,
                     expires_at=expires_at, provenance=provenance, node_kind=node_kind,
-                    importance=importance, _retried=True,
+                    importance=importance, embedding=embedding,
+                    truth_logodds=truth_logodds, _retried=True,
                 )
             new_id = cur.lastrowid
             if existing is not None:
@@ -1153,6 +1122,7 @@ class MemoryStore:
                     "WHERE agent_id = ? AND key = ? AND status = 'superseded' AND superseded_by IS NULL",
                     (new_id, self._agent_id, key),
                 )
+            await self._bump_writer(writer, "bets")
             await self._db.commit()
 
         fact = await self._get_fact_row(key)
@@ -1160,10 +1130,73 @@ class MemoryStore:
             raise MemoryVerifyError(key)
         return fact
 
+    # ------------------------------------------------------------------
+    # Writers — the bet ledger (memory spec: "creation learns from forgetting")
+    # ------------------------------------------------------------------
+
+    async def _bump_writer(self, writer: str, column: str, n: int = 1) -> None:
+        """Increment one tally for one writer (row created on first touch). Part of the
+        caller's transaction — no commit here."""
+        assert self._db is not None
+        assert column in {"bets", "confirmed", "contradicted", "paid", "lost"}
+        await self._db.execute(
+            f"INSERT INTO writers (agent_id, writer, {column}) VALUES (?, ?, ?) "
+            f"ON CONFLICT(agent_id, writer) DO UPDATE SET {column} = {column} + ?",
+            (self._agent_id, writer, n, n),
+        )
+
+    async def writer_precision(self, writer: str) -> float:
+        """The writer's measured track record as a probability — Laplace-smoothed
+        precision over confirmed/contradicted outcomes. A writer with no history is
+        exactly 0.5 (log-odds 0): no invented confidence, belief must be earned."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT confirmed, contradicted FROM writers WHERE agent_id = ? AND writer = ?",
+            (self._agent_id, writer),
+        ) as cur:
+            row = await cur.fetchone()
+        confirmed, contradicted = (row[0], row[1]) if row else (0, 0)
+        return (confirmed + 1) / (confirmed + contradicted + 2)
+
+    async def settle_writer_outcomes(self) -> int:
+        """Recompute each writer's paid/lost tallies from the store's own tables —
+        uniform statistics over everything the writer ever wrote (active, superseded,
+        archived): paid = rows that were actually recalled; lost = rows that were
+        archived without ever being recalled. Returns writers updated."""
+        assert self._db is not None
+        sql = """
+            SELECT writer,
+                   SUM(recalled)                    AS paid,
+                   SUM(archived * (1 - recalled))   AS lost
+            FROM (
+                SELECT source AS writer,
+                       CASE WHEN access_count + access_count_staged > 0 THEN 1 ELSE 0 END AS recalled,
+                       0 AS archived
+                FROM facts WHERE agent_id = :agent
+                UNION ALL
+                SELECT source AS writer,
+                       CASE WHEN access_count + access_count_staged > 0 THEN 1 ELSE 0 END AS recalled,
+                       1 AS archived
+                FROM facts_archive WHERE agent_id = :agent
+            )
+            GROUP BY writer
+        """
+        async with self._db.execute(sql, {"agent": self._agent_id}) as cur:
+            rows = await cur.fetchall()
+        for writer, paid, lost in rows:
+            await self._db.execute(
+                "INSERT INTO writers (agent_id, writer, paid, lost) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(agent_id, writer) DO UPDATE SET paid = ?, lost = ?",
+                (self._agent_id, writer or "", paid or 0, lost or 0, paid or 0, lost or 0),
+            )
+        await self._db.commit()
+        return len(rows)
+
     _FACT_COLS = (
         "key, value, agent_id, division_id, org_id, tags, confidence, source, "
         "created_at, updated_at, expires_at, status, superseded_by, provenance, id, "
-        "retrieval_strength, importance, access_count, last_accessed_at, node_kind"
+        "retrieval_strength, importance, access_count, last_accessed_at, node_kind, "
+        "truth_logodds, standing"
     )
 
     async def _get_fact_row(self, key: str) -> Fact | None:
@@ -1292,6 +1325,7 @@ class MemoryStore:
         "source", "created_at", "updated_at", "expires_at", "status", "superseded_by",
         "provenance", "retrieval_strength", "importance", "access_count",
         "last_accessed_at", "access_count_staged", "last_accessed_staged", "node_kind",
+        "truth_logodds", "standing", "embedding",
     )
 
     async def _assert_archive_columns(self) -> None:
@@ -1457,324 +1491,6 @@ class MemoryStore:
         await self._db.execute("VACUUM")
         await self._db.commit()
 
-    # ------------------------------------------------------------------
-    # Tag graph (schema v6): seeded spine + mint-time filing edges + the
-    # discovery evidence ladder. Grouping reads CHILD-tag co-membership;
-    # buckets are navigation and NEVER form grouping edges (Amendment 2/M3).
-    # ------------------------------------------------------------------
-
-    _TAG_COLS = ("id, agent_id, name, definition, status, parent_id, origin, merged_into, "
-                 "distinct_sittings, reuse_count, last_accrual_ts, created_at, updated_at")
-
-    async def _seed_tags(self) -> None:
-        """Idempotently write the seeded spine (Amendment 4) for this agent. Runs every open()
-        after migrations; ON CONFLICT(agent_id, name) DO NOTHING makes re-seeding a no-op."""
-        assert self._db is not None
-        now = int(time.time())
-        for name, definition in _SEED_BUCKETS:
-            await self._db.execute(
-                "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
-                "created_at, updated_at) VALUES (?, ?, ?, 'seeded', NULL, 'seeded', ?, ?) "
-                "ON CONFLICT(agent_id, name) DO NOTHING",
-                (self._agent_id, name, definition, now, now),
-            )
-        await self._db.commit()
-        for bucket_name, children in _SEED_CHILDREN.items():
-            bucket = await self._get_tag_row(bucket_name)
-            assert bucket is not None
-            for name, definition in children:
-                await self._db.execute(
-                    "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
-                    "created_at, updated_at) VALUES (?, ?, ?, 'seeded', ?, 'seeded', ?, ?) "
-                    "ON CONFLICT(agent_id, name) DO NOTHING",
-                    (self._agent_id, name, definition, bucket.id, now, now),
-                )
-        await self._db.commit()
-
-    async def _get_tag_row(self, name: str) -> Tag | None:
-        assert self._db is not None
-        async with self._db.execute(
-            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND name = ?",
-            (self._agent_id, name),
-        ) as cur:
-            row = await cur.fetchone()
-        return _row_to_tag(row) if row else None
-
-    async def get_tag(self, name: str) -> Tag | None:
-        return await self._get_tag_row(name)
-
-    async def get_tag_by_id(self, tag_id: int) -> Tag | None:
-        assert self._db is not None
-        async with self._db.execute(
-            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND id = ?",
-            (self._agent_id, tag_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return _row_to_tag(row) if row else None
-
-    async def list_tags(self, *, status: str | None = None) -> list[Tag]:
-        assert self._db is not None
-        q = f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ?"
-        params: list[Any] = [self._agent_id]
-        if status is not None:
-            q += " AND status = ?"
-            params.append(status)
-        q += " ORDER BY id"
-        async with self._db.execute(q, params) as cur:
-            return [_row_to_tag(r) for r in await cur.fetchall()]
-
-    async def buckets(self) -> list[Tag]:
-        """The seeded spine buckets (parent_id IS NULL) — navigation only, never edge sources."""
-        assert self._db is not None
-        async with self._db.execute(
-            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND parent_id IS NULL "
-            "AND status = 'seeded' ORDER BY id",
-            (self._agent_id,),
-        ) as cur:
-            return [_row_to_tag(r) for r in await cur.fetchall()]
-
-    async def active_children(self, bucket_id: int) -> list[Tag]:
-        """Edge-eligible children of a bucket: seeded or incorporated (active) — the exact set a
-        mint-time menu shows and the exact set that forms grouping edges. proposed/merged/retired
-        are excluded (a candidate has no grouping rights until it incorporates)."""
-        assert self._db is not None
-        async with self._db.execute(
-            f"SELECT {self._TAG_COLS} FROM tags WHERE agent_id = ? AND parent_id = ? "
-            "AND status IN ('seeded', 'active') ORDER BY id",
-            (self._agent_id, bucket_id),
-        ) as cur:
-            return [_row_to_tag(r) for r in await cur.fetchall()]
-
-    async def create_tag(self, name: str, definition: str, *, parent_id: int | None = None,
-                         status: str = "proposed", origin: str = "discovered") -> Tag:
-        """Create a tag; DEPTH IS ENFORCED HERE (the v1 two-layer invariant). A child's parent
-        must be a bucket (parent_id IS NULL) — a grandchild (parent is itself a child) raises
-        ValueError, so the graph can never grow past bucket->child in v1. Idempotent on name."""
-        assert self._db is not None
-        if parent_id is not None:
-            parent = await self.get_tag_by_id(parent_id)
-            if parent is None or parent.parent_id is not None:
-                raise ValueError(
-                    f"tag depth: parent {parent_id} is not a bucket — v1 permits only bucket->child"
-                )
-        now = int(time.time())
-        await self._db.execute(
-            "INSERT INTO tags (agent_id, name, definition, status, parent_id, origin, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(agent_id, name) DO NOTHING",
-            (self._agent_id, name, definition, status, parent_id, origin, now, now),
-        )
-        await self._db.commit()
-        tag = await self._get_tag_row(name)
-        assert tag is not None
-        return tag
-
-    async def set_tag_status(self, tag_id: int, status: str, *, name: str | None = None,
-                             merged_into: int | None = None, definition: str | None = None) -> None:
-        # #90: `definition` (optional) lets the naming step replace the "discovery candidate
-        # (unincorporated)" placeholder with a real one-liner when it incorporates a candidate —
-        # COALESCE keeps every existing caller (definition=None) byte-behavior-identical.
-        assert self._db is not None
-        await self._db.execute(
-            "UPDATE tags SET status = ?, merged_into = COALESCE(?, merged_into), "
-            "name = COALESCE(?, name), definition = COALESCE(?, definition), "
-            "updated_at = ? WHERE agent_id = ? AND id = ?",
-            (status, merged_into, name, definition, int(time.time()), self._agent_id, tag_id),
-        )
-        await self._db.commit()
-
-    async def bump_tag_evidence(self, tag_id: int, *, distinct_sittings: int, reuse_count: int,
-                                last_accrual_ts: int) -> None:
-        assert self._db is not None
-        await self._db.execute(
-            "UPDATE tags SET distinct_sittings = ?, reuse_count = ?, last_accrual_ts = ?, "
-            "updated_at = ? WHERE agent_id = ? AND id = ?",
-            (distinct_sittings, reuse_count, last_accrual_ts, int(time.time()),
-             self._agent_id, tag_id),
-        )
-        await self._db.commit()
-
-    async def add_atom_tag(self, atom_id: int, tag_id: int, provenance: str = "mint") -> None:
-        """Attach a tag to an atom (idempotent). provenance: mint|discovery|curation."""
-        assert self._db is not None
-        await self._db.execute(
-            "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(atom_id, tag_id) DO NOTHING",
-            (atom_id, tag_id, provenance, int(time.time())),
-        )
-        await self._db.commit()
-
-    async def add_bucket_tag(self, atom_id: int, bucket_tag_id: int, provenance: str = "mint") -> bool:
-        """Attach an L1 BUCKET tag (parent_id IS NULL) to an atom under the exactly-one-bucket
-        invariant (#88). If the atom already carries a DIFFERENT bucket, KEEP the existing one, log
-        the conflict, and write NOTHING — an atom NEVER holds two buckets. Idempotent on the same
-        bucket. Returns True iff a fresh bucket row was written (False = already had it, or a
-        conflicting bucket was kept). Child tags do NOT route here — they use add_atom_tag; only
-        this method (called by the classify/mining/remember filing seams) guards the bucket layer,
-        so the generic writer stays a cheap upsert for the far-more-frequent child/discovery edges."""
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT t.id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            "WHERE a.atom_id = ? AND t.agent_id = ? AND t.parent_id IS NULL",
-            (atom_id, self._agent_id),
-        ) as cur:
-            existing = [r[0] for r in await cur.fetchall()]
-        if bucket_tag_id in existing:
-            return False  # already filed under this exact bucket — idempotent no-op
-        if existing:
-            # Root cause of the double-fire (#88): a corroboration re-mint re-classified to a
-            # different bucket and the generic add_atom_tag wrote it as a second row. Keep the
-            # first bucket; the resolution is auditable via the micro-pass heal event.
-            log.warning("bucket invariant (#88): atom %d already filed under bucket %d; "
-                        "refusing conflicting bucket %d (kept existing)",
-                        atom_id, existing[0], bucket_tag_id)
-            return False
-        await self._db.execute(
-            "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(atom_id, tag_id) DO NOTHING",
-            (atom_id, bucket_tag_id, provenance, int(time.time())),
-        )
-        await self._db.commit()
-        return True
-
-    async def heal_bucket_conflicts(self, *, limit: int | None = None) -> list[tuple[int, int, list[int]]]:
-        """#88 heal: collapse any atom carrying >1 L1 bucket tag to exactly one — KEEP the earliest
-        (min ts, then min tag_id) bucket and DELETE the rest. Deterministic, pure SQL, no model
-        calls. Returns [(atom_id, kept_tag_id, [dropped_tag_id...])] for the caller (the turn-end
-        micro-pass) to count/event. Heals legacy violations written before add_bucket_tag existed,
-        the moment the micro-pass next touches the store — no manual data surgery."""
-        assert self._db is not None
-        limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
-        async with self._db.execute(
-            "SELECT a.atom_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            "WHERE t.agent_id = ? AND t.parent_id IS NULL "
-            "GROUP BY a.atom_id HAVING COUNT(*) > 1 ORDER BY a.atom_id" + limit_sql,
-            (self._agent_id,),
-        ) as cur:
-            atom_ids = [r[0] for r in await cur.fetchall()]
-        healed: list[tuple[int, int, list[int]]] = []
-        for aid in atom_ids:
-            async with self._db.execute(
-                "SELECT a.tag_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-                "WHERE a.atom_id = ? AND t.agent_id = ? AND t.parent_id IS NULL "
-                "ORDER BY a.ts ASC, a.tag_id ASC",
-                (aid, self._agent_id),
-            ) as cur:
-                rows = [r[0] for r in await cur.fetchall()]
-            kept, dropped = rows[0], rows[1:]
-            for d in dropped:
-                await self._db.execute(
-                    "DELETE FROM atom_tags WHERE atom_id = ? AND tag_id = ?", (aid, d))
-            log.warning("bucket invariant heal (#88): atom %d had buckets %s; kept %d, dropped %s",
-                        aid, rows, kept, dropped)
-            healed.append((aid, kept, dropped))
-        if healed:
-            await self._db.commit()
-        return healed
-
-    async def fact_key_exists(self, key: str) -> bool:
-        """True iff ANY row exists for `key` in ANY status (active|superseded|…) regardless of
-        expiry. Unlike get_fact (active + unexpired only) this is the durability check the novelty
-        gate needs (#89): an already-recorded first-use may have been consolidated/superseded or
-        expired, but its prior existence still means "not first use" — so it must never re-fire."""
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT 1 FROM facts WHERE agent_id = ? AND key = ? LIMIT 1",
-            (self._agent_id, key),
-        ) as cur:
-            return await cur.fetchone() is not None
-
-    async def remove_atom_tags_for_tag(self, tag_id: int) -> None:
-        """Detach a tag from every atom (a pruned discovery candidate's members return to the
-        bucket-only pool so a later cycle can re-discover them)."""
-        assert self._db is not None
-        await self._db.execute("DELETE FROM atom_tags WHERE tag_id = ?", (tag_id,))
-        await self._db.commit()
-
-    async def move_atom_tags(self, from_tag_id: int, to_tag_id: int, provenance: str = "curation") -> None:
-        """Re-point a tag's atom memberships onto another tag (merge/fold). Idempotent."""
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT atom_id FROM atom_tags WHERE tag_id = ?", (from_tag_id,)
-        ) as cur:
-            atom_ids = [r[0] for r in await cur.fetchall()]
-        now = int(time.time())
-        for aid in atom_ids:
-            await self._db.execute(
-                "INSERT INTO atom_tags (atom_id, tag_id, provenance, ts) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(atom_id, tag_id) DO NOTHING",
-                (aid, to_tag_id, provenance, now),
-            )
-        await self._db.execute("DELETE FROM atom_tags WHERE tag_id = ?", (from_tag_id,))
-        await self._db.commit()
-
-    async def tags_for_atom(self, atom_id: int) -> list[Tag]:
-        assert self._db is not None
-        cols = ", ".join("t." + c for c in self._TAG_COLS.split(", "))
-        async with self._db.execute(
-            f"SELECT {cols} FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            "WHERE a.atom_id = ? AND t.agent_id = ? ORDER BY t.id",
-            (atom_id, self._agent_id),
-        ) as cur:
-            return [_row_to_tag(r) for r in await cur.fetchall()]
-
-    async def atom_tag_rows(self, atom_id: int) -> list[Any]:
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT atom_id, tag_id, provenance, ts FROM atom_tags WHERE atom_id = ?", (atom_id,)
-        ) as cur:
-            return [SimpleNamespace(atom_id=r[0], tag_id=r[1], provenance=r[2], ts=r[3])
-                    for r in await cur.fetchall()]
-
-    async def atoms_for_tag(self, tag_id: int) -> list[Fact]:
-        """Active atoms carrying a tag (its member set) — the discovery candidate's membership."""
-        assert self._db is not None
-        cols = ", ".join("f." + c for c in self._FACT_COLS.split(", "))  # f-qualify: atom_tags also has 'provenance'
-        async with self._db.execute(
-            f"SELECT {cols} FROM facts f JOIN atom_tags a ON a.atom_id = f.id "
-            "WHERE a.tag_id = ? AND f.agent_id = ? AND f.status = 'active'",
-            (tag_id, self._agent_id),
-        ) as cur:
-            return [_row_to_fact(r) for r in await cur.fetchall()]
-
-    async def child_tags_for_atoms(
-        self, atom_ids: list[int], *, edge_eligible: bool = True
-    ) -> dict[int, set[int]]:
-        """{atom_id -> set of CHILD tag ids}. edge_eligible restricts to seeded/active children
-        (parent_id NOT NULL); buckets are ALWAYS excluded — they never form grouping edges."""
-        assert self._db is not None
-        if not atom_ids:
-            return {}
-        marks = ",".join("?" * len(atom_ids))
-        status_clause = "AND t.status IN ('seeded','active')" if edge_eligible else ""
-        out: dict[int, set[int]] = {}
-        async with self._db.execute(
-            f"SELECT a.atom_id, a.tag_id FROM atom_tags a JOIN tags t ON t.id = a.tag_id "
-            f"WHERE a.atom_id IN ({marks}) AND t.agent_id = ? AND t.parent_id IS NOT NULL "
-            f"{status_clause}",
-            (*atom_ids, self._agent_id),
-        ) as cur:
-            for atom_id, tag_id in await cur.fetchall():
-                out.setdefault(atom_id, set()).add(tag_id)
-        return out
-
-    async def atoms_without_child_tag(self, *, bucket_id: int) -> list[Fact]:
-        """The DISCOVERY pool for a bucket: active semantic atoms filed into this bucket (a bucket
-        atom_tag) but carrying NO edge-eligible (seeded/active) child tag yet. Proposed-candidate
-        members ARE included (they are re-clustered and re-matched each cycle until they
-        incorporate or prune). Read-only."""
-        assert self._db is not None
-        async with self._db.execute(
-            f"SELECT {self._FACT_COLS} FROM facts f "
-            "WHERE f.agent_id = ? AND f.status = 'active' "
-            "AND EXISTS (SELECT 1 FROM atom_tags ab WHERE ab.atom_id = f.id AND ab.tag_id = ?) "
-            "AND NOT EXISTS (SELECT 1 FROM atom_tags ac JOIN tags tc ON tc.id = ac.tag_id "
-            "  WHERE ac.atom_id = f.id AND tc.parent_id IS NOT NULL "
-            "  AND tc.status IN ('seeded','active'))",
-            (self._agent_id, bucket_id),
-        ) as cur:
-            return [_row_to_fact(r) for r in await cur.fetchall()]
-
     async def delete_fact(self, key: str) -> bool:
         """Hard-DELETE a fact by key. Returns True if a row was deleted.
 
@@ -1889,17 +1605,11 @@ class MemoryStore:
     async def fold_staged_access(self) -> int:
         """Consolidation-boundary fold: staged read-counters merge into the base columns
         the injected block reads. THE only moment a read can reorder the block — called
-        by the idle consolidation pass (Phase 31). Returns rows folded.
-
-        Also the RANK-03 'bumped on confirmed recall' path (Phase-31 critic minor 2:
-        retrieval_strength was one-way-down): folded reads restore accessibility, so a
-        heavily-used demoted/decayed fact can organically climb back above the index
-        gate instead of needing a fresh supersede-write."""
+        by the idle dreaming pass. Returns rows folded."""
         assert self._db is not None
         cur = await self._db.execute(
             "UPDATE facts SET access_count = access_count + access_count_staged, "
             "last_accessed_at = COALESCE(last_accessed_staged, last_accessed_at), "
-            "retrieval_strength = MIN(1.0, retrieval_strength + 0.05 * access_count_staged), "
             "access_count_staged = 0, last_accessed_staged = NULL "
             "WHERE agent_id = ? AND access_count_staged > 0",
             (self._agent_id,),
@@ -1908,210 +1618,194 @@ class MemoryStore:
         return cur.rowcount
 
     # ------------------------------------------------------------------
-    # Typed graph (RANK-01): facts rows are the nodes; edges carry structure
+    # Resonance surface (memory spec, roles 2 + 3): vectors in, rankings and
+    # standing out. The similarity JUDGMENT itself lives in memory/resonance.py —
+    # the store only holds vectors and tallies.
     # ------------------------------------------------------------------
 
-    EDGE_KINDS = frozenset({"derived_from", "member_of", "supports", "contradicts"})
+    async def resonance_search(
+        self,
+        query_vec: Any,
+        *,
+        limit: int = 10,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> list[tuple[Fact, float]]:
+        """Active facts ranked by resonance with the probe vector (descending).
 
-    async def add_edge(self, src_id: int, dst_id: int, kind: str) -> None:
-        """Insert a typed edge (idempotent). `supersedes` is NOT an edge kind — it stays
-        a facts column because it is the hot-path exclusion mechanism (RANK-05)."""
-        if kind not in self.EDGE_KINDS:
-            raise ValueError(f"unknown edge kind {kind!r}; allowed: {sorted(self.EDGE_KINDS)}")
+        Facts not yet embedded are invisible here until dreaming backfills them —
+        there is deliberately NO lexical or statistical fallback ranking behind
+        this method. Returns (fact, resonance) pairs."""
+        from localharness.memory import resonance as _res
+
         assert self._db is not None
-        await self._db.execute(
-            "INSERT OR IGNORE INTO edges (src_id, dst_id, kind, created_at) VALUES (?, ?, ?, ?)",
-            (src_id, dst_id, kind, int(time.time())),
-        )
-        await self._db.commit()
-
-    async def neighborhood(
-        self, node_id: int, *, depth: int = 2, limit: int = 50
-    ) -> list[tuple[int, int]]:
-        """Undirected graph walk from a node: [(fact_id, min_depth)] ordered nearest-first.
-
-        Python frontier BFS with a REAL visited set (Phase-30 critic, MAJOR): the
-        recursive-CTE version's in-path guard blocked cycles but could not prune a node
-        rediscovered via sibling branches — it enumerated ALL simple paths (~×avg-degree
-        rows per level; 129k raw rows at depth 4 on a 200-node graph, 87-148ms on the
-        every-turn retrieval path). SQLite forbids the multiple-recursive-reference
-        subquery that would fix it in SQL. BFS = ≤depth round trips, identical results
-        (verified across 15 start nodes), ~55× faster. Depth hard-capped at 4.
-        """
-        assert self._db is not None
-        depth = min(max(depth, 0), 4)
-        visited: dict[int, int] = {node_id: 0}
-        frontier: list[int] = [node_id]
-        for d in range(1, depth + 1):
-            if not frontier or len(visited) >= limit * 4:
-                break
-            qmarks = ",".join("?" * len(frontier))
-            async with self._db.execute(
-                f"SELECT src_id, dst_id FROM edges "
-                f"WHERE src_id IN ({qmarks}) OR dst_id IN ({qmarks})",
-                [*frontier, *frontier],
-            ) as cur:
-                rows = await cur.fetchall()
-            fset = set(frontier)
-            nxt: list[int] = []
-            for s, t in rows:
-                for a, b in ((s, t), (t, s)):
-                    if a in fset and b not in visited:
-                        visited[b] = d
-                        nxt.append(b)
-            frontier = nxt
-        items = sorted(visited.items(), key=lambda kv: (kv[1], kv[0]))[:limit]
-        return items
-
-    # ------------------------------------------------------------------
-    # Predictive gate substrate (COLL-01) — pure-SQL per-tool priors
-    # ------------------------------------------------------------------
-
-    async def get_tool_prior(
-        self, tool_name: str, *, before_ts: int | None = None
-    ) -> ToolPrior:
-        """Per-tool statistical prior from event history (COLL-01). ONE indexed
-        aggregate over tool_observations, zero tokens — the two-step shape query_facts
-        already uses (SQL computes the context, a pure function scores it).
-
-        before_ts (walk-forward): only rows STRICTLY earlier count, so the scored
-        observation never contaminates its own prior. Variance is the population form
-        AVG(x*x) - AVG(x)*AVG(x); tiny negative results (float cancellation on a
-        near-constant history) are clamped to 0.0. NULL aggregates (empty history)
-        map to None — cold start carried honestly, never a fabricated 0."""
-        assert self._db is not None
+        temporal = ""
+        params: list[Any] = [self._agent_id]
+        if since is not None:
+            temporal += " AND updated_at >= ?"
+            params.append(since)
+        if until is not None:
+            temporal += " AND updated_at <= ?"
+            params.append(until)
         async with self._db.execute(
-            """
-            SELECT COUNT(*),
-                   AVG(is_error),
-                   AVG(duration_ms),
-                   AVG(duration_ms * duration_ms) - AVG(duration_ms) * AVG(duration_ms),
-                   COUNT(duration_ms),
-                   AVG(output_len),
-                   AVG(output_len * output_len) - AVG(output_len) * AVG(output_len),
-                   COUNT(output_len)
-            FROM tool_observations
-            WHERE agent_id = ? AND tool_name = ? AND (? IS NULL OR ts < ?)
-            """,
-            (self._agent_id, tool_name, before_ts, before_ts),
+            f"SELECT id, embedding FROM facts WHERE agent_id = ? AND status = 'active' "
+            f"AND embedding IS NOT NULL{temporal}",
+            params,
         ) as cur:
-            row = await cur.fetchone()
+            id_blobs = [(r[0], r[1]) for r in await cur.fetchall()]
+        # Zero/anti-resonance is NOT a match: the model judged no resemblance. The sign
+        # boundary is the same non-arbitrary cut the shares arithmetic uses — no tuned
+        # floor exists here, the limit does the real work.
+        ranked = [(i, s) for i, s in _res.rank(query_vec, id_blobs) if s > 0.0][: max(0, limit)]
+        if not ranked:
+            return []
+        facts = {f.id: f for f in await self.get_facts_by_ids([i for i, _ in ranked])}
+        return [(facts[i], score) for i, score in ranked if i in facts]
 
-        lat_var = row[3]
-        if lat_var is not None and lat_var < 0.0:
-            lat_var = 0.0
-        size_var = row[6]
-        if size_var is not None and size_var < 0.0:
-            size_var = 0.0
-        return ToolPrior(
-            tool_name=tool_name,
-            n=row[0] or 0,
-            error_rate=row[1],
-            lat_mean_ms=row[2],
-            lat_var_ms=lat_var,
-            lat_n=row[4] or 0,
-            size_mean=row[5],
-            size_var=size_var,
-            size_n=row[7] or 0,
-        )
-
-    # ------------------------------------------------------------------
-    # Recording APIs (COLL-03/04) — idempotent, collect-only. These write ONLY the
-    # v4 tables; facts/sessions/edges are never touched (the byte-stability test is
-    # the enforcement). Signatures are the store contract plans 34-03/34-04 call.
-    # ------------------------------------------------------------------
-
-    async def record_tool_observation(
-        self, *, session_id: str, tool_call_id: str | None, tool_name: str, ts: int,
-        is_error: int, output_len: int | None, duration_ms: int | None,
-        event_id: str | None, source: str = "live",
-    ) -> int:
-        """INSERT OR IGNORE keyed on event_id (idempotent re-ingestion — a live row and a
-        later backfill of the same bus event collapse to one). Returns the rowid (the
-        existing row's id on ignore). One INSERT, no reads — the WriteGate cheapness class."""
-        assert self._db is not None
-        cur = await self._db.execute(
-            "INSERT OR IGNORE INTO tool_observations "
-            "(agent_id, session_id, tool_call_id, tool_name, ts, is_error, output_len, "
-            "duration_ms, event_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (self._agent_id, session_id, tool_call_id, tool_name, ts, is_error,
-             output_len, duration_ms, event_id, source),
-        )
-        await self._db.commit()
-        if cur.rowcount == 0 and event_id is not None:
-            async with self._db.execute(
-                "SELECT id FROM tool_observations WHERE event_id = ?", (event_id,)
-            ) as c2:
-                row = await c2.fetchone()
-            return row[0] if row else 0
-        return cur.lastrowid
-
-    async def record_surprise_score(
-        self, *, session_id: str, observation_id: int | None,
-        expectation_json: str | None, score: float, quadrant: str | None, scored_at: int,
-    ) -> int:
-        """One INSERT into surprise_scores. agent_id from self._agent_id."""
-        assert self._db is not None
-        cur = await self._db.execute(
-            "INSERT INTO surprise_scores "
-            "(agent_id, session_id, observation_id, expectation_json, score, quadrant, scored_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (self._agent_id, session_id, observation_id, expectation_json, score,
-             quadrant, scored_at),
-        )
-        await self._db.commit()
-        return cur.lastrowid
-
-    async def record_user_signal(
-        self, *, session_id: str, ts: int, signal_type: str, trigger_family: str | None,
-        matched_text: str | None, user_message: str, corrected_turn_summary: str | None,
-        event_id: str | None,
-    ) -> int:
-        """INSERT OR IGNORE keyed on event_id. Returns rowid (existing on ignore).
-        user_message stored in FULL (owner steer: look-ready records — the future model
-        look needs the verbatim text, not a preview)."""
-        assert self._db is not None
-        cur = await self._db.execute(
-            "INSERT OR IGNORE INTO user_signals "
-            "(agent_id, session_id, ts, signal_type, trigger_family, matched_text, "
-            "user_message, corrected_turn_summary, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (self._agent_id, session_id, ts, signal_type, trigger_family, matched_text,
-             user_message, corrected_turn_summary, event_id),
-        )
-        await self._db.commit()
-        if cur.rowcount == 0 and event_id is not None:
-            async with self._db.execute(
-                "SELECT id FROM user_signals WHERE event_id = ?", (event_id,)
-            ) as c2:
-                row = await c2.fetchone()
-            return row[0] if row else 0
-        return cur.lastrowid
-
-    async def snapshot_staged_candidates(
-        self, user_signal_id: int, candidate_type: str
-    ) -> int:
-        """COLL-03 collect-only credit assignment: snapshot the facts currently staged into
-        context (access_count_staged > 0 — exactly touch_staged's explicitly-retrieved
-        semantics; ambient always-injected facts are NOT staged and NOT snapshotted, a
-        deliberate v1 scope per 34-RESEARCH Open Q2). One SELECT + executemany INSERT.
-        candidate_type: 'bump' (confirmation) | 'suspect' (correction). Returns count."""
+    async def active_embedded(self) -> list[tuple[int, bytes]]:
+        """(id, embedding) for every active embedded fact — dreaming's competition set."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT id, key FROM facts WHERE agent_id = ? AND access_count_staged > 0",
+            "SELECT id, embedding FROM facts WHERE agent_id = ? AND status = 'active' "
+            "AND embedding IS NOT NULL",
             (self._agent_id,),
         ) as cur:
-            staged = await cur.fetchall()
-        if not staged:
-            return 0
-        now = int(time.time())
-        await self._db.executemany(
-            "INSERT INTO staged_snapshots "
-            "(user_signal_id, fact_key, fact_id, candidate_type, captured_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [(user_signal_id, r[1], r[0], candidate_type, now) for r in staged],
+            return [(r[0], r[1]) for r in await cur.fetchall()]
+
+    async def facts_missing_embedding(self, *, limit: int = 512) -> list[Fact]:
+        """Active facts with no vector yet (owner edits, restores, pre-v10 rows) —
+        dreaming embeds these first so every trace can resonate."""
+        assert self._db is not None
+        async with self._db.execute(
+            f"SELECT {self._FACT_COLS} FROM facts WHERE agent_id = ? AND status = 'active' "
+            "AND embedding IS NULL ORDER BY id LIMIT ?",
+            (self._agent_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    async def all_embedded_fact_ids(self) -> list[int]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT id FROM facts WHERE agent_id = ? AND embedding IS NOT NULL",
+            (self._agent_id,),
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+    async def set_fact_embedding(self, fact_id: int, blob: bytes | None) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE facts SET embedding = ? WHERE id = ? AND agent_id = ?",
+            (blob, fact_id, self._agent_id),
         )
         await self._db.commit()
-        return len(staged)
+
+    async def add_standing(self, deltas: dict[int, float]) -> None:
+        """Accumulate resonance-share mass onto facts (one dreaming batch, one txn)."""
+        if not deltas:
+            return
+        assert self._db is not None
+        await self._db.executemany(
+            "UPDATE facts SET standing = standing + ? WHERE id = ? AND agent_id = ?",
+            [(share, fid, self._agent_id) for fid, share in deltas.items()],
+        )
+        await self._db.commit()
+
+    async def apply_digest(self, deltas: dict[int, float], marks: dict[str, int]) -> None:
+        """One dreaming digest, atomically: the standing mass a batch of stream windows
+        distributed AND the ledger offsets that cover them commit together, so a crash
+        can never double-count a window (marks behind standing) or skip one (ahead)."""
+        assert self._db is not None
+        if deltas:
+            await self._db.executemany(
+                "UPDATE facts SET standing = standing + ? WHERE id = ? AND agent_id = ?",
+                [(share, fid, self._agent_id) for fid, share in deltas.items()],
+            )
+        if marks:
+            await self._db.executemany(
+                "INSERT INTO digest_marks (agent_id, path, byte_offset) VALUES (?, ?, ?) "
+                "ON CONFLICT(agent_id, path) DO UPDATE SET byte_offset = excluded.byte_offset",
+                [(self._agent_id, p, off) for p, off in marks.items()],
+            )
+        await self._db.commit()
+
+    # -- digest marks: how much stream has been read. The only clock. ----------
+
+    async def get_digest_marks(self) -> dict[str, int]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT path, byte_offset FROM digest_marks WHERE agent_id = ?",
+            (self._agent_id,),
+        ) as cur:
+            return {r[0]: r[1] for r in await cur.fetchall()}
+
+    async def set_digest_marks(self, marks: dict[str, int]) -> None:
+        assert self._db is not None
+        await self._db.executemany(
+            "INSERT INTO digest_marks (agent_id, path, byte_offset) VALUES (?, ?, ?) "
+            "ON CONFLICT(agent_id, path) DO UPDATE SET byte_offset = excluded.byte_offset",
+            [(self._agent_id, p, off) for p, off in marks.items()],
+        )
+        await self._db.commit()
+
+    # -- named groups: dreaming's bindings (labels for legibility, never mechanism) --
+
+    async def upsert_group(self, member_ids: list[int], label: str | None = None) -> int:
+        """Strengthen the group with exactly this member set, or mint it. A repeat
+        observation bumps `evidence`; a label fills in when one arrives (first name
+        wins — labels are display, not identity). Returns the group id."""
+        assert self._db is not None
+        members_json = json.dumps(sorted(set(member_ids)))
+        now = int(time.time())
+        async with self._db.execute(
+            "SELECT id, label FROM memory_groups WHERE agent_id = ? AND member_ids = ?",
+            (self._agent_id, members_json),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is not None:
+            gid, old_label = row[0], row[1]
+            await self._db.execute(
+                "UPDATE memory_groups SET evidence = evidence + 1, updated_at = ?, "
+                "label = CASE WHEN label = '' THEN ? ELSE label END WHERE id = ?",
+                (now, label or "", gid),
+            )
+            await self._db.commit()
+            return gid
+        cur2 = await self._db.execute(
+            "INSERT INTO memory_groups (agent_id, label, member_ids, evidence, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, ?, ?)",
+            (self._agent_id, label or "", members_json, now, now),
+        )
+        await self._db.commit()
+        return cur2.lastrowid
+
+    async def set_group_label(self, group_id: int, label: str) -> None:
+        """Fill a group's label (display identity, never mechanism) — no evidence bump:
+        naming a binding is not a second observation of it."""
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE memory_groups SET label = ?, updated_at = ? WHERE id = ? AND agent_id = ?",
+            (label, int(time.time()), group_id, self._agent_id),
+        )
+        await self._db.commit()
+
+    async def list_groups(self, *, limit: int | None = None, named_only: bool = False) -> list[dict[str, Any]]:
+        assert self._db is not None
+        where = " AND label != ''" if named_only else ""
+        lim = " LIMIT ?" if limit is not None else ""
+        params: tuple[Any, ...] = (self._agent_id, limit) if limit is not None else (self._agent_id,)
+        async with self._db.execute(
+            f"SELECT id, label, member_ids, evidence, created_at, updated_at "
+            f"FROM memory_groups WHERE agent_id = ?{where} "
+            f"ORDER BY evidence DESC, updated_at DESC, id ASC{lim}",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {"id": r[0], "label": r[1], "member_ids": json.loads(r[2] or "[]"),
+             "evidence": r[3], "created_at": r[4], "updated_at": r[5]}
+            for r in rows
+        ]
 
     async def staged_suspect_facts(self) -> list[tuple[int, str, str]]:
         """PGATE-03 read side: the facts explicitly staged into the current sitting's
@@ -2240,83 +1934,6 @@ class MemoryStore:
     # mining window ONLY; the history record itself is never touched (append-only).
     # ------------------------------------------------------------------
 
-    async def residue_enqueue(self, entries: list[dict[str, Any]]) -> int:
-        """Enqueue uncited records as PENDING. Keyed (agent, record_id): a re-enqueue of a
-        known record is a no-op that PRESERVES its attempt count and status (re-surfacing
-        never resets the K clock). Returns how many entries were newly enqueued."""
-        assert self._db is not None
-        now = int(time.time())
-        n = 0
-        for e in entries:
-            cur = await self._db.execute(
-                "INSERT OR IGNORE INTO mining_residue "
-                "(agent_id, record_id, content_h8, session_id, ts, chars, attempts, status, "
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?)",
-                (self._agent_id, str(e["id"]), str(e.get("content_h8", "")),
-                 str(e.get("session_id") or ""), int(e.get("ts", 0) or 0),
-                 int(e.get("chars", 0) or 0), now, now),
-            )
-            n += 1 if cur.rowcount and cur.rowcount > 0 else 0
-        await self._db.commit()
-        return n
-
-    async def residue_pending(self, *, cap: int = 50) -> list[dict[str, Any]]:
-        """Oldest-first PENDING ledger rows, at most `cap` (the per-pass drain budget).
-        Pending implies attempts < the cap that would have retired it (residue_bump retires
-        at the threshold), so no attempt filter is needed here."""
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT record_id, content_h8, session_id, ts, chars, attempts, status "
-            "FROM mining_residue WHERE agent_id = ? AND status = 'pending' "
-            "ORDER BY ts ASC, id ASC LIMIT ?",
-            (self._agent_id, cap),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def residue_rescue(self, record_ids: list[str]) -> int:
-        """Mark PENDING rows rescued (their record sourced a written atom). Idempotent —
-        only pending rows flip. Returns how many flipped."""
-        assert self._db is not None
-        if not record_ids:
-            return 0
-        qs = ",".join("?" for _ in record_ids)
-        cur = await self._db.execute(
-            f"UPDATE mining_residue SET status = 'rescued', updated_at = ? "
-            f"WHERE agent_id = ? AND status = 'pending' AND record_id IN ({qs})",
-            (int(time.time()), self._agent_id, *[str(r) for r in record_ids]),
-        )
-        await self._db.commit()
-        return cur.rowcount or 0
-
-    async def residue_bump(self, record_ids: list[str], *, attempt_cap: int) -> int:
-        """One barren isolated look: attempts += 1 on the PENDING rows; any row reaching
-        `attempt_cap` is RETIRED (out of the mining window forever — the record itself is
-        never deleted). Returns how many rows retired on this bump."""
-        assert self._db is not None
-        if not record_ids:
-            return 0
-        now = int(time.time())
-        qs = ",".join("?" for _ in record_ids)
-        ids = [str(r) for r in record_ids]
-        await self._db.execute(
-            f"UPDATE mining_residue SET attempts = attempts + 1, updated_at = ? "
-            f"WHERE agent_id = ? AND status = 'pending' AND record_id IN ({qs})",
-            (now, self._agent_id, *ids),
-        )
-        cur = await self._db.execute(
-            f"UPDATE mining_residue SET status = 'retired', updated_at = ? "
-            f"WHERE agent_id = ? AND status = 'pending' AND attempts >= ? "
-            f"AND record_id IN ({qs})",
-            (now, self._agent_id, int(attempt_cap), *ids),
-        )
-        await self._db.commit()
-        return cur.rowcount or 0
-
-    # ------------------------------------------------------------------
-    # History delegation
-    # ------------------------------------------------------------------
-
     async def append_history(self, record: dict[str, Any]) -> None:
         await self._history_writer.append(record)
 
@@ -2341,6 +1958,7 @@ class MemoryStore:
         self,
         index_mode: bool = True,
         max_session_history: int = 8,
+        max_chars: int = 16_000,
     ) -> MemoryContext:
         """Load three-tier context for system prompt injection.
 
@@ -2359,7 +1977,9 @@ class MemoryStore:
         assert self._db is not None
 
         if index_mode:
-            agent_md, injected_fact_ids = await self._render_memory_index_with_ids(max_session_history)
+            agent_md, injected_fact_ids = await self._render_memory_index_with_ids(
+                max_session_history, max_chars=max_chars
+            )
         else:
             agent_md, injected_fact_ids = self._markdown_memory.read(), []
 
@@ -2387,130 +2007,83 @@ class MemoryStore:
             injected_fact_ids=injected_fact_ids,
         )
 
-    async def _render_memory_index(self, max_session_history: int) -> str:
+    async def _render_memory_index(self, max_session_history: int, *, max_chars: int = 16_000) -> str:
         """Render the agent-memory INDEX string (the byte-stability-critical injected surface).
         Thin wrapper over `_render_memory_index_with_ids` — returns ONLY the string, preserving
         the exact public contract every byte-identity test asserts against; the rendered atom
         ids (for the ambient-injection trace) ride out separately via load_context."""
-        text, _ids = await self._render_memory_index_with_ids(max_session_history)
+        text, _ids = await self._render_memory_index_with_ids(max_session_history, max_chars=max_chars)
         return text
 
     async def _render_memory_index_with_ids(
         self,
         max_session_history: int,
         *,
+        max_chars: int = 16_000,
         origin_label: str = "",
         include_preamble: bool = True,
         exclude_keys: set[str] | None = None,
     ) -> tuple[str, list[int]]:
-        """Render the agent-memory INDEX: fact names + one-line descriptions (not full
-        bodies) and the most recent session-history entries — the latter from the sessions
-        TABLE with relative-time labels, hard-capped at `_SESSION_SHELF_HARD_CAP` (TIME-03).
-        The model is told it can call memory_get(name) / memory_search(query) for detail.
+        """Render the agent-memory INDEX under the loading budget (memory spec).
 
-        Also returns the atom ids rendered into the shelf (schema chapters + persistent facts,
-        in render order) — the "injected set" for the ambient-injection activation trace. `id`
-        is appended to the two facts SELECTs so the rendered line (r[0]=key, r[1]=value) stays
-        BYTE-IDENTICAL; the id is captured, never rendered. Session-history entries are not
-        atoms, so they contribute no ids.
+        The doorway from the store into working memory: every active fact competes in
+        ONE salience currency — S = ln(1 + standing) + truth log-odds + declared
+        stakes — and the char budget (`max_chars`, the config's own anchor,
+        agent.memory.max_notes_chars) is the WHOLE gate: lines render in S order until
+        the budget is spent. No confidence bars, no strength floors, no count caps.
+        Byte-stable between store mutations by construction: standing, truth and
+        stakes move only at writes and dreaming passes — no clock term anywhere.
 
-        `origin_label` (v0.13 MEMS-02): when non-empty, every rendered line
-        is prefixed with a composite origin token — `[workspace#12]`, `[global#7]`. `facts.id` is
-        AUTOINCREMENT **per database**, so a scope-merged blend showing a bare `#12` from two stores
-        would be ambiguous; the token names the store AND the row, and `memory_get` parses it back.
-        Empty (the default, every single-store caller) renders today's exact bytes.
-        `include_preamble=False` drops the leading INDEX instructions so a merged second block does
-        not repeat them; the router that merges two blocks owns the one preamble.
+        Dreaming's NAMED groups render first (labels for human legibility, never
+        mechanism), inside the same budget. Session-history entries render from the
+        sessions table as before.
 
-        `exclude_keys` (v0.13 B5) drops rows whose key another block already rendered, so a merged
-        index resolves a contradicted name the same way `query_facts`/`get_fact` do — to the
-        workspace's version, once. Filtered in Python rather than in SQL: the set is one block's
-        render, not a stable predicate, and a variadic NOT IN would rewrite the statement (and the
-        forced partial index's plan) on every turn. None — every single-store caller — renders
-        today's exact bytes."""
+        Also returns the rendered fact ids — the "injected set" for the
+        ambient-injection activation trace (groups and session entries are not atoms
+        and contribute none).
+
+        `origin_label` / `include_preamble` / `exclude_keys`: the scope-merge
+        contract (v0.13 MEMS-02/B5), unchanged — a merged second block drops the
+        preamble and the keys the first block already rendered."""
         assert self._db is not None
-        now = int(time.time())
+        import math
 
-        # r = (key, value, id). The token is a RENDER-time decoration, never a stored property:
-        # the same row renders bare in a single-store session and labelled in a merged one.
-        def _line(r: Any) -> str:
-            prefix = f"[{origin_label}#{r[2]}] " if origin_label else ""
-            return f"- {prefix}{r[0]}: {_one_line(r[1], 180)}"
+        def _line(key: str, value: str, fid: int) -> str:
+            prefix = f"[{origin_label}#{fid}] " if origin_label else ""
+            return f"- {prefix}{key}: {_one_line(value, 180)}"
 
-        # Injected-block ordering (RANK-02/04): importance + ACT-R base-level activation
-        # over the FOLDED columns only (staged read-counters are invisible here), with age
-        # quantized to DAYS — so the block's bytes change only at consolidation folds,
-        # genuine writes, or a day boundary (the loop.py:592 "date not time" precedent).
-        # Retrieval-strength gate (RANK-03): inaccessible facts drop out of the index
-        # while staying searchable via the tool path.
-        # INDEXED BY (Phase-30 critic BLOCKER 2): the rs-gate + function ORDER BY
-        # combination silently defeated the planner's partial-index choice (it fell to
-        # idx_facts_agent_id, fetching every superseded row on the hottest per-turn
-        # query — the exact long-session degradation the owner's supersede approval
-        # forbids). Forcing the partial index is deterministic, ANALYZE-independent,
-        # and fails LOUD if the index name ever drifts.
-        # SEMA-04 (Phase 36): schemas render FIRST as their own "### Knowledge" section —
-        # "gist routes, verbatim answers" made true for EXPERIENCE (a chapter leads; its
-        # member lessons are demoted OUT of the facts list by 36-04's retrieval_strength
-        # drop, NOT edge-joined here — the hottest per-turn query stays flat so the forced
-        # partial index keeps holding). SCOPE (RESEARCH Pitfall 4, "decide and state"): this
-        # schemas-first change is the index_mode=True render path ONLY (the config default,
-        # per load_context above). The legacy flush_memory_md -> MarkdownMemory.regenerate
-        # end-of-session dump is DELIBERATELY out of scope — the injected ambient block is the
-        # byte-stability-critical surface; the legacy dump is not on the hot path. Same gates
-        # + INDEXED BY + day-quantized lh_slow_score ORDER BY as the facts query below
-        # (byte-stability: folded columns only).
-        async with self._db.execute(
-            "SELECT key, value, id FROM facts INDEXED BY idx_facts_active_recency "
-            "WHERE agent_id = ? AND status = 'active' AND node_kind = 'schema' "
-            "AND confidence >= 0.7 AND retrieval_strength >= 0.2 "
-            "AND (expires_at IS NULL OR expires_at > ?) "
-            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
-            "updated_at DESC, key ASC",
-            (self._agent_id, now, now),
-        ) as cur:
-            schema_rows = await cur.fetchall()
-        if exclude_keys:
-            schema_rows = [r for r in schema_rows if r[0] not in exclude_keys]
-        schema_lines = [_line(r) for r in schema_rows]
-        # Zero bytes when absent (mirrors history_section below): an empty schemas set must
-        # not change the injected block's bytes for chapter-less stores (RANK-04 byte-stability).
-        schema_section = (
-            f"### Knowledge ({len(schema_lines)} chapters)\n" + "\n".join(schema_lines) + "\n\n"
-            if schema_lines
+        # Named groups — the store's own bindings, display only.
+        group_rows = await self.list_groups(named_only=True)
+        group_lines = [
+            f"- {g['label']} ({len(g['member_ids'])} memories, seen {g['evidence']}x)"
+            for g in group_rows
+        ]
+        groups_section = (
+            f"### Groups ({len(group_lines)})\n" + "\n".join(group_lines) + "\n\n"
+            if group_lines
             else ""
         )
 
+        # Every active fact competes; salience computed in Python (SQL knows no ln, and
+        # the competition set is the same order of size as what the budget admits).
         async with self._db.execute(
-            "SELECT key, value, id FROM facts INDEXED BY idx_facts_active_recency "
-            "WHERE agent_id = ? AND status = 'active' AND node_kind != 'schema' "
-            "AND confidence >= 0.7 "
-            "AND retrieval_strength >= 0.2 "
-            "AND (expires_at IS NULL OR expires_at > ?) "
-            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
-            "updated_at DESC, key ASC",
-            (self._agent_id, now, now),
+            "SELECT key, value, id, standing, truth_logodds, confidence, importance, "
+            "updated_at FROM facts WHERE agent_id = ? AND status = 'active'",
+            (self._agent_id,),
         ) as cur:
             rows = await cur.fetchall()
         if exclude_keys:
             rows = [r for r in rows if r[0] not in exclude_keys]
 
-        # 180-char budget (live test 2026-07-03): at the default 100, one absolute
-        # path (~50 chars) plus any prefix guillotined the payload — the injected
-        # line carried an error with no filename and no resolution. Lessons must
-        # survive the line render with their discriminating content intact.
-        fact_lines = [_line(r) for r in rows]
-        facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
+        def _salience(r: Any) -> float:
+            truth = r[4] if r[4] is not None else _logit(r[5])
+            return math.log1p(max(0.0, r[3] or 0.0)) + truth + (r[6] or 0.0)
+
+        ranked = sorted(rows, key=lambda r: (-_salience(r), -(r[7] or 0), r[0]))
 
         # TIME-02/03: the injected shelf renders from the sessions TABLE — started_at
-        # is full-precision epoch; MEMORY.md's date-only line cannot carry clock time.
-        # `summary IS NOT NULL` is one schema predicate doing two structural jobs:
-        # excludes the still-open current sitting (create_session leaves summary NULL
-        # until end_session) AND vacuous sittings (SESS-05: derive -> None -> NULL) —
-        # "renders entries or renders nothing" (1fbdf6b), now enforced by the schema
-        # instead of text filtering. Hard budget (TIME-03): min(config, cap); LIMIT
-        # drops the oldest rows WHOLE (5192f27 — never mid-line). Rows for dropped
-        # sittings stay in the table: absence from the prompt is not forgetting.
+        # is full-precision epoch; `summary IS NOT NULL` excludes the open sitting and
+        # vacuous sittings; LIMIT drops the oldest rows WHOLE.
         shelf_n = min(max_session_history, _SESSION_SHELF_HARD_CAP)
         sess_rows: list = []
         if shelf_n > 0:
@@ -2521,17 +2094,11 @@ class MemoryStore:
                 (self._agent_id, shelf_n),
             ) as cur:
                 sess_rows = list(await cur.fetchall())
-        # Relative labels: LOCAL time (the loop.py:606 convention — this block and the
-        # system prompt's date line must agree), `today` computed ONCE per render —
-        # byte-stable within a day; flips only at the local day boundary, phasing with
-        # the existing daily date bust (TIME-04: no new cache-bust class).
         today_local = datetime.now().astimezone().date()
         entry_lines = []
         for started_at, summary in sess_rows:
             dt_local = datetime.fromtimestamp(started_at).astimezone()
             label = _relative_day_label(dt_local.date(), today_local)
-            # _one_line: newline-proof + the 180-char payload budget (5192f27) —
-            # end_session stores summaries uncapped; the render must cap.
             entry_lines.append(
                 f"- {label} {_clock_label(dt_local)}: {_one_line(summary, 180)}"
             )
@@ -2541,17 +2108,31 @@ class MemoryStore:
             else ""
         )
 
-        # Injected set (co-firing atoms) = schema chapters + persistent facts, in render order.
-        # r[2] is the appended id column; session-history rows are not atoms and add none.
-        injected_ids = [r[2] for r in schema_rows] + [r[2] for r in rows]
         _preamble = (
             "This is an INDEX, not the full memory. Each line below is one persistent fact "
             "(name: short description). Call `memory_get(name)` for a fact's full body, or "
-            "`memory_search(query)` to search fact contents.\n\n"
+            "`memory_search(query)` to search memory by meaning.\n\n"
         ) if include_preamble else ""
+
+        # The budget clears: preamble + groups + history are the fixed furniture; fact
+        # lines admit in salience order until the block would exceed max_chars.
+        fixed = (len(_preamble) + len(groups_section) + len(history_section)
+                 + len("### Persistent Facts ()\n") + 4)
+        fact_lines: list[str] = []
+        injected_ids: list[int] = []
+        used = fixed
+        for r in ranked:
+            line = _line(r[0], r[1], r[2])
+            if used + len(line) + 1 > max_chars:
+                break
+            fact_lines.append(line)
+            injected_ids.append(r[2])
+            used += len(line) + 1
+
+        facts_block = "\n".join(fact_lines) if fact_lines else "(no persistent facts)"
         text = (
             f"{_preamble}"
-            f"{schema_section}### Persistent Facts ({len(fact_lines)})\n{facts_block}"
+            f"{groups_section}### Persistent Facts ({len(fact_lines)})\n{facts_block}"
             f"{history_section}"
         )
         return text, injected_ids
@@ -2637,19 +2218,26 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     async def flush_memory_md(self, session_summary: str | None = None) -> None:
-        """Regenerate MEMORY.md from current fact store. Preserves notes sections."""
+        """Regenerate MEMORY.md from current fact store (display artifact only).
+        Ordered by the one salience currency — no confidence bars, no strength floors."""
         assert self._db is not None
-        now = int(time.time())
+        import math
+
         async with self._db.execute(
-            "SELECT key, value, updated_at FROM facts INDEXED BY idx_facts_active_recency "
-            "WHERE agent_id = ? AND status = 'active' AND confidence >= 0.7 "
-            "AND retrieval_strength >= 0.2 "
-            "AND (expires_at IS NULL OR expires_at > ?) "
-            "ORDER BY lh_slow_score(importance, access_count, last_accessed_at, updated_at, ?) DESC, "
-            "updated_at DESC, key ASC",
-            (self._agent_id, now, now),
+            "SELECT key, value, updated_at, standing, truth_logodds, confidence, importance "
+            "FROM facts WHERE agent_id = ? AND status = 'active'",
+            (self._agent_id,),
         ) as cur:
             rows = await cur.fetchall()
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                -(math.log1p(max(0.0, r[3] or 0.0))
+                  + (r[4] if r[4] is not None else _logit(r[5]))
+                  + (r[6] or 0.0)),
+                -(r[2] or 0), r[0],
+            ),
+        )
 
         facts_lines = []
         for row in rows:
@@ -2839,31 +2427,23 @@ def _clock_label(sitting_local_dt: datetime) -> str:
 
 _ACTR_DECAY = 0.5
 
-# Write-time importance prior (RANK-03): a TAG HEURISTIC, never an LLM rater (VETO #1).
-_IMPORTANCE_PRIORS: dict[str, float] = {
-    "tier:resolved_error": 0.3,
-    "tier:stuck_recovered": 0.2,
-    # Phase 35 (PGATE-01/03) stat + correction tiers. Pitfall 4: this dict is closed and
-    # hand-maintained — a new tier tag with no entry here silently ranks at the 0.0
-    # fallback, so the graded-surprise/correction writes must have explicit priors or
-    # "graded surprise feeds importance/activation" degrades to no-op. surprising_failure
-    # shares resolved_error's warrant (both an error signal worth learning);
-    # correction_pending shares stuck_recovered's tier (a single-episode salient dispute).
-    "tier:surprising_failure": 0.3,
-    "tier:correction_pending": 0.2,
-    "remember": 0.4,
-    # Phase 36 (SEMA-03/04): a lesson-cluster chapter LEADS its "### Knowledge" section —
-    # 0.5 sits above resolved_error's 0.3 so the schema (a promotion over its members) sorts
-    # first; with no prior it would sink to the 0.0 floor (Pitfall 2) despite being the lead.
-    "tier:schema": 0.5,
-}
+# Log-odds <-> probability (v10). ln(p/(1-p)) diverges at the poles; the guard is the
+# CONFIDENCE column's own resolution (every value the store writes is sigmoid(logodds),
+# a 2-decimal display quantity) — one unit in from each pole, not a tuning knob.
+_LOGIT_GUARD = 0.01
 
 
-def _importance_prior(tags: list[str], source: str) -> float:
-    candidates = [0.0] + [_IMPORTANCE_PRIORS[t] for t in tags if t in _IMPORTANCE_PRIORS]
-    if source == "remember":
-        candidates.append(_IMPORTANCE_PRIORS["remember"])
-    return max(candidates)
+def _logit(p: float | None) -> float:
+    import math
+
+    c = min(max(p if p is not None else 0.5, _LOGIT_GUARD), 1.0 - _LOGIT_GUARD)
+    return math.log(c / (1.0 - c))
+
+
+def _sigmoid(x: float) -> float:
+    import math
+
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 def _base_activation(
@@ -2914,89 +2494,6 @@ def _fused_score(importance, access_total, last_access, updated_at, now, confide
     return (importance or 0.0) + base + math.log(conf) - (bm25_rank or 0.0)
 
 
-# ---------------------------------------------------------------------------
-# Surprise scoring (COLL-01) — deterministic pure functions beside the activation
-# scalars, same aesthetic (cold-start-graceful, never NULL/raise). NOT registered
-# via create_function this phase: a 12-arg SQL scalar with no SQL-side caller is
-# surface without a consumer — Phase 35 registers it when ORDER BY needs it. Module-
-# level so the report script (34-07) can import and score offline.
-# ---------------------------------------------------------------------------
-
-_SURPRISE_MIN_N = 5  # default cold-start floor; callers thread the config value through
-
-
-def _tool_error_surprisal(
-    is_error: int, prior_error_rate: float | None, n: int, min_n: int = _SURPRISE_MIN_N
-) -> float:
-    """Information-theoretic surprise of one boolean outcome against this tool's own
-    history: observed surprisal minus the prior's own entropy (~0 when routine, positive
-    when it deviates). Cold start (n < min_n) or no prior -> 0.0 neutral (mirrors
-    _base_activation's graceful n=0 — never NULL, never raises)."""
-    import math
-
-    if prior_error_rate is None or n < min_n:
-        return 0.0
-    p = min(max(prior_error_rate, 1e-3), 1 - 1e-3)  # guard degenerate 0%/100% rates
-    observed = -math.log(p if is_error else (1 - p))
-    expected = -(p * math.log(p) + (1 - p) * math.log(1 - p))  # the prior's own entropy
-    return observed - expected
-
-
-def _band_z(
-    value: float | None,
-    mean: float | None,
-    variance: float | None,
-    n: int,
-    min_n: int = _SURPRISE_MIN_N,
-) -> float:
-    """Plain z-score for a continuous feature (latency, output size). None inputs,
-    n < min_n, or degenerate (near-constant) variance all degrade to 0.0 rather than
-    raising or dividing by ~zero."""
-    import math
-
-    if value is None or mean is None or variance is None or n < min_n or variance < 1e-6:
-        return 0.0
-    return (value - mean) / math.sqrt(variance)
-
-
-def compute_surprise_score(
-    is_error: int,
-    output_len: int | None,
-    duration_ms: int | None,
-    prior: ToolPrior,
-    *,
-    min_n: int = _SURPRISE_MIN_N,
-    latency_weight: float = 0.5,
-    size_weight: float = 0.25,
-) -> float:
-    """Composite graded surprise: error-outcome surprisal + weighted ABSOLUTE latency/size
-    deviations. abs(): a deviation in EITHER direction is "succeeded-but-differently" (the
-    reframe doc's quiet-surprise quadrant) — a 10x-faster call is as anomalous as a
-    10x-slower one. Cold-start-neutral by delegation (every term is 0.0 below min_n), so an
-    empty prior yields exactly 0.0."""
-    return (
-        _tool_error_surprisal(is_error, prior.error_rate, prior.n, min_n)
-        + latency_weight
-        * abs(_band_z(duration_ms, prior.lat_mean_ms, prior.lat_var_ms, prior.lat_n, min_n))
-        + size_weight
-        * abs(_band_z(output_len, prior.size_mean, prior.size_var, prior.size_n, min_n))
-    )
-
-
-def compute_quadrant(
-    is_error: int, prior_error_rate: float | None, n: int, min_n: int = _SURPRISE_MIN_N
-) -> str:
-    """Map an outcome onto the reframe taxonomy (the quadrants the binary gate structurally
-    cannot express). Below min_n or with no prior -> 'cold_start'. predicted_fail is the
-    tool's own history saying error is the base case (error_rate >= 0.5)."""
-    if prior_error_rate is None or n < min_n:
-        return "cold_start"
-    predicted_fail = prior_error_rate >= 0.5
-    if not predicted_fail:
-        return "surprising_failure" if is_error else "routine"
-    return "unsurprising_failure" if is_error else "quiet_surprise"
-
-
 def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
     """Quote every whitespace token so FTS5 operator/syntax characters in real-corpus
     tokens (`000660.KS`, `P/GP`, `-1.5σ`) are literal phrases, never syntax (WRITE-05).
@@ -3005,17 +2502,6 @@ def _sanitize_fts_query(text: str, max_tokens: int = 32) -> str:
     tokens = (text or "").split()
     quoted = ['"' + t.replace('"', '""') + '"' for t in tokens[:max_tokens] if t.strip('"')]
     return " ".join(quoted)
-
-
-def _row_to_tag(row: aiosqlite.Row) -> Tag:
-    """Reconstruct a Tag from a _TAG_COLS row (by-name; select may be t.-prefixed)."""
-    return Tag(
-        id=row["id"], agent_id=row["agent_id"], name=row["name"], definition=row["definition"],
-        status=row["status"], parent_id=row["parent_id"], origin=row["origin"],
-        merged_into=row["merged_into"], distinct_sittings=row["distinct_sittings"],
-        reuse_count=row["reuse_count"], last_accrual_ts=row["last_accrual_ts"],
-        created_at=row["created_at"], updated_at=row["updated_at"],
-    )
 
 
 def _row_to_fact(row: aiosqlite.Row) -> Fact:
@@ -3044,6 +2530,8 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
             access_count=row["access_count"] if "access_count" in keys else 0,
             last_accessed_at=row["last_accessed_at"] if "last_accessed_at" in keys else None,
             node_kind=row["node_kind"] if "node_kind" in keys else "fact",
+            truth_logodds=row["truth_logodds"] if "truth_logodds" in keys else None,
+            standing=row["standing"] if "standing" in keys else 0.0,
         )
     # Positional (shouldn't happen with row_factory=aiosqlite.Row)
     return Fact(
@@ -3059,6 +2547,8 @@ def _row_to_fact(row: aiosqlite.Row) -> Fact:
         access_count=row[17] if len(row) > 17 else 0,
         last_accessed_at=row[18] if len(row) > 18 else None,
         node_kind=row[19] if len(row) > 19 else "fact",
+        truth_logodds=row[20] if len(row) > 20 else None,
+        standing=row[21] if len(row) > 21 else 0.0,
     )
 
 

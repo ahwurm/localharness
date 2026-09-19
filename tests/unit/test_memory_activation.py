@@ -61,9 +61,14 @@ async def test_staged_reads_keep_injected_block_byte_stable(store: MemoryStore):
     folded = await store.fold_staged_access()
     assert folded == 1
     after_fold = await store._render_memory_index(10)
-    assert after_fold != before
-    lines = [ln for ln in after_fold.splitlines() if ln.startswith("- ")]
-    assert lines[0].startswith("- b-fact:")  # the used fact now ranks first
+    # Counts are bookkeeping, not need: the fold moves counters, never the block.
+    assert after_fold == before
+    # Standing (dreaming's resonance mass) is what reorders the block.
+    await store.add_standing({(await store.get_fact("b-fact")).id: 2.0})
+    after_standing = await store._render_memory_index(10)
+    assert after_standing != before
+    lines = [ln for ln in after_standing.splitlines() if ln.startswith("- ")]
+    assert lines[0].startswith("- b-fact:")
 
 
 @pytest.mark.asyncio
@@ -81,21 +86,21 @@ async def test_fold_is_idempotent(store: MemoryStore):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_frequently_used_old_fact_outranks_fresh_unused(store: MemoryStore):
+async def test_resonant_old_fact_outranks_fresh_unused(store: MemoryStore):
     now = int(time.time())
     await store.store_fact("old-workhorse", "used constantly")
     await store._db.execute(
-        "UPDATE facts SET updated_at = ?, created_at = ?, access_count = 10, "
-        "last_accessed_at = ? WHERE agent_id = ? AND key = 'old-workhorse'",
-        (now - 10 * 86400, now - 10 * 86400, now - 86400, "act-agent"),
+        "UPDATE facts SET updated_at = ?, created_at = ?, standing = 3.0 "
+        "WHERE agent_id = ? AND key = 'old-workhorse'",
+        (now - 10 * 86400, now - 10 * 86400, "act-agent"),
     )
     await store._db.commit()
     await store.store_fact("new-never-used", "just written")
 
     index = await store._render_memory_index(10)
     lines = [ln for ln in index.splitlines() if ln.startswith("- ")]
-    # Pure recency would put new-never-used first; ACT-R puts the workhorse first:
-    # ln(11) − 0.5·ln(2 days) ≈ 2.05  >  ln(1) − 0.5·ln(1) = 0.
+    # Pure recency would put new-never-used first; earned standing puts the
+    # workhorse first: ln(1+3) > ln(1+0). No clock term anywhere.
     assert lines[0].startswith("- old-workhorse:")
 
 
@@ -104,24 +109,22 @@ async def test_frequently_used_old_fact_outranks_fresh_unused(store: MemoryStore
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_supersede_drops_retrieval_strength_and_leaves_index(store: MemoryStore):
+async def test_superseded_row_leaves_the_index(store: MemoryStore):
     await store.store_fact("thesis", "old view")
     await store.store_fact("thesis", "new view")
-    history = await store.get_fact_history("thesis")
-    old = next(f for f in history if f.value == "old view")
-    assert old.retrieval_strength <= 0.1  # lost the retrieval competition
     index = await store._render_memory_index(10)
     assert "old view" not in index and "new view" in index
 
 
 @pytest.mark.asyncio
-async def test_importance_prior_from_tags_not_llm(store: MemoryStore):
+async def test_importance_is_declared_never_invented(store: MemoryStore):
+    """Stakes are the one human input: nothing mints importance from tags or sources."""
     f_remember = await store.store_fact("r", "v", source="remember", confidence=0.9)
-    f_gate = await store.store_fact("g", "v", tags=["gate", "tier:resolved_error"], confidence=0.65)
-    f_plain = await store.store_fact("p", "v")
-    assert f_remember.importance == 0.4
-    assert f_gate.importance == 0.3
-    assert f_plain.importance == 0.0
+    f_tagged = await store.store_fact("g", "v", tags=["anything"], confidence=0.65)
+    f_declared = await store.store_fact("p", "v", importance=0.7)
+    assert f_remember.importance == 0.0
+    assert f_tagged.importance == 0.0
+    assert f_declared.importance == 0.7
 
 
 @pytest.mark.asyncio
@@ -142,30 +145,8 @@ async def test_fused_search_ranks_used_trusted_first(store: MemoryStore):
 # RANK-01: typed graph, cycle-guarded traversal
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_neighborhood_survives_a_cycle(store: MemoryStore):
-    a = await store.store_fact("node-a", "a")
-    b = await store.store_fact("node-b", "b")
-    c = await store.store_fact("node-c", "c")
-    await store.add_edge(a.id, b.id, "supports")
-    await store.add_edge(b.id, c.id, "supports")
-    await store.add_edge(c.id, a.id, "supports")  # the cycle machine-written edges WILL make
-
-    walk = await store.neighborhood(a.id, depth=10, limit=50)  # depth hard-capped at 4
-    ids = {node_id for node_id, _ in walk}
-    assert ids == {a.id, b.id, c.id}  # terminates; every node once
-    depths = dict(walk)
-    assert depths[a.id] == 0 and depths[b.id] == 1 and depths[c.id] == 1  # undirected
 
 
-@pytest.mark.asyncio
-async def test_edge_kind_is_validated(store: MemoryStore):
-    a = await store.store_fact("x", "1")
-    b = await store.store_fact("y", "2")
-    with pytest.raises(ValueError):
-        await store.add_edge(a.id, b.id, "supersedes")  # column, not edge — by design
-    await store.add_edge(a.id, b.id, "derived_from")  # idempotent
-    await store.add_edge(a.id, b.id, "derived_from")
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +184,25 @@ async def test_injected_block_query_uses_partial_active_index(store: MemoryStore
 async def test_search_and_get_touch_staging(store: MemoryStore):
     from localharness.tools.builtin.memory_tools import MemoryGetTool, MemorySearchTool
 
-    await store.store_fact("stag", "staging target value")
-    await MemorySearchTool(store)._execute(query="staging")
+    import numpy as np
+
+    from localharness.memory import resonance as res
+    from localharness.memory.embeddings import HashingEmbedder
+
+    class _Eng:
+        model_name = "hash-fake"
+        _h = HashingEmbedder(dim=64)
+
+        def embed_docs(self, texts):
+            return np.asarray(self._h.embed(texts), dtype=np.float32)
+
+        def embed_query(self, text):
+            return np.asarray(self._h.embed([text])[0], dtype=np.float32)
+
+    eng = _Eng()
+    await store.store_fact("stag", "staging target value",
+                           embedding=res.pack(eng.embed_docs(["stag: staging target value"])[0]))
+    await MemorySearchTool(store, engine=eng)._execute(query="staging target")
     await MemoryGetTool(store)._execute(name="stag")
 
     async with store._db.execute(

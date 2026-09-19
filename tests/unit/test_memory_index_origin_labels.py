@@ -28,7 +28,7 @@ from localharness.memory.sqlite import MemoryStore
 PREAMBLE = (
     "This is an INDEX, not the full memory. Each line below is one persistent fact "
     "(name: short description). Call `memory_get(name)` for a fact's full body, or "
-    "`memory_search(query)` to search fact contents.\n\n"
+    "`memory_search(query)` to search memory by meaning.\n\n"
 )
 
 
@@ -64,17 +64,17 @@ async def test_default_render_is_byte_identical_to_the_shipped_surface(store: Me
 
     text, ids = await store._render_memory_index_with_ids(8)
 
+    # Equal salience (same writer, no standing, no stakes) ties break on
+    # updated_at then key — deterministic bytes, no clock in the score itself.
     expected = (
         PREAMBLE
-        + "### Knowledge (1 chapters)\n"
-        + "- hbm-cluster: chapter body\n"
-        + "\n"
-        + "### Persistent Facts (1)\n"
-        + "- a-fact: alpha body"
+        + "### Persistent Facts (2)\n"
+        + "- a-fact: alpha body\n"
+        + "- hbm-cluster: chapter body"
     )
     assert text == expected
     # The ids ride out separately and are NOT rendered under the default.
-    assert ids == [chapter.id, fact.id]
+    assert ids == [fact.id, chapter.id]
     # No origin token of ANY shape under the default — including the empty-label
     # `[#1]` an unconditionally-applied prefix would produce.
     assert re.search(r"\[\w*#\d+\]", text) is None, text

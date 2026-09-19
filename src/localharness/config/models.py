@@ -610,21 +610,25 @@ class PermissionConfig(BaseModel):
 
 
 class MemoryConsolidationConfig(BaseModel):
-    """Idle-time memory consolidation (v2.0 CONS-01..06) — the CLS slow-integrate pass.
+    """Idle-time dreaming (the memory spec's consolidation pass).
 
     An in-harness feature (default-on, config-off; NO cron job, no daemon assumption):
     triggered by a session-start staleness check + an in-session idle timer, and
-    cooperatively cancelled the instant a user turn arrives. All fields auto-enumerate
-    as `agent.memory.consolidation.*` registry axes."""
+    cooperatively cancelled the instant a user turn arrives. The pass replays the NEW
+    event-stream windows since the last digest, distributes each moment's attention
+    over stored facts by resonance in the model's own space, binds co-fired facts
+    into named groups, folds read counters, and settles the writer bet ledger. The
+    amount digested is the pass's only clock — no decay constants, no caps, no tiers.
+    All fields auto-enumerate as `agent.memory.consolidation.*` registry axes."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     enabled: bool = Field(
         default=True,
         description=(
-            "If True (default), the harness consolidates memory during idle: folds staged "
-            "read-counters, promotes cross-episode recurring candidates, decays retrieval "
-            "strength, and trims the active tier back under the soft cap. Set False to "
-            "disable all background memory work (like disabling the cruncher)."
+            "If True (default), the harness dreams during idle: embeds un-embedded "
+            "facts, digests new event-stream windows into resonance standing, binds "
+            "and names co-fired groups, folds staged read-counters, and settles "
+            "writer tallies. Set False to disable all background memory work."
         ),
     )
     idle_minutes: float = Field(
@@ -635,339 +639,12 @@ class MemoryConsolidationConfig(BaseModel):
         default=6.0, ge=0.1, le=720.0,
         description="Session-start trigger: run a pass at startup when the last one is older than this.",
     )
-    max_active_facts: int = Field(
-        default=256, ge=8, le=100_000,
-        description=(
-            "SOFT cap on the ACTIVE tier (index-eligible facts). Admission never blocks — "
-            "the consolidation pass trims back under the bound by demoting the lowest-"
-            "activation facts below the index gate (never deleting). The forcing function "
-            "that makes the store structure knowledge instead of hoarding it."
-        ),
-    )
-    decay_half_life_days: float = Field(
-        default=30.0, ge=0.1, le=3650.0,
-        description=(
-            "Retrieval-strength half-life: accessibility halves after this many idle days "
-            "(trust/confidence never decays — the storage-vs-retrieval strength split)."
-        ),
-    )
     iteration_cap: int = Field(
         default=200, ge=1, le=10_000,
-        description="Hard per-pass work cap (letta #957 infinite-loop class guardrail).",
-    )
-
-    # --- Phase 36 (the chapter-writer) axes: the idle LLM passes, each independently
-    # gated. All require an LLM wired into the scheduler (start_cmd); with no LLM the
-    # deterministic core above is byte-unchanged (each step early-returns). ---
-    schema_writer_enabled: bool = Field(
-        default=True,
         description=(
-            "Phase 36 SEMA-02/03: the idle chapter-writer clusters promoted lessons and "
-            "writes one grounded schema per stable cluster (requires an LLM wired). MASTER "
-            "kill lever for ALL idle chapter mutation (#65): OFF stops BOTH this writer step "
-            "AND the staleness re-check step, so flipping it off is a real 'off' — no idle "
-            "pass can mint or supersede a chapter. chapter_staleness_recheck_enabled is the "
-            "SUB-switch, effective only while this master is on."
-        ),
-    )
-    reconcile_enabled: bool = Field(
-        default=True,
-        description=(
-            "Phase 36 PGATE-03: an idle model-look reconciles the correction_pending "
-            "quarantine (confirm / revert / undecidable). Also broadens the idle-work probe "
-            "to fire on a pending correction queue."
-        ),
-    )
-    mining_enabled: bool = Field(
-        default=True,
-        description=(
-            "Phase 36 PGATE-03: an idle model-look mines transcripts for missed corrections "
-            "and plain personal facts (grounded, budgeted, injectable)."
-        ),
-    )
-    cluster_min_sessions: int = Field(
-        default=2, ge=1, le=100,
-        description="A cluster is chapter-worthy only if its members span at least this many distinct sittings.",
-    )
-    schema_write_budget: int = Field(
-        default=3, ge=1, le=10_000,
-        description=(
-            "Max schema chapters written per idle cycle. Ceiling matches mining_write_budget's: "
-            "the designed-month eval derives this from its manifest (len(topics)+1) and passes it "
-            "to the CTOR, so any manifest-scale budget must validate instead of crashing "
-            "construction at le=50."
-        ),
-    )
-    schema_depth_cap: int = Field(
-        default=2, ge=1, le=5,
-        description="Max schema depth above lessons: lesson->chapter(1)->chapter-of-chapters(2)->stop.",
-    )
-    reconcile_ttl_looks: int = Field(
-        default=3, ge=1, le=20,
-        description="An undecidable correction fact leaves the reconciliation queue after this many looks.",
-    )
-    mining_write_budget: int = Field(
-        default=50, ge=1, le=10_000,
-        description=(
-            "Max semantic atoms mined per idle cycle (MOVE 2: mining is the primary feeder; the "
-            "walk is idle-window local-GPU and cancellable, so the cost is sleep-time). Default 50 "
-            "= ~2x the densest single-pass yield observed on the designed month (~25 atoms), so a "
-            "normal idle window drains without deferral; if a pass still exceeds it the un-mined "
-            "tail is DEFERRED (watermark commits only per fully-mined chunk), never lost, so this "
-            "is a throughput knob, not a correctness one. The old le=50 ceiling couldn't express a "
-            "production-scale budget (the single-pass eval had to bypass the ctor to set 500) — "
-            "raised to 10_000 (iteration_cap's scale) so any single-pass/backfill bound is settable."
-        ),
-    )
-    mining_corpus_char_cap: int = Field(
-        default=6000, ge=500, le=100_000,
-        description=(
-            "FIX 3b: mining chunk size — the per-chunk corpus char budget the transcript walk "
-            "fills before one LLM look. Was a hardcoded 6000; surfaced as a knob so an empirical "
-            "sweep can tune it later (default preserves today's behaviour). Chunks never span a "
-            "session_id boundary; an oversized session sub-splits by this cap."
-        ),
-    )
-    mining_known_atoms_cap: int = Field(
-        default=50, ge=5, le=200,
-        description=(
-            "FIX 3: how many newest active sem/ atoms are shown to the miner as `replaces=` targets. "
-            "Was a fixed 30; per-session chunking multiplies chunk count (~+40%), scrolling this "
-            "window faster. VISIBILITY only: supersede correctness never depends on this cap — "
-            "every this-pass mint stays a valid replaces= target via mining's in-pass minted "
-            "registry even after scrolling out — so write_budget may exceed it freely. The cap "
-            "bounds the prompt preamble (what the miner is SHOWN as reuse/correction targets)."
-        ),
-    )
-    mining_operative_message_types: list[str] = Field(
-        default_factory=lambda: ["user_message", "assistant_message"],
-        description=(
-            "FIX 4 (provenance-collapse guard) — mining consumes only this OPERATIVE CONVERSATIONAL "
-            "SURFACE (what the user and assistant actually said). Tool I/O (tool_result records) is "
-            "structurally OUT of scope at INPUT CONSTRUCTION, so a store read-back — "
-            "memory_search/memory_get echoing a prior fact VERBATIM into a LATER session — is never "
-            "read by the miner and can never be re-mined. Without this, per-session chunking would "
-            "re-mine an echoed fact and store_fact's distinct-day ladder would ADVANCE its provenance "
-            "to the later session, collapsing the >=2-distinct-session evidence a chapter needs (and "
-            "starving A1, which keys recall on provenance-day). A positive ALLOWLIST (not a denylist "
-            "of named echo tools) is robust: a NEW echo tool needs no upkeep to stay out, and mining "
-            "the user's actual words — not incidental file/command output — is also a quality gain. "
-            "Proven no-loss on the designed month (all 17 atoms ground in conversation; 0 need tool "
-            "I/O). Mirrors mining._OPERATIVE_MESSAGE_TYPES; empty => unrestricted (legacy all-types)."
-        ),
-    )
-    mining_residue_enabled: bool = Field(
-        default=True,
-        description=(
-            "RESIDUE LEDGER (core repair loop): the miner's first pass is attention-limited and "
-            "lossy by design; committed records that never sourced a written atom are enqueued and "
-            "re-mined in ISOLATION on the NEXT idle pass (amortized — a pass never drains its own "
-            "residue; a quiet store drains nothing). Off = enqueue and drain both inert; the "
-            "coverage metric still reports residue."
-        ),
-    )
-    mining_residue_attempt_cap: int = Field(
-        default=2, ge=1, le=10,
-        description=(
-            "K: isolated looks a residue record gets before RETIREMENT (out of the mining window "
-            "forever; the history record is never deleted — retire selects, never destroys). "
-            "Bounds the ledger: every record exits in <= K drains. Hyperparameter — sweep on the "
-            "eval, do not taste-pick."
-        ),
-    )
-    mining_residue_record_budget: int = Field(
-        default=40, ge=1, le=10_000,
-        description=(
-            "Max pending residue records drained per pass (sequential, isolated chunks — never "
-            "fanned out; single shared GPU). A cold backlog drains over several quiet cycles "
-            "instead of one long burst. Hyperparameter — sweep on the eval."
-        ),
-    )
-    mining_residue_min_chars: int = Field(
-        default=20, ge=0, le=4000,
-        description=(
-            "Intake triviality filter: an uncited record shorter than this never enters the "
-            "ledger ('ok'/'thanks' are not facts to rescue). The coverage METRIC still reports "
-            "it — the ledger just never chews it. Hyperparameter — sweep on the eval."
-        ),
-    )
-    mining_novelty_fold_threshold: float = Field(
-        default=0.70, ge=0.0, le=1.0,
-        description=(
-            "NOVELTY GATE (mining precision): a fresh mint that is PROVABLY redundant vs an "
-            "active same-slug atom FOLDS into it as corroboration (recurrence ladder) instead of "
-            "minting a paraphrase sibling (live dogfood: 8 near-identical 'GTM plan' atoms from "
-            "one conversation). Fold requires ALL of: the new claim's salient tokens are a "
-            "SUBSET of the atom's (a restatement adds nothing; a distinguishing token — "
-            "'summarizer' vs 'citation' — blocks both directions), equal number sets ('room 3' "
-            "vs 'room 7' are different facts), and Jaccard >= this threshold (floor against a "
-            "tiny probe folding into a rich atom). Supersedes exempt. 1.0 ≈ off. A missed fold "
-            "is a dup that decay handles; a false fold destroys a fact — the rule is "
-            "deliberately conservative. Hyperparameter — sweep on the eval, do not taste-pick."
-        ),
-    )
-    clustering_embed_sim_threshold: float = Field(
-        default=0.55, ge=0.0, le=1.0,
-        description=(
-            "Tier-1 embedding leg of chapter clustering (owner 2026-07-10): two pool atoms link "
-            "when cosine(embed) >= this AND they share >= 1 salient token — 2-FACTOR by doctrine, "
-            "an embedding edge never welds a group alone (mega-blob lesson; also keeps the lexical "
-            "HashingEmbedder fallback safe). Matches discovery's _EMBED_SIM default (0.55). Only "
-            "active when consolidation has an embedder. Hyperparameter — sweep on the eval."
-        ),
-    )
-    chapter_refresh_overlap: float = Field(
-        default=0.7, ge=0.0, le=1.0,
-        description=(
-            "CHAPTER REFRESH (run-14 fix): a new cluster whose member overlap with an existing "
-            "ACTIVE chapter (|intersection| / min(|old|, |new|)) clears this threshold ADOPTS "
-            "that chapter's key — store_fact supersedes on the old key (one active chapter, "
-            "history preserved) instead of minting a near-identical sibling. Membership drift "
-            "(a rescued residue atom joining, a correction row entering the pool) is an UPDATE, "
-            "not a new chapter. At most one adoption per key per pass, so a facet SPLIT of an "
-            "old chapter keeps both facets. Hyperparameter — sweep on the eval."
-        ),
-    )
-    chapter_containment_guard_enabled: bool = Field(
-        default=True,
-        description=(
-            "CHAPTER CONTAINMENT GUARD (validation-20260712-novelty070 fix): at chapter-write "
-            "time, compare the candidate's PRIMARY member set against every active chapter's. "
-            "Candidate ⊆ existing → do NOT mint a twin (fold, corroboration touch on the survivor). "
-            "Existing ⊊ candidate → mint, then supersede EACH contained chapter (append-only) — "
-            "closing the gap chapter_refresh_overlap leaves, which re-keys only the single "
-            "best-overlap chapter and strands any other subsumed one. Genuine facet splits "
-            "(neither set contains the other) are untouched. PRIMARY = member_of minus aux "
-            "tier:surprising_failure rows (opportunistically attached, non-deterministic across "
-            "passes; the raw sets were not subsets live). Ships True; this flag is the kill lever "
-            "(mutable via `localharness components set "
-            "agent.memory.consolidation.chapter_containment_guard_enabled <true|false>`)."
-        ),
-    )
-    absorption_guard_enabled: bool = Field(
-        default=True,
-        description=(
-            "ABSORPTION GUARD (d1v2 gpu_ops-into-subagents weld): at the chapter FOLD/supersede "
-            "decision, a LOPSIDED absorption — a much-smaller chapter merged into a dominant host — "
-            "must clear a stronger overlap-QUALITY bar than raw member subset or it is REFUSED (both "
-            "chapters kept independent, logged + counted). The measured weld welded a small gpu_ops "
-            "chapter (its whole identity the single child tag `ops`) INTO the 48-member subagents "
-            "chapter through that ONE bridge tag, as a full member subset — the containment rule "
-            "alone allowed it. The guard requires >= 2 distinct shared child tags between the absorbed "
-            "side and the host, which separates a cross-topic bridge (1 shared) from genuine "
-            "same-topic containment (many shared); it defers (existing containment behaviour) when "
-            "the absorbed side carries no child tags. Ships True; kill lever (mutable via `localharness "
-            "components set agent.memory.consolidation.absorption_guard_enabled <true|false>`)."
-        ),
-    )
-    absorption_guard_size_ratio: float = Field(
-        default=0.34, gt=0.0, le=1.0,
-        description=(
-            "ABSORPTION GUARD trigger: the guard only assesses a fold when the absorbed side is at "
-            "most this fraction of the host (|absorbed| <= ratio * |host|) — a LOPSIDED absorption. "
-            "Default ~1/3 (the measured weld was 0.21/0.26). Above it the two chapters are comparable "
-            "and the existing containment rule governs untouched. Hyperparameter — sweep on the eval."
-        ),
-    )
-    absorption_guard_min_overlap: float = Field(
-        default=0.5, ge=0.0, le=1.0,
-        description=(
-            "ABSORPTION GUARD floor: the member overlap of the SMALL side (|absorbed ∩ host| / "
-            "|absorbed|) must clear this for the guard to engage — a real absorption of that side "
-            "(1.0 for the pure-subset containment arms). Guards a future partial-fold path from "
-            "refusing on a trivial 1-2 atom brush. Hyperparameter — sweep on the eval."
-        ),
-    )
-    chapter_staleness_recheck_enabled: bool = Field(
-        default=True,
-        description=(
-            "CHAPTER STALENESS RE-CHECK (d1-replication-20260712 §7 / B5 fix): at the START of each "
-            "idle pass, before clustering/writing, re-run the grader's own grounded()+ground_numbers() "
-            "matchers on every active chapter against its CURRENT active members. A chapter whose "
-            "evidentiary base eroded (a member superseded out from under it — the '7-Day Taper' bug: "
-            "grounded when written, later carrying a figure nothing active supports) is caught HERE "
-            "instead of at the eval KILL: a grounded re-draft on the survivors supersedes it on its "
-            "own key (history preserved), else it is retired (marked non-active, append-only — never "
-            "deleted; also when < 2 active members remain). Ships True. SUB-switch of the "
-            "schema_writer_enabled master (#65): effective only while schema_writer_enabled is on — "
-            "the master OFF stops this re-check regardless of this flag, this flag OFF stops only the "
-            "re-check while the writer keeps running. Mutable via `localharness components set "
-            "agent.memory.consolidation.chapter_staleness_recheck_enabled <true|false>`)."
-        ),
-    )
-    chapter_staleness_recheck_cap: int = Field(
-        default=10, ge=1, le=10_000,
-        description=(
-            "Max active chapters the staleness re-check re-validates per idle pass (oldest-touched "
-            "first, updated_at ASC — a re-drafted chapter's fresh updated_at rotates it to the back). "
-            "Bounds the per-pass model work (each fail costs at most ONE re-draft generation through "
-            "the cancellable idle-LLM path). Throughput knob, not correctness: an unprocessed stale "
-            "chapter is simply caught a later pass. Hyperparameter — sweep on the eval, do not taste-pick."
-        ),
-    )
-    mint_tagging_enabled: bool = Field(
-        default=True,
-        description=(
-            "Tag-graph M1: file each freshly-mined atom via a two-step closed-set classifier into "
-            "a bucket (+optional child tag). Requires the mining LLM; a tagging failure never "
-            "blocks the mint (degrades recall, never integrity)."
-        ),
-    )
-    tag_grouping_enabled: bool = Field(
-        default=False,
-        description=(
-            "RULING-D grouping truth: when True, mining's fold scope + replaces=/B4(i) supersede "
-            "validity key off the validated CHILD TAG axis (not the freely-guessed slug), so a "
-            "wrong topic word can neither merge two unrelated facts nor authorize a correction. "
-            "SHIPS False: the re-key's pre-committed regression gate fired on its first live proof "
-            "(2026-07-12 — a real tag-identity reconciliation gap on the corrections axis), so the "
-            "mechanism ships dormant pending its re-attempt. False = byte-behavior-identical to "
-            "pre-36.2 slug scoping (any migration atom_tags data is kept, unused). "
-            "Mutable via `localharness components set agent.memory.consolidation.tag_grouping_enabled <true|false>`."
-        ),
-    )
-    tag_discovery_enabled: bool = Field(
-        default=True,
-        description=(
-            "Tag-graph discovery (v1): an idle multi-factor pass proposes NEW child tags over "
-            "bucket-only atoms, accrues Bayesian evidence, and incorporates one (model NAMES it) "
-            "at threshold. Requires the LLM; degrades to 2-factor when no embedder is available."
-        ),
-    )
-    trace_injection_weight: float = Field(
-        default=0.3, ge=0.0, le=1.0,
-        description=(
-            "Discovery co-fire discount for injection-source activation traces (owner reversal "
-            "2026-07-17). The ambient shelf fires a similar set every turn — real co-fire signal, "
-            "but our guess, weaker than the model's own retrieval — so an injection-source co-fire "
-            "contributes THIS weight to a pair's co-fire strength while a retrieval-source co-fire "
-            "contributes 1.0. The raw trace log keeps full fidelity; the discount is a "
-            "materialized-view weight applied ONLY here (log = ground truth). 0.0 ignores injection "
-            "co-fire entirely; 1.0 = no discount. The discount plus the existing reuse recency decay "
-            "are the loop mitigation for the every-turn repetition — no novel suppression. Mutable "
-            "via `localharness components set agent.memory.consolidation.trace_injection_weight <0.0-1.0>`."
-        ),
-    )
-    turn_end_micro_pass_enabled: bool = Field(
-        default=True,
-        description=(
-            "#90: after a turn's answer is delivered, run a bounded micro-pass that drains the "
-            "tail work the big idle pass rarely reaches before cancellation — backfill-classify a "
-            "few untagged atoms (drains remember-legacy + heals #88 bucket conflicts), NAME up to "
-            "two proposed discovery candidates (the model-names-the-cluster step), and run "
-            "promotion/prune (pure SQL). Bounded + cancelled by the next user turn, so it is "
-            "invisible at typical turn durations. False = only the big idle pass runs (today's "
-            "behavior). Mutable via `localharness components set "
-            "agent.memory.consolidation.turn_end_micro_pass_enabled <true|false>`."
-        ),
-    )
-    turn_end_micro_pass_budget_seconds: float = Field(
-        default=8.0, ge=0.5, le=60.0,
-        description=(
-            "#90: hard wall-clock budget per turn-end micro-pass firing. Work runs in atomic units "
-            "(one small model call + its writes) and stops cleanly once this elapses; the next "
-            "firing resumes oldest-first. Mutable via `localharness components set "
-            "agent.memory.consolidation.turn_end_micro_pass_budget_seconds <seconds>`."
+            "Hard per-pass work cap (infinite-loop-class guardrail): max stream windows "
+            "digested in one pass. The un-digested tail is simply the next pass's stream — "
+            "a throughput bound, never a correctness one."
         ),
     )
 
@@ -999,113 +676,6 @@ class MemoryArchivalConfig(BaseModel):
             "the count and the line it used. Mutable via `localharness components set "
             "agent.memory.archival.enabled <true|false>`."
         ),
-    )
-
-
-class TriggerLexiconConfig(BaseModel):
-    """COLL-02 zero-NLU trigger word lists (owner steer 2026-07-04: TRIGGERS, NOT
-    CLASSIFIERS — a tripwire for a later model look, recall-first by design; a false
-    trigger costs one logged record, a miss costs another missed correction). Matching rules
-    live in memory/user_signals.py: single-word triggers match on token boundaries,
-    multi-word triggers as substrings, all lowercased. Tunable per-family via the
-    component registry with zero code edits."""
-    model_config = ConfigDict(frozen=False, extra="forbid")
-
-    negation: list[str] = Field(
-        default_factory=lambda: [
-            "no", "nope", "nah", "not that", "not what i", "that's not", "thats not",
-            "that's wrong", "thats wrong", "wrong",
-        ],
-        description="Correction-class triggers: negations ('no' is deliberately broad — owner-endorsed).",
-    )
-    correction_phrase: list[str] = Field(
-        default_factory=lambda: [
-            "i meant", "i said", "actually", "instead", "rather", "incorrect",
-            "i didn't ask", "i didnt ask", "you misunderstood", "that isn't", "that isnt",
-        ],
-        description="Correction-class triggers: explicit correction phrasing.",
-    )
-    frustration: list[str] = Field(
-        default_factory=lambda: [
-            "ugh", "ffs", "wtf", "damn", "dammit", "fuck", "fucking", "shit",
-            "come on", "seriously", "annoying", "frustrated", "frustrating",
-            "still wrong", "still broken", "broken again",
-        ],
-        description="Correction-class triggers: frustration/profanity markers (owner-endorsed).",
-    )
-    confirmation: list[str] = Field(
-        default_factory=lambda: [
-            "exactly", "correct", "perfect", "right", "yes", "yep", "yeah",
-            "that's right", "thats right", "that's it", "thats it", "spot on",
-            "nice", "great", "awesome", "thanks", "thank you",
-        ],
-        description="Positive-label triggers ('exactly / right' are the owner's own examples).",
-    )
-    interruption: list[str] = Field(
-        default_factory=lambda: [
-            "stop", "wait", "hold on", "hang on", "never mind", "nevermind",
-            "forget it", "cancel", "cancel that", "one sec", "pause",
-        ],
-        description=(
-            "Interruption triggers — a WEAKER, separate label class, never conflated "
-            "with corrections (owner ruling 2026-07-04 22:44). LEXICAL by design: the "
-            "REPL has no mid-turn cancel seam (34-RESEARCH Pitfall 5)."
-        ),
-    )
-
-
-class PredictiveGateConfig(BaseModel):
-    """Collect-only predictive gate (Phase 34, COLL-01..04): per-tool statistical priors
-    score every outcome; user-signal triggers log labeled prediction errors. Score
-    everything, gate nothing — no store write and no behavior change keys off any of it
-    until Phase 35 sets thresholds from the observed distribution."""
-    model_config = ConfigDict(frozen=False, extra="forbid")
-
-    enabled: bool = Field(
-        default=True,
-        description=(
-            "If True (default), the collect-only scorer + user-signal detector subscribe "
-            "to the bus and persist surprise scores / signal labels (schema v4 tables). "
-            "Zero model calls, zero gating — pure measurement feeding Phase 35."
-        ),
-    )
-    min_prior_n: int = Field(
-        default=5, ge=1, le=1000,
-        description="Cold-start floor: below this many prior observations of a tool, its surprise score is neutral 0.0.",
-    )
-    latency_weight: float = Field(
-        default=0.5, ge=0.0, le=10.0,
-        description="Weight of |latency z-score| in the composite surprise score.",
-    )
-    size_weight: float = Field(
-        default=0.25, ge=0.0, le=10.0,
-        description="Weight of |output-size z-score| in the composite surprise score.",
-    )
-    pending_cap: int = Field(
-        default=256, ge=8, le=10000,
-        description="Max in-flight Action→Observation correlations held; overflow drops oldest (skip-under-load, collect-only can afford drops).",
-    )
-    reask_threshold: float = Field(
-        default=0.8, ge=0.5, le=1.0,
-        description="difflib.SequenceMatcher ratio above which a user message counts as a re-ask of an earlier message in the same sitting.",
-    )
-    reask_window: int = Field(
-        default=50, ge=1, le=500,
-        description="How many prior user messages per sitting the re-ask check compares against.",
-    )
-    write_live: bool = Field(
-        default=True,
-        description=(
-            "Phase 35 (PGATE): if True (default), PredictiveWriteGate turns surprise scores "
-            "and scoped corrections into real sub-0.7 fact writes. The pre-committed KILL "
-            "lever — set False to revert to motif-only capture while the collect-only scorer "
-            "keeps persisting scores as telemetry. "
-            "Mutable via `localharness components set agent.memory.predictive_gate.write_live <true|false>`."
-        ),
-    )
-    lexicon: TriggerLexiconConfig = Field(
-        default_factory=TriggerLexiconConfig,
-        description="COLL-02 trigger word lists — see TriggerLexiconConfig.",
     )
 
 
@@ -1210,18 +780,6 @@ class MemoryConfig(BaseModel):
         ),
     )
 
-    write_gate_enabled: bool = Field(
-        default=True,
-        description=(
-            "If True (default), the prediction-error write gate auto-captures memory fact "
-            "candidates from bus signals the loop already emits (a tool error that later "
-            "resolved, stuck-then-recovered, first-use novelty) — zero added LLM calls, "
-            "written BELOW the injection confidence threshold until consolidation promotes "
-            "them. Set False to disable all harness-initiated memory writes (the `remember` "
-            "tool is unaffected)."
-        ),
-    )
-
     trace_ambient_injection: bool = Field(
         default=True,
         description=(
@@ -1229,10 +787,23 @@ class MemoryConfig(BaseModel):
             "2026-07-17 of the P0 exclusion). Each turn's injected fact set is a co-firing event: "
             "one best-effort, per-turn-deduped row tagged source='injection' — DISTINGUISHABLE from "
             "model-initiated retrieval (memory_search / memory_get), which downstream consumers "
-            "discount (see agent.memory.consolidation.trace_injection_weight). A trace-write failure "
+            "discount (downstream consumers may discount it). A trace-write failure "
             "never disturbs the turn. False restores the pre-reversal behavior: no injection-trace "
             "rows, the injected block byte-identical. Mutable via `localharness components set "
             "agent.memory.trace_ambient_injection <true|false>`."
+        ),
+    )
+
+    embedding_model: str = Field(
+        default="Qwen/Qwen3-Embedding-0.6B",
+        description=(
+            "The subject-family embedding model whose representation space carries every "
+            "memory similarity judgment (search ranking, dreaming's stream replay, "
+            "write-time re-sighting). Runs locally on CPU via sentence-transformers "
+            "(`uv sync --extra embeddings`); weights download to the HF cache on first "
+            "use. Changing it triggers a full re-embed at the next dreaming pass "
+            "(vectors from different models are not comparable). There is NO fallback: "
+            "with the model unavailable, memory search and remember fail loudly."
         ),
     )
 
@@ -1249,10 +820,6 @@ class MemoryConfig(BaseModel):
         ),
     )
 
-    predictive_gate: PredictiveGateConfig = Field(
-        default_factory=PredictiveGateConfig,
-        description="Collect-only predictive gate (Phase 34 COLL) — see PredictiveGateConfig.",
-    )
 
 
 class ContextConfig(BaseModel):

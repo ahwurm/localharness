@@ -41,7 +41,7 @@ GLOBAL_MARKER = "GLOBAL-ONLY-MARKER"
 PREAMBLE = (
     "This is an INDEX, not the full memory. Each line below is one persistent fact "
     "(name: short description). Call `memory_get(name)` for a fact's full body, or "
-    "`memory_search(query)` to search fact contents.\n\n"
+    "`memory_search(query)` to search memory by meaning.\n\n"
 )
 
 
@@ -349,7 +349,7 @@ async def test_no_getattr_passthrough_at_all(
 #    regression in the DEFAULT path, not a compile error.
 # ------------------------------------------------------------------ #
 @pytest.mark.parametrize(
-    "verb", ["touch_staged", "record_activation_trace", "neighborhood", "get_facts_by_ids"]
+    "verb", ["touch_staged", "record_activation_trace", "get_facts_by_ids", "resonance_search"]
 )
 async def test_optional_enrichment_methods_are_present(
     primary: MemoryStore, global_store: MemoryStore, verb: str
@@ -373,7 +373,6 @@ async def test_single_scope_enrichment_hits_the_store_that_was_read(
     )
     assert [t.source for t in await primary.recent_activation_traces()] == ["search"]
     assert [f.key for f in await router.get_facts_by_ids([fact.id])] == ["ws-fact"]
-    assert await router.neighborhood(fact.id, depth=1, limit=6) == [(fact.id, 0)]
 
 
 # ------------------------------------------------------------------ #
@@ -699,19 +698,9 @@ async def test_both_writes_no_activation_trace_to_either_store(
     await both.close()
 
 
-async def test_both_disables_the_graph_enrichments(both: RecallRouter, pair) -> None:
-    """The tag graph is per-database; a merged hit list has no single graph to walk."""
-    assert await both.neighborhood(pair.ws_shared.id, depth=1, limit=6) == []
+async def test_both_disables_the_id_addressed_enrichment(both: RecallRouter, pair) -> None:
+    """facts.id is per-database; a merged hit list has no single id space to resolve."""
     assert await both.get_facts_by_ids([pair.ws_shared.id]) == []
-
-    # The control: the same calls under a single scope return real answers.
-    single = RecallRouter(pair.ws, pair.g, scope=ORIGIN_WORKSPACE)
-    assert await single.neighborhood(pair.ws_shared.id, depth=1, limit=6) == [
-        (pair.ws_shared.id, 0)
-    ]
-    assert [f.key for f in await single.get_facts_by_ids([pair.ws_shared.id])] == ["shared-key"]
-
-    await both.close()
 
 
 # ------------------------------------------------------------------ #

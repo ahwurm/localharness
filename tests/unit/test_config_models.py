@@ -138,20 +138,7 @@ def test_trace_ambient_injection_default_on():
     assert cfg.trace_ambient_injection is True
 
 
-def test_trace_injection_weight_default_and_bounds():
-    """Consumer-side discount for injection-source co-fire (retrieval-source is implicitly 1.0).
-    Default 0.3 — a materialized-view weight in [0,1]; the raw trace log keeps full fidelity, the
-    discount lives ONLY in derived computations (discovery's co-fire strength)."""
-    import pydantic
 
-    from localharness.config.models import MemoryConsolidationConfig
-
-    cfg = MemoryConsolidationConfig()
-    assert cfg.trace_injection_weight == 0.3
-    # bounded [0.0, 1.0]: 0.0 = ignore injection co-fire entirely, 1.0 = no discount.
-    for bad in (-0.1, 1.1):
-        with pytest.raises(pydantic.ValidationError):
-            MemoryConsolidationConfig(trace_injection_weight=bad)
 
 
 def test_context_config_defaults():
@@ -301,26 +288,10 @@ def test_proposer_config_optional():
 # -----------------------------------------------------------------------------
 
 
-def test_predictive_gate_defaults():
-    """COLL default-on with the owner-steered scoring weights."""
-    from localharness.config.models import MemoryConfig
-    cfg = MemoryConfig()
-    assert cfg.predictive_gate.enabled is True
-    assert cfg.predictive_gate.min_prior_n == 5
-    assert cfg.predictive_gate.latency_weight == 0.5
-    assert cfg.predictive_gate.size_weight == 0.25
-    assert cfg.predictive_gate.reask_threshold == 0.8
 
 
-def test_predictive_gate_lexicon_defaults():
-    """COLL-02 recall-first trigger lists — the owner's own specimens land per family."""
-    from localharness.config.models import MemoryConfig
-    lex = MemoryConfig().predictive_gate.lexicon
-    assert "nah" in lex.negation
-    assert "i meant" in lex.correction_phrase
-    assert "exactly" in lex.confirmation
-    assert "hold on" in lex.interruption
-    assert "frustrating" in lex.frustration
+
+
 
 
 def test_predictive_gate_extra_forbid():
@@ -330,23 +301,10 @@ def test_predictive_gate_extra_forbid():
         MemoryConfig(predictive_gate={"nope": 1})
 
 
-def test_predictive_gate_registry_discovery():
-    """The new axes auto-enumerate via walk_model_fields (zero catalogue edits) — both a
-    scalar leaf and a lexicon list[str] leaf appear on AgentConfig's walked paths."""
-    from localharness.config.models import AgentConfig
-    from localharness.registry.paths import walk_model_fields
-    paths = {p for p, _ann in walk_model_fields(AgentConfig)}
-    assert "memory.predictive_gate.enabled" in paths
-    assert "memory.predictive_gate.lexicon.negation" in paths
 
 
-def test_mining_novelty_fold_threshold_default_is_sweep_winner():
-    """sweep-20260711d: NV-HI (0.70) was the sole HOLDS row (ARI 0.748 vs 0.542 baseline,
-    recall 1.000, 32 vs 60 atoms); the old default 0.5 was the worst tested novelty value.
-    See .planning/runs/sweep-20260711d/SYNTHESIS.md (untracked)."""
-    from localharness.config.models import MemoryConsolidationConfig
 
-    assert MemoryConsolidationConfig().mining_novelty_fold_threshold == 0.70
+
 
 
 # --- #1: EndpointRef.base_url rejects a genuinely-malformed URL at load (clean config error) --- #
