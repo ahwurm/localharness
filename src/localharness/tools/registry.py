@@ -1,5 +1,6 @@
 """ToolRegistry: scope resolution, Pydantic dispatch, and hook integration."""
 import difflib
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -8,6 +9,12 @@ from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
 from localharness.tools.base import Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
+from localharness.tools.capabilities import (
+    EXEC_TOOLS,
+    UNTRUSTED_INGEST,
+    IngestViaExecError,
+    assert_no_ingest_via_exec,
+)
 
 _JSON_SCHEMA_TYPE_MAP: dict[str, type] = {
     "string": str,
@@ -47,6 +54,8 @@ async def _maybe_await(result: Any) -> Any:
         return await result
     return result
 
+
+log = logging.getLogger(__name__)
 
 class ToolRegistry:
     """Thread-safe tool registry with scope resolution."""
@@ -220,6 +229,19 @@ class ToolRegistry:
                 return bucket[name]
         return None
 
+    def _agent_has_ingest(self, agent_id: str, division_id: str, tool_config: Any) -> bool:
+        """Does this agent hold an untrusted-ingest verb — i.e. is it DESIGNATED an ingester?
+
+        Resolved from the agent's own toolset through the same per-agent path dispatch uses, so
+        it reflects inherit/add/deny exactly. Covers the built-in web verbs; an mcp:/plugin:
+        ingest tool resolved under a bare name is the same NAMED RESIDUAL assert_no_coresidence
+        documents — not silently claimed as covered.
+        """
+        return any(
+            self._get_tool_for_agent(n, agent_id, division_id, tool_config) is not None
+            for n in UNTRUSTED_INGEST
+        )
+
     def _get_tool_for_agent(
         self,
         name: str,
@@ -302,6 +324,28 @@ class ToolRegistry:
         validated = self._validate_arguments(name, arguments, tool.info())
         if isinstance(validated, ToolResult):
             return validated
+
+        # Ingest gate (owner ruling 2026-09-17): an agent DENIED the web verbs may not fetch
+        # remote content through an exec tool instead. Keyed off the agent's own DESIGNATION at
+        # the one dispatch chokepoint, so EVERY agent inherits it with no per-agent config —
+        # including a specialist the model writes itself at runtime.
+        if name in EXEC_TOOLS:
+            try:
+                assert_no_ingest_via_exec(
+                    name,
+                    validated,
+                    agent_id=agent_id,
+                    has_ingest=self._agent_has_ingest(agent_id, division_id, tool_config),
+                )
+            except IngestViaExecError as exc:
+                log.warning("ingest-via-exec BLOCKED: agent=%s tool=%s", agent_id, name)
+                return ToolResult(
+                    output="",
+                    success=False,
+                    error=str(exc),
+                    error_type="permission_denied",
+                    duration_ms=int(time.monotonic() * 1000) - start_ms,
+                )
 
         for hook in self._pre_hooks:
             try:

@@ -15,6 +15,7 @@ an arbitrary tool that ingests attacker text without an mcp:/plugin: source or a
 """
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Iterable
 from typing import Any
@@ -93,6 +94,94 @@ def assert_grant_target_safe(tool_names: Iterable[str], *, agent_id: str = "") -
             f"ingest), so granting to a bash/write/edit/exec holder would put attacker-controllable "
             f"bytes one call from a host action. Grants may target only no-host-dangerous agents (the "
             f"cruncher). Split the work: a no-danger processor reads the handle and returns a summary."
+        )
+
+
+class IngestViaExecError(ValueError):
+    pass
+
+
+# Exec tools an agent can smuggle ingestion through. Subset of HOST_DANGEROUS: write/edit touch
+# the host but fetch nothing, so they are not gated here.
+EXEC_TOOLS = frozenset({"bash_exec", "python_exec"})
+
+# Commands whose PURPOSE is pulling REMOTE CONTENT — the ingest capability an exec tool hands an
+# agent the floor just denied the web verbs to. Package/VCS/registry ops (pip, uv, git, apt, npm)
+# are deliberately ABSENT: they are not content ingestion, and denying them breaks real work.
+# Matched on the command string, so this is a REDIRECT (defense-in-depth), NOT a sandbox — a
+# determined agent can still obfuscate (base64, a helper script, an env-var'd URL). Stated plainly
+# rather than overclaimed: the airtight version is network isolation for the exec tool, which the
+# owner ruled out for now (2026-09-17: enforce at the harness level, not a netns).
+_INGEST_VIA_EXEC: tuple[tuple[Any, str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), label)
+    for pattern, label in (
+        # Binary names take a SUFFIX guard too (separator or end), so `wget-log`/`curl-config`
+        # as filenames don't trip. `links` (the terminal browser) is deliberately dropped: it is
+        # an everyday English word and the false-positive cost dwarfs its redirect value — a
+        # named residual, consistent with the redirect-not-sandbox stance above.
+        (r"(?:^|[\s;&|(`])(?:curl|wget|aria2c|httpie|lynx|w3m|elinks)(?=$|[\s;&|()'\"`<>])",
+         "http client"),
+        (r"(?:^|[\s;&|(`])(?:nc|ncat|netcat|telnet|socat)(?=$|[\s;&|()'\"`<>])",
+         "raw socket tool"),
+        (r"/dev/tcp/", "bash tcp redirect"),
+        (r"openssl\s+s_client", "openssl socket"),
+        (r"(?:^|[\s;&|(`])(?:ddgs|duckduckgo_search|googlesearch)(?=$|[\s;&|()'\"`<>])",
+         "search cli"),
+        (r"\b(?:import|from)\s+(?:requests|httpx|aiohttp|urllib|urllib2|urllib3|ddgs"
+         r"|socket|selenium|playwright|mechanize)\b", "python network import"),
+        (r"\b(?:requests|httpx)\.(?:get|post|head|put|patch|delete|request|Client|AsyncClient)\s*\(",
+         "python http call"),
+        (r"\burlopen\s*\(|\burllib\.request\b", "python urlopen"),
+        (r"\baiohttp\.ClientSession\s*\(", "python aiohttp"),
+        (r"\bwebbrowser\.open\s*\(", "webbrowser"),
+    )
+)
+
+
+def assert_no_ingest_via_exec(
+    tool_name: str,
+    arguments: Any,
+    *,
+    agent_id: str = "",
+    has_ingest: bool = False,
+) -> None:
+    """An agent DENIED the web verbs must not fetch remote content through an exec tool instead.
+
+    apply_root_capability_floor strips web_* from a host-acting agent on the theory that it
+    DELEGATES ingestion. But bash is itself an ingest tool — `curl`, `python -c 'import requests'`
+    and friends reach the same attacker-controllable bytes — so the deny list alone was advisory
+    and the floor's invariant was, for an exec holder, a fiction.
+
+    Observed live 2026-09-17: the root agent, whose own role said "never try to reach the web
+    yourself with bash/curl", ran a DuckDuckGo search through bash_exec and fed the result into a
+    subagent brief — after its delegation came back empty.
+
+    Enforced at the dispatch chokepoint, so EVERY agent inherits it from its DESIGNATION with no
+    per-agent config: an agent holding an ingest verb is untouched; one without it is redirected
+    to delegation. `has_ingest` is the designation, resolved by the caller from the agent's own
+    toolset. No-op when the floor is disabled.
+    """
+    if has_ingest or not floor_enabled() or tool_name not in EXEC_TOOLS:
+        return
+    if isinstance(arguments, dict):
+        text = " ".join(str(v) for v in arguments.values() if isinstance(v, str))
+    else:
+        text = str(arguments or "")
+    for rx, label in _INGEST_VIA_EXEC:
+        hit = rx.search(text)
+        if hit is None:
+            continue
+        who = f" '{agent_id}'" if agent_id else ""
+        raise IngestViaExecError(
+            f"BLOCKED: agent{who} holds no web-ingest tool, so it may not reach the web through "
+            f"`{tool_name}` instead (matched {label}: {hit.group(0).strip()!r}). Reading remote "
+            f"content here would put attacker-controllable bytes one call from a host action — "
+            f"the capability floor denies you the web verbs for exactly that reason, and routing "
+            f"around it defeats the split.\n"
+            f"DELEGATE instead: agent(agent_id='web-researcher', task='<what you need, including "
+            f"the exact queries or URLs>').\n"
+            f"If you believe the web-researcher itself is broken, SAY SO TO THE USER and STOP — "
+            f"report the failure, do not work around it. A silent workaround hides a real bug."
         )
 
 
