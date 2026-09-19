@@ -1,5 +1,12 @@
 # Spec 05: Memory System
 
+> **SUPERSEDED (v0.15.0, 2026-09-19).** The mechanism below describes the pre-resonance
+> memory system (write gates, tag graph, ACT-R scoring), which was replaced wholesale:
+> similarity now comes from a local embedding model (`memory/resonance.py`), idle
+> consolidation is the dreaming pass (`memory/consolidation.py`), and belief is a
+> measured writers ledger (`memory/sqlite.py`). The module docstrings are the current
+> ground truth; this file is kept as the historical record of the replaced design.
+
 **Component:** `src/localharness/memory/` (+ `cli/session_accumulator.py`)
 **Requirements:** MEM-01..04, WRITE-01..06, RANK-01..05, HIER-02..04, CONS-01..06, COLL-01..04, PGATE-01..04, SESS-02..05, TIME-01..04
 **Status:** v2 (predictive) — supersedes the v1 three-tier-scope spec

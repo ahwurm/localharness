@@ -1,10 +1,10 @@
-"""Pluggable embedding interface for tag discovery (Stage C). Embedding proximity is ONE factor
-among three in DISCOVER — never the mechanism (the owner's scoped ambivalence on vectors). The
-default production embedder is a small local CPU model (sentence-transformers MiniLM, an OPTIONAL
-extra: `pip install localharness[embeddings]`); when it is unavailable the factory falls back to a
-dependency-free deterministic HashingEmbedder so discovery still has an embedding leg rather than
-blocking the idle cycle. A CHANGED embedder needs a re-embed pass — vectors from different models
-are not comparable. Tests inject their own fake — the INTERFACE is the point, not the model.
+"""Test-double embedding utilities.
+
+The PRODUCTION similarity engine lives in memory/resonance.py (subject-family model,
+no fallback). This module keeps two things: `_quiet_ml_output` (the stream-silencing
+guard resonance.py loads the real model under) and `HashingEmbedder` — a dependency-free
+deterministic bag-of-words embedder the unit tests inject as their engine double
+(the INTERFACE is the point, not the model). Nothing in src/ falls back to it.
 """
 from __future__ import annotations
 
@@ -62,28 +62,3 @@ class HashingEmbedder:
         return [self._vec(t) for t in texts]
 
 
-class SentenceTransformerEmbedder:
-    """The default production embedder: a small local CPU model (MiniLM). Lazy-imports the optional
-    dep at construction (raises if the extra is not installed), so importing this module is free."""
-
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
-        with _quiet_ml_output():
-            from sentence_transformers import SentenceTransformer  # optional extra: [embeddings]
-
-            self._model = SentenceTransformer(model_name)
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        with _quiet_ml_output():
-            return [list(map(float, v)) for v in
-                    self._model.encode(texts, normalize_embeddings=True,
-                                       show_progress_bar=False)]
-
-
-def default_embedder(model_name: str | None = None) -> Embedder:
-    """MiniLM if the `embeddings` extra is installed, else the dep-free HashingEmbedder. Never
-    None — the disabled path (fall back to a stricter temporal+trace 2-factor rule) is a config
-    choice that discovery handles by being passed embedder=None explicitly."""
-    try:
-        return SentenceTransformerEmbedder(model_name or "sentence-transformers/all-MiniLM-L6-v2")
-    except Exception:
-        return HashingEmbedder()

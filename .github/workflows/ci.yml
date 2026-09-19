@@ -15,6 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Sync dependencies
-        run: uv sync --extra dev --extra dispatch
+        # web: the push/enrolment tests import py-vapid/http-ece/segno directly.
+        # embeddings deliberately absent: the memory tests run on a dependency-free
+        # test double; the real model never downloads in CI.
+        run: uv sync --extra dev --extra dispatch --extra web
       - name: Run tests
         run: uv run pytest -q

@@ -1,5 +1,12 @@
 # Spec 08: Context Management
 
+> **SUPERSEDED (v0.15.0, 2026-09-19).** The mechanism below describes the pre-resonance
+> memory system (write gates, tag graph, ACT-R scoring), which was replaced wholesale:
+> similarity now comes from a local embedding model (`memory/resonance.py`), idle
+> consolidation is the dreaming pass (`memory/consolidation.py`), and belief is a
+> measured writers ledger (`memory/sqlite.py`). The module docstrings are the current
+> ground truth; this file is kept as the historical record of the replaced design.
+
 **Component:** `src/localharness/agent/context.py`
 **Requirements:** CTX-01, CTX-02, CTX-03, LOOP-02
 **Dependencies:** `core/types.py`, `config/models.py`, `provider/client.py`

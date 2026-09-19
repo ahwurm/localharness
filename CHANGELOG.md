@@ -4,7 +4,72 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [0.14.2] — unreleased
+## [0.15.0] — 2026-09-19
+
+The memory system was rebuilt from the ground up: the model itself is now the
+similarity engine behind every recall, and the rule-based machinery it replaces
+(write gates, tag graphs, keyword heuristics, time-decay scoring) is deleted.
+This release also carries everything staged since 0.14.1, folded in below.
+
+### Added
+- **Resonance memory** — every similarity judgment (search ranking, idle replay,
+  duplicate detection) is made in a local embedding model's representation space
+  (`Qwen/Qwen3-Embedding-0.6B`, CPU, configurable via `agent.memory.embedding_model`).
+  There is deliberately **no fallback**: without the `embeddings` extra installed,
+  memory search and `remember` return a plain error naming the fix instead of
+  silently degrading to keyword matching.
+- **Dreaming** — the idle consolidation pass now replays the session's own
+  event-stream ledgers: each turn's attention is distributed over stored memories
+  by resonance (that accumulated *standing* is what ranks the injected memory
+  index), co-firing memories are bound into groups the model names, and writer
+  bets are settled. The amount digested is the pass's only clock — an idle store
+  does not decay.
+- **Writers ledger** — every memory write is a bet: a new memory's belief starts
+  at its writer's measured track record (log-odds), a re-sighting from another
+  session adds evidence on the existing row (the model judges "same claim"),
+  a contradiction subtracts and scores against the writer, and dreaming settles
+  paid/lost outcomes from the store's own tables.
+- **Forgetting, gated** — with `agent.memory.archival.enabled` on, dreaming
+  archives memories that score below the store's own proven-useful line (the
+  minimum salience over memories that were actually recalled or owner-touched —
+  computed from the data, never configured). Archived rows leave every recall
+  path and restore byte-identical via `localharness memory restore`.
+- Named groups render in the injected memory index; the loading budget
+  (`agent.memory.max_notes_chars`) is now the whole admission gate — no
+  confidence floors, no strength gates, no count caps.
+
+### Changed
+- Salience is one currency everywhere: `ln(1+standing) + truth log-odds +
+  declared stakes`. Importance is purely declared (the one human input) —
+  nothing mints it from tags or sources anymore.
+- `memory_search` ranks by meaning, not FTS; a zero-hit search still records the
+  retrieval moment (what was asked is a measurement too).
+- Owner-facing keyword lookup (the web memory page's search box, `localharness
+  memory list/search`, the REPL `/memory search`) keeps FTS text matching as its
+  FILTER — text matching at query time is search — but now orders results by the
+  same salience currency as everything else. The last ACT-R/recency scorer is
+  gone with the rest.
+- The REPL `/memory` overview shows named groups + recent memories (the tag tree
+  is gone with the tag system).
+
+### Removed
+- **The rule-based memory machinery, ~24k lines**: the prediction-error write
+  gate, the predictive/surprise gates and their trigger-word lexicons, transcript
+  mining, the tag graph (classify/discovery/clustering), the chapter writer, the
+  gist hierarchy, reconciliation, the ACT-R clock scorer, importance priors, the
+  corroboration ladder, and ~45 `agent.memory.*` config knobs. A config still
+  carrying a deleted knob fails loudly and names the dead key — nothing is
+  silently ignored.
+
+### Migration
+- Memory schema migrates additively to v10 on first open. Existing stores keep
+  every row; facts get vectors on the first idle pass. `pip install
+  "localharness[embeddings]"` (or `uv sync --extra embeddings`) is required for
+  memory retrieval and writes.
+
+---
+
+The staged 0.14.2 work, released here:
 
 ### Changed
 - **A compaction summary now stays in the session. Long sessions stop re-summarizing

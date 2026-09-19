@@ -14,9 +14,9 @@ Five things it does that are hard to find anywhere else:
 
 - **It reads documents bigger than its own memory.** A long filing or contract is read in sections, start to finish — nothing is skipped and nothing is skimmed — and every number in the answer points back to the line it came from.
 - **A web page cannot talk it into running commands.** Anything fetched off the internet is handled by a helper that has no power to run commands or change files. That wall is built into the structure, so it holds even when the model is fooled.
-- **It remembers what went wrong, and files it while idle.** When something fails and then gets fixed, that lesson is saved on its own, with no extra calls to the model. Lessons that keep recurring are promoted into the prompt during idle time. Old facts are never deleted, only superseded. It all lives in SQLite — no vector database, no second model sitting in memory.
+- **It remembers by meaning, and forgets what stops mattering.** Memories are recalled by similarity in a small local embedding model's space — the same family as the model you serve — not by keyword rules or hand-tuned scores. While idle it *dreams*: it replays the session's event stream, strengthens the memories that resonated with what actually happened, binds related ones into named groups, and (once you enable it) archives what no longer earns its place. Nothing is deleted — an archived memory restores with one command. It all lives in SQLite plus one ~0.6B embedding model that runs on CPU and never touches your GPU; no vector database.
 - **Each session remembers the last one.** Every run closes with a one-line summary of what you asked, or of the error it resolved, written from the record rather than by the model. The next session opens already knowing what you did last time, so "what did we do yesterday?" gets a real answer with no lookup.
-- **It learns which failures are worth remembering.** Each tool builds up a picture of how it normally behaves, so a reliable tool suddenly breaking is news and a flaky one failing again is not. A correction from you ("no, I meant…") is saved separately and can be undone. New lessons stay out of sight until an idle pass confirms them.
+- **A memory's credibility is earned, never asserted.** Every write is a bet: a new memory starts at its writer's measured track record, seeing the same claim again in a different session adds evidence, and being contradicted subtracts — so a source that keeps being wrong prices its own future claims down. Nothing in the store carries a confidence number a human invented.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
@@ -45,7 +45,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
-- **Memory that learns from use** — each agent keeps its own SQLite memory. Lessons are captured on their own when something fails and then gets fixed, with no extra calls to the model. Recall is ranked by what actually gets used, in plain SQL. Filing happens during idle time and can be cancelled. A fact that changes is superseded, never overwritten
+- **Memory that runs on the model, not on rules** — each agent keeps its own SQLite memory, and every similarity judgment (search ranking, idle replay, duplicate detection) is made in a local embedding model's space (`Qwen3-Embedding-0.6B`, CPU; needs the `embeddings` extra — without it memory says so plainly rather than degrading to something else). Idle *dreaming* replays the session stream, ranks what resonates, and binds related memories into named groups; forgetting (off by default) archives what scores below the store's own proven-useful line, restorable any time. A fact that changes is superseded, never overwritten
 - **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` names the file behind every effective key, and `doctor` names both layers and every key the project overrides
 - **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
 - **Deny-first permissions** — one deterministic gate in front of every tool call; policies inherit down the hierarchy and can only narrow
@@ -132,7 +132,7 @@ model. Per-runtime live markers: `LOCALHARNESS_LIVE_{VLLM,OLLAMA,LLAMACPP,LMSTUD
 ```bash
 git clone https://github.com/ahwurm/localharness.git
 cd localharness
-uv sync
+uv sync --extra embeddings   # the extra powers memory (a small CPU embedding model); plain `uv sync` runs everything else
 
 uv run localharness init    # probes vLLM :8081/:8000, Ollama :11434, LM Studio :1234, llama.cpp :8080
 uv run localharness start   # interactive session
@@ -249,7 +249,7 @@ Start at [docs/reference-architectures/](docs/reference-architectures/README.md)
 
 ## Status
 
-Early stage (v0.14.1, pre-1.0). Interfaces and config schema may change without notice.
+Early stage (v0.15.0, pre-1.0). Interfaces and config schema may change without notice.
 
 ## License
 
