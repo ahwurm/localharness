@@ -256,6 +256,36 @@ async def test_the_history_list_is_newest_first_titled_by_the_first_user_message
     assert rows[1]["size_bytes"] == old.stat().st_size
 
 
+async def test_worker_session_logs_are_hidden_from_the_drawer_and_search(tmp_path):
+    """A subagent's transcript is a session log too (`_ParentIdBus` stamps `parent_id` on
+    every event it publishes), but it is not a chat: it never holds a `UserMessage`, so it
+    wore a raw UUID in the drawer — a row nobody selects into. The first parseable event
+    decides worker-ness; the log stays on disk and still replays by id."""
+    bus, _, _, client = await _stack(tmp_path)
+    await bus.publish(UserMessage(agent_id="a", session_id="s1",
+                                  content="the real chat", channel="web"))
+    worker = tmp_path / "sessions" / "w1.jsonl"
+    worker.write_text(
+        "not json — a torn first line must not blur the verdict\n"
+        + json.dumps({"seq": 0, "event_type": "TurnStarted", "parent_id": "s1",
+                      "task_summary": "delegated research"})
+        + "\n"
+        + json.dumps({"seq": 1, "event_type": "TaskComplete", "parent_id": "s1",
+                      "summary": "zeppelin findings"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = (await client.get("/api/sessions", headers=BEARER)).json()["sessions"]
+    assert [r["session_id"] for r in rows] == ["s1"]
+    # hidden from search too, even though its TaskComplete summary would match
+    hits = (await client.get("/api/sessions?q=zeppelin", headers=BEARER)).json()["sessions"]
+    assert hits == []
+    # but the transcript itself stays on disk and still replays by id
+    got = await client.get("/api/sessions/w1/events?from=0", headers=BEARER)
+    assert got.status_code == 200 and b"zeppelin" in got.content
+
+
 async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_construction_bus(tmp_path):
     """THE 2026-09-15 FOUNDATIONAL BUG, wired the way PRODUCTION wires it: `localharness web`
     constructs the channel on a placeholder bus before any session exists, and the session

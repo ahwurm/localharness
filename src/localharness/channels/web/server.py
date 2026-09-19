@@ -798,12 +798,18 @@ class WebServer:
         return _json({"eviction_id": eviction_id, "body": body})
 
     async def sessions(self, request: Request) -> Response:
-        """The history list: every session log on disk, newest first (the drawer behind ☰).
+        """The history list: every top-level session log on disk, newest first (the drawer behind ☰).
 
         Reading is free, exactly as `events` below — no session, no GPU, no bring-up. `title`
         is the first `UserMessage` in the log, because "what did I ask" is how a human
         recognises a conversation; a log whose scan finds none gets null and the client
         falls back to the id.
+
+        Worker (subagent) logs are hidden: `_ParentIdBus` stamps `parent_id` on every event a
+        child publishes, so a log whose first parseable event carries one is a worker's
+        transcript, not a chat — a row nobody would ever select into, wearing a UUID for a
+        title (a worker never receives a `UserMessage`). The log itself stays on disk and
+        `GET /api/sessions/{id}/events` still replays it by id.
 
         `?q=` filters to chats where the text matches what was SAID — `UserMessage.content`
         and `TaskComplete.summary`, the same two sources the digest renders — case-insensitive
@@ -829,11 +835,14 @@ class WebServer:
                 files = sorted(base.glob("*.jsonl"),
                                key=lambda p: p.stat().st_mtime, reverse=True)
             rows: list[dict] = []
-            for path in files if q else files[:SESSION_LIST_CAP]:
+            # No files[:SESSION_LIST_CAP] pre-slice: worker logs are skipped below for the
+            # cost of one parsed line each, and pre-slicing would let them eat drawer slots.
+            for path in files:
                 if len(rows) >= SESSION_LIST_CAP:
                     break
                 title: Optional[str] = None
                 match: Optional[str] = None
+                worker: Optional[bool] = None  # decided by the first parseable event only
                 try:
                     with path.open(encoding="utf-8", errors="replace") as fh:
                         for lineno, raw in enumerate(fh):
@@ -845,6 +854,10 @@ class WebServer:
                                 data = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue  # a torn line is skipped, exactly as _backfill does
+                            if worker is None:
+                                worker = bool(data.get("parent_id"))
+                                if worker:
+                                    break  # a subagent transcript, not a chat — hide it
                             kind = data.get("event_type")
                             text = ""
                             if kind == "UserMessage":
@@ -862,7 +875,7 @@ class WebServer:
                     stat = path.stat()
                 except OSError:
                     continue  # deleted between glob and read: a listing must not 500 over it
-                if q and match is None:
+                if worker or (q and match is None):
                     continue
                 row = {
                     "session_id": path.stem,
@@ -1334,7 +1347,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/push/key", "the VAPID application server key for pushManager.subscribe()"),
     ("GET", "/api/stream", "the SSE event stream; ?from={seq} resumes"),
     ("GET", "/api/sessions",
-     "the session logs on disk, newest first: [{session_id, title, live, …}]; "
+     "the top-level session logs on disk, newest first: [{session_id, title, live, …}]; "
+     "worker (subagent) logs are hidden; "
      "?q= full-text filters on what was said, rows gain a `match` snippet"),
     ("GET", "/api/sessions/{id}/events", "replay off disk as NDJSON; ?from={seq}"),
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),
