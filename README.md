@@ -4,25 +4,25 @@
 
 **Run AI agents on the models you already run locally.**
 
-LocalHarness is the *agent layer* on top of your inference engine: vLLM, Ollama, LM Studio, or llama.cpp. It doesn't serve models. It gives the model you already serve real agents, with tools, memory, and deny-first permissions, all defined in YAML instead of Python.
+LocalHarness does not serve models. It sits on top of the one you already serve — vLLM, llama.cpp, Ollama, or LM Studio — and gives it real agents: tools, memory, and permissions, written in YAML instead of Python.
 
-It's model-agnostic. Point it at any OpenAI-compatible endpoint and the same agent runs. Agents are hierarchical: an orchestrator routes work to subagents, each with its own fresh context, tools, and memory.
+Point it at any OpenAI-compatible endpoint and the same agent runs. One main agent reads your task and hands pieces to helpers, each working in its own fresh window with only the tools you allowed it.
 
-The bet: the harness, not the model, is where most of the capability lives. The same model can swing tens of benchmark points depending on the harness around it.
+The bet behind the project: most of what makes an agent good lives in the harness, not the model. The same model can swing tens of benchmark points depending on what is built around it.
 
 Five things it does that are hard to find anywhere else:
 
-- **Read documents bigger than the context window — losslessly.** Every section is actually read, never truncated, and every number in the answer traces back to the source text it came from. Built for long filings, contracts, and reports, on hardware you control.
-- **Structural defense against prompt injection.** Untrusted web content can never share an agent with host-mutating tools like bash, write, or edit. The boundary is enforced in the agent topology and fails closed — not left to the model to refuse.
-- **Memory that consolidates while idle.** Lessons auto-capture from real failure→recovery moments at zero extra model calls; recurring ones are promoted into the prompt during idle "sleep" passes; superseded facts are never deleted, and search routes through a gist/schema hierarchy — gists route the search, leaf records anchor the answer. All SQLite: no vector DB, no second resident model.
-- **Sittings that remember each other.** Every run records a session; on close it gets one topical summary line (what you asked, or the error it resolved) — derived from events, zero model calls. The next sitting opens with the recent timeline already in its prompt (relative times, newest first, hard-capped at 8 lines) and can answer "what did we do last time?" without a single lookup.
-- **A write gate that predicts.** Per-tool statistical priors — computed in pure SQL, zero model calls — score every tool outcome against that tool's own history. A normally-reliable tool that suddenly errors becomes a captured memory, and a user correction ("no, I meant…") writes a quarantined, reversible one; a failure the tool's history already expected stops being news. Each of these lands *below* the prompt's visibility line — captured and searchable, but not steering the agent until an idle consolidation pass confirms it, with one config lever to revert to motif-only capture.
+- **It reads documents bigger than its own memory.** A long filing or contract is read in sections, start to finish — nothing is skipped and nothing is skimmed — and every number in the answer points back to the line it came from.
+- **A web page cannot talk it into running commands.** Anything fetched off the internet is handled by a helper that has no power to run commands or change files. That wall is built into the structure, so it holds even when the model is fooled.
+- **It remembers what went wrong, and files it while idle.** When something fails and then gets fixed, that lesson is saved on its own, with no extra calls to the model. Lessons that keep recurring are promoted into the prompt during idle time. Old facts are never deleted, only superseded. It all lives in SQLite — no vector database, no second model sitting in memory.
+- **Each session remembers the last one.** Every run closes with a one-line summary of what you asked, or of the error it resolved, written from the record rather than by the model. The next session opens already knowing what you did last time, so "what did we do yesterday?" gets a real answer with no lookup.
+- **It learns which failures are worth remembering.** Each tool builds up a picture of how it normally behaves, so a reliable tool suddenly breaking is news and a flaky one failing again is not. A correction from you ("no, I meant…") is saved separately and can be undone. New lessons stay out of sight until an idle pass confirms them.
 
 ![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
-> `localharness init` auto-detects your running endpoint (here, vLLM serving Qwen) and probes its tool-calling. Then `localharness start` is zero-config: it creates the orchestrator — a general-purpose root agent — and drops you straight into the REPL. Ask it a real question and watch the agent work — here it chains `web_search` → `web_fetch` across several iterations to research the best open-source model for a 128 GB machine, the tool-call loop visible the whole way.
+> `localharness init` finds the server you already have running (here, vLLM serving Qwen) and checks whether its model can call tools. Then `localharness start` needs no setup: it builds the main agent and drops you at a prompt. Ask a real question and watch it work — here it searches the web, fetches pages, and keeps going for several rounds to find the best open model for a 128 GB machine, every tool call visible as it happens.
 
-## Why local
+## Why run agents locally?
 
 Frontier coding agents are great when you're driving them. But metering and rate limits make them an awkward fit for the recurring jobs you'd actually want an agent to *own*: the nightly report, the scheduled cleanup, the watch-and-react task. LocalHarness keeps the Claude Code / OpenCode workflow you already know, pointed at a model running on hardware you control.
 
@@ -45,7 +45,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 
 - **YAML-defined agents** — add an agent, division, or tool policy without writing Python
 - **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
-- **Memory that learns from use** — per-agent SQLite memory with an automatic write gate (lessons captured from failure→recovery signals, zero extra model calls), activation-ranked recall in pure SQL, cancellable idle consolidation, and a persisted gist/schema hierarchy over document analyses; conflicting facts supersede, never overwrite
+- **Memory that learns from use** — each agent keeps its own SQLite memory. Lessons are captured on their own when something fails and then gets fixed, with no extra calls to the model. Recall is ranked by what actually gets used, in plain SQL. Filing happens during idle time and can be cancelled. A fact that changes is superseded, never overwritten
 - **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` names the file behind every effective key, and `doctor` names both layers and every key the project overrides
 - **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
 - **Deny-first permissions** — one deterministic gate in front of every tool call; policies inherit down the hierarchy and can only narrow
