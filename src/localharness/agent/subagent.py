@@ -67,12 +67,18 @@ WEB_MAX_DURATION_MINUTES = 20.0
 WEB_ZERO_CALL_RETRIES = 1
 """Fresh attempts granted a web-researcher whose run made ZERO tool calls.
 
-The observed fault mode (2026-09-16, live): the subject model answers the research brief in
-prose — `web_search("...")` typed as TEXT — then rationalizes that its tools "are not exposed";
-the IDENTICAL dispatch succeeded minutes later, so one fresh attempt catches what is a sampling
-fluke, while more would spend the parent's latency on a model refusing the format. After the
-last attempt the dispatch fails HONESTLY instead of shipping a fabricated transcript as
-findings — which is what taught the orchestrator to bypass delegation with bash+curl."""
+The fault mode: the subject model answers the research brief in prose and claims its tools "are
+not exposed". MEASURED 2026-09-17 (do not re-guess this): the tools ARE on the wire every time —
+the failing turn's recorded input_tokens (4488 over 2 iterations) only reconciles WITH the ~800
+tokens/request of tool definitions, and the act-guard that fired requires a non-empty
+tool_schemas. So the model is DECLINING, not deprived. Calling it a sampling fluke was wrong:
+the harness's own act-guard offered a CONFIRMED escape hatch promising the tool-less reply would
+be "delivered to the user unchanged", which this dispatcher then discarded — the loop and the
+dispatcher disagreed and the model was blamed. Fixed by AgentConfig.tools_required, which swaps
+that nudge for one stating the real consequence. One fresh attempt remains because the sharpened
+brief demonstrably recovers the run; more would just spend the parent's latency. After the last
+attempt the dispatch fails HONESTLY — with the advertised toolset attached, so the parent cannot
+infer a broken component and go around delegation with bash+curl (it did, live 2026-09-17)."""
 
 ZERO_CALL_RETRY_PREFIX = (
     "PREVIOUS ATTEMPT INVALID: you produced text without executing a single tool. "
@@ -251,6 +257,7 @@ def build_web_researcher_config(name: str = "web-researcher", kill_file: str | N
     elif rigor != "fast":
         role += WEB_RESEARCHER_VERIFY_ON_REQUEST_ADDENDUM
     return AgentConfig(
+        tools_required=True,
         name=_sanitize_agent_name(name),
         role=role,
         permissions=PermissionConfig(
@@ -266,6 +273,7 @@ def build_web_researcher_config(name: str = "web-researcher", kill_file: str | N
 def build_search_verifier_config(name: str = "search-verifier", kill_file: str | None = None) -> AgentConfig:
     """Build the blind search-verifier child AgentConfig with its own bounded budget (leaf)."""
     return AgentConfig(
+        tools_required=True,
         name=_sanitize_agent_name(name),
         role=SEARCH_VERIFIER_ROLE,
         permissions=PermissionConfig(
@@ -668,11 +676,27 @@ async def dispatch_web_subagent(
 
     # Zero calls on every attempt: the text is fabrication-shaped, and a fabricated transcript
     # labeled "failed" still reads like findings to a weak parent — so it is DISCARDED.
+    # Report what the child was ACTUALLY handed. Without this the parent infers a broken
+    # component from a zero-call run and "repairs" a toolset that was never empty — the live
+    # 2026-09-17 chain: false memory ("missing its search tool") -> source dive -> bash+ddgs
+    # bypass. The count is evidence, so the failure can never again be read as absence.
+    try:
+        advertised = sorted(
+            child_registry.get_tools_for_agent(
+                child_config.name, child_config.division or "", child_config.tools
+            )
+        )
+    except Exception:  # never let the diagnostic mask the failure it is describing
+        advertised = sorted(child_registry._schemas)
     return (
         f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
         f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
-        "executing any web tool, so it produced no evidence; its text was discarded. Treat "
-        "this delegation as FAILED — do not present an answer to this task as researched."
+        "executing any web tool, so it produced no evidence; its text was discarded. "
+        f"Its tools WERE advertised on every request: {advertised}. This is the model "
+        "DECLINING to call them, not a missing or broken tool — do not 'repair' the "
+        "web-researcher's toolset, and do not research this yourself with bash/curl. "
+        "Re-delegate once, or TELL THE USER the researcher is refusing and stop. Treat this "
+        "delegation as FAILED — do not present an answer to this task as researched."
     )
 
 
