@@ -108,6 +108,13 @@ _WEB_STUB_PREFIX = "[web output omitted"
 TOOL_EVICT_USAGE_FRACTION: float = 0.50
 TOOL_EVICT_KEEP_LAST: int = 3            # leave the most recent K results un-evicted
 TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbing
+# #149: keep-last is a recency proxy for "what the model is actively reasoning over", and a
+# count-based window breaks exactly when results are at their largest — a live burst of
+# oversized reads hit 221% utilization from INSIDE the protected window (#147's evidence).
+# The protected tail may hold at most this fraction of the context window; past it, its
+# oldest members spill back to eviction. The newest result always survives: the model has
+# not seen it yet, and evicting it would turn every oversized read into a restore round trip.
+TOOL_EVICT_PROTECT_BUDGET_FRACTION: float = 0.25
 _TOOL_STUB_PREFIX = "[tool result evicted"
 _TOOL_STUB_SUFFIX = " to restore the full body]"
 # A stub names the call it replaced — tool + first string argument (a path, a url, a query, a
@@ -361,12 +368,17 @@ def _evict_large_tool_results(
     store: "ContentStore",
     threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
     keep_last: int = TOOL_EVICT_KEEP_LAST,
+    protect_budget_chars: int | None = None,
     pinned_call_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[Message], int]:
     """Replace the bodies of bulky NON-web tool results with a restorable stub keyed by a
     deterministic content hash; the full body is stashed in `store` for tool_result_get.
     Web results are handled by _evict_stale_web_results (URL-restorable, no store needed).
     The newest `keep_last` evictable results are left verbatim for immediate reasoning.
+    `protect_budget_chars` (#149) size-caps that window: walking newest to oldest, the first
+    member that would push the tail's combined size past the budget spills back to eviction
+    with everything older (contiguous — no cherry-picking a small old body past an oversized
+    middle one). The newest always stays. None = count-only protection (pre-#149 behavior).
     `pinned_call_ids` (#134) are results the model restored THIS turn: they are SKIPPED, never
     evicted — but they still count toward the keep-last window, so a pin costs exactly its own
     eviction and never pushes another body into protection (non-pinned bodies evict first).
@@ -386,6 +398,16 @@ def _evict_large_tool_results(
         and not (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)
     ]
     stale = evictable[:-keep_last] if keep_last > 0 else evictable
+    if keep_last > 0 and protect_budget_chars is not None:
+        tail = evictable[-keep_last:]
+        used, kept = 0, 0
+        for n, i in enumerate(reversed(tail)):  # newest -> oldest
+            size = len(messages[i].get("content") or "")
+            if n > 0 and used + size > protect_budget_chars:
+                break  # this member and everything older spills
+            used += size
+            kept += 1
+        stale = stale + tail[: len(tail) - kept]
     if pinned_call_ids:
         stale = [i for i in stale if messages[i].get("tool_call_id") not in pinned_call_ids]
     if not stale:
@@ -1745,6 +1767,9 @@ class ContextManager:
             repaired, t_evicted = _evict_large_tool_results(
                 repaired, self._eviction_store,
                 threshold_chars=self._tool_evict_threshold_chars,
+                protect_budget_chars=int(
+                    self.max_context_tokens * TOOL_EVICT_PROTECT_BUDGET_FRACTION
+                ) * APPROX_CHARS_PER_TOKEN,
                 pinned_call_ids=restore_pins,
             )
             if t_evicted:
