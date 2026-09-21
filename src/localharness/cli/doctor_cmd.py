@@ -221,6 +221,32 @@ def _print_web_listener(config_dir: Path) -> None:
     console.print(escape(f"       Token file: {path}"), soft_wrap=True)
 
 
+def _print_comfyui() -> None:
+    """Image module health — printed ONLY when the operator opted in (env set). An
+    unconfigured install stays silent: doctor reports on what you enabled, not a catalog."""
+    from localharness.tools.builtin.generate_image_tool import comfyui_url, load_template
+
+    base = comfyui_url()
+    if base is None:
+        return
+    try:
+        _, tpl_name = load_template()
+    except Exception as exc:  # noqa: BLE001 — any load failure is the same finding for doctor
+        console.print(_FAIL + " " + escape(f"Image module: workflow template unusable — {exc}"),
+                      soft_wrap=True)
+        return
+    try:
+        httpx.get(f"{base}/system_stats", timeout=3.0).raise_for_status()
+    except Exception:  # noqa: BLE001
+        console.print(_FAIL + " " + escape(f"Image module: ComfyUI unreachable at {base}"),
+                      soft_wrap=True)
+        console.print("       generate_image and `localharness generate-image` need the image "
+                      "server running.")
+        return
+    console.print(_PASS + " " + escape(f"Image module: ComfyUI reachable at {base} "
+                                       f"(template: {tpl_name})"), soft_wrap=True)
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -331,6 +357,8 @@ def doctor(
         _print_migration_state(cfg_path, harness)
 
     _print_web_listener(cfg_path)
+
+    _print_comfyui()
 
     # 4. LLM endpoint reachable
     if harness is not None:
