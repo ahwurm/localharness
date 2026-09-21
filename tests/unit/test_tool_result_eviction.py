@@ -282,15 +282,20 @@ async def test_hard_overflow_stages_still_act_on_pinned_content():
 
 @pytest.mark.asyncio
 async def test_no_restores_means_unchanged_eviction():
-    """#134 (d) regression: with no tool_result_get in the conversation, the pass behaves exactly
-    as before — all eligible results beyond the keep-last window are stubbed."""
+    """#134 (d) regression: with no tool_result_get in the conversation, the pass runs its
+    normal policy — nothing is pin-protected. Everything beyond the keep-last window is
+    stubbed; #149's size budget may spill part of the window too (these bodies are bulky
+    enough that the tail can't all fit 25% of this fixture's window), but the newest
+    result is always kept verbatim."""
     from localharness.agent.context import TOOL_EVICT_KEEP_LAST
 
     store = ContentStore()
     msgs = _base_convo()
     cm = _evicting_cm(store, msgs)
     built, _ = await cm.build_messages(msgs)
-    assert _n_stubs(built) == 5 - TOOL_EVICT_KEEP_LAST
+    assert 5 - TOOL_EVICT_KEEP_LAST <= _n_stubs(built) <= 4
+    newest = next(m for m in built if m.get("tool_call_id") == "c4")
+    assert newest["content"].startswith(_big_body(4))  # out-of-view note may ride on it
 
 
 # ---------------------------------------------------------------------------
@@ -473,3 +478,95 @@ async def test_no_note_under_the_eviction_gate_or_on_an_assistant_tail():
     assert _n_stubs(built) > 0
     assert built[-1]["content"] == "thinking aloud"
     assert all(_OUT_OF_VIEW_PREFIX not in (m.get("content") or "") for m in built)
+
+
+# ---------------------------------------------------------------------------
+# #149: size-aware keep-last. Count-based protection shielded a whole burst of
+# oversized results at once (221% utilization from inside the protected window);
+# the protected tail is now budgeted newest-first and spills its oldest past the cap.
+# ---------------------------------------------------------------------------
+
+
+def test_protect_budget_spills_oversized_tail_oldest_first():
+    store = ContentStore()
+    msgs = []
+    for i in range(3):
+        msgs += _exchange(f"c{i}", "B" * 12_000)
+    # Budget holds the newest (12k) plus one more (24k) but not all three (36k).
+    out, n = _evict_large_tool_results(
+        msgs, store, threshold_chars=8_000, keep_last=3, protect_budget_chars=25_000,
+    )
+    assert n == 1
+    assert out[1]["content"].startswith(_TOOL_STUB_PREFIX)   # c0 (oldest) spilled
+    assert out[3]["content"] == "B" * 12_000                 # c1 kept
+    assert out[5]["content"] == "B" * 12_000                 # c2 (newest) kept
+
+
+def test_protect_budget_none_keeps_window_size_blind():
+    store = ContentStore()
+    msgs = []
+    for i in range(3):
+        msgs += _exchange(f"c{i}", "B" * 12_000)
+    out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=3)
+    assert n == 0  # no budget passed: the pre-#149 count-only window
+
+
+def test_protect_budget_newest_always_survives():
+    store = ContentStore()
+    msgs = _exchange("c0", "B" * 30_000)
+    out, n = _evict_large_tool_results(
+        msgs, store, threshold_chars=8_000, keep_last=3, protect_budget_chars=1_000,
+    )
+    assert n == 0
+    assert out[1]["content"] == "B" * 30_000  # over budget alone, still shown once
+
+
+def test_protect_budget_is_contiguous_no_cherry_picking():
+    """An oversized middle member ends protection; an older, smaller one does not sneak
+    back in past it — recency is the proxy, so protection is a contiguous tail."""
+    store = ContentStore()
+    msgs = (_exchange("old-small", "B" * 9_000)
+            + _exchange("mid-huge", "B" * 40_000)
+            + _exchange("new", "B" * 10_000))
+    out, n = _evict_large_tool_results(
+        msgs, store, threshold_chars=8_000, keep_last=3, protect_budget_chars=20_000,
+    )
+    assert n == 2  # mid-huge breaks the budget; old-small spills WITH it
+    assert out[5]["content"] == "B" * 10_000                 # newest kept
+    assert out[3]["content"].startswith(_TOOL_STUB_PREFIX)   # mid-huge spilled
+    assert out[1]["content"].startswith(_TOOL_STUB_PREFIX)   # old-small spilled too
+
+
+def test_protect_budget_spilled_pin_still_not_evicted():
+    """#134 x #149: a pinned result spilled by the budget is still skipped by the pass —
+    the pin outranks the spill (it costs budget but never re-evicts)."""
+    store = ContentStore()
+    msgs = []
+    for i in range(3):
+        msgs += _exchange(f"c{i}", "B" * 12_000)
+    out, n = _evict_large_tool_results(
+        msgs, store, threshold_chars=8_000, keep_last=3, protect_budget_chars=13_000,
+        pinned_call_ids=frozenset({"c1"}),
+    )
+    assert n == 1
+    assert out[1]["content"].startswith(_TOOL_STUB_PREFIX)   # c0 evicted
+    assert out[3]["content"] == "B" * 12_000                 # c1 pinned, survives its spill
+    assert out[5]["content"] == "B" * 12_000                 # c2 newest, survives
+
+
+@pytest.mark.asyncio
+async def test_build_messages_caps_protected_burst():
+    """#149 end-to-end: a burst of oversized results inside the keep-last window is no
+    longer shielded whole. build_messages derives the budget from the context window
+    (25% x window x chars-per-token), so only the newest of three 12k-char bodies
+    stays verbatim in an 8k-token window."""
+    store = ContentStore()
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
+    for i in range(3):
+        msgs += _exchange(f"c{i}", "B" * 12_000)
+    cm = ContextManager(max_context_tokens=8_000, eviction_store=store)
+    built, _ = await cm.build_messages(list(msgs), None)
+    full = [m for m in built if m.get("role") == "tool"
+            and not (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)]
+    assert len(full) == 1
+    assert full[0]["content"].startswith("B" * 12_000)  # newest; out-of-view note may ride on it
