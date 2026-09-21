@@ -14,6 +14,7 @@ from localharness.cli.components_cmd import components_app
 from localharness.cli.config_cmd import config_app
 from localharness.cli.doctor_cmd import doctor
 from localharness.cli.experiment_cmd import experiment_app
+from localharness.cli.generate_image_cmd import generate_image
 from localharness.cli.init_cmd import init_app
 from localharness.cli.memory_cli import memory_app
 from localharness.cli.model_cmd import model
@@ -49,6 +50,9 @@ app.command("acp")(acp_cmd)
 app.command("web")(web_cmd)
 # Internal instrument for the permission classifier, not a marketed verb (PRD §10).
 app.command("ask-rate", hidden=True)(ask_rate)
+# Opt-in image module's CLI surface. Visible even when unconfigured: running it then prints
+# the one-line setup hint, which is how a user discovers the module exists.
+app.command("generate-image")(generate_image)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
