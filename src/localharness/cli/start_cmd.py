@@ -1013,24 +1013,33 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         hook_system = None
 
     # --- 4. Memory store (soft -- degrade to None) ---
+    # org.memory_enabled=False (#151) is an explicit OFF, not a degradation: None rides the
+    # exact paths a failed open does — no tools register, nothing injects, no consolidation,
+    # and every subagent inherits the None.
     memory_store: MemoryStore | None = None
-    try:
-        memory_store = MemoryStore(
-            agent_id=agent_name_str,
-            division_id=agent_config.division or "default",
-            org_id="default",
-            # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md and
-            # GUARDRAILS.md never do — the safety voice is the org's, and a workspace must not be
-            # able to rewrite or blank it. That invariant is why these are two separate inputs:
-            # the safety context always reads from the global layer, whatever state_dir points at.
-            base_dir=str(state_dir),
-            global_base_dir=str(cfg_path),
-            bus=bus,
+    if not harness.org.memory_enabled:
+        logging.getLogger(__name__).info(
+            "memory disabled by config (org.memory_enabled: false) — no store, no memory tools"
         )
-        await memory_store.open()
-    except Exception as exc:
-        warnings.append(f"memory: {exc} (in-memory mode)")
-        memory_store = None
+    else:
+        try:
+            memory_store = MemoryStore(
+                agent_id=agent_name_str,
+                division_id=agent_config.division or "default",
+                org_id="default",
+                # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md
+                # and GUARDRAILS.md never do — the safety voice is the org's, and a workspace must
+                # not be able to rewrite or blank it. That invariant is why these are two separate
+                # inputs: the safety context always reads from the global layer, whatever state_dir
+                # points at.
+                base_dir=str(state_dir),
+                global_base_dir=str(cfg_path),
+                bus=bus,
+            )
+            await memory_store.open()
+        except Exception as exc:
+            warnings.append(f"memory: {exc} (in-memory mode)")
+            memory_store = None
 
     # v0.13 MEMS-02: scope-aware recall. The router owns the READ side; every write path below
     # keeps `memory_store` itself, so `recall_scope` can never redirect a write (that is what
