@@ -14,6 +14,7 @@ import pytest
 
 from localharness.channels.web import auth
 from localharness.channels.web.channel import WebChannel
+from localharness.channels.web.protocol import PROTOCOL_VERSION
 from localharness.channels.web.server import WebServer
 from localharness.core.bus import EventBus
 from localharness.core.events import Action, Observation, TaskComplete, UserMessage
@@ -182,7 +183,9 @@ async def test_the_stream_opens_with_hello_and_stamps_the_bus_seq_as_the_sse_id(
     await task
 
     assert frames[0][0] == "Hello" and frames[0][1] is None
-    assert frames[0][2]["protocol_version"] == 1
+    # The CURRENT version, by reference: the deliberate-bump tripwire is the snapshot test's
+    # job; this assertion is that Hello CARRIES whatever the version is.
+    assert frames[0][2]["protocol_version"] == PROTOCOL_VERSION
     assert frames[0][2]["session_id"] == "s1"
     # bind_runtime publishes "ready", and a fresh client gets that state on arrival — as an
     # SSE-only frame it must carry NO id, so it never disturbs the resume cursor.
@@ -786,7 +789,7 @@ async def test_protocol_serves_the_commands_and_modes_from_their_own_sources(tmp
 
     _, _, _, client = await _stack(tmp_path)
     body = (await client.get("/api/protocol", headers=BEARER)).json()
-    assert body["protocol_version"] == 1
+    assert body["protocol_version"] == PROTOCOL_VERSION
     assert [c["name"] for c in body["commands"]] == [n for n, _ in SLASH_COMMANDS]
     assert set(body["modes"]) == set(MODE_STRICTNESS)
     assert body["default_mid_turn_intent"] == "queue"

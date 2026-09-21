@@ -1303,7 +1303,7 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered, IMAGE_ID_RE
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
 
         budget = BudgetTracker(
@@ -2066,6 +2066,7 @@ class AgentLoop:
                 is_error = False
                 result_truncated = False
                 original_length: int | None = None
+                image_id: str | None = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2087,6 +2088,13 @@ class AgentLoop:
                         if result.success and result.truncated:
                             result_truncated = True
                             original_length = result.original_length
+                        # Image artifacts cross the wire ONLY as a shape-checked id in this
+                        # typed field (clients build the /api/images URL from it, never from
+                        # result text). The fullmatch drops anything a tool's metadata tries
+                        # to smuggle — a path, markup, someone else's filename.
+                        candidate = result.metadata.get("image_id") if result.success else None
+                        if isinstance(candidate, str) and IMAGE_ID_RE.fullmatch(candidate):
+                            image_id = candidate
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -2114,6 +2122,7 @@ class AgentLoop:
                     truncated=result_truncated,
                     original_length=original_length if result_truncated else len(result_content),
                     error=result_content if is_error else None,
+                    image_id=image_id,
                 ))
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)

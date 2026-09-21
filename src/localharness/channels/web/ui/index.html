@@ -175,6 +175,7 @@
           text-overflow:ellipsis;
           font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .row.tool, .row.sys, .row.narr { margin:8px 0; }   /* machine rows sit tighter than prose */
+  .row.tool img.genimg { display:block; max-width:100%; border-radius:8px; margin-top:6px; }
 
   /* the markdown subset (answers + narration): quiet structure, phone-first */
   .mdh { font-weight:650; margin:12px 0 4px; line-height:1.35; }
@@ -753,6 +754,17 @@ function renderObservation(d, child) {
   // element when it IS the breakout (a burst's per-call item) or an orphan.
   const home = target._det || target;
   home.appendChild(el("pre", null, out));
+  // The ONE deliberate, narrow exception to Rule 3: an image renders ONLY from the TYPED
+  // image_id field (server-minted, shape-checked again here), never by sniffing output text
+  // for paths or markup — that sniff would reopen exactly the injection hole Rule 3 closes.
+  // The URL is built from the validated id; the enrolment cookie authenticates the request.
+  if (typeof d.image_id === "string" && /^img-\d{8}-\d{6}-[0-9a-f]{6}$/.test(d.image_id)) {
+    const img = el("img", "genimg");
+    img.src = "/api/images/" + d.image_id;
+    img.alt = "generated image " + d.image_id;
+    img.loading = "lazy";
+    home.appendChild(img);
+  }
   if (d.truncated) home.appendChild(el("div", "meta",
     "truncated from " + (d.original_length ?? "?") + " chars — the full body is not on the bus at all"));
   home.appendChild(copyButton(() => out, "copy output"));
