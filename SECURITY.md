@@ -525,6 +525,17 @@ Three more, added with the installable app and notifications:
   request that already presents the credential. An anonymous fetch gets a manifest with
   no token in it, which is the version anything reaching the port can see.
 
+One more, added with the image module (`generate_image`):
+
+- **`GET /api/images/{id}` serves only harness-minted files from one directory.** The id
+  must fullmatch the exact shape the tool mints (path characters cannot appear in it),
+  the resolved file is real-path confined to the artifacts directory the registered tool
+  instance itself writes (`.localharness/artifacts/images/`), and the route is gated
+  like every other GET. Module unconfigured means 404, not a fallback root. The page
+  renders an image only from the typed `image_id` field on a tool-result event — never
+  by scanning tool output text — so the "everything is text" rendering rule and the
+  injection posture it exists for are unchanged.
+
 **Two live sessions on one agent are warned about, not prevented.** `history.jsonl` and
 `compact.md` take unlocked appends, so a terminal session and a web session on the same
 agent can interleave their writes. Starting the second one names the first; neither is
