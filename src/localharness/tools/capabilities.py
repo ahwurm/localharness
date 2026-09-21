@@ -24,6 +24,10 @@ UNTRUSTED_INGEST = frozenset({"web_search", "web_fetch", "web_page_query"})
 HOST_DANGEROUS = frozenset({"bash_exec", "write", "edit", "python_exec"})
 # NOTE: memory tools are intentionally NOT untrusted-ingest — verified: tool output goes to
 # history.jsonl, memory_get/search read only the facts table, nothing bridges them.
+# NOTE: generate_image is intentionally in NEITHER set — its endpoint is operator-configured
+# (env, never a tool argument), so nothing attacker-controllable enters context (the result
+# text is harness-authored); and it takes no path argument — it can only write harness-named
+# PNGs into its own artifacts dir, unlike write/edit which reach arbitrary host paths.
 
 # Module-level mirror of config's enforce_capability_floor (default-on). Synced at startup from
 # HarnessConfig.org by set_floor_enabled() — registry chokepoints have no config handle, so they

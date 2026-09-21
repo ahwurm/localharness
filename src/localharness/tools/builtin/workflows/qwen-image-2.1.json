@@ -1,0 +1,11 @@
+{
+  "_comment": "Qwen-Image-2.1 INT8 reference workflow (ComfyUI API format, flattened — the official UI template uses a subgraph and cannot be POSTed). __LH_*__ placeholders are filled by generate_image at call time; top-level keys without class_type (like this one) are stripped before POST. weight_dtype MUST stay 'default': fp8_e4m3fn_fast corrupts Qwen-Image output. Model files: see docs/reference-architectures.",
+  "451": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2.1_int8_convrot.safetensors", "weight_dtype": "default"}},
+  "453": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "default"}},
+  "454": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}},
+  "452": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["453", 0], "prompt": "__LH_PROMPT__", "negative_prompt": "", "resolution": 1024}},
+  "456": {"class_type": "EmptyLatentImage", "inputs": {"width": "__LH_WIDTH__", "height": "__LH_HEIGHT__", "batch_size": 1}},
+  "458": {"class_type": "KSampler", "inputs": {"model": ["451", 0], "positive": ["452", 0], "negative": ["452", 1], "latent_image": ["456", 0], "seed": "__LH_SEED__", "steps": "__LH_STEPS__", "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+  "457": {"class_type": "VAEDecode", "inputs": {"samples": ["458", 0], "vae": ["454", 0]}},
+  "459": {"class_type": "SaveImage", "inputs": {"images": ["457", 0], "filename_prefix": "__LH_PREFIX__"}}
+}

@@ -49,6 +49,12 @@ async def register_builtin_tools(
         from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
         await registry.register(ToolResultGetTool(eviction_store), scope="global")
 
+    # generate_image is an OPT-IN module: registered only when the operator points the
+    # harness at a ComfyUI endpoint (LOCALHARNESS_COMFYUI_URL). Base installs never see it.
+    from localharness.tools.builtin.generate_image_tool import GenerateImageTool, comfyui_url
+    if comfyui_url():
+        await registry.register(GenerateImageTool(workspace_root=workspace_root), scope="global")
+
 
 def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     """Re-bind this agent's store-backed verb tools onto its registry so each agent's verbs hit ITS
