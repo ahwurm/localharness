@@ -8,6 +8,7 @@ Events are immutable (frozen=True). Use model_copy(update={...}) to create modif
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
@@ -18,6 +19,12 @@ from localharness.agent.gate_types import DecisionKind, PendingCall
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 
 from .types import AgentID, DivisionID, EventSeq, OrgID, SessionID, ToolCallID  # noqa: F401
+
+# Wire contract for Observation.image_id: the exact shape generate_image mints
+# (img-<date>-<time>-<6 hex>). Both consumers — the loop before forwarding, the web image
+# endpoint before serving — fullmatch against this, so an id can never smuggle a path or
+# markup; anything else in a tool's metadata is dropped, not passed through.
+IMAGE_ID_RE = re.compile(r"img-\d{8}-\d{6}-[0-9a-f]{6}")
 
 
 class BaseEvent(BaseModel):
@@ -191,6 +198,12 @@ class Observation(BaseEvent):
     original_length: Optional[int] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
+    # Harness-minted id of an image artifact this result saved (generate_image), servable at
+    # the web channel's /api/images/{id}. Only ids fullmatching IMAGE_ID_RE are forwarded, and
+    # clients render an image ONLY from this typed field — never by sniffing output text — so
+    # the web UI's "everything is text" injection rule stays intact. Additive/default-None:
+    # every existing construction and every replayed JSONL line stays valid.
+    image_id: Optional[str] = None
 
 
 class DelegationRequest(BaseEvent):

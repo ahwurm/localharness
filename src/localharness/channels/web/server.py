@@ -333,6 +333,7 @@ class WebServer:
             # caller gets a `start_url` that pairs the installed app (see `manifest`).
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
+            Route("/api/images/{image_id}", self.image, methods=["GET"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
@@ -796,6 +797,37 @@ class WebServer:
                           "`original_length` records what was lost.",
             }, status=404)
         return _json({"eviction_id": eviction_id, "body": body})
+
+    async def image(self, request: Request) -> Response:
+        """Serve ONE generated image by its harness-minted id (the Observation.image_id field).
+
+        Same WEBCH-40 posture as every file this server touches, doubled: the id must
+        fullmatch the minting shape (so a path or `..` never even reaches the filesystem),
+        AND the resolved file is realpath-confined to the artifacts root. That root comes
+        from the REGISTERED generate_image instance itself — the same object that wrote the
+        file — so the writer and the server cannot drift onto different directories. No
+        session/tool yet (or module off) is a 404, not a fallback root.
+
+        Cookie-authed like every other GET, which is what lets a same-origin `<img>` load
+        with no token in any URL (§7.3 stays intact)."""
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        from localharness.core.events import IMAGE_ID_RE
+        from localharness.tools.builtin.generate_image_tool import image_artifacts_dir
+
+        image_id = request.path_params.get("image_id") or ""
+        registry = getattr(self.channel, "_tool_registry", None)
+        tool = registry._find_tool_by_name("generate_image") if registry is not None else None
+        if tool is None or not IMAGE_ID_RE.fullmatch(image_id):
+            return PlainTextResponse("not found", status_code=404)
+        target = auth.confine(image_artifacts_dir(tool.workspace_root), f"{image_id}.png")
+        if target is None or not target.is_file():
+            return PlainTextResponse("not found", status_code=404)
+        # An id is minted once per generation and never reused, so immutable caching is safe
+        # and spares the phone re-downloading on every history replay.
+        return FileResponse(target, media_type="image/png",
+                            headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     async def sessions(self, request: Request) -> Response:
         """The history list: every top-level session log on disk, newest first (the drawer behind ☰).

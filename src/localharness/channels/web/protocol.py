@@ -30,8 +30,11 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 """Bumped on any breaking change to the wire.
+
+v2: Observation gained the optional `image_id` field (generate_image artifacts; a v1 client
+ignores it and simply shows no picture — additive, but a schema move is a version move here).
 
 Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
