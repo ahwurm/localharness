@@ -279,13 +279,14 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 178, (
-        "catalogue should be 178 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 179, (
+        "catalogue should be 179 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
         "mechanisms) plus agent.memory.embedding_model x1 "
-        "(the subject-family resonance space is owner-addressable). "
+        "(the subject-family resonance space is owner-addressable) "
+        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable). "
         f"got {len(entries)}"
     )
 
@@ -367,13 +368,14 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 178, (
-        "catalogue should be 178 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 179, (
+        "catalogue should be 179 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
         "mechanisms) plus agent.memory.embedding_model x1 "
-        "(the subject-family resonance space is owner-addressable). "
+        "(the subject-family resonance space is owner-addressable) "
+        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable). "
         f"got {len(entries)}"
     )
 

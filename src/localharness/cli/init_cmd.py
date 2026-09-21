@@ -168,6 +168,9 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 #
 # org:
 #   log_level: debug
+#   memory_enabled: false     # memory off for THIS project only: no store, no memory tools
+#   permissions:
+#     mode: read-only         # this project's sessions never write, edit, or run shell
 #   context:
 #     compaction_threshold_pct: 85.0
 #
@@ -541,6 +544,33 @@ def init_app(
     else:
         console.print("  [yellow]⚠[/yellow]  Tool calling: XML fallback (less reliable than native)")
 
+    # #151: the two most-asked posture choices, one question each. TTY-gated exactly like
+    # _guided_setup — a scripted init is never blocked on a prompt and gets today's defaults
+    # (host tools on, memory on). Both keys are ordinary org keys, so a project can flip
+    # either per-workspace in .localharness/config.yaml (the scaffold template shows both).
+    host_tools_on = True
+    memory_on = True
+    if sys.stdin.isatty():
+        console.print()
+        host_tools_on = Confirm.ask(
+            "  Allow the agent to change this machine — write/edit files, run shell commands?",
+            default=True,
+        )
+        memory_on = Confirm.ask(
+            "  Enable persistent memory — facts saved and recalled across sessions?",
+            default=True,
+        )
+        if not host_tools_on:
+            console.print(
+                "  [green]✓[/green] Read-only sessions (org.permissions.mode: read-only — "
+                "flip it there any time)"
+            )
+        if not memory_on:
+            console.print(
+                "  [green]✓[/green] Memory off (org.memory_enabled: false — existing memory "
+                "files stay on disk, untouched)"
+            )
+
     # ------------------------------------------------------------------ #
     # Write config
     # ------------------------------------------------------------------ #
@@ -553,8 +583,13 @@ def init_app(
     # revision gate in config/migrate.py only protects configs stamped current at birth).
     org_kwargs: dict = {
         "default_model": selected_model,
-        "permissions": PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+        "permissions": PermissionConfig(
+            defaults_revision=CURRENT_DEFAULTS_REVISION,
+            **({} if host_tools_on else {"mode": "read-only"}),
+        ),
     }
+    if not memory_on:
+        org_kwargs["memory_enabled"] = False
     if result.provider_type == "llamacpp":
         max_len = _detect_llamacpp_nctx(result.base_url)
     elif result.provider_type == "lmstudio":

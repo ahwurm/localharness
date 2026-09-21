@@ -1626,6 +1626,17 @@ class OrgConfig(BaseModel):
         description="Structlog log level for the harness process.",
     )
 
+    memory_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for the memory system (#151). False: no MemoryStore is opened for "
+            "this session — memory tools (memory_search/memory_get/remember) never register, "
+            "nothing is recalled into context, nothing is written, and subagents inherit the "
+            "absence. Existing store files are left untouched on disk and `localharness memory` "
+            "still reads them. `init` asks this once; flip it here any time."
+        ),
+    )
+
     enforce_capability_floor: bool = Field(
         default=True,
         description=(
