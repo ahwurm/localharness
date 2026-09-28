@@ -62,6 +62,23 @@ def test_schema_cannot_move_without_a_protocol_version_bump():
     )
 
 
+def test_the_reference_page_is_written_against_the_current_version():
+    """The page pins the version it renders (its Hello check). A server bump that forgets the
+    page ships a red 'written against N' banner to every phone — 2026-09-28's live failure:
+    the v1->v2 bump moved the snapshot and both server pins, and nothing forced the page."""
+    import re
+
+    from localharness.channels.web.server import PACKAGED_UI_DIR
+
+    html = (PACKAGED_UI_DIR / "index.html").read_text(encoding="utf-8")
+    pins = [int(x) for pair in re.findall(r"protocol_version !== (\d+)|written against (\d+)", html)
+            for x in pair if x]
+    assert pins and all(v == PROTOCOL_VERSION for v in pins), (
+        f"index.html pins {pins} but PROTOCOL_VERSION is {PROTOCOL_VERSION} — update the page's "
+        "Hello check in the same diff as the version bump."
+    )
+
+
 def test_every_frame_is_described():
     """A frame added without a description is a frame a UI author has to guess at."""
     for frame in FRAME_TYPES:

@@ -840,8 +840,8 @@ function onFrame(name, d) {
       if (d.synthetic) add(el("div", "row sys",
         "REPLAY: the streaming and instrument frames on this connection are SYNTHESIZED from a " +
         "persisted log — plausible, not measured. A blocking ask has no persisted analog at all."));
-      if (d.protocol_version !== 1) add(el("div", "row err",
-        "protocol_version " + d.protocol_version + " — this page was written against 1. Something " +
+      if (d.protocol_version !== 2) add(el("div", "row err",
+        "protocol_version " + d.protocol_version + " — this page was written against 2. Something " +
         "will render as a blank cell; go read /api/protocol."));
       // REPLAY keeps its label: paint() maps a healthy state to the quiet wordmark otherwise.
       paint(d.synthetic ? null : d.model_state);
