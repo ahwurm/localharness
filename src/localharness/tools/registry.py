@@ -2,7 +2,7 @@
 import difflib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError, create_model
@@ -68,6 +68,46 @@ async def _maybe_await(result: Any) -> Any:
 
 log = logging.getLogger(__name__)
 
+
+class ContributedTool:
+    """A plugin-contributed tool as the registry holds it (PAPI-05, PAPI-11).
+
+    info() is the plugin tool's own schema with `source_plugin` stamped, and any loader override
+    (such as SAFE-06's gate-family clamp for a plugin you installed) applied, on EVERY call, so
+    every reader sees one schema: the gate (agent/loop.py reads tool.info() per call), the
+    capability floor, the context store, /api/tools. The safety readers never read source_plugin
+    (CORE-04). run() turns an exception the plugin's tool raises, SystemExit included, into an
+    attributed error result: a plugin never takes a turn, or the harness, down. Cancellation still
+    propagates. Other attribute reads fall through to the plugin's own tool."""
+
+    def __init__(self, inner: ToolProtocol, source_plugin: str,
+                 overrides: Mapping[str, Any] | None = None) -> None:
+        self._inner = inner
+        self._source_plugin = source_plugin
+        self._overrides = dict(overrides or {})
+
+    def info(self) -> ToolSchema:
+        return self._inner.info().model_copy(
+            update={**self._overrides, "source_plugin": self._source_plugin})
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            return await self._inner.run(**kwargs)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: attributed, never fatal
+            name = self.info().name
+            log.warning("tool %r from plugin %r raised; returned as a tool error",
+                        name, self._source_plugin, exc_info=True)
+            return ToolResult(output="", success=False, error_type="execution_error",
+                              error=f"tool {name!r} from plugin {self._source_plugin!r} failed: "
+                                    f"{type(exc).__name__}: {exc}")
+
+    def __getattr__(self, attr: str) -> Any:
+        inner = self.__dict__.get("_inner")
+        if inner is None:
+            raise AttributeError(attr)
+        return getattr(inner, attr)
+
+
 class ToolRegistry:
     """Thread-safe tool registry with scope resolution."""
 
@@ -100,12 +140,23 @@ class ToolRegistry:
         scope: str = "global",
         division_id: str | None = None,
         agent_id: str | None = None,
+        *,
+        source_plugin: str | None = None,
+        overrides: Mapping[str, Any] | None = None,
     ) -> None:
+        """A plugin's tool registers bare at global scope, exactly as a builtin does (PAPI-05), with
+        `source_plugin` naming the plugin. It is then held as a ContributedTool, which stamps that
+        provenance and the loader's `overrides` onto every info() read and contains its errors."""
         if not isinstance(tool, ToolProtocol):
             raise TypeError(
                 f"{type(tool).__name__} does not satisfy ToolProtocol "
                 "(must implement info() and run())"
             )
+        if overrides and source_plugin is None:
+            raise ValueError("schema overrides apply only to a plugin-contributed tool "
+                             "(pass source_plugin)")
+        if source_plugin is not None:
+            tool = ContributedTool(tool, source_plugin, overrides)
 
         schema = tool.info()
         name = schema.name

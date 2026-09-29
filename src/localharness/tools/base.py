@@ -68,9 +68,10 @@ class ToolSchema(BaseModel):
     # a tool that declares nothing is treated as ingesting attacker-controllable content, able to
     # change the host, returning untrusted results, and in no gate family (asked about in
     # `guarded`). Never provenance: which plugin contributed a tool is not a safety input (CORE-04).
-    # Readers: the permission gate classifies by `gate_family` (agent/verdict.py `_kind`); the
-    # capability floor and the context store still read today's name sets, which every builtin's
-    # declaration matches (the oracle in tests/unit/test_tool_declarations.py).
+    # Readers: the permission gate (`gate_family`, agent/verdict.py `_kind`), the capability floor
+    # (`ingest`, `host`, tools/capabilities.py) and the context store (`result_origin`, via
+    # ToolRegistry.result_origin); the oracle in tests/unit/test_tool_declarations.py pins every
+    # builtin's declaration to today's classes.
     # `exclude=True` keeps all five out of `model_dump()`, which is what
     # `provider/client._tools_to_api_format` puts on the wire and the chat template renders into
     # the prompt (measured on the served model: +32 tokens per tool) — harness metadata, not

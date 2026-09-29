@@ -144,6 +144,15 @@ DELEGATE_TOOLS: frozenset[str] = frozenset({"agent"})
 """PRD §3.1 ``delegate`` class (``tools/builtin/agent_tool.py:36``). A subagent's own calls pass
 this same gate, so the dispatch asks once and the child's boundary crossings still surface."""
 
+NAME_CLASSIFIED_TOOLS: frozenset[str] = frozenset({
+    *WRITE_TOOL_PATH_PARAMS, *SHELL_COMMAND_PARAMS, *CODE_EXEC_TOOLS, *DELEGATE_TOOLS,
+    *NETWORK_URL_PARAMS,
+})
+"""Tools :func:`_kind` classifies by NAME before reading any declaration. A plugin may not
+contribute a tool with one of these names: the name would decide its class instead of its
+declaration (CORE-04), and ``agent`` is registered after plugins load, so a plugin holding that
+name would break startup."""
+
 MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` names every MCP tool's group ``mcp/<server>``. A call that carries one is
 judged on the MCP path even if ``ToolMeta.is_mcp`` did not survive the trip."""
