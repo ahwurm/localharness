@@ -114,6 +114,7 @@ class CruncherExecTool(Tool):
         return ToolSchema(
             name="cruncher_exec",
             group="code",
+            gate_family="code", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Run restricted Python over your GRANTED handle bodies (clean-origin only) for "
                 "joins/aggregation/index the verbs can't express. Bodies are pre-bound as h0, h1, … "

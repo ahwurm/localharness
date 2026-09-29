@@ -16,6 +16,11 @@ import httpx
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
+WEB_INGEST_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch", "web_page_query"})
+"""DISPLAY family only: the tools the terminal groups under the 'UNTRUSTED, treated as data' note and
+the phone labels `untrusted_ingest`. The safety model never reads this set — it reads each tool's
+`ingest` declaration; a test pins this set to the builtins that declare ingest: untrusted."""
+
 _FETCH_DEFAULT_CHARS = 5000   # ~1.2k tokens — page through with start_index instead of raising
 _FETCH_MAX_CHARS = 20000      # hard ceiling regardless of caller request
 # Byte cap on the DOWNLOAD itself. Lossless retention made the full body load-bearing, and an
@@ -87,6 +92,7 @@ class WebSearchTool(Tool):
         return ToolSchema(
             name="web_search",
             group="web",
+            gate_family="network", ingest="untrusted", host="safe", result_origin="untrusted",
             description=(
                 "Search the web (DuckDuckGo, no API key). Returns ranked results as "
                 "title / URL / snippet. Use this for current information, news, docs, or "
@@ -154,6 +160,7 @@ class WebFetchTool(Tool):
         return ToolSchema(
             name="web_fetch",
             group="web",
+            gate_family="network", ingest="untrusted", host="safe", result_origin="untrusted",
             description=(
                 "Fetch a URL and return its readable text content (HTML stripped). Output is "
                 "CLIPPED to a character window so large pages can't overflow context. To read "
@@ -273,6 +280,7 @@ class WebPageQueryTool(Tool):
         return ToolSchema(
             name="web_page_query",
             group="web",
+            gate_family="network", ingest="untrusted", host="safe", result_origin="untrusted",
             description=(
                 "Search the FULL retained text of a page previously fetched with web_fetch (lossless "
                 "— not the clipped inline preview). Pass the fetch_id from a web_fetch result plus a "

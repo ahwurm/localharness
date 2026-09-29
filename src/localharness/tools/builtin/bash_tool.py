@@ -232,6 +232,7 @@ class BashExecTool(Tool):
         return ToolSchema(
             name="bash_exec",
             group="shell",
+            gate_family="shell", ingest="none", host="dangerous", result_origin="trusted",
             description=(
                 "Execute a bash command and return combined stdout+stderr. "
                 "Working directory is the harness working directory. "

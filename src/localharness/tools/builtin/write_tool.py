@@ -32,6 +32,7 @@ class WriteTool(Tool):
         return ToolSchema(
             name="write",
             group="fs.write",
+            gate_family="write", ingest="none", host="dangerous", result_origin="trusted",
             description=(
                 "Write or overwrite a file. Creates parent directories if needed. "
                 "Returns the absolute path written and byte count. For a large file, write "

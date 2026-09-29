@@ -35,6 +35,7 @@ class AgentTool(Tool):
         return ToolSchema(
             name="agent",
             group="delegate",
+            gate_family="delegate", ingest="none", host="safe", result_origin="trusted",
             description=(
                 f"Delegate a task to a subagent. Available agents: {agent_list}. "
                 "Use this when a specialized agent would handle the task better than you. "
