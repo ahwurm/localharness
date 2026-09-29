@@ -25,6 +25,7 @@ class _PingTool(Tool):
             name="ping",
             description="Ping.",
             parameters={"type": "object", "properties": {}, "required": []},
+            ingest="none", host="safe",  # undeclared, a tool co-resides with itself (fails closed)
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

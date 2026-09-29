@@ -698,13 +698,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             model=selected_data.get("model", "inherit"),
         )
 
-    # --- Capability floor (P-A): sync the module flag from config, then strip web ingestion from
-    # the ROOT agent. Root inherits 'global' scope where web_* are registered, so without this it
-    # would co-resident web ingestion with bash/write/edit (prompt-injection->host hole). It delegates
-    # ingestion to the web-researcher subagent (no bash). KEEP tool_result_get — not untrusted-ingest.
-    from localharness.tools.capabilities import apply_root_capability_floor, set_floor_enabled
+    # --- Capability floor (P-A): sync the module flag from config. The ROOT agent's strip reads
+    # tool declarations, so it runs after every global tool is registered (after the plugin loader).
+    from localharness.tools.capabilities import set_floor_enabled
     set_floor_enabled(harness.org.enforce_capability_floor)
-    apply_root_capability_floor(agent_config.tools)
 
     # Wire dependencies
     provider = harness.provider
@@ -1210,6 +1207,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 plugins_loaded = len(loaded_names)
         except Exception as exc:
             warnings.append(f"plugins: {exc}")
+
+        # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
+        # Strips every GLOBAL tool that declares — or, undeclared, defaults to — ingest: untrusted:
+        # the web verbs today, any plugin tool that ingests, any tool that declares nothing. It runs
+        # here, after every global tool is registered, because a declaration can only be read off a
+        # registered tool. MCP tools (step 6) keep today's rule: checked by the chokepoint, not stripped.
+        from localharness.tools.capabilities import apply_root_capability_floor
+        apply_root_capability_floor(agent_config.tools, tool_registry.global_schemas())
 
         # --- 6. MCP client manager (soft) ---
         mcp_manager: MCPClientManager | None = None

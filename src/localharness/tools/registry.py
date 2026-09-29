@@ -10,10 +10,12 @@ from pydantic.fields import FieldInfo
 
 from localharness.tools.base import Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
 from localharness.tools.capabilities import (
-    EXEC_TOOLS,
-    UNTRUSTED_INGEST,
     IngestViaExecError,
+    assert_no_coresidence,
     assert_no_ingest_via_exec,
+    floor_enabled,
+    ingests_untrusted,
+    is_exec,
 )
 
 _JSON_SCHEMA_TYPE_MAP: dict[str, type] = {
@@ -46,6 +48,15 @@ def _build_validator_model(tool_name: str, parameters: dict[str, Any]) -> type[B
         )
 
     return create_model(f"_{tool_name}_Args", **field_definitions)
+
+
+def _bare_name(entry: str) -> str:
+    """An allowed-list entry's TOOL name: `mcp:TOOL` and `plugin:PLUGIN.TOOL` strip to TOOL."""
+    from localharness.bench.schema import parse_tool_name
+    try:
+        return parse_tool_name(entry)[1]
+    except ValueError:
+        return entry
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -208,15 +219,23 @@ class ToolRegistry:
                 stacklevel=2,
             )
 
-        from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
+        schemas = {name: tool.info() for name, tool in resolved.items()}
         if floor_enabled():
-            # Mark mcp-bucket tools so an MCP ingestion tool (e.g. fetch) co-resident with a
-            # host-dangerous tool is caught here too. (Plugins resolved via 'global' scope register
-            # bare and are a named residual — see capabilities.assert_no_coresidence.)
-            check_names = {("mcp:" + n if n in self._tools["mcp"] else n) for n in resolved}
-            assert_no_coresidence(check_names, agent_id=agent_id)
+            # Judged by what each resolved tool DECLARES, whatever scope or name it arrived under:
+            # an MCP tool declares ingest in the wrapper's code, a plugin tool inherited through
+            # 'global' under a bare name declares its own (or fails closed) — no residual left.
+            assert_no_coresidence(schemas.values(), agent_id=agent_id)
+        return schemas
 
-        return {name: tool.info() for name, tool in resolved.items()}
+    def schema_of(self, name: str) -> ToolSchema | None:
+        """The live schema of a registered tool, any scope, or None. An allowed-list form
+        (`mcp:TOOL`, `plugin:PLUGIN.TOOL`) resolves to its bare TOOL, as from_allowed resolves it."""
+        tool = self._find_tool_by_name(name) or self._find_tool_by_name(_bare_name(name))
+        return tool.info() if tool is not None else None
+
+    def global_schemas(self) -> list[ToolSchema]:
+        """Every global-scope tool's live schema — what the root capability floor reads."""
+        return [tool.info() for tool in self._tools["global"].values()]
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [
@@ -230,16 +249,20 @@ class ToolRegistry:
         return None
 
     def _agent_has_ingest(self, agent_id: str, division_id: str, tool_config: Any) -> bool:
-        """Does this agent hold an untrusted-ingest verb — i.e. is it DESIGNATED an ingester?
+        """Does this agent reach a tool that declares ingest: untrusted — i.e. is it DESIGNATED an
+        ingester?
 
-        Resolved from the agent's own toolset through the same per-agent path dispatch uses, so
-        it reflects inherit/add/deny exactly. Covers the built-in web verbs; an mcp:/plugin:
-        ingest tool resolved under a bare name is the same NAMED RESIDUAL assert_no_coresidence
-        documents — not silently claimed as covered.
+        Resolved through the same per-agent path dispatch uses (so deny wins), over every tool in
+        the global, mcp, the agent's division and the agent's own buckets, and judged by the
+        DECLARATION: the web verbs, an MCP tool, a plugin's search tool and a tool that declares
+        nothing all count, under whatever name they are registered.
         """
+        names = {*self._tools["global"], *self._tools["mcp"],
+                 *self._division_tools.get(division_id, {}), *self._agent_tools.get(agent_id, {})}
         return any(
-            self._get_tool_for_agent(n, agent_id, division_id, tool_config) is not None
-            for n in UNTRUSTED_INGEST
+            (tool := self._get_tool_for_agent(n, agent_id, division_id, tool_config)) is not None
+            and ingests_untrusted(tool.info())
+            for n in names
         )
 
     def _get_tool_for_agent(
@@ -321,18 +344,19 @@ class ToolRegistry:
         if tool is None:
             return self._unknown_tool(name, agent_id, division_id, tool_config)
 
-        validated = self._validate_arguments(name, arguments, tool.info())
+        schema = tool.info()
+        validated = self._validate_arguments(name, arguments, schema)
         if isinstance(validated, ToolResult):
             return validated
 
         # Ingest gate (owner ruling 2026-09-17): an agent DENIED the web verbs may not fetch
         # remote content through an exec tool instead. Keyed off the agent's own DESIGNATION at
         # the one dispatch chokepoint, so EVERY agent inherits it with no per-agent config —
-        # including a specialist the model writes itself at runtime.
-        if name in EXEC_TOOLS:
+        # including a specialist the model writes itself at runtime. Exec-ness is DECLARED.
+        if is_exec(schema):
             try:
                 assert_no_ingest_via_exec(
-                    name,
+                    schema,
                     validated,
                     agent_id=agent_id,
                     has_ingest=self._agent_has_ingest(agent_id, division_id, tool_config),
@@ -473,8 +497,6 @@ class ToolRegistry:
         (``await _get_base_registry()``) or an explicit empty one built with
         ``ToolRegistry()`` when you deliberately want no base tools.
         """
-        from localharness.bench.schema import parse_tool_name
-
         if base_registry is None:
             raise ValueError(
                 "from_allowed() requires an explicit base_registry; "
@@ -484,11 +506,9 @@ class ToolRegistry:
             )
         out = cls()
 
+        unresolved_external: list[str] = []
         for entry in allowed:
-            try:
-                _source, tool_name, _plugin = parse_tool_name(entry)
-            except ValueError:
-                tool_name = entry
+            tool_name = _bare_name(entry)
 
             tool = (
                 base_registry._tools["global"].get(tool_name)
@@ -497,6 +517,8 @@ class ToolRegistry:
                 or base_registry._tools["mcp"].get(entry)
             )
             if tool is None:
+                if entry.startswith(("mcp:", "plugin:")):
+                    unresolved_external.append(entry)
                 continue
 
             # Register under bare name in global scope (sync — bypass async lock
@@ -509,19 +531,15 @@ class ToolRegistry:
                 out._tools["global"][entry] = tool
                 out._schemas[entry] = tool.info()
 
-        from localharness.tools.capabilities import assert_no_coresidence, floor_enabled
         if floor_enabled():
-            # Detect ingest by SOURCE: keep the mcp:/plugin: prefix so an MCP/plugin ingestion tool
-            # (e.g. mcp:fetch, plugin:research_tools.exa_search) is flagged untrusted-ingest — not
-            # just the 3 built-in web verbs. Intent-based (checks the declared `allowed`) so a
-            # co-resident config is rejected regardless of whether each tool happens to be installed.
-            check_names: set[str] = set()
-            for entry in allowed:
-                try:
-                    source, tool_name, _p = parse_tool_name(entry)
-                except ValueError:
-                    source, tool_name = "builtin", entry
-                check_names.add(entry if source in ("mcp", "plugin") else tool_name)
-            assert_no_coresidence(check_names)
+            # The RESOLVED tools are judged by what they declare. An mcp:/plugin: entry the base
+            # registry could not resolve is judged by its declared INTENT — the MCP wrapper's
+            # posture, ingest untrusted — so a config naming an external ingestion tool beside a
+            # host-dangerous one is rejected whether or not that tool happens to be installed (the
+            # check the floor has always made). Its host class is unknowable until it is installed.
+            intents = [ToolSchema(name=entry, description="named in allowed, not installed",
+                                  parameters={}, ingest="untrusted", host="safe",
+                                  result_origin="untrusted") for entry in unresolved_external]
+            assert_no_coresidence([*(t.info() for t in out._tools["global"].values()), *intents])
 
         return out
