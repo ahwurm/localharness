@@ -14,16 +14,20 @@ import ast
 import asyncio
 import inspect
 import logging
+import sys
+from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from localharness.agent import verdict
 from localharness.agent.gate import tool_meta_from_schema
-from localharness.agent.gate_types import GateSettings, Verdict
+from localharness.agent.gate_types import GateSettings, Mode, Verdict
 from localharness.config.models import ToolConfig
+from localharness.plugins.api import PluginContext, PluginPaths
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.capabilities import ingests_untrusted, is_exec, is_host_dangerous
 from localharness.tools.registry import ToolRegistry
 
 CFG = ToolConfig(inherit=["global"])
@@ -157,3 +161,41 @@ def test_the_name_classified_set_is_every_table_kind_reads_before_a_declaration(
     assert verdict.NAME_CLASSIFIED_TOOLS == frozenset().union(*(getattr(verdict, t) for t in tables))
     assert verdict.NAME_CLASSIFIED_TOOLS == {
         "write", "edit", "bash_exec", "python_exec", "cruncher_exec", "agent", "web_fetch"}
+
+
+async def test_provenance_changes_no_safety_reading_of_a_real_plugin_tool(tmp_path: Path):
+    """CORE-04 on the real registration path, with the example plugin's own tool (44-08, loaded
+    through its real entry point): registered with source_plugin or without, the gate, the
+    capability floor and the context store judge it identically, because they read its declaration
+    and nothing else. The only difference a reader can find is the provenance itself."""
+    before = set(sys.modules)
+    try:
+        (ep,) = [e for e in entry_points(group="localharness.plugins") if e.name == "example"]
+        plugin_cls = ep.load()
+        ctx = PluginContext(
+            bus=None, tools=None, hooks=None, config=plugin_cls.ConfigModel(),
+            agent_config=plugin_cls.AgentConfigModel(), llm=None,
+            paths=PluginPaths(global_config_dir=tmp_path / "cfg", workspace=None,
+                              state_dir=tmp_path / "state", artifact_dir=tmp_path / "art"))
+        judged = {}
+        for plugin in (None, "example"):
+            (tool,) = await plugin_cls().tools(ctx)
+            reg = ToolRegistry()
+            await reg.register(tool, source_plugin=plugin)
+            schema = reg.lookup_tool("example_swatch", *ROOT, CFG).info()
+            meta = tool_meta_from_schema(schema)
+            judged[plugin] = (schema.source_plugin, (
+                ingests_untrusted(schema), is_host_dangerous(schema), is_exec(schema),
+                reg.result_origin("example_swatch"), sorted(reg.get_tools_for_agent(*ROOT, CFG)),
+                [verdict.evaluate("example_swatch", {}, meta, verdict.GateContext(
+                    boundary=tmp_path, workspace=tmp_path, grants=lambda *_: None, mode=mode),
+                    GateSettings()).verdict for mode in get_args(Mode)],
+                (await reg.dispatch("example_swatch", {}, *ROOT, CFG)).success))
+    finally:
+        for name in set(sys.modules) - before:
+            if name.startswith("localharness_plugin_example"):
+                del sys.modules[name]
+
+    assert (judged[None][0], judged["example"][0]) == (None, "example")
+    assert judged[None][1][-1] is True  # the real tool ran (its PNG written), so the tuples mean it
+    assert judged["example"][1] == judged[None][1]
