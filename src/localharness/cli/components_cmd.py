@@ -27,6 +27,7 @@ from localharness.config.overlay import (
     load_overlay,
 )
 from localharness.config.paths import resolve_config_dir, resolve_runtime_path
+from localharness.config.plugin_sections import core_agent_view, core_harness_view
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
@@ -134,10 +135,12 @@ def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict) -> Non
     """
     if path.startswith(_AGENT_PREFIX):
         merged_agent = deep_merge(dict(_AGENT_VALIDATE_BASE), new_overlay.get(_AGENT_KEY, {}))
-        AgentConfig.model_validate(merged_agent)
+        # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+        AgentConfig.model_validate(core_agent_view(merged_agent))
     else:
         harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
-        HarnessConfig.model_validate(deep_merge(loader.raw_harness_dict(), harness_overlay))
+        # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+        HarnessConfig.model_validate(core_harness_view(deep_merge(loader.raw_harness_dict(), harness_overlay)))
 
 
 def _build_tool_registry() -> Any:

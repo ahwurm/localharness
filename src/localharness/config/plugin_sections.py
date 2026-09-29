@@ -41,6 +41,18 @@ def split_plugin_keys(data: Mapping[str, Any], names: Iterable[str],
             {k: v for k, v in data.items() if k in owned})
 
 
+def core_harness_view(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Only HarnessConfig's own top-level keys — what a WRITE-time check validates. A plugin's
+    section is validated by the plugin; an unknown key is still rejected when the config LOADS
+    (load_harness), which is where the typo guard lives."""
+    return {k: v for k, v in data.items() if k in HarnessConfig.model_fields}
+
+
+def core_agent_view(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Only AgentConfig's own keys — the agent-level twin of core_harness_view."""
+    return {k: v for k, v in data.items() if k in AgentConfig.model_fields}
+
+
 def global_only_paths(model: type[BaseModel] | None, prefix: str = "",
                       _chain: tuple[type[BaseModel], ...] = ()) -> frozenset[str]:
     """Dot-paths of the fields a plugin marked GLOBAL_ONLY (by name and by alias), recursing into

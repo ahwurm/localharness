@@ -39,10 +39,12 @@ def _provenance_agent_cfg():
     """
     from localharness.config.models import AgentConfig
     from localharness.config.overlay import _resolve_user_overlay_path, deep_merge, load_overlay
+    from localharness.config.plugin_sections import core_agent_view
     agent_overlay = load_overlay(_resolve_user_overlay_path()).get("agent", {})
     if not agent_overlay:
         return None
-    return AgentConfig.model_validate(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay))
+    # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+    return AgentConfig.model_validate(core_agent_view(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay)))
 
 
 class ProposerError(Exception):

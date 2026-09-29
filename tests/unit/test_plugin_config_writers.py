@@ -148,6 +148,17 @@ def test_adoption_validation_accepts_plugin_sections_and_refuses_bad_core_values
                          {"example": {"enabled": True}, "org": {"default_temperature": 9.0}})
 
 
+def test_a_harness_adoption_validates_beside_an_adopted_agent_value(global_dir) -> None:
+    """Found while wrapping (pre-existing on main): the harness branch validated the whole live
+    overlay, `agent:` included, so after one adopted agent.* win every org.* adoption was refused
+    with extra_forbidden on `agent`. The core view leaves `agent:` out, as `components set` and
+    /model persistence always did."""
+    cfg = ConfigLoader(config_dir=global_dir).load_harness()
+
+    _validate_merged(cfg, "org.default_temperature",
+                     {"agent": {"temperature": 0.3}, "org": {"default_temperature": 0.5}})
+
+
 @pytest.mark.parametrize("provenance", [experiment_provenance, proposer_provenance],
                          ids=["experiment", "proposer"])
 def test_provenance_reads_an_agent_overlay_that_carries_a_plugin_section(
