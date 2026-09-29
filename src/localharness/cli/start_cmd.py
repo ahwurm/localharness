@@ -1305,6 +1305,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             agent_id=agent_config.name,
             pipeline=pipeline,
             eviction_store=eviction_store,
+            # An evicted body's origin is what its tool DECLARES (result_origin, SAFE-03).
+            result_origin=tool_registry.result_origin,
             tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
             tool_evict_enabled=agent_config.context.tool_result_eviction,
             token_counter=token_counter,

@@ -471,6 +471,9 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         session_id=session_id,
         content_store=bench_store,
         eviction_store=bench_store if can_restore else None,
+        # An evicted body's origin is what its tool DECLARES (SAFE-03). Late-bound: tool_registry is
+        # assigned a few lines below, before any turn runs.
+        result_origin=lambda name: tool_registry.result_origin(name),
         token_counter=token_counter,
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
