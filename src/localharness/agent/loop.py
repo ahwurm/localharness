@@ -925,6 +925,7 @@ class AgentLoop:
         session_id: str | None = None,
         config_dir: Path | None = None,
         gate: Any = None,  # PermissionGate
+        guardrails_path: Path | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -965,6 +966,11 @@ class AgentLoop:
             permissions=getattr(config, "permissions", None), deny=self._deny_fn, bus=bus
         )
         self._memory = memory_loader
+        # The org's safety voice (SAFE-04). Read by CORE every turn from the GLOBAL config dir —
+        # never the workspace, never the agent state dir — and injected whether or not memory is
+        # on. start_cmd passes it; subagents and bench pass nothing and get none, exactly as before.
+        self._guardrails_path = guardrails_path
+        self._guardrails_warned = False
         # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
         # session's own store and keeps every write and trace below; only the ambient-context
         # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
@@ -1006,6 +1012,24 @@ class AgentLoop:
         self._sitting_session_id = session_id
         self._current_session_id: str | None = session_id
         self._conversation: list[Message] = []
+
+    def _read_guardrails(self) -> str:
+        """GUARDRAILS.md's text for this turn, or "" when there is none (SAFE-04). Re-read every
+        turn, so an edit reaches the next one. No file is the common case and stays silent; a
+        file that exists but cannot be read is named once, and never takes the turn down."""
+        path = self._guardrails_path
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except (OSError, UnicodeError) as exc:
+            if not self._guardrails_warned:
+                self._guardrails_warned = True
+                log.warning("GUARDRAILS.md at %s could not be read (%r) — no guardrails while it "
+                            "stays unreadable", path, exc)
+            return ""
 
     def _resolve_compact_md_path(self) -> Path | None:
         """This loop's compact.md, or None when it has none.
@@ -1351,6 +1375,12 @@ class AgentLoop:
                 "\n\nWhen you have finished using tools, respond directly to the user. "
                 "Be concise — give the answer, not your reasoning process."
             )
+        # SAFE-04: OUTSIDE the memory block, so memory off — or a memory failure — can never turn
+        # the safety rules off with it. Same place and separator the memory block's join used, so
+        # with memory on the prompt is byte-identical to before.
+        guardrails = self._read_guardrails()
+        if guardrails:
+            system_prompt += "\n\n## Guardrails\n" + guardrails
         if self._memory is not None:
             try:
                 # Default provenance for this session's writes (WRITE-04).
@@ -1369,8 +1399,6 @@ class AgentLoop:
                     max_chars=getattr(_mem_cfg, "max_notes_chars", 16_000),
                 )
                 parts = [system_prompt]
-                if ctx.guardrails_md:
-                    parts.append("## Guardrails\n" + ctx.guardrails_md)
                 if ctx.division_md:
                     parts.append("## Division Context\n" + ctx.division_md)
                 if ctx.agent_memory_md:
