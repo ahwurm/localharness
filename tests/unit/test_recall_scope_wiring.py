@@ -46,7 +46,6 @@ class _Ctx:
     """Shaped like MemoryContext for the fields loop.py touches."""
     agent_memory_md: str = "INJECTED-MEMORY"
     division_md: str = ""
-    guardrails_md: str = ""
     fact_count: int = 1
     token_estimate: int = 10
     injected_fact_ids: tuple = (7,)
