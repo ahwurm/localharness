@@ -209,14 +209,17 @@ def test_a_folder_plugin_is_imported_once_per_process(entry_points, tmp_path) ->
 
 
 def test_same_named_folders_in_two_config_dirs_are_different_modules(entry_points, tmp_path) -> None:
-    one = _folder_plugin(tmp_path / "one", "foo", _FOO, tmp_path / "s1.txt")
-    two = _folder_plugin(tmp_path / "two", "foo", _FOO, tmp_path / "s2.txt")
+    """Each folder answers with its OWN code — its package and its submodules — even though both
+    import under the same synthetic name."""
+    loaded = []
+    for which in ("one", "two"):
+        folder = _folder_plugin(
+            tmp_path / which, "foo", "from .impl import FooPlugin as plugin\n", tmp_path / f"{which}.txt"
+        )
+        (folder / "impl.py").write_text(_FOO.replace('kind="tools")', f'kind="tools")\n    origin = "{which}"'))
+        loaded.append(load_plugin_class(DiscoveredPlugin("foo", "folder", str(folder))))
 
-    first = load_plugin_class(DiscoveredPlugin("foo", "folder", str(one)))
-    second = load_plugin_class(DiscoveredPlugin("foo", "folder", str(two)))
-
-    assert first is not second
-    assert (tmp_path / "s2.txt").exists()
+    assert [cls.origin for cls in loaded] == ["one", "two"], "the second folder ran the first one's impl.py"
 
 
 def test_a_failed_folder_import_propagates_unchanged_and_leaves_no_module(
