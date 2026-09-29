@@ -69,13 +69,14 @@ async def test_a_plugin_that_is_not_on_404s_without_touching_any_filesystem(tmp_
     def touched(*_a, **_k):
         raise AssertionError("the route touched the filesystem for a plugin that is not on")
 
-    monkeypatch.setattr(server_mod, "_find_artifact", touched)
-    monkeypatch.setattr(auth, "confine", touched)
-    for name in ("stat", "lstat", "listdir", "scandir"):
-        monkeypatch.setattr(os, name, touched)
-    for plugin in ("image", "Example"):
-        got = await client.get(f"/api/artifacts/{plugin}/{ref.id}", headers=BEARER)
-        assert got.status_code == 404, plugin
+    with monkeypatch.context() as spies:  # only around the requests: teardown may stat freely
+        spies.setattr(server_mod, "_find_artifact", touched)
+        spies.setattr(auth, "confine", touched)
+        for name in ("stat", "lstat", "listdir", "scandir"):
+            spies.setattr(os, name, touched)
+        statuses = [(await client.get(f"/api/artifacts/{plugin}/{ref.id}", headers=BEARER)).status_code
+                    for plugin in ("image", "Example")]
+    assert statuses == [404, 404]
 
 
 @pytest.mark.parametrize("bad", ["art-1", "{id}.png", "{id}.png.png", "ART-{rest}", "{id}x"])
@@ -91,6 +92,7 @@ async def test_an_id_not_of_the_core_minted_shape_404s(tmp_path, bad):
 
 async def test_a_traversal_never_reaches_a_file(tmp_path):
     root, _, client = await _served(tmp_path)
+    write_artifact(root, "example", PNG, "image/png")  # the root exists; the secret sits above it
     (tmp_path / "state" / "secret.png").write_bytes(PNG)
     for path in ("/api/artifacts/example/../secret", "/api/artifacts/example/..%2F..%2Fsecret",
                  "/api/artifacts/example/%2E%2E%2Fsecret"):

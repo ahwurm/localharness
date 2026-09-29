@@ -42,6 +42,7 @@ from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
 from localharness.config import session_presence
+from localharness.core.events import ARTIFACT_ID_RE, ARTIFACT_MIMES
 
 from . import auth, push
 from .channel import WebChannel
@@ -236,6 +237,23 @@ def _unauthorized() -> JSONResponse:
     return _json({"error": auth.UNAUTHENTICATED_ERROR}, status=401)
 
 
+_SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
+"""The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
+
+
+def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
+    """The ONE file `<artifact_id>.<suffix>` directly under `root`, realpath-confined, with the media
+    type its suffix names (None if off the allowlist). None when there is no such file, or more than
+    one (an ambiguous id is not served)."""
+    if not root.is_dir():
+        return None
+    names = [entry.name for entry in root.iterdir() if entry.stem == artifact_id]
+    path = auth.confine(root, names[0]) if len(names) == 1 else None
+    if path is None or not path.is_file():
+        return None
+    return path, _SUFFIX_MIMES.get(path.suffix)
+
+
 class WebServer:
     """Routes, auth and the SSE loop for one `localharness web` process."""
 
@@ -333,6 +351,7 @@ class WebServer:
             # caller gets a `start_url` that pairs the installed app (see `manifest`).
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
+            Route("/api/artifacts/{plugin}/{artifact_id}", self.artifact, methods=["GET"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
@@ -796,6 +815,28 @@ class WebServer:
                           "`original_length` records what was lost.",
             }, status=404)
         return _json({"eviction_id": eviction_id, "body": body})
+
+    async def artifact(self, request: Request) -> Response:
+        """One file a plugin produced (PAPI-10). Authenticated like every GET (the cookie lets a
+        same-origin <img> load with no token in any URL); only for a plugin that is ON this session
+        and whose root core computed and accepted — anything else 404s before any filesystem access;
+        only a core-minted id; only the core media-type allowlist (else 415); realpath-confined; an
+        id names one immutable file, so it is cached as immutable."""
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        root = self.channel.artifact_root(request.path_params.get("plugin") or "")
+        artifact_id = request.path_params.get("artifact_id") or ""
+        if root is None or not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            return PlainTextResponse("not found", status_code=404)
+        found = _find_artifact(root, artifact_id)
+        if found is None:
+            return PlainTextResponse("not found", status_code=404)
+        path, mime = found
+        if mime not in ARTIFACT_MIMES:
+            return PlainTextResponse("unsupported media type", status_code=415)
+        return FileResponse(path, media_type=mime,
+                            headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     async def sessions(self, request: Request) -> Response:
         """The history list: every top-level session log on disk, newest first (the drawer behind ☰).
@@ -1356,6 +1397,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/health", "model reachability and session state"),
     ("GET", "/api/grants", "the permanent grants in force (read-only)"),
     ("GET", "/api/tool-results/{eviction_id}", "a ContentStore-evicted body, live session only"),
+    ("GET", "/api/artifacts/{plugin}/{id}",
+     "one file a plugin produced; core-computed root, image/png|jpeg|webp only, immutable"),
     ("GET", "/api/schema", "JSON Schema for every event and frame"),
     ("GET", "/api/protocol", "this document, as data"),
 )
