@@ -163,3 +163,22 @@ def test_register_plugin_by_name_is_dedup_safe():
     hooks.register_plugin(obj)
     assert hooks.pm.get_plugin("x") is obj and hooks.pm.get_name(obj) == "x"
     assert len(hooks.pm.hook.pre_tool.get_hookimpls()) == 1
+
+
+async def test_implementations_run_in_pluggys_own_order():
+    """Last registered first, as pluggy itself calls them, so a veto registered later still
+    pre-empts an observer registered earlier."""
+    order: list[str] = []
+
+    class First:
+        @HARNESS_HOOKIMPL
+        def pre_tool(self, name, arguments, agent_id, division_id):
+            order.append("first")
+
+    class Second:
+        @HARNESS_HOOKIMPL
+        def pre_tool(self, name, arguments, agent_id, division_id):
+            order.append("second")
+
+    await _dispatch(("first", First()), ("second", Second()))
+    assert order == ["second", "first"]
