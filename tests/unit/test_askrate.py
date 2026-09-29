@@ -157,10 +157,10 @@ def test_sessions_load_chronologically_and_empty_files_count(tmp_path: Path) -> 
 
 def test_buckets_and_meta_resolution() -> None:
     assert [bucket_of(n) for n in (0, 1, 2, 5, 6, 99)] == ["0", "1", "2-5", "2-5", ">5", ">5"]
-    assert tool_meta_for("bash_exec").group == "shell"
+    assert tool_meta_for("bash_exec").gate_family == "shell"
     mcp = tool_meta_for("discord__reply")
     assert mcp.is_mcp and mcp.mcp_server == "discord"
-    assert tool_meta_for("some_plugin_tool").group == "other"
+    assert tool_meta_for("some_plugin_tool").gate_family is None
 
 
 def test_render_reports_slo_lines_and_caveats(tmp_path: Path) -> None:
