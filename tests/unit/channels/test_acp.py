@@ -150,6 +150,7 @@ class Shell(Tool):
             },
             group="shell",
             destructive=True,
+            ingest="none", host="dangerous", gate_family="shell",  # what the real bash_exec declares
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

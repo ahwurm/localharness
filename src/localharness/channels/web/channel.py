@@ -972,7 +972,7 @@ class WebChannel(ChannelAdapter):
         ]
 
     def _ask_frame(self, request_id: str, request: Any) -> BlockingAsk:
-        from localharness.tools.capabilities import UNTRUSTED_INGEST
+        from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 
         klass = getattr(request, "klass", "")
         grantable = bool(getattr(request, "grantable", False))
@@ -991,7 +991,7 @@ class WebChannel(ChannelAdapter):
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
             options=self.ask_options(klass, grantable),
-            untrusted_ingest=tool_name in UNTRUSTED_INGEST,
+            untrusted_ingest=tool_name in WEB_INGEST_TOOLS,
         )
 
     def open_asks(self) -> list[dict[str, Any]]:

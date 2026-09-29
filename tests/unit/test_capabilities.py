@@ -253,3 +253,28 @@ async def test_builtin_subagent_toolsets_clean():
         schemas = [reg.schema_of(n) for n in toolset]
         assert None not in schemas, f"'{name}' names a tool no builtin declares: {toolset}"
         assert_no_coresidence(schemas, agent_id=name)  # must not raise
+
+
+# --- Display is pinned to the declarations, and only display ---------------
+
+@pytest.mark.asyncio
+async def test_the_display_families_label_exactly_the_tools_that_declare_ingest():
+    """The terminal's 'UNTRUSTED, treated as data' group and the phone's `untrusted_ingest` label
+    name exactly the builtins that DECLARE ingest: untrusted. They are display sets: the floor never
+    reads them. (A PLUGIN tool that ingests is floor-protected but not grouped or labelled — a named
+    display residual.)"""
+    from types import SimpleNamespace
+
+    from localharness.channels.terminal import _BURST_GROUPS, _UNTRUSTED_NOTE
+    from localharness.channels.web.channel import WebChannel
+    from localharness.core.bus import EventBus
+
+    schemas = (await _builtin_registry()).global_schemas()
+    declared = {s.name for s in schemas if s.ingest == "untrusted"}
+    assert declared == set(WEB)
+    grouped = {n for group, note, _style in _BURST_GROUPS if note == _UNTRUSTED_NOTE for n in group}
+    assert grouped == declared
+    channel = WebChannel(bus=EventBus(), config={})
+    labelled = {s.name for s in schemas
+                if channel._ask_frame("r1", SimpleNamespace(tool_name=s.name, klass="shell")).untrusted_ingest}
+    assert labelled == declared

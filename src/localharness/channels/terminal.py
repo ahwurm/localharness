@@ -55,7 +55,7 @@ from localharness.core.events import (
     TaskComplete,
     TurnFailed,
 )
-from localharness.tools.capabilities import UNTRUSTED_INGEST
+from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 
 log = structlog.get_logger(__name__)
 
@@ -156,12 +156,13 @@ def _fmt_elapsed(seconds: float) -> str:
 # Burst consolidation: consecutive calls from one tool family collapse into a single
 # live counter line (`◆ web_search · web_fetch · 30/30`) instead of a line per call —
 # a 30-hit research burst is one scrollback line, not 60. Per-call truth (args, errors,
-# timings) stays on the bus ledger (bus-events.jsonl); this is display-only. Family
-# membership reuses the capability metadata. (Descriptive labels dropped 2026-07-14 —
+# timings) stays on the bus ledger (bus-events.jsonl); this is display-only. The web family is
+# web_tool.WEB_INGEST_TOOLS, a display set pinned to the builtins that declare ingest: untrusted
+# (the safety model reads declarations, never this set). (Descriptive labels dropped 2026-07-14 —
 # owner: cleaner without; the close_note security disclosure stays.)
 # Display families (owner, 2026-09-11: "group similar tools like web search — the all-purple
 # wall"): the read-only local tools and the memory tools collapse the same way. Side-effecting
-# tools stay ITEMIZED on purpose — bash_exec / write / edit / python_exec (HOST_DANGEROUS),
+# tools stay ITEMIZED on purpose — bash_exec / write / edit / python_exec (the host-dangerous builtins),
 # cruncher_exec and agent delegations print one line per call, because each command, write and
 # hand-off is the user's audit trail. The memory family wears the memory hue of the
 # architecture plates (cli/theme.py), so a turn's tool section is no longer one color.
@@ -170,7 +171,7 @@ LOCAL_READ = frozenset({"read", "glob", "grep", "load_document", "chunk"})
 MEMORY_TOOLS = frozenset({"memory_search", "memory_get", "remember"})
 _UNTRUSTED_NOTE = "web results — UNTRUSTED, treated as data only"
 _BURST_GROUPS: tuple[tuple[frozenset[str], str | None, str], ...] = (
-    (UNTRUSTED_INGEST, _UNTRUSTED_NOTE, "tool.call"),
+    (WEB_INGEST_TOOLS, _UNTRUSTED_NOTE, "tool.call"),
     (frozenset({"tool_result_get"}), None, "tool.call"),
     (LOCAL_READ, None, "tool.call"),
     (MEMORY_TOOLS, None, "memory.call"),
@@ -1282,7 +1283,7 @@ class TerminalChannel(ChannelAdapter):
                 self._console.print(f"  [tool.result]{_CHECK} {name}[/tool.result]")
             else:
                 self._console.print(f"  [tool.result]{_CHECK} {name} ({len(lines)} lines)[/tool.result]")
-            if tool_name in UNTRUSTED_INGEST and not is_error:
+            if tool_name in WEB_INGEST_TOOLS and not is_error:
                 self._print_close_note(_UNTRUSTED_NOTE)  # itemized (verbose) web calls keep the disclosure
 
     async def send_permission_denied(
