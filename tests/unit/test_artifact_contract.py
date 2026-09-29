@@ -40,7 +40,7 @@ def test_ref_constructs_and_is_frozen():
     "art-20260929-120000-abcdef/../x", "art-٢٠٢٦٠٩٢٩-120000-abcdef",
 ])
 def test_ref_refuses_an_id_core_did_not_mint(bad):
-    """Last case: Arabic-Indic digits — `\\d` alone would accept them, the phone's JS check would not."""
+    """Last case: Arabic-Indic digits, which an unflagged Python `\\d` accepts."""
     with pytest.raises(ValidationError, match="core-minted"):
         _ref(id=bad.replace("{minted}", mint_artifact_id()))
 
