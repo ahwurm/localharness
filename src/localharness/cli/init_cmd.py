@@ -182,6 +182,48 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 #   only — a session always writes to this project's own store whatever it says.
 """
 
+# ENAB-05: the README `init` leaves in each plugins/ folder — where a user first learns how plugins
+# arrive. The workspace copy says plainly that a project is never a plugin source (ENAB-06).
+GLOBAL_PLUGINS_README = """\
+# Plugins
+
+A plugin adds tools, commands and checks to LocalHarness. There are two ways to add one, and
+LocalHarness loads neither until you turn it on:
+
+1. Install a package that declares a `localharness.plugins` entry point into the same Python
+   environment as LocalHarness (for example `uv pip install <package>`).
+2. Put a folder here, `plugins/<name>/`, whose `__init__.py` binds the name `plugin` to the
+   plugin class.
+
+`localharness plugins list` shows what was found and whether it is on.
+`localharness plugins enable <name>` turns one on. Turning on a plugin you brought yourself is a
+machine-level setting, and it is you vouching for what that plugin says its tools do. Plugin code
+runs inside the harness with your privileges — treat it like any program you install.
+
+To write one, copy the example plugin: `examples/plugin-template/` in the LocalHarness repository
+(https://github.com/ahwurm/localharness/tree/main/examples/plugin-template).
+"""
+
+WORKSPACE_PLUGINS_README = """\
+# Plugins in this project
+
+LocalHarness never loads plugin code from a project folder — it does not look for plugins in this
+folder, or anywhere else in this project. Plugins come from your machine: an installed package that
+declares a `localharness.plugins` entry point, or a folder `plugins/<name>/` in your machine-level
+config directory (`~/.localharness/` by default).
+
+What a project CAN do is switch a plugin that ships with LocalHarness on or off for itself:
+
+    localharness plugins enable <name> --workspace
+    localharness plugins disable <name> --workspace
+
+A plugin you brought yourself is turned on only in your machine-level settings
+(`localharness plugins enable <name>`, without `--workspace`).
+
+To write a plugin, copy the example plugin: `examples/plugin-template/` in the LocalHarness
+repository (https://github.com/ahwurm/localharness/tree/main/examples/plugin-template).
+"""
+
 
 def _is_the_global_config_dir(target: Path) -> bool:
     """Would scaffolding here write the machine's own config directory?
@@ -334,6 +376,8 @@ def _scaffold_workspace(
     try:
         (target / "agents").mkdir()
         (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
+        (target / "plugins").mkdir()
+        (target / "plugins" / "README.md").write_text(WORKSPACE_PLUGINS_README, encoding="utf-8")
     except _HANDLED as exc:
         _remove_partial_workspace(target)
         report_filesystem_error(
@@ -646,6 +690,12 @@ def init_app(
     # for a missing agents dir, so init must actually create it (previously only `start` and
     # `doctor --fix` did, which left that remedy non-functional).
     (config_path / "agents").mkdir(parents=True, exist_ok=True)
+    # ENAB-05. Written only when absent: a re-init the user said yes to replaces config.yaml, never
+    # notes they keep in this README.
+    plugins_readme = config_path / "plugins" / "README.md"
+    plugins_readme.parent.mkdir(exist_ok=True)
+    if not plugins_readme.exists():
+        plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
     # escape(): the receipt runs AFTER config.yaml is on disk, so an unescaped markup-named config
     # dir crashed here and exited 1 — init reporting failure for a setup that had just succeeded.
     console.print("\n[green]✓[/green] " + escape(f"LocalHarness configured at {config_file}."), soft_wrap=True)
