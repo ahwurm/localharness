@@ -1014,8 +1014,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # --- 4. Memory store (soft -- degrade to None) ---
     # org.memory_enabled=False (#151) is an explicit OFF, not a degradation: None rides the
-    # exact paths a failed open does — no tools register, nothing injects, no consolidation,
-    # and every subagent inherits the None.
+    # exact paths a failed open does — no tools register, no memory context injects, no
+    # consolidation, and every subagent inherits the None. The org guardrails are core's, not
+    # memory's (SAFE-04): they still reach the prompt — see AgentLoop's guardrails_path below.
     memory_store: MemoryStore | None = None
     if not harness.org.memory_enabled:
         logging.getLogger(__name__).info(
