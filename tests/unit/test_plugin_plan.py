@@ -127,6 +127,7 @@ def test_an_enabled_discovered_plugin_with_no_import_result_is_failed() -> None:
     (">=9", "9.2.0", ("on", "")),
     (">=0.15,<1", "1.0.0", ("skipped", "requires localharness >=0.15,<1, this is 1.0.0")),
     (">=0.15,<1", "0.16.0.dev1", ("on", "")),  # a development build is in range
+    (">=0.15,<1", "unknown", ("skipped", "requires localharness >=0.15,<1, this is unknown")),
 ])
 def test_requires_localharness_is_checked_against_the_injected_version(spec, version, expected) -> None:
     plan = build(discovered=(found("exa"),), enabled={"exa": True},
@@ -385,7 +386,8 @@ def _fake_dists(monkeypatch, *, requires: list[str], extras: list[str], installe
     monkeypatch.setattr(importlib.metadata, "distribution", distribution)
 
 
-_REQUIRES = ["pydantic>=2", "starlette<1,>=0.40; extra == 'web'", "uvicorn>=0.30; extra == 'web'",
+_REQUIRES = ["pydantic>=2", "colorama>=0.4; python_version >= '3'",  # base requirements: not web's
+             "starlette<1,>=0.40; extra == 'web'", "uvicorn>=0.30; extra == 'web'",
              "discord.py>=2.3; extra == 'dispatch'",
              "pywin32>=300; sys_platform == 'nonesuch' and extra == 'web'"]
 
@@ -397,6 +399,7 @@ _REQUIRES = ["pydantic>=2", "starlette<1,>=0.40; extra == 'web'", "uvicorn>=0.30
     ({"starlette": "1.2.0", "uvicorn": "0.34.0"}, "web", False),       # one out of its range
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "dispatch", False),
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "image", False),    # an extra this release lacks
+    ({"starlette": "0.46.0", "uvicorn": "2004d"}, "web", False),       # a version that is not PEP 440
 ])
 def test_extra_installed_reads_the_distribution_metadata(monkeypatch, installed, extra, expected) -> None:
     _fake_dists(monkeypatch, requires=_REQUIRES, extras=["web", "dispatch"], installed=installed)
