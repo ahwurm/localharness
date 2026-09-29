@@ -223,7 +223,8 @@ def test_start_no_agents_runs_async(tmp_path, monkeypatch):
 
 def test_repl_slash_help():
     """REPL /help shows help text without calling agent loop."""
-    from localharness.cli.repl import OrchestratorREPL, HELP_TEXT
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.cli.slash_commands import help_text
 
     responses = ["/help"]
     response_iter = iter(responses)
@@ -247,8 +248,8 @@ def test_repl_slash_help():
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
     asyncio.run(repl.run())
 
-    # send_message should have been called with HELP_TEXT
-    mock_channel.send_message.assert_any_call(HELP_TEXT, metadata={"style": "system.info"})
+    # send_message should have been called with the table's /help render
+    mock_channel.send_message.assert_any_call(help_text(), metadata={"style": "system.info"})
     # Agent loop should NOT have been called
     mock_loop.run_turn.assert_not_called()
 
