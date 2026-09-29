@@ -1,6 +1,6 @@
 {
   "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description \u2014 which moves a digest without moving the wire, and is said so in the commit. See test_web_protocol.py.",
-  "protocol_version": 2,
+  "protocol_version": 3,
   "types": {
     "Action": "65edde367f5433b5",
     "AgentCreated": "11d98a7d4a1a385c",
@@ -18,7 +18,7 @@
     "ExpectationAttached": "c8bda93795dffae6",
     "GapDetected": "c84722ab0154d63d",
     "Heartbeat": "4e43c5fa407474a2",
-    "Hello": "a8f31428998683d5",
+    "Hello": "81097589e24d2350",
     "InputRouted": "c506d2b31b0dc06c",
     "Lagged": "7a6c3216423b1834",
     "MemoryGateFired": "54ae391510447ea6",
@@ -42,9 +42,9 @@
     "TaskRequest": "84ba2cdc78815421",
     "TokenDelta": "06abb2d928d0a93b",
     "TurnCancelled": "d08a7905e7e25858",
-    "TurnCompleted": "486b005437ed4eb5",
+    "TurnCompleted": "f958fb0d94128546",
     "TurnEndMicroPassCompleted": "4388e501f6620b23",
-    "TurnFailed": "6c1c8bf3ac4a9660",
+    "TurnFailed": "bc1740414e871b3f",
     "TurnStarted": "eee1131df8dfe4c7",
     "UserMessage": "38c7d894b72e87c4"
   }

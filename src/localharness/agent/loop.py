@@ -70,6 +70,9 @@ class Session:
     # One bounded re-prompt spent this turn on an EMPTY completion (no content, no tool
     # calls) — the second empty reply ends the turn as a failure, never a stale "success".
     empty_reprompt_used: bool = False
+    # Ground truth: the exact tool names resolved for THIS turn's injection, stamped onto
+    # TurnCompleted/TurnFailed. None = resolution never ran (the honest "not recorded").
+    resolved_tool_names: list[str] | None = None
     # One bounded re-prompt spent this turn on a FINAL answer cut at the output ceiling
     # (finish_reason="length", text, no tool calls) once the cap could be grown for the retry.
     truncated_reply_reprompt_used: bool = False
@@ -1291,6 +1294,7 @@ class AgentLoop:
                 output_tokens=session.output_tokens,
                 tokens_estimated=session.tokens_estimated,
                 summary=summary,
+                tool_names=session.resolved_tool_names,
             ))
         return summary
 
@@ -1409,10 +1413,12 @@ class AgentLoop:
                 tool_config = self._config.tools
                 tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
                 tool_schemas = list(tool_schemas_dict.values())
+                session.resolved_tool_names = sorted(tool_schemas_dict)
             except CoResidenceError:
                 raise  # capability floor must fail LOUD, never be swallowed into an empty toolset
             except Exception:
                 tool_schemas = []
+                session.resolved_tool_names = []
 
         # Initialize or continue session messages. Prior-session context (compact.md) is FOLDED
         # into this ONE system message's content — never a second system message (strict chat
@@ -2532,4 +2538,5 @@ class AgentLoop:
             detail=reason,
             iterations=session.iteration,
             duration_seconds=session.elapsed_seconds(),
+            tool_names=session.resolved_tool_names,
         ))
