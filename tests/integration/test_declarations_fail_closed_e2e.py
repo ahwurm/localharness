@@ -16,8 +16,9 @@ first names what broke:
   3. over EVERY tool a production-shaped root registry holds (the 15 `register_builtin_tools`
      wires, the `agent` tool, one MCP tool): no host-dangerous tool declares or lands in a gate
      tier that runs without a rule set (allow, network); the gate's kind is the declared family;
-     the floor's functions classify it by its declaration; the context store stores its evicted
-     body with its declared origin — and #140's outcome holds (recall bodies untrusted);
+     the floor's functions classify it by its declaration; stamping `source_plugin` changes no
+     classification (CORE-04); the context store stores its evicted body with its declared
+     origin — and #140's outcome holds (recall bodies untrusted);
   4. the oracle: the 18 builtins' declarations reproduce today's name sets (imported, one copy);
   5. after the root floor the root holds bash_exec with the three memory tools and no web verb —
      and an MCP tool beside bash is still REJECTED, not stripped;
@@ -53,6 +54,7 @@ from localharness.tools.capabilities import (
     assert_grant_target_safe,
     assert_no_coresidence,
     ingests_untrusted,
+    is_exec,
     is_host_dangerous,
 )
 from localharness.tools.mcp import MCPToolWrapper
@@ -146,6 +148,11 @@ async def test_declarations_fail_closed_one_declaration_three_readers(tmp_path):
         denied = apply_root_capability_floor(ToolConfig(), [schema], enabled=True)
         assert denied == ([name] if schema.ingest == "untrusted" else []), name
         assert root.result_origin(name) == schema.result_origin, name
+        # CORE-04: which plugin contributed a tool is provenance, never a safety input.
+        stamped = schema.model_copy(update={"source_plugin": "some_plugin"})
+        assert (_kind(name, tool_meta_from_schema(stamped)), ingests_untrusted(stamped),
+                is_host_dangerous(stamped), is_exec(stamped)) == (
+            kind, ingests_untrusted(schema), is_host_dangerous(schema), is_exec(schema)), name
         if name in bodies:
             assert store.origin(_content_handle(bodies[name])) == schema.result_origin, name
     recall = {n: store.origin(_content_handle(bodies[n])) for n in ("memory_search", "memory_get", "bash_exec")}
