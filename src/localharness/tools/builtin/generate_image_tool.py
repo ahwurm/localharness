@@ -165,9 +165,15 @@ class GenerateImageTool(Tool):
         return ToolSchema(
             name="generate_image",
             group="image",
+            # Blunt on purpose: measured twice (2026-09-28/29), the subject model's trained
+            # prior ("harnesses don't have diffusion models") beat a clean tool listing and it
+            # hand-built SVG screenshots instead. The description must defeat the prior.
             description=(
-                "Generate an image from a text prompt using the locally configured image "
-                "model. Takes ~half a minute. Returns the saved PNG's file path."
+                "Create a picture with the locally installed image model — image generation "
+                "IS available in this harness through this tool. Use it for any request for "
+                "an image, picture, art, or logo; never claim image generation is "
+                "unavailable, and never hand-craft SVG or screenshots instead. Takes ~half "
+                "a minute and returns the saved PNG's file path."
             ),
             parameters={
                 "type": "object",
