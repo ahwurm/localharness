@@ -118,8 +118,14 @@ def test_offline_and_unreachable_are_distinct_and_neither_is_a_spinner(page):
 
 
 def test_a_protocol_version_mismatch_is_loud(page):
-    """§8: a stale client otherwise degrades silently, rendering `undefined` as a blank cell."""
-    assert "d.protocol_version !== 1" in page
+    """§8: a stale client otherwise degrades silently, rendering `undefined` as a blank cell.
+
+    By reference, not literal: a literal here pinned version 1 while the server moved to 2,
+    which is how the page shipped a red banner to the phone (2026-09-28). The page<->constant
+    sync itself is enforced in test_web_protocol.py."""
+    from localharness.channels.web.protocol import PROTOCOL_VERSION
+
+    assert f"d.protocol_version !== {PROTOCOL_VERSION}" in page
 
 
 def test_the_page_is_one_file_with_no_build_step(page):

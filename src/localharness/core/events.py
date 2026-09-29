@@ -101,6 +101,11 @@ class TurnCompleted(BaseEvent):
     input_tokens: int = 0
     output_tokens: int = 0
     tokens_estimated: bool = False
+    # Ground truth for "which tools did the model actually see this turn": the exact names
+    # resolved at the dispatch seam (loop.py), recorded so a which-tools dispute is settled by
+    # the session log, not by reconstruction (born 2026-09-29, live). None = not recorded
+    # (old lines, or a turn that failed before resolution). Additive/default-None.
+    tool_names: Optional[list[str]] = None
 
 
 class TurnFailed(BaseEvent):
@@ -116,6 +121,9 @@ class TurnFailed(BaseEvent):
     input_tokens: int = 0
     output_tokens: int = 0
     tokens_estimated: bool = False
+    # Same instrument as TurnCompleted.tool_names; None on the wrapper arms that fail before
+    # the turn ever resolved a toolset — an honest "not recorded", never a guessed list.
+    tool_names: Optional[list[str]] = None
 
 
 class UserMessage(BaseEvent):
