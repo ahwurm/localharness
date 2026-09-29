@@ -1,0 +1,24 @@
+[project]
+name = "localharness-plugin-example"
+version = "0.1.0"
+description = "The copyable LocalHarness plugin: one declared tool, one CLI command, one doctor check, one artifact."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "localharness>=0.15,<1",
+    # Imported directly (plugin.py, cli.py) — a transitive dependency is not a promise.
+    "pydantic>=2.13,<3",
+    "typer>=0.25,<1",
+]
+
+# How LocalHarness finds the plugin without importing it: the entry point's name must equal
+# the manifest's name, and its value names the Plugin class.
+[project.entry-points."localharness.plugins"]
+example = "localharness_plugin_example:ExamplePlugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/localharness_plugin_example"]
