@@ -494,16 +494,22 @@ def test_prepend_toolset_states_capabilities():
 # default-roster security invariant (v0.5.3)
 # ---------------------------------------------------------------------------
 
-def test_builtin_roster_has_no_host_dangerous_agents():
+async def test_builtin_roster_has_no_host_dangerous_agents():
     """v0.5.3 invariant: every default-roster builtin is quarantined or read-only.
     bash/write/edit-holding specialist roles (data-analyst, frontend-designer) were demoted
     to opt-in examples/agents/ configs (quality investigation 2026-07-03) — a default agent
-    must never put granted or ingested bytes one call from a host action."""
+    must never put granted or ingested bytes one call from a host action. Judged by each tool's
+    declared `host`, resolved through a registry holding every builtin."""
     import localharness.agent.subagent as subagent
-    from localharness.tools.capabilities import HOST_DANGEROUS
+    from localharness.tools.capabilities import is_host_dangerous
+    from tests.unit.test_capabilities import _builtin_registry
 
+    reg = await _builtin_registry()
     for name, tools in subagent._BUILTIN_TOOLSETS.items():
-        assert not (set(tools) & HOST_DANGEROUS), f"default builtin '{name}' holds host-dangerous tools"
+        schemas = [reg.schema_of(t) for t in tools]
+        assert None not in schemas, f"default builtin '{name}' names an unregistered tool: {tools}"
+        assert not any(is_host_dangerous(s) for s in schemas), \
+            f"default builtin '{name}' holds host-dangerous tools"
 
 
 def test_role_prompt_examples_use_placeholders_not_concrete_tickers():
