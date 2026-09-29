@@ -21,7 +21,10 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from localharness.tools.base import ToolSchema
+from localharness.agent.gate import tool_meta_from_schema
+from localharness.agent.gate_types import ToolMeta
+from localharness.agent.verdict import UNFAMILIAR_TOOL_KIND, _kind
+from localharness.tools.base import GATE_FAMILIES, ToolSchema
 
 # Today's name sets (tools/capabilities.py:23-24, agent/context.py:141 on main @ 75ad038), kept
 # ONLY here as the oracle that no builtin changed class — SAFE-02.
@@ -172,3 +175,93 @@ async def test_the_display_web_set_is_exactly_the_declared_ingest_set():
 
     schemas = await _builtin_schemas()
     assert WEB_INGEST_TOOLS == {name for name, s in schemas.items() if s.ingest == "untrusted"}
+
+
+# ------------------------------------------- the gate reads the declaration (reader one of three)
+
+@pytest.mark.parametrize("family", sorted(GATE_FAMILIES))
+def test_every_declared_family_is_the_branch_the_gate_takes(family):
+    assert _kind("some_plugin_tool", ToolMeta(gate_family=family)) == family
+
+
+@pytest.mark.parametrize("group", ["other", "fs.read", "memory", "fs.write", "shell", "code", "delegate", "web"])
+def test_an_undeclared_tool_is_unfamiliar_whatever_its_group(group):
+    """`group` is exposure taxonomy, not a gate input: a tool the gate does not know by name and
+    that declares no family asks — even when its group names a read tier."""
+    assert _kind("some_plugin_tool", ToolMeta(group=group)) == UNFAMILIAR_TOOL_KIND
+
+
+def test_mcp_and_the_name_tables_still_come_first():
+    assert _kind("srv__x", ToolMeta(is_mcp=True, gate_family="allow")) == "mcp"
+    assert _kind("srv__x", ToolMeta(group="mcp/srv", gate_family="allow")) == "mcp"
+    assert _kind("bash_exec", ToolMeta(gate_family="allow")) == "shell"
+
+
+def test_kind_by_group_is_gone():
+    import localharness.agent.verdict as verdict
+
+    assert not hasattr(verdict, "KIND_BY_GROUP")
+
+
+def test_the_declarable_families_are_exactly_the_gates_branches(tmp_path):
+    """GateFamily and `evaluate`'s dispatch cannot drift apart: the literals `evaluate` tests `kind`
+    against, minus `mcp` (not declarable), plus `allow` — the fall-through, which really ALLOWs."""
+    import ast
+    import inspect
+
+    from localharness.agent import verdict
+    from localharness.agent.gate_types import GateSettings, Verdict
+
+    tested = {
+        node.comparators[0].value
+        for node in ast.walk(ast.parse(inspect.getsource(verdict.evaluate)))
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "kind"
+        and isinstance(node.comparators[0], ast.Constant)
+    }
+    assert tested - {"mcp"} | {"allow"} == GATE_FAMILIES
+
+    ctx = verdict.GateContext(workspace=tmp_path, boundary=tmp_path, grants=lambda *a: None, mode="guarded")
+    result = verdict.evaluate("some_plugin_tool", {}, ToolMeta(gate_family="allow"), ctx, GateSettings())
+    assert result.verdict is Verdict.ALLOW
+
+
+def test_a_duck_typed_schema_cannot_smuggle_an_unknown_family():
+    """`tool.info()` is whatever a tool returns; one that bypasses ToolSchema's validator still
+    lands on the fail-closed side at the gate's own schema read."""
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(name="x", group="other", destructive=False, gate_family="read_only")
+    assert tool_meta_from_schema(fake).gate_family is None
+
+
+async def test_the_gate_and_the_declaration_agree_on_every_builtin():
+    """Through the gate's real schema read (`tool_meta_from_schema`, what the loop calls on
+    `tool.info()`): every builtin lands in exactly the branch it declares."""
+    for name, schema in (await _builtin_schemas()).items():
+        assert _kind(name, tool_meta_from_schema(schema)) == schema.gate_family, name
+    mcp = _mcp_schema()
+    assert _kind(mcp.name, tool_meta_from_schema(mcp)) == "mcp"
+
+
+async def test_each_name_table_agrees_with_that_builtins_declaration():
+    """The name tables bind the parameter each rule reads; they must never contradict a
+    declaration, or a builtin would be judged by a rule set other than the one it declares."""
+    from localharness.agent import verdict as v
+
+    tables = {"write": v.WRITE_TOOL_PATH_PARAMS, "shell": v.SHELL_COMMAND_PARAMS,
+              "code": v.CODE_EXEC_TOOLS, "delegate": v.DELEGATE_TOOLS, "network": v.NETWORK_URL_PARAMS}
+    schemas = await _builtin_schemas()
+    for branch, names in tables.items():
+        for name in names:
+            assert schemas[name].gate_family == branch, name
+
+
+async def test_the_askrate_replay_reads_the_same_families():
+    """A trace records a NAME, so the replay rebuilds the gate's view from a map — which must be
+    the live declarations, or the ask-rate report measures a gate that does not exist."""
+    from localharness.bench.askrate import BUILTIN_TOOL_FAMILIES, tool_meta_for
+
+    schemas = await _builtin_schemas()
+    assert dict(BUILTIN_TOOL_FAMILIES) == {name: s.gate_family for name, s in schemas.items()}
+    for name, schema in schemas.items():
+        assert _kind(name, tool_meta_for(name)) == _kind(name, tool_meta_from_schema(schema)), name
