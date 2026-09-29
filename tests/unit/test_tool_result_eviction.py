@@ -302,8 +302,21 @@ async def test_no_restores_means_unchanged_eviction():
 # #140: memory-recall output enters the store with UNTRUSTED origin. Memory can hold
 # material that originally arrived from untrusted channels (remembered web content),
 # and facts carry no per-item provenance — so an evicted recall body is verb-readable
-# data, never exec-bindable. Web already had this; memory was the gap.
+# data, never exec-bindable. Web already had this; memory was the gap. The origin is now
+# read off the producing tool's DECLARED result_origin (SAFE-03): memory_search/memory_get
+# declare untrusted, bash_exec trusted — no name set in the context store.
 # ---------------------------------------------------------------------------
+
+
+async def _declared_origin():
+    """The registry's result_origin lookup over the real builtins, memory verbs included — the
+    lookup start and bench wire into the context store."""
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg, memory_store=object(), eviction_store=ContentStore())
+    return reg.result_origin
 
 
 def _named_exchange(call_id: str, body: str, tool: str):
@@ -316,22 +329,23 @@ def _named_exchange(call_id: str, body: str, tool: str):
     ]
 
 
-def test_memory_recall_evicts_with_untrusted_origin():
+async def test_memory_recall_evicts_with_untrusted_origin():
     """#140: an evicted memory_search/memory_get body carries untrusted origin in the store,
-    while a generic tool body evicted in the same pass keeps the trusted default."""
+    while a generic tool body evicted in the same pass is trusted — each as its tool declares."""
     store = ContentStore()
     recall, fact, generic = "R" * 12_000, "F" * 12_000, "G" * 12_000
     msgs = (_named_exchange("m1", recall, "memory_search")
             + _named_exchange("m2", fact, "memory_get")
             + _named_exchange("b1", generic, "bash_exec"))
-    out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    out, n = _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0,
+                                       result_origin=await _declared_origin())
     assert n == 3
     assert store.origin(_content_handle(recall)) == "untrusted"
     assert store.origin(_content_handle(fact)) == "untrusted"
     assert store.origin(_content_handle(generic)) == "trusted"
 
 
-def test_memory_recall_handle_refused_by_exec_floor():
+async def test_memory_recall_handle_refused_by_exec_floor():
     """#140 end-to-end: the exec floor refuses an evicted recall handle outright, and the
     refusal doesn't take bystander trusted handles down with it when bound alone."""
     from localharness.tools.builtin.cruncher_exec import (
@@ -343,7 +357,8 @@ def test_memory_recall_handle_refused_by_exec_floor():
     recall, generic = "R" * 12_000, "G" * 12_000
     msgs = (_named_exchange("m1", recall, "memory_search")
             + _named_exchange("b1", generic, "bash_exec"))
-    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0,
+                              result_origin=await _declared_origin())
     with pytest.raises(UntrustedHandleError):
         bind_clean_origin_bodies(store, [_content_handle(recall)])
     seed = bind_clean_origin_bodies(store, [_content_handle(generic)])
@@ -357,12 +372,64 @@ async def test_memory_recall_restore_and_reevict_stays_untrusted():
     store = ContentStore()
     recall = "sticky recall body\n" * 800
     msgs = _named_exchange("m1", recall, "memory_search")
-    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0)
+    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0,
+                              result_origin=await _declared_origin())
     tool = ToolResultGetTool(store)
     res = await tool.run(id=_content_handle(recall))
     assert res.success and res.output == recall
     assert store.put(res.output) == _content_handle(recall)  # generic re-put, no origin arg
     assert store.origin(_content_handle(recall)) == "untrusted"
+
+
+async def test_the_registry_answers_each_tools_declared_origin_and_fails_closed():
+    origin = await _declared_origin()
+    assert origin("bash_exec") == "trusted"
+    assert origin("memory_search") == "untrusted"
+    assert origin("memory_get") == "untrusted"
+    assert origin("no_such_tool") == "untrusted", "a name no tool answers to must fail closed"
+
+
+async def test_an_orphan_body_is_untrusted_even_with_a_lookup():
+    """A tool result whose assistant call was compacted away names no tool: nothing vouches for
+    it, so it is untrusted — restorable and verb-readable, never exec-bindable."""
+    store = ContentStore()
+    orphan = "O" * 12_000
+    msgs = [{"role": "tool", "tool_call_id": "orphan", "content": orphan}]
+    _evict_large_tool_results(msgs, store, threshold_chars=8_000, keep_last=0,
+                              result_origin=await _declared_origin())
+    assert store.origin(_content_handle(orphan)) == "untrusted"
+
+
+def test_with_no_lookup_wired_every_evicted_body_is_untrusted():
+    """Fail closed: a context that was not told how to read declarations cannot vouch for any
+    body — even a bash_exec body, which declares trusted, is stored untrusted."""
+    store = ContentStore()
+    generic = "G" * 12_000
+    _, n = _evict_large_tool_results(_named_exchange("b1", generic, "bash_exec"), store,
+                                     threshold_chars=8_000, keep_last=0)
+    assert n == 1
+    assert store.origin(_content_handle(generic)) == "untrusted"
+
+
+def test_the_memory_name_set_is_gone():
+    import localharness.agent.context as context
+
+    assert not hasattr(context, "_MEMORY_TOOLS")
+
+
+async def test_the_context_manager_evicts_through_its_wired_lookup():
+    """build_messages — the one production eviction site — marks origin with the lookup the
+    ContextManager was built with (start and bench wire ToolRegistry.result_origin); a
+    ContextManager built without one fails closed."""
+    lookup = await _declared_origin()
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "read five files"}]
+    for i in range(5):
+        msgs += _exchange(f"c{i}", _big_body(i), tool="read")
+    for wired, expected in ((lookup, "trusted"), (None, "untrusted")):
+        store = ContentStore()
+        built, _ = await _evicting_cm(store, msgs, result_origin=wired).build_messages(msgs)
+        assert _n_stubs(built) > 0, "eviction gate never armed — test setup is wrong"
+        assert store.origin(_stub_handle(built)) == expected, wired
 
 
 def test_pin_costs_exactly_one_eviction_not_the_keep_last_window():
