@@ -1,32 +1,96 @@
-"""Single source of truth for the REPL's slash commands.
+"""The ONE slash-command table (PAPI-07).
 
-Both /help (repl.HELP_TEXT) and the input completion menu (channels.terminal.SlashCommandCompleter)
-read this one table, so they can never drift. Order here is the display order in both surfaces.
+Four consumers read it, so they can never drift: the REPL dispatcher (`OrchestratorREPL._handle_slash`
+via `find_row`), `/help` (`help_text`), the input completion menu
+(`channels.terminal.SlashCommandCompleter`) and the phone's command menu (`/api/protocol`
+`commands[]`). Each reads `all_rows()` when it is used, so rows added after import show everywhere.
+Order here is the display order in all of them; plugin rows follow the core rows.
+
+Plugins append rows through the session lifecycle (`set_plugin_rows`) — never by editing this file.
+`/memory` is a core row until memory's command surfaces are converted.
 """
 from __future__ import annotations
 
-# (name, one-line description). The name includes its leading slash.
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "Show this help message"),
-    ("/agents", "List configured agents"),
-    ("/model", "List available models; /model <name|number> to switch"),
-    ("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off"),
-    ("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off"),
-    ("/mode", "Permission mode for this session; /mode guarded|trusted|read-only"),
-    ("/pending", "Tool calls parked for you to answer"),
-    ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
-    ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
-    ("/memory", "Browse the agent's memory by tag; show/forget/search a memory"),
-    ("/quit", "Exit LocalHarness"),
-    ("/exit", "Exit LocalHarness"),
-]
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SlashCommand:
+    """One row of the slash table. Unpacks as (name, description) — the display pair every consumer
+    of the old two-tuple list reads, so /help, the completer and the phone read rows unchanged.
+
+    `handler` is an OrchestratorREPL method name for a core row, and a bound async callable for a
+    plugin row (called with the text after the name; the text it returns is shown to the user).
+    `takes_args` rows claim "name ..." as well as "name"."""
+
+    name: str
+    description: str
+    handler: str | Callable[[str], Awaitable[str | None]]
+    takes_args: bool = False
+    plugin: str | None = None
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((self.name, self.description))
+
+
+SLASH_COMMANDS: tuple[SlashCommand, ...] = (
+    SlashCommand("/help", "Show this help message", "_slash_help"),
+    SlashCommand("/agents", "List configured agents", "_slash_agents"),
+    SlashCommand("/model", "List available models; /model <name|number> to switch", "_slash_model", True),
+    SlashCommand("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off",
+                 "_slash_reasoning", True),
+    SlashCommand("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off",
+                 "_slash_verbose", True),
+    SlashCommand("/mode", "Permission mode for this session; /mode guarded|trusted|read-only",
+                 "_slash_mode", True),
+    SlashCommand("/pending", "Tool calls parked for you to answer", "_slash_pending"),
+    SlashCommand("/approve", "Run a parked call; /approve [N] (default: the oldest)", "_slash_approve", True),
+    SlashCommand("/deny", "Drop a parked call; /deny [N] (default: the oldest)", "_slash_deny", True),
+    SlashCommand("/memory", "Browse the agent's memory by tag; show/forget/search a memory",
+                 "_slash_memory", True),
+    SlashCommand("/quit", "Exit LocalHarness", "_slash_quit"),
+    SlashCommand("/exit", "Exit LocalHarness", "_slash_quit"),
+)
+_plugin_rows: tuple[SlashCommand, ...] = ()
+
+
+def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
+    """Replace every plugin row (`()` removes them all). A row whose name is already taken — by core
+    or an earlier plugin row — is skipped, and so is one without a callable handler (only core rows
+    name a REPL method). Returns one warning per skipped row, naming its plugin."""
+    global _plugin_rows
+    kept: list[SlashCommand] = []
+    warnings: list[str] = []
+    for row in rows:
+        if row.name in {r.name for r in (*SLASH_COMMANDS, *kept)}:
+            warnings.append(f"plugin {row.plugin}: slash command {row.name} is already taken — skipped")
+        elif not callable(row.handler):
+            warnings.append(f"plugin {row.plugin}: slash command {row.name} has no callable handler — skipped")
+        else:
+            kept.append(row)
+    _plugin_rows = tuple(kept)
+    return warnings
+
+
+def all_rows() -> tuple[SlashCommand, ...]:
+    """Core rows, then plugin rows — what every consumer reads, at the moment it reads."""
+    return SLASH_COMMANDS + _plugin_rows
+
+
+def find_row(lowered: str) -> SlashCommand | None:
+    """The row a lower-cased, stripped input line invokes: its exact name, or its name and a space
+    for a row that takes arguments. None when no row claims the line."""
+    return next((row for row in all_rows() if lowered == row.name
+                 or (row.takes_args and lowered.startswith(row.name + " "))), None)
 
 
 def help_text() -> str:
-    """Render the /help body from SLASH_COMMANDS (single source of truth)."""
-    width = max(len(name) for name, _ in SLASH_COMMANDS)
+    """Render the /help body from `all_rows()`."""
+    rows = all_rows()
+    width = max(len(name) for name, _ in rows)
     lines = ["Available commands:"]
-    for name, desc in SLASH_COMMANDS:
+    for name, desc in rows:
         lines.append(f"  {name.ljust(width)}  {desc}")
     lines.append("")
     lines.append("Everything else is handled by the orchestrator through natural language.")

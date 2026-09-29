@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
-from localharness.cli.slash_commands import help_text
+from localharness.cli.slash_commands import SlashCommand, find_row, help_text
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
     PENDING_DENIED_NUDGE,
@@ -88,9 +88,6 @@ BARE_MODE_COMMAND_CHANNELS: frozenset[str] = frozenset({"discord"})
 """Channels where `mode <name>` as the first word IS the command (PRD §3.4). Discord has no
 slash convention of its own; the terminal does, so there the bare word stays a message."""
 
-
-# Derived from the single-source SLASH_COMMANDS table (shared with the input completion menu).
-HELP_TEXT = help_text()
 
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
 # outlives the session, and a silent one leaves the user running an experiment forever.
@@ -1095,81 +1092,18 @@ class OrchestratorREPL:
             self._slash_followup = nudge
 
     async def _handle_slash(self, cmd: str) -> bool:
-        """Handle slash commands. Returns True if handled, False to pass through."""
-        cmd_lower = cmd.lower().strip()
-
-        if cmd_lower in ("/quit", "/exit"):
-            # #60: mid-wizard, /quit and /exit are handled BEFORE the run-loop's workflow
-            # branch, so they used to hard-exit the whole SESSION silently (while bare 'quit'
-            # only cancels the wizard). Cancel the CREATION first and stay alive; a repeat
-            # /quit (no active workflow now) exits normally.
-            if self._orchestrator.active_workflow is not None:
-                self._orchestrator._active_workflow = None
-                await self._channel.send_message(
-                    "Agent creation cancelled. /quit again to exit.",
-                    metadata={"style": "system.info"},
-                )
-                return True
-            raise EOFError()
-
-        if cmd_lower == "/help":
-            await self._channel.send_message(
-                HELP_TEXT,
-                metadata={"style": "system.info"},
-            )
-            return True
-
-        if cmd_lower == "/model" or cmd_lower.startswith("/model "):
-            # Slice the ORIGINAL string — model ids are case-sensitive.
-            await self._handle_model_cmd(cmd.strip()[len("/model"):].strip())
-            return True
-
-        if cmd_lower == "/reasoning" or cmd_lower.startswith("/reasoning "):
-            await self._handle_reasoning_cmd(cmd_lower[len("/reasoning"):].strip())
-            return True
-
-        if cmd_lower == "/verbose" or cmd_lower.startswith("/verbose "):
-            await self._handle_verbose_cmd(cmd_lower[len("/verbose"):].strip())
-            return True
-
-        if cmd_lower == "/mode" or cmd_lower.startswith("/mode "):
-            await self._handle_mode_cmd(cmd_lower[len("/mode"):].strip())
-            return True
-
-        if cmd_lower == "/pending":
-            await self._handle_pending_cmd()
-            return True
-
-        if cmd_lower == "/approve" or cmd_lower.startswith("/approve "):
-            await self._handle_pending_answer(cmd_lower[len("/approve"):], approve=True)
-            return True
-
-        if cmd_lower == "/deny" or cmd_lower.startswith("/deny "):
-            await self._handle_pending_answer(cmd_lower[len("/deny"):], approve=False)
-            return True
-
-        if cmd_lower == "/memory" or cmd_lower.startswith("/memory "):
-            # Slice the ORIGINAL string — ids and search words are case-sensitive. Claimed here,
-            # BEFORE the unknown-/word reject below, so bare "/memory" isn't refused as unknown.
-            await self._handle_memory_cmd(cmd.strip()[len("/memory"):].strip())
-            return True
-
-        if cmd_lower == "/agents":
-            cards = self._orchestrator._card_registry.all_cards()
-            if not cards:
-                await self._channel.send_message(
-                    "No agents configured. Describe what you need and I'll create one.",
-                    metadata={"style": "system.info"},
-                )
+        """Handle a slash command from the ONE table (cli/slash_commands.py). Returns True if
+        handled, False to pass the line through to the agent."""
+        raw = cmd.strip()
+        lowered = cmd.lower().strip()
+        row = find_row(lowered)
+        if row is not None:
+            if callable(row.handler):
+                await self._run_plugin_slash(row, raw[len(row.name):].strip())
             else:
-                lines = ["Configured agents:"]
-                for card in cards:
-                    status_mark = f"[{card.status}]" if hasattr(card, "status") else ""
-                    lines.append(f"  {card.name} -- {card.description[:80]} {status_mark}")
-                await self._channel.send_message(
-                    "\n".join(lines),
-                    metadata={"style": "system.info"},
-                )
+                # A core row's adapter gets the text after the name as typed and lower-cased;
+                # each passes on exactly the slice its command always took.
+                await getattr(self, row.handler)(raw[len(row.name):], lowered[len(row.name):])
             return True
 
         # #48: a single-token "/word" is the COMMAND namespace — reject unknown ones
@@ -1177,16 +1111,98 @@ class OrchestratorREPL:
         # orchestrator as chat. Rule: ^/[a-zA-Z0-9_-]+$ — a lone leading-slash token and
         # nothing else. A bare "/", a path ("/tmp/foo", extra slashes), or "/word ..."
         # with more text is NOT claimed and falls through to the agent exactly as before.
-        stripped = cmd.strip()
-        if re.fullmatch(r"/[a-zA-Z0-9_-]+", stripped):
+        if re.fullmatch(r"/[a-zA-Z0-9_-]+", raw):
             await self._channel.send_message(
-                f"Unknown command: {stripped} — /help lists commands.",
+                f"Unknown command: {raw} — /help lists commands.",
                 metadata={"style": "system.error"},
             )
             return True
 
         # Not a command — pass through to the orchestrator (natural language / paths).
         return False
+
+    async def _run_plugin_slash(self, row: SlashCommand, args: str) -> None:
+        """A plugin's slash row (PAPI-11). Its failure — an exception, a sys.exit(), or a reply
+        that is not text — is logged and shown naming the plugin, and the session goes on. The
+        text it returns is shown as info."""
+        try:
+            text = await row.handler(args)
+            if text is not None and not isinstance(text, str):
+                raise TypeError(f"returned {type(text).__name__}, not text")
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — a plugin never ends the session
+            log.warning("slash command %s from plugin %r failed", row.name, row.plugin, exc_info=True)
+            await self._channel.send_message(
+                f"{row.name} (plugin {row.plugin}) failed: {type(exc).__name__}: {exc}",
+                metadata={"style": "system.error"},
+            )
+            return
+        if text:
+            await self._channel.send_message(text, metadata={"style": "system.info"})
+
+    # One adapter per core row of the slash table (named by its `handler`): `args` is the text
+    # after the command name as typed, `args_lower` the same text lower-cased.
+
+    async def _slash_quit(self, args: str, args_lower: str) -> None:
+        # #60: mid-wizard, /quit and /exit are handled BEFORE the run-loop's workflow
+        # branch, so they used to hard-exit the whole SESSION silently (while bare 'quit'
+        # only cancels the wizard). Cancel the CREATION first and stay alive; a repeat
+        # /quit (no active workflow now) exits normally.
+        if self._orchestrator.active_workflow is not None:
+            self._orchestrator._active_workflow = None
+            await self._channel.send_message(
+                "Agent creation cancelled. /quit again to exit.",
+                metadata={"style": "system.info"},
+            )
+            return
+        raise EOFError()
+
+    async def _slash_help(self, args: str, args_lower: str) -> None:
+        # Rendered when typed, so plugin rows added after import are listed.
+        await self._channel.send_message(help_text(), metadata={"style": "system.info"})
+
+    async def _slash_model(self, args: str, args_lower: str) -> None:
+        # The ORIGINAL case — model ids are case-sensitive.
+        await self._handle_model_cmd(args.strip())
+
+    async def _slash_reasoning(self, args: str, args_lower: str) -> None:
+        await self._handle_reasoning_cmd(args_lower.strip())
+
+    async def _slash_verbose(self, args: str, args_lower: str) -> None:
+        await self._handle_verbose_cmd(args_lower.strip())
+
+    async def _slash_mode(self, args: str, args_lower: str) -> None:
+        await self._handle_mode_cmd(args_lower.strip())
+
+    async def _slash_pending(self, args: str, args_lower: str) -> None:
+        await self._handle_pending_cmd()
+
+    async def _slash_approve(self, args: str, args_lower: str) -> None:
+        await self._handle_pending_answer(args_lower, approve=True)
+
+    async def _slash_deny(self, args: str, args_lower: str) -> None:
+        await self._handle_pending_answer(args_lower, approve=False)
+
+    async def _slash_memory(self, args: str, args_lower: str) -> None:
+        # The ORIGINAL case — ids and search words are case-sensitive. A table row, so a bare
+        # "/memory" is claimed before the unknown-/word reject.
+        await self._handle_memory_cmd(args.strip())
+
+    async def _slash_agents(self, args: str, args_lower: str) -> None:
+        cards = self._orchestrator._card_registry.all_cards()
+        if not cards:
+            await self._channel.send_message(
+                "No agents configured. Describe what you need and I'll create one.",
+                metadata={"style": "system.info"},
+            )
+        else:
+            lines = ["Configured agents:"]
+            for card in cards:
+                status_mark = f"[{card.status}]" if hasattr(card, "status") else ""
+                lines.append(f"  {card.name} -- {card.description[:80]} {status_mark}")
+            await self._channel.send_message(
+                "\n".join(lines),
+                metadata={"style": "system.info"},
+            )
 
     # ------------------------------------------------------------------ #
     # /model — list and swap models

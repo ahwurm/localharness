@@ -219,8 +219,12 @@ async def test_a_plugin_row_reaches_every_surface(rows, tmp_path):
     assert rows([_example()]) == []
     assert all_rows()[:-1] == SLASH_COMMANDS and all_rows()[-1].name == "/example"
     assert help_text() == HELP_BEFORE.replace(
-        "\n\nEverything", f"\n  /example   {EXAMPLE_HELP}\n\nEverything")
+        "\n\nEverything", f"\n  /example    {EXAMPLE_HELP}\n\nEverything")
     assert _completions("/e", completer) == [("/exit", "Exit LocalHarness"), ("/example", EXAMPLE_HELP)]
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)  # the REPL module was imported long before the row existed
+    assert await repl._handle_slash("/help") is True
+    assert channel.sent == [(help_text(), INFO)] and "/example" in channel.sent[0][0]
     assert await _phone_menu(tmp_path) == [
         *({"name": n, "description": d} for n, d in CORE), {"name": "/example", "description": EXAMPLE_HELP}]
 

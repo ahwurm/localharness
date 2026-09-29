@@ -265,25 +265,25 @@ def _colorize_rate_notes(content: str) -> Text:
 
 class SlashCommandCompleter(Completer):
     """Complete REPL slash commands when the buffer is a single leading-slash token. Prefix match
-    (case-insensitive) against the SLASH_COMMANDS table — the same table /help renders, so the menu
-    and /help never drift. Command arguments are left alone (e.g. `/memory show 12`) with ONE
-    exception: `/model <partial>` completes its first argument from `model_names_fn` — the
-    session's cached live-model list. The supplier must never fetch or block (an empty list just
-    means no menu); ids filter case-insensitively but insert case-true (model ids are
-    case-sensitive)."""
+    (case-insensitive) against the slash table (`all_rows()`: core rows, then plugin rows) — the
+    same table /help renders and the dispatcher reads, so the menu and /help never drift. It is read
+    at completion time, never snapshotted, so plugin rows added later appear. Command arguments are
+    left alone (e.g. `/memory show 12`) with ONE exception: `/model <partial>` completes its first
+    argument from `model_names_fn` — the session's cached live-model list. The supplier must never
+    fetch or block (an empty list just means no menu); ids filter case-insensitively but insert
+    case-true (model ids are case-sensitive)."""
 
     def __init__(self, model_names_fn: Callable[[], list[str]] | None = None) -> None:
-        from localharness.cli.slash_commands import SLASH_COMMANDS
-        self._commands = SLASH_COMMANDS
         self._model_names_fn = model_names_fn
 
     def get_completions(self, document, complete_event):
+        from localharness.cli.slash_commands import all_rows
         text = document.text_before_cursor
         if not text.startswith("/"):
             return
         head, sep, tail = text.partition(" ")
         if not sep:
-            for name, desc in self._commands:
+            for name, desc in all_rows():
                 if name.startswith(text.lower()):
                     yield Completion(name, start_position=-len(text), display=name, display_meta=desc)
             return
