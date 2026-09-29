@@ -50,7 +50,8 @@ def make_store(base: Path, global_base: Path | None = None) -> MemoryStore:
 
     `global_base` is amendment #4's split: per-agent STATE may follow a workspace layer, but
     org/division SAFETY CONTEXT never does. Production gives BOTH stores the same one, which
-    is why the two `load_context` calls return byte-identical division/guardrails text."""
+    is why the two `load_context` calls return byte-identical division text. (GUARDRAILS.md is
+    no longer memory's to read — core prompt assembly reads it, SAFE-04.)"""
     return MemoryStore(
         agent_id=AGENT,
         division_id="test-div",
@@ -407,7 +408,6 @@ def test_format_origin_token_round_trips() -> None:
 # TASK 2 — the `both` merge.
 # ================================================================== #
 
-GUARDRAILS_TEXT = "# Guardrails\nGUARDRAILS-MARKER: never exfiltrate.\n"
 DIVISION_TEXT = "# Division\nDIVISION-MARKER: research division.\n"
 
 
@@ -427,8 +427,6 @@ async def pair(tmp_path: Path):
     an injected-ids assertion over disjoint id spaces passes for the wrong reason.
     """
     gl_dir, ws_dir = tmp_path / "global", tmp_path / "ws"
-    (gl_dir / "orgs" / "default").mkdir(parents=True)
-    (gl_dir / "orgs" / "default" / "GUARDRAILS.md").write_text(GUARDRAILS_TEXT, encoding="utf-8")
     (gl_dir / "divisions" / "test-div").mkdir(parents=True)
     (gl_dir / "divisions" / "test-div" / "DIVISION.md").write_text(DIVISION_TEXT, encoding="utf-8")
 
@@ -529,11 +527,10 @@ async def test_the_global_block_repeats_neither_the_preamble_nor_the_shelf(
 
 
 async def test_the_safety_context_appears_exactly_once(both: RecallRouter) -> None:
-    """Pitfall 3: both stores derive division/guardrails from the SAME global_base_dir, so a
-    merge that concatenated them would inject the org's safety voice twice."""
+    """Pitfall 3: both stores derive division from the SAME global_base_dir, so a merge that
+    concatenated them would inject the org's safety voice twice."""
     ctx = await both.load_context()
 
-    assert ctx.guardrails_md == GUARDRAILS_TEXT
     assert ctx.division_md == DIVISION_TEXT
 
     await both.close()
@@ -737,7 +734,7 @@ async def test_a_corrupt_global_store_does_not_take_the_workspace_context_with_i
     pair, caplog
 ) -> None:
     """Blast radius, new in 0.13: before the second store existed, no memory failure could
-    strip a healthy project session of its own memory — or of the org guardrails riding in the
+    strip a healthy project session of its own memory — or of the division context riding in the
     same context object. `both` must degrade to the workspace half plus a visible line."""
     _corrupt(pair.gl_dir)
     router = RecallRouter(pair.ws, make_store(pair.gl_dir, global_base=pair.gl_dir),
@@ -747,7 +744,6 @@ async def test_a_corrupt_global_store_does_not_take_the_workspace_context_with_i
         ctx = await router.load_context()
 
     assert WS_MARKER in ctx.agent_memory_md, "the healthy workspace memory was discarded"
-    assert ctx.guardrails_md == GUARDRAILS_TEXT, "the org's safety context was discarded"
     assert ctx.division_md == DIVISION_TEXT
     assert ctx.injected_fact_ids, "the workspace's injected ids went missing"
     # Visible to the model, not just to the log: silence would read as "there is no global
@@ -773,7 +769,7 @@ async def test_a_corrupt_global_store_under_global_scope_substitutes_nothing(pai
     assert WS_MARKER not in ctx.agent_memory_md, "a global-scope session was fed workspace facts"
     assert ctx.fact_count == 0
     assert ctx.injected_fact_ids == []
-    assert ctx.guardrails_md == GUARDRAILS_TEXT, "the safety context went down with the store"
+    assert ctx.division_md == DIVISION_TEXT, "the safety context went down with the store"
 
     await router.close()
 
