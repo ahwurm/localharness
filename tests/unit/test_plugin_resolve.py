@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -37,7 +38,7 @@ def _write_yaml(path: Path, data: dict) -> None:
 
 
 def write_folder_plugin(g: Path, name: str, *, manifest: str = "", attrs: str = "",
-                        prelude: str = "") -> None:
+                        prelude: str = "", manifest_name: str | None = None) -> None:
     """`<g>/plugins/<name>/__init__.py`: writes `<sentinel dir>/<name>` when imported, then runs
     `prelude`; its ConfigModel has a hex `color` and a machine-level `url`."""
     folder = g / "plugins" / name
@@ -63,7 +64,7 @@ def write_folder_plugin(g: Path, name: str, *, manifest: str = "", attrs: str = 
 
         class ThePlugin(Plugin):
             """draws {name} swatches"""
-            manifest = PluginManifest(name="{name}", version="0.1.0", kind="tools"{manifest})
+            manifest = PluginManifest(name="{manifest_name or name}", version="0.1.0", kind="tools"{manifest})
             ConfigModel = Config
             AgentConfigModel = AgentConfig
             {attrs}
@@ -211,6 +212,22 @@ def test_a_plugin_you_installed_never_imports_under_a_name_it_cannot_have(layers
     assert r.classes == {"shipped": Shipped}
 
 
+def test_a_class_that_names_another_plugin_is_refused_and_shows_nothing(layers, sentinels) -> None:
+    """Its manifest says it is `other`: refused, and neither its class nor its settings appear
+    under the name it was found as (components and `plugins info` read those)."""
+    g, ws = layers
+    write_folder_plugin(g, "exa", manifest_name="other")
+    _write_yaml(g / "overrides.yaml", {"exa": {"enabled": True, "color": "#000000"}})
+
+    r = resolved(g, ws)
+
+    entry = r.plan.entry("exa")
+    assert (entry.state, entry.reason) == (
+        "refused", "it was found as 'exa' but its class names 'other' in its manifest")
+    assert (sentinels / "exa").exists()  # enabled, so imported — then refused
+    assert "exa" not in r.classes and "exa" not in r.settings
+
+
 # --------------------------------------------------------------------------- settings
 
 
@@ -283,6 +300,28 @@ def test_a_bundled_plugin_meets_the_same_machine_level_rule(layers, monkeypatch)
     assert [w for w in r.warnings if "shipped.url" in w and str(ws / "config.yaml") in w]
 
 
+def test_validated_settings_never_alias_the_loaders_cached_config(layers, monkeypatch) -> None:
+    """A plugin that edits its own settings object must not edit what `components` and the next
+    resolve read (the merged section shares nested values with the loader's cache)."""
+    class Settings(BaseModel):
+        data: dict[str, Any] = {}
+
+    class Shipped(Plugin):
+        """ships with it"""
+        manifest = PluginManifest(name="shipped", version="1.0", kind="tools")
+        ConfigModel = Settings
+
+    bundle(monkeypatch, Shipped)
+    g, ws = layers
+    _write_yaml(g / "config.yaml", {**_MINIMAL, "shipped": {"data": {"nested": {"x": 1}}}})
+    loader = ConfigLoader(config_dir=g, local_config_dir=ws)
+
+    resolve(loader).settings["shipped"].config.data["nested"]["x"] = 2
+
+    assert loader.plugin_layers()["shipped"][0] == {"data": {"nested": {"x": 1}}}
+    assert resolve(loader).settings["shipped"].config.data == {"nested": {"x": 1}}
+
+
 def test_the_agent_level_settings_come_from_the_loaded_agent(layers) -> None:
     g, ws = layers
     write_folder_plugin(g, "foo")
@@ -337,6 +376,37 @@ def test_an_unreadable_enable_warns_and_keeps_a_plugin_you_installed_off(layers,
 
     assert r.plan.entry("foo").state == "available" and not (sentinels / "foo").exists()
     assert [w for w in r.warnings if w.startswith("plugin foo: ") and warning in w]
+
+
+def test_a_projects_broken_section_cannot_decide_what_the_machine_turned_on(layers, sentinels) -> None:
+    """Not a mapping in the project: reported, the global layers decide `enabled`, and the plugin
+    — imported, because the machine turned it on — fails for its invalid settings, said once."""
+    g, ws = layers
+    write_folder_plugin(g, "foo")
+    _write_yaml(g / "overrides.yaml", {"foo": {"enabled": True}})
+    _write_yaml(ws / "config.yaml", {"foo": 1})
+
+    r = resolved(g, ws)
+
+    entry = r.plan.entry("foo")
+    assert r.enabled["foo"] is True and (sentinels / "foo").exists()
+    assert entry.state == "failed" and entry.reason == (
+        f"invalid settings — `foo:` in {ws / 'config.yaml'} must be a mapping of settings, not int")
+    assert r.problems() == [f"plugin foo: {entry.reason}"] and r.warnings == ()
+
+
+def test_a_non_mapping_agent_section_is_invalid_settings(layers) -> None:
+    g, ws = layers
+    write_folder_plugin(g, "foo")
+    _write_yaml(g / "overrides.yaml", {"foo": {"enabled": True}})
+    _write_yaml(g / "agents" / "helper.yaml", {"name": "helper", "role": "helps", "foo": 5})
+    loader = ConfigLoader(config_dir=g, local_config_dir=ws)
+    loader.load_agent("helper")
+
+    entry = resolve(loader, agent_name="helper").plan.entry("foo")
+
+    assert (entry.state, entry.reason) == (
+        "failed", "invalid settings — `agent.foo:` must be a mapping of settings, not int")
 
 
 # --------------------------------------------------------------------------- containment, version
