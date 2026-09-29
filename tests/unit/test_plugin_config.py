@@ -181,12 +181,17 @@ def _agent(g: Path, **extra) -> None:
 
 
 def test_an_agent_plugin_section_loads_and_is_kept(layers, known) -> None:
+    """Kept under the agent's `name:` — what start hands the resolver (agent_config.name) — not
+    under its file stem."""
     g, _ = layers
-    _agent(g, example={"size": 4})
+    _write_yaml(g / "agents" / "helper.yaml",
+                {"name": "helper-agent", "role": "helps", "example": {"size": 4}})
     loader = ConfigLoader(config_dir=g)
 
-    assert isinstance(loader.load_agent("helper"), AgentConfig)
-    assert loader.agent_plugin_sections("helper") == {"example": {"size": 4}}
+    agent = loader.load_agent("helper")
+
+    assert isinstance(agent, AgentConfig) and agent.name == "helper-agent"
+    assert loader.agent_plugin_sections("helper-agent") == {"example": {"size": 4}}
 
 
 def test_the_overlay_agent_section_merges_under_the_agent_file(layers, known) -> None:
@@ -294,12 +299,14 @@ def test_both_workspace_files_are_narrowed_and_global_overrides_may_set_it() -> 
 def test_a_nested_global_only_field_is_narrowed_and_its_siblings_are_not() -> None:
     layers = ({"discord": {"token": "g", "room": "lobby"}}, None,
               {"discord": {"token": "evil", "room": "dev"}}, None)
+    before = copy.deepcopy(layers)
 
     merged, warnings = merge_plugin_layers(
         "dispatch", layers, global_only={"discord.token"}, layer_files=_FILES)
 
     assert merged == {"discord": {"token": "g", "room": "dev"}}
     assert len(warnings) == 1 and "dispatch.discord.token" in warnings[0]
+    assert layers == before, "a nested drop must copy along the path, not edit the cached source"
 
 
 def test_a_workspace_cannot_replace_the_subtree_that_holds_a_global_only_field() -> None:
