@@ -637,3 +637,26 @@ async def test_build_messages_caps_protected_burst():
             and not (m.get("content") or "").startswith(_TOOL_STUB_PREFIX)]
     assert len(full) == 1
     assert full[0]["content"].startswith("B" * 12_000)  # newest; out-of-view note may ride on it
+
+
+async def test_bench_evicts_through_the_scenario_registrys_declarations():
+    """The bench's ContextManager is built BEFORE its scenario registry (bench/runner.py), so its
+    lookup is late-bound: it must answer from the registry the scenario actually runs with."""
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import LimitsSpec, ScenarioSpec, SuccessCriteria
+    from localharness.core.events import BudgetSpec
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    base = ToolRegistry()
+    await register_builtin_tools(base, memory_store=object(), eviction_store=ContentStore())
+    scen = ScenarioSpec(
+        name="origin-wiring", prompt="x", success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(), limits=LimitsSpec(), tools_allowed=["bash_exec", "tool_result_get"],
+        slice="train", category="tool_basics",
+    )
+    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen,
+                                                base_registry=base)
+    assert loop._ctx._eviction_store is not None, "premise: this scenario can restore, so it evicts"
+    assert loop._ctx._result_origin("bash_exec") == "trusted"       # declared, and in the scenario
+    assert loop._ctx._result_origin("memory_search") == "untrusted"  # not in the scenario: unknown

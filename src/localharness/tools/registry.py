@@ -3,7 +3,7 @@ import difflib
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import FieldInfo
@@ -236,6 +236,12 @@ class ToolRegistry:
     def global_schemas(self) -> list[ToolSchema]:
         """Every global-scope tool's live schema — what the root capability floor reads."""
         return [tool.info() for tool in self._tools["global"].values()]
+
+    def result_origin(self, name: str) -> Literal["untrusted", "trusted"]:
+        """What the context store marks an evicted body of `name` (SAFE-03): the tool's declared
+        result_origin; a name no registered tool answers to fails closed (untrusted)."""
+        schema = self.schema_of(name)
+        return schema.result_origin if schema is not None else "untrusted"
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [
