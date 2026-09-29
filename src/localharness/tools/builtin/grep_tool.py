@@ -78,6 +78,7 @@ class GrepTool(Tool):
         return ToolSchema(
             name="grep",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Search LOCAL FILE contents on disk for a regex pattern. Returns matching "
                 "lines with file path and line number. Searches recursively if path is a "

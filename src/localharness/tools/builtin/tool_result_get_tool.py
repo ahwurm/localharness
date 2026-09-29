@@ -19,6 +19,7 @@ class ToolResultGetTool(Tool):
         return ToolSchema(
             name="tool_result_get",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Restore the full body of a previously evicted tool result. When you see a "
                 "stub like \"[tool result evicted — <tool> <argument> — ~N tokens — call "

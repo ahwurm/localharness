@@ -47,6 +47,7 @@ class ReadTool(Tool):
         return ToolSchema(
             name="read",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Read file contents. Returns the file as a string with line numbers "
                 "prepended (format: 'N\\t<line>'). Supports optional line range. Refuses "

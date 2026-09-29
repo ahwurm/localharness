@@ -30,6 +30,7 @@ class PythonExecTool(Tool):
         return ToolSchema(
             name="python_exec",
             group="code",
+            gate_family="code", ingest="none", host="dangerous", result_origin="trusted",
             description=(
                 "Execute Python in a STATEFUL REPL. The namespace PERSISTS across calls "
                 "this session — variables, imports, and function definitions you create "
