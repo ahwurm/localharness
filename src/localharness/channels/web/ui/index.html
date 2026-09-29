@@ -758,12 +758,14 @@ function renderObservation(d, child) {
   // image_id field (server-minted, shape-checked again here), never by sniffing output text
   // for paths or markup — that sniff would reopen exactly the injection hole Rule 3 closes.
   // The URL is built from the validated id; the enrolment cookie authenticates the request.
+  // Appended to the ROW, not the breakout: the picture IS the result, and a details fold
+  // hid it entirely on the phone (owner report 2026-09-28) — text stays foldable, art doesn't.
   if (typeof d.image_id === "string" && /^img-\d{8}-\d{6}-[0-9a-f]{6}$/.test(d.image_id)) {
     const img = el("img", "genimg");
     img.src = "/api/images/" + d.image_id;
     img.alt = "generated image " + d.image_id;
     img.loading = "lazy";
-    home.appendChild(img);
+    target.appendChild(img);
   }
   if (d.truncated) home.appendChild(el("div", "meta",
     "truncated from " + (d.original_length ?? "?") + " chars — the full body is not on the bus at all"));
