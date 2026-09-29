@@ -292,6 +292,7 @@ class _Reader(Tool):
             description="Read something.",
             parameters={"type": "object", "properties": {}, "required": []},
             group="fs.read",
+            gate_family="allow",
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

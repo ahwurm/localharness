@@ -35,6 +35,7 @@ from localharness.agent.gate_types import (
     Verdict,
 )
 from localharness.agent.verdict import GateContext, derive_boundary, evaluate
+from localharness.tools.base import GateFamily
 
 # ------------------------------------------------------------------ constants
 
@@ -82,17 +83,18 @@ REPLAY_PROVENANCE = "replay"
 the durable store (`config/grants.py`) — the replay is read-only by construction — but `Grant`
 requires provenance (PRD §3.3), so it gets provenance that says what it is."""
 
-BUILTIN_TOOL_GROUPS: Mapping[str, str] = {
-    "read": "fs.read", "glob": "fs.read", "grep": "fs.read", "load_document": "fs.read",
-    "chunk": "fs.read", "tool_result_get": "fs.read",
-    "write": "fs.write", "edit": "fs.write",
+BUILTIN_TOOL_FAMILIES: Mapping[str, GateFamily] = {
+    "read": "allow", "glob": "allow", "grep": "allow", "load_document": "allow",
+    "chunk": "allow", "tool_result_get": "allow",
+    "write": "write", "edit": "write",
     "bash_exec": "shell",
     "python_exec": "code", "cruncher_exec": "code",
     "agent": "delegate",
-    "web_search": "web", "web_fetch": "web", "web_page_query": "web",
-    "memory_search": "memory", "memory_get": "memory", "remember": "memory",
+    "web_search": "network", "web_fetch": "network", "web_page_query": "network",
+    "memory_search": "allow", "memory_get": "allow", "remember": "allow",
 }
-"""`ToolSchema.group` for each builtin (A3's taxonomy, PRD §6), read off the builtin schemas.
+"""Each builtin schema's declared `gate_family` (SAFE-01), pinned equal to the live declarations
+by tests/unit/test_tool_declarations.py.
 
 A trace records a tool's NAME, not its schema, so the replay has to reconstruct the `ToolMeta`
 the live gate gets from the registry. Names the live gate knows by name (`write`, `bash_exec`,
@@ -190,13 +192,14 @@ def tool_meta_for(tool_name: str) -> ToolMeta:
     """The `ToolMeta` the live gate would hold for this tool, reconstructed from its name.
 
     MCP tools are `server__tool` (`tools/mcp.py:63`) and are marked destructive by their schema,
-    so they replay as the `mcp` class. A name this function does not recognize lands at group
-    `other`, which the verdict treats as the ALLOW tier — an honest undercount for a plugin tool
-    in an old trace, and the reason the report prints how many names it did not know.
+    so they replay as the `mcp` class. A name this function does not recognize has no declared
+    family, so it replays as `tool-unfamiliar` (a once-per-workspace ask) — what the live gate does
+    with an undeclared tool, though a plugin tool that DID declare a family is replayed stricter
+    than it ran; the report prints how many names it did not know.
     """
-    group = BUILTIN_TOOL_GROUPS.get(tool_name)
-    if group is not None:
-        return ToolMeta(group=group)
+    family = BUILTIN_TOOL_FAMILIES.get(tool_name)
+    if family is not None:
+        return ToolMeta(gate_family=family)
     if MCP_NAME_SEPARATOR in tool_name:
         server = tool_name.split(MCP_NAME_SEPARATOR, 1)[0]
         return ToolMeta(group=f"mcp/{server}", is_mcp=True, mcp_server=server, destructive=True)
@@ -401,7 +404,7 @@ def summarize_from_replay(
         calls = 0
         for tool_name, params in tool_calls(session):
             calls += 1
-            if tool_name not in BUILTIN_TOOL_GROUPS and MCP_NAME_SEPARATOR not in tool_name:
+            if tool_name not in BUILTIN_TOOL_FAMILIES and MCP_NAME_SEPARATOR not in tool_name:
                 unknown.add(tool_name)
             result = evaluate(tool_name, params, tool_meta_for(tool_name), ctx, gate_settings)
             if result.verdict is not Verdict.ASK or result.request is None:
