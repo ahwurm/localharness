@@ -278,6 +278,9 @@ def test_each_api_name_is_defined_exactly_once():
     ]
     expected = {n: ["plugins/api.py"] for n in once_in_api}
     expected |= {"BUILTIN_PLUGINS": ["plugins/builtin.py"], "bundled_plugins": ["plugins/builtin.py"]}
+    # PAPI-02/PAPI-10: ArtifactRef lives in core/events.py, beside the one id shape and allowlist.
+    expected |= {n: ["core/events.py"] for n in ("ArtifactRef", "ARTIFACT_ID_RE", "ARTIFACT_MIMES")}
+    expected |= {n: ["core/artifacts.py"] for n in ("artifact_root", "mint_artifact_id", "write_artifact")}
     assert {n: found.get(n) for n in expected} == expected
 
 
