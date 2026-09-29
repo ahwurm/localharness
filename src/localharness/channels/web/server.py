@@ -654,16 +654,16 @@ class WebServer:
     async def protocol(self, request: Request) -> Response:
         """The contract, served from the same places the code reads it from.
 
-        `commands[]` comes from the REPL's own table and `modes[]` from the gate's own mode list
-        rather than being hardcoded here: a one-thumb mode chip or command menu that duplicates
-        those lists client-side is exactly the drift the generated event schema exists to
-        prevent.
+        `commands[]` comes from the REPL's own slash table, read live (plugin rows included), and
+        `modes[]` from the gate's own mode list, rather than being hardcoded here: a one-thumb mode
+        chip or command menu that duplicates those lists client-side is exactly the drift the
+        generated event schema exists to prevent.
         """
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
         from localharness.agent.gate import MODE_STRICTNESS
-        from localharness.cli.slash_commands import SLASH_COMMANDS
+        from localharness.cli.slash_commands import all_rows
 
         return _json({
             "protocol_version": PROTOCOL_VERSION,
@@ -675,7 +675,7 @@ class WebServer:
             "verbs": [
                 {"method": m, "path": p, "note": n} for m, p, n in _VERBS
             ],
-            "commands": [{"name": n, "description": d} for n, d in SLASH_COMMANDS],
+            "commands": [{"name": n, "description": d} for n, d in all_rows()],
             "modes": sorted(MODE_STRICTNESS, key=lambda m: MODE_STRICTNESS[m]),
             "intents": sorted(INTENTS),
             "default_mid_turn_intent": DEFAULT_MID_TURN_INTENT,

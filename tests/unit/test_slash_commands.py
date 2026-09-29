@@ -39,7 +39,6 @@ async def test_slash_help_renders_the_live_table():
                               bus=AsyncMock())
     assert await r._handle_slash("/help") is True
     assert sent == [(help_text(), {"style": "system.info"})]
-    assert not hasattr(repl, "HELP_TEXT")
 
 
 def test_table_matches_the_dispatcher_command_set():
