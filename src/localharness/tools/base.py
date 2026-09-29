@@ -58,16 +58,19 @@ class ToolSchema(BaseModel):
     version: str = "1.0.0"
     destructive: bool = False
     # What KIND of thing this tool does, as one dotted name: fs.read, fs.write, shell, code,
-    # delegate, web, memory, or `mcp/<server>` for a discovered MCP tool. The permission gate
-    # keys its ask classes on this rather than on tool names (PRD §3.1), and it is the seed of
-    # the v0.14 exposure taxonomy, where a GROUP — not a tool — is the unit an agent is granted
-    # (PRD §6, .planning/scope-hierarchical-tools-v0.12.md). "other" means unclassified: every
-    # registered builtin names its group, and a test asserts none of them is left at the default.
+    # delegate, web, memory, or `mcp/<server>` for a discovered MCP tool. It is the exposure
+    # taxonomy, where a GROUP — not a tool — is the unit an agent is granted (PRD §6,
+    # tools/registry.py), the ACP tool kind (channels/acp.py) and the `mcp/` marker. It is NOT a
+    # permission-gate input: the gate reads `gate_family` below. "other" means unclassified:
+    # every registered builtin names its group, and a test asserts none is left at the default.
     group: str = "other"
     # What the safety model reads instead of a tool's NAME (SAFE-01). Every default FAILS CLOSED:
     # a tool that declares nothing is treated as ingesting attacker-controllable content, able to
     # change the host, returning untrusted results, and in no gate family (asked about in
     # `guarded`). Never provenance: which plugin contributed a tool is not a safety input (CORE-04).
+    # Readers: the permission gate classifies by `gate_family` (agent/verdict.py `_kind`); the
+    # capability floor and the context store still read today's name sets, which every builtin's
+    # declaration matches (the oracle in tests/unit/test_tool_declarations.py).
     # `exclude=True` keeps all five out of `model_dump()`, which is what
     # `provider/client._tools_to_api_format` puts on the wire and the chat template renders into
     # the prompt (measured on the served model: +32 tokens per tool) — harness metadata, not

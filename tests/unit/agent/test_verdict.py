@@ -39,7 +39,7 @@ SETTINGS = GateSettings()
 ALL_MODES = ("guarded", "trusted", "read-only", "unattended")
 WRITE_META = ToolMeta(destructive=True, group="fs.write")
 SHELL_META = ToolMeta(destructive=True, group="shell")
-READ_META = ToolMeta(group="fs.read")
+READ_META = ToolMeta(group="fs.read", gate_family="allow")
 
 
 class LookupSpy:
@@ -398,11 +398,13 @@ def test_read_only_denies_a_shell_write_target_even_when_every_segment_reads(ws,
 @pytest.mark.parametrize(
     "tool_name,params,meta",
     [
-        # R8: `remember` writes the memory store, and its group put it in the read tier, where
-        # the old per-branch check only looked at `destructive` — which it did not set.
-        ("remember", {"name": "x", "content": "y"}, ToolMeta(destructive=True, group="memory")),
+        # R8: `remember` writes the memory store, and its declared family puts it in the read
+        # tier, where the old per-branch check only looked at `destructive` — which it did not set.
+        ("remember", {"name": "x", "content": "y"},
+         ToolMeta(destructive=True, group="memory", gate_family="allow")),
         # R8: `_evaluate_network` had no mode check at all, so a destructive plugin web tool ran.
-        ("deploy_hook", {"url": "https://example.com/deploy"}, ToolMeta(destructive=True, group="web")),
+        ("deploy_hook", {"url": "https://example.com/deploy"},
+         ToolMeta(destructive=True, group="web", gate_family="network")),
         # R8: and a destructive plugin tool in no known family.
         ("deploy", {"target": "prod"}, ToolMeta(destructive=True, group="other")),
     ],
@@ -417,7 +419,7 @@ def test_read_only_denies_every_tool_that_declares_itself_destructive(ws, tool_n
 def test_read_only_still_allows_a_network_read_and_a_memory_read(ws):
     for name, params, meta in [
         ("web_fetch", {"url": "https://example.com"}, ToolMeta(group="web")),
-        ("memory_search", {"query": "x"}, ToolMeta(group="memory")),
+        ("memory_search", {"query": "x"}, ToolMeta(group="memory", gate_family="allow")),
     ]:
         result = evaluate(name, params, meta, make_ctx(ws, mode="read-only"), SETTINGS)
         assert result.verdict is Verdict.ALLOW, name
@@ -640,7 +642,8 @@ def test_network_reads_are_silent_by_default_and_per_host_when_asked_for(ws):
 
 def test_a_search_that_names_no_host_never_asks(ws):
     settings = dataclasses.replace(SETTINGS, ask_network_hosts=True)
-    result = evaluate("web_search", {"query": "acp"}, ToolMeta(group="web"), make_ctx(ws), settings)
+    result = evaluate("web_search", {"query": "acp"}, ToolMeta(group="web", gate_family="network"),
+                      make_ctx(ws), settings)
     assert result.verdict is Verdict.ALLOW
 
 
@@ -652,10 +655,10 @@ def test_read_tier_tools_are_allowed_without_a_grant_lookup(ws):
     assert spy.calls == []
 
 
-def test_an_unknown_tool_is_classified_by_its_group(ws, tmp_path):
+def test_an_unknown_tool_is_classified_by_its_declared_family(ws, tmp_path):
     outside = (tmp_path / "elsewhere").resolve()
     outside.mkdir()
-    meta = ToolMeta(destructive=True, group="fs.write")
+    meta = ToolMeta(destructive=True, group="fs.write", gate_family="write")
     result = evaluate("plugin_writer", {"file_path": str(outside / "f.txt")}, meta, make_ctx(ws), SETTINGS)
     assert result.request.klass == "edit-outside"
 
@@ -855,9 +858,11 @@ def test_an_unfamiliar_tool_can_be_refused_forever(ws):
 
 
 @pytest.mark.parametrize("group", ["fs.read", "memory"])
-def test_the_read_tier_groups_stay_in_the_allow_tier(ws, group):
-    """The group map is closed, so the read families are listed rather than defaulted into."""
-    result = evaluate("some_reader", {"q": "x"}, ToolMeta(group=group), make_ctx(ws), SETTINGS)
+def test_the_read_tier_declared_family_stays_in_the_allow_tier(ws, group):
+    """The read tier is DECLARED (`gate_family="allow"`), never defaulted into: the group is
+    exposure taxonomy only, and a tool that declares no family is unfamiliar instead."""
+    result = evaluate("some_reader", {"q": "x"}, ToolMeta(group=group, gate_family="allow"),
+                      make_ctx(ws), SETTINGS)
     assert result.verdict is Verdict.ALLOW
 
 
