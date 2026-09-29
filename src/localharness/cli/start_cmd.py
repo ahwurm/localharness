@@ -1028,10 +1028,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 division_id=agent_config.division or "default",
                 org_id="default",
                 # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md
-                # and GUARDRAILS.md never do — the safety voice is the org's, and a workspace must
-                # not be able to rewrite or blank it. That invariant is why these are two separate
-                # inputs: the safety context always reads from the global layer, whatever state_dir
-                # points at.
+                # never does — the safety voice is the org's, and a workspace must not be able to
+                # rewrite or blank it. That invariant is why these are two separate inputs: the
+                # safety context always reads from the global layer, whatever state_dir points at.
+                # (GUARDRAILS.md is read by core, not here — see AgentLoop's guardrails_path below.)
                 base_dir=str(state_dir),
                 global_base_dir=str(cfg_path),
                 bus=bus,
@@ -1450,6 +1450,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             kill_file_path=kill_file_path,
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
+            # SAFE-04: core reads the org guardrails every turn, memory on or off. `cfg_path` is the
+            # always-global config dir — the same global-only primitive MemoryStore's
+            # global_base_dir receives and the plugin context's paths.global_config_dir will carry;
+            # "default" is the org id the store is built with. A workspace can neither rewrite nor
+            # blank the org's safety voice.
+            guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
         )
         if acp_channel is not None:
             # Built at the ACP handshake (it had to answer `initialize` before any of this

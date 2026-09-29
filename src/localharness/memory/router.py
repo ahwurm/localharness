@@ -88,7 +88,7 @@ _MERGED_GLOBAL_SESSION_HISTORY = 0
 # What the model is told when the second store cannot be read (v0.13 B4). ONE line, and it says
 # which half is missing: silence would read as "there is no global memory", a different and
 # false statement, and a raised exception would take a healthy session's own memory — and the
-# org guardrails riding in the same context object — down with a store it does not own.
+# division context riding in the same context object — down with a store it does not own.
 _GLOBAL_UNAVAILABLE = (
     "## Global Memory unavailable this turn — it could not be read, so nothing from the "
     "machine-global store is included."
@@ -243,8 +243,8 @@ class RecallRouter:
         if index_mode:
             # The primary's index is rendered twice here (once inside load_context above for the
             # safety-context fields and the true fact_count, once labelled below). Two local
-            # SQLite SELECTs; the alternative — reaching past load_context for guardrails,
-            # division and the count — trades a measurable cost for an unmeasurable one.
+            # SQLite SELECTs; the alternative — reaching past load_context for the division
+            # context and the count — trades a measurable cost for an unmeasurable one.
             ws_md, ws_ids = await self._primary._render_memory_index_with_ids(
                 max_session_history, max_chars=max_chars, origin_label=ORIGIN_WORKSPACE
             )
@@ -277,25 +277,25 @@ class RecallRouter:
         except Exception as exc:
             return self._degraded_merge(ws_ctx, exc)
         merged_md = f"{_MERGED_PREAMBLE}{ws_md}\n\n{_MERGED_HEADER}\n\n{g_md}"
-        # guardrails/division come from ws_ctx UNCHANGED: both stores derive them from the same
+        # The division context comes from ws_ctx UNCHANGED: both stores derive it from the same
         # global_base_dir, so concatenating would inject the org's safety voice twice (Pitfall 3).
         return replace(
             ws_ctx,
             agent_memory_md=merged_md,
             fact_count=ws_ctx.fact_count + len(g_ids),
-            token_estimate=len(merged_md + ws_ctx.division_md + ws_ctx.guardrails_md) // 4,
+            token_estimate=len(merged_md + ws_ctx.division_md) // 4,
             injected_fact_ids=ws_ids,
         )
 
     def _degraded_merge(self, ws_ctx: Any, exc: Exception) -> Any:
         """`both`, minus the half that failed: this project's own memory, its own injected ids
-        and the org safety context, plus the one line that says the rest is missing."""
+        and the division context, plus the one line that says the rest is missing."""
         log.warning("machine-global memory unavailable, reading this project's only: %r", exc)
         md = f"{ws_ctx.agent_memory_md}\n\n{_GLOBAL_UNAVAILABLE}"
         return replace(
             ws_ctx,
             agent_memory_md=md,
-            token_estimate=len(md + ws_ctx.division_md + ws_ctx.guardrails_md) // 4,
+            token_estimate=len(md + ws_ctx.division_md) // 4,
         )
 
     async def _degraded_global_only(
@@ -303,8 +303,8 @@ class RecallRouter:
         max_chars: int = 16_000,
     ) -> Any:
         """`global` scope, minus the only store it may read. The primary's context supplies the
-        SAFETY fields — both stores derive division/guardrails from the same global_base_dir,
-        so this is the same text the global store would have returned — and nothing else:
+        division context — both stores derive it from the same global_base_dir, so this is
+        the same text the global store would have returned — and nothing else:
         substituting this project's facts would be the knob quietly reversing itself."""
         log.warning("machine-global memory unavailable under recall_scope: global: %r", exc)
         ws_ctx = await self._primary.load_context(
@@ -315,9 +315,7 @@ class RecallRouter:
             agent_memory_md=_GLOBAL_UNAVAILABLE,
             fact_count=0,
             injected_fact_ids=[],
-            token_estimate=len(
-                _GLOBAL_UNAVAILABLE + ws_ctx.division_md + ws_ctx.guardrails_md
-            ) // 4,
+            token_estimate=len(_GLOBAL_UNAVAILABLE + ws_ctx.division_md) // 4,
         )
 
     async def query_facts(self, query: Any) -> list[Any]:
