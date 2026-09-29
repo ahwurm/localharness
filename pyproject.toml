@@ -121,6 +121,18 @@ Documentation = "https://localharness.dev"
 Repository = "https://github.com/ahwurm/localharness"
 Issues = "https://github.com/ahwurm/localharness/issues"
 
+[dependency-groups]
+# The example plugin (examples/plugin-template/) installed as a REAL distribution, so the suite proves
+# discovery through the unmocked importlib.metadata (ENAB-06, DOCS-05). A dependency GROUP rather
+# than the `dev` extra on purpose: extras are published in the wheel's metadata, and a
+# `Requires-Dist: <this name>; extra == "dev"` line would send `pip install "localharness[dev]"` to
+# PyPI for a name anyone could register. Groups are never published, and `uv sync --extra dev`
+# still installs this one — uv syncs the `dev` group by default.
+dev = ["localharness-plugin-example"]
+
+[tool.uv.sources]
+localharness-plugin-example = { path = "examples/plugin-template", editable = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
