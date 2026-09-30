@@ -272,19 +272,25 @@ def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
     for warning in resolution.warnings:
         console.print(_WARN + " " + escape(warning), soft_wrap=True)
     for row in rows:
-        for check in row.checks:
-            console.print(_CHECK_GLYPH[check.status] + escape(
-                check.name + (f": {check.detail}" if check.detail else "")), soft_wrap=True)
-            if check.hint:
-                console.print(escape(f"       {check.hint}"), soft_wrap=True)
-            if check.status == "fail":
-                failures.append(f"plugin-{row.name}")
-        if row.state == "on":
-            continue
-        console.print(_ROW_GLYPH.get(row.state, _FAIL + " ") + escape(f"{row.name}: {row.detail}"),
-                      soft_wrap=True)
-        if row.state not in _ROW_GLYPH:
+        print_plugin_row(row, failures)
+
+
+def print_plugin_row(row, failures: list[str]) -> None:
+    """One plugin's doctor lines — its checks (hint on the next line) or its state row. Shared with
+    `plugins enable`, so the check it runs after setup prints exactly as doctor prints it."""
+    for check in row.checks:
+        console.print(_CHECK_GLYPH[check.status] + escape(
+            check.name + (f": {check.detail}" if check.detail else "")), soft_wrap=True)
+        if check.hint:
+            console.print(escape(f"       {check.hint}"), soft_wrap=True)
+        if check.status == "fail":
             failures.append(f"plugin-{row.name}")
+    if row.state == "on":
+        return
+    console.print(_ROW_GLYPH.get(row.state, _FAIL + " ") + escape(f"{row.name}: {row.detail}"),
+                  soft_wrap=True)
+    if row.state not in _ROW_GLYPH:
+        failures.append(f"plugin-{row.name}")
 
 
 def doctor(
