@@ -1337,7 +1337,8 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from localharness.core.events import Action, ArtifactRef, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from pydantic import ValidationError
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
 
         budget = BudgetTracker(
@@ -2116,6 +2117,7 @@ class AgentLoop:
                 is_error = False
                 result_truncated = False
                 original_length: int | None = None
+                artifact: ArtifactRef | None = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2137,6 +2139,14 @@ class AgentLoop:
                         if result.success and result.truncated:
                             result_truncated = True
                             original_length = result.original_length
+                        # The one place a ToolResult becomes an Observation: a typed artifact rides
+                        # the wire only after validation; anything else a tool puts there is dropped.
+                        raw = result.metadata.get("artifact") if result.success else None
+                        if raw is not None:
+                            try:
+                                artifact = ArtifactRef.model_validate(raw)
+                            except (ValidationError, TypeError, ValueError):
+                                log.debug("dropped invalid artifact metadata from %s", tool_call.name)
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -2164,6 +2174,7 @@ class AgentLoop:
                     truncated=result_truncated,
                     original_length=original_length if result_truncated else len(result_content),
                     error=result_content if is_error else None,
+                    artifact=artifact,
                 ))
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)

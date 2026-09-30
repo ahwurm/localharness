@@ -37,9 +37,8 @@ artifact route serves (anything else is 415), with the suffix core writes for ea
 class ArtifactRef(BaseModel):
     """A typed reference to one file a plugin produced (PAPI-10, decision 13).
 
-    NOT an event and not in EVENT_TYPE_MAP, so the web protocol snapshot does not move. Carrying it
-    on Observation is the image conversion's protocol bump, not this change. `plugin` reaches the
-    phone's artifact URL just as `id` does, so it is held to the plugin-name rule."""
+    Carried on Observation.artifact since web protocol v4. `plugin` reaches the phone's artifact
+    URL just as `id` does, so it is held to the plugin-name rule."""
 
     model_config = ConfigDict(frozen=True)
     plugin: str
@@ -245,10 +244,11 @@ class Observation(BaseEvent):
     original_length: Optional[int] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
-    # Never-released image-artifact id (the loop no longer fills it); kept one protocol version
-    # so the current wire snapshot still matches, replaced by the typed `artifact` field.
-    # Additive/default-None: every existing construction and every replayed JSONL line stays valid.
-    image_id: Optional[str] = None
+    # v4 (channels/web/protocol.py): a file a plugin tool produced, validated by the loop from
+    # ToolResult.metadata["artifact"]. The page builds /api/artifacts/<plugin>/<id> from it and
+    # never from output text. Additive/default-None: every replayed JSONL line stays valid; an older
+    # line carrying the unreleased v2 image field loads (unknown keys are ignored) and shows no picture.
+    artifact: Optional[ArtifactRef] = None
 
 
 class DelegationRequest(BaseEvent):
