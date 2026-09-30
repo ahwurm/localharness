@@ -10,6 +10,7 @@ one immutable file, so it is cached as immutable.
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 
@@ -69,11 +70,15 @@ async def test_a_plugin_that_is_not_on_404s_without_touching_any_filesystem(tmp_
     def touched(*_a, **_k):
         raise AssertionError("the route touched the filesystem for a plugin that is not on")
 
+    def on_this_thread(real):  # the app runs on this thread; other threads keep the real call
+        here = threading.get_ident()
+        return lambda *a, **k: touched() if threading.get_ident() == here else real(*a, **k)
+
     with monkeypatch.context() as spies:  # only around the requests: teardown may stat freely
         spies.setattr(server_mod, "_find_artifact", touched)
         spies.setattr(auth, "confine", touched)
         for name in ("stat", "lstat", "listdir", "scandir"):
-            spies.setattr(os, name, touched)
+            spies.setattr(os, name, on_this_thread(getattr(os, name)))
         statuses = [(await client.get(f"/api/artifacts/{plugin}/{ref.id}", headers=BEARER)).status_code
                     for plugin in ("image", "Example")]
     assert statuses == [404, 404]
