@@ -67,22 +67,12 @@ class HookSystem:
     def __init__(self) -> None:
         self.pm = pluggy.PluginManager("localharness")
         self.pm.add_hookspecs(HarnesHookSpec)
-        self._loaded_plugins: list[str] = []
 
     def register_plugin(self, plugin: object, name: str | None = None) -> None:
         """Register a hook implementation object (dedup-safe). Pass `name` — a plugin passes its own
         plugin name — so a hook that raises is reported under it rather than an object id."""
         if not self.pm.is_registered(plugin):
             self.pm.register(plugin, name=name)
-
-    # register_impl and loaded_plugin_names are removed with their last readers (start_cmd verbose
-    # line, catalogue hooks source).
-    def register_impl(self, instance: object, name: str) -> None:
-        """Register a hook implementation by name (used by PluginLoader)."""
-        if self.pm.is_registered(instance):
-            return
-        self.pm.register(instance, name=name)
-        self._loaded_plugins.append(name)
 
     def _call_each(self, hook_name: str, *, veto: bool, **kwargs: Any) -> None:
         """Call every implementation of `hook_name` separately (PAPI-11): an exception is caught and
@@ -127,7 +117,3 @@ class HookSystem:
 
         registry.register_pre_hook(pre_hook_caller)
         registry.register_post_hook(post_hook_caller)
-
-    @property
-    def loaded_plugin_names(self) -> list[str]:
-        return list(self._loaded_plugins)

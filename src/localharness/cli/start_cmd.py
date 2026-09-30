@@ -57,6 +57,16 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
+def _available_hint(names: list[str]) -> str:
+    """ENAB-04 / PRD §4: nothing runs because it was installed, and the operator is told how to turn
+    it on — once, at start."""
+    if len(names) == 1:
+        return (f"i 1 plugin available, not enabled: {names[0]} — run "
+                f"`localharness plugins enable {names[0]}` to turn it on")
+    return (f"i {len(names)} plugins available, not enabled: {', '.join(names)} — run "
+            f"`localharness plugins enable <name>` to turn one on")
+
+
 def _agent_roster_table(agents: list[dict[str, Any]]) -> Table:
     """The --subagents picker roster, with each agent NAME in the agent entity color.
 
@@ -1227,7 +1237,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # here, after every global tool is registered, because a declaration can only be read off a
         # registered tool. MCP tools (step 6) keep today's rule: checked by the chokepoint, not stripped.
         from localharness.tools.capabilities import apply_root_capability_floor
-        apply_root_capability_floor(agent_config.tools, tool_registry.global_schemas())
+        _global = {s.name: s for s in tool_registry.global_schemas()}
+        for _name in apply_root_capability_floor(agent_config.tools, _global.values()):
+            # A plugin tool the root cannot hold is named, not silently missing. Core's web verbs
+            # are stripped the same way by design (the root delegates ingestion) and say nothing.
+            if (_plugin := _global[_name].source_plugin) is not None:
+                _why = ("it declares ingest: untrusted" if "ingest" in _global[_name].model_fields_set
+                        else "it declares no ingest, which counts as ingest: untrusted")
+                warnings.append(f"capability floor: the root agent does not hold {_name} (plugin "
+                                f"{_plugin}) — {_why}; delegate to an agent without host tools")
 
         # --- 6. MCP client manager (soft) ---
         mcp_manager: MCPClientManager | None = None
@@ -1571,6 +1589,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # summary and reported nothing. Amber is the site's warning tone.
             summary_line += " " + entity("warning", f"[{'; '.join(warnings)}]")
         console.print(summary_line, soft_wrap=True)
+        if plugin_result is not None and plugin_result.running:
+            console.print("  " + entity("tool", "Plugins: " + ", ".join(plugin_result.loaded_names)),
+                          soft_wrap=True)
+        if plugin_resolution is not None:
+            available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
+            if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)
+                console.print(Text(_available_hint(available)), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
@@ -1580,9 +1605,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if mcp_manager and mcp_manager.connected_servers:
                 for srv in mcp_manager.connected_servers:
                     console.print("  " + entity("tool", f"MCP: {srv}"), soft_wrap=True)
-            if plugins_loaded > 0 and hook_system:
-                for pname in hook_system.loaded_plugin_names:
-                    console.print("  " + entity("tool", f"Plugin: {pname}"), soft_wrap=True)
             tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
             console.print("  " + entity("tool", f"Tools: {tool_count} total"))
             if memory_store:

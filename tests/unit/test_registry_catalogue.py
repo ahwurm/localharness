@@ -154,8 +154,9 @@ def test_catalogue_tool_registry_descriptions(components_home):
 
 
 def test_the_dead_hooks_source_is_gone(components_home):
-    """`hooks.<name>.config` rows came from HookSystem.loaded_plugin_names, whose only writer had no
-    real caller (44-13). No such row appears; `org.hooks` still covers the hook_config family."""
+    """`hooks.<name>.config` rows came from HookSystem's list of loaded hook plugins, whose only
+    writer had no real caller (44-13; the list itself went in 44-14). No such row appears;
+    `org.hooks` still covers the hook_config family."""
     import inspect
 
     from localharness.registry.catalogue import SURFACE_FAMILIES, build_catalogue

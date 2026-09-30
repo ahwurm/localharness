@@ -379,22 +379,38 @@ async def test_the_banner_names_the_loaded_plugins_right_after_the_summary(tmp_p
     assert printed[i + 1] == "  " + entity("tool", "Plugins: probe, settled")
 
 
+class _ImportSpy:
+    """First on sys.meta_path: records every module name an import ASKS for, found or not. An import
+    of a module that does not exist leaves nothing in sys.modules, so only the asking shows it."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+        self.asked.append(name)
+        return None
+
+
 async def test_one_available_plugin_gets_the_exact_enable_command(tmp_path, monkeypatch):
     """ENAB-04 / PRD §4: an installed plugin that is not enabled is named once, with the command that
-    turns it on, and is never imported."""
+    turns it on, and nothing tries to import it."""
     from localharness.cli.start_cmd import _start_async
 
     printed = _capture_start_console(monkeypatch)
     _stub_start_boundaries(tmp_path, monkeypatch)
     _discovers(monkeypatch, "lh-exa")
+    spy = _ImportSpy()
+    monkeypatch.setattr(sys, "meta_path", [spy, *sys.meta_path])
 
     await _start_async(None, False, False, str(tmp_path))
 
     assert ("i 1 plugin available, not enabled: lh-exa — run `localharness plugins enable lh-exa` "
             "to turn it on") in printed
-    assert "lh_exa" not in _summary(printed) and "lh-exa" not in _summary(printed), \
-        "nothing may have tried to import it"
-    assert "lh_exa" not in sys.modules
+    assert "lh_exa" not in spy.asked, "an available plugin must never be imported"
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lh_exa_premise")
+    assert spy.asked[-1] == "lh_exa_premise", "premise: the spy sees an import that is attempted"
+    assert "lh_exa" not in _summary(printed) and "lh-exa" not in _summary(printed)
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete"
 
