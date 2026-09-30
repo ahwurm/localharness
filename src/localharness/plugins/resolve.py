@@ -86,7 +86,8 @@ def resolve(loader: ConfigLoader, *, agent_name: str | None = None, version: str
        reason in the plan, never an error for the harness.
     5. The plan, pure, against `version` (default: this package's own version).
     6. Warnings in the order met, each once, and never a line problems() already says — so an off
-       plugin's invalid settings are a warning, an on plugin's are its reason in the plan.
+       plugin's invalid settings are a warning, an on plugin's are its reason in the plan. Plugins
+       built for the 0.15 API come first (discovery.legacy_notices), named and never loaded.
 
     `agent_name` is the `name:` of an agent this loader has already loaded; None: no agent, and
     each AgentConfigModel validates empty (its defaults).
@@ -100,7 +101,7 @@ def resolve(loader: ConfigLoader, *, agent_name: str | None = None, version: str
         core_keys)
     admitted_bundled = [c for c, why in zip(bundled, refusals) if why is None]
     admitted_found = [d for d, why in zip(found, refusals[len(bundled):]) if why is None]
-    warnings: list[str] = []
+    warnings: list[str] = discovery.legacy_notices(loader.global_config_dir)
 
     def merged(name: str, global_only: frozenset[str]) -> dict[str, Any]:
         section, dropped = merge_plugin_layers(name, layers.get(name, (None,) * 4),
