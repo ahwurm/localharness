@@ -119,6 +119,7 @@ vLLM, llama.cpp and Ollama must all work out of the box harness-wide:
 - [mac-mini.md](mac-mini.md) — architecture B, proposed config + validation checklist
 - [rtx-4060.md](rtx-4060.md) — architecture C, 8 GB consumer GPU, proposed config + validation checklist
 - [gaps.md](gaps.md) — development items blocking out-of-box support for all three
+- [image-generation.md](image-generation.md) — the image plugin: ComfyUI setup, settings, and the Qwen-Image-2.1 reference model
 
 ---
 

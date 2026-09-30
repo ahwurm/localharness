@@ -91,8 +91,9 @@ deny patterns remain the mechanism that stops specific actions.
 
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
-treated differently, it says so below. (No feature ships as a plugin yet: everything that comes
-with LocalHarness is still built into its core.)
+treated differently, it says so below. (Image generation is the one feature that ships as a
+plugin, off until you turn it on; everything else that comes with LocalHarness is still built
+into its core.)
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
