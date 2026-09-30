@@ -378,6 +378,11 @@ def doctor(
     if configured:
         try:
             harness = loader.load_harness()
+            # QA-16: `start` refuses a root agent whose file will not load, so "valid" must cover
+            # the agent it would run (none discovered is a fresh install: `start` mints one).
+            if agents := loader.discover_agents():
+                from localharness.cli.start_cmd import default_root_agent
+                loader.load_agent(default_root_agent(agents).get("name", "orchestrator"))
             console.print(f"{_PASS} Config valid")
         except Exception as exc:
             # The message is 43-01's ConfigValidationError and CARRIES THE OWNING FILE'S PATH —
