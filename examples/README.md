@@ -30,8 +30,9 @@ fit together, and the tool model used by `tools.add` / `tools.mcp_servers`.
 ## `plugin-template/`
 
 The copyable plugin. It adds one of each thing a plugin can add: a declared tool that saves an image
-artifact, a command, a slash command, a `doctor` check and its own settings. It is also the fixture
-LocalHarness's tests install and exercise, so it cannot drift from the plugin API.
+artifact, a command, a slash command, a `doctor` check and its own settings. It is also a fixture:
+the development install includes it and LocalHarness's tests exercise it, so it cannot drift from the
+plugin API.
 
 Install it and see it listed — no model server needed:
 

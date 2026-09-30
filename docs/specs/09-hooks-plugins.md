@@ -188,7 +188,7 @@ class HookSystem:
 
 ## Plugins
 
-This section outlines the implemented API. `src/localharness/plugins/api.py` defines every type a plugin touches, once each and with docstrings, and `examples/plugin-template/` is a complete working plugin that the test suite installs and exercises; start there. SECURITY.md ("Plugins") states the trust model. The example imports three LocalHarness modules: `localharness.plugins.api`, `localharness.tools.base` and `localharness.core.artifacts`.
+This section outlines the implemented API. `src/localharness/plugins/api.py` defines every type a plugin touches, once each and with docstrings, and `examples/plugin-template/` is a complete working plugin that the development install includes and the test suite exercises; start there. SECURITY.md ("Plugins") states the trust model. The example imports three LocalHarness modules: `localharness.plugins.api`, `localharness.tools.base` and `localharness.core.artifacts`.
 
 A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` is empty today: no feature ships as a plugin yet.
 
