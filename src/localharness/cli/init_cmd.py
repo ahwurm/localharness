@@ -229,6 +229,22 @@ To write a plugin, copy the example plugin: `examples/plugin-template/` in the L
 repository (https://github.com/ahwurm/localharness/tree/main/examples/plugin-template).
 """
 
+# State the harness writes under a project's .localharness/ stays out of git; the files a team
+# shares (config.yaml, overrides.yaml, agents/*.yaml, plugins/README.md) stay committable.
+WORKSPACE_GITIGNORE = """\
+# LocalHarness state for this project: sessions, memory, logs and generated pictures. Git ignores it.
+# Yours to commit: config.yaml, overrides.yaml, agents/*.yaml, plugins/README.md.
+agents/*/
+artifacts/
+autoresearch/
+audit.jsonl
+.repl_history
+*.db
+*.db-shm
+*.db-wal
+*.log
+"""
+
 
 def _is_the_global_config_dir(target: Path) -> bool:
     """Would scaffolding here write the machine's own config directory?
@@ -383,6 +399,7 @@ def _scaffold_workspace(
         (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
         (target / "plugins").mkdir()
         (target / "plugins" / "README.md").write_text(WORKSPACE_PLUGINS_README, encoding="utf-8")
+        (target / ".gitignore").write_text(WORKSPACE_GITIGNORE, encoding="utf-8")
     except _HANDLED as exc:
         _remove_partial_workspace(target)
         report_filesystem_error(

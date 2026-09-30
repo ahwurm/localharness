@@ -371,6 +371,11 @@ def doctor(
         # command people run to find out where their config comes from. (`[/]` raises outright.)
         console.print(_PASS + " " + escape(f"Workspace layer: {workspace}"), soft_wrap=True)
         console.print(escape(f"       Global layer:    {cfg_path}"), soft_wrap=True)
+        if not (workspace / ".gitignore").exists():
+            console.print(_INFO + "  " + escape(
+                "No .gitignore in this workspace — git may pick up its memory and pictures. Add one "
+                "listing: agents/*/ artifacts/ autoresearch/ audit.jsonl .repl_history *.db* *.log"),
+                soft_wrap=True)
         # The override diff needs a global layer to diff AGAINST. With none, every workspace key
         # would report as an override of nothing, so the honest report is that there is nothing to
         # compare — one line, and the layer rows above already say where the files are (D1).
