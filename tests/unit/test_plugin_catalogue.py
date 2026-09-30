@@ -3,19 +3,30 @@ its ConfigModel (`<name>.*`) and of its AgentConfigModel (`agent.<name>.*`), eac
 `plugin=<name>` and the same layer provenance core rows get — read through the ONE
 `layered_catalogue` that `components`, doctor and `config show` share.
 
+`components list/get/set` then treat those rows like core rows: the `(plugin: <name>)` suffix, a
+`plugin` JSON field, and `set` writing the GLOBAL overrides.yaml only after the plugin's own model
+accepted the value.
+
 `p` is a bundled plugin swapped into BUILTIN_PLUGINS. Folder plugins are 44-09's sentinel writers,
 so "never imported" is observed, not assumed. Entry-point discovery is stubbed to none around the
 REAL folder scan, so the venv's installed example plugin stays out.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from rich.console import Console
+from typer.testing import CliRunner
 
+from localharness.cli import components_cmd
+from localharness.cli.app import app
 from localharness.config.models import HarnessConfig
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import GLOBAL_ONLY, Plugin, PluginManifest
@@ -38,7 +49,7 @@ class PConfig(BaseModel):
 
 
 class PAgentConfig(BaseModel):
-    size: int = Field(8, ge=1)
+    size: int = Field(8, le=64)
 
 
 class P(Plugin):
@@ -192,3 +203,117 @@ def test_core_rows_are_the_same_with_and_without_a_plugin(layers, monkeypatch) -
     assert _row(with_p, "org.log_level") == ("debug", "workspace-config")
     assert len([e for e in with_p.values() if e.plugin]) == 4
     assert [e for e in without.values() if e.plugin] == []
+
+
+# --------------------------------------------------------------------------- components list/get/set
+
+runner = CliRunner()
+
+
+def _cli(*args: str):
+    return runner.invoke(app, ["components", *args])
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_list_suffixes_each_plugin_rows_layer_and_no_core_row(components_home, monkeypatch) -> None:
+    monkeypatch.setattr(components_cmd, "console", Console(width=400))  # no folding: one row, one line
+
+    result = _cli("list")
+
+    assert result.exit_code == 0, result.output
+    suffixed = [line for line in result.stdout.splitlines() if "(plugin: " in line]
+    assert len(suffixed) == 4 and all("(plugin: p)" in line for line in suffixed)
+    assert re.search(r"^│ p\.color +│ str +│ '#4a90d9' +│ default \(plugin: p\) +│$",
+                     "\n".join(suffixed), re.MULTILINE)
+
+
+def test_list_json_carries_the_owning_plugin_and_null_for_core(components_home) -> None:
+    result = _cli("list", "--json")
+
+    assert result.exit_code == 0, result.output
+    rows = {r["path"]: r for r in json.loads(result.stdout)}
+    assert {path: r["plugin"] for path, r in rows.items() if r["plugin"] is not None} == {
+        "p.enabled": "p", "p.color": "p", "p.url": "p", "agent.p.size": "p"}
+    assert all("plugin" in r for r in rows.values()) and rows["provider.default_model"]["plugin"] is None
+
+
+def test_get_prints_a_plugin_settings_value_and_layer(components_home) -> None:
+    result = _cli("get", "p.color")
+
+    assert result.exit_code == 0, result.output
+    assert "p.color = '#4a90d9'" in result.stdout
+    assert "layer:   default (plugin: p)" in result.stdout
+
+
+def test_set_writes_the_global_overrides_and_get_reads_it_back(components_home) -> None:
+    config_before = (components_home / "config.yaml").read_bytes()
+
+    result = _cli("set", "p.color", "#00ff00")
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load((components_home / "overrides.yaml").read_text()) == {"p": {"color": "#00ff00"}}
+    assert (components_home / "config.yaml").read_bytes() == config_before
+    got = json.loads(_cli("get", "p.color", "--json").stdout)
+    assert (got["value"], got["layer"], got["plugin"]) == ("#00ff00", "global-overrides", "p")
+
+
+def test_set_refuses_a_value_the_plugins_model_rejects_and_writes_nothing(components_home) -> None:
+    overrides = components_home / "overrides.yaml"
+    _dump(overrides, {"p": {"color": "#111111"}})
+    before, config_before = _sha(overrides), _sha(components_home / "config.yaml")
+
+    result = _cli("set", "p.color", "red")  # a str, so coercion passes: only PConfig's pattern refuses
+
+    assert result.exit_code == 2, result.output
+    assert "Validation failed" in result.output and "p.color" in result.output
+    assert (_sha(overrides), _sha(components_home / "config.yaml")) == (before, config_before)
+
+
+def test_set_enabled_false_writes_the_switch(components_home) -> None:
+    result = _cli("set", "p.enabled", "false")
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load((components_home / "overrides.yaml").read_text()) == {"p": {"enabled": False}}
+    got = json.loads(_cli("get", "p.enabled", "--json").stdout)
+    assert (got["value"], got["layer"]) == (False, "global-overrides")
+
+
+def test_set_checks_an_agent_level_setting_with_the_plugins_agent_model(components_home) -> None:
+    overrides = components_home / "overrides.yaml"
+    assert _cli("set", "agent.p.size", "4").exit_code == 0
+    assert yaml.safe_load(overrides.read_text()) == {"agent": {"p": {"size": 4}}}
+    before = _sha(overrides)
+
+    result = _cli("set", "agent.p.size", "99")  # an int, so coercion passes: only le=64 refuses
+
+    assert result.exit_code == 2 and "Validation failed" in result.output, result.output
+    assert _sha(overrides) == before
+
+
+def test_a_plugin_validator_that_exits_is_contained_and_nothing_is_written(components_home,
+                                                                           monkeypatch) -> None:
+    """A plugin's own validator raising SystemExit(0) must not end `set` as a silent success."""
+    class ExitsConfig(BaseModel):
+        color: str = "#4a90d9"
+
+        @field_validator("color")
+        @classmethod
+        def _exit(cls, value: str) -> str:
+            if value == "#000000":
+                raise SystemExit(0)
+            return value
+
+    class E(Plugin):
+        manifest = PluginManifest(name="e", version="0.1.0", kind="tools")
+        ConfigModel = ExitsConfig
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (E,))
+
+    result = _cli("set", "e.color", "#000000")
+
+    assert result.exit_code == 2, result.output
+    assert "Validation failed" in result.output and "SystemExit" in result.output
+    assert not (components_home / "overrides.yaml").exists()
