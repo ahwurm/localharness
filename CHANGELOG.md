@@ -131,6 +131,26 @@ Migration.
   forever if one finished just as the wait began. Only a wait with no time
   limit could, and only the test suite waited that way: `localharness web`
   waits with a limit when it shuts down and was not affected.
+- `start` ran the root agent on a bare default config when its agent file
+  would not load, without a word: the file's permission mode, deny patterns,
+  `workspace_root`, budget, MCP servers, memory and context settings were all
+  dropped, so a `read-only` agent ran in `auto`. It now refuses with the
+  loader's error, naming the file and line, and exits 1; `doctor` reports the
+  same error instead of "Config valid". The commonest cause is a removed
+  plugin's `agent.<name>` entry left in `overrides.yaml`. An agent file that
+  still carries a key an earlier release removed (such as
+  `memory.predictive_gate`) now gets that named error where it used to get a
+  silent session.
+- `org.permissions.mode` never reached a session: sessions ran in the agent
+  file's mode, or `auto`, whatever the org said, so `init`'s "No" printed
+  "Read-only sessions" and sessions still ran in `auto`. A session now runs in
+  the agent's own `permissions.mode` when the agent file (or `agent:` in
+  `overrides.yaml`) sets one, else in `org.permissions.mode`, else in `auto`.
+  The workspace trust question, `/mode` and Zed's mode picker all show that
+  mode. When an agent sets a looser mode than the org, it keeps its own and
+  `start` prints one line naming both.
+- A misspelled core key, such as `provder:` for `provider:`, was reported as a
+  removed plugin's leftover section. It now gets "did you mean `provider`?".
 
 ### Migration
 - A plugin written for 0.15 no longer loads, and nothing migrates it for you.
@@ -143,6 +163,10 @@ Migration.
   `<name>:` section is refused like a misspelled key, and
   `localharness plugins list` and `localharness validate` say where each
   leftover is.
+- If you set `org.permissions.mode`, it now applies to every session whose
+  agent file sets no mode. If it is `unattended`, sessions will stop asking:
+  check it before upgrading. A workspace's org mode may only tighten the
+  global one.
 
 ### Known limitations (named, not hidden)
 - No feature ships as a plugin yet: memory, the web channel, Discord and
