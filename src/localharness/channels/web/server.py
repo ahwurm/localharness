@@ -239,6 +239,8 @@ def _unauthorized() -> JSONResponse:
 
 _SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
 """The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
+# The one place the artifact route's caching is decided (a later private mode switches it to no-store).
+ARTIFACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
 
 
 def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
@@ -836,7 +838,7 @@ class WebServer:
         if mime not in ARTIFACT_MIMES:
             return PlainTextResponse("unsupported media type", status_code=415)
         return FileResponse(path, media_type=mime,
-                            headers={"Cache-Control": "private, max-age=31536000, immutable"})
+                            headers={"Cache-Control": ARTIFACT_CACHE_CONTROL})
 
     async def sessions(self, request: Request) -> Response:
         """The history list: every top-level session log on disk, newest first (the drawer behind ☰).
