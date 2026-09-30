@@ -265,6 +265,17 @@ def test_doctor_never_crashes_when_plugins_cannot_be_resolved(cfg, recorded, mon
     assert _plugin_failures(recorded) == ["plugins-unresolved"]
 
 
+def test_an_unreadable_config_is_one_issue_not_two(cfg, recorded) -> None:
+    """Measured on the real binary before this test: the parse error printed twice, 2 issues."""
+    (cfg / "config.yaml").write_text("version: '1'\nprovider: [unclosed\n", encoding="utf-8")
+
+    out = _doctor(cfg)
+
+    assert _section(out) == ["i  Plugins: not checked — the config above could not be read"]
+    assert "config-invalid" in recorded and _plugin_failures(recorded) == [], recorded
+    assert out.count("unclosed") == 1, out  # the parse error is shown once, by the config check
+
+
 # --------------------------------------------------------------------------- the real example plugin
 
 
