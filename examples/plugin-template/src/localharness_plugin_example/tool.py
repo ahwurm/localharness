@@ -27,7 +27,7 @@ def solid_png(size: int, rgb: bytes) -> bytes:
 
 
 class SwatchTool(Tool):
-    """Renders a swatch in the configured color and size, and returns its artifact id."""
+    """Renders a swatch in the configured color and size, and says which file it saved."""
 
     def __init__(self, ctx: PluginContext) -> None:
         self._ctx = ctx
@@ -35,13 +35,17 @@ class SwatchTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="example_swatch",  # one namespace with core's tools: prefix yours with your plugin
-            description="Render a small solid-color swatch image and return its artifact id.",
+            # What the model reads: say what the tool can't do too, so it never offers a color it
+            # cannot draw.
+            description=("Render a small solid-color swatch image and say where it was saved. It "
+                         "takes no arguments: the color is the user's `example.color` setting and "
+                         "the size is `agent.example.size`, both read when the session starts."),
             parameters={"type": "object", "properties": {}, "required": []},
             # The four safety declarations (SAFE-01). Say what the tool does: a tool that says
             # nothing is treated as the riskiest kind on all four.
             ingest="none",            # it reads no outside content
             host="safe",              # it writes only into the directory core assigned it
-            result_origin="trusted",  # its result is text this code wrote from validated settings
+            result_origin="trusted",  # its result: its own text, validated settings, core's path
             gate_family=None,         # no family: asked about once per workspace in `guarded`. A
                                       # plugin you install has its family honoured only if it asks
                                       # at least as often as an undeclared tool would (SAFE-06).
@@ -53,5 +57,8 @@ class SwatchTool(Tool):
             return self.err("no artifact directory was assigned to the example plugin")
         color, size = self._ctx.config.color, self._ctx.agent_config.size
         ref = write_artifact(root, "example", solid_png(size, bytes.fromhex(color[1:])), "image/png")
-        return self.ok(f"Rendered a {size}x{size} {color} swatch: artifact {ref.id}",
-                       artifact=ref.model_dump())
+        # The file write_artifact made, named in full: no screen shows artifacts yet, so this path,
+        # repeated by the model, is how the user finds the swatch.
+        path = (root / f"{ref.id}.png").absolute()
+        return self.ok(f"Rendered a {size}x{size} {color} swatch: artifact {ref.id}, "
+                       f"saved to {path}", artifact=ref.model_dump())
