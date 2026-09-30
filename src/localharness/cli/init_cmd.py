@@ -191,7 +191,12 @@ A plugin adds tools, commands and checks to LocalHarness. There are two ways to 
 LocalHarness loads neither until you turn it on:
 
 1. Install a package that declares a `localharness.plugins` entry point into the same Python
-   environment as LocalHarness (for example `uv pip install <package>`).
+   environment as LocalHarness:
+   - if you installed LocalHarness with `uv tool`, run
+     `uv tool install --with <package> localharness`. Each run replaces the install's plugins and
+     extras with the ones it names, so name your extras too (`'localharness[web]'`) and add a
+     `--with` for every plugin you keep;
+   - in a virtual environment, activate it and run `uv pip install <package>`.
 2. Put a folder here, `plugins/<name>/`, whose `__init__.py` binds the name `plugin` to the
    plugin class.
 
