@@ -1,113 +1,135 @@
-"""generate-image CLI + doctor's image-module line (the module's operator surfaces)."""
+"""`localharness generate-image`: the image plugin's command, mounted lazily from its manifest,
+reading image.* from the same resolved plugin config a session reads (never the environment).
+
+Hermetic: `components_home` is the global config dir; each case writes its overrides.yaml; cwd is a
+tmp project with no .localharness. ComfyUI is faked at `generate_image_tool._TRANSPORT`."""
 from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
-from localharness.cli import doctor_cmd
 from localharness.cli.app import app
 from localharness.tools.builtin import generate_image_tool as gi
 
 PNG = b"\x89PNG\r\n\x1a\n-cli-bytes"
+GIF = b"GIF89a-not-a-png"
+URL = "http://comfy.test"
 runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    for var in ("LOCALHARNESS_COMFYUI_URL", "LOCALHARNESS_COMFYUI_WORKFLOW",
-                "LOCALHARNESS_COMFYUI_TIMEOUT_S"):
-        monkeypatch.delenv(var, raising=False)
+def home(components_home, tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
     monkeypatch.setattr(gi, "_POLL_S", 0.01)
+    return components_home
 
 
-def _fake_comfy(monkeypatch, *, connect_error=False):
-    class _Resp:
-        status_code = 200
-        content = PNG
-        text = ""
-        def json(self):
-            return {"prompt_id": "p1"}
-        def raise_for_status(self):
-            pass
-
-    class _Hist(_Resp):
-        def json(self):
-            return {"p1": {"status": {"status_str": "success", "completed": True},
-                           "outputs": {"9": {"images": [{"filename": "f.png", "subfolder": "",
-                                                         "type": "output"}]}}}}
-
-    class _Client:
-        def __init__(self, *a, **k): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def post(self, url, json=None):
-            if connect_error:
-                raise httpx.ConnectError("refused")
-            return _Resp()
-        async def get(self, url, params=None):
-            return _Hist() if "/history/" in url else _Resp()
-
-    monkeypatch.setattr(gi.httpx, "AsyncClient", _Client)
+def _image(home, **cfg) -> None:
+    body = ", ".join(f"{k}: {v}" for k, v in {"enabled": "true", **cfg}.items())
+    (home / "overrides.yaml").write_text(f"image: {{{body}}}\n", encoding="utf-8")
 
 
-# --- CLI ------------------------------------------------------------------------
+def _fake_comfy(monkeypatch, *, connect_error=False, view=PNG) -> list[str]:
+    seen: list[str] = []
 
-def test_unconfigured_exits_2_with_setup_hint():
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if connect_error:
+            raise httpx.ConnectError("refused", request=req)
+        if req.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "p1"})
+        if req.url.path == "/history/p1":
+            return httpx.Response(200, json={"p1": {
+                "status": {"status_str": "success", "completed": True},
+                "outputs": {"9": {"images": [{"filename": "f.png", "subfolder": "", "type": "output"}]}}}})
+        if req.url.path == "/view":
+            return httpx.Response(200, content=view)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(gi, "_TRANSPORT", httpx.MockTransport(handler))
+    return seen
+
+
+def test_on_but_not_set_up_exits_2_naming_the_set_command(home):
+    _image(home)
     r = runner.invoke(app, ["generate-image", "hello"])
-    assert r.exit_code == 2
-    assert "LOCALHARNESS_COMFYUI_URL" in r.output
+    assert r.exit_code == 2, r.output
+    assert "image generation is not set up" in r.output
+    assert "localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188" in r.output
 
 
-def test_happy_path_writes_png_where_asked(monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALHARNESS_COMFYUI_URL", "http://comfy.test")
+def test_configured_it_writes_the_png_where_asked(home, tmp_path, monkeypatch):
+    _image(home, comfyui_url=URL)
     _fake_comfy(monkeypatch)
-    out = tmp_path / "fox.png"
-    r = runner.invoke(app, ["generate-image", "a fox", "--seed", "5",
-                            "--steps", "4", "--out", str(out)])
+    out = tmp_path / "cat.png"
+    r = runner.invoke(app, ["generate-image", "a cat", "--out", str(out), "--seed", "5",
+                            "--width", "992", "--height", "512"])
     assert r.exit_code == 0, r.output
-    assert out.read_bytes() == PNG
-    assert "saved:" in r.output and "seed 5" in r.output and "qwen-image-2.1" in r.output
+    assert out.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    for bit in ("saved:", "seed 5", "992x512", "template qwen-image-2.1"):
+        assert bit in r.output
 
 
-def test_out_must_be_png():
-    r = runner.invoke(app, ["generate-image", "x", "--out", "pic.jpg"])
-    # checked before any network use, so this fails fast even unconfigured -> the
-    # unconfigured check fires first; configure via env to reach the suffix check
-    assert r.exit_code == 2
+def test_a_non_png_out_exits_2_before_any_request(home, tmp_path, monkeypatch):
+    _image(home, comfyui_url=URL)
+    seen = _fake_comfy(monkeypatch)
+    r = runner.invoke(app, ["generate-image", "a cat", "--out", str(tmp_path / "cat.jpg")])
+    assert r.exit_code == 2, r.output
+    assert "--out must end in .png" in r.output
+    assert seen == []
 
 
-def test_unreachable_exits_1(monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALHARNESS_COMFYUI_URL", "http://127.0.0.1:8188")
+def test_comfyui_down_exits_1(home, tmp_path, monkeypatch):
+    _image(home, comfyui_url=URL)
     _fake_comfy(monkeypatch, connect_error=True)
     r = runner.invoke(app, ["generate-image", "x", "--out", str(tmp_path / "a.png")])
-    assert r.exit_code == 1
-    assert "unreachable" in r.output
+    assert r.exit_code == 1, r.output
+    assert f"ComfyUI unreachable at {URL}" in r.output
 
 
-# --- doctor ----------------------------------------------------------------------
-
-def test_doctor_silent_when_module_unconfigured(capsys):
-    doctor_cmd._print_comfyui()
-    assert "Image module" not in capsys.readouterr().out
-
-
-def test_doctor_reports_unreachable_server(monkeypatch, capsys):
-    monkeypatch.setenv("LOCALHARNESS_COMFYUI_URL", "http://127.0.0.1:8188")
-    def _refused(*a, **k):
-        raise httpx.ConnectError("refused")
-    monkeypatch.setattr(doctor_cmd.httpx, "get", _refused)
-    doctor_cmd._print_comfyui()
-    out = capsys.readouterr().out
-    assert "Image module" in out and "unreachable" in out
+def test_without_out_it_writes_one_stamped_png_in_the_current_directory(home, monkeypatch):
+    _image(home, comfyui_url=URL)
+    _fake_comfy(monkeypatch)
+    before = set(os.listdir("."))
+    r = runner.invoke(app, ["generate-image", "x"])
+    assert r.exit_code == 0, r.output
+    new = set(os.listdir(".")) - before
+    assert len(new) == 1
+    assert re.fullmatch(r"image-\d{8}-\d{6}-[0-9a-f]{6}\.png", new.pop())
 
 
-def test_doctor_reports_reachable_and_template(monkeypatch, capsys):
-    monkeypatch.setenv("LOCALHARNESS_COMFYUI_URL", "http://127.0.0.1:8188")
-    class _Ok:
-        def raise_for_status(self):
-            pass
-    monkeypatch.setattr(doctor_cmd.httpx, "get", lambda *a, **k: _Ok())
-    doctor_cmd._print_comfyui()
-    out = capsys.readouterr().out
-    assert "ComfyUI reachable" in out and "qwen-image-2.1" in out
+def test_a_file_that_is_not_a_png_is_refused_and_not_written(home, tmp_path, monkeypatch):
+    _image(home, comfyui_url=URL)
+    _fake_comfy(monkeypatch, view=GIF)
+    out = tmp_path / "cat.png"
+    r = runner.invoke(app, ["generate-image", "x", "--out", str(out)])
+    assert r.exit_code == 1, r.output
+    assert "not a PNG" in r.output
+    assert not out.exists()
+
+
+def test_with_image_off_there_is_no_command():
+    help_ = runner.invoke(app, ["--help"], env={"COLUMNS": "400"})
+    assert help_.exit_code == 0, help_.output
+    assert "generate-image" not in help_.output
+    assert runner.invoke(app, ["generate-image", "x"]).exit_code == 2
+
+
+def test_help_does_not_import_the_command_module(home, tmp_path):
+    _image(home, comfyui_url=URL)
+    code = ("import sys; from typer.testing import CliRunner; from localharness.cli.app import app; "
+            "r = CliRunner().invoke(app, ['--help'], env={'COLUMNS': '400'}); "
+            "print('generate-image' in r.output, 'localharness.cli.generate_image_cmd' in sys.modules)")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOCALHARNESS_")}
+    env.update(LOCALHARNESS_DIR=str(home), HOME=str(tmp_path))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                         cwd=tmp_path / "proj", env=env).stdout.split()
+    assert out == ["True", "False"]
