@@ -131,13 +131,14 @@ async def test_plugin_resolution_on_an_empty_plugins_dir(tmp_harness_dir, monkey
 
     from localharness.config.loader import ConfigLoader
     from localharness.core.bus import EventBus
-    from localharness.plugins import discovery
+    from localharness.plugins import builtin, discovery
     from localharness.plugins.api import PluginPaths
     from localharness.plugins.lifecycle import start_plugins
     from localharness.plugins.resolve import resolve
     from localharness.tools.hooks import HookSystem
     from localharness.tools.registry import ToolRegistry
 
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     real = discovery.discover
     monkeypatch.setattr("localharness.plugins.discovery.discover",
                         lambda d: [f for f in real(d) if f.source == "folder"])

@@ -232,8 +232,12 @@ def test_api_version_constant():
 # --- CORE-03: the one list --------------------------------------------------------------------
 
 
-def test_the_one_list_is_empty_and_read_at_call_time(monkeypatch):
-    assert bundled_plugins() == () and builtin.BUILTIN_PLUGINS == ()
+def test_the_one_list_holds_the_image_plugin_and_is_read_at_call_time(monkeypatch):
+    from localharness.tools.builtin.image_plugin import ImagePlugin
+
+    assert bundled_plugins() == (ImagePlugin,) and builtin.BUILTIN_PLUGINS == (ImagePlugin,)
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())
+    assert bundled_plugins() == ()
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (_Bare,))
     assert bundled_plugins() == (_Bare,)
 

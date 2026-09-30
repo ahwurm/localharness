@@ -41,7 +41,8 @@ from typer.testing import CliRunner
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import discover_workspace_dir
-from localharness.registry.catalogue import build_catalogue
+from localharness.plugins.resolve import resolve
+from localharness.registry.catalogue import build_catalogue, plugin_catalogue_rows
 
 runner = CliRunner()
 
@@ -437,14 +438,16 @@ def test_all_lists_the_whole_catalogue_and_the_default_view_lists_less(tmp_path,
     default_keys = json.loads(default_run.stdout)["keys"]
     all_keys = json.loads(all_run.stdout)["keys"]
 
+    loader = ConfigLoader(config_dir=layout.global_dir, local_config_dir=layout.ws_dir)
+    # The whole catalogue includes every plugin's rows (ENAB-04) — the bundled image plugin's are
+    # listed even while it is off, so the derivation resolves the plugins as the command does.
     expected = len(
-        build_catalogue(
-            ConfigLoader(
-                config_dir=layout.global_dir, local_config_dir=layout.ws_dir
-            ).load_harness()
-        )
+        build_catalogue(loader.load_harness(), plugins=plugin_catalogue_rows(resolve(loader)))
     )
     assert len(all_keys) == expected, "--all is not the whole catalogue"
+    image_paths = {"image.comfyui_url", "image.enabled", "image.timeout_s", "image.workflow"}
+    assert image_paths <= {k["path"] for k in all_keys}, "an off bundled plugin's rows are in --all"
+    assert not image_paths & {k["path"] for k in default_keys}, "unset plugin defaults stay out of the default view"
     assert len(default_keys) < len(all_keys), (
         "the default view is the whole catalogue — the answer is buried in ~180 shipped defaults"
     )
