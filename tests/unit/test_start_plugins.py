@@ -138,6 +138,8 @@ def _clean_rows_and_events():
     CONTEXTS.clear()
     yield
     set_plugin_rows(())  # a test that fails mid-drive must not leave rows for the next one
+    for name in [m for m in sys.modules if m.startswith("localharness_folder_plugins")]:
+        del sys.modules[name]  # the folder plugin one test imports is not another test's
 
 
 def _bundle(monkeypatch, *classes: type[Plugin]) -> None:

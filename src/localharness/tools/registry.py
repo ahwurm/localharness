@@ -516,7 +516,7 @@ class ToolRegistry:
         Accepts bare names (`exa_search`), MCP-prefixed names (`mcp:fetch`),
         and plugin-prefixed names (`plugin:PLUGIN.TOOL`). The prefix forms
         strip down to the bare TOOL name for resolution because plugin tools
-        register at scope="global" under their bare name (see plugins/loader.py).
+        register at scope="global" under their bare name (see plugins/lifecycle.py).
         """
         from localharness.bench.schema import parse_tool_name
         try:
@@ -543,7 +543,7 @@ class ToolRegistry:
         `allowed` entries use the source-prefix convention from
         bench.schema.parse_tool_name (`bare`, `mcp:TOOL`, `plugin:PLUGIN.TOOL`).
         For each entry the bare TOOL name is resolved against `base_registry`'s
-        scope='global' (where plugins/loader.py and register_builtin_tools both
+        scope='global' (where plugins/lifecycle.py and register_builtin_tools both
         register) and re-registered under both bare and prefixed forms so
         downstream dispatch resolves whichever form the agent loop uses.
 

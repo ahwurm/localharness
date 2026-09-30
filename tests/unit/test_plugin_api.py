@@ -270,10 +270,10 @@ def _top_level_bindings() -> dict[str, list[str]]:
 
 
 def test_each_api_name_is_defined_exactly_once():
-    """PluginManifest is left out only while the dormant plugins/loader.py (which defines its own)
-    still exists; the substrate deletes that loader."""
+    """Every public API name is bound in exactly one module — PluginManifest included, now that the
+    dormant legacy loader, which defined its own, is deleted (44-14)."""
     found = _top_level_bindings()
-    once_in_api = [n for n in PUBLIC_TYPES if n != "PluginManifest"] + [
+    once_in_api = [*PUBLIC_TYPES] + [
         "Availability", "PLUGIN_API_VERSION", "GLOBAL_ONLY", "plugin_summary",
     ]
     expected = {n: ["plugins/api.py"] for n in once_in_api}
