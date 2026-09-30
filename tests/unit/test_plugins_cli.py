@@ -47,6 +47,7 @@ class PConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     color: str = Field("#4a90d9", pattern=r"^#[0-9a-f]{6}$")
     url: str = Field("", json_schema_extra=GLOBAL_ONLY)
+    retries: int = 3
 
 
 class PAgentConfig(BaseModel):
@@ -98,7 +99,8 @@ def _dir(tmp_path: Path, name: str = "g") -> Path:
 
 @pytest.fixture
 def g(tmp_path: Path) -> Path:
-    return _dir(tmp_path)
+    """Named `[old] g` so every printed path is a markup guard: unescaped, rich deletes `[old]`."""
+    return _dir(tmp_path, "[old] g")
 
 
 def _cli(*args: str):
@@ -194,7 +196,7 @@ def test_info_lists_exactly_the_paths_components_list_marks_as_the_plugins(g) ->
     assert info.exit_code == 0, info.output
     got = json.loads(info.stdout)
     assert {s["path"] for s in got["settings"]} == {r["path"] for r in rows if r["plugin"] == "p"} == {
-        "p.enabled", "p.color", "p.url", "agent.p.size"}
+        "p.enabled", "p.color", "p.url", "p.retries", "agent.p.size"}
     assert {s["path"] for s in got["settings"] if s["machine_level_only"]} == {"p.url"}
     assert (got["state"], got["what_it_does"], got["from"], got["version"], got["kind"]) == (
         "on", "draws p swatches", "built in", "0.1.0", "tools")
@@ -212,6 +214,7 @@ def test_info_prints_type_value_layer_and_machine_level_only(g) -> None:
         "agent.p.size": ["agent.p.size", "int", "8", "[default]"],
         "p.color": ["p.color", "str", "'#00ff00'", "[global-overrides]"],
         "p.enabled": ["p.enabled", "bool", "True", "[default]"],
+        "p.retries": ["p.retries", "int", "3", "[default]"],
         "p.url": ["p.url", "str", "''", "[default] (machine-level only)"],
     }
 
@@ -239,11 +242,35 @@ def test_info_for_an_available_plugin_shows_only_its_switch_and_imports_nothing(
     assert ["foo.enabled", "bool", "False", "[default] (machine-level only)"] in [
         _cells(line) for line in human.stdout.splitlines()]
     assert "Its other settings are listed once it is enabled." in human.stdout
+    assert f"  from:         folder: {g / 'plugins' / 'foo'}\n" in human.stdout  # `[old] g` escaped
     got = json.loads(machine.stdout)
     assert got["settings"] == [{"path": "foo.enabled", "type": "bool", "current_value": False,
                                 "layer": "default", "machine_level_only": True}]
     assert got["state_kind"] == "available" and got["version"] is None
     assert not (sentinels / "foo").exists()
+
+
+def test_info_names_the_layer_a_switched_off_plugin_you_installed_is_read_from(g) -> None:
+    write_folder_plugin(g, "foo")
+    assert _plugins(g, "disable", "foo").exit_code == 0
+
+    got = json.loads(_plugins(g, "info", "foo", "--json").stdout)
+
+    assert got["settings"] == [{"path": "foo.enabled", "type": "bool", "current_value": False,
+                                "layer": "global-overrides", "machine_level_only": True}]
+
+
+def test_info_never_credits_a_project_with_turning_on_a_plugin_you_installed(tmp_path, monkeypatch,
+                                                                             fake_home) -> None:
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+    write_folder_plugin(layout.global_dir, "foo")
+    (layout.ws_dir / "config.yaml").write_text("foo: {enabled: true}\n", encoding="utf-8")
+
+    got = json.loads(_cli("plugins", "info", "foo", "--json").stdout)
+
+    assert got["state_kind"] == "available"
+    assert got["settings"] == [{"path": "foo.enabled", "type": "bool", "current_value": False,
+                                "layer": "default", "machine_level_only": True}]
 
 
 def test_info_for_an_unknown_name_exits_2_naming_plugins_list(g) -> None:
@@ -337,13 +364,29 @@ def test_enable_set_is_enable_then_components_set(tmp_path, name, folder) -> Non
         write_folder_plugin(a, name)
         write_folder_plugin(b, name)
 
-    assert _plugins(a, "enable", name, "--set", "color=#ff0000").exit_code == 0
+    sets = [("color", "#ff0000")] + ([] if folder else [("retries", "5")])  # an int: coercion too
+
+    assert _plugins(a, "enable", name, *[a for k, v in sets for a in ("--set", f"{k}={v}")]).exit_code == 0
     assert _plugins(b, "enable", name).exit_code == 0
-    done = _cli("components", "set", f"{name}.color", "#ff0000", "--config-dir", str(b))
-    assert done.exit_code == 0, done.output
+    for key, value in sets:
+        done = _cli("components", "set", f"{name}.{key}", value, "--config-dir", str(b))
+        assert done.exit_code == 0, done.output
 
     assert _yaml(a / "overrides.yaml") == _yaml(b / "overrides.yaml") == {
-        name: {"enabled": True, "color": "#ff0000"}}
+        name: {"enabled": True, "color": "#ff0000", **({} if folder else {"retries": 5})}}
+
+
+def test_enable_set_on_a_plugin_that_cannot_be_imported_writes_nothing(g) -> None:
+    write_folder_plugin(g, "boom", prelude="raise RuntimeError('kaput')")
+
+    refused = _plugins(g, "enable", "boom", "--set", "color=#00ff00")
+
+    assert refused.exit_code == 2, refused.output
+    assert "boom could not be imported: RuntimeError: kaput" in refused.stderr
+    assert not (g / "overrides.yaml").exists()
+    # A plain enable runs none of its code, so it cannot fail this way.
+    assert _plugins(g, "enable", "boom").exit_code == 0
+    assert _yaml(g / "overrides.yaml") == {"boom": {"enabled": True}}
 
 
 def test_a_name_that_cannot_be_a_plugin_is_refused_and_nothing_is_written(g) -> None:
@@ -403,6 +446,18 @@ def test_workspace_refuses_a_machine_level_setting(tmp_path, monkeypatch, fake_h
     assert result.exit_code == 2, result.output
     assert "q.url" in result.stderr and "machine-level" in result.stderr
     assert not (layout.ws_dir / "overrides.yaml").exists()
+
+
+def test_a_machine_level_set_is_checked_with_the_machines_layers(tmp_path, monkeypatch,
+                                                                  fake_home) -> None:
+    """A machine value holds in every project, so this project's own bad value cannot block it."""
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+    (layout.ws_dir / "config.yaml").write_text("q: {color: not-a-color}\n", encoding="utf-8")
+
+    result = _cli("plugins", "enable", "q", "--set", "color=#00ff00")
+
+    assert result.exit_code == 0, result.output
+    assert _yaml(layout.global_dir / "overrides.yaml") == {"q": {"enabled": True, "color": "#00ff00"}}
 
 
 def test_workspace_with_no_workspace_exits_2(g) -> None:
