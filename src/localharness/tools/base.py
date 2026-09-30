@@ -237,6 +237,7 @@ class Tool(ABC):
                 success=False,
                 error=str(exc),
                 error_type="execution_error",
+                metadata={"raised": type(exc).__name__},  # a crash, not a refusal (PAPI-11)
             )
 
     def ok(self, output: str, **metadata: Any) -> ToolResult:
