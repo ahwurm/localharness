@@ -29,7 +29,9 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
-from localharness.config.plugin_sections import CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys
+from localharness.config.plugin_sections import (
+    CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys, unowned_hint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -596,8 +598,15 @@ class ConfigLoader:
                     except OSError:
                         line_maps[key] = {}
                 owners.append(owner_path)
+                # QA-06: a top-level key no core model and no installed plugin owns is refused (the
+                # typo guard), most often a removed plugin's section: say so, and what to do.
+                # `agent:` is core's (read from overrides.yaml only) and keeps pydantic's text.
+                message = err["msg"]
+                if (err["type"] == "extra_forbidden" and len(err["loc"]) == 1
+                        and loc not in CORE_HARNESS_KEYS):
+                    message = unowned_hint(loc)
                 errors.append(
-                    ConfigFieldError(loc, err.get("input"), err["msg"], line_maps[key].get(loc))
+                    ConfigFieldError(loc, err.get("input"), message, line_maps[key].get(loc))
                 )
 
             # If every error came from ONE file, that file heads the report and no error repeats
@@ -807,7 +816,8 @@ class ConfigLoader:
         # max_tokens, so an overlay scalar could never win — stored, confirmed, and ignored at load
         # (pre-existing <=0.12.5). Precedence shipped: agent yaml > division > org > overlay >
         # schema default, which is 5b's stated contract with the last two rungs now real.
-        overlay_agent_raw = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_path = _resolve_user_overlay_path(self._config_dir)
+        overlay_agent_raw = load_overlay(overlay_path).get("agent")
         overlay_agent = overlay_agent_raw if isinstance(overlay_agent_raw, dict) else {}
 
         # Resolve scalar fields: model, temperature, max_tokens
@@ -1013,8 +1023,33 @@ class ConfigLoader:
         try:
             result = AgentConfig.model_validate(merged)
         except ValidationError as exc:
-            errors = _pydantic_error_to_field_errors(exc, str(path), line_map)
-            raise ConfigValidationError(str(path), errors) from exc
+            # QA-06: a top-level key only the overrides' `agent:` section sets (an unknown key can
+            # come from nowhere else) is that file's, as `agent.<key>` on its own line — never the
+            # agent file's, which does not contain it. Every other error stays the agent file's.
+            errors: list[ConfigFieldError] = []
+            owners: list[Path] = []
+            for err in exc.errors():
+                loc = ".".join(str(p) for p in err["loc"])
+                owner, field, line, message = path, loc, line_map.get(loc), err["msg"]
+                if err["type"] == "extra_forbidden" and len(err["loc"]) == 1:
+                    under = err["loc"][0] not in raw and err["loc"][0] in overlay_agent
+                    message = unowned_hint(loc, agent=True, under_agent=under)
+                    if under:
+                        try:
+                            lines = _build_line_map(overlay_path.read_text(encoding="utf-8"))
+                        except OSError:
+                            lines = {}
+                        owner, field = overlay_path, f"agent.{loc}"
+                        line = lines.get(field)
+                owners.append(owner)
+                errors.append(ConfigFieldError(field, err.get("input"), message, line))
+            # load_harness's rule: one owner heads the report; mixed owners keep the agent file and
+            # name each foreign owner on its own line.
+            header = owners[0] if len(set(owners)) == 1 else path
+            for field_err, owner in zip(errors, owners):
+                if owner != header:
+                    field_err.source_path = str(owner)
+            raise ConfigValidationError(str(header), errors) from exc
 
         self._agent_plugin_sections[result.name] = agent_sections
         return result

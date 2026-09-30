@@ -41,6 +41,17 @@ def split_plugin_keys(data: Mapping[str, Any], names: Iterable[str],
             {k: v for k, v in data.items() if k in owned})
 
 
+def unowned_hint(key: str, *, agent: bool = False, under_agent: bool = False) -> str:
+    """Why a top-level key was refused, and the fix. The key is neither a core setting nor any
+    installed plugin's — most often the settings of a plugin since uninstalled, sometimes a typo.
+    `under_agent`: the key sits under `agent:` in overrides.yaml. No square brackets: start prints
+    this through rich markup."""
+    what = "an agent" if agent or under_agent else "a LocalHarness"
+    section = f"`{key}:` under `agent:`" if under_agent else "this section"
+    return (f"not {what} setting, and no installed plugin is named `{key}` — if a plugin you "
+            f"removed used it, reinstall that plugin or delete {section}")
+
+
 def core_harness_view(data: Mapping[str, Any]) -> dict[str, Any]:
     """Only HarnessConfig's own top-level keys — what a WRITE-time check validates. A plugin's
     section is validated by the plugin; an unknown key is still rejected when the config LOADS

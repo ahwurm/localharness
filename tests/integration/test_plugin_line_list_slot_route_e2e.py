@@ -210,7 +210,7 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     ConfigLoader(config_dir=global_dir).load_harness()
     with monkeypatch.context() as m:
         m.setattr(builtin, "BUILTIN_PLUGINS", ())
-        with pytest.raises(ConfigValidationError, match="fakebundled.*Extra inputs are not permitted"):
+        with pytest.raises(ConfigValidationError, match="fakebundled.*no installed plugin is named"):
             ConfigLoader(config_dir=global_dir).load_harness()
 
     # The banner and the registry: one real session.
