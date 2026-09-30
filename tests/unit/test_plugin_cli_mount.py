@@ -49,14 +49,15 @@ def mounted(tmp_path: Path, monkeypatch, components_home):
 
 
         @app.command()
-        def run(flag: str = typer.Option("", "--flag", help="A flag for the thing."),
+        def run(words: list[str] = typer.Argument(None),
+                flag: str = typer.Option("", "--flag", help="A flag for the thing."),
                 fail: bool = typer.Option(False, "--fail"), crash: bool = typer.Option(False, "--crash")):
             """Do the thing, for real."""
             if fail:
                 raise typer.Exit(3)
             if crash:
                 raise RuntimeError("swatch server on fire")
-            typer.echo(f"swatchcmd ran with flag={flag}")
+            typer.echo(f"swatchcmd ran with flag={flag}" + (f" words={words}" if words else ""))
         '''), encoding="utf-8")
     monkeypatch.syspath_prepend(str(mods))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [
@@ -110,6 +111,14 @@ def test_running_it_imports_its_module_and_hands_it_the_arguments() -> None:
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "swatchcmd ran with flag=x"
     assert _MOD in sys.modules
+
+
+def test_its_arguments_reach_it_verbatim_double_dash_included() -> None:
+    """`--` is the plugin command's to read: `-- -5` hands it the word `-5`, not an option."""
+    result = _run("swatchcmd", "--flag", "x", "--", "-5", "--flag")
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "swatchcmd ran with flag=x words=['-5', '--flag']"
 
 
 def test_its_own_help_usage_and_exit_code_are_its_own() -> None:
@@ -184,8 +193,10 @@ def test_a_core_command_always_wins_its_name(monkeypatch) -> None:
 
     helped, ran = _run("--help"), _run("doctor", "--help")
 
-    assert [line for line in helped.output.splitlines() if "doctor" in line.split()[:2]] and \
-        _help_rows(helped.output)["doctor"].startswith("Run prerequisite checks")
+    rows = [line for line in helped.output.splitlines()
+            if line.startswith("│") and line.strip("│ ").split(None, 1)[:1] == ["doctor"]]
+    assert len(rows) == 1, rows  # listed once, as the core command
+    assert _help_rows(helped.output)["doctor"].startswith("Run prerequisite checks")
     assert "Not the doctor." not in helped.output
     assert "Run prerequisite checks" in ran.output
     assert _MOD not in sys.modules
