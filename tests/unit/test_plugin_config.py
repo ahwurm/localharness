@@ -69,6 +69,7 @@ def known(monkeypatch):
                                        for n in names],
         )
 
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     set_names("example")
     return set_names
 

@@ -24,6 +24,7 @@ import yaml
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ToolConfig
 from localharness.core.bus import EventBus
+from localharness.plugins import builtin
 from localharness.plugins.api import Plugin, PluginManifest, PluginPaths
 from localharness.plugins.lifecycle import start_plugins
 from localharness.plugins.resolve import Resolution, resolve
@@ -229,6 +230,7 @@ def test_an_explicit_config_dir_roots_the_plugin_folder(tmp_path, monkeypatch):
     """Replaces test_plugins_dir_explicit_arg_unchanged (an explicit plugins_dir was honoured exactly;
     the env chain never re-rooted it). Still proves it: plugin folders come from `<config dir>/plugins`
     of the config dir the session names, whatever LOCALHARNESS_DIR says."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "ignored"))
     _folder(_config(tmp_path / "ignored"), "decoy", _NEVER)
     explicit = _config(tmp_path / "explicit")
@@ -241,6 +243,7 @@ def test_the_plugin_folder_follows_the_env_chain(tmp_path, monkeypatch):
     """Replaces test_plugins_dir_default_honors_env_chain (a --config-dir / LOCALHARNESS_DIR session
     loads ITS plugins, #150 phase 38). Still proves it: with no dir named, LOCALHARNESS_HOME roots the
     plugin folder, and LOCALHARNESS_DIR wins over it."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     home_env, dir_env = _config(tmp_path / "home"), _config(tmp_path / "dir")
     at_home, at_dir = _folder(home_env, "at_home", _NEVER), _folder(dir_env, "at_dir", _NEVER)
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
@@ -251,9 +254,10 @@ def test_the_plugin_folder_follows_the_env_chain(tmp_path, monkeypatch):
         assert _listed(ConfigLoader()) == {"at_dir": ("available", f"folder: {at_dir}")}
 
 
-def test_with_nothing_set_the_plugin_folder_is_the_default_dir(tmp_path, fake_home):
+def test_with_nothing_set_the_plugin_folder_is_the_default_dir(tmp_path, fake_home, monkeypatch):
     """Replaces test_plugins_dir_default_unchanged_when_nothing_set (no env, no arg: the default
     ~/.localharness/plugins). Still proves it, against a fake home: `~/.localharness/plugins`."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     home = fake_home(tmp_path / "home")  # also clears LOCALHARNESS_DIR / LOCALHARNESS_HOME
     default = _config(home / ".localharness")
     found = _folder(default, "stock", _NEVER)
@@ -268,6 +272,7 @@ def test_the_plugin_folder_is_read_at_call_time(tmp_path, monkeypatch):
     per-invocation path at import time; two loaders built under different env disagree). Still
     proves it, and more: a folder created after the first resolve is found by the next one, and a
     loader built under a different env sees only its own dir's plugins."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     first, second = _config(tmp_path / "first"), _config(tmp_path / "second")
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.setenv("LOCALHARNESS_HOME", str(first))

@@ -111,7 +111,8 @@ def bundle(monkeypatch, *classes: type[Plugin]) -> None:
 # --------------------------------------------------------------------------- enabled-only import
 
 
-def test_a_folder_plugin_that_is_not_enabled_is_available_and_never_imported(layers, sentinels) -> None:
+def test_a_folder_plugin_that_is_not_enabled_is_available_and_never_imported(layers, sentinels, monkeypatch) -> None:
+    bundle(monkeypatch)  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     g, ws = layers
     write_folder_plugin(g, "foo")
     _write_yaml(g / "config.yaml", {**_MINIMAL, "foo": {"color": "#000000"}})  # settings, no enable
@@ -125,7 +126,8 @@ def test_a_folder_plugin_that_is_not_enabled_is_available_and_never_imported(lay
     assert (r.enabled, r.classes, r.settings, r.warnings) == ({"foo": False}, {}, {}, ())
 
 
-def test_enabled_in_the_global_layer_it_is_imported_and_its_settings_validated(layers, sentinels) -> None:
+def test_enabled_in_the_global_layer_it_is_imported_and_its_settings_validated(layers, sentinels, monkeypatch) -> None:
+    bundle(monkeypatch)  # discovery mechanics, not the bundled list: swap it out (as test_doctor_plugins does)
     g, ws = layers
     write_folder_plugin(g, "foo")
     _write_yaml(g / "overrides.yaml", {"foo": {"enabled": True}})
