@@ -27,6 +27,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message
+from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
 log = logging.getLogger("localharness.agent.loop")
@@ -34,7 +35,7 @@ log = logging.getLogger("localharness.agent.loop")
 UNKNOWN_TOOL_META = ToolMeta(group="other", destructive=True)
 """What the gate is told about a tool whose schema could not be read (`_tool_facts`).
 
-Fail closed: `group="other"` is no known family, so `verdict.evaluate` raises a grantable
+Fail closed: it has no declared gate family, so `verdict.evaluate` raises a grantable
 `tool-unfamiliar` ask keyed on the tool name, and `destructive=True` keeps it out of read-only
 mode. The previous neutral `ToolMeta()` landed such a call in the ALLOW tier — the one place an
 unreadable schema must never put it."""
@@ -926,6 +927,7 @@ class AgentLoop:
         config_dir: Path | None = None,
         gate: Any = None,  # PermissionGate
         guardrails_path: Path | None = None,
+        memory_slot: Any = None,  # plugins.slot.MemorySlot
     ) -> None:
         self._config = config
         self._llm = llm
@@ -971,6 +973,10 @@ class AgentLoop:
         # on. start_cmd passes it; subagents and bench pass nothing and get none, exactly as before.
         self._guardrails_path = guardrails_path
         self._guardrails_warned = False
+        # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
+        # guardrails. None or an empty slot adds no section. The legacy memory block below stays
+        # until memory converts into the slot's occupant.
+        self._memory_slot = memory_slot
         # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
         # session's own store and keeps every write and trace below; only the ambient-context
         # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
@@ -1381,6 +1387,16 @@ class AgentLoop:
         guardrails = self._read_guardrails()
         if guardrails:
             system_prompt += "\n\n## Guardrails\n" + guardrails
+        slot = self._memory_slot
+        if slot is not None and slot.occupied:
+            _slot_cfg = getattr(self._config, "memory", None)
+            contribution = await slot.context(task, ContextBudget(
+                max_chars=getattr(_slot_cfg, "max_notes_chars", 16_000),
+                max_session_history=getattr(_slot_cfg, "max_session_history_entries", 8),
+            ))
+            for heading, body in contribution.sections:
+                if body:
+                    system_prompt += f"\n\n## {heading}\n{body}"
         if self._memory is not None:
             try:
                 # Default provenance for this session's writes (WRITE-04).

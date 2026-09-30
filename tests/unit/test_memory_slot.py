@@ -115,6 +115,10 @@ async def _context_raises(self, ctx, turn, budget):
     raise RuntimeError("store gone")
 
 
+async def _context_exits(self, ctx, turn, budget):
+    raise SystemExit(6)
+
+
 async def _context_junk(self, ctx, turn, budget):
     return {"sections": "not a ContextContribution"}
 
@@ -127,10 +131,10 @@ def _raising(exc: BaseException):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verb, method", [
-    ("context", _context_raises), ("context", _context_junk),
+    ("context", _context_raises), ("context", _context_exits), ("context", _context_junk),
     ("browse", _raising(SystemExit(5))), ("browse", lambda self: "not a browse API"),
     ("bind_subagent", _raising(RuntimeError("no handle"))), ("bind_subagent", lambda self, ctx: 42),
-], ids=["context-raises", "context-junk", "browse-exits", "browse-junk", "bind-raises", "bind-junk"])
+], ids=["context-raises", "context-exits", "context-junk", "browse-exits", "browse-junk", "bind-raises", "bind-junk"])
 async def test_a_failing_occupant_answers_nothing_and_is_named(tmp_path, caplog, verb, method):
     """Raising (sys.exit() included) or answering with the wrong type: the slot answers as if
     empty, and a warning names the occupant and the verb."""
@@ -158,6 +162,38 @@ async def test_an_occupied_slot_adds_its_sections_after_the_guardrails(tmp_path)
     assert "\n\n## Guardrails\nRULES-G\n\n## Division Context\nD\n\n## Agent Memory\nM" in prompts[0]
     assert prompts[0].count("## Guardrails") == 1
     assert seen == [(ctx, "hello slot", ContextBudget(max_chars=1234, max_session_history=3))]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_section_adds_no_heading(tmp_path):
+    async def context(self, ctx, turn, budget):
+        return ContextContribution(sections=(("Division Context", ""), ("Agent Memory", "M")))
+
+    loop, prompts = _loop(tmp_path, memory_slot=MemorySlot(
+        _memory_plugin(context=context)(), _ctx(tmp_path), "recall"))
+
+    await loop.run_turn("hello")
+
+    assert "\n\n## Guardrails\nRULES-G\n\n## Agent Memory\nM" in prompts[0]
+    assert "## Division Context" not in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_asks_the_slot_only_when_it_is_occupied(tmp_path):
+    asked: list = []
+
+    class Unoccupied:
+        occupied = False
+
+        async def context(self, turn, budget):
+            asked.append(turn)
+            return ContextContribution(sections=SECTIONS)
+
+    loop, prompts = _loop(tmp_path, memory_slot=Unoccupied())
+
+    await loop.run_turn("hello")
+
+    assert asked == [] and "## Division Context" not in prompts[0]
 
 
 @pytest.mark.asyncio
