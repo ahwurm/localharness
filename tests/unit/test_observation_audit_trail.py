@@ -97,6 +97,7 @@ async def test_observation_records_real_upstream_cap_truncation(bus):
                 name="big",
                 description="Returns huge output.",
                 parameters={"type": "object", "properties": {}, "required": []},
+                ingest="none", host="safe",
             )
 
         async def _execute(self, **kwargs: Any) -> ToolResult:

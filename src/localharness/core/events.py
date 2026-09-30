@@ -4,6 +4,9 @@ event_type field values are PascalCase matching the Python class name — requir
 (bubus routes by class.__name__; lowercase Literal values break routing silently).
 
 Events are immutable (frozen=True). Use model_copy(update={...}) to create modified instances.
+
+ArtifactRef also lives here, with the one artifact-id shape and the mime allowlist: a typed
+reference to a file a plugin produced — not an event.
 """
 from __future__ import annotations
 
@@ -13,18 +16,54 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from localharness.agent.gate_types import DecisionKind, PendingCall
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 
 from .types import AgentID, DivisionID, EventSeq, OrgID, SessionID, ToolCallID  # noqa: F401
 
-# Wire contract for Observation.image_id: the exact shape generate_image mints
-# (img-<date>-<time>-<6 hex>). Both consumers — the loop before forwarding, the web image
-# endpoint before serving — fullmatch against this, so an id can never smuggle a path or
-# markup; anything else in a tool's metadata is dropped, not passed through.
-IMAGE_ID_RE = re.compile(r"img-\d{8}-\d{6}-[0-9a-f]{6}")
+ARTIFACT_ID_RE = re.compile(r"art-\d{8}-\d{6}-[0-9a-f]{6}", re.ASCII)
+"""The ONE shape of an artifact id (PAPI-10). Core mints every id (core/artifacts.mint_artifact_id)
+and every consumer fullmatches before touching a filesystem, so an id can never carry a path, a
+glob or markup. A plugin cannot substitute its own pattern. re.ASCII keeps the digit class to 0-9;
+Python's default would also accept other scripts' digits."""
+
+ARTIFACT_MIMES: dict[str, str] = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+"""The core allowlist (PAPI-10): the only media types an artifact may have and the only ones the
+artifact route serves (anything else is 415), with the suffix core writes for each."""
+
+
+class ArtifactRef(BaseModel):
+    """A typed reference to one file a plugin produced (PAPI-10, decision 13).
+
+    NOT an event and not in EVENT_TYPE_MAP, so the web protocol snapshot does not move. Carrying it
+    on Observation is the image conversion's protocol bump, not this change. `plugin` reaches the
+    phone's artifact URL just as `id` does, so it is held to the plugin-name rule."""
+
+    model_config = ConfigDict(frozen=True)
+    plugin: str
+    kind: Literal["image"]
+    id: str
+    mime: Literal["image/png", "image/jpeg", "image/webp"]
+
+    @field_validator("id")
+    @classmethod
+    def _minted_shape(cls, value: str) -> str:
+        if not ARTIFACT_ID_RE.fullmatch(value):
+            raise ValueError(f"artifact id {value!r} is not a core-minted id")
+        return value
+
+    @field_validator("plugin")
+    @classmethod
+    def _plugin_name(cls, value: str) -> str:
+        # Imported here, not at module top: the one name rule lives in the plugin API, and this
+        # module is imported by nearly everything, so it takes no module-level edge onto it.
+        from localharness.plugins.api import PLUGIN_NAME_RE
+
+        if not PLUGIN_NAME_RE.fullmatch(value):
+            raise ValueError(f"artifact plugin {value!r} is not a plugin name")
+        return value
 
 
 class BaseEvent(BaseModel):
@@ -206,11 +245,9 @@ class Observation(BaseEvent):
     original_length: Optional[int] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
-    # Harness-minted id of an image artifact this result saved (generate_image), servable at
-    # the web channel's /api/images/{id}. Only ids fullmatching IMAGE_ID_RE are forwarded, and
-    # clients render an image ONLY from this typed field — never by sniffing output text — so
-    # the web UI's "everything is text" injection rule stays intact. Additive/default-None:
-    # every existing construction and every replayed JSONL line stays valid.
+    # Never-released image-artifact id (the loop no longer fills it); kept one protocol version
+    # so the current wire snapshot still matches, replaced by the typed `artifact` field.
+    # Additive/default-None: every existing construction and every replayed JSONL line stays valid.
     image_id: Optional[str] = None
 
 

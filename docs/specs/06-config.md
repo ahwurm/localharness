@@ -1263,7 +1263,7 @@ list — every field is declared there with its own description.
 | `tools.add` | list[string] | `[]` | registered tool names | Tools to add |
 | `tools.deny` | list[string] | `[]` | tool names or globs | Tools to deny |
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
-| `permissions.mode` | string | `"auto"` | auto, guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness (`unattended` < `auto` < `trusted` < `guarded` < `read-only`) |
+| `permissions.mode` | string | `"auto"` | auto, guarded, trusted, read-only, unattended | Session permission mode. An agent that sets none runs in `org.permissions.mode` (section 5.1). A project layer may only RAISE strictness (`unattended` < `auto` < `trusted` < `guarded` < `read-only`) |
 | `permissions.ask.network_hosts` | bool | `false` | — | Ask before a network tool reaches a host with no grant |
 | `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
@@ -1396,10 +1396,11 @@ directory — so an answer about one question never satisfies another. A record 
 any other missing provenance field) is skipped with a warning and the call asks again.
 
 One ask class is the catch-all: **`tool-unfamiliar`**, keyed by the tool's name, for a tool in no
-family the gate has rules for — a plugin's tool, or one whose schema could not be read. It is
-grantable, so in `guarded` it asks once per workspace, while `auto` and `trusted` allow it
-outright; the point is that in the mode that asks, a tool nobody can describe is never silently in
-the allow tier.
+family the gate has rules for — one whose schema declares no `gate_family`, or one whose schema
+could not be read. A tool from a plugin you installed keeps a declared `code` or `delegate`; any
+other family it declares counts as none (SECURITY.md, step 4). It is grantable, so in `guarded` it
+asks once per workspace, while `auto` and `trusted` allow it outright; the point is that in the
+mode that asks, a tool nobody can describe is never silently in the allow tier.
 
 A "never here" answer lives in the same file as a **negative grant**: same workspace entry, same key
 space, same mandatory provenance. It is not a text pattern — a refusal of the signature `cp` denies
@@ -1488,6 +1489,12 @@ resolve(agent_name: str) → AgentConfig:
            An agent cannot remove a pattern inherited from division or org.
        - PermissionConfig.budget:
            Agent values WIN. If agent sets max_actions: 50, the resolved value is 50 regardless of division/org.
+       - PermissionConfig.mode:
+           The agent's own mode when it sets one (its file, or the overlay's `agent:` section),
+           else `org.permissions.mode` from config.yaml, else `auto`. Key presence decides, so an
+           explicit `mode: auto` beats an org `read-only`; `start` then prints one line naming
+           both. A layer's overrides.yaml beats its config.yaml, and a workspace org value may
+           only tighten the global one. A division's mode does not set the session's.
        - MemoryConfig:
            Agent values win for all fields.
        - ContextConfig:

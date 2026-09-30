@@ -36,6 +36,7 @@ class EditTool(Tool):
         return ToolSchema(
             name="edit",
             group="fs.write",
+            gate_family="write", ingest="none", host="dangerous", result_origin="trusted",
             description=(
                 "Make a surgical edit to a file by replacing an exact string. Prefer this over "
                 "`write` for changing an existing file — you emit only the changed snippet, not the "

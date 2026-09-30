@@ -31,6 +31,7 @@ from typing import Any, Optional
 from localharness.bench.aggregator import welch_improvement, welch_regression
 from localharness.config.models import AgentConfig
 from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay
+from localharness.config.plugin_sections import core_agent_view
 from localharness.registry import build_catalogue, coerce_value, set_value_in_dict
 
 # ---------------------------------------------------------------------------
@@ -289,7 +290,8 @@ def _resolve_worktree_agent_cfg(root, scenario, *, include_experiment_overlay):
     # name is always synthesized last to satisfy the validator.
     built = deep_merge(deep_merge(identity, org_base), agent_overlay)
     built["name"] = f"bench-{base_name}"
-    return AgentConfig.model_validate(built)
+    # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+    return AgentConfig.model_validate(core_agent_view(built))
 
 
 def _provenance_agent_cfg():
@@ -302,7 +304,8 @@ def _provenance_agent_cfg():
     agent_overlay = load_overlay(_resolve_user_overlay_path()).get("agent", {})
     if not agent_overlay:
         return None
-    return AgentConfig.model_validate(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay))
+    # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+    return AgentConfig.model_validate(core_agent_view(deep_merge({"name": "provenance", "role": "provenance"}, agent_overlay)))
 
 
 # ---------------------------------------------------------------------------

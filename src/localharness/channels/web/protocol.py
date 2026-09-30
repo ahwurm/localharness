@@ -99,7 +99,9 @@ the owner's own UI read the same list from one place.
 """
 
 UNTRUSTED_INGEST_LABEL = "untrusted_ingest"
-"""The provenance label a frame carries for the web tools (`tools/capabilities.UNTRUSTED_INGEST`).
+"""The provenance label a frame carries for the web tools (`tools/builtin/web_tool.WEB_INGEST_TOOLS`,
+a display family pinned to the builtins that declare ingest: untrusted — the safety model reads the
+declarations, not this set).
 
 The UI marks it the way the terminal's once-per-turn note does. It is a label, not a filter:
 §4.2 forbids the wire dropping anything.

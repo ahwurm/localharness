@@ -582,7 +582,7 @@ async def test_an_allowed_call_still_claims_ownership(tmp_path):
     """The owner is whoever called FIRST, not whoever asked first — otherwise an orchestrator
     whose own calls all passed would be labelled as a subagent the moment one asked."""
     gate = _gate(tmp_path, asker=_answer("allow_once"))
-    await gate.check("read", {"path": "x"}, ToolMeta(group="fs.read"),
+    await gate.check("read", {"path": "x"}, ToolMeta(group="fs.read", gate_family="allow"),
                      agent_id="main", session_id="s")
     assert gate.owner_agent_id == "main"
 

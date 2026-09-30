@@ -211,6 +211,7 @@ def test_plugin_prefix_dispatch_resolves():
                 scope="agent",
                 estimated_tokens=10,
                 destructive=False,
+                ingest="untrusted", host="safe",  # a search tool: ingests, touches nothing
             )
 
     base = ToolRegistry()

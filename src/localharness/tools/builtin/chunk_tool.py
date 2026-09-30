@@ -57,6 +57,7 @@ class ChunkTool(Tool):
         return ToolSchema(
             name="chunk",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Split a large body you hold as a handle (an eviction-stub id, a 'pg-N' page, or a "
                 "granted handle) into smaller numbered pieces, each retained under its own handle. "

@@ -15,8 +15,9 @@ from localharness.agent.context import ContentStore
 from localharness.config.models import AgentConfig, ToolConfig
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.builtin.agent_tool import AgentTool
-from localharness.tools.capabilities import GrantTargetError
+from localharness.tools.capabilities import GrantTargetError, is_host_dangerous
 from localharness.tools.registry import ToolRegistry
+from tests.unit.test_capabilities import _Bare, _builtin_registry, _production_registry
 
 _CLEAN = ToolConfig(deny=["web_search", "web_fetch", "web_page_query"])  # host-acting agent under the P-A floor
 
@@ -69,7 +70,7 @@ async def test_runner_builds_granted_readthrough_store(monkeypatch):
     monkeypatch.setattr(subagent, "dispatch_config_subagent", _spy_config)
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=await _production_registry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         load_agent=lambda n: AgentConfig(
             name="doc-reader", role="reads granted handles", tools=ToolConfig(add=["tool_result_get"]),
@@ -122,7 +123,7 @@ async def test_grant_to_host_dangerous_target_is_refused(monkeypatch):
     monkeypatch.setattr(subagent, "dispatch_config_subagent", _must_not_run)
     bash_child = AgentConfig(name="bash-child", role="r", tools=ToolConfig(add=["bash_exec", "read"]))
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=await _production_registry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         load_agent=lambda n: bash_child,
         parent_store=ContentStore(),
@@ -143,7 +144,7 @@ async def test_grant_to_no_danger_target_passes_the_gate(monkeypatch):
 
     monkeypatch.setattr(subagent, "dispatch_explore_subagent", _spy_explore)
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=await _production_registry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         parent_store=ContentStore(),
     )
@@ -151,12 +152,37 @@ async def test_grant_to_no_danger_target_passes_the_gate(monkeypatch):
     assert out == "explored" and captured  # gate allowed it through
 
 
-def test_resolve_target_toolset_flags_builtin_danger():
+async def test_resolve_target_toolset_flags_builtin_danger():
     """The grant-safety resolver sees clean builtins (explore) and host-dangerous config
-    children (yaml allowlist), so the gate can decide."""
-    from localharness.tools.capabilities import HOST_DANGEROUS
-
-    assert not (set(subagent._resolve_target_toolset("explore", None)) & HOST_DANGEROUS)
+    children (yaml allowlist), so the gate can decide — by each name's DECLARATION."""
+    reg = await _builtin_registry()
+    explore = [reg.schema_of(n) for n in subagent._resolve_target_toolset("explore", None)]
+    assert explore and None not in explore
+    assert not any(is_host_dangerous(s) for s in explore)
 
     cfg = AgentConfig(name="danger-cfg", role="r", tools=ToolConfig(add=["bash_exec", "read"]))
     assert "bash_exec" in subagent._resolve_target_toolset("danger-cfg", lambda n: cfg)
+    assert is_host_dangerous(reg.schema_of("bash_exec"))
+
+
+@pytest.mark.parametrize("entry", ["plugin:research_tools.exa_search", "exa_search"])
+async def test_a_grant_to_an_undeclared_plugin_tool_holder_is_refused(monkeypatch, entry):
+    """A config child may name a tool in the `plugin:PLUGIN.TOOL` form, which from_allowed resolves
+    to the bare TOOL. The grant check resolves it the SAME way and reads the declaration: a tool
+    that declares nothing is host-dangerous by default, so the grant is refused — the prefix is not
+    a way around the check, and neither is a name the old name set never listed."""
+    async def _must_not_run(task, **kwargs):  # pragma: no cover - asserted never reached
+        raise AssertionError("dispatch must not run when the grant target is host-dangerous")
+
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", _must_not_run)
+    reg = await _production_registry()
+    await reg.register(_Bare("exa_search"), scope="global")
+    child = AgentConfig(name="plug-child", role="r", tools=ToolConfig(add=[entry]))
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=reg,
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=lambda n: child,
+        parent_store=ContentStore(),
+    )
+    with pytest.raises(GrantTargetError, match="exa_search"):
+        await runner("plug-child", "here is a big doc", grant_handles=["H"])

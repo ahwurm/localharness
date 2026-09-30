@@ -50,6 +50,7 @@ import yaml
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 from localharness.config.overlay import restrict_config_file
+from localharness.config.plugin_sections import core_harness_view
 
 log = logging.getLogger(__name__)
 
@@ -252,7 +253,8 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
     backups: list[Path] = []
     if not migration.config_unchanged:
         try:
-            HarnessConfig.model_validate(migration.updated)
+            # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+            HarnessConfig.model_validate(core_harness_view(migration.updated))
         except Exception as exc:
             raise MigrationError(f"migrated config fails validation: {exc}") from exc
         backups.append(_write_with_backup(config_file, original, migration.updated))

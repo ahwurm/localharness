@@ -982,7 +982,6 @@ from dataclasses import dataclass as _dataclass
 class _MockMemoryContext:
     agent_memory_md: str
     division_md: str
-    guardrails_md: str
     fact_count: int
     token_estimate: int
 
@@ -1002,7 +1001,7 @@ def _mock_memory_loader(**load_context_kwargs):
     return loader
 
 
-def _make_memory_agent_loop(memory_loader=None):
+def _make_memory_agent_loop(memory_loader=None, guardrails_path=None):
     """Create an AgentLoop with mocked dependencies for memory testing."""
     from localharness.config.models import AgentConfig
     from tests.conftest import MockLLMClient, FakeLLMResponse
@@ -1021,21 +1020,32 @@ def _make_memory_agent_loop(memory_loader=None):
         tool_registry=None,
         permission_evaluator=perm,
         memory_loader=memory_loader,
+        guardrails_path=guardrails_path,
     ), llm
 
 
+def _guardrails_file(tmp_path, text="safety rules"):
+    """An org GUARDRAILS.md where start_cmd puts it: `<global config dir>/orgs/default/`."""
+    path = tmp_path / "orgs" / "default" / "GUARDRAILS.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 @pytest.mark.asyncio
-async def test_memory_loader_tiered_prompt():
-    """MEM-03: load_context() result builds tiered system prompt with all 3 sections."""
+async def test_memory_loader_tiered_prompt(tmp_path):
+    """MEM-03: the tiered system prompt carries all 3 sections, guardrails first. Since SAFE-04
+    the guardrails tier is read by core from `guardrails_path`, not by the memory loader."""
     memory = _mock_memory_loader(return_value=_MockMemoryContext(
         agent_memory_md="my notes",
         division_md="div context",
-        guardrails_md="safety rules",
         fact_count=5,
         token_estimate=100,
     ))
 
-    loop, llm = _make_memory_agent_loop(memory_loader=memory)
+    loop, llm = _make_memory_agent_loop(
+        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path)
+    )
 
     # Capture messages sent to LLM
     captured_messages = []
@@ -1068,7 +1078,6 @@ async def test_memory_loader_empty_tiers_omitted():
     memory = _mock_memory_loader(return_value=_MockMemoryContext(
         agent_memory_md="notes only",
         division_md="",
-        guardrails_md="",
         fact_count=0,
         token_estimate=10,
     ))
@@ -1118,6 +1127,124 @@ async def test_memory_loader_failure_nonfatal():
         sys_content = sys_msgs[0]["content"]
         assert "You are a test assistant." in sys_content
         assert "## Agent Memory" not in sys_content
+
+
+# ---------------------------------------------------------------------------
+# SAFE-04: the org guardrails come from CORE prompt assembly, never from memory. Before this,
+# the splice sat inside `if self._memory is not None:`, so turning memory off — or any memory
+# failure — silently turned the safety rules off with it.
+# ---------------------------------------------------------------------------
+
+
+def _record_system_prompts(llm) -> list[str]:
+    """Record the leading system message of every request the loop sends, in order."""
+    seen: list[str] = []
+    original = llm.stream_complete
+
+    async def recording(messages=None, tools=None, on_token=None, **kwargs):
+        seen.append(next(m["content"] for m in messages if m.get("role") == "system"))
+        return await original(messages=messages, tools=tools, on_token=on_token, **kwargs)
+
+    llm.stream_complete = recording
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_guardrails_reach_the_prompt_with_memory_off(tmp_path):
+    """No memory loader at all (org.memory_enabled: false builds none): guardrails still arrive."""
+    loop, llm = _make_memory_agent_loop(guardrails_path=_guardrails_file(tmp_path, "RULES-X"))
+    prompts = _record_system_prompts(llm)
+
+    await loop.run_turn("hello")
+
+    assert "\n\n## Guardrails\nRULES-X" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_guardrails_survive_a_failing_memory_load(tmp_path):
+    """The memory block runs and raises; the safety rules are not collateral damage."""
+    memory = _mock_memory_loader(side_effect=RuntimeError("db gone"))
+    loop, llm = _make_memory_agent_loop(
+        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
+    )
+    prompts = _record_system_prompts(llm)
+
+    await loop.run_turn("hello")
+
+    memory.load_context.assert_awaited_once()  # the failure really happened on this turn
+    assert "\n\n## Guardrails\nRULES-X" in prompts[0]
+    assert "## Agent Memory" not in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_guardrails_splice_is_byte_identical_to_the_old_memory_join(tmp_path):
+    """With memory on, moving the reader changed no byte: the prompt equals the pre-SAFE-04 join
+    `"\\n\\n".join([prompt, guardrails, division, memory])` over the same bare prompt."""
+    memory = _mock_memory_loader(return_value=_MockMemoryContext(
+        agent_memory_md="MEM", division_md="DIV", fact_count=1, token_estimate=1,
+    ))
+    loop, llm = _make_memory_agent_loop(
+        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
+    )
+    prompts = _record_system_prompts(llm)
+    bare_loop, bare_llm = _make_memory_agent_loop()
+    bare = _record_system_prompts(bare_llm)
+
+    await loop.run_turn("hello")
+    await bare_loop.run_turn("hello")
+
+    assert prompts[0] == "\n\n".join([
+        bare[0], "## Guardrails\nRULES-X", "## Division Context\nDIV", "## Agent Memory\nMEM",
+    ])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", ["missing file", "no path"])
+async def test_absent_guardrails_inject_nothing_and_warn_nothing(tmp_path, caplog, configured):
+    """Most installs have no GUARDRAILS.md, and subagents/bench pass no path: both are silent."""
+    path = tmp_path / "orgs" / "default" / "GUARDRAILS.md" if configured == "missing file" else None
+    loop, llm = _make_memory_agent_loop(guardrails_path=path)
+    prompts = _record_system_prompts(llm)
+
+    with caplog.at_level("WARNING", logger="localharness.agent.loop"):
+        await loop.run_turn("hello")
+
+    assert "## Guardrails" not in prompts[0]
+    assert not [r for r in caplog.records if "GUARDRAILS" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_guardrails_warn_once_and_inject_nothing(tmp_path, caplog):
+    """A path that exists but cannot be read (here a directory) is named once, never per turn,
+    and never takes the turn down."""
+    path = tmp_path / "GUARDRAILS.md"
+    path.mkdir()
+    loop, llm = _make_memory_agent_loop(guardrails_path=path)
+    prompts = _record_system_prompts(llm)
+
+    with caplog.at_level("WARNING", logger="localharness.agent.loop"):
+        await loop.run_turn("one")
+        await loop.run_turn("two")
+
+    assert len(prompts) >= 2 and not [p for p in prompts if "## Guardrails" in p]
+    warned = [r for r in caplog.records if "GUARDRAILS.md" in r.getMessage()]
+    assert len(warned) == 1, [r.getMessage() for r in warned]
+
+
+@pytest.mark.asyncio
+async def test_guardrails_are_reread_every_turn(tmp_path):
+    """An edit to GUARDRAILS.md reaches the very next turn — no restart, no stale copy."""
+    path = _guardrails_file(tmp_path, "RULES-V1")
+    loop, llm = _make_memory_agent_loop(guardrails_path=path)
+    prompts = _record_system_prompts(llm)
+
+    await loop.run_turn("one")
+    path.write_text("RULES-V2", encoding="utf-8")
+    await loop.run_turn("two")
+
+    assert "## Guardrails\nRULES-V1" in prompts[0]
+    assert "## Guardrails\nRULES-V2" in prompts[-1]
+    assert "RULES-V1" not in prompts[-1]
 
 
 # ---------------------------------------------------------------------------

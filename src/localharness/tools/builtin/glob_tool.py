@@ -11,6 +11,7 @@ class GlobTool(Tool):
         return ToolSchema(
             name="glob",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Find files matching a glob pattern. Returns newline-separated "
                 "absolute paths. Use ** for recursive matching (a trailing bare "

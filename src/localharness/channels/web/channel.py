@@ -27,6 +27,7 @@ import json
 import secrets
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -308,6 +309,7 @@ class WebChannel(ChannelAdapter):
         self._forwarded_max: dict[str, int] = {}
         self._session_dir: Optional[Path] = None
         self._memory_store: Any = None
+        self._artifact_roots: dict[str, Path] = {}
 
         # Web Push, when a phone has enrolled. Optional on purpose: `--replay` sets none, and a
         # box nobody has paired a phone with must behave exactly as it did before A2.
@@ -364,6 +366,7 @@ class WebChannel(ChannelAdapter):
         session_dir: Optional[Path] = None,
         bus: Any = None,
         memory_store: Any = None,
+        artifact_roots: Optional[Mapping[str, Path]] = None,
     ) -> None:
         """Hand the channel the session objects the HTTP surface has to answer questions about.
 
@@ -371,6 +374,9 @@ class WebChannel(ChannelAdapter):
         call rather than reaching through the bus for each: `/api/tools`, `/api/permissions` and
         `/api/health` are *state* questions, and a channel that has to reconstruct state from an
         event stream it also forwards is a channel with two sources of truth.
+
+        `artifact_roots` are the core-computed roots of the plugins that are ON this session and
+        whose root core accepted — the only places `/api/artifacts/{plugin}/{id}` serves from.
         """
         self.rebind_bus(bus)
         self.session_id = session_id
@@ -381,6 +387,7 @@ class WebChannel(ChannelAdapter):
         self._agent_loop = agent_loop
         self._session_dir = session_dir
         self._memory_store = memory_store
+        self._artifact_roots = dict(artifact_roots or {})
         # The session exists from this line on, with two client-visible consequences. First,
         # "ready" is published HERE — the bring-up task only returns when the whole session
         # ends, so publishing ready from its `else` branch meant the build row and the ribbon
@@ -405,9 +412,16 @@ class WebChannel(ChannelAdapter):
         self._llm = None
         self._agent_loop = None
         self._memory_store = None  # closes with the session — a dead store must not answer
+        self._artifact_roots = {}  # the next session's plugins decide what is served
         self._turn_running = False
         self._open_asks.clear()
         self.set_bringup_abort(None)
+
+    def artifact_root(self, plugin: str) -> Optional[Path]:
+        """Where `plugin`'s artifacts live this session — core computed it — or None: the plugin is
+        off, did not ask for artifacts, or returned a root core refused. None means the route
+        answers 404 without touching any filesystem."""
+        return self._artifact_roots.get(plugin)
 
     async def start(self) -> None:
         """Subscribe to the bus. Idempotent — the REPL starts the channel that already exists.
@@ -601,9 +615,16 @@ class WebChannel(ChannelAdapter):
         socket budget, so a few devices behind a dead network path would hold Ctrl-C for minutes
         — while uvicorn's own graceful-shutdown budget claims two seconds. An undelivered
         notification is worth waiting a moment for and is not worth a hung process.
+
+        With no `timeout` there is no bound at all, so only tests call it that way: it returns
+        once no push is still running, including any fired while it waited. It loops on
+        unfinished tasks, not on the set being empty. A finished task leaves the set only through
+        a done-callback that asyncio queues for the next loop pass, and `gather` over tasks that
+        are all finished never suspends, so waiting for the set to empty re-gathered a push that
+        finished in the same pass forever, at 100% CPU. A finished task may still be in the set
+        when this returns.
         """
-        while self._push_tasks:
-            pending = list(self._push_tasks)
+        while pending := [t for t in self._push_tasks if not t.done()]:
             if timeout is None:
                 await asyncio.gather(*pending, return_exceptions=True)
                 continue
@@ -972,7 +993,7 @@ class WebChannel(ChannelAdapter):
         ]
 
     def _ask_frame(self, request_id: str, request: Any) -> BlockingAsk:
-        from localharness.tools.capabilities import UNTRUSTED_INGEST
+        from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 
         klass = getattr(request, "klass", "")
         grantable = bool(getattr(request, "grantable", False))
@@ -991,7 +1012,7 @@ class WebChannel(ChannelAdapter):
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
             options=self.ask_options(klass, grantable),
-            untrusted_ingest=tool_name in UNTRUSTED_INGEST,
+            untrusted_ingest=tool_name in WEB_INGEST_TOOLS,
         )
 
     def open_asks(self) -> list[dict[str, Any]]:

@@ -19,6 +19,7 @@ The asymmetry below is the shipped truth, not an oversight:
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, get_origin
@@ -32,7 +33,10 @@ from localharness.registry.catalogue import (
     LAYER_WORKSPACE_OVERRIDES,
     _LAYER_PRIORITY,
     ComponentEntry,
+    PluginRows,
+    _global_bands,
     build_catalogue,
+    plugin_catalogue_rows,
 )
 from localharness.registry.paths import _unwrap_optional
 
@@ -156,7 +160,8 @@ def _is_dict_leaf(entry: ComponentEntry) -> bool:
 
 
 def honest_attribution(
-    catalogue: dict[str, ComponentEntry], overlays: dict[str, dict]
+    catalogue: dict[str, ComponentEntry], overlays: dict[str, dict], *,
+    global_only: frozenset[str] = frozenset(),
 ) -> dict[str, ComponentEntry]:
     """Repair the two attributions `_detect_layer` cannot express on its own.
 
@@ -172,13 +177,19 @@ def honest_attribution(
     With one band setting `model_context_overrides.modelA` and another `modelB`, this says both
     contributed; it cannot say which band owns which key, because `walk_model_fields` stops at
     dict leaves and the catalogue has no entry below them. `config show` prints what this returns.
+
+    GLOBAL_ONLY plugin paths (`global_only`, full dot-paths) are judged against the two global bands
+    alone, as build_catalogue attributed them: the workspace value there — a set leaf or a replaced
+    ancestor — was dropped at load (ENAB-02), so it contributed nothing and must not be credited.
     """
+    machine = _global_bands(overlays)
     for path, entry in list(catalogue.items()):
-        contributors = _contributing_layers(path, overlays)
+        bands = machine if path in global_only else overlays
+        contributors = _contributing_layers(path, bands)
         if len(contributors) > 1 and (path in _UNION_PATHS or _is_dict_leaf(entry)):
             catalogue[path] = replace(entry, winning_layer=_accumulated(contributors))
             continue
-        layer = _attributing_layer(path, overlays)
+        layer = _attributing_layer(path, bands)
         if layer is not None and layer != entry.winning_layer:
             catalogue[path] = replace(entry, winning_layer=layer)
     return catalogue
@@ -205,6 +216,7 @@ def layered_catalogue(
     *,
     tool_registry: Any = None,
     loader: Optional[ConfigLoader] = None,
+    plugins: Optional[Sequence[PluginRows]] = None,
 ) -> tuple[dict[str, ComponentEntry], dict[str, dict]]:
     """(catalogue, overlays) for exactly one layering. Callers that need BOTH the workspace-on and
     the workspace-off view (doctor's diff) call this twice with different `workspace` values.
@@ -213,13 +225,25 @@ def layered_catalogue(
     paying for a second parse of the same files (doctor). It must be a loader for exactly this
     `config_dir`/`workspace` pair — the catalogue would otherwise describe a layering the caller
     never asked for.
+
+    `plugins`: this layering's plugin rows (ENAB-04); None resolves them from `loader`. A command
+    that resolves anyway (`components set` validates with the plugins' own models) hands its rows
+    over instead of resolving twice.
     """
     if loader is None:
         loader = ConfigLoader(config_dir=config_dir, local_config_dir=workspace)
     cfg = loader.load_harness()
     overlays = build_layer_overlays(loader, workspace)
-    cat = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry)
-    return honest_attribution(apply_agent_overlay_values(cat, overlays), overlays), overlays
+    if plugins is None:
+        # Lazy: plugins.resolve imports the bundled plugin modules and every ENABLED plugin you
+        # installed — never paid by a mere import of the registry.
+        from localharness.plugins.resolve import resolve
+
+        plugins = plugin_catalogue_rows(resolve(loader))
+    cat = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry, plugins=plugins)
+    global_only = frozenset(f"{p.name}.{rel}" for p in plugins for rel in p.global_only)
+    return honest_attribution(apply_agent_overlay_values(cat, overlays), overlays,
+                              global_only=global_only), overlays
 
 
 def overridden_paths(

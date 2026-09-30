@@ -492,7 +492,7 @@ async def test_load_context_agent_only(memory_store: MemoryStore):
     assert isinstance(ctx, MemoryContext)
     assert isinstance(ctx.agent_memory_md, str)
     assert ctx.division_md == ""
-    assert ctx.guardrails_md == ""
+    assert not hasattr(ctx, "guardrails_md")
 
 
 @pytest.mark.asyncio
@@ -512,8 +512,11 @@ async def test_load_context_with_division(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_load_context_with_org(tmp_path: Path):
-    # Create GUARDRAILS.md
+async def test_load_context_never_reads_org_guardrails(tmp_path: Path):
+    """SAFE-04: GUARDRAILS.md has exactly one reader, core prompt assembly (AgentLoop's
+    guardrails_path). A store whose own root holds the file neither reads nor carries it."""
+    import dataclasses
+
     org_dir = tmp_path / "orgs" / "default"
     org_dir.mkdir(parents=True)
     (org_dir / "GUARDRAILS.md").write_text("# Guardrails\nDo not harm.", encoding="utf-8")
@@ -522,9 +525,13 @@ async def test_load_context_with_org(tmp_path: Path):
     await store.open()
     try:
         ctx = await store.load_context()
-        assert "Guardrails" in ctx.guardrails_md or "Do not harm" in ctx.guardrails_md
     finally:
         await store.close()
+
+    assert "guardrails_md" not in {f.name for f in dataclasses.fields(MemoryContext)}
+    assert not hasattr(ctx, "guardrails_md")
+    assert not hasattr(store, "_guardrails_path") and not hasattr(store, "_org_dir")
+    assert "Do not harm" not in ctx.agent_memory_md + ctx.division_md
 
 
 # ---------------------------------------------------------------------------

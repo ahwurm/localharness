@@ -79,6 +79,12 @@ class MCPToolWrapper(Tool):
             # One group per SERVER (PRD §6): what an MCP tool does is unknowable from here, so
             # the server it came from is the honest unit of both the ask and, in v0.14, exposure.
             group=f"mcp/{self._server_name}",
+            # Today's MCP posture, declared in wrapper code (SAFE-01): external content is
+            # attacker-controllable (ingest, result_origin); the tool is not host-dangerous by the
+            # floor's definition (it never was — left at the fail-closed default it would co-reside
+            # with itself); and its gate class stays `mcp`, derived from the group prefix above, so
+            # existing ("mcp", …) grant keys keep matching.
+            ingest="untrusted", host="safe", result_origin="untrusted", gate_family=None,
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

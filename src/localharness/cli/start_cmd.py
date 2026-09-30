@@ -57,6 +57,23 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
+def _available_hint(names: list[str]) -> str:
+    """ENAB-04 / PRD §4: nothing runs because it was installed, and the operator is told how to turn
+    it on — once, at start."""
+    if len(names) == 1:
+        return (f"i 1 plugin available, not enabled: {names[0]} — run "
+                f"`localharness plugins enable {names[0]}` to turn it on")
+    return (f"i {len(names)} plugins available, not enabled: {', '.join(names)} — run "
+            f"`localharness plugins enable <name>` to turn one on")
+
+
+def default_root_agent(agents: list[dict[str, Any]]) -> dict[str, Any]:
+    """The discovered agent `start` opens without --agent/--subagents: 'default', else
+    'orchestrator', else the first. Shared with `doctor`, so it checks the agent `start` runs."""
+    return next((a for a in agents if a.get("name") == "default"),
+                next((a for a in agents if a.get("name") == "orchestrator"), agents[0]))
+
+
 def _agent_roster_table(agents: list[dict[str, Any]]) -> Table:
     """The --subagents picker roster, with each agent NAME in the agent entity color.
 
@@ -492,12 +509,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.init_cmd import init_app
+    from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
-    from localharness.config.models import AgentConfig
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
-    from localharness.plugins.loader import PluginLoader
+    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.lifecycle import start_plugins, stop_plugins
+    from localharness.plugins.resolve import resolve
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
     from localharness.tools.mcp import MCPClientManager
@@ -675,10 +694,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # agent), and the un-migrated legacy root must keep winning selection or the
         # user lands in a different agent and loses their memory continuity. Normal
         # installs have no default.yaml after migration, so 'orchestrator' wins.
-        selected_data = next(
-            (a for a in agents if a.get("name") == "default"),
-            next((a for a in agents if a.get("name") == "orchestrator"), agents[0]),
-        )
+        selected_data = default_root_agent(agents)
     else:
         # --subagents + multiple agents: show picker
         console.print(_agent_roster_table(agents))
@@ -686,25 +702,38 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         idx = max(1, min(choice, len(agents))) - 1
         selected_data = agents[idx]
 
-    # Load full AgentConfig (uses ConfigLoader for inheritance)
+    # Load full AgentConfig (uses ConfigLoader for inheritance). QA-16: a load error REFUSES the
+    # session, exactly like a bad config.yaml above. It used to fall back to a bare
+    # AgentConfig(name, role, model) without a word, which ran the agent without its mode (a
+    # read-only agent ran auto), deny patterns, workspace_root, budget, MCP servers, memory and
+    # context settings. No fallback is kept, because no legitimate path reaches this line without
+    # a file: every agent here was read from one (discovered, or minted just above), and
+    # `--agent <name>` with no file already stopped at "not found". A not-found error here means a
+    # file whose `name:` is not its file name — still that file's settings, still refused.
     agent_name_str: str = selected_data.get("name", "orchestrator")
     try:
         agent_config = loader.load_agent(agent_name_str)
-    except Exception:
-        # Fall back to building from raw data
-        agent_config = AgentConfig(
-            name=agent_name_str,
-            role=selected_data.get("role", "General-purpose assistant"),
-            model=selected_data.get("model", "inherit"),
+    except Exception as exc:
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"Cannot load agent '{agent_name_str}': {exc}"),
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    # QA-18: an agent's own mode stands even when it is looser than the org's (no "most restrictive
+    # wins"; that is the owner's call), and the session says so once, naming both.
+    from localharness.agent.gate_types import MODE_STRICTNESS
+    _own, _org = agent_config.permissions.mode, loader.org_mode()
+    if _org is not None and MODE_STRICTNESS[_own] < MODE_STRICTNESS[_org]:
+        console.print(
+            f"⚠ The {agent_name_str} agent sets permissions.mode: {_own}, looser than "
+            f"org.permissions.mode: {_org}. This session runs in {_own}; remove the agent's mode "
+            "to use the org's.", style="yellow", markup=False, soft_wrap=True,
         )
 
-    # --- Capability floor (P-A): sync the module flag from config, then strip web ingestion from
-    # the ROOT agent. Root inherits 'global' scope where web_* are registered, so without this it
-    # would co-resident web ingestion with bash/write/edit (prompt-injection->host hole). It delegates
-    # ingestion to the web-researcher subagent (no bash). KEEP tool_result_get — not untrusted-ingest.
-    from localharness.tools.capabilities import apply_root_capability_floor, set_floor_enabled
+    # --- Capability floor (P-A): sync the module flag from config. The ROOT agent's strip reads
+    # tool declarations, so it runs after every global tool is registered (after step 5's plugins).
+    from localharness.tools.capabilities import set_floor_enabled
     set_floor_enabled(harness.org.enforce_capability_floor)
-    apply_root_capability_floor(agent_config.tools)
 
     # Wire dependencies
     provider = harness.provider
@@ -1014,8 +1043,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # --- 4. Memory store (soft -- degrade to None) ---
     # org.memory_enabled=False (#151) is an explicit OFF, not a degradation: None rides the
-    # exact paths a failed open does — no tools register, nothing injects, no consolidation,
-    # and every subagent inherits the None.
+    # exact paths a failed open does — no tools register, no memory context injects, no
+    # consolidation, and every subagent inherits the None. The org guardrails are core's, not
+    # memory's (SAFE-04): they still reach the prompt — see AgentLoop's guardrails_path below.
     memory_store: MemoryStore | None = None
     if not harness.org.memory_enabled:
         logging.getLogger(__name__).info(
@@ -1028,10 +1058,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 division_id=agent_config.division or "default",
                 org_id="default",
                 # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md
-                # and GUARDRAILS.md never do — the safety voice is the org's, and a workspace must
-                # not be able to rewrite or blank it. That invariant is why these are two separate
-                # inputs: the safety context always reads from the global layer, whatever state_dir
-                # points at.
+                # never does — the safety voice is the org's, and a workspace must not be able to
+                # rewrite or blank it. That invariant is why these are two separate inputs: the
+                # safety context always reads from the global layer, whatever state_dir points at.
+                # (GUARDRAILS.md is read by core, not here — see AgentLoop's guardrails_path below.)
                 base_dir=str(state_dir),
                 global_base_dir=str(cfg_path),
                 bus=bus,
@@ -1091,6 +1121,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     session_acc = None
     consolidation_scheduler = None
     mcp_manager = None
+    plugin_resolution = None
+    plugin_result = None
     _session_started = False
     _exit_reason = "complete"
     try:
@@ -1195,20 +1227,44 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.tools.builtin import bind_agent_store_tools
         bind_agent_store_tools(tool_registry, eviction_store)
 
-        # --- 5. Plugin loader (soft) ---
-        plugin_loader: PluginLoader | None = None
+        # --- 5. Plugins: build the plan, run the lifecycle (soft: never stops the harness) ---
+        # The plan is pure (BUILTIN_PLUGINS + discovered METADATA + this config); only ENABLED
+        # third-party plugins are imported. Each stage is contained per plugin (PAPI-11): a failure
+        # is named in the summary line's warnings and the session goes on. Memory is still wired by
+        # step 4 above this phase; the slot is empty in every session until memory converts.
+        # #150 phase 38 criterion 3: plugins follow the SESSION's config dir — resolve() discovers
+        # from `loader.global_config_dir` (cfg_path, never the workspace), after the same loader
+        # loaded this agent (its `agent.<name>` plugin sections are keyed on the declared name).
         try:
-            if hook_system is not None:
-                # #150 phase 38 criterion 3: plugins follow the SESSION's config dir; the loader's
-                # own default (chokepoint-resolved since plan 38-03) only covers env-based
-                # selection, not this --config-dir flag.
-                plugin_loader = PluginLoader(
-                    tool_registry, hook_system, plugins_dir=cfg_path / "plugins"
-                )
-                loaded_names = await plugin_loader.discover_all()
-                plugins_loaded = len(loaded_names)
-        except Exception as exc:
+            plugin_resolution = resolve(loader, agent_name=agent_config.name)
+            warnings.extend(plugin_resolution.warnings)
+            warnings.extend(plugin_resolution.problems())
+            plugin_result = await start_plugins(
+                plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
+                paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
+                                  state_dir=state_dir),
+            )
+            warnings.extend(plugin_result.warnings)
+            warnings.extend(set_plugin_rows(plugin_result.slash_rows))
+            plugins_loaded = len(plugin_result.running)
+        except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
             warnings.append(f"plugins: {exc}")
+
+        # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
+        # Strips every GLOBAL tool that declares — or, undeclared, defaults to — ingest: untrusted:
+        # the web verbs today, any plugin tool that ingests, any tool that declares nothing. It runs
+        # here, after every global tool is registered, because a declaration can only be read off a
+        # registered tool. MCP tools (step 6) keep today's rule: checked by the chokepoint, not stripped.
+        from localharness.tools.capabilities import apply_root_capability_floor
+        _global = {s.name: s for s in tool_registry.global_schemas()}
+        for _name in apply_root_capability_floor(agent_config.tools, _global.values()):
+            # A plugin tool the root cannot hold is named, not silently missing. Core's web verbs
+            # are stripped the same way by design (the root delegates ingestion) and say nothing.
+            if (_plugin := _global[_name].source_plugin) is not None:
+                _why = ("it declares ingest: untrusted" if "ingest" in _global[_name].model_fields_set
+                        else "it declares no ingest, which counts as ingest: untrusted")
+                warnings.append(f"capability floor: the root agent does not hold {_name} (plugin "
+                                f"{_plugin}) — {_why}; delegate to an agent without host tools")
 
         # --- 6. MCP client manager (soft) ---
         mcp_manager: MCPClientManager | None = None
@@ -1299,6 +1355,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             agent_id=agent_config.name,
             pipeline=pipeline,
             eviction_store=eviction_store,
+            # An evicted body's origin is what its tool DECLARES (result_origin, SAFE-03).
+            result_origin=tool_registry.result_origin,
             tool_evict_threshold_chars=agent_config.context.tool_result_evict_threshold_chars,
             tool_evict_enabled=agent_config.context.tool_result_eviction,
             token_counter=token_counter,
@@ -1450,6 +1508,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             kill_file_path=kill_file_path,
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
+            # SAFE-04: core reads the org guardrails every turn, memory on or off. `cfg_path` is the
+            # always-global config dir — the same global-only primitive MemoryStore's
+            # global_base_dir receives and the plugin context's paths.global_config_dir will carry;
+            # "default" is the org id the store is built with. A workspace can neither rewrite nor
+            # blank the org's safety voice.
+            guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
+            # PAPI-04: the memory slot the lifecycle seated — empty in every session until memory
+            # converts (the legacy store above still feeds the prompt); None if plugins never ran.
+            memory_slot=plugin_result.slot if plugin_result is not None else None,
         )
         if acp_channel is not None:
             # Built at the ACP handshake (it had to answer `initialize` before any of this
@@ -1541,6 +1608,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # summary and reported nothing. Amber is the site's warning tone.
             summary_line += " " + entity("warning", f"[{'; '.join(warnings)}]")
         console.print(summary_line, soft_wrap=True)
+        if plugin_result is not None and plugin_result.running:
+            console.print("  " + entity("tool", "Plugins: " + ", ".join(plugin_result.loaded_names)),
+                          soft_wrap=True)
+        if plugin_resolution is not None:
+            available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
+            if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)
+                console.print(Text(_available_hint(available)), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
@@ -1550,9 +1624,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if mcp_manager and mcp_manager.connected_servers:
                 for srv in mcp_manager.connected_servers:
                     console.print("  " + entity("tool", f"MCP: {srv}"), soft_wrap=True)
-            if plugins_loaded > 0 and hook_system:
-                for pname in hook_system.loaded_plugin_names:
-                    console.print("  " + entity("tool", f"Plugin: {pname}"), soft_wrap=True)
             tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
             console.print("  " + entity("tool", f"Tools: {tool_count} total"))
             if memory_store:
@@ -1624,6 +1695,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # The memory page (GET/POST /api/memory*) speaks to the SESSION's store —
                 # same object the memory tools write through, never a second connection.
                 memory_store=memory_store,
+                # PAPI-10: the only roots /api/artifacts/{plugin}/{id} serves — the ones core
+                # computed for this session's running plugins and accepted back from them.
+                artifact_roots=plugin_result.artifact_roots if plugin_result is not None else {},
             )
 
         if acp_channel is not None:
@@ -1671,8 +1745,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Dreaming -> end_session -> MemoryStore -> LLMClient ---
-        # (EventBus handles its own file closing on GC/process exit)
+        # --- Ordered shutdown: MCP -> plugins (reverse) -> Dreaming -> end_session -> MemoryStore
+        # -> LLMClient --- (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
@@ -1680,6 +1754,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # Swallow — a teardown failure must not replace the real exit reason — but never
                 # silently: an MCP server that refuses to die is a diagnosable thing.
                 log.debug("MCP shutdown failed: %s", exc)
+        if plugin_result is not None:
+            try:
+                await stop_plugins(plugin_result)  # reverse start order, each stop contained
+            except Exception as exc:  # noqa: BLE001
+                log.debug("plugin shutdown failed: %s", exc)
+            set_plugin_rows(())  # the rows are process-wide: they leave with the session
         if consolidation_scheduler:
             try:
                 await consolidation_scheduler.stop()

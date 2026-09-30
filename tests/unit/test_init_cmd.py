@@ -251,6 +251,67 @@ def test_init_creates_agents_directory(mock_client_cls, mock_detect, tmp_path):
 
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
+def test_init_scaffolds_a_plugins_folder_with_a_readme(mock_client_cls, mock_detect, tmp_path):
+    """ENAB-05: the README names the two ways a plugin arrives (an installed package's entry point,
+    a folder here), that turning one on is the user vouching for it, and where the example is."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / "plugins" / "README.md").read_text(encoding="utf-8")
+    for phrase in ("`localharness.plugins` entry point", "plugins/<name>/",
+                   "localharness plugins enable <name>", "examples/plugin-template", "vouching"):
+        assert phrase in text, phrase
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_the_plugins_readme_names_both_install_forms(mock_client_cls, mock_detect, tmp_path):
+    """QA-04: a `uv tool` install has no virtual environment, so `uv pip install <package>` fails
+    there ("No virtual environment found"). Measured: `uv tool install --with <package>` adds a
+    plugin to an existing install too, and each run replaces the install's plugins and extras with
+    the ones it names (a re-run without `[web]` uninstalled the web extra's packages; one without a
+    `--with` uninstalled that plugin) — so the README says to name them all again."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / "plugins" / "README.md").read_text(encoding="utf-8")
+    for phrase in ("`uv tool install --with <package> localharness`", "`uv pip install <package>`",
+                   "`'localharness[web]'`", "every plugin you keep"):
+        assert phrase in text, phrase
+
+
+@pytest.mark.parametrize("flags, answer", [(["--force"], None), ([], "y\n")],
+                         ids=["force", "confirmed"])
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_reinit_keeps_an_edited_plugins_readme(mock_client_cls, mock_detect, flags, answer, tmp_path):
+    """A re-init the user said yes to rewrites config.yaml — never a plugins README they edited."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+    assert runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"]).exit_code == 0
+    readme, config = tmp_path / "plugins" / "README.md", tmp_path / "config.yaml"
+    readme.write_text("# my own notes\n", encoding="utf-8")
+    config.write_text("version: '1'\nold: true\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), *flags], input=answer)
+
+    assert result.exit_code == 0, result.output
+    assert "old: true" not in config.read_text(), "premise: the second init reached its writes"
+    assert readme.read_text(encoding="utf-8") == "# my own notes\n"
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
 def test_init_stamps_current_defaults_revision(mock_client_cls, mock_detect, tmp_path):
     """A freshly-init'd config is born stamped at the current defaults revision, so the first
     `start` never spuriously migrates AND a later deliberate removal of a default is respected

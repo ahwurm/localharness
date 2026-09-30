@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from localharness.config.paths import WORKSPACE_DIR_NAME
+from tests.unit.test_cli_hostile_filesystem import _no_traceback
 
 runner = CliRunner()
 
@@ -131,7 +132,7 @@ def test_scaffold_creates_agents_but_no_overrides_and_no_state_dirs(project):
     assert runner.invoke(app, ["init", "--workspace"]).exit_code == 0
 
     workspace = project / WORKSPACE_DIR_NAME
-    assert _listing(workspace) == ["agents", "config.yaml"]
+    assert _listing(workspace) == ["agents", "config.yaml", "plugins", "plugins/README.md"]
 
 
 def test_scaffold_does_not_prompt_with_stdin_closed(project):
@@ -140,6 +141,36 @@ def test_scaffold_does_not_prompt_with_stdin_closed(project):
 
     assert result.exit_code == 0, result.output
     assert (project / WORKSPACE_DIR_NAME / "config.yaml").exists()
+
+
+def test_plugins_readme_says_a_project_is_never_a_plugin_source(project):
+    """ENAB-05: the scaffold is where a user first learns how plugins arrive — and that a project
+    folder can never be one. Plugin code loads only from the machine (ENAB-06); a workspace can only
+    switch a plugin that ships with LocalHarness on or off for itself."""
+    assert runner.invoke(app, ["init", "--workspace"]).exit_code == 0
+
+    text = (project / WORKSPACE_DIR_NAME / "plugins" / "README.md").read_text(encoding="utf-8")
+    for phrase in ("never loads plugin code from a project folder",
+                   "`localharness.plugins` entry point", "plugins/<name>/",
+                   "localharness plugins enable <name> --workspace", "examples/plugin-template"):
+        assert phrase in text, phrase
+
+
+def test_a_failed_plugins_readme_write_leaves_no_partial_workspace(project, monkeypatch):
+    """The README is written inside the claim's cleanup scope, so a failure there removes the whole
+    half-made workspace instead of leaving a tree the next run would refuse to touch."""
+    real_write_text = Path.write_text
+
+    def _fail_readme(self, *args, **kwargs):
+        if self.name == "README.md":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail_readme)
+    result = runner.invoke(app, ["init", "--workspace"])
+
+    _no_traceback(result)
+    assert not (project / WORKSPACE_DIR_NAME).exists(), "a failed scaffold left a partial workspace"
 
 
 # --------------------------------------------------------------------------- refusal

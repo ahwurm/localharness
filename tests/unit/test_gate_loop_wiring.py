@@ -45,6 +45,7 @@ class _Shell(Tool):
                 "required": ["command"],
             },
             group="shell",
+            ingest="none", host="dangerous", gate_family="shell",  # what the real bash_exec declares
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:
@@ -292,6 +293,7 @@ class _Reader(Tool):
             description="Read something.",
             parameters={"type": "object", "properties": {}, "required": []},
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe",
         )
 
     async def _execute(self, **kwargs: Any) -> ToolResult:

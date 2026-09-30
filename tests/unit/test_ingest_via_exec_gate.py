@@ -13,25 +13,50 @@ from __future__ import annotations
 import pytest
 
 from localharness.config.models import ToolConfig
+from localharness.tools.base import ToolSchema
 from localharness.tools.builtin import register_builtin_tools
+from localharness.tools.builtin.bash_tool import BashExecTool
+from localharness.tools.builtin.python_tool import PythonExecTool
+from localharness.tools.builtin.write_tool import WriteTool
 from localharness.tools.capabilities import (
-    EXEC_TOOLS,
-    HOST_DANGEROUS,
     IngestViaExecError,
     apply_root_capability_floor,
     assert_no_ingest_via_exec,
+    is_exec,
+    is_host_dangerous,
     set_floor_enabled,
 )
 from localharness.tools.registry import ToolRegistry
+from tests.unit.test_capabilities import _Bare, _builtin_registry, _decl
+
+# The gate takes the tool's SCHEMA: it reads the declaration, never the name.
+_SCHEMAS = {s.name: s for s in (BashExecTool().info(), PythonExecTool().info(), WriteTool().info())}
 
 
 # --- Membership pins ------------------------------------------------------
 
-def test_exec_tools_is_the_fetch_capable_subset():
+@pytest.mark.asyncio
+async def test_exec_tools_is_the_fetch_capable_subset():
     # write/edit touch the host but FETCH nothing — gating them here would block authoring a
-    # script that merely mentions curl. Execution surface only.
-    assert EXEC_TOOLS == {"bash_exec", "python_exec"}
-    assert EXEC_TOOLS < HOST_DANGEROUS
+    # script that merely mentions curl. Execution surface only: host-dangerous AND a shell/code
+    # family. cruncher_exec is code but declares host: safe (a sandboxed, stateless cell).
+    schemas = {s.name: s for s in (await _builtin_registry()).global_schemas()}
+    exec_tools = {n for n, s in schemas.items() if is_exec(s)}
+    assert exec_tools == {"bash_exec", "python_exec"}
+    assert exec_tools < {n for n, s in schemas.items() if is_host_dangerous(s)}
+    assert not is_exec(schemas["cruncher_exec"])
+
+
+def test_an_undeclared_family_on_a_host_dangerous_tool_is_an_exec_surface():
+    """Fail closed on the family axis too: a host-dangerous tool that does not say which rule set
+    judges it may be a shell — the redirect covers it. A declared non-exec family does not."""
+    runner = _decl("plugin_runner", host="dangerous")  # ingest none, family undeclared
+    assert is_exec(runner)
+    with pytest.raises(IngestViaExecError):
+        assert_no_ingest_via_exec(runner, {"cmd": "curl http://x"}, has_ingest=False)
+    notes = ToolSchema(name="plugin_notes", description="d", parameters={}, ingest="none",
+                       host="dangerous", gate_family="write")
+    assert not is_exec(notes)
 
 
 # --- Pure predicate: blocked ---------------------------------------------
@@ -55,7 +80,7 @@ def test_exec_tools_is_the_fetch_capable_subset():
 )
 def test_predicate_blocks_ingest_shapes(tool, args):
     with pytest.raises(IngestViaExecError) as exc_info:
-        assert_no_ingest_via_exec(tool, args, agent_id="root", has_ingest=False)
+        assert_no_ingest_via_exec(_SCHEMAS[tool], args, agent_id="root", has_ingest=False)
     msg = str(exc_info.value)
     assert "DELEGATE" in msg, "the block must redirect to delegation, not just refuse"
     assert "web-researcher" in msg
@@ -63,7 +88,7 @@ def test_predicate_blocks_ingest_shapes(tool, args):
 
 def test_predicate_blocks_non_dict_arguments():
     with pytest.raises(IngestViaExecError):
-        assert_no_ingest_via_exec("python_exec", "import requests", has_ingest=False)
+        assert_no_ingest_via_exec(_SCHEMAS["python_exec"], "import requests", has_ingest=False)
 
 
 # --- Pure predicate: passes ----------------------------------------------
@@ -87,20 +112,20 @@ def test_predicate_blocks_non_dict_arguments():
     ],
 )
 def test_predicate_passes_benign_shapes(tool, args):
-    assert_no_ingest_via_exec(tool, args, agent_id="root", has_ingest=False)  # must not raise
+    assert_no_ingest_via_exec(_SCHEMAS[tool], args, agent_id="root", has_ingest=False)  # must not raise
 
 
 def test_designated_ingester_is_untouched():
     # An agent that HOLDS a web verb is a designated ingester — the gate is not for it.
     assert_no_ingest_via_exec(
-        "bash_exec", {"command": "curl https://example.com"}, has_ingest=True
+        _SCHEMAS["bash_exec"], {"command": "curl https://example.com"}, has_ingest=True
     )
 
 
 def test_non_exec_tools_are_out_of_scope():
     # Authoring a file that MENTIONS curl is not fetching; this gate covers execution only.
     assert_no_ingest_via_exec(
-        "write", {"path": "fetch.sh", "content": "curl https://example.com"}, has_ingest=False
+        _SCHEMAS["write"], {"path": "fetch.sh", "content": "curl https://example.com"}, has_ingest=False
     )
 
 
@@ -109,7 +134,7 @@ def test_floor_disabled_disables_the_gate():
         set_floor_enabled(False)
     try:
         assert_no_ingest_via_exec(
-            "bash_exec", {"command": "curl https://example.com"}, has_ingest=False
+            _SCHEMAS["bash_exec"], {"command": "curl https://example.com"}, has_ingest=False
         )
     finally:
         set_floor_enabled(True)
@@ -123,7 +148,7 @@ async def _root_registry_and_cfg():
     reg = ToolRegistry()
     await register_builtin_tools(reg)
     cfg = ToolConfig()
-    apply_root_capability_floor(cfg, enabled=True)
+    apply_root_capability_floor(cfg, reg.global_schemas(), enabled=True)
     return reg, cfg
 
 
@@ -153,3 +178,21 @@ async def test_dispatch_carve_out_reaches_real_execution(tmp_path):
     )
     assert "web-ingest" not in (result.error or ""), "the package-op carve-out regressed"
     assert marker.exists(), "the allowed path must actually execute"
+
+
+# --- The designation reads declarations ------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_designation_is_any_reachable_tool_that_declares_ingest():
+    """An agent is a designated ingester when ANY tool it can reach declares ingest: untrusted —
+    the web verbs, an MCP tool, a plugin's search, a tool that declares nothing — not when it
+    holds one of three names. Denying the tool withdraws the designation."""
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = ToolConfig()
+    apply_root_capability_floor(cfg, reg.global_schemas(), enabled=True)
+    assert reg._agent_has_ingest("root", "", cfg) is False
+
+    await reg.register(_Bare("plugin_search"), scope="global")
+    assert reg._agent_has_ingest("root", "", cfg) is True
+    assert reg._agent_has_ingest("root", "", ToolConfig(deny=[*cfg.deny, "plugin_search"])) is False

@@ -409,7 +409,7 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
     # `write` implies `edit`: a child allowed to rewrite a whole file may certainly replace a
     # snippet of it, and on a bandwidth-bound local model the snippet is the cheap path (a
     # yaml that listed `write` alone left the child regenerating entire files). Same
-    # capability class (both HOST_DANGEROUS), so the floor and grant gates are unchanged;
+    # capability class (both declare host: dangerous), so the floor and grant gates are unchanged;
     # an explicit deny of `edit` still wins below.
     if "write" in add and "edit" not in add:
         add.append("edit")
@@ -1333,7 +1333,14 @@ def make_explore_agent_runner(
         if grant_handles:
             from localharness.tools.capabilities import assert_grant_target_safe, floor_enabled
             if floor_enabled():
-                assert_grant_target_safe(_resolve_target_toolset(name, load_agent), agent_id=name)
+                # Judged by each tool's declared `host`, resolved the way from_allowed resolves the
+                # child's allowlist (bare, mcp:TOOL, plugin:PLUGIN.TOOL). A name the base registry
+                # cannot resolve is skipped: from_allowed skips it too, so the child cannot hold it.
+                assert_grant_target_safe(
+                    [s for n in _resolve_target_toolset(name, load_agent)
+                     if (s := base_registry.schema_of(n)) is not None],
+                    agent_id=name,
+                )
         child_agent_tool = _build_child_agent_tool(name)
         child_ctx = _make_child_ctx(grant_handles)
         if name == "cruncher":

@@ -28,6 +28,7 @@ class LoadDocumentTool(Tool):
         return ToolSchema(
             name="load_document",
             group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
             description=(
                 "Load a large local document and retain its FULL text under a handle WITHOUT pulling "
                 "it into context. Returns the handle + a short stub. Use for a document too big to "

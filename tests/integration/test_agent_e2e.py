@@ -10,7 +10,7 @@ from localharness.agent.context import ContextManager
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
-from localharness.tools.capabilities import UNTRUSTED_INGEST
+from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 from localharness.core.bus import EventBus
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.registry import ToolRegistry
@@ -85,7 +85,7 @@ def _make_config(max_actions: int = 100) -> AgentConfig:
         role="Test integration agent.",
         # P-A capability floor: deny web ingestion so the host-tool agent resolves clean (mirrors the
         # real root topology — host tools, web stripped). These tests exercise glob/read, not web.
-        tools=ToolConfig(deny=list(UNTRUSTED_INGEST)),
+        tools=ToolConfig(deny=sorted(WEB_INGEST_TOOLS)),
         permissions=PermissionConfig(
             deny_patterns=[],
             budget=BudgetConfig(max_actions=max_actions, max_duration_minutes=30.0),

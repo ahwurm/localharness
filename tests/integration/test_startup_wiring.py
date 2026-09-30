@@ -122,20 +122,37 @@ async def test_hook_system_wires_to_registry():
 
 
 @pytest.mark.asyncio
-async def test_plugin_loader_discovers_entry_points(tmp_harness_dir):
-    """HOOK-02/HOOK-03: PluginLoader.discover_all runs without error."""
+async def test_plugin_resolution_on_an_empty_plugins_dir(tmp_harness_dir, monkeypatch):
+    """HOOK-02/HOOK-03 on the plugin substrate (the legacy loader is gone): resolving a config whose
+    `plugins/` folder is empty — with discovery narrowed to the real folder scan, so the venv's
+    installed plugins stay out — builds an empty plan, imports nothing and raises nothing, and the
+    lifecycle over it starts nothing."""
+    import sys
+
+    from localharness.config.loader import ConfigLoader
+    from localharness.core.bus import EventBus
+    from localharness.plugins import discovery
+    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.lifecycle import start_plugins
+    from localharness.plugins.resolve import resolve
     from localharness.tools.hooks import HookSystem
     from localharness.tools.registry import ToolRegistry
-    from localharness.plugins.loader import PluginLoader
 
+    real = discovery.discover
+    monkeypatch.setattr("localharness.plugins.discovery.discover",
+                        lambda d: [f for f in real(d) if f.source == "folder"])
+    (tmp_harness_dir / "plugins").mkdir(exist_ok=True)
+    before = set(sys.modules)
+
+    resolution = resolve(ConfigLoader(config_dir=tmp_harness_dir))
+    assert list(resolution.plan.entries) == [] and list(resolution.plan.order) == []
+    assert dict(resolution.classes) == {} and resolution.problems() == [] and resolution.warnings == ()
+    assert not [m for m in set(sys.modules) - before if m.startswith("localharness_folder_plugins")]
     registry = ToolRegistry()
-    hook_system = HookSystem()
-    plugins_dir = tmp_harness_dir / "plugins"
-    plugins_dir.mkdir(exist_ok=True)
-
-    loader = PluginLoader(registry, hook_system, plugins_dir=plugins_dir)
-    loaded = await loader.discover_all()
-    assert isinstance(loaded, list)
+    result = await start_plugins(resolution, bus=EventBus(), registry=registry, hooks=HookSystem(),
+                                 llm=None, paths=PluginPaths(global_config_dir=tmp_harness_dir,
+                                                             workspace=None, state_dir=tmp_harness_dir))
+    assert result.running == [] and result.warnings == [] and registry.global_schemas() == []
 
 
 @pytest.mark.asyncio

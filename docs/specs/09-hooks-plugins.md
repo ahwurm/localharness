@@ -4,25 +4,25 @@
 **Requirements covered:** HOOK-01, HOOK-02, HOOK-03
 **Dependencies:** `tools/registry.py` (spec 04), `core/events.py`
 **Library:** pluggy 1.6.0, importlib.metadata (stdlib)
-**Stability:** UNSTABLE (v1)
+**Stability:** UNSTABLE (v1). The hook sections describe the live code; the Plugins section describes the implemented API in outline — `src/localharness/plugins/api.py` and `examples/plugin-template/` are the reference.
 
 ---
 
 ## Purpose
 
-LocalHarness has two orthogonal extension mechanisms:
+LocalHarness has two extension mechanisms:
 
-1. **Tool plugins** — packages that contribute new tools to the `ToolRegistry`. Discovered via `importlib.metadata` entry points. Every tool plugin registers its tools under the group `localharness.tools`. This is the mechanism for tool packs: "install this package, get these tools."
+1. **Tool hooks** — `pre_tool` and `post_tool`, dispatched through `pluggy`. They run before and after a tool call, for cross-cutting concerns such as audit logging, lint gates and metrics, and a `pre_tool` hook can veto the call. These two are the only pluggy hooks.
 
-2. **Hook plugins** — packages that attach behavior to lifecycle events. Implemented via `pluggy`. Hooks fire before/after tool calls, at agent start/end, and on bus events. This is the mechanism for cross-cutting concerns: audit logging, lint gates, risk annotation, metrics.
+2. **Plugins** — typed classes with a manifest declared in code and one fixed lifecycle (`src/localharness/plugins/`). A plugin can contribute tools, CLI commands, slash commands, `doctor` checks, settings and artifacts, and a plugin of kind `"memory"` can fill the memory slot.
 
-A plugin package may implement both mechanisms (contribute tools AND register hooks), but the mechanisms are independent. A pure tool plugin need not implement any hooks. A pure hook plugin need not register any tools.
+The two meet in one place: a plugin receives the session's `HookSystem` as `ctx.hooks` and registers any hook object it has in its `start()`.
 
 ---
 
 ## Hook Specifications
 
-Hook specs are the contracts. They define what hooks exist, what arguments they receive, and their calling convention. LocalHarness defines one `HookSpec` class.
+Hook specs are the contracts. They define what hooks exist and what arguments they receive. LocalHarness defines one `HookSpec` class with two hooks.
 
 ```python
 # src/localharness/tools/hooks.py
@@ -35,9 +35,12 @@ HARNESS_HOOKIMPL = pluggy.HookimplMarker("localharness")
 
 
 class HarnesHookSpec:
-    """Pluggy hook specifications for LocalHarness.
+    """The two tool hooks — the only pluggy hooks LocalHarness keeps. A plugin's lifecycle
+    (configure / tools / start / stop) comes from plugins/api.Plugin, not from pluggy.
 
-    All hooks are optional. Plugin implementations may implement any subset.
+    Implementations are plain functions, each called on its own and synchronously: an exception
+    is caught and logged under the implementing plugin's name. pluggy wrapper implementations are
+    not supported and are skipped with a warning.
     """
 
     @HARNESS_HOOKSPEC
@@ -50,21 +53,14 @@ class HarnesHookSpec:
     ) -> None:
         """Called before a tool's run() method is invoked.
 
-        Implementations MAY raise ToolVetoed to prevent execution. Any other
-        exception is caught, logged, and does not block execution (plugins
-        must not crash the harness on hook failure).
-
-        Raise ToolVetoed to block:
-            raise ToolVetoed("Reason the tool call is denied")
+        Implementations MAY raise ToolVetoed to prevent execution. Any other exception is caught,
+        logged with the plugin's name, and the call goes on.
 
         Args:
             name: Tool name as registered in ToolRegistry.
             arguments: Validated (post-Pydantic) arguments dict. Read-only.
             agent_id: ID of the agent making the call.
             division_id: Division of the calling agent.
-
-        Returns:
-            None. Return value is ignored. Raise ToolVetoed to block.
         """
 
     @HARNESS_HOOKSPEC
@@ -72,17 +68,15 @@ class HarnesHookSpec:
         self,
         name: str,
         arguments: dict[str, Any],
-        result: "ToolResult",
+        result: Any,
         agent_id: str,
         division_id: str,
     ) -> None:
-        """Called after a tool's run() method returns.
+        """Called after a tool's run() method returns. Observability only.
 
-        Always called, even if run() returned success=False. Never called if
-        pre_tool raised ToolVetoed (tool did not run).
-
-        Exceptions raised here are caught, logged, and ignored. post_tool hooks
-        must never block or fail loudly — they are for observability only.
+        Called whether or not run() succeeded; never called when a pre_tool hook vetoed the
+        call (the tool did not run). An exception here (ToolVetoed included) is caught and logged
+        with the plugin's name; the tool's result is unchanged.
 
         Args:
             name: Tool name.
@@ -91,92 +85,38 @@ class HarnesHookSpec:
             agent_id: ID of the agent making the call.
             division_id: Division of the calling agent.
         """
-
-    @HARNESS_HOOKSPEC
-    def on_agent_start(
-        self,
-        agent_id: str,
-        division_id: str,
-        task: str,
-        iteration_budget: int,
-    ) -> None:
-        """Called once when an agent loop starts a new turn.
-
-        Exceptions raised here are caught and logged. Agent loop continues.
-
-        Args:
-            agent_id: Agent being started.
-            division_id: Division of the agent.
-            task: The task string passed to the agent.
-            iteration_budget: max_actions configured for this agent.
-        """
-
-    @HARNESS_HOOKSPEC
-    def on_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        """Called once when an agent loop ends (success or failure).
-
-        Exceptions raised here are caught and logged.
-
-        Args:
-            agent_id: Agent that finished.
-            division_id: Division of the agent.
-            summary: The summary text the agent produced (if success=True).
-            iterations_used: Number of ReAct iterations consumed.
-            success: False if the loop ended due to budget, stuck detection, or exception.
-            error: Error message if success=False, else None.
-        """
-
-    @HARNESS_HOOKSPEC
-    def on_event(
-        self,
-        event_type: str,
-        event_data: dict[str, Any],
-        agent_id: str | None,
-    ) -> None:
-        """Called for every event emitted on the event bus.
-
-        This is a broad hook for monitoring and audit. Implementations should
-        be fast — they are called on the event bus dispatch path.
-
-        Note: This hook is called synchronously on the event loop. If the
-        implementation needs to do I/O (e.g. write to a database), it must
-        schedule it as a background task, not await it inline.
-
-        Args:
-            event_type: Event class name, e.g. "Action", "Observation", "Heartbeat".
-            event_data: Event fields as a dict. Structure varies by event_type.
-            agent_id: The agent that emitted the event, or None for system events.
-        """
 ```
 
 ### Hook Calling Convention
 
-- **`pre_tool`**: `firstresult=False` — all implementations called. Any raising `ToolVetoed` blocks execution.
-- **`post_tool`**: `firstresult=False` — all implementations called.
-- **`on_agent_start`**: `firstresult=False`.
-- **`on_agent_end`**: `firstresult=False`.
-- **`on_event`**: `firstresult=False`.
+`HookSystem` calls each implementation of a hook **separately**, in pluggy's own order (the last registered runs first), passing only the arguments that implementation names:
 
-No hook uses `firstresult=True` — all implementations always fire.
+- **`pre_tool`**: implementations run one by one until one raises `ToolVetoed`. That stops the call: the ones after it do not run, and the tool returns `ToolResult(success=False, error_type="permission_denied")` carrying the veto's message.
+- **`post_tool`**: every implementation runs. A `ToolVetoed` raised here is logged and ignored — only `pre_tool` can veto.
+- **Any other exception**, in either hook, is caught and logged as a warning naming the plugin (its name on the `HookSystem`) and the implementation's module, with the traceback. The remaining implementations and the tool call go on.
+- **pluggy wrappers** (`wrapper=True` or `hookwrapper=True`) are not supported and are skipped with a warning naming the plugin.
+- **Synchronous only.** Implementations are called and never awaited, so an `async def` implementation never runs: calling it only creates a coroutine, Python warns that the coroutine was never awaited, and a veto it would have raised is lost.
+
+**Where hooks fire.** `localharness start` builds one `HookSystem` per session and wires it to the session's tool registry before any plugin starts; implementations registered later are called too. Hooks fire for tool calls dispatched through that registry, which are the calls of the agent you talk to. A subagent runs on a registry of its own, built from the tools it is allowed, and that registry has no hooks: **`pre_tool` and `post_tool` do not fire for a subagent's tool calls.**
+
+**Raw registry hooks.** `ToolRegistry.register_pre_hook` and `register_post_hook` (spec 04) accept any callable, and the `HookSystem` registers its two callers that way. A callable registered there directly that raises anything but `ToolVetoed` is swallowed by the registry with no log line. Register hook objects on the `HookSystem` instead.
 
 ---
 
 ## Hook Implementation Pattern
 
-Plugin authors implement hooks by decorating methods with `@HARNESS_HOOKIMPL`:
+Hook implementations are methods decorated with `@HARNESS_HOOKIMPL`:
 
 ```python
 # Example: my_plugin/hooks.py
-from localharness.tools.hooks import HARNESS_HOOKIMPL, ToolVetoed
+import logging
 from typing import Any
+
+from localharness.tools.base import ToolVetoed
+from localharness.tools.hooks import HARNESS_HOOKIMPL
+
+log = logging.getLogger(__name__)
+
 
 class MyPluginHooks:
     """Example hook implementation."""
@@ -204,777 +144,163 @@ class MyPluginHooks:
         agent_id: str,
         division_id: str,
     ) -> None:
-        # Emit a metric (fire-and-forget via background task)
-        import asyncio
         if not result.success:
-            asyncio.get_event_loop().call_soon(
-                lambda: print(f"[METRIC] tool_failure agent={agent_id} tool={name}")
-            )
-
-    @HARNESS_HOOKIMPL
-    def on_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        print(f"[AUDIT] {agent_id} finished success={success} iters={iterations_used}")
+            log.info("tool_failure agent=%s tool=%s", agent_id, name)
 ```
 
-Hook implementations **do not** need to implement all hook methods. Pluggy only calls methods that are decorated with `@HARNESS_HOOKIMPL`.
+Hook implementations **do not** need to implement both hooks. Pluggy only calls methods that are decorated with `@HARNESS_HOOKIMPL`.
+
+A plugin registers its hook object in `start()`, under its own name, so that a hook that raises is reported under that name:
+
+```python
+async def start(self, ctx: PluginContext) -> None:
+    if ctx.hooks is not None:  # None only when the session's hook system failed to start
+        ctx.hooks.register_plugin(MyPluginHooks(), name=self.manifest.name)
+```
+
+If the plugin fails at any lifecycle stage, the hook objects it registered through `ctx.hooks` are unregistered with it (see "Lifecycle and containment" below).
 
 ---
 
 ## `HookSystem` Class
 
-The `HookSystem` is the runtime manager: it creates the pluggy `PluginManager`, discovers and registers all plugins, and exposes the `pm` (PluginManager) for the `ToolRegistry` and agent loop to call.
+The runtime manager: it holds the pluggy `PluginManager` with the two hookspecs and connects dispatch to a `ToolRegistry`.
 
 ```python
-# src/localharness/tools/hooks.py (continued)
-import importlib.metadata
-import structlog
-
-log = structlog.get_logger(__name__)
-
-
+# src/localharness/tools/hooks.py (continued): the public surface
 class HookSystem:
-    """Manages plugin discovery, registration, and hook dispatch.
-
-    Instantiated once at harness startup. The ToolRegistry receives references
-    to pre_tool and post_tool callers via register_pre_hook / register_post_hook.
-    The agent loop calls on_agent_start and on_agent_end directly via pm.hook.
-    """
-
     def __init__(self) -> None:
         self.pm = pluggy.PluginManager("localharness")
         self.pm.add_hookspecs(HarnesHookSpec)
-        self._loaded_plugins: list[str] = []
 
-    async def discover_and_register(self) -> None:
-        """Discover all plugins and register their hook implementations.
-
-        Discovery happens in two passes:
-        1. importlib.metadata entry points (group="localharness.hooks") for hook-only plugins
-        2. Plugin manifests (loaded in plugin discovery flow) for combined tool+hook plugins
-
-        This method is idempotent — safe to call multiple times (re-registration
-        of the same plugin name is a no-op with a warning).
-        """
-        # Hook-only plugins register via entry_points group "localharness.hooks"
-        eps = importlib.metadata.entry_points(group="localharness.hooks")
-        for ep in eps:
-            await self._load_hook_plugin(ep)
-
-    async def _load_hook_plugin(self, ep: importlib.metadata.EntryPoint) -> None:
-        plugin_name = ep.name
-        try:
-            impl_class = ep.load()
-            instance = impl_class()
-            if not self.pm.is_registered(instance):
-                self.pm.register(instance, name=plugin_name)
-                self._loaded_plugins.append(plugin_name)
-                log.info("hook_plugin_loaded", plugin=plugin_name)
-            else:
-                log.warning("hook_plugin_already_registered", plugin=plugin_name)
-        except Exception as exc:
-            # Plugin load failure is non-fatal. Log and continue.
-            # If a hook plugin fails to load, the harness still runs —
-            # hooks are optional. A missing security hook IS dangerous,
-            # so log at ERROR level.
-            log.error(
-                "hook_plugin_load_failed",
-                plugin=plugin_name,
-                error=str(exc),
-                exc_info=True,
-            )
-
-    def register_impl(self, instance: object, name: str) -> None:
-        """Register a hook implementation instance directly.
-
-        Used by the plugin loader (PluginLoader) after loading a combined
-        tool+hook plugin from its manifest.
-
-        Args:
-            instance: Object with @HARNESS_HOOKIMPL-decorated methods.
-            name: Unique plugin name for pluggy tracking.
-        """
-        if self.pm.is_registered(instance):
-            log.warning("hook_impl_already_registered", name=name)
-            return
-        self.pm.register(instance, name=name)
-        self._loaded_plugins.append(name)
+    def register_plugin(self, plugin: object, name: str | None = None) -> None:
+        """Register a hook implementation object (dedup-safe). Pass `name` (a plugin passes its
+        own plugin name) so a hook that raises is reported under it rather than an object id."""
 
     def wire_to_registry(self, registry: "ToolRegistry") -> None:
-        """Connect hook dispatch to ToolRegistry.
-
-        Must be called after discover_and_register() and before any agents run.
-        """
-        async def pre_hook_caller(
-            name: str, arguments: dict, agent_id: str, **_: Any
-        ) -> None:
-            # pm.hook.pre_tool is a sync call to pluggy's caller infrastructure.
-            # Each hookimpl may be sync or async. LocalHarness requires sync hookimpls
-            # for pre_tool (they run on the hot path). Async hookimpls are NOT
-            # supported for pre_tool — pluggy does not await coroutines by default.
-            self.pm.hook.pre_tool(
-                name=name,
-                arguments=arguments,
-                agent_id=agent_id,
-                division_id=_get_division(agent_id),
-            )
-
-        async def post_hook_caller(
-            name: str, arguments: dict, result: Any, agent_id: str, **_: Any
-        ) -> None:
-            self.pm.hook.post_tool(
-                name=name,
-                arguments=arguments,
-                result=result,
-                agent_id=agent_id,
-                division_id=_get_division(agent_id),
-            )
-
-        registry.register_pre_hook(pre_hook_caller)
-        registry.register_post_hook(post_hook_caller)
-
-    def call_agent_start(
-        self, agent_id: str, division_id: str, task: str, iteration_budget: int
-    ) -> None:
-        """Called by the agent loop at the start of each turn."""
-        try:
-            self.pm.hook.on_agent_start(
-                agent_id=agent_id,
-                division_id=division_id,
-                task=task,
-                iteration_budget=iteration_budget,
-            )
-        except Exception as exc:
-            log.warning("on_agent_start_hook_error", error=str(exc))
-
-    def call_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        """Called by the agent loop at the end of each turn."""
-        try:
-            self.pm.hook.on_agent_end(
-                agent_id=agent_id,
-                division_id=division_id,
-                summary=summary,
-                iterations_used=iterations_used,
-                success=success,
-                error=error,
-            )
-        except Exception as exc:
-            log.warning("on_agent_end_hook_error", error=str(exc))
-
-    def call_on_event(
-        self, event_type: str, event_data: dict, agent_id: str | None
-    ) -> None:
-        """Called by the event bus subscriber after each event emission."""
-        try:
-            self.pm.hook.on_event(
-                event_type=event_type,
-                event_data=event_data,
-                agent_id=agent_id,
-            )
-        except Exception as exc:
-            log.warning("on_event_hook_error", error=str(exc), event_type=event_type)
-
-    @property
-    def loaded_plugin_names(self) -> list[str]:
-        return list(self._loaded_plugins)
+        """Register one async pre-hook and one async post-hook on `registry`; each calls every
+        implementation of its hook separately (see Hook Calling Convention)."""
 ```
 
-**Note on async hooks:** pluggy does not natively await coroutines. LocalHarness requires all `pre_tool` and `post_tool` hook implementations to be synchronous. `on_event` implementations must also be synchronous (they schedule async work via `asyncio.get_event_loop().call_soon()` or create tasks). This constraint is documented in `HarnesHookSpec` and enforced by a type check at registration time in `register_impl()`.
+`HookSystem` discovers nothing. Hook objects are registered on it with `register_plugin`, which ignores an object that is already registered. Unregistering goes through pluggy directly (`hooks.pm.unregister(obj)`); the plugin lifecycle does it for a plugin that fails.
 
 ---
 
-## Plugin Manifest Format
-
-Every plugin package (tool plugin, hook plugin, or combined) includes a `manifest.yaml` at its package root. This is the human-readable declaration of what the plugin provides.
-
-```yaml
-# manifest.yaml schema
-# Located at: <package_root>/manifest.yaml
-
-# Required fields:
-name: my-search-tools          # Unique plugin name. snake_case or kebab-case.
-version: "1.2.0"               # Semver.
-description: "Web search tools via Exa API"  # One-line description.
-author: "Your Name <you@example.com>"
-
-# Stability marker. LocalHarness v1 marks its own extension API as UNSTABLE.
-# Plugin authors declare their own stability level.
-stability: UNSTABLE             # UNSTABLE | STABLE | DEPRECATED
-
-# Minimum LocalHarness version required.
-requires_localharness: ">=0.1.0"
-
-# Python package dependencies (passed to pip/uv at install time).
-dependencies:
-  - exa-py>=1.0.0
-
-# Tools this plugin contributes (tool plugins only).
-# Each entry is loaded by the plugin loader and registered in ToolRegistry.
-tools:
-  - name: exa_search            # Must match ToolSchema.name returned by info()
-    scope: global               # global | division | agent
-    # If scope=division or scope=agent, add:
-    # division_id: financial
-    # agent_id: morning-briefing
-    entrypoint: my_search_tools.tools:ExaSearchTool  # Python import path
-    description: "Search the web using Exa semantic search"
-
-  - name: exa_crawl
-    scope: global
-    entrypoint: my_search_tools.tools:ExaCrawlTool
-    description: "Crawl a URL and return its content"
-
-# Hook implementations this plugin contributes (hook plugins only).
-hooks:
-  - entrypoint: my_search_tools.hooks:MySearchHooks
-    # Class must have @HARNESS_HOOKIMPL-decorated methods.
-
-# Optional: Configuration schema this plugin accepts.
-# If present, users may configure the plugin under plugins.<name> in
-# ~/.localharness/config.yaml. Values are passed to tool constructors.
-config_schema:
-  type: object
-  properties:
-    api_key:
-      type: string
-      description: "Exa API key"
-    timeout_s:
-      type: number
-      default: 30
-  required: [api_key]
-```
-
-### Manifest validation rules
-
-- `name` must be unique across all loaded plugins. Collision on load raises `PluginConflictError`.
-- `version` must be valid semver. Invalid versions fail validation.
-- `stability: UNSTABLE` is the only valid value for v1 plugins. If a plugin declares `STABLE`, the harness emits a warning (the harness API itself is UNSTABLE; stable plugins cannot make stability guarantees).
-- `entrypoint` format: `package.module:ClassName`. The class must be importable and must satisfy `ToolProtocol` (for tools) or have at least one `@HARNESS_HOOKIMPL` method (for hooks).
-- `requires_localharness` is checked against `localharness.__version__` at load time. Version mismatch raises `PluginVersionError` (non-fatal — logged and skipped).
-
----
-
-## Plugin Discovery via importlib.metadata
-
-```python
-# src/localharness/plugins/loader.py
-import importlib.metadata
-import importlib
-from pathlib import Path
-import yaml
-import structlog
-
-log = structlog.get_logger(__name__)
-
-
-class PluginLoader:
-    """Discovers, validates, and loads all plugins.
-
-    Two discovery paths:
-    1. Entry points: packages declare tools via pyproject.toml entry_points.
-       Group "localharness.tools" for tool classes.
-       Group "localharness.hooks" for hook implementation classes.
-    2. Manifest-based: packages include manifest.yaml; the loader finds all
-       installed packages with a manifest.yaml at their package root.
-       (Used for combined tool+hook plugins and config-aware plugins.)
-
-    At startup, PluginLoader is called before ToolRegistry.register_builtin_tools()
-    but after the registry and hook system are constructed.
-    """
-
-    def __init__(self, registry: "ToolRegistry", hook_system: "HookSystem") -> None:
-        self._registry = registry
-        self._hook_system = hook_system
-        self._loaded: dict[str, "PluginManifest"] = {}
-
-    async def discover_all(self) -> None:
-        """Run full discovery. Order:
-            1. Discover tool entry points
-            2. Discover hook entry points
-            3. Discover manifest-based plugins (catches combined plugins)
-        """
-        await self._discover_tool_entry_points()
-        await self._hook_system.discover_and_register()
-        await self._discover_manifest_plugins()
-
-    async def _discover_tool_entry_points(self) -> None:
-        """Load tools registered under group 'localharness.tools'."""
-        eps = importlib.metadata.entry_points(group="localharness.tools")
-        for ep in eps:
-            await self._load_tool_entry_point(ep)
-
-    async def _load_tool_entry_point(self, ep: importlib.metadata.EntryPoint) -> None:
-        tool_name = ep.name
-        try:
-            tool_class = ep.load()
-            instance = tool_class()
-            schema = instance.info()
-            await self._registry.register(instance, scope=schema.scope or "global")
-            log.info("tool_plugin_loaded_via_entrypoint", tool=tool_name)
-        except Exception as exc:
-            log.error(
-                "tool_plugin_entrypoint_failed",
-                tool=tool_name,
-                error=str(exc),
-                exc_info=True,
-            )
-
-    async def _discover_manifest_plugins(self) -> None:
-        """Find all installed packages with a manifest.yaml."""
-        for dist in importlib.metadata.distributions():
-            # Check if this distribution has a manifest.yaml file listed
-            for file in dist.files or []:
-                if file.name == "manifest.yaml":
-                    manifest_path = file.locate()
-                    await self._load_manifest_plugin(manifest_path, dist.name)
-                    break
-
-    async def _load_manifest_plugin(
-        self, manifest_path: Path, dist_name: str
-    ) -> None:
-        try:
-            manifest_data = yaml.safe_load(manifest_path.read_text())
-            manifest = PluginManifest(**manifest_data)
-        except Exception as exc:
-            log.error(
-                "manifest_parse_failed",
-                dist=dist_name,
-                path=str(manifest_path),
-                error=str(exc),
-            )
-            return
-
-        if manifest.name in self._loaded:
-            log.warning("manifest_plugin_already_loaded", name=manifest.name)
-            return
-
-        # Version check
-        if not _version_compatible(manifest.requires_localharness):
-            log.warning(
-                "manifest_plugin_version_mismatch",
-                plugin=manifest.name,
-                requires=manifest.requires_localharness,
-            )
-            return
-
-        # Load tools from manifest
-        for tool_entry in manifest.tools:
-            await self._load_manifest_tool(tool_entry, manifest.name)
-
-        # Load hooks from manifest
-        for hook_entry in manifest.hooks:
-            await self._load_manifest_hook(hook_entry, manifest.name)
-
-        self._loaded[manifest.name] = manifest
-        log.info("manifest_plugin_loaded", name=manifest.name, version=manifest.version)
-
-    async def _load_manifest_tool(self, entry: "ToolEntry", plugin_name: str) -> None:
-        try:
-            module_path, class_name = entry.entrypoint.rsplit(":", 1)
-            module = importlib.import_module(module_path)
-            tool_class = getattr(module, class_name)
-            instance = tool_class()
-            await self._registry.register(
-                instance,
-                scope=entry.scope,
-                division_id=getattr(entry, "division_id", None),
-                agent_id=getattr(entry, "agent_id", None),
-            )
-            log.info(
-                "manifest_tool_registered", tool=entry.name, plugin=plugin_name
-            )
-        except Exception as exc:
-            log.error(
-                "manifest_tool_load_failed",
-                tool=entry.name,
-                plugin=plugin_name,
-                error=str(exc),
-                exc_info=True,
-            )
-
-    async def _load_manifest_hook(self, entry: "HookEntry", plugin_name: str) -> None:
-        try:
-            module_path, class_name = entry.entrypoint.rsplit(":", 1)
-            module = importlib.import_module(module_path)
-            hook_class = getattr(module, class_name)
-            instance = hook_class()
-            self._hook_system.register_impl(instance, name=f"{plugin_name}.{class_name}")
-            log.info(
-                "manifest_hook_registered", plugin=plugin_name, class_name=class_name
-            )
-        except Exception as exc:
-            log.error(
-                "manifest_hook_load_failed",
-                plugin=plugin_name,
-                error=str(exc),
-                exc_info=True,
-            )
-```
-
-### Pydantic models for manifest parsing
-
-```python
-from pydantic import BaseModel
-from typing import Literal
-
-class ToolEntry(BaseModel):
-    name: str
-    scope: Literal["global", "division", "agent"] = "global"
-    entrypoint: str  # "package.module:ClassName"
-    description: str = ""
-    division_id: str | None = None
-    agent_id: str | None = None
-
-class HookEntry(BaseModel):
-    entrypoint: str  # "package.module:ClassName"
-
-class PluginManifest(BaseModel):
-    name: str
-    version: str
-    description: str
-    author: str = ""
-    stability: Literal["UNSTABLE", "STABLE", "DEPRECATED"] = "UNSTABLE"
-    requires_localharness: str = ">=0.1.0"
-    dependencies: list[str] = []
-    tools: list[ToolEntry] = []
-    hooks: list[HookEntry] = []
-    config_schema: dict | None = None
-```
-
----
-
-## Plugin Lifecycle
-
-```
-discover_all() called at harness startup
-  │
-  ├─ [Phase 1] Entry point scan: importlib.metadata.entry_points()
-  │    group="localharness.tools"  → each → ToolRegistry.register()
-  │    group="localharness.hooks"  → each → HookSystem.register_impl()
-  │
-  ├─ [Phase 2] Manifest scan: iterate all installed distributions
-  │    For each dist with manifest.yaml:
-  │      ├─ Parse + validate PluginManifest (Pydantic)
-  │      ├─ Version check against localharness.__version__
-  │      ├─ Load tools → ToolRegistry.register()
-  │      └─ Load hooks → HookSystem.register_impl()
-  │
-  └─ [Phase 3] HookSystem.wire_to_registry(registry)
-       Connects pluggy pm.hook.pre_tool / post_tool to ToolRegistry dispatch
-```
-
-**Activate**: Plugins are "active" once registered. There is no separate activate step — registered tools are immediately available in the ToolRegistry; registered hooks are immediately called by pluggy.
-
-**No hot-reload in v1.** Plugin changes require harness restart. Dynamic reload is v2.
-
----
-
-## Tool Plugins vs Hook Plugins
-
-| Dimension | Tool Plugin | Hook Plugin |
-|-----------|-------------|-------------|
-| Discovery group | `localharness.tools` entry point OR manifest `tools:` section | `localharness.hooks` entry point OR manifest `hooks:` section |
-| Base contract | Implements `ToolProtocol` (`info()` + `run()`) | Has `@HARNESS_HOOKIMPL` methods on hookspecs |
-| Effect | Adds tools to ToolRegistry | Fires callbacks at lifecycle events |
-| Failure impact | Tool not available; logged at ERROR | Hook not called for that event; logged at ERROR |
-| Can veto tool calls | No (tools don't observe other tools) | Yes, via `pre_tool` raising `ToolVetoed` |
-| Async support | Yes — `run()` is an async method | No — hookimpl methods must be synchronous (schedule async work via `call_soon`) |
-| State | Stateless preferred; stateful tools use own lock | Stateless strongly preferred |
-
----
-
-## Plugin Versioning and Stability
-
-All v1 LocalHarness hook and tool APIs are marked **UNSTABLE**. This means:
-
-- The `HarnesHookSpec` signatures may change between minor versions.
-- `ToolProtocol` may gain new required methods.
-- `manifest.yaml` schema may gain required fields.
-
-Plugin authors must pin `requires_localharness` to a specific minor version, e.g. `>=0.1.0,<0.2.0`.
-
-The harness enforces this:
-- `PluginLoader._load_manifest_plugin()` checks `requires_localharness` against `localharness.__version__`.
-- Incompatible plugins are **skipped with a WARNING**, not a hard failure.
-- The `localharness doctor` command reports all skipped plugins.
-
-Stability will be bumped to STABLE when the hook API reaches v1.0 (post first stable release).
-
----
-
-## Error Handling Reference
-
-| Situation | Behavior |
-|-----------|----------|
-| Tool entry point fails to import | `log.error(...)`, tool not registered, harness continues |
-| Tool entry point class not found | `log.error(...)`, tool not registered, harness continues |
-| Tool name collision in registry | `log.warning(...)`, second registration skipped |
-| Manifest parse error | `log.error(...)`, entire plugin skipped |
-| Manifest version mismatch | `log.warning(...)`, plugin skipped |
-| Hook entry point fails to import | `log.error(...)`, hook not registered, harness continues |
-| `pre_tool` raises `ToolVetoed` | Tool execution blocked; `ToolResult(error_type="permission_denied")` returned |
-| `pre_tool` raises other exception | `log.warning(...)`, exception swallowed, execution continues |
-| `post_tool` raises any exception | `log.warning(...)`, exception swallowed, result returned unchanged |
-| `on_agent_start` raises | `log.warning(...)`, agent loop continues |
-| `on_agent_end` raises | `log.warning(...)`, end handling continues |
-| `on_event` raises | `log.warning(...)`, event processing continues |
-| Plugin `config_schema` missing required field | `log.error(...)`, plugin's tools registered but with default config |
-
-**The harness never crashes due to a plugin.** All plugin errors are contained.
-
----
-
-## Example Plugin: Complete Working Implementation
-
-This section is a complete, working plugin that contributes one tool (`lint_python`) and one hook (a post_tool hook that logs tool failures to a file). Copy it as a template.
-
-### File layout
-
-```
-localharness-lint-plugin/
-├── pyproject.toml
-├── manifest.yaml
-└── localharness_lint/
-    ├── __init__.py
-    ├── tools.py
-    └── hooks.py
-```
-
-### `pyproject.toml`
-
-```toml
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "localharness-lint-plugin"
-version = "0.1.0"
-description = "Lint tool and failure-logging hook for LocalHarness"
-requires-python = ">=3.12"
-dependencies = []
-
-# Entry points for discovery without manifest.yaml.
-# The manifest.yaml is the primary mechanism; entry points are the fallback.
-[project.entry-points."localharness.tools"]
-lint_python = "localharness_lint.tools:LintPythonTool"
-
-[project.entry-points."localharness.hooks"]
-lint_failure_logger = "localharness_lint.hooks:LintFailureLoggerHooks"
-```
-
-### `manifest.yaml`
-
-```yaml
-name: localharness-lint-plugin
-version: "0.1.0"
-description: "Lint Python files and log tool failures"
-author: "Example Author <example@example.com>"
-stability: UNSTABLE
-requires_localharness: ">=0.1.0,<0.2.0"
-dependencies: []
-
-tools:
-  - name: lint_python
-    scope: global
-    entrypoint: localharness_lint.tools:LintPythonTool
-    description: "Run ruff linter on a Python file or directory"
-
-hooks:
-  - entrypoint: localharness_lint.hooks:LintFailureLoggerHooks
-```
-
-### `localharness_lint/tools.py`
-
-```python
-import asyncio
-import shutil
-from pathlib import Path
-from localharness.tools.base import Tool, ToolSchema, ToolResult
-
-
-class LintPythonTool(Tool):
-    """Run ruff linter on a Python file or directory.
-
-    Returns lint output (empty string = no issues). Fails with an error result
-    if ruff is not installed.
-    """
-
-    def info(self) -> ToolSchema:
-        return ToolSchema(
-            name="lint_python",
-            description=(
-                "Run the ruff linter on a Python file or directory. "
-                "Returns lint findings or empty string if clean."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to Python file or directory to lint.",
-                    },
-                    "fix": {
-                        "type": "boolean",
-                        "description": "Apply auto-fixes where possible.",
-                        "default": False,
-                    },
-                },
-                "required": ["path"],
-            },
-            destructive=False,
-            estimated_tokens=300,
-            version="0.1.0",
-        )
-
-    async def _execute(self, path: str, fix: bool = False) -> ToolResult:
-        if shutil.which("ruff") is None:
-            return self.err(
-                "ruff is not installed. Install with: pip install ruff",
-                error_type="execution_error",
-            )
-
-        target = Path(path).resolve()
-        if not target.exists():
-            return self.err(f"Path does not exist: {target}", error_type="not_found")
-
-        cmd = ["ruff", "check", str(target)]
-        if fix:
-            cmd.append("--fix")
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-        output = stdout.decode("utf-8", errors="replace").strip()
-
-        if proc.returncode == 0:
-            return self.ok("(no lint issues)")
-        return self.ok(output, exit_code=proc.returncode)
-```
-
-### `localharness_lint/hooks.py`
-
-```python
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
-
-from localharness.tools.hooks import HARNESS_HOOKIMPL
-
-
-class LintFailureLoggerHooks:
-    """Log tool failures to ~/.localharness/tool-failures.jsonl."""
-
-    LOG_PATH = Path.home() / ".localharness" / "tool-failures.jsonl"
-
-    @HARNESS_HOOKIMPL
-    def post_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any],
-        result: Any,
-        agent_id: str,
-        division_id: str,
-    ) -> None:
-        """Log failed tool calls to a JSONL file."""
-        if result.success:
-            return  # Only log failures
-
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "agent_id": agent_id,
-            "division_id": division_id,
-            "tool": name,
-            "error_type": result.error_type,
-            "error": result.error,
-        }
-
-        # Synchronous append — safe because POSIX O_APPEND writes are atomic
-        # for records < PIPE_BUF (4096 bytes). Our records are well under that.
-        self.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with self.LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
-
-    @HARNESS_HOOKIMPL
-    def on_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        """Print a summary line when an agent finishes."""
-        status = "OK" if success else f"FAILED: {error}"
-        print(
-            f"[lint-plugin] {agent_id} finished after {iterations_used} iterations: {status}"
-        )
-```
-
-### Install and verify
-
-```bash
-# Development install
-cd localharness-lint-plugin
-uv pip install -e .
-
-# Verify discovery
-localharness doctor
-# Expected output includes:
-# [PASS] Plugin: localharness-lint-plugin 0.1.0 (tools: lint_python, hooks: lint_failure_logger)
-```
-
----
-
-## Harness Startup Sequence (hooks-relevant excerpt)
-
-```python
-# src/localharness/tools/__init__.py
-
-async def build_tool_system(
-    harness_config: "HarnessConfig",
-) -> tuple["ToolRegistry", "HookSystem", "PluginLoader"]:
-    """Construct and wire the full tool system. Called once at startup."""
-    from localharness.tools.registry import ToolRegistry
-    from localharness.tools.hooks import HookSystem
-    from localharness.plugins.loader import PluginLoader
-    from localharness.tools.builtin import register_builtin_tools
-
-    registry = ToolRegistry(
-        default_timeout_s=harness_config.tools.default_timeout_s,
-        result_size_cap_chars=harness_config.tools.result_size_cap_chars,
-    )
-    hook_system = HookSystem()
-    loader = PluginLoader(registry, hook_system)
-
-    # Phase 1: Register built-in tools (always present, not pluggable)
-    await register_builtin_tools(registry)
-
-    # Phase 2: Discover and register all plugins
-    await loader.discover_all()
-
-    # Phase 3: Wire hooks to registry dispatch
-    hook_system.wire_to_registry(registry)
-
-    return registry, hook_system, loader
-```
+## Plugins
+
+This section outlines the implemented API. `src/localharness/plugins/api.py` defines every type a plugin touches, once each and with docstrings, and `examples/plugin-template/` is a complete working plugin that the development install includes and the test suite exercises; start there. SECURITY.md ("Plugins") states the trust model. The example imports three LocalHarness modules: `localharness.plugins.api`, `localharness.tools.base` and `localharness.core.artifacts`.
+
+A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` is empty today: no feature ships as a plugin yet.
+
+### Discovery and enabling
+
+Discovery (`plugins/discovery.py`) has two sources, both machine-level; a workspace is never one:
+
+- an installed distribution with an entry point in the group **`localharness.plugins`**: its name is the plugin name and its value names the `Plugin` subclass (`"package.module:Class"`);
+- a folder `<global config dir>/plugins/<name>/` whose `__init__.py` binds `plugin = <the Plugin subclass>`. It is imported by file location, under `localharness_folder_plugins.<name>`, without touching `sys.path`.
+
+Discovery reads metadata only: entry-point names, distribution names and versions, folder names. A plugin you installed is **off** until enabled and is not imported before that. Its `<name>.enabled` is read from the machine-level layers only (the global `config.yaml` and `overrides.yaml`); a project's value is dropped with a warning. A bundled plugin's `<name>.enabled` is layered like any setting and defaults to the manifest's `enabled_by_default`.
+
+- `localharness plugins list [--json]` shows every plugin (name, what it does, state, where it came from) and the command that turns an off or available one on; `plugins info NAME [--json]` shows one plugin and the settings it owns.
+- `localharness plugins enable NAME [--set KEY=VALUE ...] [--workspace]` and `plugins disable NAME [--workspace]` write `NAME.enabled`, and any `--set` values after checking them with the plugin's `ConfigModel`, into one layer's `overrides.yaml`: the machine's, or with `--workspace` the project's. They never write a `config.yaml`. `--workspace` is refused for a plugin you installed and for a machine-level-only setting. The change takes effect at the next `localharness start`. Unlike `components set`, these commands write no audit event. A plain `enable` imports nothing; `enable NAME --set ...` imports a plugin you installed, to check the values.
+
+### Plugins written for 0.15
+
+LocalHarness 0.15 loaded plugins in three ways, and none of them is loaded any more:
+
+- an installed package's `localharness.tools` entry points, each naming a tool class, which `start` created and registered as a tool;
+- an installed package's `localharness.hooks` entry points, each naming a hook class, which `start` created and registered on the hook system;
+- a folder `<global config dir>/plugins/<dir>/` holding a `manifest.yaml` that listed tool and hook classes.
+
+0.15's `start` loaded all of them in every session; nothing had to turn them on. 0.15 also declared three more hooks, `on_agent_start`, `on_agent_end` and `on_event`, which nothing in 0.15 ever called.
+
+LocalHarness now imports nothing from such a plugin. Reading package metadata and file names only, it names each one in `localharness plugins list` (on stderr), in `localharness doctor` (a warning, not a failure) and in the startup summary of `localharness start`: a package with a `localharness.tools` or `localharness.hooks` entry point and no `localharness.plugins` one, as ``<package> <version> (`localharness.tools` entry point `<name>`) was built for the 0.15 plugin API and is no longer loaded``, and a `plugins/<dir>/` folder with a `manifest.yaml` and no `__init__.py`, by the manifest's path. The notice stops once the plugin is ported or removed (the package uninstalled, or the folder deleted).
+
+To port one, with `examples/plugin-template/` as the model:
+
+1. Write a `Plugin` subclass with a `PluginManifest` (see "Manifest and methods").
+2. Expose it as a `localharness.plugins` entry point whose name is the manifest's name, in place of the old entry points, or as a folder `<global config dir>/plugins/<name>/` whose `__init__.py` binds `plugin = <the class>` (see "Discovery and enabling").
+3. Return your tools from `tools(ctx)`, and give each tool's `ToolSchema` the four declarations; a tool that declares nothing is treated as the riskiest kind (see "Tool declarations and the gate-family rule"). A tool may not use a name the permission gate classifies by name (see "Lifecycle and containment").
+4. Keep your `pre_tool` and `post_tool` implementations as they are, and register the object that holds them in `start()` with `ctx.hooks.register_plugin(obj, name=self.manifest.name)` (see "Hook Implementation Pattern").
+5. `on_agent_start`, `on_agent_end` and `on_event` have no replacement hook; 0.15 never called them, so dropping them loses nothing. What exists instead: `start(ctx)` and `stop(ctx)` run once per session, and `ctx.bus` is the session's event bus. `ctx.bus.subscribe(TurnStarted, handler)`, with an event class from `localharness.core.events`, calls `handler` with each such event the session publishes, and returns a handle for `ctx.bus.unsubscribe`. The lifecycle does not remove subscriptions: unsubscribe in `stop()`. A plugin whose `start()` raised is never stopped, so a subscription it made stays for the session.
+6. Install it, then run `localharness plugins enable <name>`: a plugin you install runs nothing until it is enabled.
+
+### The load plan
+
+`resolve(loader)` (`plugins/resolve.py`) discovers, reads each plugin's `enabled`, imports only the enabled plugins you installed, validates settings, and passes the result to `build_load_plan` (`plugins/plan.py`), which is pure: it reads no file and imports nothing. The same plan feeds `start`, the banner, `plugins list`, `doctor`, `components` and the CLI mount. Each plugin gets one state:
+
+| State | Meaning |
+|---|---|
+| `on` | loads this session |
+| `off` | ships with LocalHarness and is not enabled |
+| `available` | installed, not enabled, never imported |
+| `failed` | enabled, but importing it raised, its settings are invalid, or a plugin it `requires` is not on |
+| `skipped` | enabled, but its `requires_localharness` range excludes this version |
+| `refused` | breaks a plan rule: an invalid name, a name that is a core settings key or already taken, a class whose manifest is missing or names another plugin, kind `"memory"` without being a `MemorySlotPlugin`, two or more memory plugins on at once (all are refused), or a dependency cycle |
+| `needs-extra` | enabled, but the `localharness[<extra>]` install extra it needs is missing |
+
+The ON plugins are ordered dependencies first (`requires`, and `uses` naming a plugin that is on), ties in display order.
+
+### Manifest and methods
+
+A plugin is a subclass of `Plugin` whose class attribute `manifest` is a frozen, validated `PluginManifest`:
+
+| Field | Meaning |
+|---|---|
+| `name` | the plugin name and its settings key: a lower-case letter, then up to 63 of `a-z`, `0-9`, `_`, `-` |
+| `version` | the plugin's own version |
+| `kind` | `"tools"`, `"channel"`, `"memory"` or `"dev"` |
+| `enabled_by_default` | read for a plugin that ships with LocalHarness only |
+| `requires_extra` | the `localharness[<extra>]` the plugin needs |
+| `requires_localharness` | a PEP 440 range, default `>=0.15,<1`; out of range, the plugin is skipped. For a plugin you installed it is checked after the import, since the manifest is in its code |
+| `requires` / `uses` | hard / soft dependencies on other plugins |
+| `cli` / `slash` | `CliDescriptor` / `SlashDescriptor` tuples (see "Commands, slash commands and doctor") |
+
+`PLUGIN_API_VERSION` (`"1"`) names this API's version; it changes only with a change that would break a plugin. Nothing in the loader compares it with anything: `requires_localharness` is the check that runs. The other class attributes are `ConfigModel` and `AgentConfigModel` (pydantic models for the plugin's settings, or None) and `wants_artifacts` (default False). The first line of the class docstring is what `plugins list` shows. Every method is optional, and the defaults do nothing:
+
+- `configure(ctx)` returns `"ready"` or `("unconfigured", "<missing dot-path>")`, and must not start anything.
+- `tools(ctx)` returns the tools the plugin contributes.
+- `start(ctx)` and `stop(ctx)` acquire and release what runs during the session.
+- `doctor(ctx)` returns a list of `Check(name, status, detail, hint)`, with `status` one of `"pass"`, `"fail"`, `"skip"`.
+- `channels()` returns channel classes by name. Nothing reads it yet: `start --channel` accepts core's channels only.
+- `artifact_root(ctx)` returns the root the plugin writes to (default: `ctx.paths.artifact_dir`).
+
+`MemorySlotPlugin`, for kind `"memory"`, adds `context(ctx, turn, budget)`, `browse()` and `bind_subagent(ctx)`. `configure`, `tools`, `start`, `stop` and `doctor` may be `def` or `async def`: the lifecycle awaits a result when it is awaitable. `context()` must be `async def`, and `artifact_root()`, `browse()` and `bind_subagent()` must be plain `def`; the wrong kind counts as a failed call.
+
+### Context and paths
+
+Every method gets one `PluginContext` with exactly seven fields: `bus` (the session's `EventBus`), `tools` (its `ToolRegistry`), `hooks` (its `HookSystem`, or None if that failed to start), `config` and `agent_config` (the plugin's validated `ConfigModel` and `AgentConfigModel` instances, or None), `paths`, and `llm` (the session's LLM client; None outside a session, as in `doctor`). A plugin's CLI command gets no context: it is a plain Typer app. `paths` is a `PluginPaths` whose every path core computes: `global_config_dir`, `workspace` (or None), `state_dir` (the workspace layer when one applies, else the global directory) and `artifact_dir` (see Artifacts). The API asks a plugin never to import `cli/start_cmd.py` or another plugin; nothing enforces that.
+
+### Lifecycle and containment
+
+`localharness start` resolves the plugins once the built-in tools, the hook system and the memory store are set up. `start_plugins` (`plugins/lifecycle.py`) then runs the ON plugins through four stages: create (the class is instantiated), `configure`, `tools`, `start`. Each stage runs over every plugin in dependency order before the next stage begins. After that the root agent's capability floor is applied to every registered tool, and then MCP servers connect. When the session ends, after the MCP servers shut down, `stop_plugins` stops the running plugins in reverse start order.
+
+Every call into plugin code is contained (`except (Exception, SystemExit)`). A plugin is **failed for the session** when it raises, exits, or hands back something unusable: a `configure()` answer in neither form above, a `tools()` result that is not a list of tools, or a tool name that it uses twice, that is already registered, or that the permission gate classifies by name (`write`, `edit`, `bash_exec`, `python_exec`, `cruncher_exec`, `agent`, `web_fetch`). A failed plugin is named in the startup summary as `plugin <name>: <reason>`, the tools it registered and the hook objects it put on `ctx.hooks` are removed, and every plugin that `requires` it is failed too. An unconfigured plugin is reported as `plugin <name>: unconfigured — set <key>` and registers nothing. The harness keeps running; `KeyboardInterrupt` and task cancellation still propagate. A `stop()` that raises is logged, and the other plugins still stop.
+
+What containment does not cover: a stage that hangs; a plugin whose `start()` raised, which is never stopped; and anything a plugin registers directly on `ctx.tools` (a tool, or a raw pre/post hook) instead of returning it from `tools()` or registering it on `ctx.hooks`. Such a tool carries no `source_plugin` and escapes the gate-family rule below, and it stays registered if the plugin fails.
+
+When any plugin runs, the start banner adds `Plugins: <names>`. When plugins you installed are not enabled, it adds one line that names them all: ``i 1 plugin available, not enabled: <name> — run `localharness plugins enable <name>` to turn it on``, or, for two or more, ``i 2 plugins available, not enabled: <a>, <b> — run `localharness plugins enable <name>` to turn one on``.
+
+### Settings
+
+A plugin's harness-level settings live under `<name>:`, and its agent-level settings under `agent.<name>` in an agent's file. Core splits those sections off before it validates its own config, so a key that is neither a core setting nor a known plugin's is still an error. That includes a section left by a plugin that is no longer installed: its `<name>:` section is refused like a misspelled key, with an error that names the file, the line and the fix (``not a LocalHarness setting, and no installed plugin is named `<name>` — if a plugin you removed used it, reinstall that plugin or delete this section``), and `validate` reports a leftover `agent.<name>` entry the same way. `plugins list` names each leftover `<name>:` section in any config layer and each leftover `agent.<name>` entry in the machine's `overrides.yaml`, and `plugins info`, `enable` and `disable` for a removed plugin's name say where its settings still are. The plugin's own `ConfigModel` and `AgentConfigModel` validate them, and the validated instances arrive as `ctx.config` and `ctx.agent_config`. The harness-level section merges across the four config layers like any setting. A field marked `Field(..., json_schema_extra=GLOBAL_ONLY)` is machine-level only: a project's value for it is dropped with a warning. A field that names an endpoint, a credential or an access list should be marked. `GLOBAL_ONLY` on an `AgentConfigModel` field fails the plugin, because agent-level settings cannot enforce it. Plugin settings are listed by `components list` with `(plugin: <name>)` and set with `components set`.
+
+### Tool declarations and the gate-family rule
+
+Every `ToolSchema` carries four safety declarations, each with a fail-closed default: `ingest` (`"untrusted"` or `"none"`), `host` (`"dangerous"` or `"safe"`), `result_origin` (`"untrusted"` or `"trusted"`) and `gate_family` (None, or one of `"write"`, `"shell"`, `"code"`, `"delegate"`, `"network"`, `"allow"`). They are excluded from the schema sent to the model. The permission gate reads `gate_family`; the capability floor reads `ingest` and `host`, plus `gate_family` to find exec surfaces; the context store reads `result_origin`. The gate still recognises its own builtins by name, which is why a plugin may not reuse those names; every other tool is classified only by what it declares, and no safety reader looks at `source_plugin`. A tool that declares nothing is the worst case on every axis, so while the capability floor is on (the default) no agent may hold it: the root agent's floor strips it, with a startup warning naming the tool and its plugin, and any other agent configured with it is refused.
+
+A plugin's tools register under their bare names at global scope, with `source_plugin` set. For a plugin you installed, and never for one that ships with LocalHarness, the lifecycle rewrites what reaches the gate before registering (`plugins/trust.py`): a `gate_family` in `THIRD_PARTY_CLAMPED_FAMILIES` (`allow`, `network`, `shell`, `write`) becomes undeclared, and a `group` starting with `mcp/` becomes `other`, each with a startup warning. `code` and `delegate` are kept. The clamped set is measured by a test over the real gate, not argued.
+
+### Artifacts
+
+A plugin sets `wants_artifacts = True`. Core then computes its root, `<state_dir>/artifacts/<name>/`, and passes it as `ctx.paths.artifact_dir`; a plugin that did not ask gets None. `write_artifact(root, name, data, mime)` in `localharness.core.artifacts` accepts only `image/png`, `image/jpeg` and `image/webp`, mints the id (`art-YYYYMMDD-HHMMSS-<6 hex>`, UTC), writes exactly one new file (never overwriting one) and returns an `ArtifactRef(plugin, kind="image", id, mime)`. After the start stage, core asks each running plugin's `artifact_root(ctx)`; unless the answer is the root core computed, that plugin's artifacts are not served this session. The web channel serves the accepted roots at `GET /api/artifacts/{plugin}/{artifact_id}` (SECURITY.md, "`localharness web`"). `ArtifactRef` is not an event, and no event carries one yet.
+
+### The memory slot
+
+`MemorySlot` (`plugins/slot.py`) holds at most one running `MemorySlotPlugin`, or nobody. When it is occupied, the agent loop asks `context(turn, budget)` on every turn, right after the guardrails, and adds each non-empty section as `## <heading>`. Every call into the occupant is contained. `browse()` and `bind_subagent()` exist, but nothing calls them yet. Memory is still part of core and no bundled plugin occupies the slot, so it is empty unless you install and enable a memory plugin yourself; if you do, its section is added alongside core's memory block, and both render. Core does not enforce the budget; the occupant is trusted to keep to it.
+
+### Commands, slash commands and doctor
+
+- **CLI commands.** Each `CliDescriptor(name, help, target)` of an ON plugin appears in `localharness --help`, read from the manifest. The module that `target` names (`"package.module:attr"`, a `typer.Typer`) is imported only when the command runs, and it runs as a subcommand of `localharness`. A core command wins a name clash, and when two plugins share a command name the first in start order wins, without a warning. The CLI resolves plugins only to list commands (`--help`) or to find a name no core command has. So a core command (`start`, `doctor`, `--version` and the rest) never loads a plugin to build the command list, while `localharness --help` imports each enabled plugin you installed: its package and plugin class, because the manifest is in code, and never a command module. A command that fails to import or raises prints `plugin <name>: command <cmd> …` and exits 1.
+- **Slash commands.** Each `SlashDescriptor(name, help, target)` of a running plugin becomes a row in the one slash table (`cli/slash_commands.py`). The REPL dispatcher, `/help` and the input completer read that table, and the web channel's `/api/protocol` lists its rows in `commands[]`. A plugin's rows are in the table only while its session runs: they are added when the session starts and removed when it ends, so a client that reads `commands[]` before a session is live sees core's rows only. The reference phone page has no command menu. `target` names `async def f(ctx, args) -> str | None`, imported the first time the command runs. A name already in the table is skipped with a warning. A handler that raises, exits or returns something other than text or None is reported to the user as a failure naming the plugin, and the session goes on. The Zed (ACP) channel does not read the table.
+- **Doctor.** After core's checks, `localharness doctor` prints a Plugins section. An ON plugin is created and configured against a throwaway context (no LLM client, and a fresh bus, registry and hook system), and its `doctor()` checks are shown; a failing check is a doctor failure. An off or available plugin is listed with the command that turns it on. `skipped`, `needs-extra` and unconfigured plugins are warnings, and `failed` and `refused` ones are failures. Doctor never starts a plugin, and it does not show which plugin tools the root agent's floor will strip.

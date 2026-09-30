@@ -22,3 +22,19 @@ jobs:
         run: uv sync --extra dev --extra dispatch --extra web
       - name: Run tests
         run: uv run pytest -q
+      - name: Plugin commands on a fresh resolve of the built wheel
+        # uv.lock pins the typer the suite above runs on (the declared floor); a PyPI install resolves
+        # the newest. typer 0.26 vendored click, and the plugin command mount broke there while the
+        # locked suite stayed green. So: build the wheel, install it the way a user does, with the
+        # example plugin, run the mount's and the example's tests against it, and run a real plugin
+        # command in a scratch home.
+        run: |
+          uv build --out-dir "$RUNNER_TEMP/dist"
+          uv venv "$RUNNER_TEMP/fresh" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/fresh/bin/python" "$(ls "$RUNNER_TEMP"/dist/*.whl)[dev]" ./examples/plugin-template
+          "$RUNNER_TEMP/fresh/bin/python" -c "import typer; print('typer', typer.__version__)"
+          PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/fresh/bin/python" -m pytest -q -p no:cacheprovider tests/unit/test_plugin_cli_mount.py tests/unit/test_example_plugin.py
+          export HOME="$RUNNER_TEMP/home" LOCALHARNESS_DIR="$RUNNER_TEMP/home/.localharness"
+          mkdir -p "$LOCALHARNESS_DIR"
+          "$RUNNER_TEMP/fresh/bin/localharness" plugins enable example
+          "$RUNNER_TEMP/fresh/bin/localharness" example

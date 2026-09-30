@@ -29,6 +29,9 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
+from localharness.config.plugin_sections import (
+    CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys, unowned_hint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +172,14 @@ def _build_line_map(yaml_text: str) -> dict[str, int]:
         indent_stack.append((indent, path))
 
     return line_map
+
+
+def _file_line_map(path: Path) -> dict[str, int]:
+    """_build_line_map of a file's text; {} when it cannot be read."""
+    try:
+        return _build_line_map(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
 
 
 def _dotpath_in(raw: object, dotpath: str) -> bool:
@@ -370,6 +381,13 @@ def _org_deny_patterns(raw: object) -> list[str]:
     return [p for p in patterns if isinstance(p, str)]
 
 
+def _org_mode(raw: object) -> Optional[str]:
+    """The `org.permissions.mode` ONE raw config source declares, normalized, or None."""
+    org = raw.get("org") if isinstance(raw, dict) else None
+    perms = org.get("permissions") if isinstance(org, dict) else None
+    return _normalize_mode(perms.get("mode")) if isinstance(perms, dict) else None
+
+
 # ------------------------------------------------------------------ #
 # ConfigLoader
 # ------------------------------------------------------------------ #
@@ -405,6 +423,11 @@ class ConfigLoader:
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
         self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
+        self._org_mode_cache: Optional[tuple[Optional[str]]] = None  # (mode,) once org_mode() ran
+        # ENAB-01: the names that own a plugin settings section (discovered once per loader), and
+        # the `agent.<name>` sections each agent load split off, by agent name.
+        self._plugin_names: Optional[frozenset[str]] = None
+        self._agent_plugin_sections: dict[str, dict[str, Any]] = {}
 
     # ---------------------------------------------------------------- #
     # Internal helpers
@@ -517,6 +540,28 @@ class ConfigLoader:
                 out = deep_merge(out, section)
         return out
 
+    def org_mode(self) -> Optional[str]:
+        """`org.permissions.mode` as it reaches a session, or None when no layer sets one (QA-18).
+
+        Each layer's overrides.yaml beats its config.yaml, as in the merge. The one exception is
+        the one `permissions.mode` gets everywhere (PRD §3.3): the workspace layer may TIGHTEN the
+        global value (or the default, when the global layer is silent), never loosen it. A looser
+        workspace value is dropped with a warning, once per loader. `load_agent_file` hands this
+        to every agent that sets no mode of its own.
+        """
+        if self._org_mode_cache is None:
+            g_cfg, g_over, ws_cfg, ws_over = self._raw_config_sources()
+            glob, ws = _org_mode(g_over) or _org_mode(g_cfg), _org_mode(ws_over) or _org_mode(ws_cfg)
+            floor = glob or DEFAULT_MODE
+            if ws is not None and MODE_STRICTNESS[ws] < MODE_STRICTNESS[floor]:
+                log.warning(
+                    "ignoring workspace org.permissions.mode %r: a project layer may only tighten "
+                    "the session mode, and the global layer asks for %r", ws, floor,
+                )
+                ws = None
+            self._org_mode_cache = (ws or glob,)
+        return self._org_mode_cache[0]
+
     def load_harness(self) -> HarnessConfig:
         if self._harness_cache is not None:
             return self._harness_cache
@@ -557,6 +602,12 @@ class ConfigLoader:
         # field — before this, every error was hardcoded to `cfg_path` and given a line number read
         # off the GLOBAL file's text, so a bad value on line 3 of a workspace config.yaml was
         # reported as a line of the global file where a valid value sat (dogfood F5, CLI-02).
+        #
+        # ENAB-01: plugin-owned `<name>:` sections leave first — HarnessConfig is extra="forbid".
+        # They are read back per source through plugin_layers(), so each value's layer survives for
+        # global-only narrowing and provenance. A key that is neither core nor a known plugin stays
+        # in `merged` and is refused below: the typo guard.
+        merged, _plugins = split_plugin_keys(merged, self.plugin_names(), CORE_HARNESS_KEYS)
         try:
             result = HarnessConfig.model_validate(merged)
         except ValidationError as exc:
@@ -585,8 +636,15 @@ class ConfigLoader:
                     except OSError:
                         line_maps[key] = {}
                 owners.append(owner_path)
+                # QA-06: a top-level key no core model and no installed plugin owns is refused (the
+                # typo guard), most often a removed plugin's section: say so, and what to do.
+                # `agent:` is core's (read from overrides.yaml only) and keeps pydantic's text.
+                message = err["msg"]
+                if (err["type"] == "extra_forbidden" and len(err["loc"]) == 1
+                        and loc not in CORE_HARNESS_KEYS):
+                    message = unowned_hint(loc)
                 errors.append(
-                    ConfigFieldError(loc, err.get("input"), err["msg"], line_maps[key].get(loc))
+                    ConfigFieldError(loc, err.get("input"), message, line_maps[key].get(loc))
                 )
 
             # If every error came from ONE file, that file heads the report and no error repeats
@@ -629,13 +687,81 @@ class ConfigLoader:
         return _resolve_user_overlay_path(self._config_dir)
 
     def invalidate_cache(self) -> None:
-        """Drop the cached HarnessConfig so the next load_harness() re-reads disk.
+        """Drop the cached HarnessConfig (and the discovered plugin names) so the next
+        load_harness() re-reads disk.
 
-        Used by `localharness components set` after writing the overlay.
+        Used by `localharness components set` after writing the overlay. The agent cache is not
+        dropped here, so neither are the agent plugin sections that belong to it — reload() drops
+        both.
         """
         self._harness_cache = None
         self._raw_harness_dict = None
         self._raw_sources_cache = None
+        self._org_mode_cache = None
+        self._plugin_names = None
+
+    @property
+    def global_config_dir(self) -> Path:
+        """The GLOBAL layer (or its --config-dir replacement) — where plugin folders are discovered
+        and GUARDRAILS.md lives. Never the workspace."""
+        return self._config_dir
+
+    def plugin_names(self) -> frozenset[str]:
+        """Every plugin that may own a settings section: BUILTIN_PLUGINS' manifests plus discovered
+        METADATA — entry points and the GLOBAL plugins/ folder (self._config_dir), never the
+        workspace. Nothing is imported."""
+        if self._plugin_names is None:
+            from localharness.plugins import discovery
+            from localharness.plugins.builtin import bundled_plugins
+            self._plugin_names = (frozenset(c.manifest.name for c in bundled_plugins())
+                                  | frozenset(d.name for d in discovery.discover(self._config_dir)))
+        return self._plugin_names
+
+    def plugin_layers(self) -> dict[str, tuple[Any, Any, Any, Any]]:
+        """Each plugin's raw `<name>:` section in the four ruled sources — global config, global
+        overrides, workspace config, workspace overrides — None where a source is silent. Kept per
+        layer so global-only narrowing and provenance know where a value came from. A plugin named
+        after a core key is not listed: that key is core's."""
+        g_cfg, g_over, ws_cfg, ws_over = self._raw_config_sources()
+        return {n: (g_cfg.get(n), g_over.get(n), ws_cfg.get(n), ws_over.get(n))
+                for n in sorted(self.plugin_names() - CORE_HARNESS_KEYS)}
+
+    def plugin_layer_files(self) -> tuple[str, str, str, str]:
+        """The four files plugin_layers() reads, in the same order ("" for the workspace pair when
+        no workspace applies)."""
+        ws = self._local_dir
+        return (str(self._config_dir / "config.yaml"),
+                str(_resolve_user_overlay_path(self._config_dir)),
+                str(ws / "config.yaml") if ws is not None else "",
+                str(ws / "overrides.yaml") if ws is not None else "")
+
+    def agent_plugin_sections(self, agent_name: str) -> dict[str, Any]:
+        """{plugin name: its `agent.<name>` section} for the agent whose `name:` is `agent_name`, as
+        split off when this loader loaded it (the agent file over the overrides file's `agent:`
+        defaults, as for every agent key). Empty for an agent this loader never loaded or one that
+        sets none."""
+        return dict(self._agent_plugin_sections.get(agent_name, {}))
+
+    def unowned_sections(self) -> list[tuple[str, Path, Optional[int]]]:
+        """(dot-path, file, line) for each key load_harness / load_agent refuse as unowned (QA-06),
+        most often a removed plugin's settings — what `plugins list` names: each top-level key of
+        the four config sources that is neither core nor a known plugin, and `agent.<key>` for such
+        a key in the GLOBAL overrides' `agent:` section (the one agents read). Nothing is validated
+        or imported. Keys inside agent yaml files are not listed: `validate` and `start` report
+        them against their own file."""
+        known = self.plugin_names()
+        overlay = _resolve_user_overlay_path(self._config_dir)
+        ws = self._local_dir
+        files = (self._config_dir / "config.yaml", overlay,
+                 ws / "config.yaml" if ws is not None else None,
+                 ws / "overrides.yaml" if ws is not None else None)
+        found = [(str(key), f) for f, source in zip(files, self._raw_config_sources())
+                 if f is not None for key in source if key not in CORE_HARNESS_KEYS | known]
+        agent = load_overlay(overlay).get("agent")
+        found += [(f"agent.{key}", overlay) for key in (agent if isinstance(agent, dict) else {})
+                  if key not in CORE_AGENT_KEYS | known]
+        maps = {f: _file_line_map(f) for _, f in found}
+        return [(dotpath, f, maps[f].get(dotpath)) for dotpath, f in found]
 
     def load_org(self) -> OrgConfig:
         if self._org_cache is not None:
@@ -750,7 +876,8 @@ class ConfigLoader:
         # max_tokens, so an overlay scalar could never win — stored, confirmed, and ignored at load
         # (pre-existing <=0.12.5). Precedence shipped: agent yaml > division > org > overlay >
         # schema default, which is 5b's stated contract with the last two rungs now real.
-        overlay_agent_raw = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_path = _resolve_user_overlay_path(self._config_dir)
+        overlay_agent_raw = load_overlay(overlay_path).get("agent")
         overlay_agent = overlay_agent_raw if isinstance(overlay_agent_raw, dict) else {}
 
         # Resolve scalar fields: model, temperature, max_tokens
@@ -948,14 +1075,49 @@ class ConfigLoader:
         if self._local_dir is not None:
             self._narrow_project_layer_permissions(merged, path.stem, div_name)
 
+        # 5d. QA-18: an agent that sets no `permissions.mode` (in its file, or under `agent:` in
+        #     overrides.yaml) runs in the org's, the mode `init`'s posture question writes. Key
+        #     presence, never a comparison with the default: an explicit `mode: auto` is the
+        #     agent's choice. Resolved here, where all agent inheritance is, so the gate, the trust
+        #     question, `/mode` and a gate-less loop read one value. After 5c, which judges only
+        #     what a project layer wrote.
+        perms = merged.get("permissions")
+        if isinstance(perms, dict) and "mode" not in perms and self.org_mode() is not None:
+            perms["mode"] = self.org_mode()
+
         # 6. Validate merged dict
         line_map = _build_line_map(text)
+        # ENAB-01, agent level: `agent.<name>` sections leave before AgentConfig (extra="forbid")
+        # validates, and reach the plugin through agent_plugin_sections(). Unknown keys still fail.
+        merged, agent_sections = split_plugin_keys(merged, self.plugin_names(), CORE_AGENT_KEYS)
         try:
             result = AgentConfig.model_validate(merged)
         except ValidationError as exc:
-            errors = _pydantic_error_to_field_errors(exc, str(path), line_map)
-            raise ConfigValidationError(str(path), errors) from exc
+            # QA-06: a top-level key only the overrides' `agent:` section sets (an unknown key can
+            # come from nowhere else) is that file's, as `agent.<key>` on its own line — never the
+            # agent file's, which does not contain it. Every other error stays the agent file's.
+            errors: list[ConfigFieldError] = []
+            owners: list[Path] = []
+            for err in exc.errors():
+                loc = ".".join(str(p) for p in err["loc"])
+                owner, field, line, message = path, loc, line_map.get(loc), err["msg"]
+                if err["type"] == "extra_forbidden" and len(err["loc"]) == 1:
+                    under = err["loc"][0] not in raw and err["loc"][0] in overlay_agent
+                    message = unowned_hint(loc, agent=True, under_agent=under)
+                    if under:
+                        owner, field = overlay_path, f"agent.{loc}"
+                        line = _file_line_map(overlay_path).get(field)
+                owners.append(owner)
+                errors.append(ConfigFieldError(field, err.get("input"), message, line))
+            # load_harness's rule: one owner heads the report; mixed owners keep the agent file and
+            # name each foreign owner on its own line.
+            header = owners[0] if len(set(owners)) == 1 else path
+            for field_err, owner in zip(errors, owners):
+                if owner != header:
+                    field_err.source_path = str(owner)
+            raise ConfigValidationError(str(header), errors) from exc
 
+        self._agent_plugin_sections[result.name] = agent_sections
         return result
 
     def _global_layer_kill_file(
@@ -1451,10 +1613,13 @@ class ConfigLoader:
 
     def reload(self) -> None:
         self._agent_cache.clear()
+        self._agent_plugin_sections.clear()
         self._division_cache.clear()
         self._harness_cache = None
         self._org_cache = None
         self._raw_sources_cache = None
+        self._org_mode_cache = None
+        self._plugin_names = None
 
     def validate_all(self) -> list[tuple[str, Optional[ConfigError]]]:
         """Every config file of every layer, each validated AT ITS OWN PATH.

@@ -1,11 +1,12 @@
 """Tool base types: ToolProtocol, Tool ABC, ToolSchema, ToolParameter, ToolResult, ToolVetoed."""
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 FileReadHook = Callable[[Path], Awaitable[str]]
 """Read a file's text through something other than the disk (PRD §4: Zed's `fs/read_text_file`,
@@ -32,6 +33,20 @@ class ToolParameter(BaseModel):
     default: Any | None = None
 
 
+GateFamily = Literal["write", "shell", "code", "delegate", "network", "allow"]
+"""The permission gate's rule-set branches a tool may DECLARE (agent/verdict.py `_kind` / `evaluate`)
+— exactly the six branch names, nothing invented. The gate's two other outcomes are not declarable:
+`mcp` comes from the MCP wrapper's group, and `tool-unfamiliar` is what an undeclared (None) family
+means — asked about once per workspace in `guarded`. Defined here, beside ToolSchema, because
+tools/base.py must never depend on the agent package (agent/__init__ imports agent.loop, which
+imports the tool registry — a cycle); agent/gate_types.py and agent/verdict.py import it from here."""
+
+GATE_FAMILIES: frozenset[str] = frozenset(get_args(GateFamily))
+
+_log = logging.getLogger(__name__)
+_WARNED_FAMILIES: set[tuple[str, str]] = set()
+
+
 class ToolSchema(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -43,12 +58,48 @@ class ToolSchema(BaseModel):
     version: str = "1.0.0"
     destructive: bool = False
     # What KIND of thing this tool does, as one dotted name: fs.read, fs.write, shell, code,
-    # delegate, web, memory, or `mcp/<server>` for a discovered MCP tool. The permission gate
-    # keys its ask classes on this rather than on tool names (PRD §3.1), and it is the seed of
-    # the v0.14 exposure taxonomy, where a GROUP — not a tool — is the unit an agent is granted
-    # (PRD §6, .planning/scope-hierarchical-tools-v0.12.md). "other" means unclassified: every
-    # registered builtin names its group, and a test asserts none of them is left at the default.
+    # delegate, web, memory, or `mcp/<server>` for a discovered MCP tool. It is the exposure
+    # taxonomy, where a GROUP — not a tool — is the unit an agent is granted (PRD §6,
+    # tools/registry.py), the ACP tool kind (channels/acp.py) and the `mcp/` marker. It is NOT a
+    # permission-gate input: the gate reads `gate_family` below. "other" means unclassified:
+    # every registered builtin names its group, and a test asserts none is left at the default.
     group: str = "other"
+    # What the safety model reads instead of a tool's NAME (SAFE-01). Every default FAILS CLOSED:
+    # a tool that declares nothing is treated as ingesting attacker-controllable content, able to
+    # change the host, returning untrusted results, and in no gate family (asked about in
+    # `guarded`). Never provenance: which plugin contributed a tool is not a safety input (CORE-04).
+    # Readers: the permission gate (`gate_family`, agent/verdict.py `_kind`), the capability floor
+    # (`ingest`, `host`, tools/capabilities.py) and the context store (`result_origin`, via
+    # ToolRegistry.result_origin); the oracle in tests/unit/test_tool_declarations.py pins every
+    # builtin's declaration to today's classes.
+    # `exclude=True` keeps all five out of `model_dump()`, which is what
+    # `provider/client._tools_to_api_format` puts on the wire and the chat template renders into
+    # the prompt (measured on the served model: +32 tokens per tool) — harness metadata, not
+    # something the model should read or pay for.
+    ingest: Literal["untrusted", "none"] = Field("untrusted", exclude=True)
+    host: Literal["dangerous", "safe"] = Field("dangerous", exclude=True)
+    result_origin: Literal["untrusted", "trusted"] = Field("untrusted", exclude=True)
+    gate_family: GateFamily | None = Field(None, exclude=True)
+    # Which plugin contributed this tool (PAPI-05), stamped at registration; None for core's own.
+    # Provenance only — the safety model NEVER reads it.
+    source_plugin: str | None = Field(None, exclude=True)
+
+    @field_validator("gate_family", mode="before")
+    @classmethod
+    def _unrecognised_family_is_unset(cls, value: Any, info: ValidationInfo) -> Any:
+        """SAFE-01: an unrecognised gate_family counts as unset — asked about, never a crash.
+
+        A plugin's typo must fail closed rather than disable the plugin, so this coerces and warns
+        (once per tool name and value — info() is called every turn) instead of raising."""
+        if value is None or (isinstance(value, str) and value in GATE_FAMILIES):
+            return value
+        key = (str(info.data.get("name", "?")), repr(value))
+        if key not in _WARNED_FAMILIES:
+            _WARNED_FAMILIES.add(key)
+            _log.warning("tool %r declares unknown gate_family %s — treated as undeclared "
+                         "(it is asked about); known families: %s", key[0], key[1],
+                         ", ".join(sorted(GATE_FAMILIES)))
+        return None
 
 
 class ToolResult(BaseModel):
@@ -186,6 +237,7 @@ class Tool(ABC):
                 success=False,
                 error=str(exc),
                 error_type="execution_error",
+                metadata={"raised": type(exc).__name__},  # a crash, not a refusal (PAPI-11)
             )
 
     def ok(self, output: str, **metadata: Any) -> ToolResult:
