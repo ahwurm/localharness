@@ -6,18 +6,22 @@ wins a name; and dispatching a core command (`localharness start`) never resolve
 The root group resolves plugins from the DEFAULT config dir (the root has no --config-dir), so each
 test writes `components_home`'s overrides.yaml. `swatch` is a bundled test plugin whose command
 module `lh_test_cli_mod` is written to tmp and put on sys.path; it is removed from sys.modules
-before every import-state assertion. The last tests drive the REAL installed example plugin.
+before every import-state assertion. The example-plugin tests drive the REAL installed example plugin;
+the last two pin that the mount takes its Click classes from typer (QA-01).
 """
 from __future__ import annotations
 
+import ast
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
-from typer.core import TyperGroup
+import typer
+from typer.core import TyperCommand, TyperGroup
 from typer.testing import CliRunner
 
+from localharness.cli import plugin_mount
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import CliDescriptor, Plugin, PluginManifest
@@ -291,3 +295,48 @@ def test_the_example_plugin_on_mounts_its_command_lazily(example, mounted) -> No
     assert ran.exit_code == 0, ran.output
     assert ran.stdout.startswith("example plugin 0.1.0:")
     assert "localharness_plugin_example.cli" in sys.modules
+
+
+# --------------------------------------------------------------------------- QA-01: typer 0.26+ vendors click
+
+
+def _runtime_imports(node: ast.AST) -> list[str]:
+    """The module each import statement under `node` names, except in the body of
+    `if TYPE_CHECKING:`, which never runs."""
+    if isinstance(node, ast.If) and ast.unparse(node.test) in ("TYPE_CHECKING", "typing.TYPE_CHECKING"):
+        return [m for stmt in node.orelse for m in _runtime_imports(stmt)]
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return ["." * node.level + (node.module or "")]
+    return [m for child in ast.iter_child_nodes(node) for m in _runtime_imports(child)]
+
+
+def test_the_mount_uses_typers_own_click_never_the_click_package() -> None:
+    """typer < 0.26 builds on the `click` package; typer 0.26+ vendors its own copy (`typer._click`),
+    and a class from one copy is not the other's. On a fresh PyPI install (the newest typer)
+    `import click` names the copy typer does not run, so every plugin command failed its
+    `isinstance(..., click.Command)` — while this suite, locked to typer 0.25.1 where the two are one,
+    stayed green. The locked suite cannot see that by behaviour, so this pins the structure: no
+    runtime `import click` in the mount, and its command class is typer's own. CI's fresh-resolve
+    step runs the behaviour on the newest typer."""
+    imports = _runtime_imports(ast.parse(Path(plugin_mount.__file__).read_text(encoding="utf-8")))
+
+    assert "typer" in imports  # the scan reads the module's imports
+    assert [m for m in imports if m == "click" or m.startswith("click.")] == []
+    assert issubclass(plugin_mount.LazyPluginCommand, TyperCommand)
+
+
+def test_the_mount_lets_through_exactly_what_typers_main_loop_handles() -> None:
+    """A plugin command runs as a child of the root context, so the Click control flow it raises (an
+    exit code, an abort, a usage error) must reach typer's own main loop untouched — as the classes
+    typer catches there. On typer 0.26+ those are typer's and its vendored click's, not the `click`
+    package's: letting the package's through would report a plugin's `typer.Exit(3)` as a crash, exit
+    1. `_COMMAND` is the Click `Command` both of typer's command classes build on, the class every
+    Typer app becomes. Same blind spot as above: the locked suite (typer 0.25.1) cannot tell the
+    copies apart; CI's fresh-resolve step proves the behaviour."""
+    click_exception = next(c for c in typer.BadParameter.__mro__ if c.__name__ == "ClickException")
+
+    assert set(plugin_mount._PASS_THROUGH) == {typer.Exit, typer.Abort, click_exception}
+    assert plugin_mount._COMMAND in TyperCommand.__mro__ and plugin_mount._COMMAND.__name__ == "Command"
+    assert issubclass(TyperGroup, plugin_mount._COMMAND)
