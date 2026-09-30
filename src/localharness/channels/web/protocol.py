@@ -30,14 +30,17 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 """Bumped on any breaking change to the wire.
 
-v2: Observation gained the optional `image_id` field (generate_image artifacts; a v1 client
-ignores it and simply shows no picture — additive, but a schema move is a version move here).
+v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
 v3: TurnCompleted/TurnFailed gained optional `tool_names` — the ground-truth record of the
 exact tool set resolved for the model that turn (the 2026-09-29 which-tools-did-it-see
 dispute is unanswerable from a v2 log; additive, older clients ignore it).
+v4: Observation gained the optional `artifact` field — an ArtifactRef (plugin, kind, id, mime)
+that a plugin tool returns through ToolResult.metadata["artifact"], validated by the loop. The page
+shows an image artifact from /api/artifacts/<plugin>/<id>. It replaces v2's field; v3's tool_names
+is a separate change and is untouched.
 
 Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
