@@ -8,8 +8,9 @@ A small, real LocalHarness plugin that you can copy. It adds one of each thing a
 - a check in `localharness doctor`
 - two settings, `example.color` and `agent.example.size`
 
-LocalHarness's own test suite installs this plugin and exercises each of those. So it cannot quietly
-fall behind the plugin API: if the API changes, the tests fail until this example is updated.
+LocalHarness's development install includes this plugin, and its test suite exercises each of those.
+So it cannot quietly fall behind the plugin API: if the API changes, the tests fail until this example
+is updated.
 
 ## Try it
 
@@ -57,12 +58,14 @@ riskiest kind on all four:
 - `ingest`: does the tool bring outside content (web pages, files, another service's replies) into
   the conversation? `"none"`, or `"untrusted"` (the default). An agent that holds a tool which
   ingests untrusted content is kept from also holding tools that can change your machine, so text
-  injected into a page can never become a command.
+  injected into a page never reaches, word for word, an agent that can run commands. A summary of
+  it still can; SECURITY.md names that gap.
 - `host`: can it change your machine (run commands, write files wherever it likes)? `"safe"`, or
   `"dangerous"` (the default).
 - `result_origin`: is its result text your code wrote (`"trusted"`), or outside content
-  (`"untrusted"`, the default)? An untrusted result stays marked as outside content: it can be read
-  back later, but never fed into code the agent runs.
+  (`"untrusted"`, the default)? An untrusted result is stored marked as outside content. The agent
+  can read it back later, but the step that runs code over stored results (the cruncher) refuses
+  to take it as input.
 - `gate_family`: which rule of the permission gate decides whether to ask you before the tool runs:
   `"write"`, `"shell"`, `"code"`, `"delegate"`, `"network"` or `"allow"`. The default, no family,
   is asked about once per workspace in `guarded` mode. For a plugin you install, a declared family
