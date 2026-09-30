@@ -61,6 +61,17 @@ async def test_a_valid_id_is_served_with_its_type_and_the_immutable_cache_header
     assert got.content == PNG
 
 
+async def test_an_image_plugin_png_is_served_from_the_generic_route(tmp_path):
+    """The image plugin needs no route of its own: its PNG rides the generic one."""
+    root = artifact_root(tmp_path / "state", "image")
+    ref = write_artifact(root, "image", PNG, "image/png")
+    _, _, _, client = await _stack(tmp_path, runtime={"artifact_roots": {"image": root}})
+    r = await client.get(f"/api/artifacts/image/{ref.id}", headers=BEARER)
+    assert r.status_code == 200 and r.content == PNG
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == IMMUTABLE == server_mod.ARTIFACT_CACHE_CONTROL
+
+
 async def test_a_plugin_that_is_not_on_404s_without_touching_any_filesystem(tmp_path, monkeypatch):
     root, _, client = await _served(tmp_path)
     ref = write_artifact(root, "example", PNG, "image/png")
