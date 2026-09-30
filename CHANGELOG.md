@@ -7,9 +7,10 @@ All notable changes to LocalHarness are documented here. The format follows
 ## [Unreleased]
 
 This release adds a plugin system: one API, one loader and one trust model, for
-plugins you install and for plugins that ship with LocalHarness. No built-in
-feature has become a plugin yet; memory, the web channel, Discord and
-autoresearch are still part of core. The plugin API that 0.15.0 documented is
+plugins you install and for plugins that ship with LocalHarness. The first
+feature to ship as a plugin is image generation, new in this release and off
+until you turn it on; memory, the web channel, Discord and autoresearch are
+still part of core. The plugin API that 0.15.0 documented is
 removed, so a plugin written for 0.15 no longer loads: see Removed and
 Migration.
 
@@ -21,8 +22,37 @@ Migration.
   `enable NAME [--set KEY=VALUE ...]` and `disable NAME` write an
   `overrides.yaml`, never your `config.yaml`, and take effect at the next
   `localharness start`. `--workspace` writes a project's `overrides.yaml`
-  instead; it is only for plugins that ship with LocalHarness, and none does
-  yet.
+  instead; it is only for plugins that ship with LocalHarness (today: image).
+- **Image generation, as a plugin (off by default).** The `image` plugin adds
+  a `generate_image` tool, a `localharness generate-image` command and a
+  `doctor` check for a ComfyUI server you run on your own machine. Turn it on
+  with `localharness plugins enable image`: on a terminal it asks for the
+  ComfyUI address and checks it; in a script add
+  `--set comfyui_url=http://127.0.0.1:8188`. Settings: `image.comfyui_url` and
+  `image.workflow` (machine-level only: a project cannot set them) and
+  `image.timeout_s` (default 570). Pictures are saved under
+  `<state dir>/artifacts/image/` and the phone app shows them inline. See
+  `docs/reference-architectures/image-generation.md`.
+- **Web protocol 3: `tool_names`.** `TurnCompleted` and `TurnFailed` carry the
+  exact list of tools the model was offered that turn, so which tools it saw
+  is answered by the session log. Additive; an older client ignores it.
+- **Web protocol 4: `artifact`.** A tool result (`Observation`) can carry a
+  typed `artifact` — plugin, kind, id, mime — that a plugin tool returned; the
+  phone page shows an image artifact from `GET /api/artifacts/{plugin}/{id}`.
+  Version 2 was never released. The page and the server ship together; a page
+  written for another version says so in red.
+- **Setup questions for plugins.** A plugin's manifest can list `setup` fields
+  (`SetupField(key, prompt, default)`) and a short `setup_help` text.
+  `plugins enable NAME` asks them on a terminal when no `--set` is given,
+  writes the answers the way `--set` does, and runs the plugin's `doctor`
+  check once. `--no-input` skips the questions; without a terminal they are
+  never asked. `plugins info NAME` shows the `--set` spelling.
+- **New project workspaces keep their state out of git.** `init --workspace`,
+  and `start` when it creates a workspace, write `.localharness/.gitignore`:
+  sessions, memory databases, logs and generated pictures are ignored;
+  `config.yaml`, `overrides.yaml`, `agents/*.yaml` and `plugins/README.md`
+  stay yours to commit. `doctor` points out an existing workspace without one
+  and writes nothing.
 - **Plugins you install.** LocalHarness finds a plugin in two places, both on
   your machine and never in a project: an installed package that declares a
   `localharness.plugins` entry point, in the same Python environment as
@@ -169,16 +199,19 @@ Migration.
   global one.
 
 ### Known limitations (named, not hidden)
-- No feature ships as a plugin yet: memory, the web channel, Discord and
-  autoresearch are still part of core, and the memory slot is empty.
+- Image generation is the only feature that ships as a plugin: memory, the
+  web channel, Discord and autoresearch are still part of core, and the memory
+  slot is empty.
+- LocalHarness does not start ComfyUI or download its model files;
+  `plugins enable image` and the reference doc say what to run.
 - `pre_tool` and `post_tool` do not fire for a subagent's tool calls, and a
   hook written as `async def` never runs.
 - `plugins enable` and `plugins disable` write no audit event;
   `components set` does.
 - `localharness --help` imports each enabled plugin's package and plugin class
   to read the commands it declares.
-- Neither the terminal nor the reference phone page displays an artifact yet.
-  The example plugin's tool names the file it saved, so the agent can tell you
+- The terminal does not display artifacts; the phone page shows image
+  artifacts only. The example plugin's tool names the file it saved, so the agent can tell you
   where it is.
 - `localharness validate` does not check an enabled plugin's own settings: a
   misspelled key in its section passes `validate`, while `plugins list` and
