@@ -92,14 +92,21 @@ class ContributedTool:
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
-            return await self._inner.run(**kwargs)
+            result = await self._inner.run(**kwargs)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: attributed, never fatal
-            name = self.info().name
-            log.warning("tool %r from plugin %r raised; returned as a tool error",
-                        name, self._source_plugin, exc_info=True)
-            return ToolResult(output="", success=False, error_type="execution_error",
-                              error=f"tool {name!r} from plugin {self._source_plugin!r} failed: "
-                                    f"{type(exc).__name__}: {exc}")
+            return self._attributed(ToolResult(output="", success=False, error_type="execution_error",
+                                               error=str(exc)), type(exc).__name__, exc)
+        # A Tool subclass's run() already caught what its _execute raised and marked it (tools/base.py);
+        # an error the tool chose to return carries no mark and is its own words.
+        raised = None if result.success else result.metadata.get("raised")
+        return self._attributed(result, raised) if isinstance(raised, str) else result
+
+    def _attributed(self, result: ToolResult, raised: str, exc: BaseException | None = None) -> ToolResult:
+        name = self.info().name
+        log.warning("tool %r from plugin %r raised %s; returned as a tool error",
+                    name, self._source_plugin, raised, exc_info=exc)
+        return result.model_copy(update={
+            "error": f"tool {name!r} from plugin {self._source_plugin!r} failed: {raised}: {result.error}"})
 
     def __getattr__(self, attr: str) -> Any:
         inner = self.__dict__.get("_inner")
