@@ -20,12 +20,16 @@ From a checkout of the LocalHarness repository:
 uv sync --extra dev                          # installs this plugin along with the dev tools
 uv run localharness plugins list             # "example" is listed as available, not yet on
 uv run localharness plugins enable example   # turn it on (writes your machine-level overrides.yaml)
-uv run localharness start                    # ask for a swatch; type /example to see its settings
 uv run localharness example                  # the plugin's own command
+uv run localharness init                     # first time on this machine: needs your model server
 uv run localharness doctor                   # its check shows in the plugins section
+uv run localharness start                    # ask for a swatch; type /example to see its settings
 ```
 
-Only `start` needs your model server running. To turn the plugin off again:
+`plugins list`, `plugins enable` and `localharness example` need no model server and no config.
+`init` writes the config that `doctor` and `start` read, and `init` and `start` need your model
+server running: without it, `init` writes nothing. Ask for a swatch and the agent can tell you the
+file it saved (see [Artifacts](#artifacts)). To turn the plugin off again:
 `uv run localharness plugins disable example`.
 
 ## How LocalHarness finds a plugin
@@ -118,12 +122,23 @@ An artifact is a file a plugin makes for you, like the swatch image.
   file, never overwrites one, and returns an `ArtifactRef`.
 - Only three types are allowed: `image/png`, `image/jpeg` and `image/webp`. Anything else is refused
   before a byte is written.
-- The web channel serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`.
+- Neither the terminal nor the reference phone page displays an artifact yet. So the swatch tool's
+  result names the file it wrote, `<state dir>/artifacts/example/<id>.png`, and the agent can tell
+  you where the swatch is. The state dir is the `.localharness/` folder of the project you started
+  in, if it has one (`localharness init --workspace` makes it), and `~/.localharness/` otherwise.
+- The web channel serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`, if
+  you open that URL.
+- The swatch tool takes no arguments, so asking for another color changes nothing. A different
+  color is a settings change (`localharness components set example.color '#ff7f50'`), read when a
+  session starts.
 
 ## Removing a plugin
 
-1. Uninstall it (`uv pip uninstall <distribution>`), or delete its folder from
-   `~/.localharness/plugins/`.
+1. Remove it. A folder plugin: delete its folder from `~/.localharness/plugins/`. An installed
+   package, if you installed LocalHarness with `uv tool`: run `uv tool install` again without that
+   plugin's `--with`, naming your extras and every plugin you keep (each run replaces the install's
+   plugins and extras with the ones it names). In a virtual environment: activate it and run
+   `uv pip uninstall <distribution>`.
 2. Delete its `<name>:` section, and its entry under `agent:` if you set one, from `overrides.yaml`
    and `config.yaml`. LocalHarness refuses settings for a plugin it cannot find, exactly as it
    refuses a misspelled key, so a leftover section is an error until you remove it.
@@ -144,8 +159,11 @@ An artifact is a file a plugin makes for you, like the swatch image.
 6. Keep the four declarations honest for what your tool really does. They are all the safety checks
    know about it.
 7. Set `requires_localharness` to the LocalHarness releases you have tested against.
-8. Install it into the same Python environment as LocalHarness (for example
-   `uv pip install -e path/to/your-plugin`), then turn it on with `localharness plugins enable <name>`.
+8. Install it into the same Python environment as LocalHarness, then turn it on with
+   `localharness plugins enable <name>`. If you installed LocalHarness with `uv tool`, run
+   `uv tool install --with-editable path/to/your-plugin localharness`, naming your extras (as in
+   `'localharness[web]'`) and every other plugin's `--with` again. In a virtual environment,
+   activate it and run `uv pip install -e path/to/your-plugin`.
 
 ## How this repository installs it
 
