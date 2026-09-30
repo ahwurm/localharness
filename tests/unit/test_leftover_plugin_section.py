@@ -102,25 +102,41 @@ def _squash(text: str) -> str:
     return " ".join(text.split())
 
 
-# --------------------------------------------------------------------------- harness level
+_LAYERS = ["global overrides", "global config", "workspace config", "workspace overrides"]
 
 
-@pytest.mark.parametrize("where", ["global overrides", "global config", "workspace config",
-                                   "workspace overrides"])
-def test_a_leftover_section_is_refused_naming_its_file_line_and_fix(g, tmp_path, where) -> None:
+def _leftover_in(g: Path, tmp_path: Path, where: str) -> tuple[Path, Path, int]:
+    """(workspace dir, the file now holding `example:`, its line) for one of the four layers."""
     ws = tmp_path / "proj" / ".localharness"
     ws.mkdir(parents=True)
     target = {"global overrides": g / "overrides.yaml", "global config": g / "config.yaml",
               "workspace config": ws / "config.yaml", "workspace overrides": ws / "overrides.yaml"}[where]
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     target.write_text(before + _LEFTOVER, encoding="utf-8")
-    line = len(before.splitlines()) + 1
+    return ws, target, len(before.splitlines()) + 1
+
+
+# --------------------------------------------------------------------------- harness level
+
+
+@pytest.mark.parametrize("where", _LAYERS)
+def test_a_leftover_section_is_refused_naming_its_file_line_and_fix(g, tmp_path, where) -> None:
+    ws, target, line = _leftover_in(g, tmp_path, where)
 
     with pytest.raises(ConfigValidationError) as exc:
         ConfigLoader(config_dir=g, local_config_dir=ws).load_harness()
 
     assert exc.value.path == str(target)
     assert f"example (line {line}): {_HINT}" in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize("where", _LAYERS)
+def test_the_detector_names_the_leftover_in_every_layer_with_its_line(g, tmp_path, where) -> None:
+    """What `plugins list` and the unknown-name error read: the same four files the refusal reads."""
+    ws, target, line = _leftover_in(g, tmp_path, where)
+
+    assert ConfigLoader(config_dir=g, local_config_dir=ws).unowned_sections() == [
+        ("example", target, line)]
 
 
 @pytest.mark.parametrize("section", ["org:\n  bogus: 1\n", "agent:\n  temperature: 0.5\n"])
@@ -165,6 +181,17 @@ def test_a_leftover_under_agent_in_overrides_is_attributed_to_overrides(g) -> No
     assert (err.field_path, err.yaml_line, err.source_path) == ("agent.example", 3, None)
     assert f"agent.example (line 3): {_OVERRIDES_AGENT_HINT}" in str(exc.value), str(exc.value)
     assert str(agent) not in str(exc.value), "the agent file does not hold the key"
+
+
+def test_an_unknown_key_inside_an_agent_section_keeps_pydantics_message(g) -> None:
+    """Boundary pin, agent level: only a top-level key is a leftover."""
+    agent = _agent_file(g, "memory:\n  bogus: 1\n")
+
+    with pytest.raises(ConfigValidationError) as exc:
+        ConfigLoader(config_dir=g).load_agent_file(agent)
+
+    assert "memory.bogus (line 4): Extra inputs are not permitted" in str(exc.value), str(exc.value)
+    assert "no installed plugin" not in str(exc.value)
 
 
 def test_a_leftover_in_the_agent_file_is_the_agent_files(g) -> None:
