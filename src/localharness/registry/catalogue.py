@@ -4,7 +4,8 @@ Enumerates every mutable component for `localharness components list`. Merges:
   - Static HarnessConfig leaves via walk_model_fields(HarnessConfig)
   - Static AgentConfig leaves via walk_model_fields(AgentConfig) under "agent." prefix
   - Dynamic tools.<name>.description from ToolRegistry._schemas
-  - Dynamic hooks.<name>.config from HookSystem.loaded_plugin_names
+  - Dynamic plugins' settings (ENAB-04): each plugin's `<name>.enabled` and, once loaded, the
+    leaves of its ConfigModel (`<name>.*`) and AgentConfigModel (`agent.<name>.*`) — PluginRows
 
 Layer attribution: pass overlays={"global-config": {...}, "global-overrides": {...},
 "workspace-config": {...}, "workspace-overrides": {...}, "experiment": {...}}; catalogue records
@@ -15,11 +16,17 @@ See 14-RESEARCH.md Example B for the reference implementation.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Optional, Union, get_args, get_origin
+
+from pydantic import BaseModel
 
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.registry.paths import get_value, walk_model_fields
+
+if TYPE_CHECKING:
+    from localharness.plugins.resolve import Resolution
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,41 @@ class ComponentEntry:
     current_value: Any         # resolved-cascade value (what `get` returns)
     default_value: Any         # the Pydantic-baked default
     winning_layer: str         # one of the LAYER_* constants below, or LAYER_DEFAULT
+    plugin: str | None = None  # the plugin that owns this setting (ENAB-04); None for core
+
+
+@dataclass(frozen=True)
+class PluginRows:
+    """What the catalogue lists for one plugin (ENAB-04): its enable switch, and — once loaded — every
+    leaf of its ConfigModel (`<name>.*`) and AgentConfigModel (`agent.<name>.*`)."""
+    name: str
+    enabled: bool
+    enabled_default: bool
+    config_model: type[BaseModel] | None = None
+    config: BaseModel | None = None
+    agent_config_model: type[BaseModel] | None = None
+    agent_config: BaseModel | None = None
+    global_only: frozenset[str] = frozenset()   # paths relative to `<name>.` (incl. "enabled" for a plugin you installed)
+
+
+def plugin_catalogue_rows(resolution: Resolution) -> tuple[PluginRows, ...]:
+    """One PluginRows per plugin whose settings validated: every bundled plugin, on or off (its rows
+    show before it is switched on), and every loaded plugin you installed. One that is only
+    available, failed, or holds invalid settings has none, and nothing is imported to list it.
+    `global_only` is the resolver's own machine-level rule, so the attribution below drops exactly
+    what the resolver dropped."""
+    from localharness.plugins.resolve import _machine_only
+
+    out = []
+    for name, settings in resolution.settings.items():
+        # Every name in settings has a plan entry; a missing one would get the stricter rule.
+        entry, cls = resolution.plan.entry(name), resolution.classes[name]
+        bundled = entry is not None and entry.bundled
+        out.append(PluginRows(
+            name, resolution.enabled[name], bundled and cls.manifest.enabled_by_default,
+            cls.ConfigModel, settings.config, cls.AgentConfigModel, settings.agent_config,
+            _machine_only(cls.ConfigModel, bundled)))
+    return tuple(out)
 
 
 # The four config FILES the owner's 2026-09-03 ruling merges, named for what they are. Until v0.13
@@ -56,6 +98,13 @@ _LAYER_PRIORITY = (
     LAYER_GLOBAL_OVERRIDES,
     LAYER_GLOBAL_CONFIG,
 )
+
+
+def _global_bands(overlays: dict[str, dict]) -> dict[str, dict]:
+    """`overlays` narrowed to the two global bands — the only files a GLOBAL_ONLY plugin path can
+    take its value from: a workspace value there is dropped at load (ENAB-02), so crediting a
+    workspace band would name a file the value never came from."""
+    return {k: v for k, v in overlays.items() if k in (LAYER_GLOBAL_OVERRIDES, LAYER_GLOBAL_CONFIG)}
 
 
 def _path_exists_in_dict(d: dict, path: str) -> bool:
@@ -136,7 +185,7 @@ def build_catalogue(
     overlays: dict[str, dict] | None = None,
     agent_cfg: Optional[AgentConfig] = None,
     tool_registry: Any = None,
-    hook_system: Any = None,
+    plugins: Sequence[PluginRows] = (),
 ) -> dict[str, ComponentEntry]:
     """Build the complete component catalogue.
 
@@ -149,7 +198,8 @@ def build_catalogue(
                    if None, uses AgentConfig.model_construct() defaults (REG-04 always exposes
                    agent surfaces in list).
         tool_registry: ToolRegistry instance (provides `._schemas` for tools.<name>.description).
-        hook_system: HookSystem instance (provides `.loaded_plugin_names` for hooks.<name>.config).
+        plugins: one PluginRows per plugin (`plugin_catalogue_rows(resolve(loader))`); none, and
+                 the catalogue is core rows only (the autoresearch callers).
     """
     overlays = overlays or {}
     entries: dict[str, ComponentEntry] = {}
@@ -212,24 +262,29 @@ def build_catalogue(
                 winning_layer=_detect_layer(path, overlays),
             )
 
-    # 4. Dynamic: hooks.<name>.config
-    if hook_system is not None and hasattr(hook_system, "loaded_plugin_names"):
-        org_hooks = {}
-        if cfg is not None:
-            try:
-                org_hooks = cfg.org.hooks
-            except AttributeError:
-                org_hooks = {}
-        for hook_name in hook_system.loaded_plugin_names:
-            path = f"hooks.{hook_name}.config"
-            entries[path] = ComponentEntry(
-                path=path,
-                annotation=dict,
-                type_name="dict[str, Any]",
-                current_value=org_hooks.get(hook_name, {}),
-                default_value={},
-                winning_layer=_detect_layer(path, overlays),
-            )
+    # 4. Dynamic: each plugin's settings (ENAB-04). A GLOBAL_ONLY path is attributed from the two
+    #    global bands alone (see _global_bands); agent-level GLOBAL_ONLY is refused by the resolver.
+    machine = _global_bands(overlays)
+    for p in plugins:
+        path = f"{p.name}.enabled"
+        entries[path] = ComponentEntry(
+            path, bool, "bool", p.enabled, p.enabled_default,
+            _detect_layer(path, machine if "enabled" in p.global_only else overlays), plugin=p.name)
+        for prefix, model, instance, marked in (
+            (p.name, p.config_model, p.config, p.global_only),
+            (f"agent.{p.name}", p.agent_config_model, p.agent_config, frozenset()),
+        ):
+            if model is None:
+                continue
+            for rel, ann in walk_model_fields(model):
+                path = f"{prefix}.{rel}"
+                try:
+                    current = get_value(instance, rel)
+                except AttributeError:
+                    current = None
+                entries[path] = ComponentEntry(
+                    path, ann, _type_name(ann), current, _get_default(model, rel),
+                    _detect_layer(path, machine if rel in marked else overlays), plugin=p.name)
 
     return entries
 
@@ -245,5 +300,5 @@ SURFACE_FAMILIES = {
                              r"^agent\.context\.compaction_threshold_pct$"),
     "stuck_detector": (r"^agent\.stuck_detector\.",),
     "recovery_injection": (r"^agent\.recovery_injection\.",),
-    "hook_config": (r"^hooks\..+\.config$", r"^org\.hooks$"),
+    "hook_config": (r"^org\.hooks$",),
 }
