@@ -221,8 +221,9 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash â€
 
 ## Plugins
 
-A plugin adds tools, commands, slash commands and `doctor` checks. No built-in feature ships as a
-plugin yet. LocalHarness finds plugins in two places on your machine: installed packages that
+A plugin adds tools, commands, slash commands and `doctor` checks. Image generation ships as a
+plugin, off until you turn it on (`localharness plugins enable image`); the other built-in features
+are still part of core. LocalHarness finds plugins in two places on your machine: installed packages that
 declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
 loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
 Python environment as LocalHarness:

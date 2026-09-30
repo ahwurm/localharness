@@ -208,8 +208,10 @@ Exit code 1 on failure.
 
 **`--workspace` (v0.13): a different command in the same name.** `localharness init --workspace`
 does not configure the machine. It scaffolds `./.localharness/` for the project you are standing in
-— an `agents/` directory and an all-comments `config.yaml`, nothing else, and never a `provider:`
-block. It probes nothing, asks nothing, and refuses an existing workspace with **exit 1** rather
+— an `agents/` directory, an all-comments `config.yaml`, `plugins/README.md` and a `.gitignore`
+that keeps this project's LocalHarness state (sessions, memory databases, logs, generated pictures)
+out of git while `config.yaml`, `overrides.yaml`, `agents/*.yaml` and `plugins/README.md` stay
+committable — and never a `provider:` block. It probes nothing, asks nothing, and refuses an existing workspace with **exit 1** rather
 than plain `init`'s interactive exit 0, so a script can tell "created" from "already there" by the
 exit code. It cannot be combined with `--endpoint`, `--model` or `--config-dir` (exit 2, naming the
 flag). Spec 06 §2 has what the scaffolded file says and why it is empty.
@@ -649,7 +651,8 @@ already had produces no row. A workspace that changes nothing prints
 `No overrides — the global config governs every key.` instead of an empty section. None of these
 lines appears at all when no workspace applies. A config error here names the file that set the
 offending key and that file's own line number, so an error you cannot find in the global config
-tells you which workspace file to open.
+tells you which workspace file to open. A workspace without `.gitignore` gets one `i` line; doctor
+writes nothing.
 
 *The security-defaults state, printed on every run.* One informational line — never a failure, and
 it counts toward no issue total:

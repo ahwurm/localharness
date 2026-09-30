@@ -190,7 +190,7 @@ class HookSystem:
 
 This section outlines the implemented API. `src/localharness/plugins/api.py` defines every type a plugin touches, once each and with docstrings, and `examples/plugin-template/` is a complete working plugin that the development install includes and the test suite exercises; start there. SECURITY.md ("Plugins") states the trust model. The example imports three LocalHarness modules: `localharness.plugins.api`, `localharness.tools.base` and `localharness.core.artifacts`.
 
-A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` is empty today: no feature ships as a plugin yet.
+A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` holds one plugin today, `image` (off by default); the other bundled features have not converted yet.
 
 ### Discovery and enabling
 
@@ -202,7 +202,7 @@ Discovery (`plugins/discovery.py`) has two sources, both machine-level; a worksp
 Discovery reads metadata only: entry-point names, distribution names and versions, folder names. A plugin you installed is **off** until enabled and is not imported before that. Its `<name>.enabled` is read from the machine-level layers only (the global `config.yaml` and `overrides.yaml`); a project's value is dropped with a warning. A bundled plugin's `<name>.enabled` is layered like any setting and defaults to the manifest's `enabled_by_default`.
 
 - `localharness plugins list [--json]` shows every plugin (name, what it does, state, where it came from) and the command that turns an off or available one on; `plugins info NAME [--json]` shows one plugin and the settings it owns.
-- `localharness plugins enable NAME [--set KEY=VALUE ...] [--workspace]` and `plugins disable NAME [--workspace]` write `NAME.enabled`, and any `--set` values after checking them with the plugin's `ConfigModel`, into one layer's `overrides.yaml`: the machine's, or with `--workspace` the project's. They never write a `config.yaml`. `--workspace` is refused for a plugin you installed and for a machine-level-only setting. The change takes effect at the next `localharness start`. Unlike `components set`, these commands write no audit event. A plain `enable` imports nothing; `enable NAME --set ...` imports a plugin you installed, to check the values.
+- `localharness plugins enable NAME [--set KEY=VALUE ...] [--workspace] [--no-input]` and `plugins disable NAME [--workspace]` write `NAME.enabled`, and any `--set` values after checking them with the plugin's `ConfigModel`, into one layer's `overrides.yaml`: the machine's, or with `--workspace` the project's. They never write a `config.yaml`. `--workspace` is refused for a plugin you installed and for a machine-level-only setting. The change takes effect at the next `localharness start`. Unlike `components set`, these commands write no audit event. A plain `enable` imports nothing; `enable NAME --set ...` imports a plugin you installed, to check the values. On a terminal, with no `--set`, it asks the plugin's `setup` questions, writes the answers the same way, runs the plugin's doctor check once, and prints `setup_help` if the check does not pass.
 
 ### Plugins written for 0.15
 
@@ -255,6 +255,8 @@ A plugin is a subclass of `Plugin` whose class attribute `manifest` is a frozen,
 | `requires_localharness` | a PEP 440 range, default `>=0.15,<1`; out of range, the plugin is skipped. For a plugin you installed it is checked after the import, since the manifest is in its code |
 | `requires` / `uses` | hard / soft dependencies on other plugins |
 | `cli` / `slash` | `CliDescriptor` / `SlashDescriptor` tuples (see "Commands, slash commands and doctor") |
+| `setup` | `SetupField` tuple — the questions `plugins enable` asks on a terminal when no `--set` is given: `key` (a leaf of `ConfigModel`), `prompt`, `default`. Data, not a callback: the harness asks, writes and checks |
+| `setup_help` | a few plain lines printed after that enable when the plugin's doctor check does not pass |
 
 `PLUGIN_API_VERSION` (`"1"`) names this API's version; it changes only with a change that would break a plugin. Nothing in the loader compares it with anything: `requires_localharness` is the check that runs. The other class attributes are `ConfigModel` and `AgentConfigModel` (pydantic models for the plugin's settings, or None) and `wants_artifacts` (default False). The first line of the class docstring is what `plugins list` shows. Every method is optional, and the defaults do nothing:
 
@@ -293,7 +295,7 @@ A plugin's tools register under their bare names at global scope, with `source_p
 
 ### Artifacts
 
-A plugin sets `wants_artifacts = True`. Core then computes its root, `<state_dir>/artifacts/<name>/`, and passes it as `ctx.paths.artifact_dir`; a plugin that did not ask gets None. `write_artifact(root, name, data, mime)` in `localharness.core.artifacts` accepts only `image/png`, `image/jpeg` and `image/webp`, mints the id (`art-YYYYMMDD-HHMMSS-<6 hex>`, UTC), writes exactly one new file (never overwriting one) and returns an `ArtifactRef(plugin, kind="image", id, mime)`. After the start stage, core asks each running plugin's `artifact_root(ctx)`; unless the answer is the root core computed, that plugin's artifacts are not served this session. The web channel serves the accepted roots at `GET /api/artifacts/{plugin}/{artifact_id}` (SECURITY.md, "`localharness web`"). `ArtifactRef` is not an event, and no event carries one yet.
+A plugin sets `wants_artifacts = True`. Core then computes its root, `<state_dir>/artifacts/<name>/`, and passes it as `ctx.paths.artifact_dir`; a plugin that did not ask gets None. `write_artifact(root, name, data, mime)` in `localharness.core.artifacts` accepts only `image/png`, `image/jpeg` and `image/webp`, mints the id (`art-YYYYMMDD-HHMMSS-<6 hex>`, UTC), writes exactly one new file (never overwriting one) and returns an `ArtifactRef(plugin, kind="image", id, mime)`. After the start stage, core asks each running plugin's `artifact_root(ctx)`; unless the answer is the root core computed, that plugin's artifacts are not served this session. The web channel serves the accepted roots at `GET /api/artifacts/{plugin}/{artifact_id}` (SECURITY.md, "`localharness web`"). `ArtifactRef` is not an event; the one event that carries it is `Observation`, whose optional `artifact` field (web protocol 4) the agent loop fills from a successful tool result's `metadata["artifact"]` after validating it as an `ArtifactRef`, dropping anything that does not validate. The reference phone page shows an image artifact inline; the terminal does not display artifacts.
 
 ### The memory slot
 
