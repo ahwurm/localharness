@@ -275,6 +275,12 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
     # root that lost its plugin segment cannot pass by being computed the same wrong way here.
     png = ws / "artifacts" / "example" / f"{seen['art_id']}.png"
     assert png.is_file() and png.read_bytes().startswith(PNG_SIGNATURE), f"no PNG at {png}"
+    # The result the model's second request carried names that very file, so the model can tell the
+    # user where the swatch is (QA-05). Compared resolved: `ws` is, the session's state dir need not be.
+    saved = re.search(r"saved to (\S+\.png)", seen["tool_text"])
+    assert saved is not None, f"the tool's result names no saved file: {seen['tool_text']}"
+    said = Path(saved.group(1))
+    assert said.is_absolute() and said.resolve() == png.resolve() and said.is_file(), (said, png)
     assert not (global_dir / "artifacts").exists(), "a workspace session's artifact landed globally"
     # The phone: the route serves exactly those bytes from the root THIS session bound.
     got = seen["get"]
