@@ -45,8 +45,11 @@ To turn it on and use it:
 
 ```bash
 uv run localharness plugins enable example   # a machine-level setting
+uv run localharness init                     # first time on this machine: needs your model server
 uv run localharness start                    # ask for a swatch
 ```
+
+The agent can tell you where the swatch was saved: the tool's result names the file.
 
 See [plugin-template/README.md](plugin-template/README.md) for what each part does and a checklist
 for copying it.
