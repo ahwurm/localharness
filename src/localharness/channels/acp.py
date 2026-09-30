@@ -824,6 +824,10 @@ class AcpChannel(ChannelAdapter):
             gate.set_mode(self._pending_mode, from_channel=True)
             self._pending_mode = None
         await self.start()
+        # The picker shows the gate's mode from here on, whatever `session/new` could say before
+        # the gate existed: the configured one, a picked one, or `guarded` after a declined trust
+        # question (QA-18).
+        await self._update(update_current_mode(str(gate.mode)))
         self._ready.set()
         try:
             await self._closed.wait()
@@ -1233,11 +1237,29 @@ class AcpChannel(ChannelAdapter):
         )
 
     def _current_mode_id(self) -> str:
-        from localharness.agent.gate_types import DEFAULT_MODE
-
         if self._gate is not None:
             return str(self._gate.mode)
-        return self._pending_mode or DEFAULT_MODE
+        return self._pending_mode or self._configured_mode()
+
+    def _configured_mode(self) -> str:
+        """The mode the session will be built in, before it is (QA-18): the agent `start` opens,
+        resolved by the same loader — its own mode, else `org.permissions.mode`, else the default.
+        A display only: the gate is built from that same resolution on the first prompt, where a
+        config that will not load is refused with its error, and `serve` then announces the
+        gate's own mode."""
+        from localharness.agent.gate_types import DEFAULT_MODE
+        from localharness.cli.start_cmd import default_root_agent
+        from localharness.config.loader import ConfigLoader
+
+        try:
+            loader = ConfigLoader(config_dir=self._config_dir, local_config_dir=self._workspace)
+            agents = loader.discover_agents()
+            if not agents:  # `start` mints a root agent that sets no mode of its own
+                return loader.org_mode() or DEFAULT_MODE
+            root = default_root_agent(agents).get("name", "orchestrator")
+            return loader.load_agent(root).permissions.mode
+        except Exception:  # noqa: BLE001 — the first prompt reports the real error
+            return DEFAULT_MODE
 
     def _group_for(self, tool_name: str) -> str:
         """The tool's `ToolSchema.group`, or `other` when the registry has not been built yet
