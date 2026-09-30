@@ -1,37 +1,94 @@
-# Image Generation Module — Qwen-Image-2.1 on ComfyUI
+# Image Generation — Qwen-Image-2.1 on ComfyUI
 
-**Status: TESTED** (maintainer hardware, DGX Spark GB10, 2026-09-21). The image module is
-**opt-in and model-agnostic**: the harness ships the client and a workflow-template
-contract; the model, its weights and the ComfyUI server are operator-provided. Base
-installs never register the tool.
+Image generation is a plugin that ships with LocalHarness, off until you turn it on. It talks to a
+ComfyUI server you run on your own machine.
 
-## How the module works
+The harness ships the client, a doctor check and a workflow-template contract; the model, its
+weights and the ComfyUI server are yours to provide.
 
-| Piece | Where |
+## How it works
+
+| Piece | What it does |
 |---|---|
-| Tool | `generate_image` — registered only when `LOCALHARNESS_COMFYUI_URL` is set |
-| CLI | `localharness generate-image "<prompt>" [--width --height --steps --seed --out]` |
-| App | tool results carry a typed image id; the web UI renders it via `GET /api/images/{id}` |
-| Health | `localharness doctor` prints an Image module line when the env var is set |
+| **Tool** | `generate_image` — offered to the model only when image is on and `image.comfyui_url` is set. Declared: reads no outside content, writes only into the folder LocalHarness gives it, result trusted. |
+| **Command** | `localharness generate-image "a prompt" [--out picture.png]` — listed only while image is on. |
+| **App** | A tool result carries a typed `artifact`; the phone page shows it inline from `GET /api/artifacts/image/{id}`. |
+| **Health** | `localharness doctor` runs the plugin's check: ComfyUI answers, the template loads, and ComfyUI has every model file the template needs. |
 
-Environment contract (operator config — none of this is visible to the subject model):
+## Settings
+
+`image.comfyui_url` and `image.workflow` are machine-level only; the other two may be set per project.
+
+| Setting | Meaning |
+|---|---|
+| `image.enabled` | Default off; a project may switch it. |
+| `image.comfyui_url` | Machine-level only. The address of your ComfyUI server, e.g. `http://127.0.0.1:8188`. |
+| `image.workflow` | Machine-level only. Empty = the shipped `qwen-image-2.1` template; a path = your own template. |
+| `image.timeout_s` | Seconds to wait for one picture (the first one also loads the model). Default 570; a project may change it. |
+
+Machine-level only means a project folder cannot set it: ComfyUI runs whatever graph it is sent, so
+a cloned project must never choose the server or the graph. A project can turn image on, but only
+against the server your machine already points at.
+
+## Setup
+
+Turn it on with `localharness plugins enable image`. On a terminal it asks for the ComfyUI address,
+checks it, and if ComfyUI is not ready prints the short version below. In a script:
+`localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188` (this form does not run
+the check; run `localharness doctor` afterwards).
 
 ```
-LOCALHARNESS_COMFYUI_URL        e.g. http://127.0.0.1:8188  (unset = module off)
-LOCALHARNESS_COMFYUI_WORKFLOW   path to a workflow template; default = shipped qwen-image-2.1
-LOCALHARNESS_COMFYUI_TIMEOUT_S  generation deadline, default 570 (first call loads weights)
+Image needs ComfyUI running on this machine, with three model files:
+  models/diffusion_models/qwen_image_2.1_int8_convrot.safetensors   (about 7.3 GB)
+  models/text_encoders/qwen3vl_8b_int8_convrot.safetensors          (about 9.4 GB)
+  models/vae/qwen_image_2.1_vae_bf16.safetensors                    (about 0.7 GB)
+Start it from your ComfyUI folder: venv/bin/python main.py --listen 127.0.0.1 --port 8188
+Then run `localharness doctor` to check.
 ```
 
-**Swapping image models is a template, not a code change.** A template is a ComfyUI
-API-format graph (JSON) with placeholder values `__LH_PROMPT__`, `__LH_WIDTH__`,
-`__LH_HEIGHT__`, `__LH_STEPS__`, `__LH_SEED__` (ints are written as quoted placeholders
-and substituted post-parse), optional `__LH_PREFIX__`. Top-level keys without a
-`class_type` are stripped before POST, so templates can carry `_comment` keys. A template
-must contain `__LH_PROMPT__`; the rest are optional. The shipped reference template:
-`src/localharness/tools/builtin/workflows/qwen-image-2.1.json`.
+### The coding-agent prompt
 
-Generated PNGs land in `<workspace>/.localharness/artifacts/images/` under a
-harness-minted id; the web endpoint serves only that directory, only by exact id shape.
+After those six lines the CLI prints "Or paste this into your coding agent to set it up for your hardware:" and this prompt:
+
+```
+Set up ComfyUI on this machine for LocalHarness image generation. Install ComfyUI and run it on
+127.0.0.1, port 8188 (this machine only, not the network). Put these Qwen-Image-2.1 INT8 files in
+its models folder: diffusion_models/qwen_image_2.1_int8_convrot.safetensors (about 7.3 GB),
+text_encoders/qwen3vl_8b_int8_convrot.safetensors (about 9.4 GB) and
+vae/qwen_image_2.1_vae_bf16.safetensors (about 0.7 GB). The weights are under the Qwen Research
+License: personal, non-commercial use. Keep the UNETLoader weight_dtype at "default" (the fp8 fast
+mode spoils the pictures). On an NVIDIA GB10 (DGX Spark) the INT8 kernels compile on first use and
+need the Python headers: start ComfyUI with C_INCLUDE_PATH pointing at them. You are done when
+http://127.0.0.1:8188/system_stats answers and `localharness doctor` shows image reachable.
+```
+
+In more detail: the three files go under ComfyUI's own `models/` folder —
+`models/diffusion_models/qwen_image_2.1_int8_convrot.safetensors` (~7.3 GB),
+`models/text_encoders/qwen3vl_8b_int8_convrot.safetensors` (~9.4 GB) and
+`models/vae/qwen_image_2.1_vae_bf16.safetensors` (~0.7 GB). On a GB10, start ComfyUI with the
+command under [Running ComfyUI on the GB10](#running-comfyui-on-the-gb10). The weights are under
+the Qwen Research License (see [Reference model](#reference-model-qwen-image-21-int8-convrot)); they
+are not distributed with this repo, and where to download them is left to you or your agent.
+LocalHarness does not install ComfyUI or download weights for you yet.
+
+## Swapping image models is a template, not a code change
+
+A template is a ComfyUI API-format graph (JSON) with placeholder values `__LH_PROMPT__`,
+`__LH_WIDTH__`, `__LH_HEIGHT__`, `__LH_STEPS__`, `__LH_SEED__` (ints are written as quoted
+placeholders and substituted post-parse), optional `__LH_PREFIX__`. Top-level keys without a
+`class_type` are stripped before POST, so templates can carry `_comment` keys. A template must
+contain `__LH_PROMPT__`; the rest are optional. Point `image.workflow` at your template. The shipped
+reference template: `src/localharness/tools/builtin/workflows/qwen-image-2.1.json`.
+
+## Where pictures are saved
+
+Pictures are saved under `<state dir>/artifacts/image/` — the project's `.localharness/` in a
+project, `~/.localharness/` otherwise — named by an id LocalHarness makes
+(`art-YYYYMMDD-HHMMSS-xxxxxx`). They are kept until you delete them. The web app serves only that
+folder and only ids of that shape. A new project's `.localharness/.gitignore` keeps them out of git.
+
+`localharness generate-image` is different: it writes the picture where `--out` says, or to
+`./image-<YYYYmmdd-HHMMSS>-<hex6>.png` in the current folder.
 
 ## Reference model: Qwen-Image-2.1 INT8 (convrot)
 
@@ -66,6 +123,6 @@ C_INCLUDE_PATH="$HOME/ComfyUI/pyheaders/python3.12:$HOME/ComfyUI/pyheaders" \
   venv/bin/python main.py --listen 127.0.0.1 --port 8188
 ```
 
-v1 lifecycle is deliberately external: you run ComfyUI (tmux/systemd), the harness talks
+The lifecycle is deliberately external: you run ComfyUI (tmux/systemd), the harness talks
 to it and says exactly what to start when it is down. Supervised start/stop is future
 work, not a shipped claim.
