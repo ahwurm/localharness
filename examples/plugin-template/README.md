@@ -9,8 +9,10 @@ A small, real LocalHarness plugin that you can copy. It adds one of each thing a
 - two settings, `example.color` and `agent.example.size`
 
 LocalHarness's development install includes this plugin, and its test suite exercises each of those.
-So it cannot quietly fall behind the plugin API: if the API changes, the tests fail until this example
-is updated.
+CI runs those tests on the locked dependencies, then runs this plugin's own tests and
+`localharness example` again on a fresh install of the built wheel, which takes the newest versions
+its dependencies allow. A change to the plugin API or a dependency release that breaks this example
+fails CI.
 
 ## Try it
 
