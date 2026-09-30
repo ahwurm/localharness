@@ -2,14 +2,15 @@
 
 The loader, the startup banner, `plugins list`, `doctor` and `components` all reach it through
 bundled_plugins() — never by importing the name — so there is no second list anywhere and a test can
-swap this one and watch every reader follow. It is empty until the bundled features convert; each
-conversion appends exactly one class. This is the one module in core allowed to import a plugin
+swap this one and watch every reader follow. The image plugin is the first entry; each bundled
+feature that converts appends exactly one class. This is the one module in core allowed to import a plugin
 module (CORE-02)."""
 from __future__ import annotations
 
 from localharness.plugins.api import Plugin
+from localharness.tools.builtin.image_plugin import ImagePlugin
 
-BUILTIN_PLUGINS: tuple[type[Plugin], ...] = ()
+BUILTIN_PLUGINS: tuple[type[Plugin], ...] = (ImagePlugin,)
 
 
 def bundled_plugins() -> tuple[type[Plugin], ...]:
