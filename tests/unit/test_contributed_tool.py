@@ -132,6 +132,41 @@ async def test_a_plugin_tool_that_raises_is_an_attributed_error_and_the_turn_goe
     assert [r.levelno for r in caplog.records if "'palette'" in r.getMessage()] == [logging.WARNING]
 
 
+class _Fails(Tool):
+    """The usual plugin tool shape — a Tool subclass — whose own code raises `outcome`, or returns it
+    as the error it chose to report."""
+
+    def __init__(self, name: str, outcome: BaseException | str) -> None:
+        super().__init__()
+        self._name, self._outcome = name, outcome
+
+    def info(self) -> ToolSchema:
+        return _declared(self._name, "code")
+
+    async def _execute(self, **kwargs: Any) -> ToolResult:
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self.err(self._outcome)
+
+
+async def test_a_tool_subclass_that_raises_is_attributed_and_its_own_refusal_is_not(caplog):
+    """PAPI-11 for the common plugin tool: Tool.run catches what _execute raises, so the error names
+    the plugin only if the wrapper can tell a crash from a refusal — a result the tool chose to
+    return as an error is its own words, left alone and not logged."""
+    reg = ToolRegistry()
+    await reg.register(_Fails("kaboom", RuntimeError("kaboom")), source_plugin="palette")
+    await reg.register(_Fails("refuses", "no artifact directory was assigned"), source_plugin="palette")
+    with caplog.at_level(logging.WARNING, logger="localharness.tools.registry"):
+        raised = await reg.dispatch("kaboom", {}, *ROOT, CFG)
+        refused = await reg.dispatch("refuses", {}, *ROOT, CFG)
+
+    assert (raised.success, raised.error_type) == (False, "execution_error")
+    assert raised.error == "tool 'kaboom' from plugin 'palette' failed: RuntimeError: kaboom"
+    assert (refused.success, refused.error) == (False, "no artifact directory was assigned")
+    logged = [r for r in caplog.records if "'palette'" in r.getMessage()]
+    assert [(r.levelno, "kaboom" in r.getMessage()) for r in logged] == [(logging.WARNING, True)]
+
+
 async def test_cancelling_a_turn_still_cancels_a_plugin_tool():
     reg = ToolRegistry()
     await reg.register(_Raises(asyncio.CancelledError()), source_plugin="palette")
