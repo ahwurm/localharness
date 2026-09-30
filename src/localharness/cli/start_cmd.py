@@ -492,12 +492,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.init_cmd import init_app
+    from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
     from localharness.config.models import AgentConfig
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
-    from localharness.plugins.loader import PluginLoader
+    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.lifecycle import start_plugins, stop_plugins
+    from localharness.plugins.resolve import resolve
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
     from localharness.tools.mcp import MCPClientManager
@@ -699,7 +702,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
 
     # --- Capability floor (P-A): sync the module flag from config. The ROOT agent's strip reads
-    # tool declarations, so it runs after every global tool is registered (after the plugin loader).
+    # tool declarations, so it runs after every global tool is registered (after step 5's plugins).
     from localharness.tools.capabilities import set_floor_enabled
     set_floor_enabled(harness.org.enforce_capability_floor)
 
@@ -1089,6 +1092,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     session_acc = None
     consolidation_scheduler = None
     mcp_manager = None
+    plugin_resolution = None
+    plugin_result = None
     _session_started = False
     _exit_reason = "complete"
     try:
@@ -1193,19 +1198,27 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.tools.builtin import bind_agent_store_tools
         bind_agent_store_tools(tool_registry, eviction_store)
 
-        # --- 5. Plugin loader (soft) ---
-        plugin_loader: PluginLoader | None = None
+        # --- 5. Plugins: build the plan, run the lifecycle (soft: never stops the harness) ---
+        # The plan is pure (BUILTIN_PLUGINS + discovered METADATA + this config); only ENABLED
+        # third-party plugins are imported. Each stage is contained per plugin (PAPI-11): a failure
+        # is named in the summary line's warnings and the session goes on. Memory is still wired by
+        # step 4 above this phase; the slot is empty in every session until memory converts.
+        # #150 phase 38 criterion 3: plugins follow the SESSION's config dir — resolve() discovers
+        # from `loader.global_config_dir` (cfg_path, never the workspace), after the same loader
+        # loaded this agent (its `agent.<name>` plugin sections are keyed on the declared name).
         try:
-            if hook_system is not None:
-                # #150 phase 38 criterion 3: plugins follow the SESSION's config dir; the loader's
-                # own default (chokepoint-resolved since plan 38-03) only covers env-based
-                # selection, not this --config-dir flag.
-                plugin_loader = PluginLoader(
-                    tool_registry, hook_system, plugins_dir=cfg_path / "plugins"
-                )
-                loaded_names = await plugin_loader.discover_all()
-                plugins_loaded = len(loaded_names)
-        except Exception as exc:
+            plugin_resolution = resolve(loader, agent_name=agent_config.name)
+            warnings.extend(plugin_resolution.warnings)
+            warnings.extend(plugin_resolution.problems())
+            plugin_result = await start_plugins(
+                plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
+                paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
+                                  state_dir=state_dir),
+            )
+            warnings.extend(plugin_result.warnings)
+            warnings.extend(set_plugin_rows(plugin_result.slash_rows))
+            plugins_loaded = len(plugin_result.running)
+        except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
             warnings.append(f"plugins: {exc}")
 
         # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
@@ -1464,6 +1477,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # "default" is the org id the store is built with. A workspace can neither rewrite nor
             # blank the org's safety voice.
             guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
+            # PAPI-04: the memory slot the lifecycle seated — empty in every session until memory
+            # converts (the legacy store above still feeds the prompt); None if plugins never ran.
+            memory_slot=plugin_result.slot if plugin_result is not None else None,
         )
         if acp_channel is not None:
             # Built at the ACP handshake (it had to answer `initialize` before any of this
@@ -1638,6 +1654,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # The memory page (GET/POST /api/memory*) speaks to the SESSION's store —
                 # same object the memory tools write through, never a second connection.
                 memory_store=memory_store,
+                # PAPI-10: the only roots /api/artifacts/{plugin}/{id} serves — the ones core
+                # computed for this session's running plugins and accepted back from them.
+                artifact_roots=plugin_result.artifact_roots if plugin_result is not None else {},
             )
 
         if acp_channel is not None:
@@ -1685,8 +1704,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> Dreaming -> end_session -> MemoryStore -> LLMClient ---
-        # (EventBus handles its own file closing on GC/process exit)
+        # --- Ordered shutdown: MCP -> plugins (reverse) -> Dreaming -> end_session -> MemoryStore
+        # -> LLMClient --- (EventBus handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
@@ -1694,6 +1713,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # Swallow — a teardown failure must not replace the real exit reason — but never
                 # silently: an MCP server that refuses to die is a diagnosable thing.
                 log.debug("MCP shutdown failed: %s", exc)
+        if plugin_result is not None:
+            try:
+                await stop_plugins(plugin_result)  # reverse start order, each stop contained
+            except Exception as exc:  # noqa: BLE001
+                log.debug("plugin shutdown failed: %s", exc)
+            set_plugin_rows(())  # the rows are process-wide: they leave with the session
         if consolidation_scheduler:
             try:
                 await consolidation_scheduler.stop()
