@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from localharness.channels.web.protocol import FRAME_TYPES
+from localharness.channels.web.protocol import FRAME_TYPES, PROTOCOL_VERSION
 from localharness.channels.web.server import MANIFEST, PACKAGED_UI_DIR
 
 PAGE = PACKAGED_UI_DIR / "index.html"
@@ -284,7 +284,10 @@ def _drive(page: str, script: str, tmp_path) -> list[dict]:
     assert sep, "the page's boot block moved; this harness slices it off by that marker"
 
     path = tmp_path / "driven.mjs"
-    path.write_text(DOM_SHIM + body + script, encoding="utf-8")
+    # The Hello snippets say `protocol_version: PROTOCOL_VERSION`: bound here from the Python
+    # constant, so a version bump moves every driven Hello with it (no literal to forget).
+    shim = f"const PROTOCOL_VERSION = {PROTOCOL_VERSION};\n" + DOM_SHIM
+    path.write_text(shim + body + script, encoding="utf-8")
     result = subprocess.run(["node", str(path)], capture_output=True, text=True)
     assert result.returncode == 0, f"the page threw:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -292,7 +295,7 @@ def _drive(page: str, script: str, tmp_path) -> list[dict]:
 
 HELLO = """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
-                  protocol_version: 1, synthetic: false, model_state: "ready"});
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 onEvent("TurnStarted", {seq: 1, task_summary: "a question"});
 onFrame("TokenDelta", {stream_id: "x", text: "half an ", phase: "writing"});
 onFrame("TokenDelta", {stream_id: "x", text: "answer"});
@@ -366,13 +369,13 @@ def test_a_running_turn_pulses_a_working_row_and_its_end_removes_it(page, tmp_pa
     it down."""
     running = _drive(page, """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
-                  protocol_version: 1, synthetic: false, model_state: "ready"});
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 report();
 """, tmp_path)
     assert sum(1 for r in running if "working" in r["cls"]) == 1, running
     ended = _drive(page, """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
-                  protocol_version: 1, synthetic: false, model_state: "ready"});
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 onFrame("TurnCancelled", {session_id: "s"});
 report();
 """, tmp_path)
@@ -386,7 +389,7 @@ def test_answers_render_the_markdown_subset_without_leaking_markup(page, tmp_pat
     (##, **, |---|) must not survive into the rendered text."""
     rendered = _drive(page, """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
-                  protocol_version: 1, synthetic: false, model_state: "ready"});
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 onEvent("TaskComplete", {seq: 2, success: true, duration_seconds: 1.0, summary:
   "## Indexes\\n| Index | Move |\\n|---|---|\\n| S&P 500 | -0.48% |\\n- **AI worries** hit chips\\n<script>x</script>"});
 report();
@@ -407,7 +410,7 @@ def test_safe_group_calls_consolidate_into_one_counter_row_by_default(page, tmp_
     and an error both counts on the counter and opens the per-call truth."""
     rendered = _drive(page, """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
-                  protocol_version: 1, synthetic: false, model_state: "ready"});
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 S.tools = {read: {group: "fs.read"}, grep: {group: "fs.read"}, bash_exec: {group: "execute"}};
 S.collapsible = ["fs.read", "web", "memory"];
 onEvent("Action", {seq: 2, action_type: "tool_call", tool_name: "read",
@@ -427,3 +430,52 @@ report();
     assert "✗1" in counter, "the error never reached the counter"
     assert "a.py" in counter, "the per-call truth is not one tap away"
     assert "bash_exec" in tool_rows[1]["text"], "the side-effecting call lost its own row"
+
+
+# --- v4: an image artifact renders from the generic route, and nothing else does ---------------
+
+GOOD_ARTIFACT = {"plugin": "image", "kind": "image", "id": "art-20260930-120000-abcdef",
+                 "mime": "image/png"}
+
+# rows() reports class+text only; the picture is an <img> nested in the tool row, so walk the log.
+FIND_IMAGES = """
+const found = [];
+const walk = (n) => { if (n.className === "genimg") found.push(n); n.children.forEach(walk); };
+walk(document.getElementById("log"));
+console.log(JSON.stringify(found.map((e) => ({cls: e.className, src: e.src, loading: e.loading}))));
+"""
+
+
+def _observe(page, tmp_path, **fields) -> list[dict]:
+    obs = {"seq": 1, "tool_call_id": "t", "tool_name": "generate_image", "output": "Image saved",
+           **fields}
+    return _drive(page, HELLO + f"onEvent(\"Observation\", {json.dumps(obs)});" + FIND_IMAGES,
+                  tmp_path)
+
+
+def test_an_image_artifact_renders_from_the_generic_artifact_route(page, tmp_path):
+    assert _observe(page, tmp_path, artifact=GOOD_ARTIFACT) == [
+        {"cls": "genimg", "src": "/api/artifacts/image/art-20260930-120000-abcdef",
+         "loading": "lazy"}]
+
+
+@pytest.mark.parametrize("fields", [
+    {"artifact": {**GOOD_ARTIFACT, "id": "art-2026-bad"}},
+    {"artifact": {**GOOD_ARTIFACT, "plugin": "../x"}},
+    {"artifact": {**GOOD_ARTIFACT, "plugin": "Image"}},
+    {"artifact": {**GOOD_ARTIFACT, "mime": "text/html"}},
+    {"output": "see /api/artifacts/image/art-20260930-120000-abcdef"},
+    {"artifact": "art-20260930-120000-abcdef"},
+], ids=["bad-id", "traversal-plugin", "uppercase-plugin", "html-mime", "path-in-output-text",
+        "string-artifact"])
+def test_a_malformed_or_untyped_artifact_renders_no_image(page, tmp_path, fields):
+    assert _observe(page, tmp_path, **fields) == []
+
+
+def test_the_page_mirrors_the_core_artifact_regexes(page):
+    """The page re-checks the artifact against JS copies of core's two rules; drift fails here."""
+    from localharness.core.events import ARTIFACT_ID_RE
+    from localharness.plugins.api import PLUGIN_NAME_RE
+
+    assert "/^" + ARTIFACT_ID_RE.pattern.replace("\\d", "[0-9]") + "$/" in page
+    assert "/^" + PLUGIN_NAME_RE.pattern + "$/" in page
