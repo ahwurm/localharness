@@ -22,9 +22,9 @@ or mitigation will be coordinated before any public disclosure.
 ## Trust boundaries
 
 LocalHarness runs tools — including `bash` and file writes — on the machine where
-the harness runs, driven by a local model. **Treat agent definitions and any
-connected MCP servers as trusted code**: review them the way you would review code,
-because they decide what the agents are allowed to do.
+the harness runs, driven by a local model. **Treat agent definitions, any
+connected MCP servers and any plugin you turn on as trusted code**: review them the way you
+would review code, because they decide what the agents are allowed to do.
 
 **Workspace config from outside your project is not trusted by default.** From v0.13 the harness
 looks for a `.localharness/` directory at or above your current directory and can load agent and
@@ -59,12 +59,16 @@ test lands narrower or wider than you might guess. Know which before you rely on
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
 repository's `.localharness/agents/` loads with no prompt, because you are inside that project.
 Agent files decide an agent's role, model and tool permissions, so read them in an unfamiliar
-repository before you run the harness there, the same way you would read its build scripts. Plugins
-and the org-level guardrails file are never taken from a workspace — they load from your global
-config directory only. For the guardrails file that is a mechanism rather than a side effect: the
-memory store is given the global directory as a separate input from the directory its own state
-lives in, so a workspace cannot silence the org's safety context by shipping its own copy of the
-file, and cannot blank it by having no copy at all. One crossing does exist and it is yours to make:
+repository before you run the harness there, the same way you would read its build scripts. Plugin
+code and the org-level guardrails file are never taken from a workspace. Plugins are found only in
+Python packages installed alongside LocalHarness that declare a `localharness.plugins` entry point,
+and in the `plugins/` folder of your global (machine-level) config directory; nothing of a plugin
+you installed is imported until you turn it on (see [Plugins](#plugins) below). The guardrails
+file, `GUARDRAILS.md`, is read by the harness itself from your global config directory on every
+turn of the agent you talk to, whether or not memory is on, so a workspace cannot silence the org's
+safety context by shipping its own copy of the file, and cannot blank it by having no copy at all.
+The agents it delegates to (subagents) and bench runs are not given the file. One crossing does
+exist and it is yours to make:
 `/memory promote` copies a memory out of a project's store into your machine-global store, so a
 memory learned inside an untrusted repository can reach your global memory **if you promote it**.
 The harness never promotes anything on its own — nothing runs it, nothing suggests it — and the
@@ -82,6 +86,48 @@ inside a workspace and out, and means unconfined. Read that honestly: unconfined
 posture, and the gate — not a path check — is what stands in front of a tool call. Even when you do
 set it, it is not a sandbox: a command run through `bash_exec` can still leave the folder, and the
 deny patterns remain the mechanism that stops specific actions.
+
+### Plugins
+
+A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
+covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
+treated differently, it says so below. (No feature ships as a plugin yet: everything that comes
+with LocalHarness is still built into its core.)
+
+- **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
+  installed stays off, with none of its code imported, until you turn it on. `localharness start`,
+  `localharness doctor` and `localharness plugins list` say it is available and print the command
+  that turns it on.
+- **Turning on a plugin you installed is a machine-level act, and it is your trust grant.**
+  `localharness plugins enable <name>` writes your machine-level `overrides.yaml`. A project can
+  never turn such a plugin on: its value for `<name>.enabled` is ignored with a warning, and
+  `plugins enable --workspace` refuses. A plugin that ships with LocalHarness can be switched on or
+  off per project, like any other setting. A project can also change a plugin's ordinary settings,
+  but not one the plugin marks machine-level only (endpoints, credentials, access lists), so that
+  protection is only as good as the plugin's marking.
+- **What turning it on vouches for.** The safety checks believe what a tool declares about itself
+  (step 4 of the approval gate, and the prompt-injection section). The one exception is the
+  permission gate: a `gate_family` declared by a tool from a plugin you installed counts only when
+  the gate treats it at least as strictly as no family at all (`code` and `delegate`), so a plugin
+  cannot declare its way past a question. Plugins that ship with LocalHarness are reviewed with the
+  rest of the code and are exempt from that exception.
+- **Plugin code is trusted code.** It runs inside the harness process with your privileges and can
+  do anything the harness can, including things no tool call shows: the gate judges tool calls, not
+  a plugin's own code. This is the stance taken for MCP servers, except that a plugin runs inside
+  the harness process itself. The harness contains a plugin's failures, not its intent: a plugin
+  that raises or exits while loading or starting is disabled for the session, its tools and hooks
+  are taken out, and it is named in the startup summary (`localharness doctor` names one that fails
+  to load or configure); a tool of its that raises returns an error to the model instead of ending
+  the turn.
+- **`plugins/**` stays protected.** It is on the protected list in step 2 of the approval gate, in
+  your machine-level config directory and in a project's `.localharness/`, because it is code the
+  harness imports.
+
+**What this does NOT cover.** A malicious plugin you turned on: nothing here contains code that
+means harm once it runs. A plugin that hangs instead of failing: containment catches errors, not
+stalls. And anything a plugin registers directly on the tool registry, a tool or a raw pre/post
+hook, instead of handing it over through its `tools()` method or the hook system, skips the
+gate-family rule above and stays registered if the plugin later fails.
 
 ## Human approval gate
 
@@ -224,8 +270,17 @@ read and argue with. Each step below says what it does in `auto`.
    target outside the project folder (keyed by the target's parent directory), a shell command whose
    signature this workspace has not seen before, an inline interpreter (`python3 -c`, `bash -c`,
    `eval`, `xargs`), `python_exec` and `cruncher_exec`, the `agent` tool, each MCP tool, and any
-   tool in no family the gate knows — a plugin's tool, or one whose schema could not be read —
-   keyed by the tool's name, because a tool nobody can describe is asked about rather than allowed.
+   tool in no family the gate knows, keyed by the tool's name, because a tool nobody can describe is
+   asked about rather than allowed. A tool's family is what its schema declares (`gate_family`); a
+   tool that declares none, or whose schema could not be read, is in no family. For a plugin you
+   installed yourself, only a declared `code` or `delegate` is honoured, because the gate treats
+   both at least as strictly as no family; any other family it declares (`allow`, `network`,
+   `shell`, `write`) is treated as no family, because each of those lets through some call that a
+   tool in no family would have been asked about. A plugin tool that labels itself as an MCP
+   server's (`group: mcp/<server>`) is not judged as that server's tool either.
+   What this does NOT cover is making a plugin's tool ask where a tool in no family would not: in
+   `auto`, the default, and in `trusted`, a tool in no family runs without asking, and so does a
+   plugin's.
 5. **Allow.** Everything else: reads, search, memory, `chunk`, the read-only shell commands (`ls`,
    `cat`, `head`, `tail`, `grep`, `rg`, `find` without `-exec`/`-delete`, `git status`/`diff`/`log`,
    `sed -n`, and their kin), network reads, and edits inside the project when the channel can show
@@ -435,9 +490,28 @@ untrusted text. This is enforced where an agent's tools are resolved: a host-mut
 toolset combined with untrusted ingestion is rejected, and the check **fails closed**
 (deny on doubt). Untrusted content moves between agents only as opaque handles
 carrying a sticky "untrusted" tag; its raw bytes resolve only inside an agent that
-holds no host-mutating tools. This covers built-in web and tool-result ingestion and
-MCP tools today; one known gap remains — a plugin pulled in through inherited global
-scope still needs a per-tool ingestion tag to be caught.
+holds no host-mutating tools.
+
+Which tools count as ingesting and which as host-mutating is read from each tool's own declaration,
+never from its name or from the plugin it came from. Every tool declares what it ingests
+(`ingest`), whether it can change the host (`host`) and whether its results are trusted
+(`result_origin`), and a tool that declares nothing is treated as the worst case on all three. So a
+plugin tool that declares nothing counts as both ingesting and host-mutating, and no agent may hold
+it: the root agent is not given it (`localharness start` prints a warning naming the tool and its
+plugin), and any other agent configured with it is refused. The same declarations are read by the
+separation check, by the rule that a handle to untrusted content may be granted only to an agent
+with no host-mutating tools, by the rule that an agent without the web tools may not fetch through
+an exec tool such as `bash_exec`, and by the context store when it marks a stored tool result
+untrusted. Built-in tools, MCP tools (their wrapper declares them untrusted) and plugin tools are
+judged the same way, whatever scope they arrive in.
+
+**What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
+it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
+installed yourself is you vouching for what its tools declare (see [Plugins](#plugins)). The warning
+at start is the only place a stripped plugin tool is named; `localharness doctor` does not show it.
+And a plugin tool that ingests is kept apart from the host tools, but it is not marked as untrusted
+where you read its output: the terminal's "web results — UNTRUSTED, treated as data only" note and
+the phone's untrusted label cover the three built-in web tools only.
 
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
@@ -524,6 +598,24 @@ Three more, added with the installable app and notifications:
   `start_url` is what can pair it — and that variant is served `no-store`, only to a
   request that already presents the credential. An anonymous fetch gets a manifest with
   no token in it, which is the version anything reaching the port can see.
+
+One more, added with plugins:
+
+- **`GET /api/artifacts/{plugin}/{id}` serves a file a plugin made, and nothing else.** It takes
+  the same credential as every other `/api` route. It answers only for a plugin that is on in this
+  session and asked for artifacts, and only from the folder the harness computed for that plugin,
+  `<state dir>/artifacts/<plugin>/`; a plugin that reports any other folder gets no artifact
+  serving for the session, and a request naming any other plugin is a 404 before the filesystem is
+  touched. The id must have the one shape the harness mints (`art-`, a timestamp and six hex
+  digits, ASCII only), exactly one file may match it, and that file's real path must stay inside
+  the folder, so a symlink out of it is refused. The media type comes from the file actually
+  served, and only `image/png`, `image/jpeg` and `image/webp` are served; anything else is refused
+  with 415. Responses are cached as immutable, because an id never names a different file.
+  **What this does NOT cover:** the folder itself is resolved before that check, so if
+  `<state dir>/artifacts/<plugin>` is replaced with a symlink, files are served from wherever it
+  points (still only harness-shaped names with an allowed type, and whoever can plant that link
+  can already write your state directory); and a folder the harness cannot read answers 500, not
+  404.
 
 **Two live sessions on one agent are warned about, not prevented.** `history.jsonl` and
 `compact.md` take unlocked appends, so a terminal session and a web session on the same

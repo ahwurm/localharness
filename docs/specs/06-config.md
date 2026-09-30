@@ -1396,10 +1396,11 @@ directory — so an answer about one question never satisfies another. A record 
 any other missing provenance field) is skipped with a warning and the call asks again.
 
 One ask class is the catch-all: **`tool-unfamiliar`**, keyed by the tool's name, for a tool in no
-family the gate has rules for — a plugin's tool, or one whose schema could not be read. It is
-grantable, so in `guarded` it asks once per workspace, while `auto` and `trusted` allow it
-outright; the point is that in the mode that asks, a tool nobody can describe is never silently in
-the allow tier.
+family the gate has rules for — one whose schema declares no `gate_family`, or one whose schema
+could not be read. A tool from a plugin you installed keeps a declared `code` or `delegate`; any
+other family it declares counts as none (SECURITY.md, step 4). It is grantable, so in `guarded` it
+asks once per workspace, while `auto` and `trusted` allow it outright; the point is that in the
+mode that asks, a tool nobody can describe is never silently in the allow tier.
 
 A "never here" answer lives in the same file as a **negative grant**: same workspace entry, same key
 space, same mandatory provenance. It is not a text pattern — a refusal of the signature `cp` denies
