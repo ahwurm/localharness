@@ -8,7 +8,9 @@
 - `enable NAME [--set k=v …]` and `disable NAME` write `NAME.enabled` (and the settings) into ONE
   layer's overrides.yaml through the atomic overlay writer — the machine's, or with --workspace this
   project's — and never into a config.yaml. `enable NAME --set k=v` writes the same overlay as
-  `enable NAME` followed by `components set NAME.k v`.
+  `enable NAME` followed by `components set NAME.k v`. On a terminal, with no --set, it asks the
+  plugin's declared setup questions, writes the answers the same way, and runs the plugin's doctor
+  check once.
 
 A plugin you installed is turned on and off only in machine-level settings: turning it on is your
 trust grant (SAFE-06), so --workspace is refused for it, as it is for a machine-level setting.
@@ -34,6 +36,7 @@ from rich.table import Table
 from localharness.cli.components_cmd import (
     _build_layered_loader, _err, _err_config, _serialize_value,
 )
+from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.plugin_sections import unowned_hint
 from localharness.registry import (
@@ -177,6 +180,7 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
         note = ("Its other settings are listed once it is enabled." if entry.state == "available"
                 else "Its other settings are listed once it loads.")
     m = entry.manifest
+    setup_cmd = _set_spelling(name, m.setup) if m is not None and m.setup else None
     if json_output:
         typer.echo(_json.dumps({
             "name": name, "state": entry.display, "state_kind": entry.state,
@@ -186,7 +190,7 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
             "cli": [d.name for d in m.cli] if m else [], "slash": [d.name for d in m.slash] if m else [],
             "settings": [{"path": p, "type": t, "current_value": _serialize_value(v), "layer": layer,
                           "machine_level_only": only} for p, t, v, layer, only in settings],
-            "note": note}, indent=2))
+            "setup_command": setup_cmd, "note": note}, indent=2))
         return
     lines = [("state", entry.display), ("what it does", entry.summary), ("from", entry.source)]
     if m is not None:
@@ -195,6 +199,8 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
                 ("requires", m.requires), ("uses", m.uses),
                 ("commands", [f"localharness {d.name}" for d in m.cli]),
                 ("slash", [d.name for d in m.slash])) if values]
+    if setup_cmd:
+        lines.append(("set up", setup_cmd))
     console.print(escape(name), soft_wrap=True)
     for label, value in lines:
         console.print(escape(f"  {label + ':':<14}{value}"), soft_wrap=True)
@@ -258,8 +264,17 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
     return values
 
 
-def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str]) -> None:
-    """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml."""
+def _set_spelling(name: str, setup) -> str:
+    """The non-interactive enable for a plugin's setup fields: `--set key=<default or <key>>` each."""
+    return f"localharness plugins enable {name} " + " ".join(
+        f"--set {f.key}={f.default or '<' + f.key + '>'}" for f in setup)
+
+
+def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str],
+            ask: bool = False) -> None:
+    """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml. With
+    `ask` (a terminal, no --set), the plugin's declared setup questions are asked first, their
+    answers written as --set values, and its doctor check run once after the write."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
     word, verb = ("on", "enable") if on else ("off", "disable")
@@ -273,6 +288,9 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
               "project first, or leave out --workspace to change the machine-level setting")
     # Each layer's overrides.yaml exactly as config/loader.py reads it.
     target = workspace / "overrides.yaml" if to_workspace else loader.user_overlay_path
+    setup = entry.manifest.setup if (on and entry.manifest is not None) else ()
+    if ask and setup:  # the answers go through the one checked write path, as --set values
+        pairs = [f"{f.key}={typer.prompt(f.prompt, default=f.default)}" for f in setup]
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
     values = _checked(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
@@ -288,6 +306,42 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
             f"here — `localharness plugins {verb} {name} --workspace` changes it for this project"),
             soft_wrap=True)
+    if ask and setup:
+        console.print("Checking it now:")
+        _probe(name, entry.manifest.setup_help, loader, workspace)
+    elif on and setup and not pairs:
+        console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
+                             + ": " + _set_spelling(name, setup)), soft_wrap=True)
+
+
+def _probe(name: str, setup_help: str, loader: ConfigLoader, workspace: Any) -> None:
+    """Run the plugin's doctor check once against what was just written, and print it with doctor's
+    own row printer; `setup_help` follows when it does not pass. Never fails the enable (it wrote)."""
+    import asyncio
+
+    from localharness.cli.doctor_cmd import print_plugin_row
+    from localharness.config.loader import ConfigLoader as _Loader
+    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.lifecycle import DoctorRow, _doctor_row
+    from localharness.plugins.resolve import resolve
+
+    try:
+        # A fresh loader over the SAME layers: re-deriving the workspace would print its trust
+        # notice (and maybe ask) a second time.
+        fresh = _Loader(config_dir=loader.global_config_dir, local_config_dir=workspace)
+        resolution = resolve(fresh)
+        entry = resolution.plan.entry(name)
+        paths = PluginPaths(global_config_dir=fresh.global_config_dir, workspace=workspace,
+                            state_dir=workspace if workspace is not None else fresh.global_config_dir)
+        row = (asyncio.run(_doctor_row(resolution, name, paths)) if entry.state == "on"
+               else DoctorRow(name, entry.state, entry.display))
+        print_plugin_row(row, [])
+    except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice
+        console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"), soft_wrap=True)
+        return
+    if setup_help and (row.state != "on" or any(c.status == "fail" for c in row.checks)):
+        console.print()
+        console.print(escape(setup_help), soft_wrap=True)
 
 
 @plugins_app.command("enable")
@@ -298,13 +352,18 @@ def plugins_enable(
         help="Also write one of its settings, the same as `components set NAME.KEY VALUE` "
              "(repeatable).")] = None,
     workspace: Workspace = False,
+    no_input: Annotated[bool, typer.Option(
+        "--no-input", help="Never ask the plugin's setup questions: write the switch (and any --set "
+                           "values) only, and print the --set spelling of the rest.")] = False,
     config_dir: ConfigDir = None,
 ) -> None:
     """Turn a plugin on.
 
     Writes an overrides.yaml, never your config.yaml; takes effect on the next `localharness start`.
+    On a terminal, with no --set, it first asks the plugin's setup questions, if it declares any.
     """
-    _switch(name, True, settings or [], workspace, config_dir)
+    _switch(name, True, settings or [], workspace, config_dir,
+            ask=not settings and not no_input and not workspace and _stdin_is_a_terminal())
 
 
 @plugins_app.command("disable")

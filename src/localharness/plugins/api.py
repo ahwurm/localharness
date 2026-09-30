@@ -99,6 +99,18 @@ class SlashDescriptor(BaseModel):
     target: _ImportTarget
 
 
+class SetupField(BaseModel):
+    """One question `plugins enable NAME` asks on a terminal: `key` is a leaf of the plugin's
+    ConfigModel, `prompt` the words shown, `default` the answer offered. Data, not a callback:
+    the harness asks, checks and writes; the plugin does no I/O (a later setup wizard walks the
+    same list across plugins)."""
+
+    model_config = ConfigDict(frozen=True)
+    key: str
+    prompt: str
+    default: str = ""
+
+
 class PluginManifest(BaseModel):
     """What a plugin is, declared in code and frozen (PAPI-01). Core reads it before any of the
     plugin's methods run.
@@ -115,6 +127,9 @@ class PluginManifest(BaseModel):
       `uses`: soft dependencies — they load first if they are on. A cycle is a load error.
     - `cli` / `slash`: the commands the plugin adds, mounted from these descriptors without
       importing the plugin until one runs.
+    - `setup`: what `plugins enable` asks on a terminal when no --set is given (see SetupField).
+    - `setup_help`: a few plain lines printed after that enable when the plugin's check does not
+      pass: what to start, what files it needs, and optionally a prompt to paste into a coding agent.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -128,6 +143,8 @@ class PluginManifest(BaseModel):
     uses: tuple[str, ...] = ()
     cli: tuple[CliDescriptor, ...] = ()
     slash: tuple[SlashDescriptor, ...] = ()
+    setup: tuple[SetupField, ...] = ()
+    setup_help: str = ""
 
 
 Availability = Literal["ready"] | tuple[Literal["unconfigured"], str]
