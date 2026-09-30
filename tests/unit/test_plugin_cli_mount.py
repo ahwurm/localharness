@@ -120,7 +120,8 @@ def test_its_own_help_usage_and_exit_code_are_its_own() -> None:
     assert helped.exit_code == 0 and "Usage: localharness swatchcmd [OPTIONS]" in helped.output
     assert "A flag for the thing." in helped.output
     assert failed.exit_code == 3, failed.output
-    assert usage.exit_code == 2 and "No such option: --nope" in usage.output
+    assert usage.exit_code == 2 and "No such option '--nope'" in usage.output  # Click 8.4's words
+    assert usage.output.startswith("Usage: localharness swatchcmd [OPTIONS]")
 
 
 def test_an_off_plugins_command_is_absent(mounted) -> None:
