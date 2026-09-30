@@ -14,7 +14,7 @@ import sys
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localharness.cli.slash_commands import all_rows, find_row, set_plugin_rows
 from localharness.cli.theme import entity
@@ -30,7 +30,7 @@ CONTEXTS: list[Any] = []
 
 
 class _EchoTool(Tool):
-    """Declares all four axes (ingest none, host safe), so the root agent keeps it."""
+    """Declares ingest none and host safe, so the root agent keeps it."""
 
     def info(self) -> ToolSchema:
         return ToolSchema(name="probe_echo", description="Echo.", parameters={},
@@ -115,6 +115,35 @@ class _Reads(Plugin):
 
     async def tools(self, ctx: Any) -> list:
         return [_ReaderTool()]
+
+
+class _BadConfigure(Plugin):
+    """a bundled test plugin whose configure() raises"""
+
+    manifest = PluginManifest(name="badconf", version="1", kind="tools")
+
+    async def configure(self, ctx: Any) -> Any:
+        raise ValueError("no endpoint")
+
+
+class _BadTools(Plugin):
+    """a bundled test plugin whose tools() raises"""
+
+    manifest = PluginManifest(name="badtools", version="1", kind="tools")
+
+    async def tools(self, ctx: Any) -> list:
+        raise KeyError("registry")
+
+
+class _Hex(BaseModel):
+    color: str = Field("#000000", pattern=r"^#[0-9a-f]{6}$")
+
+
+class _Strict(Plugin):
+    """a bundled test plugin with settings"""
+
+    manifest = PluginManifest(name="strict", version="1", kind="tools")
+    ConfigModel = _Hex
 
 
 class _Size(BaseModel):
@@ -470,3 +499,31 @@ def test_the_hook_system_keeps_no_plugin_bookkeeping():
     surface is registering a hook object and wiring to a registry, and an instance holds only pluggy."""
     assert {n for n in vars(HookSystem) if not n.startswith("_")} == {"register_plugin", "wire_to_registry"}
     assert set(vars(HookSystem())) == {"pm"}
+
+
+async def test_a_failure_at_every_stage_is_named_and_the_session_goes_on(tmp_path, monkeypatch):
+    """PAPI-11, criterion 2, one plugin per stage: an import that fails, settings that do not
+    validate, a configure() and a tools() that raise are each named in the startup summary's warnings
+    — as is a warning about a plugin that is off — while the healthy plugin runs, and the session
+    starts and ends normally."""
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _bundle(monkeypatch, _BadConfigure, _BadTools, _Strict, _Probe)
+    _discovers(monkeypatch, "lh-broken")
+    with (tmp_path / "config.yaml").open("a") as f:
+        f.write("lh-broken:\n  enabled: true\nstrict:\n  color: red\nbadtools:\n  enabled: 'yes'\n")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    summary = _summary(printed)
+    for named in ("plugin lh-broken: ", "ModuleNotFoundError",                    # import
+                  "plugin strict: invalid settings — strict.color",               # settings
+                  "plugin badconf: configure() raised ValueError: no endpoint",   # configure
+                  "plugin badtools: tools() raised KeyError",                     # tools
+                  "`badtools.enabled` must be true or false"):                    # a resolve warning
+        assert named in summary, f"{named!r} is not in the startup summary: {summary}"
+    assert EVENTS == ["start", "stop"]
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
