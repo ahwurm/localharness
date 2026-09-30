@@ -111,4 +111,7 @@ def test_write_artifact_never_overwrites(tmp_path, monkeypatch):
 def test_artifact_ref_is_not_an_event():
     assert "ArtifactRef" not in EVENT_TYPE_MAP
     assert not issubclass(ArtifactRef, BaseEvent)
-    assert "ArtifactRef" not in json.dumps(event_schemas())  # no event embeds it either
+    # Since protocol v4 exactly one event carries it: Observation.artifact (45-02). No other embeds it.
+    schemas = event_schemas()
+    assert [name for name, schema in schemas.items() if "ArtifactRef" in json.dumps(schema)] == ["Observation"]
+    assert "ArtifactRef" in json.dumps(schemas["Observation"]["properties"]["artifact"])
