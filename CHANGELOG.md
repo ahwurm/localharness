@@ -127,6 +127,10 @@ Migration.
 - Right after a machine booted, the terminal could count you as present before
   your first keystroke, so the pending-decision bell rang when it should have
   stayed quiet (contributed by @mjdufresne, #164).
+- Waiting for web push notifications still being sent could spin at 100% CPU
+  forever if one finished just as the wait began. Only a wait with no time
+  limit could, and only the test suite waited that way: `localharness web`
+  waits with a limit when it shuts down and was not affected.
 
 ### Migration
 - A plugin written for 0.15 no longer loads, and nothing migrates it for you.

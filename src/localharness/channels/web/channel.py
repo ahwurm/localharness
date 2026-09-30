@@ -615,9 +615,16 @@ class WebChannel(ChannelAdapter):
         socket budget, so a few devices behind a dead network path would hold Ctrl-C for minutes
         — while uvicorn's own graceful-shutdown budget claims two seconds. An undelivered
         notification is worth waiting a moment for and is not worth a hung process.
+
+        With no `timeout` there is no bound at all, so only tests call it that way: it returns
+        once no push is still running, including any fired while it waited. It loops on
+        unfinished tasks, not on the set being empty. A finished task leaves the set only through
+        a done-callback that asyncio queues for the next loop pass, and `gather` over tasks that
+        are all finished never suspends, so waiting for the set to empty re-gathered a push that
+        finished in the same pass forever, at 100% CPU. A finished task may still be in the set
+        when this returns.
         """
-        while self._push_tasks:
-            pending = list(self._push_tasks)
+        while pending := [t for t in self._push_tasks if not t.done()]:
             if timeout is None:
                 await asyncio.gather(*pending, return_exceptions=True)
                 continue
