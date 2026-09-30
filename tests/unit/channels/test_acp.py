@@ -326,6 +326,44 @@ async def test_new_session_returns_the_mode_picker(tmp_path, monkeypatch, keep_c
     assert all(m.name and m.description for m in modes.available_modes)
 
 
+@pytest.mark.parametrize("agent_yaml, expected", [
+    pytest.param(None, "read-only", id="minted-root-runs-the-orgs"),
+    pytest.param("name: orchestrator\nrole: r\nmodel: inherit\npermissions:\n  mode: guarded\n",
+                 "guarded", id="the-agents-own"),
+])
+async def test_new_session_reports_the_mode_the_session_will_run(
+    tmp_path, monkeypatch, keep_cwd, agent_yaml, expected
+):
+    """QA-18: there is no gate before the first prompt, and the picker said `auto` whatever the
+    config said. It now answers with the resolution the gate is built from."""
+    cfg = tmp_path / "config"
+    (cfg / "agents").mkdir(parents=True)
+    (cfg / "config.yaml").write_text(
+        "version: '1'\nprovider:\n  provider_type: vllm\n  base_url: http://127.0.0.1:9/v1\n"
+        "  default_model: m\norg:\n  permissions:\n    mode: read-only\n", encoding="utf-8"
+    )
+    if agent_yaml is not None:
+        (cfg / "agents" / "orchestrator.yaml").write_text(agent_yaml, encoding="utf-8")
+    session = await _start(tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")])
+    assert session.new_session_response.modes.current_mode_id == expected
+
+
+async def test_the_gate_mode_is_announced_when_the_session_comes_up(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """Once the gate exists the picker must show ITS mode: the configured one, or `guarded` after
+    a declined trust question. Nothing told Zed, so the picker kept what `session/new` said."""
+    from acp.schema import CurrentModeUpdate
+
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")], mode="read-only"
+    )
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("hello")])
+    announced = [u.current_mode_id for u in session.client.updates
+                 if isinstance(u, CurrentModeUpdate)]
+    assert announced == ["read-only"], session.client.updates
+
+
 # ------------------------------------------------------------------ one thread per process
 
 
